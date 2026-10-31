@@ -24,7 +24,7 @@ fn admission(error: WriteTxnError) -> Fault {
 }
 
 enum Input<'a> {
-    Script(&'a PreparedGraphWriteScript, &'a GqlParameters, usize),
+    Script(&'a PreparedGraphWriteScript, &'a GqlParameters),
     Batch(&'a PreparedGraphWriteScript, &'a [GqlParameters], usize),
     Bound(&'a BoundGraphWriteScriptBatch),
 }
@@ -32,37 +32,22 @@ enum Input<'a> {
 enum Bound<'a> {
     Script(PreparedGraphWriteProgram),
     Batch(BoundGraphWriteScriptBatch),
-    NativeRoots(BoundGraphWriteScriptBatch),
     Borrowed(&'a BoundGraphWriteScriptBatch),
 }
 impl Bound<'_> {
     fn program(&self) -> &PreparedGraphWriteProgram {
         match self {
             Self::Script(program) => program,
-            Self::Batch(batch) | Self::NativeRoots(batch) => batch.program(),
+            Self::Batch(batch) => batch.program(),
             Self::Borrowed(batch) => batch.program(),
         }
     }
     fn error(&self, source: super::Fault) -> Fault {
         match self {
             Self::Script(_) => Fault::Program(source),
-            Self::Batch(batch) | Self::NativeRoots(batch) => batch.execution_error(source),
+            Self::Batch(batch) => batch.execution_error(source),
             Self::Borrowed(batch) => batch.execution_error(source),
         }
-    }
-
-    // One native source statement internally binds several root instances.
-    // Preserve actual program counters/receipts for raw returning APIs and
-    // every explicit batch; only its stats-only external statement count is 1.
-    fn receipt_stats(
-        &self,
-        mut stats: GraphWriteProgramStats,
-        returning: bool,
-    ) -> GraphWriteProgramStats {
-        if !returning && matches!(self, Self::NativeRoots(_)) {
-            stats.completed_statements = 1;
-        }
-        stats
     }
 }
 
@@ -82,7 +67,7 @@ impl<'a> Input<'a> {
             // authority a read, and a forbidden relationship tail cannot reserve
             // identities through an earlier, otherwise legal creation record.
             let script = match &self {
-                Self::Script(script, _, _) | Self::Batch(script, _, _) => Some(*script),
+                Self::Script(script, _) | Self::Batch(script, _, _) => Some(*script),
                 Self::Bound(_) => None,
             };
             if let Some(script) = script {
@@ -107,7 +92,7 @@ impl<'a> Input<'a> {
                 }
             }
             match self {
-                Self::Script(script, arguments, max_statements) => {
+                Self::Script(script, arguments) => {
                     cx.checkpoint()
                         .map_err(WriteTxnError::Interrupted)
                         .map_err(admission)?;
@@ -117,34 +102,6 @@ impl<'a> Input<'a> {
                     execution
                         .work(script.statements().len() as u64)
                         .map_err(admission)?;
-                    let mut reserve = true;
-                    let roots = script
-                        .bind_native_parameter_rows_controlled(
-                            arguments,
-                            max_statements,
-                            |at, count| {
-                                cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                                if at.is_none() && reserve {
-                                    reserve = false;
-                                    // The ordinary statement debit above is part
-                                    // of the same complete expansion bill.
-                                    execution.work((count - script.statements().len()) as u64)
-                                } else {
-                                    execution.checkpoint()
-                                }
-                            },
-                        )
-                        .map_err(|error| match error {
-                            GraphWriteScriptBatchBindError::Binding(error) => {
-                                Fault::BatchBinding(error)
-                            }
-                            GraphWriteScriptBatchBindError::Interrupted { source, .. } => {
-                                admission(source)
-                            }
-                        })?;
-                    if let Some(batch) = roots {
-                        return Ok(Bound::NativeRoots(batch));
-                    }
                     let program = script.bind_parameters(arguments).map_err(Fault::Binding)?;
                     cx.checkpoint()
                         .map_err(WriteTxnError::Interrupted)
@@ -235,11 +192,7 @@ impl<V: Vfs + Clone> Database<V> {
             authority,
             token,
             branch,
-            Input::Script(
-                script,
-                arguments,
-                PreparedGraphWriteScript::MAX_BATCH_STATEMENTS,
-            ),
+            Input::Script(script, arguments),
             policy,
             clock,
             false,
@@ -273,11 +226,7 @@ impl<V: Vfs + Clone> Database<V> {
             authority,
             token,
             branch,
-            Input::Script(
-                script,
-                arguments,
-                PreparedGraphWriteScript::MAX_BATCH_STATEMENTS,
-            ),
+            Input::Script(script, arguments),
             policy,
             clock,
             true,
@@ -475,7 +424,7 @@ impl<V: Vfs + Clone> Database<V> {
                     verified.predicates(),
                     &mut execution,
                     returning,
-                    |stats, steps| receipt(bound.receipt_stats(stats, returning), steps),
+                    receipt,
                 )
                 .await
                 .map_err(|error| bound.error(error))

@@ -79,13 +79,13 @@ fn prepared_map_fields_rebind_across_native_delivery_modes_and_recovery() {
             let parameters = crate::convert::parameters(&parameters, None).unwrap();
             let (mut session, template) =
                 ok(crate::execute::read_prepared_session(&root, db, &token, &definition).await);
-            let parameters = ok(definition.arguments(&query, db, &token, &parameters));
+            let derived = ok(definition.arguments(&query, db, &token, &parameters));
             // The original property-only canonical order needs a blocking
             // sort and remains a native source-profile refusal. Explicit root
             // identity order admits that same typed map predicate lazily.
             assert_eq!(
                 session
-                    .stream_prepared(&query, &template, &parameters)
+                    .stream_prepared(&query, &template, &derived)
                     .err()
                     .unwrap()
                     .code,

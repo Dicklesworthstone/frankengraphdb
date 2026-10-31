@@ -299,178 +299,6 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
 }
 
 impl GraphUnwindWriteText {
-    /// A closed distributive native row prefix. Each MATCH is a positive
-    /// vertex pattern, WITH only carries existing names, and later UNWINDs
-    /// read static paths of the unchanged root parameter row. The native
-    /// compiler still owns every pattern, value, scope and type check.
-    pub(crate) fn native_frozen_parameter_root(text: &str) -> Option<(&str, &str)> {
-        if scan(text).ok()?.len() != 1 {
-            return None;
-        }
-        let mut lexer = Lexer {
-            text,
-            at: 0,
-            tokens: 0,
-        };
-        let mut tokens = Vec::new();
-        loop {
-            let next = token(&mut lexer).ok()?;
-            if matches!(next.0.kind, TokenKind::End | TokenKind::Punct(b';')) {
-                break;
-            }
-            tokens.push(next);
-        }
-        let [first, source, as_word, alias, ..] = tokens.as_slice() else {
-            return None;
-        };
-        let (TokenKind::Parameter(parameter), TokenKind::Word(root)) =
-            (source.0.kind, alias.0.kind)
-        else {
-            return None;
-        };
-        if !is_word(&first.0, "UNWIND") || !is_word(&as_word.0, "AS") {
-            return None;
-        }
-        // These operators do not distribute over singleton root rows. No
-        // optimistic origin proof is made for a renamed or rebound root.
-        if tokens[4..].iter().any(|(token, _)| match token.kind {
-            TokenKind::Parameter(name) => name != parameter,
-            TokenKind::Word(word) => [
-                "RETURN",
-                "DISTINCT",
-                "ORDER",
-                "SKIP",
-                "OFFSET",
-                "LIMIT",
-                "GROUP",
-                "HAVING",
-                "UNION",
-                "INTERSECT",
-                "EXCEPT",
-                "CALL",
-                "OPTIONAL",
-                "EXISTS",
-                "COUNT",
-                "SUM",
-                "AVG",
-                "MIN",
-                "MAX",
-                "COLLECT",
-                "CREATE",
-                "INSERT",
-                "MERGE",
-                "DELETE",
-                "DETACH",
-                "FOREACH",
-                "RAND",
-                "RANDOM",
-                "CLOCK",
-                "TIMESTAMP",
-                "NOW",
-                "DATETIME",
-                "DATE",
-                "TIME",
-                "LOCALDATETIME",
-                "LOCALTIME",
-            ]
-            .iter()
-            .any(|name| word.eq_ignore_ascii_case(name)),
-            _ => false,
-        }) {
-            return None;
-        }
-        let mut names = BTreeSet::from([root]);
-        let mut at = 4;
-        let (mut matched, mut expanded) = (false, false);
-        while let Some((clause, _)) = tokens.get(at) {
-            if is_word(clause, "MATCH") {
-                at += 1;
-                if !is_punct(tokens.get(at), b'(') {
-                    return None;
-                }
-                let TokenKind::Word(name) = tokens.get(at + 1)?.0.kind else {
-                    return None;
-                };
-                if name == root {
-                    return None;
-                }
-                names.insert(name);
-                let mut depth = 0_usize;
-                loop {
-                    match tokens.get(at)?.0.kind {
-                        TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
-                        TokenKind::Punct(b')' | b']' | b'}') => depth -= 1,
-                        _ => {}
-                    }
-                    at += 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                matched = true;
-            } else if is_word(clause, "WITH") {
-                at += 1;
-                let mut carried = BTreeSet::new();
-                loop {
-                    let TokenKind::Word(name) = tokens.get(at)?.0.kind else {
-                        return None;
-                    };
-                    if !names.contains(name) || !carried.insert(name) {
-                        return None;
-                    }
-                    at += 1;
-                    if !is_punct(tokens.get(at), b',') {
-                        break;
-                    }
-                    at += 1;
-                }
-                if !carried.contains(root) {
-                    return None;
-                }
-                names = carried;
-            } else if matched && is_word(clause, "UNWIND") {
-                at += 1;
-                if !matches!(tokens.get(at)?.0.kind, TokenKind::Word(name) if name == root) {
-                    return None;
-                }
-                let (path, next, _) = field_path(&tokens, at).ok()?;
-                if path.is_empty() || !is_word(&tokens.get(next)?.0, "AS") {
-                    return None;
-                }
-                let TokenKind::Word(name) = tokens.get(next + 1)?.0.kind else {
-                    return None;
-                };
-                if !names.insert(name) {
-                    return None;
-                }
-                at = next + 2;
-                expanded = true;
-            } else if expanded && (is_word(clause, "SET") || is_word(clause, "REMOVE")) {
-                // A second mutation clause retains the chain's ownership.
-                let mut depth = 0_usize;
-                for (token, _) in &tokens[at + 1..] {
-                    match token.kind {
-                        TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
-                        TokenKind::Punct(b')' | b']' | b'}') => depth -= 1,
-                        TokenKind::Word(word)
-                            if depth == 0
-                                && ["SET", "REMOVE", "WITH", "MATCH", "UNWIND"]
-                                    .iter()
-                                    .any(|name| word.eq_ignore_ascii_case(name)) =>
-                        {
-                            return None;
-                        }
-                        _ => {}
-                    }
-                }
-                return Some((parameter, root));
-            } else {
-                return None;
-            }
-        }
-        None
-    }
-
     /// Whether native ingress must keep a computed whole-map MATCH update as
     /// one relational statement. Row expansion cannot preserve heterogeneous
     /// map keys or freeze map expressions across the complete input bag.
@@ -934,7 +762,7 @@ mod graph_unwind_routing_tests {
     use fgdb_types::CanonicalScalar;
 
     #[test]
-    fn nested_lists_after_match_keep_native_selection_and_field_root_instances() {
+    fn nested_lists_after_match_keep_one_native_clause_pipeline() {
         let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
         let rows = (1..=2)
             .map(|id| {
@@ -958,12 +786,12 @@ mod graph_unwind_routing_tests {
         };
         let original_arguments = arguments.canonical_bytes();
         for carry in ["", "WITH p, row "] {
-            for (tail, parameter_fields) in [
-                ("MERGE (p)-[:R]->(f)", false),
-                ("CREATE (p)-[:R]->(f)", false),
-                ("SET f.name = row.id", true),
-                ("SET f.name = 0", false),
-                ("SET f.name = f.name + row.id", false),
+            for tail in [
+                "MERGE (p)-[:R]->(f)",
+                "CREATE (p)-[:R]->(f)",
+                "SET f.name = row.id",
+                "SET f.name = 0",
+                "SET f.name = f.name + row.id",
             ] {
                 let text = format!(
                     "UNWIND $rows AS row MATCH (p:Entity {{id: row.id}}) \
@@ -977,17 +805,11 @@ mod graph_unwind_routing_tests {
                 );
                 let bound = BoundNativeGraphWrite::bind(&text, &arguments, RelationId(1), resolve)
                     .unwrap_or_else(|error| panic!("{text}: {error}"));
-                // All original inputs still bypass scalar-hole expansion.
-                // Only proven parameter fields now instantiate the same native
-                // relation per root, with selection frozen before any effect.
-                if parameter_fields {
-                    assert_eq!(bound.input_records(), Some(2), "{text}");
-                    assert_eq!(bound.program().statements().len(), 2, "{text}");
-                    assert!(bound.program().freezes_vertex_update_input(), "{text}");
-                } else {
-                    assert_eq!(bound.input_records(), None, "{text}");
-                    assert_eq!(bound.program().statements().len(), 1, "{text}");
-                }
+                // Every tail consumes its complete native relation. Parameter
+                // fields do not turn one source statement into per-root ones.
+                assert_eq!(bound.input_records(), None, "{text}");
+                assert_eq!(bound.program().statements().len(), 1, "{text}");
+                assert!(!bound.program().freezes_field_update_input(), "{text}");
                 assert_eq!(arguments.canonical_bytes(), original_arguments);
             }
         }

@@ -1026,10 +1026,10 @@ fn full_scope_compressed_nodes_and_rows_refuse_one_below_and_admit_exactly() {
         let args = GqlParameters::new();
         let prefix = "CALL fnx.out_degree_centrality(label => 'L', relation => 'R') \
                       YIELD vertex, score ";
-        for (tail, rows) in [
-            ("RETURN vertex, score ORDER BY vertex", 3),
-            ("RETURN count(*) AS n", 1),
-            ("RETURN vertex, score LIMIT 0", 0),
+        for (tail, rows, row_limits) in [
+            ("RETURN vertex, score ORDER BY vertex", 3, &[2, 3][..]),
+            ("RETURN count(*) AS n", 1, &[0, 1, 2, 3][..]),
+            ("RETURN vertex, score LIMIT 0", 0, &[0, 2, 3][..]),
         ] {
             let text = format!("{prefix}{tail}");
             let expected = db.query(&cx, &text, &args, catalog, policy()).unwrap();
@@ -1047,14 +1047,16 @@ fn full_scope_compressed_nodes_and_rows_refuse_one_below_and_admit_exactly() {
             // The full grant sees four vertices. The query's label selects
             // only three, and their induced graph produces three kernel rows.
             // COUNT and the terminal empty page still complete that procedure;
-            // neither replaces its own signed source/kernel admission.
+            // neither replaces its source or work admission. Signed rows count
+            // the final page/groups, not those private kernel rows. Keep the
+            // original row limits 2/3 beside the exact COUNT and empty bounds.
             for dimension in [LimitDimension::Nodes, LimitDimension::Rows] {
-                let exact = match dimension {
-                    LimitDimension::Nodes => 4,
-                    LimitDimension::Rows => 3,
+                let (exact, limits): (u64, &[u64]) = match dimension {
+                    LimitDimension::Nodes => (4, &[3, 4]),
+                    LimitDimension::Rows => (rows as u64, row_limits),
                     LimitDimension::Work => unreachable!(),
                 };
-                for limit in [exact - 1, exact] {
+                for &limit in limits {
                     let mut allowed = grant(false);
                     allowed.limits.max_nodes = 4;
                     allowed.limits.max_rows = 3;
@@ -1083,10 +1085,10 @@ fn full_scope_compressed_nodes_and_rows_refuse_one_below_and_admit_exactly() {
                             compressed_calls() > before,
                             "{dimension:?}={limit}, repeat {repeat}: {text}"
                         );
-                        if limit == exact {
-                            assert_eq!(result.unwrap(), expected);
-                        } else {
+                        if limit < exact {
                             refusal(result, AuthorizationError::LimitExceeded(dimension));
+                        } else {
+                            assert_eq!(result.unwrap(), expected);
                         }
                         assert!(!session.is_closed(), "a quota refusal is retryable");
                     }

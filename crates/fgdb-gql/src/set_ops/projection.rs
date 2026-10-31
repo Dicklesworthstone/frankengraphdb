@@ -545,25 +545,17 @@ impl GraphSetValue {
     /// preceding writes cannot change them. This does not evaluate or fold
     /// anything; lazy errors and ordinary work/scratch charges stay at runtime.
     pub(crate) fn is_input_independent(&self) -> bool {
-        self.is_input_independent_except(&[])
-    }
-
-    /// The listed columns have independently proved immutable parameter
-    /// origins. This only checks dependencies; it neither grants that origin
-    /// nor admits element-valued parameters or evaluates a lazy expression.
-    pub(crate) fn is_input_independent_except(&self, parameters: &[usize]) -> bool {
-        fn independent(value: &GraphSetValue, locals: usize, parameters: &[usize]) -> bool {
-            let same_scope = |value: &GraphSetValue| independent(value, locals, parameters);
+        fn independent(value: &GraphSetValue, locals: usize) -> bool {
+            let same_scope = |value: &GraphSetValue| independent(value, locals);
             match value {
-                GraphSetValue::Column(column) => parameters.contains(column),
-                GraphSetValue::ElementMetadata { .. } | GraphSetValue::Random { .. } => false,
+                GraphSetValue::Column(_)
+                | GraphSetValue::ElementMetadata { .. }
+                | GraphSetValue::Random { .. } => false,
                 GraphSetValue::Literal(_) | GraphSetValue::TypedNull(_) => true,
                 GraphSetValue::Value(value) => value.is_stored_value(),
                 GraphSetValue::Local(offset) => *offset < locals,
                 GraphSetValue::Integer(expression) => {
-                    expression
-                        .referenced_columns()
-                        .all(|column| parameters.contains(&column))
+                    expression.referenced_columns().next().is_none()
                         && expression.referenced_locals().all(|offset| offset < locals)
                 }
                 GraphSetValue::List(values) => values.iter().all(same_scope),
@@ -586,14 +578,14 @@ impl GraphSetValue {
                     same_scope(list)
                         && filter
                             .as_deref()
-                            .is_none_or(|value| independent(value, locals + 1, parameters))
+                            .is_none_or(|value| independent(value, locals + 1))
                         && map
                             .as_deref()
-                            .is_none_or(|value| independent(value, locals + 1, parameters))
+                            .is_none_or(|value| independent(value, locals + 1))
                 }
                 GraphSetValue::Quantifier {
                     list, predicate, ..
-                } => same_scope(list) && independent(predicate, locals + 1, parameters),
+                } => same_scope(list) && independent(predicate, locals + 1),
                 GraphSetValue::Slice { list, from, to } => {
                     same_scope(list)
                         && from.as_deref().is_none_or(same_scope)
@@ -603,9 +595,7 @@ impl GraphSetValue {
                     same_scope(start) && same_scope(end) && step.as_deref().is_none_or(same_scope)
                 }
                 GraphSetValue::Reduce { init, list, expr } => {
-                    same_scope(init)
-                        && same_scope(list)
-                        && independent(expr, locals + 2, parameters)
+                    same_scope(init) && same_scope(list) && independent(expr, locals + 2)
                 }
                 GraphSetValue::MapLiteral { values, guard, .. } => {
                     values.iter().all(same_scope) && guard.as_deref().is_none_or(same_scope)
@@ -614,8 +604,7 @@ impl GraphSetValue {
                     same_scope(base) && values.iter().all(same_scope)
                 }
                 GraphSetValue::Let { values, body } => {
-                    values.iter().all(same_scope)
-                        && independent(body, locals + values.len(), parameters)
+                    values.iter().all(same_scope) && independent(body, locals + values.len())
                 }
                 GraphSetValue::Case { arms, otherwise } => {
                     arms.iter()
@@ -625,7 +614,7 @@ impl GraphSetValue {
             }
         }
 
-        independent(self, 0, parameters)
+        independent(self, 0)
     }
 
     // A conservative preparation-time effect check. All children, including

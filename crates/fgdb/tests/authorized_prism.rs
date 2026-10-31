@@ -1730,6 +1730,7 @@ fn completed_analytics_pages_and_groups_preserve_masked_answers_and_signed_limit
                 vec!["vertex", "distance"],
                 vec![vec![vertex(3), scalar(2)]],
                 true,
+                1_u64,
             ),
             (
                 "WITH vertex, distance, distance % 2 AS parity \
@@ -1741,15 +1742,17 @@ fn completed_analytics_pages_and_groups_preserve_masked_answers_and_signed_limit
                     vec![scalar(1), QueryValue::Count(1), QueryValue::Integer(1)],
                 ],
                 true,
+                2,
             ),
             (
                 "RETURN vertex, distance ORDER BY distance DESC, vertex LIMIT 0",
                 vec!["vertex", "distance"],
                 vec![],
                 false,
+                0,
             ),
         ];
-        for (tail, columns, rows, control_differs) in cases {
+        for (tail, columns, rows, control_differs, emitted_rows) in cases {
             let statement = |yields| {
                 format!("CALL fnx.single_source_shortest_path_length(1) YIELD {yields} {tail}")
             };
@@ -1796,22 +1799,35 @@ fn completed_analytics_pages_and_groups_preserve_masked_answers_and_signed_limit
                         low = middle + 1;
                     }
                 }
-                assert!(
-                    low > 0,
-                    "complete source admission still costs {dimension:?}"
-                );
+                if dimension == LimitDimension::Rows {
+                    // The page emits one row, parity produces two groups, and
+                    // LIMIT 0 emits none; internal procedure rows stay private.
+                    assert_eq!(low, emitted_rows, "signed delivery rows: {cursor}");
+                } else {
+                    assert!(
+                        low > 0,
+                        "complete source admission still costs {dimension:?}"
+                    );
+                }
                 for db in [&visible, &masked] {
                     let exact = token.attenuate(restrict(low)).unwrap();
                     assert_eq!(read(db, &exact, &cursor).unwrap(), expected);
-                    let short = token.attenuate(restrict(low - 1)).unwrap();
-                    assert!(
-                        matches!(
-                            read(db, &short, &cursor),
-                            Err(QueryError::Authorization(Error::LimitExceeded(actual)))
-                                if actual == dimension
-                        ),
-                        "{cursor}: one-short {dimension:?} must preserve its typed refusal"
-                    );
+                    if let Some(one_short) = low.checked_sub(1) {
+                        let short = token.attenuate(restrict(one_short)).unwrap();
+                        assert!(
+                            matches!(
+                                read(db, &short, &cursor),
+                                Err(QueryError::Authorization(Error::LimitExceeded(actual)))
+                                    if actual == dimension
+                            ),
+                            "{cursor}: one-short {dimension:?} must preserve its typed refusal"
+                        );
+                    } else {
+                        // Zero emitted rows admit at MaxRows(0); there is no
+                        // nonnegative one-below allowance to manufacture.
+                        assert_eq!(dimension, LimitDimension::Rows);
+                        assert_eq!(emitted_rows, 0);
+                    }
                 }
             }
         }

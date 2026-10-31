@@ -748,33 +748,22 @@ and successful proof verification remain open; no source-dependent Bead closes
 on these diagnostic results. The broader vision gaps and performance claims
 above remain unchanged.
 
-Further runtime reaches and repairs a missing native field-update owner. A
-post-MATCH UNWIND with parameter-dependent SET previously reduced all root rows
-simultaneously, rejecting a valid repeated-target update. The bounded binder now
-proves immutable root provenance from token scope and the actual compiled column,
-binds the same prepared native relation per root, and uses the existing frozen
-field program: all selections finish at entry, then effects stage in original
-root order. Ordinary simultaneous conflicts remain. Global operators, rebinding,
-graph-dependent RHS values and unsupported profiles retain their original owner.
-Current-host, retained-prepared and hard caps all apply, with the complete
-expanded binding bill charged before allocation.
+An attempted native field-update specialization was wrong. It split one
+completed post-MATCH UNWIND relation into per-root statements, allowing unequal
+assignments to the same field to become last-wins. The existing global collector
+correctly rejects that bag atomically, including single-target-column updates.
+The specialization and its private completion-count adapter are being removed;
+the original exact-conflict and distinct-friend entry-selection laws remain.
+Explicit parameter batches still contain separate statements. Three UNWIND rows
+inside one native query are one statement, not a statement-cap negative.
 
-The private native completion owner preserves one source statement in FGP
-stats-only output. Raw program instances, work/source/effect counters and explicit
-parameter-batch counts remain expanded. Paired native1/raw2/batch2 controls make
-that distinction observable. The original FGP statement now passes, as do direct
-and prepared reversed-root, carry-column, cap, arithmetic rollback and scope
-controls. A separate embedded test checks six order/carry combinations, a changed
-MATCH key, exact literal values, zero allocation, one commit, unchanged parameters,
-pinned history and reopen. Its initial retirement-metadata oracle was wrong:
-current-root historical rows know their seq2 retirement, while the earlier pin
-retains open intervals. Both exact forms are now checked before and after reopen.
-
-Fresh focused terminal results are: complete GQL library **1,853/0**, complete
-FGP no-return target **15/0**, and embedded document target **7/0**, all unfiltered.
-The GQL run retains every original nested-UNWIND query and scalar-hole rejection;
-only the proven field profile now expects two internal instances. Edge writes,
-literal-only and graph-RHS controls still require the original single owner.
+The earlier focused GQL **1,853/0**, FGP no-return **15/0** and document **7/0**
+results exercised invalid new last-wins expectations and do not qualify that
+specialization. Their raw transcripts remain. Corrected controls retain the
+original conflicting SQL/data as atomic negatives and add legal disjoint-field
+and equal-duplicate bags, both carry-column orders and input orders, direct and
+prepared FGP delivery, precise batch caps, unchanged parameters, issued identity
+mapping, pinned history and durable reopen. These corrections require execution.
 Complete Strata is **302/0 with eight existing ignored tests**, and the spine
 differential is **26/0**, including exact first-stage Healthy cancellation and
 sixth-sync `manifest.root` recovery fencing. No original quota, data assertion or
@@ -813,6 +802,36 @@ were stopped only after verified ownership, while the wrapper recorded stable
 RED143. The verifier rejects its missing aggregate verdict; it is not qualified
 evidence. Refresh remote history before the next clean proof, then run the full
 integrated mandatory chain and verifier. No source-dependent task closes early.
+
+The complete stable proof10 on `48cac8c36e04b3fc7ed7d63edd7f8bffbec82cf0`
+(tree `432da9dc0434348f08c359be7f590ef4147b99d4`) terminates **RED**, with a
+successful integrity verifier. Cargo executes all 1,092 native summaries:
+**13,592 passed, nine failed and 33 existing ignored**, zero filtered. The
+mandatory scanner, Node, format, check and Clippy gates pass. All 40 registered
+gates execute; 39 pass, while cross-crate determinism refuses its first
+workspace run because tests fail. Both checked Miri workloads pass. The verifier
+authenticates this failure; it is not a passing qualification.
+
+The nine failures identify the real bag regression above and stale expectations:
+signed analytic rows count final pages/groups (3/1/0), while source nodes and
+work remain charged; the new mixed-MERGE unit underfunds even its tiny positive
+at cumulative scratch32; one prepared-map fixture confuses original and derived
+parameters; and four runtime arithmetic refusals expect a pre-execution error
+class. Repairs preserve the original inputs and limits, add genuine same-cap
+small/large payload controls with acquisition-phase witnesses, and retain syntax
+and rollback controls. Production quotas, wire tags and HTTP mappings do not
+change. Current whole-Cargo and exact committed mandatory proof remain required.
+
+The corrected dirty-source diagnostic completes successfully: **5,946 passed,
+zero failed, 25 existing ignored, zero filtered**, across all 36 selected
+workspace-library and affected integration targets. The source diff is identical
+before and after. Root library **1,687/0** includes all 16 ordinary/deferred
+mixed-payload controls and final-row admission. Complete GQL **1,853/0**, server
+library **198/0**, FGP no-return **15/0**, loopback **53/0**, document **7/0**,
+unchanged chained-UNWIND **8/0** and authorized Prism **16/0** pass. Earlier direct
+executions of those same binaries are duplicate evidence. A later literal-value
+assertion and incoming peer integration still require fresh qualification; this
+diagnostic is not the complete workspace or a clean committed-tree verdict.
 
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,

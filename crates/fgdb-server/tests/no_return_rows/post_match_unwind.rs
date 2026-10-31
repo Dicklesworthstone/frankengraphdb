@@ -58,15 +58,40 @@ fn field_parameters(name: &str, ages: [i64; 2]) -> Vec<(String, WireValue)> {
     )]
 }
 
+fn disjoint_field_parameters(reverse: bool) -> Vec<(String, WireValue)> {
+    let record = |name: &str, age, friend: &str| {
+        WireValue::Map(vec![
+            ("age".into(), WireValue::Int(age)),
+            (
+                "friends".into(),
+                WireValue::List(vec![WireValue::Text(friend.into())]),
+            ),
+            ("name".into(), WireValue::Text(name.into())),
+        ])
+    };
+    // Three rows still form ONE native statement. The equal Ada duplicate
+    // is legal; reversing the whole list changes which root comes first.
+    let mut rows = vec![
+        record("Ada", 100, "Bob"),
+        record("Ada", 100, "Bob"),
+        record("Bob", 200, "Ada"),
+    ];
+    if reverse {
+        rows.reverse();
+    }
+    vec![("rows".into(), WireValue::List(rows))]
+}
+
 #[test]
-fn native_field_roots_keep_rank_frozen_keys_and_one_statement_over_fgp() {
+fn native_field_updates_keep_global_bag_conflicts_and_frozen_selection_over_fgp() {
     run(async |cx| {
-        for (prepared, carry, ages) in [
-            (false, "WITH p,row ", [100, 200]),
-            (true, "WITH p,row ", [200, 100]),
-            (false, "WITH row,p ", [200, 100]),
-            (true, "WITH row,p ", [100, 200]),
+        for (prepared, carry, reverse) in [
+            (false, "WITH p,row ", false),
+            (true, "WITH p,row ", true),
+            (false, "WITH row,p ", true),
+            (true, "WITH row,p ", false),
         ] {
+            let ages = if reverse { [200, 100] } else { [100, 200] };
             let fixture = Fixture::start(cx, "native-field-roots", |config| {
                 config.max_statements = 2;
             })
@@ -78,6 +103,25 @@ fn native_field_roots_keep_rank_frozen_keys_and_one_statement_over_fgp() {
                 vec![],
             ).await.unwrap(), 1, 1);
             let before = state(cx, &mut observer).await;
+            let issued = |name: &str| {
+                before
+                    .0
+                    .rows
+                    .iter()
+                    .find(|row| row[1] == WireValue::Text(name.into()))
+                    .unwrap()[0]
+                    .clone()
+            };
+            let ada_id = issued("Ada");
+            let bob_id = issued("Bob");
+            let cy = before
+                .0
+                .rows
+                .iter()
+                .find(|row| row[1] == WireValue::Text("Cy".into()))
+                .unwrap()
+                .clone();
+            let valid = disjoint_field_parameters(reverse);
             // The first root evaluates successfully, but the second divides
             // by zero. Neither root may publish its proposed key/age update.
             let bad = statement(carry, "SET p.name='Renamed',f.age=10/(200-row.age)");
@@ -115,35 +159,50 @@ fn native_field_roots_keep_rank_frozen_keys_and_one_statement_over_fgp() {
             if let WireValue::List(rows) = &mut excess[0].1 {
                 rows.push(rows[0].clone());
             }
-            let cap_error = if prepared {
-                let handle = writer
-                    .prepare_write(cx, &text, field_parameters("Ada", ages))
-                    .await
-                    .unwrap();
-                writer
-                    .execute_prepared_write(cx, handle, excess)
-                    .await
-                    .unwrap_err()
-            } else {
-                writer
-                    .execute(cx, ExecuteMode::Write, &text, excess)
-                    .await
-                    .unwrap_err()
-            };
-            assert!(matches!(
-                cap_error,
-                ClientError::Server {
-                    code: ErrorCode::Budget,
-                    ..
-                }
-            ));
-            assert_eq!(state(cx, &mut observer).await, before);
+            // The complete relation has one simultaneous field-assignment
+            // bag. Original unequal Ada roots conflict, including the old
+            // three-row input; three rows are not three native statements.
+            // A single target also conflicts: target count grants no ordering.
+            for (invalid, parameters) in [
+                (text.clone(), field_parameters("Ada", ages)),
+                (text.clone(), excess),
+                (
+                    statement(carry, "SET p.age=row.age"),
+                    field_parameters("Ada", [10, 20]),
+                ),
+            ] {
+                let refusal = if prepared {
+                    let handle = writer
+                        .prepare_write(cx, &invalid, parameters.clone())
+                        .await
+                        .unwrap();
+                    writer
+                        .execute_prepared_write(cx, handle, parameters)
+                        .await
+                        .unwrap_err()
+                } else {
+                    writer
+                        .execute(cx, ExecuteMode::Write, &invalid, parameters)
+                        .await
+                        .unwrap_err()
+                };
+                // ConflictingAssignment is a leaf in the current typed
+                // mapper and retains its existing Statement wire class.
+                assert!(matches!(
+                    refusal,
+                    ClientError::Server {
+                        code: ErrorCode::Statement,
+                        ..
+                    }
+                ));
+                assert_eq!(state(cx, &mut observer).await, before);
+            }
             let mut limited = grant(Rights::ReadWrite, 0);
             limited.properties = Scope::only([fgdb_delta_types::PropertyKeyId(1)]);
             let mut limited = fixture.client(cx, &limited).await;
             assert!(matches!(
                 limited
-                    .execute(cx, ExecuteMode::Write, &text, field_parameters("Ada", ages))
+                    .execute(cx, ExecuteMode::Write, &text, valid.clone())
                     .await
                     .unwrap_err(),
                 ClientError::Server {
@@ -156,12 +215,12 @@ fn native_field_roots_keep_rank_frozen_keys_and_one_statement_over_fgp() {
 
             if prepared {
                 let handle = writer
-                    .prepare_write(cx, &text, field_parameters("Ada", ages))
+                    .prepare_write(cx, &text, valid.clone())
                     .await
                     .unwrap();
                 assert_eq!(
                     writer
-                        .execute_prepared_write(cx, handle, field_parameters("Ada", ages))
+                        .execute_prepared_write(cx, handle, valid.clone())
                         .await
                         .unwrap(),
                     Outcome::WriteCommitted {
@@ -198,7 +257,7 @@ fn native_field_roots_keep_rank_frozen_keys_and_one_statement_over_fgp() {
             } else {
                 committed(
                     writer
-                        .execute(cx, ExecuteMode::Write, &text, field_parameters("Ada", ages))
+                        .execute(cx, ExecuteMode::Write, &text, valid.clone())
                         .await
                         .unwrap(),
                     2,
@@ -206,33 +265,55 @@ fn native_field_roots_keep_rank_frozen_keys_and_one_statement_over_fgp() {
                 );
             }
             let after = state(cx, &mut observer).await;
-            let bob = after
-                .0
-                .rows
-                .iter()
-                .find(|row| row[1] == WireValue::Text("Bob".into()))
-                .unwrap();
-            assert_eq!(bob[2], WireValue::Int(ages[1]));
+            assert_eq!(after.0.outcome, Outcome::Rows { seq: 2 });
+            for (id, age) in [(&ada_id, 200), (&bob_id, 100)] {
+                let row = after.0.rows.iter().find(|row| &row[0] == id).unwrap();
+                assert_eq!(row[1], WireValue::Text("Renamed".into()));
+                assert_eq!(row[2], WireValue::Int(age));
+            }
             assert_eq!(
-                after
-                    .0
-                    .rows
-                    .iter()
-                    .filter(|row| row[1] == WireValue::Text("Renamed".into()))
-                    .count(),
-                1
+                after.0.rows.iter().find(|row| row[0] == cy[0]).unwrap(),
+                &cy
             );
             assert_eq!(after.0.rows.len(), 3);
             assert!(after.1.rows.is_empty());
 
-            // Literal-only assignments keep the ordinary simultaneous owner.
-            committed(
+            // The original literal input now finds no friend named Bob.
+            assert_eq!(
                 writer
                     .execute(
                         cx,
                         ExecuteMode::Write,
                         &statement(carry, "SET f.age=777"),
                         field_parameters("Renamed", ages),
+                    )
+                    .await
+                    .unwrap()
+                    .outcome,
+                Outcome::ReadClosed {
+                    seq: 2,
+                    statements: 1
+                }
+            );
+            assert_eq!(state(cx, &mut observer).await, after);
+            // Literal-only assignments still use one global bag: both
+            // renamed roots propose the same value for the unchanged Cy.
+            committed(
+                writer
+                    .execute(
+                        cx,
+                        ExecuteMode::Write,
+                        &statement(carry, "SET f.age=777"),
+                        vec![(
+                            "rows".into(),
+                            WireValue::List(vec![WireValue::Map(vec![
+                                (
+                                    "friends".into(),
+                                    WireValue::List(vec![WireValue::Text("Cy".into())]),
+                                ),
+                                ("name".into(), WireValue::Text("Renamed".into())),
+                            ])]),
+                        )],
                     )
                     .await
                     .unwrap(),
@@ -248,6 +329,38 @@ fn native_field_roots_keep_rank_frozen_keys_and_one_statement_over_fgp() {
                 )
                 .await
                 .unwrap();
+            let before_batch = state(cx, &mut observer).await;
+            let mut expected_cy = cy.clone();
+            expected_cy[2] = WireValue::Int(777);
+            assert_eq!(
+                before_batch
+                    .0
+                    .rows
+                    .iter()
+                    .find(|row| row[0] == cy[0])
+                    .unwrap(),
+                &expected_cy
+            );
+            assert_eq!(before_batch.0.outcome, Outcome::Rows { seq: 3 });
+            let refusal = writer
+                .execute_prepared_batch(
+                    cx,
+                    batch,
+                    [1, 2, 3]
+                        .into_iter()
+                        .map(|age| vec![("age".into(), WireValue::Int(age))])
+                        .collect(),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                refusal,
+                ClientError::Server {
+                    code: ErrorCode::Budget,
+                    ..
+                }
+            ));
+            assert_eq!(state(cx, &mut observer).await, before_batch);
             assert_eq!(
                 writer
                     .execute_prepared_batch(
@@ -410,47 +523,107 @@ fn post_match_lists_work_over_fgp_and_prepared_writes_with_atomic_refusals() {
         assert_eq!(state(cx, &mut observer).await, expected);
         restricted.close(cx).await.unwrap();
 
+        // Keep the original unequal proposals as an atomic conflict, never
+        // a per-root last-wins execution.
+        let refusal = writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                &statement("WITH p, row ", "SET p.name='Renamed', f.age=row.age"),
+                vec![(
+                    "rows".into(),
+                    WireValue::List(
+                        [100, 200]
+                            .into_iter()
+                            .map(|age| {
+                                WireValue::Map(vec![
+                                    ("age".into(), WireValue::Int(age)),
+                                    (
+                                        "friends".into(),
+                                        WireValue::List(vec![WireValue::Text("Bob".into())]),
+                                    ),
+                                    ("name".into(), WireValue::Text("Ada".into())),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                )],
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            refusal,
+            ClientError::Server {
+                code: ErrorCode::Statement,
+                ..
+            }
+        ));
+        assert_eq!(state(cx, &mut observer).await, expected);
+        let issued = |name: &str| {
+            expected
+                .0
+                .rows
+                .iter()
+                .find(|row| row[1] == WireValue::Text(name.into()))
+                .unwrap()[0]
+                .clone()
+        };
+        let ada_id = issued("Ada");
+        let bob_id = issued("Bob");
+        let cy = expected
+            .0
+            .rows
+            .iter()
+            .find(|row| row[1] == WireValue::Text("Cy".into()))
+            .unwrap()
+            .clone();
+        let edge_image = |answer: &Answer| {
+            answer
+                .rows
+                .iter()
+                .map(|row| {
+                    let WireValue::Edge(id) = &row[2] else {
+                        panic!("the real relationship projection contains an edge identity");
+                    };
+                    (*id, row[3].clone())
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let edges_before = edge_image(&expected.1);
+        assert_eq!(edges_before.len(), 3);
+        // Distinct target fields and equal duplicate proposals are legal.
+        // The whole relation must finish before renaming either MATCH key.
         committed(
             writer
                 .execute(
                     cx,
                     ExecuteMode::Write,
                     &statement("WITH p, row ", "SET p.name='Renamed', f.age=row.age"),
-                    vec![(
-                        "rows".into(),
-                        WireValue::List(
-                            [100, 200]
-                                .into_iter()
-                                .map(|age| {
-                                    WireValue::Map(vec![
-                                        ("age".into(), WireValue::Int(age)),
-                                        (
-                                            "friends".into(),
-                                            WireValue::List(vec![WireValue::Text("Bob".into())]),
-                                        ),
-                                        ("name".into(), WireValue::Text("Ada".into())),
-                                    ])
-                                })
-                                .collect(),
-                        ),
-                    )],
+                    disjoint_field_parameters(false),
                 )
                 .await
                 .unwrap(),
             4,
             1,
         );
-        // Changing the first MATCH key cannot erase the second occurrence
-        // already selected by this statement. Row-by-row rematching yields
-        // age=100; the native clause pipeline must retain age=200.
         let final_state = state(cx, &mut observer).await;
-        let bob = final_state
-            .0
-            .rows
-            .iter()
-            .find(|row| row[1] == WireValue::Text("Bob".into()))
-            .unwrap();
-        assert_eq!(bob[2], WireValue::Int(200));
+        assert_eq!(final_state.0.outcome, Outcome::Rows { seq: 4 });
+        for (id, age) in [(&ada_id, 200), (&bob_id, 100)] {
+            let row = final_state.0.rows.iter().find(|row| &row[0] == id).unwrap();
+            assert_eq!(row[1], WireValue::Text("Renamed".into()));
+            assert_eq!(row[2], WireValue::Int(age));
+        }
+        assert_eq!(
+            final_state
+                .0
+                .rows
+                .iter()
+                .find(|row| row[0] == cy[0])
+                .unwrap(),
+            &cy
+        );
+        assert_eq!(final_state.0.rows.len(), 3);
+        assert_eq!(edge_image(&final_state.1), edges_before);
         writer.close(cx).await.unwrap();
         observer.close(cx).await.unwrap();
         fixture.stop(cx, 4, 3, 3).await;

@@ -683,7 +683,7 @@ fn document_shape_and_late_row_type_refusals_never_enter_catalog_or_publish() {
 }
 
 #[test]
-fn post_match_field_updates_preserve_root_order_and_frozen_selection_through_reopen() {
+fn post_match_field_updates_keep_global_conflicts_and_frozen_selection_through_reopen() {
     use fgdb::WriteBatch;
     let ((), report) = run_async_under_lab(0x646f_6307, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -737,13 +737,93 @@ fn post_match_field_updates_preserve_root_order_and_frozen_selection_through_reo
                  MATCH (f:Entity {{id:friend}}) SET p.id=99,f.score=row.score"
             );
             let mut allocations = 0_u64;
+            let single_target = format!(
+                "UNWIND $rows AS row MATCH (p:Entity {{id:row.id}}) \
+                 {carry} UNWIND row.friends AS friend \
+                 MATCH (f:Entity {{id:friend}}) SET p.score=row.score"
+            );
+            // A completed native relation is one simultaneous statement,
+            // including when every assignment addresses one target column.
+            // Keep the original unequal roots and original two-target SQL.
+            for (negative, expected_action) in [(&text, 1), (&single_target, 0)] {
+                let error = db
+                    .query_write(
+                        &txcx,
+                        &cx,
+                        &commit,
+                        negative,
+                        &parameters,
+                        symbols,
+                        R,
+                        writes(),
+                        |_| {
+                            allocations += 1;
+                            Err::<ElementId, _>("field updates allocate no identity")
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(
+                        &error,
+                        QueryWriteError::Execute(
+                            fgdb_gql::GraphWriteScriptExecutionError::Program(
+                                fgdb_gql::GraphWriteProgramError::Program(
+                                    fgdb_gql::GraphMutationProgramError::Statement {
+                                        statement: 0,
+                                        source: GqlQueryError::Source(
+                                            GraphMutationError::ConflictingAssignment {
+                                                first_row: 0,
+                                                first_action,
+                                                row: 1,
+                                                action,
+                                            }
+                                        ),
+                                    }
+                                )
+                            )
+                        ) if *first_action == expected_action && *action == expected_action
+                    ),
+                    "{negative}: {error:?}"
+                );
+                assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+                assert_eq!(db.vertices().unwrap(), original);
+                assert!(db.edges().unwrap().is_empty());
+                assert_eq!(pinned.vertices().unwrap(), original);
+                assert_eq!(parameters.canonical_bytes(), parameter_bytes);
+                assert_eq!(allocations, 0);
+            }
+            // These proposals address different fields. Repeating the first
+            // row is an equal-assignment collapse, not another statement.
+            // Either input order changes a key that the other row's friend
+            // MATCH needs, so a row-at-a-time rematch loses valid proposals.
+            let mut selected = vec![(1, 100, 2), (1, 100, 2), (2, 200, 1)];
+            if scores[0] > scores[1] {
+                selected.reverse();
+            }
+            let valid_parameters = GqlParameters::new()
+                .with_list(
+                    "rows",
+                    selected
+                        .into_iter()
+                        .map(|(id, score, friend)| {
+                            object(vec![
+                                ("id", int(id)),
+                                ("score", int(score)),
+                                ("friends", list(vec![int(friend)])),
+                            ])
+                        })
+                        .collect(),
+                )
+                .unwrap();
+            let valid_bytes = valid_parameters.canonical_bytes();
             let result = db
                 .query_write(
                     &txcx,
                     &cx,
                     &commit,
                     &text,
-                    &parameters,
+                    &valid_parameters,
                     symbols,
                     R,
                     writes(),
@@ -760,9 +840,8 @@ fn post_match_field_updates_preserve_root_order_and_frozen_selection_through_reo
                 completion,
             } = result
             {
-                // Raw program statistics retain both instances, even when a
-                // native server completion reports one source statement.
-                assert_eq!(receipt.stats().completed_statements, 2);
+                assert_eq!(receipt.stats().completed_statements, 1);
+                assert_eq!(receipt.stats().mutation_effects, 4);
                 assert_eq!(
                     completion,
                     Some(EmbeddedTxnCompletion::WriteCommitted {
@@ -772,17 +851,36 @@ fn post_match_field_updates_preserve_root_order_and_frozen_selection_through_reo
             }
             assert_eq!(allocations, 0);
             assert_eq!(parameters.canonical_bytes(), parameter_bytes);
+            assert_eq!(valid_parameters.canonical_bytes(), valid_bytes);
             assert_eq!(db.frontier().unwrap(), CommitSeq(2));
             assert!(db.edges().unwrap().is_empty());
-            let wanted = expected(&[[2, scores[1]], [99, 10]]);
+            let read = "MATCH (n:Entity) RETURN n.id AS id,n.score AS score ORDER BY id,score";
+            let wanted = expected(&[[99, 100], [99, 200]]);
             assert_eq!(
-                db.query(&cx, READ, &GqlParameters::new(), symbols, reads())
+                db.query(&cx, read, &GqlParameters::new(), symbols, reads())
                     .unwrap(),
                 wanted,
                 "{text}: {scores:?}"
             );
-            // Both parameter roots matched id=1 before either changed it.
-            // Re-matching after the first update would leave scores[0].
+            for (vertex, score) in [(VId(1), 200), (VId(2), 100)] {
+                let actual = db.vertex(vertex).unwrap().unwrap();
+                assert_eq!(actual.vid, vertex);
+                assert_eq!(actual.labels, [LabelId(1)]);
+                assert_eq!(
+                    actual.props,
+                    vec![
+                        (
+                            PropertyKeyId(1),
+                            fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(99)),
+                        ),
+                        (
+                            PropertyKeyId(2),
+                            fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(score)),
+                        ),
+                    ]
+                );
+            }
+            // Both MATCH pairs were selected before either id changed.
             // The new root knows when both old rows retired. The earlier
             // pinned root still carries their original open intervals.
             let mut historical = original.clone();
@@ -797,10 +895,26 @@ fn post_match_field_updates_preserve_root_order_and_frozen_selection_through_reo
                 .unwrap();
             assert_eq!(db.frontier().unwrap(), CommitSeq(2));
             assert_eq!(
-                db.query(&cx, READ, &GqlParameters::new(), symbols, reads())
+                db.query(&cx, read, &GqlParameters::new(), symbols, reads())
                     .unwrap(),
                 wanted
             );
+            for (vertex, score) in [(VId(1), 200), (VId(2), 100)] {
+                let actual = db.vertex(vertex).unwrap().unwrap();
+                assert_eq!(
+                    actual.props,
+                    vec![
+                        (
+                            PropertyKeyId(1),
+                            fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(99)),
+                        ),
+                        (
+                            PropertyKeyId(2),
+                            fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(score)),
+                        ),
+                    ]
+                );
+            }
             assert_eq!(db.vertices_at(CommitSeq(1)).unwrap(), historical);
             assert_eq!(pinned.vertices().unwrap(), original);
             assert_eq!(txcx.outstanding_obligations(), 0);

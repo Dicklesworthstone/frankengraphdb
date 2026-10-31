@@ -1603,12 +1603,13 @@ fn mixed_merge_target_payload_is_admitted_before_owner_frame_copy() {
     use fgdb_gql::{
         GlaExecutionStats, GlaLimitDimension, GqlExecutionStats, GqlParameters, GqlQueryError,
         GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphVertexMergePolicy,
-        GraphVertexMergeRowAction, GraphVertexMergeStats, GraphWriteChainStep,
-        PreparedGraphWriteChainText,
+        GraphVertexMergeRowAction, GraphVertexMergeRowInput, GraphVertexMergeStats,
+        GraphWriteChainStep, PreparedGraphWriteChainText,
     };
     const P: fgdb_delta_types::PropertyKeyId = fgdb_delta_types::PropertyKeyId(1);
     const Q: fgdb_delta_types::PropertyKeyId = fgdb_delta_types::PropertyKeyId(2);
     const SCRATCH: u64 = 32;
+    const SHARED: u64 = 128;
     let ((), report) = asupersync::lab::run_async_under_lab(0xf0ec_1012, |root| async move {
         let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(&root);
         let definition = PreparedGraphWriteChainText::prepare(
@@ -1630,13 +1631,20 @@ fn mixed_merge_target_payload_is_admitted_before_owner_frame_copy() {
             panic!("the compiled first stage is the row MERGE");
         };
         let actions = &merge.actions().unwrap().after;
-        assert!(matches!(
-            &actions[..],
-            [GraphVertexMergeRowAction::Value {
-                inputs: Some(_),
-                ..
-            }]
-        ));
+        let [GraphVertexMergeRowAction::Value {
+            inputs: Some(inputs),
+            ..
+        }] = &actions[..]
+        else {
+            panic!("the compiled assignment has one mixed value frame");
+        };
+        assert_eq!(
+            &inputs[..],
+            &[
+                GraphVertexMergeRowInput::Property(Q),
+                GraphVertexMergeRowInput::Column(0),
+            ]
+        );
         let input = GraphValueRow::from_owned_values(vec![
             GraphValue::map(vec![
                 ("key".into(), GraphValue::Scalar(CanonicalScalar::Int(1))),
@@ -1644,11 +1652,15 @@ fn mixed_merge_target_payload_is_admitted_before_owner_frame_copy() {
             ])
             .unwrap(),
         ]);
-        // Each 64-byte payload quantum must consume scratch before the copy.
-        // A tiny value fits the same cap; this large bound cell alone exceeds
-        // it. The CASE result is always7, so output admission cannot explain
-        // the refusal. This owner-stage law deliberately excludes selection.
-        for payload_bytes in [1, (SCRATCH as usize + 1) * GRAPH_VALUE_PAYLOAD_UNIT_BYTES] {
+        // Scratch is cumulative: the frame and expression copies make 32 an
+        // underfunded tiny invocation, retained below as a typed refusal.
+        // At 128, the tiny value has room for the fixed frame/copy costs, while
+        // the oversized bound cell alone exceeds the SAME allowance. The CASE
+        // still returns 7, so output admission cannot explain that refusal.
+        // This real owner-stage law deliberately excludes MATCH selection.
+        let original_payload = (SCRATCH as usize + 1) * GRAPH_VALUE_PAYLOAD_UNIT_BYTES;
+        let shared_payload = (SHARED as usize + 1) * GRAPH_VALUE_PAYLOAD_UNIT_BYTES;
+        for payload_bytes in [1, original_payload, shared_payload] {
             let stored = CanonicalScalar::ucs_basic_text(&"x".repeat(payload_bytes)).unwrap();
             let mut db = Database::<crate::MemVfs>::open_memory(
                 &contexts.commit(),
@@ -1669,7 +1681,12 @@ fn mixed_merge_target_payload_is_admitted_before_owner_frame_copy() {
             db.write(&contexts.commit(), seed).await.unwrap();
             let frontier = db.frontier().unwrap();
             for held_target in [false, true] {
-                for scratch in [SCRATCH, 1_000_000] {
+                let scratch_limits: &[u64] = if payload_bytes == original_payload {
+                    &[SCRATCH, 1_000_000]
+                } else {
+                    &[SCRATCH, SHARED, 1_000_000]
+                };
+                for &scratch in scratch_limits {
                     let mut transaction = db.begin(&contexts.txn()).unwrap();
                     let mut prefix = WriteBatch::new(RelationId(1));
                     prefix.create_vertex(VId(77), vec![], vec![]);
@@ -1685,6 +1702,12 @@ fn mixed_merge_target_payload_is_admitted_before_owner_frame_copy() {
                             vec![(P, CanonicalScalar::Int(1)), (Q, stored.clone())],
                         );
                         held.defer(creation);
+                    }
+                    let target = fgdb_delta_types::ElementId::Vertex(vertex);
+                    {
+                        let reads = transaction.point_reads.borrow();
+                        assert!(reads.1.is_none());
+                        assert!(!reads.contains(target, PointReadField::Property(Q)));
                     }
                     let mut used = GraphVertexMergeStats {
                         match_selection: GqlExecutionStats::default(),
@@ -1710,14 +1733,32 @@ fn mixed_merge_target_payload_is_admitted_before_owner_frame_copy() {
                             held_target.then_some(&mut held),
                             &None,
                         );
-                    if payload_bytes > GRAPH_VALUE_PAYLOAD_UNIT_BYTES && scratch == SCRATCH {
+                    let refuses = scratch == SCRATCH
+                        || (scratch == SHARED && payload_bytes == shared_payload);
+                    if refuses {
                         assert!(
                             matches!(&result, Err(GqlQueryError::Evaluator(error))
                             if error.dimension == GlaLimitDimension::ScratchEntries
-                                && error.limit == SCRATCH && error.observed == u128::from(SCRATCH + 1)),
-                            "held={held_target}: {result:?}"
+                                && error.limit == scratch && error.observed == u128::from(scratch + 1)),
+                            "payload={payload_bytes},scratch={scratch},held={held_target}: {result:?}"
                         );
+                        assert_eq!(used.evaluator.scratch_entries, scratch);
                         assert_eq!(transaction.staged_effect_digest().unwrap(), before);
+                        if payload_bytes > GRAPH_VALUE_PAYLOAD_UNIT_BYTES {
+                            let reads = transaction.point_reads.borrow();
+                            assert!(!reads.contains(target, PointReadField::Property(Q)));
+                            if held_target {
+                                assert!(reads.1.is_none());
+                                // Before Property(Q): 3 scratch/6 work. Each
+                                // admitted payload quantum is Work+Scratch;
+                                // the next Work precedes the refused Scratch.
+                                assert_eq!(used.evaluator.work_units, 2 * scratch + 1);
+                            } else {
+                                // Ordinary acquisition refused before its
+                                // field witness and before owner-frame copy.
+                                assert_eq!(reads.1, Some(target));
+                            }
+                        }
                         if held_target {
                             assert_eq!(held.batches.len(), 1);
                             assert_eq!(

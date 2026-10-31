@@ -1701,7 +1701,7 @@ fn mutation_returning_property_maps_use_the_server_catalog_and_post_write_scope(
             )
             .await
             .unwrap_err();
-        assert_eq!(server_code(failure), ErrorCode::Statement);
+        assert_eq!(server_code(failure), ErrorCode::Execution);
         limited.close(cx).await.unwrap();
         let current = owner
             .execute(
@@ -1909,7 +1909,7 @@ fn merge_returning_preserves_the_selected_vertex_and_atomic_failure_over_fgp() {
             )
             .await
             .unwrap_err();
-        assert_eq!(server_code(refused), ErrorCode::Statement);
+        assert_eq!(server_code(refused), ErrorCode::Execution);
 
         let scoped = Grant {
             properties: Scope::only([PropertyKeyId(1)]),
@@ -2121,7 +2121,19 @@ fn http_adapter_serves_the_same_authorized_statements() {
             r#"{"statement":"MATCH (p:Person) WHERE p.name = 'Ann' SET p.age = 99 RETURN 1 / 0"}"#,
         )
         .await;
+        assert_eq!(status, 500, "{body}");
+        assert!(body.contains(r#""code":"execution""#), "{body}");
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/write",
+            host,
+            Some(&rw),
+            r#"{"statement":"CREATE ("}"#,
+        )
+        .await;
         assert_eq!(status, 400, "{body}");
+        assert!(body.contains(r#""code":"statement""#), "{body}");
         let (status, body) = http(
             addr,
             "POST",

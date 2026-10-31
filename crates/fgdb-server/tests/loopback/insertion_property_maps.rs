@@ -172,7 +172,7 @@ fn insertion_returning_maps_mask_matched_sources_and_refuse_late_failures_atomic
                     )
                     .await
                     .unwrap_err();
-                assert_eq!(server_code(failure), ErrorCode::Statement);
+                assert_eq!(server_code(failure), ErrorCode::Execution);
                 assert_eq!((columns, rows), (0, 0));
                 let current = owner
                     .execute(

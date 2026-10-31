@@ -436,47 +436,6 @@ impl PreparedGraphWriteProgram {
         true
     }
 
-    /// The prepared text binder proved an unchanged parameter-row column for
-    /// each singleton-root statement. Re-prove every resolved action here;
-    /// ordinary simultaneous mutations acquire no different duplicate rule.
-    pub(crate) fn freeze_parameter_field_update_input(&mut self, columns: &[usize]) -> bool {
-        if self.statements.len() <= 1
-            || self.statements.len() != columns.len()
-            || self.freezes_field_update_input()
-            || self.frozen_vertex_upsert_input
-            || self.frozen_edge_merge_input
-        {
-            return false;
-        }
-        let mut vertices = false;
-        let mut edges = false;
-        for (statement, &column) in self.statements.iter().zip(columns) {
-            let GraphWriteStatement::Mutation(mutation) = statement else {
-                return false;
-            };
-            if !mutation.writes_only_parameter_columns(&[column]) {
-                return false;
-            }
-            if mutation.is_vertex_update_only() {
-                vertices = true;
-            } else if mutation.is_edge_update_only() {
-                edges = true;
-            } else if mutation.is_mixed_update_only() {
-                vertices = true;
-                edges = true;
-            } else {
-                return false;
-            }
-        }
-        match (vertices, edges) {
-            (true, false) => self.frozen_vertex_update_input = true,
-            (false, true) => self.frozen_edge_update_input = true,
-            (true, true) => self.frozen_mixed_update_input = true,
-            (false, false) => return false,
-        }
-        true
-    }
-
     /// Relationship property updates whose selections use the entry
     /// transaction overlay before any input row is staged. Assignments are
     /// resolved constants or removals: freezing selection identities does not
