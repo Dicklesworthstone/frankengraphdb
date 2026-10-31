@@ -451,6 +451,42 @@ tracks that work; checked investigation is not delivered capability.
 - [ ] Re-read acceptance in a fresh solo verification pass; close only work
   whose complete criteria and required gates actually passed.
 
+The later integrated repair run on `7afd8d653f1ba44c4069218aff013bf076b8ab7e`
+plus the owned repair set passes all-target/all-feature compilation. Its
+fourteen public integration targets report **177 passed, twelve failed**.
+Bulk source limits/replay and the complete CLI loader now pass after logical
+NULL-as-absence resume comparison; raw source hashes, admission and checkpoint
+formats remain intact. Composite spill probes, final mutation metadata,
+carried grouping and all twenty sealed-owner tests pass. The new literal GQL
+component fixture specifies every vertex at two cuts, including a newly
+committed bridge, and retains both owners after another write and writer drop.
+Whole-map upsert routing, primitive NULL accounting, optional-query paths and
+newly integrated FOREACH cases still require the next runtime verdict.
+
+Two new private structural-admission tests pass for inline and CSR owners.
+Process-local mutants ignoring the actual finish/reload validator refusal
+fail both tests, and normal execution passes again with unchanged disk hashes.
+Validation still executes in those experiments; they are enforcement-bypass
+mutants, not source-check removal or a public receipt-forging API.
+
+A separate older-source release witness at
+`621e3df54ecdfd8e116e5a2375e8d3cf8385e8a1` appends all 332,334 official SNAP
+email temporal edges to 986 previously loaded vertices in seventeen windows,
+ending at sequence18. After all writes, 68 fresh queries check seventeen old
+cuts against independent Python counts, timestamp summaries, exact distinct
+endpoint pairs and top out-degrees. An invalid append leaves the old frontier
+and edge population unchanged. The first driver used an unsupported ordinary
+query `--as-of` flag; its corrected `FOR SYSTEM_TIME` verification passes.
+This is named-source functional/load evidence, not an incumbent speedup or a
+current whole-workspace verdict. `fgdb-ewc7i` remains in progress.
+
+The second full proof was stopped after two genuine Clippy failures and new
+remote integration requirements. It records RED143 after interrupted test
+compilation130, but its verifier rejects the partial bundle because the final
+gate verdict was never reached. Preserve that qualification alongside the
+earlier VOID125 run. Neither is a completed mandatory proof; all implementation
+and qualification items remain open until the exact integrated tree passes.
+
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,
 not a new gate or capability. Retire it from active use when these work units
