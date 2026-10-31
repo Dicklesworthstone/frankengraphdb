@@ -163,6 +163,11 @@ struct Projection {
     // Zero or one budgeted directory, shared by every compressed row cursor.
     vertex_prefix: Vec<OrdinalPrefix>,
     degrees: Vec<usize>,
+    // Optional exact incoming degrees of the FINAL admitted projection.
+    // Directed rows already visit every target during admission, so later
+    // incoming-degree calls need no repeated compressed scan. Undirected
+    // projections borrow `degrees` instead. Tight budgets retain the scanner.
+    incoming_degrees: Option<Vec<usize>>,
     binding: SnapshotBinding,
     digest: Digest,
     input_edges: usize,
@@ -414,6 +419,25 @@ impl SealedGraphView {
             workspace_bytes,
             limits.max_workspace_bytes,
         )?;
+        // Mandatory construction and the existing endpoint accelerator keep
+        // their original allowance. This optional O(V) directory consumes
+        // only the remaining admitted backing bytes; allocation failure also
+        // retains the existing scan path, never a new projection refusal.
+        let mut incoming_degrees = if config.projection.directedness == Directedness::Undirected {
+            None
+        } else {
+            let available = limits.max_workspace_bytes - workspace_bytes;
+            let mut counts = Vec::<usize>::new();
+            if n <= available / size_of::<usize>()
+                && counts.try_reserve_exact(n).is_ok()
+                && counts.capacity() <= available / size_of::<usize>()
+            {
+                workspace_bytes = add(workspace_bytes, counts.capacity() * size_of::<usize>())?;
+                Some(counts)
+            } else {
+                None
+            }
+        };
         let binding = SnapshotBinding {
             root: scope.source_root.0,
             as_of: config.as_of,
@@ -436,6 +460,10 @@ impl SealedGraphView {
             hash.update(&vertex.0.to_le_bytes());
             if let Some(prefix) = vertex_prefix.first_mut() {
                 prefix.include(*vertex, index);
+            }
+            if let Some(counts) = &mut incoming_degrees {
+                // Share the already bounded vertex-initialization pass.
+                counts.push(0);
             }
         }
         if let Some(prefix) = vertex_prefix.first_mut() {
@@ -512,6 +540,15 @@ impl SealedGraphView {
                         adjacency_entries,
                         limits.max_adjacency_entries,
                     )?;
+                    if let Some(counts) = &mut incoming_degrees {
+                        // A collapsed parallel group contributes exactly once.
+                        // Visibility, endpoint selection, loop and weight laws
+                        // have all completed before this final cursor item.
+                        let count = counts
+                            .get_mut(target)
+                            .ok_or(SealedProjectionError::UnknownOrdinal(target))?;
+                        *count = add(*count, 1)?;
+                    }
                     if config.projection.directedness != Directedness::Undirected
                         || source <= target
                     {
@@ -538,6 +575,9 @@ impl SealedGraphView {
                 .capacity()
                 .checked_mul(size_of::<OrdinalPrefix>()),
             degrees.capacity().checked_mul(size_of::<usize>()),
+            incoming_degrees.as_ref().map_or(Some(0), |counts| {
+                counts.capacity().checked_mul(size_of::<usize>())
+            }),
         ] {
             resident_bytes = add(resident_bytes, bytes.ok_or(ProjectionError::SizeOverflow)?)?;
         }
@@ -549,6 +589,7 @@ impl SealedGraphView {
             vertices: owned_vertices,
             vertex_prefix,
             degrees,
+            incoming_degrees,
             binding,
             digest: hash.finalize(),
             input_edges,
@@ -618,6 +659,15 @@ impl SealedGraphView {
     }
     pub fn degree(&self, ordinal: usize) -> Option<usize> {
         self.0.degrees.get(ordinal).copied()
+    }
+    /// Exact incoming degrees when retained by projection admission. Absence
+    /// means callers must scan the admitted rows, not assume zero degrees.
+    pub(crate) fn incoming_degrees(&self) -> Option<&[usize]> {
+        if self.spec().directedness == Directedness::Undirected {
+            Some(&self.0.degrees)
+        } else {
+            self.0.incoming_degrees.as_deref()
+        }
     }
     pub fn charged_workspace_bytes(&self) -> usize {
         self.0.workspace_bytes

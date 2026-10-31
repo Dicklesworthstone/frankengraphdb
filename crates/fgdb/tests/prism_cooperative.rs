@@ -2464,3 +2464,173 @@ fn cooperative_degree_directory_yields_over_history_and_scalar_only_populations(
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
+
+#[test]
+fn cooperative_incoming_degrees_preserve_history_fallback_and_exact_admission() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let call = FnxCallSpec::bind(
+            "CALL fnx.in_degree_centrality() YIELD score AS rank,vertex AS id",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        for n in [0, 1, 4, 600] {
+            let (db, original) = if n == 4 {
+                database(&contexts.commit()).await
+            } else {
+                let db = small_database(&contexts.commit(), n, false).await;
+                let at = db.frontier().unwrap();
+                (db, at)
+            };
+            let mut cuts = vec![original];
+            if db.frontier().unwrap() != original {
+                cuts.push(db.frontier().unwrap());
+            }
+            for at in cuts {
+                for direction in [Directedness::Directed, Directedness::Reversed] {
+                    let mut opt = options(direction);
+                    opt.as_of = Some(at);
+                    let cached = projection(&db, &cx, opt).await;
+                    let decoded = db
+                        .read_session()
+                        .unwrap()
+                        .execute_fnx(&cx, &call, opt)
+                        .unwrap();
+                    opt.projection_limits.max_workspace_bytes = n
+                        * (size_of::<VId>() + size_of::<usize>())
+                        + cached
+                            .incoming_index_stats()
+                            .map_or(0, |stats| stats.charged_workspace_bytes);
+                    let fallback = projection(&db, &cx, opt).await;
+                    assert_eq!(cached.digest(), fallback.digest());
+                    for (graph, directory) in [(&cached, true), (&fallback, n == 0)] {
+                        let sync = call
+                            .execute_sealed(&cx, graph, opt.execution_limits, memory())
+                            .unwrap();
+                        assert_eq!(sync.rows, decoded.analytics.rows);
+                        assert_eq!(
+                            sync.certificate.witness.edges_scanned,
+                            if directory {
+                                0
+                            } else {
+                                graph.adjacency_entry_count()
+                            }
+                        );
+                        if directory {
+                            assert_eq!(sync.certificate.estimated_work, n + 2);
+                            assert_eq!(
+                                sync.certificate.kernel_workspace_bytes,
+                                n * size_of::<f64>()
+                            );
+                        }
+                        let exact_limits = FnxExecutionLimits {
+                            max_iterations: 0,
+                            max_result_rows: n,
+                            max_estimated_work: sync.certificate.estimated_work,
+                        };
+                        let exact_memory = FnxMemoryLimits {
+                            max_kernel_workspace_bytes: sync.certificate.kernel_workspace_bytes,
+                            ..memory()
+                        };
+                        for q in [1, 7, 257] {
+                            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                            let (actual, pending) = drive(
+                                call.execute_sealed_cooperative(
+                                    &controlled,
+                                    graph,
+                                    exact_limits,
+                                    exact_memory,
+                                    quantum(q),
+                                    yield_now,
+                                ),
+                                &probe,
+                                q,
+                            );
+                            let actual = actual.unwrap();
+                            compare_execution(&actual, &sync);
+                            assert_eq!(
+                                actual.certificate.execution_kernel,
+                                if directory {
+                                    "fgdb-prism/sealed-in-degree-directory-cooperative-v2"
+                                } else {
+                                    "fgdb-prism/sealed-in-degree-cooperative-v1"
+                                }
+                            );
+                            if q == 1 && n != 0 {
+                                assert!(pending >= 2 * n);
+                            }
+                            compare_retained(
+                                call.execute_sealed_cooperative_rows(
+                                    &cx,
+                                    graph,
+                                    exact_limits,
+                                    exact_memory,
+                                    quantum(q),
+                                    yield_now,
+                                )
+                                .await
+                                .unwrap(),
+                                &actual,
+                                n,
+                            );
+                        }
+                        let mut limits = exact_limits;
+                        limits.max_estimated_work -= 1;
+                        assert!(matches!(
+                            call.execute_sealed_cooperative(
+                                &cx,
+                                graph,
+                                limits,
+                                exact_memory,
+                                quantum(1),
+                                || -> std::future::Ready<()> {
+                                    panic!("admission must precede yielding")
+                                },
+                            )
+                            .await,
+                            Err(FnxSealedExecutionError::Execution(
+                                FnxExecutionError::LimitExceeded {
+                                    resource: "estimated work",
+                                    ..
+                                }
+                            ))
+                        ));
+                        if n != 0 {
+                            let mut memory = exact_memory;
+                            memory.max_kernel_workspace_bytes -= 1;
+                            assert!(matches!(
+                                call.execute_sealed_cooperative(
+                                    &cx,
+                                    graph,
+                                    exact_limits,
+                                    memory,
+                                    quantum(1),
+                                    || -> std::future::Ready<()> {
+                                        panic!("admission must precede yielding")
+                                    },
+                                )
+                                .await,
+                                Err(FnxSealedExecutionError::Execution(
+                                    FnxExecutionError::LimitExceeded {
+                                        resource: "kernel workspace bytes",
+                                        ..
+                                    }
+                                ))
+                            ));
+                        }
+                        assert_eq!(
+                            call.execute_sealed(&cx, graph, exact_limits, exact_memory)
+                                .unwrap(),
+                            sync
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}

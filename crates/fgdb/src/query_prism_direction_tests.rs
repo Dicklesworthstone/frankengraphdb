@@ -753,14 +753,25 @@ fn direction_specific_admission_counts_construction_workspace_and_both_incidence
             opt.projection.directedness = direction;
             let graph = projected(&view, &query, &image, opt);
             let index = graph.incoming_index_stats().unwrap();
+            let mandatory = forward.charged_workspace_bytes() + index.charged_workspace_bytes;
             assert_eq!(
                 graph.charged_workspace_bytes(),
-                forward.charged_workspace_bytes() + index.charged_workspace_bytes
+                mandatory
+                    + if direction == Directedness::Reversed {
+                        graph.node_count() * std::mem::size_of::<usize>()
+                    } else {
+                        0
+                    }
             );
             assert!(index.charged_workspace_bytes > index.charged_resident_bytes);
             opt.projection_limits.max_workspace_bytes = graph.charged_workspace_bytes();
             projected(&view, &query, &image, opt);
-            opt.projection_limits.max_workspace_bytes -= 1;
+            opt.projection_limits.max_workspace_bytes = mandatory;
+            assert_eq!(
+                projected(&view, &query, &image, opt).digest(),
+                graph.digest()
+            );
+            opt.projection_limits.max_workspace_bytes = mandatory - 1;
             assert!(
                 view.prism_sealed_projection_at(
                     &query,

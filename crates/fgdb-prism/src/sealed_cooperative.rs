@@ -542,8 +542,11 @@ impl FnxCallSpec {
                 FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
                     admission.rows(n)?;
                     let incoming = matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality);
+                    let directory = incoming && graph.incoming_degrees().is_some();
                     (
-                        if incoming {
+                        if directory {
+                            "fgdb-prism/sealed-in-degree-directory-cooperative-v2"
+                        } else if incoming {
                             "fgdb-prism/sealed-in-degree-cooperative-v1"
                         } else {
                             "fgdb-prism/sealed-out-degree-directory-cooperative-v1"
@@ -551,7 +554,12 @@ impl FnxCallSpec {
                         pass,
                         mul(
                             n,
-                            size_of::<f64>() + if incoming { size_of::<usize>() } else { 0 },
+                            size_of::<f64>()
+                                + if incoming && !directory {
+                                    size_of::<usize>()
+                                } else {
+                                    0
+                                },
                         )?,
                         None,
                     )
@@ -751,9 +759,11 @@ where
 {
     control.tick().await?;
     let n = graph.node_count();
-    let mut counts = reserve(if incoming { n } else { 0 })?;
+    let directory = incoming.then(|| graph.incoming_degrees()).flatten();
+    let scan = incoming && directory.is_none();
+    let mut counts = reserve(if scan { n } else { 0 })?;
     let mut edges = 0usize;
-    if incoming {
+    if scan {
         for _ in 0..n {
             control.tick().await?;
             counts.push(0usize);
@@ -775,13 +785,13 @@ where
     for vertex in 0..n {
         control.tick().await?;
         output.push_directed(if incoming {
-            counts.get(vertex).copied()
+            directory.unwrap_or(&counts).get(vertex).copied()
         } else {
             graph.degree(vertex)
         })?;
     }
     control.tick().await?;
-    output.finish_directed(incoming, edges)
+    output.finish_directed(incoming, edges, scan)
 }
 
 // The heap and its exclusively borrowed repair both belong to this future.

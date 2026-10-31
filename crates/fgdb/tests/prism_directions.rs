@@ -1386,15 +1386,26 @@ fn incoming_build_peak_and_undirected_arcs_are_admitted_not_just_simple_edges() 
             let graph = project(&db, &query, opt).await;
             let stats = graph.incoming_index_stats().unwrap();
             let directory = graph.node_count() * (size_of::<VId>() + size_of::<usize>());
+            let mandatory = directory + stats.charged_workspace_bytes;
             assert_eq!(
                 graph.charged_workspace_bytes(),
-                directory + stats.charged_workspace_bytes
+                mandatory
+                    + if direction == Directedness::Reversed {
+                        graph.node_count() * size_of::<usize>()
+                    } else {
+                        0
+                    }
             );
             assert!(stats.charged_workspace_bytes > stats.charged_resident_bytes);
             assert_eq!(stats.incidences, 20); // includes both excluded endpoints
             opt.projection_limits.max_workspace_bytes = graph.charged_workspace_bytes();
             assert_eq!(project(&db, &query, opt).await.digest(), graph.digest());
-            opt.projection_limits.max_workspace_bytes -= 1;
+            // Optional incoming degrees may disappear without changing the
+            // graph. The mandatory incoming-index construction still refuses
+            // exactly one byte below its original admitted peak.
+            opt.projection_limits.max_workspace_bytes = mandatory;
+            assert_eq!(project(&db, &query, opt).await.digest(), graph.digest());
+            opt.projection_limits.max_workspace_bytes = mandatory - 1;
             assert!(matches!(
                 db.prism_sealed_projection_at(
                     &query,
@@ -1844,6 +1855,187 @@ fn empty_images_and_isolates_work_in_every_direction_without_invented_sources() 
 }
 
 const DEGREE: &str = "CALL fnx.degree_centrality() YIELD score AS rank, vertex AS node";
+
+#[test]
+fn sealed_incoming_degree_directory_matches_independent_history_counts_and_scan_fallback() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let original = db.write(&commit, fixture()).await.unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.create_vertex(VId(40), vec![LabelId(1)], vec![]);
+        update.delete_edge(EId(6));
+        update.add_edge(
+            EId(3000),
+            VId(1),
+            VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        db.write(&commit, update).await.unwrap();
+        let mut unrelated = WriteBatch::new(RelationId(2));
+        unrelated.add_edge(
+            EId(4000),
+            VId(1),
+            VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+        );
+        let current = db.write(&commit, unrelated).await.unwrap();
+        let procedure = call("CALL fnx.in_degree_centrality() YIELD vertex,score");
+        let view = db.read_session().unwrap();
+        let mut retained = Vec::new();
+        for at in [original, current] {
+            for direction in [Directedness::Directed, Directedness::Reversed] {
+                for loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+                    for reduction in [
+                        ParallelEdgePolicy::Sum,
+                        ParallelEdgePolicy::Minimum,
+                        ParallelEdgePolicy::Maximum,
+                        ParallelEdgePolicy::CollapseUnit,
+                    ] {
+                        let mut opt = options(direction);
+                        opt.as_of = Some(at);
+                        opt.projection.self_loops = loops;
+                        opt.projection.parallel_edges = reduction;
+                        let decoded_options = opt;
+                        let graph = project(&db, &query, opt).await;
+                        let n = graph.node_count();
+                        let extra = n * size_of::<usize>();
+                        let mandatory = n * (size_of::<VId>() + size_of::<usize>())
+                            + graph
+                                .incoming_index_stats()
+                                .map_or(0, |stats| stats.charged_workspace_bytes);
+                        assert_eq!(graph.charged_workspace_bytes(), mandatory + extra);
+                        // One byte short drops the optional directory, keeping
+                        // the original exact construction budget admissible.
+                        opt.projection_limits.max_workspace_bytes = mandatory + extra - 1;
+                        let fallback = project(&db, &query, opt).await;
+                        assert_eq!(fallback.charged_workspace_bytes(), mandatory);
+                        assert_eq!(
+                            graph.charged_resident_bytes(),
+                            fallback.charged_resident_bytes() + extra
+                        );
+                        assert_eq!(graph.digest(), fallback.digest());
+                        assert_eq!(graph.binding(), fallback.binding());
+
+                        // Independent simple-edge oracle: parallel EIds collapse,
+                        // excluded label/relation rows do not contribute, and a
+                        // retained loop contributes once. No cursor supplies it.
+                        let mut pairs = vec![
+                            (1, 2),
+                            (2, 1),
+                            (2, 3),
+                            (3, 4),
+                            (4, 2),
+                            (2, 2),
+                            (4, u128::MAX),
+                            (1, 3),
+                        ];
+                        if at == current {
+                            pairs.retain(|&pair| pair != (4, 2));
+                            pairs.push((1, u128::MAX));
+                        }
+                        let expected: Vec<_> = graph
+                            .vertex_ids()
+                            .iter()
+                            .map(|&vertex| {
+                                let count = pairs
+                                    .iter()
+                                    .filter(|&&(source, target)| {
+                                        (loops == SelfLoopPolicy::Keep || source != target)
+                                            && if direction == Directedness::Directed {
+                                                target == vertex.0
+                                            } else {
+                                                source == vertex.0
+                                            }
+                                    })
+                                    .count();
+                                vec![
+                                    FnxValue::Vertex(vertex),
+                                    FnxValue::Score(count as f64 / (n - 1) as f64),
+                                ]
+                            })
+                            .collect();
+                        let actual = procedure
+                            .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                            .unwrap();
+                        let scanned = procedure
+                            .execute_sealed(&query, &fallback, opt.execution_limits, memory())
+                            .unwrap();
+                        let decoded = view
+                            .execute_fnx(&query, &procedure, decoded_options)
+                            .unwrap();
+                        assert_eq!(actual.rows, expected);
+                        assert_eq!(scanned.rows, expected);
+                        assert_eq!(decoded.analytics.rows, expected);
+                        assert_eq!(
+                            actual.certificate.result_digest,
+                            scanned.certificate.result_digest
+                        );
+                        assert_eq!(
+                            actual.certificate.projection_digest,
+                            scanned.certificate.projection_digest
+                        );
+                        assert_eq!(
+                            actual.certificate.execution_kernel,
+                            "fgdb-prism/sealed-in-degree-directory-v2"
+                        );
+                        assert_eq!(
+                            scanned.certificate.execution_kernel,
+                            "fgdb-prism/sealed-in-degree-v1"
+                        );
+                        assert_eq!(actual.certificate.witness.edges_scanned, 0);
+                        assert_eq!(
+                            scanned.certificate.witness.edges_scanned,
+                            graph.adjacency_entry_count()
+                        );
+                        assert_eq!(actual.certificate.estimated_work, n + 2);
+                        assert_eq!(
+                            actual.certificate.kernel_workspace_bytes,
+                            n * size_of::<f64>()
+                        );
+                        assert_eq!(
+                            scanned.certificate.kernel_workspace_bytes,
+                            actual.certificate.kernel_workspace_bytes + extra
+                        );
+                        exact_sealed_limits(
+                            &procedure,
+                            &query,
+                            &graph,
+                            opt.execution_limits,
+                            &actual,
+                        );
+                        exact_sealed_limits(
+                            &procedure,
+                            &query,
+                            &fallback,
+                            opt.execution_limits,
+                            &scanned,
+                        );
+                        retained.push((graph, opt.execution_limits, actual));
+                    }
+                }
+            }
+        }
+        drop(view);
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        for (graph, limits, expected) in retained {
+            assert_eq!(
+                procedure
+                    .execute_sealed(&query, &graph, limits, memory())
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
 
 #[test]
 fn sealed_degree_directory_preserves_reductions_history_pins_and_exact_limits() {
