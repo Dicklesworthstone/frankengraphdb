@@ -248,10 +248,19 @@ fn a_kept_vertex_reads_its_properties_after_the_grouping_in_both_return_classes(
                 "{text}"
             );
         }
-        // A read in a later stage sees only the grouped row, never the graph.
+        // Passing the grouped identity through another WITH keeps the same
+        // scoped property reads and both occurrences, even when p is equal.
+        let carried = "MATCH (n:L)-[:R]->(m:L) WITH n, count(m) AS c \
+            WITH n, c RETURN n.p";
+        assert_eq!(
+            db.query(&c.query(), carried, &params, symbols, policy())
+                .unwrap(),
+            rows(&["n.p"], vec![vec![value(10)], vec![value(10)]]),
+        );
+        // Dropping the identity really does remove it from the next scope.
         assert!(
             PreparedNativeRead::prepare(
-                "MATCH (n:L)-[:R]->(m:L) WITH n, count(m) AS c WITH n, c RETURN n.p",
+                "MATCH (n:L)-[:R]->(m:L) WITH n, count(m) AS c WITH c RETURN n.p",
                 &params,
                 symbols
             )
