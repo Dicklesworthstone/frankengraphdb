@@ -157,6 +157,205 @@ fn tuple_counts_drive_all_distinct_windows_and_do_not_expand_large_offsets() {
 }
 
 #[test]
+fn private_group_bags_keep_huge_counts_and_unrelated_rows_compressed() {
+    let mut measurements = Vec::new();
+    for unrelated in [1, 128] {
+        let mut state = State::new_group_input(definition(false, 0, None, false)).unwrap();
+        assert!(state.is_private_bag());
+        let mut initial = vec![(1, u64::MAX, 1)];
+        initial.extend((2..=unrelated + 1).map(|key| (key, 1, 1)));
+        apply(&mut state, &initial, u64::MAX);
+        assert!(state.ordered.is_empty());
+        assert!(state.last_delta.is_none());
+
+        let stats = apply(
+            &mut state,
+            &[(1, u64::MAX, -1), (1, u64::MAX - 1, 1)],
+            u64::MAX,
+        );
+        let key =
+            GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(1))]);
+        assert_eq!(
+            state.rows.weight(&key).unwrap().to_i128(),
+            Some(i128::from(u64::MAX - 1))
+        );
+        let change = state.last_delta.as_ref().unwrap();
+        assert_eq!(change.len(), 1);
+        assert_eq!(change.weight(&key).unwrap().to_i128(), Some(-1));
+        assert_eq!(state.rows.len(), usize::try_from(unrelated + 1).unwrap());
+        assert!(state.ordered.is_empty());
+        measurements.push(stats);
+
+        // The complete count-bearing before-image must advance too.
+        apply(&mut state, &[(1, u64::MAX - 1, -1)], u64::MAX);
+        assert!(state.rows.weight(&key).is_none());
+        assert_eq!(state.rows.len(), usize::try_from(unrelated).unwrap());
+        apply(&mut state, &[], u64::MAX);
+        assert!(state.last_delta.as_ref().unwrap().is_empty());
+    }
+    assert_eq!(measurements[0], measurements[1]);
+}
+
+#[test]
+fn group_delivery_keeps_public_distinct_ordered_and_paged_laws() {
+    for distinct in [false, true] {
+        for reverse in [false, true] {
+            for offset in [0, 1, u64::MAX] {
+                for count in [None, Some(0), Some(4)] {
+                    let query = definition(distinct, offset, count, reverse);
+                    let mut public = State::new(query.clone()).unwrap();
+                    let mut private = State::new_group_input(query).unwrap();
+                    for changes in [
+                        &[(1, 4, 1), (2, 3, 1), (3, 2, 1)][..],
+                        &[(1, 4, -1), (1, 2, 1), (2, 3, -1), (4, 5, 1)][..],
+                    ] {
+                        apply(&mut public, changes, 20);
+                        apply(&mut private, changes, 20);
+                        assert_eq!(private.rows, public.rows);
+                        assert_eq!(private.last_delta, public.last_delta);
+                        if private.is_private_bag() {
+                            assert!(private.ordered.is_empty());
+                        } else {
+                            same(&private, &public);
+                        }
+                    }
+                    assert_eq!(
+                        private.is_private_bag(),
+                        !distinct && !reverse && offset == 0 && count.is_none(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn private_bag_null_retractions_cancel_at_every_checkpoint_and_retry_atomically() {
+    let query = definition(false, 0, None, false);
+    let producer = query.incremental_row_source_definition().unwrap();
+    let counted = |value, count| {
+        producer
+            .materialize_incremental_row(vec![value], vec![GraphAggregateValue::Count(count)])
+            .unwrap()
+    };
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let integer = GraphValue::Scalar(CanonicalScalar::Int(1));
+    let seed = || {
+        let mut state = State::new_group_input(query.clone()).unwrap();
+        let initial = ZSet::from_updates(
+            [
+                (counted(null.clone(), 2), ZWeight::ONE),
+                (counted(integer.clone(), 3), ZWeight::ONE),
+            ],
+            LimbLimit::new(4),
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
+        let mut checkpoint = || Ok(());
+        let mut meter = Meter {
+            policy: policy(10),
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        state.prepare(&initial, &mut meter).unwrap().commit();
+        state
+    };
+    let changes = ZSet::from_updates(
+        [
+            (counted(null.clone(), 2), ZWeight::from_i128(-1)),
+            (counted(null.clone(), 1), ZWeight::ONE),
+            (counted(integer.clone(), 3), ZWeight::from_i128(-1)),
+        ],
+        LimbLimit::new(4),
+        &mut |_| Ok::<_, ()>(()),
+    )
+    .unwrap();
+    let before = seed();
+    let mut success = seed();
+    let mut calls = 0;
+    let stats = {
+        let mut checkpoint = || {
+            calls += 1;
+            Ok(())
+        };
+        let mut meter = Meter {
+            policy: policy(10),
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        success.prepare(&changes, &mut meter).unwrap().commit();
+        meter.stats
+    };
+    let null_row = GraphValueRow::from_owned_values(vec![null.clone()]);
+    let integer_row = GraphValueRow::from_owned_values(vec![integer.clone()]);
+    assert_eq!(success.rows.len(), 1);
+    assert_eq!(success.rows.weight(&null_row), Some(&ZWeight::ONE));
+    let accepted = success.last_delta.as_ref().unwrap();
+    assert_eq!(accepted.weight(&null_row).unwrap().to_i128(), Some(-1));
+    assert_eq!(accepted.weight(&integer_row).unwrap().to_i128(), Some(-3));
+    for stop in 1..=calls {
+        let mut candidate = seed();
+        let mut seen = 0;
+        let mut checkpoint = || {
+            seen += 1;
+            if seen == stop {
+                Err(StandingQueryFailure::Interrupted)
+            } else {
+                Ok(())
+            }
+        };
+        let mut meter = Meter {
+            policy: policy(10),
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        assert!(matches!(
+            candidate.prepare(&changes, &mut meter),
+            Err(StandingQueryFailure::Interrupted)
+        ));
+        assert_eq!(seen, stop);
+        same(&candidate, &before);
+        assert_eq!(candidate.last_delta, before.last_delta);
+        let mut checkpoint = || Ok(());
+        let mut meter = Meter {
+            policy: policy(10),
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        drop(candidate.prepare(&changes, &mut meter).unwrap());
+        same(&candidate, &before);
+        candidate.prepare(&changes, &mut meter).unwrap().commit();
+        same(&candidate, &success);
+        assert_eq!(candidate.last_delta, success.last_delta);
+    }
+    for reason in [
+        StandingQueryFailure::WorkBudget,
+        StandingQueryFailure::ScratchBudget,
+    ] {
+        let mut candidate = seed();
+        let mut bounded = policy(10);
+        match reason {
+            StandingQueryFailure::WorkBudget => {
+                bounded.evaluator.max_work_units = stats.work_units - 1
+            }
+            StandingQueryFailure::ScratchBudget => {
+                bounded.evaluator.max_scratch_entries = stats.scratch_entries - 1
+            }
+            _ => unreachable!(),
+        }
+        let mut checkpoint = || Ok(());
+        let mut meter = Meter {
+            policy: bounded,
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        assert!(matches!(candidate.prepare(&changes, &mut meter), Err(actual) if actual == reason));
+        same(&candidate, &before);
+        assert_eq!(candidate.last_delta, before.last_delta);
+    }
+}
+
+#[test]
 fn every_row_sink_checkpoint_quota_and_dropped_guard_is_atomic_and_retryable() {
     for distinct in [false, true] {
         let seed = || {

@@ -324,10 +324,22 @@ fn optional_relationship_fields_and_identities_follow_every_committed_transition
         for pattern in ["(a)-[e:R]->(b)", "(a)<-[e:R]-(b)", "(a)-[e:R]-(b)"] {
             let prefix = format!("MATCH (a:Owner) OPTIONAL MATCH {pattern} WHERE b.flag=1");
             for projection in [
-                "RETURN a,e,e.amount AS amount,b.amount AS endpoint",
-                "RETURN e.amount AS amount",
                 "WITH a AS root,COUNT(*) AS rows,COUNT(e) AS hits,SUM(e.amount) AS total RETURN root,rows,hits,total ORDER BY root",
                 "WITH e.amount AS amount,COUNT(DISTINCT e) AS distinct_edges,COUNT(*) AS copies RETURN amount,distinct_edges,copies ORDER BY amount",
+            ] {
+                // Unbounded relational sorting is outside the maintained
+                // profile, independently of OPTIONAL or empty current data.
+                let text = format!("{prefix} {projection}");
+                assert!(matches!(
+                    db.register_standing_native(&cx, &text, &parameters, symbols, policy()),
+                    Err(StandingQueryError::Unsupported)
+                ));
+            }
+            for projection in [
+                "RETURN a,e,e.amount AS amount,b.amount AS endpoint",
+                "RETURN e.amount AS amount",
+                "WITH a AS root,COUNT(*) AS rows,COUNT(e) AS hits,SUM(e.amount) AS total RETURN root,rows,hits,total ORDER BY root LIMIT 1000",
+                "WITH e.amount AS amount,COUNT(DISTINCT e) AS distinct_edges,COUNT(*) AS copies RETURN amount,distinct_edges,copies ORDER BY amount LIMIT 1000",
             ] {
                 let text = format!("{prefix} {projection}");
                 let handle = db
@@ -549,7 +561,7 @@ fn optional_edge_field_ticks_touch_only_the_changed_relationship() {
             assert!(matches!(
                 db.standing_query(&cx, &handle),
                 Err(StandingQueryError::Unavailable {
-                    reason: StandingQueryFailure::NonIntegerSum,
+                    reason: StandingQueryFailure::NonIntegerAggregate { column: 2 },
                     ..
                 })
             ));

@@ -1021,20 +1021,38 @@ fn multi_hop_edge_field_maintenance_visits_only_affected_join_partners() {
                 let handle = db
                     .register_standing_native(&cx, text, &args, symbols, policy())
                     .unwrap();
-                let mut change = WriteBatch::new(RelationId(1));
-                change.set_edge_property(EId(2), Q, Some(CanonicalScalar::Int(7)));
-                db.write(&commit, change).await.unwrap();
+                let mut transitions = Vec::new();
+                for (amount, rebuild) in [(7, false), (9, true)] {
+                    if rebuild {
+                        db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
+                    }
+                    let mut change = WriteBatch::new(RelationId(1));
+                    change.set_edge_property(EId(2), Q, Some(CanonicalScalar::Int(amount)));
+                    db.write(&commit, change).await.unwrap();
+                    assert_native(&db, &cx, &handle, text, &args);
+                    let stats: Vec<_> = db
+                        .standing_query_node_stats(&cx, &handle)
+                        .unwrap()
+                        .copied()
+                        .collect();
+                    assert_eq!(
+                        stats.iter().map(|stats| stats.affected_edges).max(),
+                        Some(1)
+                    );
+                    transitions.push(stats);
+                }
+                let mut hidden = WriteBatch::new(RelationId(1));
+                hidden.set_edge_property(EId(2), PropertyKeyId(3), Some(CanonicalScalar::Int(99)));
+                db.write(&commit, hidden).await.unwrap();
                 assert_native(&db, &cx, &handle, text, &args);
                 let stats: Vec<_> = db
                     .standing_query_node_stats(&cx, &handle)
                     .unwrap()
                     .copied()
                     .collect();
-                assert_eq!(
-                    stats.iter().map(|stats| stats.affected_edges).max(),
-                    Some(1)
-                );
-                measurements.push(stats);
+                assert!(stats.iter().all(|stats| stats.affected_edges == 0));
+                transitions.push(stats);
+                measurements.push(transitions);
             }
             // Both sizes keep the unchanged value row and aggregate group alive;
             // extra components do not change the source or downstream work.
@@ -1187,7 +1205,8 @@ fn optional_multi_hop_edge_fields_follow_complete_witnesses_and_null_transitions
             .iter()
             .enumerate()
             .map(|(index, text)| {
-                let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+                let prepared = PreparedNativeRead::prepare(text, &args, symbols)
+                    .unwrap_or_else(|error| panic!("query {index}: {text}: {error:?}"));
                 let (_, width) = prepared.subscription_footprint(&cx, &args).unwrap();
                 let minimum_width = match index {
                     10 => 2,

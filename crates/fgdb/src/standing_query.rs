@@ -575,12 +575,27 @@ impl<V: Vfs + Clone> Database<V> {
         definition: PreparedGraphPattern<GraphValueRow>,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQuery, StandingQueryError> {
+        self.prepare_registered_rows_with_delivery(cx, definition, policy, false)
+    }
+
+    fn prepare_registered_rows_with_delivery(
+        &self,
+        cx: &QueryCx,
+        definition: PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+        group_input: bool,
+    ) -> Result<StandingQuery, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         let producer = definition
             .incremental_row_source_definition()
             .ok_or(StandingQueryError::Unsupported)?;
-        let mut output = row::State::new(definition).ok_or(StandingQueryError::Unsupported)?;
+        let mut output = if group_input {
+            row::State::new_group_input(definition)
+        } else {
+            row::State::new(definition)
+        }
+        .ok_or(StandingQueryError::Unsupported)?;
         let source =
             self.prepare_standing_query_with_output(cx, producer, policy, Some(&mut output))?;
         Ok(StandingQuery::Rows {
@@ -674,9 +689,12 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::ProjectedAggregate { output, .. } => {
                 self.prepare_registered_aggregate(cx, output.definition().clone(), policy)?
             }
-            StandingQuery::Rows { output, .. } => {
-                self.prepare_registered_rows(cx, output.definition().clone(), policy)?
-            }
+            StandingQuery::Rows { output, .. } => self.prepare_registered_rows_with_delivery(
+                cx,
+                output.definition().clone(),
+                policy,
+                output.is_private_bag(),
+            )?,
             StandingQuery::Reachability(query) => StandingQuery::Reachability(Box::new(
                 self.prepare_standing_reachability(cx, query.relation(), policy)?,
             )),

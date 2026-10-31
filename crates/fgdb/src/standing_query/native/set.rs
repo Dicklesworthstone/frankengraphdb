@@ -116,6 +116,7 @@ struct Staging<'a, V: Vfs + Clone> {
     database: &'a mut Database<V>,
     first: usize,
     accepted: bool,
+    group_input: bool,
 }
 impl<'a, V: Vfs + Clone> Staging<'a, V> {
     fn new(database: &'a mut Database<V>) -> Self {
@@ -123,10 +124,25 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             first: database.standing_queries.len(),
             database,
             accepted: false,
+            group_input: false,
         }
     }
     fn append(&mut self, query: StandingQuery) -> usize {
         self.database.store_standing_query(query).index
+    }
+
+    fn compile_group_input(
+        &mut self,
+        cx: &QueryCx,
+        query: &PreparedGraphSet,
+        policy: GqlQueryPolicy,
+        checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
+    ) -> Result<usize, StandingQueryError> {
+        let previous = self.group_input;
+        self.group_input = true;
+        let result = self.compile(cx, query, policy, checkpoint);
+        self.group_input = previous;
+        result
     }
 
     // Internal consumers need the selected bag; native delivery also needs
@@ -232,9 +248,12 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             )?;
             self.append(StandingQuery::Window(Box::new(state)))
         } else if let Some(pattern) = query.incremental_pattern() {
-            let query = self
-                .database
-                .prepare_registered_rows(cx, pattern.clone(), policy)?;
+            let query = self.database.prepare_registered_rows_with_delivery(
+                cx,
+                pattern.clone(),
+                policy,
+                self.group_input,
+            )?;
             self.append(query)
         } else if let Some((source, spec)) = analytic_procedure(query)? {
             let state = match source {
@@ -270,7 +289,7 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             // reducer and checked row sink publish one atomic derivative;
             // projection, HAVING-as-filter and top-k stay downstream. As for a
             // terminal group, pre-group occurrences are not result rows.
-            let input = self.compile(
+            let input = self.compile_group_input(
                 cx,
                 definition.input(),
                 group::input_policy(policy),
@@ -517,7 +536,7 @@ fn register_group_checked<V: Vfs + Clone>(
     let mut staged = Staging::new(database);
     // The nine admitted aggregates consume a bag, not an inherited order trace.
     // Every input-local page must still be admitted by the recursive compiler.
-    let input = staged.compile(
+    let input = staged.compile_group_input(
         cx,
         definition.input(),
         group::input_policy(policy),
@@ -669,9 +688,12 @@ fn rebuild_checked<V: Vfs + Clone>(
                 )?,
             )),
             StandingQuery::Rows { output, .. } => {
-                staged
-                    .database
-                    .prepare_registered_rows(cx, output.definition().clone(), policy)?
+                staged.database.prepare_registered_rows_with_delivery(
+                    cx,
+                    output.definition().clone(),
+                    policy,
+                    output.is_private_bag(),
+                )?
             }
             StandingQuery::Set(query) => {
                 let mut inputs = [0; 2];

@@ -59,6 +59,9 @@ pub(crate) struct State {
     distinct: bool,
     offset: u64,
     count: Option<u64>,
+    // A private unpaged ALL input is consumed as a counted bag by its group
+    // circuit. It has no public occurrence sequence to rebuild on each tick.
+    private_bag: bool,
     candidates: Candidates,
     pub(super) rows: ZSet<GraphValueRow>,
     pub(super) ordered: Vec<Arc<GraphValueRow>>,
@@ -100,14 +103,28 @@ fn reserve_values(
 
 impl State {
     pub(super) fn new(definition: PreparedGraphPattern<GraphValueRow>) -> Option<Self> {
+        Self::with_delivery(definition, false)
+    }
+
+    pub(super) fn new_group_input(definition: PreparedGraphPattern<GraphValueRow>) -> Option<Self> {
+        Self::with_delivery(definition, true)
+    }
+
+    fn with_delivery(
+        definition: PreparedGraphPattern<GraphValueRow>,
+        group_input: bool,
+    ) -> Option<Self> {
         let (distinct, offset, count) = definition.incremental_row_window()?;
-        let ordering = definition.incremental_row_ordering()?.into();
+        let ordering: Arc<[GraphAggregateOrder]> = definition.incremental_row_ordering()?.into();
+        let private_bag =
+            group_input && !distinct && offset == 0 && count.is_none() && ordering.is_empty();
         Some(Self {
             definition,
             ordering,
             distinct,
             offset,
             count,
+            private_bag,
             candidates: BTreeMap::new(),
             rows: ZSet::new(),
             ordered: Vec::new(),
@@ -118,6 +135,10 @@ impl State {
 
     pub(super) fn definition(&self) -> &PreparedGraphPattern<GraphValueRow> {
         &self.definition
+    }
+
+    pub(super) fn is_private_bag(&self) -> bool {
+        self.private_bag
     }
 
     /// Retractions validate full before-images, including counts. A new count
@@ -179,7 +200,29 @@ impl State {
         }
         let limbs = LimbLimit::new(4);
         let mut updates = Vec::new();
-        let next_page = if changes.is_empty() {
+        let next_page = if self.private_bag {
+            // Retract/add only changed complete tuples. Each count stays
+            // compressed, including u64::MAX; the downstream group consumes
+            // this exact bag derivative, not a newly materialized whole page.
+            for (rank, next) in &changes {
+                meter.charge(ZSetEvent::Work)?;
+                if let Some(old) = self.candidates.get(rank) {
+                    reserve_values(old.row.values(), meter)?;
+                    updates.push((
+                        old.row.as_ref().clone(),
+                        ZWeight::from_i128(-i128::from(old.count)),
+                    ));
+                }
+                if let Some(next) = next {
+                    reserve_values(next.row.values(), meter)?;
+                    updates.push((
+                        next.row.as_ref().clone(),
+                        ZWeight::from_i128(i128::from(next.count)),
+                    ));
+                }
+            }
+            None
+        } else if changes.is_empty() {
             // Empty committed ticks advance the source frontier, not scan a
             // retained page or manufacture result changes.
             if meter
