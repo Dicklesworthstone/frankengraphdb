@@ -1014,6 +1014,8 @@ fn compressed_reuse_matches_cold_rows_statistics_and_each_fresh_allowance() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
 fn full_scope_compressed_nodes_and_rows_refuse_one_below_and_admit_exactly() {
     let ((), report) = run_async_under_lab(0xa115_ea06, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
