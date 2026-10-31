@@ -423,3 +423,181 @@ fn projection_vertex_history_reuse_bounds_work_by_identities_and_version_searche
     assert_eq!(count(&events, SourceEvent::SnapshotRecord), 0);
     assert!(index.flat.rows.get().is_none());
 }
+
+#[test]
+fn cold_patch_cursor_preserves_every_history_winner_and_identity_at_every_cut() {
+    for seed in 0..16 {
+        let patches = histories(seed);
+        let identities: Vec<_> = patches
+            .iter()
+            .flat_map(|rows| rows.iter().map(|row| row.vid))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for at in 0..=25 {
+            let at = CommitSeq(at);
+            let mut scan = VertexPatchScanCursor::default();
+            let mut actual = Vec::new();
+            while let Some(vid) = scan.next(&patches, at, &mut |_| Ok::<_, ()>(())).unwrap() {
+                actual.push(vid);
+                assert_eq!(
+                    scan.current_row(&patches, vid, at),
+                    Some(oracle(&patches, vid, at)),
+                    "seed={seed} at={at:?} vid={vid:?}"
+                );
+                assert!(scan.current_row(&patches, VId(vid.0 ^ 1), at).is_none());
+            }
+            assert_eq!(actual, identities);
+            assert!(
+                scan.current.is_none(),
+                "EOF releases the winning coordinate"
+            );
+        }
+    }
+}
+
+#[test]
+fn cold_patch_cursor_retries_every_refused_checkpoint_without_losing_a_winner() {
+    let patches = histories(71);
+    for at in [CommitSeq(0), CommitSeq(10), CommitSeq(25)] {
+        let mut scan = VertexPatchScanCursor::default();
+        let mut expected = Vec::new();
+        let mut events = Vec::new();
+        while let Some(vid) = scan
+            .next(&patches, at, &mut |event| {
+                events.push(event);
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+        {
+            expected.push(vid);
+        }
+        for stop in 1..=events.len() {
+            let mut scan = VertexPatchScanCursor::default();
+            let mut observed = Vec::new();
+            let mut actual = Vec::new();
+            loop {
+                match scan.next(&patches, at, &mut |event| {
+                    observed.push(event);
+                    if observed.len() == stop {
+                        Err(())
+                    } else {
+                        Ok(())
+                    }
+                }) {
+                    Ok(Some(vid)) => actual.push(vid),
+                    Ok(None) => panic!("checkpoint {stop} did not refuse"),
+                    Err(()) => break,
+                }
+            }
+            assert_eq!(observed, events[..stop]);
+            assert_eq!(actual, expected[..actual.len()]);
+            if let Some(&last) = actual.last() {
+                assert_eq!(
+                    scan.current_row(&patches, last, at),
+                    Some(oracle(&patches, last, at)),
+                    "the last delivered winner survives refusal {stop}"
+                );
+            } else {
+                assert!(scan.current.is_none());
+            }
+            while let Some(vid) = scan.next(&patches, at, &mut |_| Ok::<_, ()>(())).unwrap() {
+                actual.push(vid);
+                assert_eq!(
+                    scan.current_row(&patches, vid, at),
+                    Some(oracle(&patches, vid, at))
+                );
+            }
+            assert_eq!(actual, expected, "retry checkpoint {stop} at {at:?}");
+        }
+    }
+}
+
+#[test]
+fn cold_patch_first_row_does_not_visit_or_allocate_for_the_unrequested_suffix() {
+    for count in [1, 64, 256] {
+        let patches = [patch(
+            (0..count)
+                .map(|vid| VertexRow {
+                    vid: VId(vid),
+                    birth_ordinal: vid as u64,
+                    created_at: CommitSeq(1),
+                    retired_at: None,
+                    labels: vec![],
+                    props: vec![],
+                })
+                .collect(),
+        )];
+        let mut scan = VertexPatchScanCursor::default();
+        assert_eq!(scan.heads.capacity(), 0);
+        let mut work = 0;
+        let mut scratch = 0;
+        let first = scan
+            .next(&patches, CommitSeq(1), &mut |event| {
+                match event {
+                    SourceEvent::Work => work += 1,
+                    SourceEvent::ScratchEntry => scratch += 1,
+                    SourceEvent::SnapshotRecord => panic!("caller owns record admission"),
+                }
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(first, Some(VId(0)));
+        assert!(
+            work <= 8,
+            "first row must not scan the suffix of length {count}"
+        );
+        assert_eq!(scratch, 1, "only one patch head is retained");
+        assert_eq!(scan.heads.capacity(), 1);
+        assert_eq!(
+            scan.current_row(&patches, VId(0), CommitSeq(1)),
+            Some(Some(&patches[0][0]))
+        );
+    }
+}
+
+#[test]
+fn cold_patch_first_row_workspace_and_work_grow_only_with_patch_heads() {
+    for patch_count in [1, 16, 64] {
+        let patches: Vec<_> = (0..patch_count)
+            .map(|patch_at| {
+                patch(
+                    (0..256)
+                        .map(|row| {
+                            let vid = patch_at * 256 + row;
+                            VertexRow {
+                                vid: VId(vid),
+                                birth_ordinal: vid as u64,
+                                created_at: CommitSeq(1),
+                                retired_at: None,
+                                labels: vec![],
+                                props: vec![],
+                            }
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut scan = VertexPatchScanCursor::default();
+        let mut work = 0;
+        let mut scratch = 0;
+        assert_eq!(
+            scan.next(&patches, CommitSeq(1), &mut |event| {
+                match event {
+                    SourceEvent::Work => work += 1,
+                    SourceEvent::ScratchEntry => scratch += 1,
+                    SourceEvent::SnapshotRecord => panic!("caller owns record admission"),
+                }
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+            Some(VId(0))
+        );
+        assert!(
+            work <= 2 * patch_count + 8,
+            "work={work} patches={patch_count}"
+        );
+        assert_eq!(scratch, patch_count);
+        assert_eq!(scan.heads.capacity(), patch_count as usize);
+    }
+}
