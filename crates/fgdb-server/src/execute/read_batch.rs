@@ -23,6 +23,8 @@ enum ReadBatchInput<'a> {
     Statements(&'a [Execute]),
 }
 
+type ReadBatchStatement<'a> = (&'a str, &'a [(String, WireValue)]);
+
 impl<'a> ReadBatchInput<'a> {
     fn len(self) -> usize {
         match self {
@@ -38,7 +40,7 @@ impl<'a> ReadBatchInput<'a> {
         }
     }
 
-    fn statement(self, index: usize) -> Result<(&'a str, &'a [(String, WireValue)]), Refusal> {
+    fn statement(self, index: usize) -> Result<ReadBatchStatement<'a>, Refusal> {
         match self {
             Self::Parameterized(batch) => Ok((&batch.statement, &batch.argument_sets[index])),
             Self::Statements(statements) => {
