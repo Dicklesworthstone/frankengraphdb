@@ -1285,6 +1285,112 @@ fn historical_sealed_native_parameters_and_temporal_calls_keep_the_exact_source(
 }
 
 #[test]
+fn retained_temporal_gql_components_match_literal_partitions_across_a_new_bridge() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let mut database = seed(&commit, &vfs).await;
+        let mut bridge = WriteBatch::new(R);
+        bridge.add_edge(EId(200), VId(u128::MAX), VId(3), vec![]);
+        assert_eq!(database.write(&commit, bridge).await.unwrap(), CommitSeq(4));
+        let text = "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at WITH n \
+            CALL fnx.weakly_connected_components(label => 'L', relation => 'R', \
+            direction => 'directed', parallel => 'collapse', self_loops => 'keep') \
+            YIELD vertex, component WHERE vertex = n \
+            RETURN vertex, component ORDER BY vertex";
+        let mut retained = Vec::new();
+        for selected in [CommitSeq(1), CommitSeq(4)] {
+            let owner = database
+                .prepare_sealed_read(
+                    &cx,
+                    Some(selected),
+                    R,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap();
+            let params = GqlParameters::new().with_uint64("at", selected.0).unwrap();
+            let prepared =
+                fgdb::PreparedNativeRead::prepare(text, &params, sealed_sql_symbols).unwrap();
+            assert_eq!(prepared.facade_class(), fgdb::NativeReadClass::TemporalSet);
+            // Independent literal labels: the cycle 1/2/3 is connected at
+            // both cuts. MAX is isolated until the new directed bridge.
+            // The seed also includes a self-loop, parallel incidences, an
+            // excluded-label edge and a bridge of the wrong relation.
+            let pairs = [
+                (1, 1),
+                (2, 1),
+                (3, 1),
+                (u128::MAX, if selected.0 == 1 { u128::MAX } else { 1 }),
+            ];
+            let expected = fgdb::QueryResult::Rows {
+                columns: vec!["vertex".into(), "component".into()],
+                rows: pairs
+                    .iter()
+                    .map(|&(vertex, component)| {
+                        vec![
+                            fgdb::QueryValue::Value(GraphValue::Vertex(VId(vertex))),
+                            fgdb::QueryValue::Value(GraphValue::Vertex(VId(component))),
+                        ]
+                    })
+                    .collect(),
+            };
+            assert_eq!(
+                database
+                    .query(&cx, text, &params, sealed_sql_symbols, sealed_sql_policy())
+                    .unwrap(),
+                expected,
+            );
+            let actual = owner
+                .execute_prepared(&cx, &prepared, &params, sealed_sql_policy(), memory())
+                .unwrap();
+            assert_eq!(actual, expected);
+            let fgdb::QueryResult::Rows { rows, .. } = &actual else {
+                panic!("component query must return rows")
+            };
+            let expected_json = pairs
+                .iter()
+                .map(|(vertex, component)| format!(r#"["{vertex}","{component}"]"#))
+                .collect::<Vec<_>>()
+                .join(",");
+            let actual_json = rows
+                .iter()
+                .map(|row| match row.as_slice() {
+                    [
+                        fgdb::QueryValue::Value(GraphValue::Vertex(vertex)),
+                        fgdb::QueryValue::Value(GraphValue::Vertex(component)),
+                    ] => format!(r#"["{}","{}"]"#, vertex.0, component.0),
+                    other => panic!("typed vertex/component pair: {other:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                r#"{{"schema":"fgdb.component.gql.v1","source_kind":"retained-native-temporal-gql","source_root":"{:?}","seq":{},"seed":null,"projection":{{"label":"L","relation":"R","direction":"directed","parallel":"collapse","self_loops":"keep"}},"projection_digest":null,"digest_boundary":"native response exposes no projection digest","expected":[{}],"actual":[{}],"terminal":"ok"}}"#,
+                owner.partition_root(), selected.0, expected_json, actual_json,
+            );
+            retained.push((owner, prepared, params, expected));
+        }
+        let mut later = WriteBatch::new(R);
+        later.create_vertex(VId(0), vec![L], vec![]);
+        assert_eq!(database.write(&commit, later).await.unwrap(), CommitSeq(5));
+        drop(database);
+        for (owner, prepared, params, expected) in retained {
+            assert_eq!(
+                owner
+                    .execute_prepared(&cx, &prepared, &params, sealed_sql_policy(), memory())
+                    .unwrap(),
+                expected,
+            );
+        }
+    });
+}
+
+#[test]
 fn composed_sealed_calls_match_decoded_queries_for_sparse_pages_aliases_and_projections() {
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);

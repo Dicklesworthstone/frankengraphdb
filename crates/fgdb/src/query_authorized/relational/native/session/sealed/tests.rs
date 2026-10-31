@@ -400,10 +400,12 @@ fn composed_calls_use_compressed_rows_and_incompatible_sources_keep_the_masked_p
 
 // The public native response exposes no cost metadata. Inspect its existing
 // source observer privately to prove both admitted statistics and rows agree.
+type MeasuredRead = (Vec<Vec<fgdb_prism::FnxValue>>, u64, u64, u64);
+
 fn measured<Rs: GraphSymbolResolver, C: FnMut() -> u64>(
     session: &mut AuthorizedSealedReadSession<'_, Rs, C>,
     cx: &QueryCx,
-) -> Result<(Vec<Vec<fgdb_prism::FnxValue>>, u64, u64, u64), QueryError> {
+) -> Result<MeasuredRead, QueryError> {
     measured_options(session, cx, FnxReadOptions::whole_graph(None))
 }
 
@@ -411,7 +413,7 @@ fn measured_options<Rs: GraphSymbolResolver, C: FnMut() -> u64>(
     session: &mut AuthorizedSealedReadSession<'_, Rs, C>,
     cx: &QueryCx,
     mut options: FnxReadOptions,
-) -> Result<(Vec<Vec<fgdb_prism::FnxValue>>, u64, u64, u64), QueryError> {
+) -> Result<MeasuredRead, QueryError> {
     session
         .inner
         .run(cx, |view, _, scope, _, policy, execution| {
