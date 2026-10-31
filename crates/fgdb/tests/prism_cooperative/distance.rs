@@ -178,9 +178,9 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
         let cx = contexts.query();
         let db = small_database(&contexts.commit(), 3, true).await;
         // The literal source is 0 -> 1 -> 2. Incoming closeness uses the
-        // reachable-set correction; harmonic adds 1 and 1/2 in that order.
+        // reachable-set correction: both other vertices reach vertex 2,
+        // so (2/3) * (2/2) = 2/3. Harmonic adds 1 and 1/2 in that order.
         let two_thirds = 2.0 / 3.0;
-        let four_ninths = two_thirds * two_thirds;
         for (direction, call, literal) in [
             (Directedness::Undirected, call(false), None),
             (Directedness::Undirected, call(true), None),
@@ -188,9 +188,9 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                 "CALL fnx.load_centrality() YIELD score AS rank,vertex AS id",
                 &FnxParameters::new(),
             ).unwrap(), None),
-            (Directedness::Directed, call(false), Some([0.0, 0.5, four_ninths])),
+            (Directedness::Directed, call(false), Some([0.0, 0.5, two_thirds])),
             (Directedness::Directed, call(true), Some([0.0, 1.0, 1.5])),
-            (Directedness::Reversed, call(false), Some([four_ninths, 0.5, 0.0])),
+            (Directedness::Reversed, call(false), Some([two_thirds, 0.5, 0.0])),
             (Directedness::Reversed, call(true), Some([1.5, 1.0, 0.0])),
         ] {
             let opt = options(direction);
@@ -224,6 +224,21 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                     scalar + opposite.charged_workspace_bytes());
                 Some(opposite)
             };
+            let mandatory_workspace = if let Some(opposite) = &opposite {
+                let n = graph.node_count();
+                let scalar = n * (2 * size_of::<usize>() + size_of::<f64>());
+                let auxiliary = n * (size_of::<VId>() + size_of::<usize>())
+                    + opposite.incoming_index_stats()
+                        .map_or(0, |stats| stats.charged_workspace_bytes);
+                // This three-vertex fixture has no optional endpoint prefix.
+                // Incoming degree counts are optional on both directed faces;
+                // the mandatory bound includes the incoming construction peak.
+                assert_eq!(opposite.charged_workspace_bytes(),
+                    auxiliary + n * size_of::<usize>());
+                scalar + auxiliary
+            } else {
+                expected.certificate.kernel_workspace_bytes
+            };
             let columns = call.outputs().len() * size_of::<String>()
                 + call.outputs().iter().map(|column| column.name.len()).sum::<usize>();
             let exact = FnxExecutionLimits {
@@ -240,12 +255,32 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
             compare_execution(&call.execute_sealed_cooperative(
                 &cx, &graph, exact, mem, quantum(1), yield_now,
             ).await.unwrap(), &expected);
+            if opposite.is_some() {
+                // One byte below the fully cached peak is still admissible.
+                // Both it and the exact mandatory bound omit optional counts,
+                // preserving every logical result and certificate field.
+                let mut fallback_expected = expected.clone();
+                fallback_expected.certificate.kernel_workspace_bytes = mandatory_workspace;
+                for allowance in [mem.max_kernel_workspace_bytes - 1, mandatory_workspace] {
+                    let fallback = FnxMemoryLimits {
+                        max_kernel_workspace_bytes: allowance,
+                        ..mem
+                    };
+                    assert_eq!(call.execute_sealed(&cx, &graph, exact, fallback).unwrap(),
+                        fallback_expected);
+                    compare_execution(&call.execute_sealed_cooperative(
+                        &cx, &graph, exact, fallback, quantum(1), yield_now,
+                    ).await.unwrap(), &fallback_expected);
+                }
+            }
             for resource in ["estimated work", "kernel workspace bytes", "result rows", "result bytes"] {
                 let mut limits = exact;
                 let mut memory = mem;
                 match resource {
                     "estimated work" => limits.max_estimated_work -= 1,
-                    "kernel workspace bytes" => memory.max_kernel_workspace_bytes -= 1,
+                    "kernel workspace bytes" => {
+                        memory.max_kernel_workspace_bytes = mandatory_workspace - 1;
+                    }
                     "result rows" => limits.max_result_rows -= 1,
                     "result bytes" => memory.max_result_bytes -= 1,
                     _ => unreachable!(),
@@ -255,7 +290,7 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                         && direction != Directedness::Undirected;
                     let result = if cooperative {
                         if directed_workspace {
-                            // The auxiliary constructor checks its own exact
+                            // The auxiliary constructor checks its mandatory
                             // bound while running the normal bounded driver.
                             call.execute_sealed_cooperative(&cx, &graph, limits, memory,
                                 quantum(1), yield_now).await
@@ -281,7 +316,8 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                                 )) if requested == incoming && limit == incoming - 1));
                             }
                             Directedness::Reversed => {
-                                let auxiliary = opposite.charged_workspace_bytes();
+                                let auxiliary = graph.node_count()
+                                    * (size_of::<VId>() + size_of::<usize>());
                                 assert!(matches!(result, Err(FnxSealedExecutionError::Source(
                                     SealedProjectionError::Projection(ProjectionError::LimitExceeded {
                                         resource: "workspace bytes", observed, limit,
