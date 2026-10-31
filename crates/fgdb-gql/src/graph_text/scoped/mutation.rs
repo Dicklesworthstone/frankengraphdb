@@ -256,6 +256,25 @@ fn build_error(at: usize, source: GraphMutationBuildError) -> GraphMutationTextE
         kind: GraphMutationTextErrorKind::Build(source),
     }
 }
+
+fn final_mutation_catalog<R: GraphSymbolResolver + ?Sized>(
+    returning: &Option<MutationReturnTemplate>,
+    resolve: &mut R,
+    statement: &str,
+) -> Option<std::sync::Arc<ReverseSymbolCatalog>> {
+    returning
+        .as_ref()
+        .filter(|returning| {
+            returning.bindings.iter().any(|binding| {
+                matches!(
+                    binding,
+                    crate::GraphMutationBinding::Labels { .. }
+                        | crate::GraphMutationBinding::Properties { .. }
+                )
+            })
+        })
+        .map(|_| std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(resolve, statement)))
+}
 fn scalar(
     value: GqlParameterValue,
     at: usize,
@@ -490,10 +509,10 @@ impl<'a> Parser<'a> {
         loop {
             let at = self.current.at;
             // A chain owns sequential clauses, while each native mutation
-            // owns one simultaneous homogeneous proposal. Leave a different
-            // mode untouched so row_mutation can produce its implicit WITH
-            // continuation before the next owner parses it. This also keeps
-            // FOREACH's ordered update/delete body on the ordinary IR.
+            // owns one simultaneous proposal. Leave every subsequent clause
+            // untouched so row_mutation can produce its implicit WITH before
+            // the next owner parses it. Comma-separated assignments remain
+            // inside the current proposal, including their conflict checks.
             let next_mode = if self.is_word("SET") || self.is_word("REMOVE") {
                 Some((false, false))
             } else if self.is_word("DETACH") {
@@ -503,10 +522,7 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            if self.chain_write
-                && deletion_mode
-                    .is_some_and(|previous| next_mode.is_some_and(|next| previous != next))
-            {
+            if self.chain_write && deletion_mode.is_some() && next_mode.is_some() {
                 break;
             }
             // (setting, deleting, detach)
@@ -1114,6 +1130,7 @@ impl PreparedGraphMutationText {
                     input: MutationTextInput::Relation {
                         statement: statement.to_owned(),
                         input: Box::new(step.input),
+                        catalog: step.catalog,
                     },
                     relation,
                     actions: step.actions,
@@ -1282,6 +1299,7 @@ impl PreparedGraphMutationText {
             let returning = returning
                 .map(|returning| returning.resolve(&mut symbol))
                 .transpose()?;
+            let catalog = final_mutation_catalog(&returning, &mut resolve, statement);
             return Ok((
                 Self {
                     input: MutationTextInput::Relation {
@@ -1290,6 +1308,7 @@ impl PreparedGraphMutationText {
                             first: row,
                             continuations: Vec::new(),
                         }),
+                        catalog,
                     },
                     relation,
                     actions,
@@ -1652,10 +1671,11 @@ impl PreparedGraphMutationText {
             MutationTextInput::Relation { input, .. } => input.first.return_at,
         };
         let actions = Self::bind_actions(&self.actions, &values, at)?;
-        if let MutationTextInput::Relation { input, .. } = &self.input {
+        if let MutationTextInput::Relation { input, catalog, .. } = &self.input {
             // The read relation's rows, each the WITH row its actions index.
             let input = input.bind_values(&values)?;
             return PreparedGraphMutation::prepare_relation(input, self.relation, actions)
+                .and_then(|mutation| mutation.with_input_catalog(catalog.clone()))
                 .map_err(|error| build_error(at, error));
         }
         let MutationTextInput::Pattern(selection) = &self.input else {
@@ -1916,7 +1936,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         let mut input = source.resolve(resolve)?;
         input.first.owned = owned;
         let (step, returning) =
-            Self::resolve_chain_step(resolve, relation, at, input, actions, returning)?;
+            Self::resolve_chain_step(resolve, statement, relation, at, input, actions, returning)?;
         Ok((step, returning, continuation))
     }
 
@@ -2032,8 +2052,15 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
             first: input,
             continuations: Vec::new(),
         };
-        let (step, returning) =
-            Self::resolve_chain_step(resolve, relation, at, input, parsed_actions, returning)?;
+        let (step, returning) = Self::resolve_chain_step(
+            resolve,
+            statement,
+            relation,
+            at,
+            input,
+            parsed_actions,
+            returning,
+        )?;
         Ok((step, returning, continuation))
     }
 
@@ -2127,8 +2154,15 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
             first: input,
             continuations: Vec::new(),
         };
-        let (step, returning) =
-            Self::resolve_chain_step(resolve, relation, at, input, parsed_actions, returning)?;
+        let (step, returning) = Self::resolve_chain_step(
+            resolve,
+            statement,
+            relation,
+            at,
+            input,
+            parsed_actions,
+            returning,
+        )?;
         Ok((step, returning, continuation))
     }
 
@@ -2136,6 +2170,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
     /// the catalog, over its resolved input.
     fn resolve_chain_step<'a, R>(
         resolve: &mut R,
+        statement: &str,
         relation: RelationId,
         at: usize,
         input: crate::set_text::multipart::BoundReadInput,
@@ -2170,11 +2205,13 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         let returning = returning
             .map(|returning| returning.resolve(&mut symbol))
             .transpose()?;
+        let catalog = final_mutation_catalog(&returning, resolve, statement);
         Ok((
             Self {
                 relation,
                 actions,
                 input,
+                catalog,
                 at,
             },
             returning,
@@ -2216,6 +2253,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         } else {
             PreparedGraphMutation::prepare_owned(input, self.relation, actions)
         }
+        .and_then(|mutation| mutation.with_input_catalog(self.catalog.clone()))
         .map_err(|error| build_error(self.at, error))
     }
 
@@ -2326,6 +2364,55 @@ mod graph_function_tests {
             (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
             (GraphSymbolKind::Property, "cost") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn final_metadata_catalog_preserves_absence_and_refuses_conflicting_names() {
+        let mutation = crate::PreparedGraphMutationText::prepare(
+            "MATCH (n) SET n.cost=1",
+            RelationId(1),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&crate::GqlParameters::new())
+        .unwrap();
+        assert!(mutation.reverse_catalog().is_none());
+        assert!(
+            mutation
+                .clone()
+                .with_input_catalog(None)
+                .unwrap()
+                .reverse_catalog()
+                .is_none()
+        );
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_label(LabelId(1), "L");
+        catalog.insert_relation(RelationId(1), "R");
+        catalog.insert_property(PropertyKeyId(1), "cost");
+        let mutation = mutation
+            .with_input_catalog(Some(std::sync::Arc::new(catalog.clone())))
+            .unwrap();
+        assert_eq!(mutation.reverse_catalog(), Some(&catalog));
+        for conflict in 0..6 {
+            let mut names = ReverseSymbolCatalog::new();
+            match conflict {
+                0 => names.insert_label(LabelId(1), "other"),
+                1 => names.insert_label(LabelId(2), "L"),
+                2 => names.insert_relation(RelationId(1), "other"),
+                3 => names.insert_relation(RelationId(2), "R"),
+                4 => names.insert_property(PropertyKeyId(1), "other"),
+                5 => names.insert_property(PropertyKeyId(2), "cost"),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                mutation
+                    .clone()
+                    .with_input_catalog(Some(std::sync::Arc::new(names)))
+                    .unwrap_err(),
+                GraphMutationBuildError::IncompatibleSourceCatalog,
+                "conflict {conflict}"
+            );
         }
     }
 

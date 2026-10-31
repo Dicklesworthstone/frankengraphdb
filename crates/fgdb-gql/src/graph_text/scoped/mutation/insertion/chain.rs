@@ -88,8 +88,8 @@ impl PreparedGraphWriteChainText {
         // A MATCH after a leading UNWIND of a non-parameter source: it binds
         // a relationship MERGE's endpoints, which the chain reads per row.
         let mut unwound_matched = false;
-        // A SET, REMOVE or DELETE after a leading MATCH: a chain once a
-        // CREATE or MERGE follows it.
+        // A SET, REMOVE or DELETE after a leading MATCH: a chain once
+        // another independent write clause follows it.
         let mut mutated = false;
         // A WITH or UNWIND stage after the leading MATCH, before any write:
         // the unique upsert reads a MATCH only, so a relationship MERGE's
@@ -209,6 +209,18 @@ impl PreparedGraphWriteChainText {
                         && (matched || parameter_matched || unwound_matched)
                         && mutation()?
                     {
+                        // Repeated plain mutations are sequential proposals.
+                        // A MERGE's ON CREATE/ON MATCH SET clauses retain its
+                        // upsert owner; DELETE within DETACH DELETE is still
+                        // the same clause rather than a second mutation.
+                        if mutated
+                            && !merged
+                            && !matches!(previous, Some(TokenKind::Word(prior))
+                                if word.eq_ignore_ascii_case("DELETE")
+                                    && prior.eq_ignore_ascii_case("DETACH"))
+                        {
+                            return Ok(true);
+                        }
                         mutated = true;
                     } else if clause
                         && mutated
@@ -1674,6 +1686,11 @@ mod tests {
             "UNWIND $rows AS row MERGE (n:N {id:row.id}) ON MATCH SET n.p=7",
             "UNWIND $rows AS row MATCH (a:N {id:row.id}),(b:N {id:row.id}) \
              MERGE (a)-[r:R]->(b) ON CREATE SET r.p=7 ON MATCH SET r.p=r.p+1",
+            "MATCH (n:N) DETACH DELETE n",
+            "MATCH (n:N) SET n.p=2,n.p=3 RETURN n.p",
+            "MATCH (n:N) SET n.p='SET n.p=3' RETURN n.p",
+            "MATCH (n:N) SET n.p=2 /* SET n.p=3 */ RETURN n.p",
+            "MATCH (n:N) SET n.p=2; SET n.p=3 RETURN n.p",
         ] {
             assert!(
                 !PreparedGraphWriteChainText::is_chain(text).unwrap(),

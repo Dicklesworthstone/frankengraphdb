@@ -1,17 +1,18 @@
 //! FOREACH runs native writes in one workspace and preserves its input bag.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphWriteChain,
-    PreparedGraphWriteChainText,
+    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
+    GraphWriteProgramPolicy, PreparedGraphWriteChain, PreparedGraphWriteChainText,
+    ReverseSymbolCatalog,
 };
 use fgdb_types::{
-    CanonicalList, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId,
-    PurposeContexts, VId,
+    CanonicalList, CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId,
+    EId, PurposeContexts, VId,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -43,12 +44,33 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 
+struct Catalog;
+
+impl GraphSymbolResolver for Catalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        // properties() enumerates the complete trusted host catalog, including
+        // keys absent from the expression. Token probes cannot supply it.
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_label(COUNTER, "Counter");
+        catalog.insert_label(ITEM, "F");
+        catalog.insert_label(OUTER, "Outer");
+        catalog.insert_relation(R, "R");
+        catalog.insert_property(P, "p");
+        catalog.insert_property(Q, "q");
+        Some(catalog)
+    }
+}
+
 fn prepare(text: &str) -> PreparedGraphWriteChain {
     assert!(
         PreparedGraphWriteChainText::is_chain(text).unwrap(),
         "{text}"
     );
-    PreparedGraphWriteChainText::prepare(text, R, symbols)
+    PreparedGraphWriteChainText::prepare(text, R, Catalog)
         .expect(text)
         .bind_parameters(&GqlParameters::new())
         .expect(text)
@@ -120,6 +142,184 @@ fn local_create_set_remove_body_commits_once_and_reopens() {
             .unwrap();
         assert_eq!(reopened.vertices().unwrap(), expected);
         assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn separate_set_clauses_read_prior_effects_but_one_clause_keeps_conflicts_atomic() {
+    let ((), report) = run_async_under_lab(0xf0ec_0026, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(
+            VId(1),
+            vec![COUNTER],
+            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(7))],
+        );
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let chain = prepare(
+            "MATCH (n:Counter) FOREACH (x IN [1] | SET n.p=n.p+1 \
+             SET n.p=n.p*10 REMOVE n.q SET n.q=n.p+5) RETURN n.p,n.q",
+        );
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let (stats, rows, receipt) = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &chain,
+                policy(1, HIGH, HIGH, 0, 4),
+                |_| -> Result<ElementId, ()> { panic!("SET reserves no identity") },
+            )
+            .unwrap();
+        assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+        assert_eq!(receipt.stats().mutation_effects, 4);
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[
+                GraphValue::Scalar(CanonicalScalar::Int(30)),
+                GraphValue::Scalar(CanonicalScalar::Int(35)),
+            ]
+        );
+        let expected = vec![
+            (P, CanonicalScalar::Int(30).into()),
+            (Q, CanonicalScalar::Int(35).into()),
+        ];
+        assert_eq!(txn.vertex(&db, VId(1)).unwrap().unwrap().props, expected);
+        txn.finish(&mut db, &contexts.commit()).await.unwrap();
+        assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, expected);
+
+        let committed = db.frontier().unwrap();
+        let chain = prepare("MATCH (n:Counter) FOREACH (x IN [1] | SET n.p=2,n.p=3) RETURN n.p");
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(7), vec![], vec![(P, CanonicalScalar::Int(99))]);
+        txn.write(&mut db, prefix).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let error = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &chain,
+                generous(),
+                |_| -> Result<ElementId, ()> { panic!("a conflicting SET reserves no identity") },
+            )
+            .expect_err("comma-separated assignments remain one simultaneous proposal");
+        assert!(matches!(
+            error,
+            fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Mutation(
+                fgdb_gql::GraphMutationQueryError::Mutation(
+                    fgdb_gql::GraphMutationError::ConflictingAssignment { .. }
+                )
+            ))
+        ));
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!(txn.vertices(&db).unwrap().len(), 2);
+        assert_eq!(txn.vertex(&db, VId(1)).unwrap().unwrap().props, expected);
+        assert_eq!(db.frontier().unwrap(), committed);
+        assert_eq!(db.vertices().unwrap().len(), 1);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn plain_repeated_set_uses_native_chain_and_one_clause_conflicts_remain_atomic() {
+    let ((), report) = run_async_under_lab(0xf0ec_0028, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&contexts.commit(), vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![COUNTER], vec![(P, CanonicalScalar::Int(2))]);
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let text = "MATCH (n:Counter) SET n.p=n.p+1 SET n.p=n.p*10 RETURN n.p AS value";
+        assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+        let allowance =
+            GraphWriteProgramPolicy::new(GqlQueryPolicy::new(HIGH, 1, HIGH, HIGH), 2, 0, 0);
+        let result = db
+            .query_write(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                text,
+                &GqlParameters::new(),
+                Catalog,
+                R,
+                allowance,
+                |_| -> Result<ElementId, ()> { panic!("plain SET reserves no identity") },
+            )
+            .await
+            .unwrap();
+        let QueryResult::Rows { columns, rows } = result else {
+            panic!("the public mutation query must retain RETURN");
+        };
+        assert_eq!(columns, ["value"]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0],
+            [QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+                30
+            )))]
+        );
+        assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        let expected = db.vertices().unwrap();
+        assert_eq!(expected.len(), 1);
+        assert_eq!(
+            expected[0].props,
+            vec![(P, CanonicalScalar::Int(30).into())]
+        );
+
+        let committed = db.frontier().unwrap();
+        let text = "MATCH (n:Counter) SET n.p=2,n.p=3 RETURN n.p";
+        assert!(!PreparedGraphWriteChainText::is_chain(text).unwrap());
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(7), vec![], vec![(P, CanonicalScalar::Int(99))]);
+        txn.write(&mut db, prefix).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let error = txn
+            .query_write(
+                &mut db,
+                &contexts.query(),
+                text,
+                &GqlParameters::new(),
+                Catalog,
+                R,
+                allowance,
+                |_| -> Result<ElementId, ()> { panic!("a conflicting SET reserves no identity") },
+            )
+            .expect_err("the public route keeps one-clause conflicting assignments strict");
+        assert!(matches!(
+            error,
+            fgdb::QueryWriteError::Mutation(fgdb_gql::GqlQueryError::Source(
+                fgdb_gql::GraphMutationQueryError::Mutation(
+                    fgdb_gql::GraphMutationError::ConflictingAssignment { .. }
+                )
+            ))
+        ));
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!(txn.vertices(&db).unwrap().len(), 2);
+        assert_eq!(db.vertices().unwrap(), expected);
+        assert_eq!(db.frontier().unwrap(), committed);
+        drop(txn);
+        drop(db);
+        let reopened = Database::open_with_vfs(&contexts.commit(), vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(reopened.vertices().unwrap(), expected);
+        assert_eq!(reopened.frontier().unwrap(), committed);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -954,7 +1154,11 @@ fn vertex_merge_selected_on_values_read_carried_properties_and_metadata() {
                 assert_eq!(stats.created_vertices, u64::from(!matched));
                 assert_eq!(receipt.stats().mutation_effects, 1);
                 assert_eq!(rows.value.len(), 1);
-                assert_eq!(rows.value[0].values(), &[expected.clone()], "{expression}");
+                assert_eq!(
+                    rows.value[0].values(),
+                    std::slice::from_ref(&expected),
+                    "{expression}"
+                );
                 let target = if matched { VId(2) } else { VId(100) };
                 let properties = vec![
                     (P, CanonicalScalar::Int(1).into()),
@@ -965,6 +1169,68 @@ fn vertex_merge_selected_on_values_read_carried_properties_and_metadata() {
                 assert_eq!(db.vertex(target).unwrap().unwrap().props, properties);
             }
         }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn merge_metadata_without_a_complete_catalog_refuses_before_reserving_identity() {
+    let ((), report) = run_async_under_lab(0xf0ec_0027, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(
+            VId(1),
+            vec![COUNTER],
+            vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(8))],
+        );
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let before = db.vertices().unwrap();
+        let basis = db.frontier().unwrap();
+        // An ordinary resolver knows the mentioned tokens. It cannot enumerate
+        // all property names for properties(source), even when p is mentioned.
+        let chain = PreparedGraphWriteChainText::prepare(
+            "MATCH (source:Counter) MERGE (target:F {p:1}) \
+             ON CREATE SET target.q=properties(source).p \
+             ON MATCH SET target.q=0 RETURN target.q",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let error = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &chain,
+                generous(),
+                |_| -> Result<ElementId, ()> {
+                    panic!("missing catalog metadata must refuse before identity reservation")
+                },
+            )
+            .expect_err("metadata reads require a complete trusted reverse catalog");
+        assert!(matches!(
+            error,
+            fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphWriteChainError::VertexMerge(
+                fgdb_gql::GraphVertexMergeRowsQueryError::Merge(
+                    fgdb_gql::GraphVertexMergeError::InputRelation(
+                        fgdb_gql::GraphSetExecutionError::Source(fgdb::WriteTxnError::Read(
+                            fgdb::ReadError::UnmappedProperty(P)
+                        ))
+                    )
+                )
+            ))
+        ));
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!(txn.vertices(&db).unwrap(), before);
+        assert_eq!(db.vertices().unwrap(), before);
+        assert_eq!(db.frontier().unwrap(), basis);
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -1234,6 +1500,25 @@ fn relationship_merge_endpoint_padding_preserves_hidden_body_fields() {
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn relationship_merge_on_carried_vertex_cannot_read_its_own_relationship() {
+    // The ON action runs inside MERGE. A following standalone SET has the
+    // post-MERGE relationship reader, exercised by the positive test above.
+    let error = PreparedGraphWriteChainText::prepare(
+        "CREATE (a:Counter),(b:Outer) FOREACH (x IN [1] | \
+         MERGE (a)-[r:R {p:x}]->(b) ON CREATE SET a.q=r.p)",
+        R,
+        Catalog,
+    )
+    .expect_err("an ON action on a carried vertex cannot read the MERGE relationship");
+    assert!(
+        error
+            .to_string()
+            .contains("a value that does not read the MERGE relationship"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -1553,9 +1838,18 @@ fn foreach_local_create_update_delete_and_nested_continuation_are_one_write() {
             assert_eq!(vertex.labels, [OUTER]);
             assert_eq!(vertex.props, vec![(P, CanonicalScalar::Int(value).into())]);
         }
+        let published_at = CommitSeq(basis.0 + 1);
+        let mut expected = vertices;
+        for vertex in &mut expected {
+            assert_eq!(
+                vertex.created_at, basis,
+                "staged rows use the transaction basis"
+            );
+            vertex.created_at = published_at;
+        }
         txn.finish(&mut db, &contexts.commit()).await.unwrap();
-        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
-        assert_eq!(db.vertices().unwrap(), vertices);
+        assert_eq!(db.frontier().unwrap(), published_at);
+        assert_eq!(db.vertices().unwrap(), expected);
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

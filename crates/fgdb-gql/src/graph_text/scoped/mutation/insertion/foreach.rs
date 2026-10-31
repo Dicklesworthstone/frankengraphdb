@@ -222,7 +222,10 @@ impl PreparedGraphForeachText {
                             declarations,
                             resolve,
                             from,
-                            false,
+                            // A child FOREACH restores identities, not a
+                            // precomputed property image. The native owned
+                            // input prepares fields from this staged cut.
+                            true,
                         )?;
                     steps.push(ChainTextStep::Mutation(Box::new((step, returning))));
                     next = after;

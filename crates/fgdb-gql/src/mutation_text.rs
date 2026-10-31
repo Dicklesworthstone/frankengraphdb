@@ -120,6 +120,7 @@ pub(crate) enum MutationTextInput {
     Relation {
         statement: String,
         input: Box<crate::set_text::multipart::BoundReadInput>,
+        catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
     },
 }
 
@@ -155,6 +156,7 @@ pub(crate) struct PreparedGraphMutationRowsText {
     pub(crate) relation: RelationId,
     pub(crate) actions: Vec<MutationActionTemplate>,
     pub(crate) input: crate::set_text::multipart::BoundReadInput,
+    pub(crate) catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
     /// The write's own clause, where its binding errors point.
     pub(crate) at: usize,
 }

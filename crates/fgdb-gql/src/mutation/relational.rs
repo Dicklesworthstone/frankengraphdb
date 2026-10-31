@@ -51,7 +51,7 @@ pub(super) fn merge_property_catalog(
     merge_names(&mut Arc::make_mut(current).properties, &catalog.properties)
 }
 
-fn merge_names<K: Copy + Ord>(
+pub(super) fn merge_names<K: Copy + Ord>(
     merged: &mut BTreeMap<K, String>,
     names: &BTreeMap<K, String>,
 ) -> Result<(), GraphMutationBuildError> {

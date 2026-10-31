@@ -1761,11 +1761,16 @@ impl PreparedGraphInsertText {
         from: ChainContinuation<'a>,
         multipart: bool,
     ) -> Result<InsertStep<'a>, GraphInsertTextError> {
+        // An identity-only continuation has no hidden property preimages.
+        // Prepare its CREATE fields through the same native owned-input
+        // relation used after multipart reads, before any identity allocation.
+        // Bound hidden-read rows retain their existing compact adapter.
+        let current_fields = multipart || from.boundary.is_none();
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones())
             .resume_after(from.boundary, &from.parameters, from.at)?;
         parser.chain_write = true;
-        if multipart {
+        if current_fields {
             return Self::prepare_after_multipart(
                 parser,
                 statement,

@@ -889,6 +889,28 @@ impl PreparedGraphMutation {
     pub(crate) fn reverse_catalog(&self) -> Option<&crate::graph_text::ReverseSymbolCatalog> {
         self.reverse_catalog.as_deref()
     }
+
+    /// Retain the compiler's final-row metadata catalog even when the read
+    /// relation projects metadata above its graph leaves. No graph source or
+    /// catalog name is invented; conflicting host/source names still refuse.
+    pub(crate) fn with_input_catalog(
+        mut self,
+        catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
+    ) -> Result<Self, GraphMutationBuildError> {
+        if let Some(catalog) = catalog {
+            if let Some(current) = &mut self.reverse_catalog {
+                if current.as_ref() != catalog.as_ref() {
+                    let current = std::sync::Arc::make_mut(current);
+                    relational::merge_names(&mut current.labels, &catalog.labels)?;
+                    relational::merge_names(&mut current.relations, &catalog.relations)?;
+                    relational::merge_names(&mut current.properties, &catalog.properties)?;
+                }
+            } else {
+                self.reverse_catalog = Some(catalog);
+            }
+        }
+        Ok(self)
+    }
     #[must_use]
     pub const fn relation(&self) -> RelationId {
         self.relation

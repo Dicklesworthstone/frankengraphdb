@@ -3,12 +3,16 @@
 
 use asupersync::Budget;
 use asupersync::security::key::AuthKey;
-use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, QueryWriteError, WriteBatch};
+use fgdb::{
+    Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, QueryWriteError, ReadError,
+    WriteBatch, WriteTxnError,
+};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationPolicy, GraphSymbol,
-    GraphSymbolKind, GraphSymbolResolver, GraphWriteIdentityRequest, GraphWriteProgramPolicy,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationError, GraphMutationPolicy,
+    GraphMutationQueryError, GraphSetExecutionError, GraphSymbol, GraphSymbolKind,
+    GraphSymbolResolver, GraphWriteIdentityRequest, GraphWriteProgramPolicy,
     PreparedGraphMutationQueryText, ReverseSymbolCatalog,
 };
 use fgdb_types::{
@@ -424,6 +428,62 @@ fn metadata_does_not_hide_late_errors_or_limit_the_effect_set() {
 }
 
 #[test]
+fn multipart_metadata_refuses_an_unlisted_property_without_publishing_changes() {
+    struct MissingQ;
+    impl GraphSymbolResolver for MissingQ {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            Catalog.resolve_symbol(kind, name)
+        }
+
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = Catalog.reverse_catalog()?;
+            catalog.properties.remove(&Q);
+            Some(catalog)
+        }
+    }
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, fixture()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let statement = "WITH 1 AS unit MATCH (n:Item) WITH n \
+                         SET n.p=n.p+10,n:Tagged RETURN properties(n) AS props,labels(n) AS tags";
+        // The catalog names every explicit field but omits the unmentioned,
+        // visible q. Enumeration must report that exact missing identity,
+        // never infer an absent field from the statement's own names.
+        let query = PreparedGraphMutationQueryText::prepare(statement, R, MissingQ)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let result = db
+            .execute_graph_mutation_query_autocommit_governed(
+                txcx,
+                cx,
+                commit,
+                &query,
+                GraphMutationPolicy::new(query_policy(2), 100),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphMutationQueryError::Mutation(
+                GraphMutationError::InputRelation(GraphSetExecutionError::Source(
+                    WriteTxnError::Read(ReadError::UnmappedProperty(Q))
+                ))
+            )))
+        ));
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(read_p(&db, cx), vec![vec![int(1)], vec![int(2)]]);
+        assert!(
+            db.vertices()
+                .unwrap()
+                .iter()
+                .all(|vertex| vertex.labels == [ITEM])
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn deleted_metadata_reads_fail_without_publishing_a_delete_prefix() {
     run(async |commit, cx, txcx| {
         let mut db = Database::open_memory(commit, keys()).await.unwrap();
@@ -593,6 +653,11 @@ fn optional_and_unwind_continuations_return_final_scoped_maps_and_rollback() {
                  OPTIONAL MATCH (a)-[:R]->(b) WHERE b.p IN allowed \
                  UNWIND [0,0] AS occurrence",
                 true,
+            ),
+            (
+                "WITH 1 AS unit MATCH (a:Item) WITH a,a AS b \
+                 MATCH (a) UNWIND [0,0] AS occurrence",
+                false,
             ),
         ];
         for authorized in [false, true] {

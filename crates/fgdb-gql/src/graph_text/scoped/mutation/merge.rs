@@ -517,7 +517,11 @@ impl<'a> Parser<'a> {
         // The common SET is a distinct clause, not a deduplicated extension
         // of both branches. It sees prior effects and cannot erase an earlier
         // failure or unauthorized write just by overwriting the same target.
-        if self.take_word("SET")? {
+        // A chained SET is a separate native mutation over the post-MERGE
+        // row, so it may target/read any carried element. ON branches retain
+        // their narrower MERGE action laws. A standalone upsert still owns
+        // its existing final SET directly.
+        if !self.chain_write && self.take_word("SET")? {
             self.upsert_assignments(
                 variable,
                 &mut after,
