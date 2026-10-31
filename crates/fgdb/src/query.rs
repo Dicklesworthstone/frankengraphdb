@@ -64,7 +64,7 @@ pub use view::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
     NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor,
     NativeSpoolDifference, NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
-    PreparedBufferedSealedOrder,
+    PreparedBufferedSealedAggregate, PreparedBufferedSealedOrder,
 };
 
 /// Lossless cells: identity/scalar values, counts, wide integer sums and exact

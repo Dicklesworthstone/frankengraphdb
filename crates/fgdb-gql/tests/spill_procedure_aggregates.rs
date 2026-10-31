@@ -338,3 +338,172 @@ fn input_pages_preserve_collection_occurrences_and_empty_group_semantics() {
         assert_eq!(native(&query, &rows), expected);
     }
 }
+
+#[test]
+fn composed_terminal_text_prepares_and_binds_before_reaching_any_source() {
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_gql::{
+        GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphPipelineAggregateText,
+    };
+
+    fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(7))),
+            (GraphSymbolKind::Relation, "KNOWS") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(LabelId(10))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(9))),
+            _ => None,
+        }
+    }
+
+    const BFS: &str = "CALL fnx.single_source_shortest_path_length(\
+        args => [$start], label => 'Person', relation => 'R', direction => 'directed', \
+        parallel => 'collapse', self_loops => 'drop')";
+    const WCC: &str = "CALL fnx.weakly_connected_components(\
+        label => 'Person', relation => 'R', direction => 'directed', \
+        parallel => 'collapse', self_loops => 'drop')";
+    const CLI: &str =
+        "CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node,component";
+    let cases = [
+        (
+            format!(
+                "{BFS} YIELD node,distance WHERE distance>0 \
+                RETURN MAX(distance) AS farthest,SUM(9223372036854775807) AS wide,\
+                COUNT(*) AS reached,AVG(distance) AS mean,MIN(distance) AS nearest"
+            ),
+            1,
+            0,
+        ),
+        (
+            format!(
+                "{BFS} YIELD node,distance UNWIND [distance,distance,NULL] AS d \
+                WITH d ORDER BY d DESC RETURN COUNT(*) AS occurrences,COUNT(d) AS nonnull,\
+                COUNT(DISTINCT d) AS unique,SUM(DISTINCT d) AS total,AVG(DISTINCT d) AS mean,\
+                COLLECT(d) AS bag,COLLECT(DISTINCT d) AS distinct_bag"
+            ),
+            1,
+            0,
+        ),
+        (
+            format!(
+                "{BFS} YIELD node,distance WHERE distance<0 \
+                RETURN COUNT(*) AS reached,COLLECT(node) AS nodes"
+            ),
+            1,
+            0,
+        ),
+        (
+            format!(
+                "{WCC} YIELD node,component RETURN DISTINCT COUNT(*) AS size \
+                GROUP BY component ORDER BY size DESC"
+            ),
+            1,
+            0,
+        ),
+        (
+            format!(
+                "{WCC} YIELD node,component MATCH (component:Person) \
+                WITH component,component.p AS p,node ORDER BY node DESC \
+                RETURN COUNT(*) AS size,component,p,COLLECT(node) AS members \
+                ORDER BY size DESC,component"
+            ),
+            2,
+            0,
+        ),
+        (
+            format!("{BFS} YIELD node,distance RETURN COUNT(*) AS reached"),
+            1,
+            0,
+        ),
+        (
+            format!("{BFS} YIELD node,distance RETURN COUNT(*) AS reached LIMIT 0"),
+            1,
+            0,
+        ),
+        (
+            format!("{BFS} YIELD node,distance RETURN SUM(1/(2-distance)) AS broken LIMIT 0"),
+            1,
+            0,
+        ),
+        (
+            format!("{BFS} YIELD node,distance RETURN 1/(SUM(distance)-3) AS broken LIMIT 0"),
+            1,
+            0,
+        ),
+        (
+            format!(
+                "{CLI} RETURN component,COUNT(*) AS members \
+                ORDER BY members DESC,component LIMIT 1"
+            ),
+            1,
+            0,
+        ),
+        (
+            format!(
+                "{CLI} RETURN COUNT(*) AS n,SUM(1) AS total,AVG(1) AS mean,\
+                MIN(component) AS first,MAX(component) AS last,COLLECT(DISTINCT node) AS members"
+            ),
+            1,
+            0,
+        ),
+        (
+            format!("{CLI} WITH component,COUNT(*) AS members RETURN SUM(members) AS total"),
+            1,
+            1,
+        ),
+        (
+            "CALL fnx.weakly_connected_components({relations:['KNOWS'],parallel:'collapse'}) \
+                YIELD vertex,component RETURN component,COUNT(*) AS total \
+                GROUP BY component ORDER BY component LIMIT $top"
+                .to_owned(),
+            1,
+            0,
+        ),
+    ];
+    for (text, sources, aggregates) in cases {
+        let parameters = if text.contains("$start") {
+            GqlParameters::new().with_int64("start", 1).unwrap()
+        } else if text.contains("$top") {
+            GqlParameters::new().with_int64("top", 2).unwrap()
+        } else {
+            GqlParameters::new()
+        };
+        // Use the CLI's real normalization boundary. Inline projection maps
+        // remain intact; bound map-field arguments, if present, are lowered by
+        // the native helper rather than by a test-specific text rewrite.
+        let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(&text, &parameters);
+        let (input, arguments) = lowered
+            .as_ref()
+            .map_or((text.as_str(), &parameters), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
+        let template = PreparedGraphPipelineAggregateText::prepare(input, resolve)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let query = template
+            .bind_relation_parameters(arguments)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let transcript = query.canonical_bytes();
+        assert!(
+            AsyncSpillAggregatePlan::compile_relation(&query).is_err(),
+            "{text}"
+        );
+        let AsyncSpillAggregatePlan::Relation { input, definition } =
+            AsyncSpillAggregatePlan::compile_relation_with_single_procedure(&query)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        else {
+            panic!("{text}: the complete input relation was lost");
+        };
+        assert_eq!(input.source_count(), sources, "{text}");
+        assert_eq!(input.aggregate_count(), aggregates, "{text}");
+        assert_eq!(input.procedure_source().unwrap().call().namespace(), "fnx");
+        assert_eq!(
+            definition.has_collections(),
+            text.contains("COLLECT("),
+            "{text}"
+        );
+        assert_eq!(template.columns().len(), template.output_slots().len());
+        assert_eq!(query.canonical_bytes(), transcript);
+        // These are prepare/bind/admission calls only. Late input/output
+        // division errors must not be evaluated before the source is reached.
+    }
+}

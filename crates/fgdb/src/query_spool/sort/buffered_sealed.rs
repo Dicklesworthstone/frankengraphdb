@@ -80,20 +80,15 @@ impl PreparedNativeRead {
         };
         let plan =
             AsyncSpillSetPlan::compile_with_single_procedure(&query).map_err(|_| unsupported())?;
-        let source = plan.procedure_source().ok_or_else(unsupported)?;
-        if !admit_procedure_shape(source, relation) {
-            return Err(unsupported());
-        }
-        Ok(PreparedBufferedSealedOrder {
+        PreparedBufferedSealedOrder::from_relation(
             plan,
             as_of,
-            options: SealedOptions {
-                relation,
-                memory,
-                sealing,
-                max_source_incidences,
-            },
-        })
+            relation,
+            memory,
+            sealing,
+            max_source_incidences,
+        )
+        .ok_or_else(unsupported)
     }
 }
 
@@ -201,6 +196,31 @@ fn admit_procedure_shape(
 }
 
 impl PreparedBufferedSealedOrder {
+    /// The terminal aggregate owner uses this same registry admission and host
+    /// for its complete input relation. No second procedure executor is needed.
+    pub(crate) fn from_relation(
+        plan: AsyncSpillSetPlan,
+        as_of: Option<CommitSeq>,
+        relation: RelationId,
+        memory: FnxMemoryLimits,
+        sealing: SealedLimits,
+        max_source_incidences: usize,
+    ) -> Option<Self> {
+        if !admit_procedure_shape(plan.procedure_source()?, relation) {
+            return None;
+        }
+        Some(Self {
+            plan,
+            as_of,
+            options: SealedOptions {
+                relation,
+                memory,
+                sealing,
+                max_source_incidences,
+            },
+        })
+    }
+
     pub fn stage_count(&self) -> usize {
         self.plan.stage_count()
     }

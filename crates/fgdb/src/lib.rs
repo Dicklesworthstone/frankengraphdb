@@ -180,10 +180,11 @@ pub use query::{
     NativeAggregateSpoolCursor, NativeAggregateSpoolDifference, NativeAggregateSpoolError,
     NativeAggregateSpoolRow, NativeExplainCertificate, NativeResultCertificate, NativeResultSpool,
     NativeSpoolCursor, NativeSpoolDifference, NativeSpoolError, PinnedIndex,
-    PreparedBufferedAggregate, PreparedBufferedOrder, PreparedBufferedSealedOrder,
-    PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue, QueryWriteError,
-    ReadCacheLimits, ReadCacheStatus, ReadCacheUsage, RefreshReport, ReplayRefusal, ResidentIndex,
-    ResidentIndexError, SealedProjectionOpenError, SealedQueryError, SealedReadView,
+    PreparedBufferedAggregate, PreparedBufferedOrder, PreparedBufferedSealedAggregate,
+    PreparedBufferedSealedOrder, PreparedNativeRead, ProcedureError, QueryError, QueryResult,
+    QueryValue, QueryWriteError, ReadCacheLimits, ReadCacheStatus, ReadCacheUsage, RefreshReport,
+    ReplayRefusal, ResidentIndex, ResidentIndexError, SealedProjectionOpenError, SealedQueryError,
+    SealedReadView,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,

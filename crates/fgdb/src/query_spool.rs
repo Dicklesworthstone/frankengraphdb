@@ -19,6 +19,7 @@ mod sort;
 pub use aggregate::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
     NativeAggregateSpoolError, NativeAggregateSpoolRow, PreparedBufferedAggregate,
+    PreparedBufferedSealedAggregate,
 };
 pub(crate) use sort::{ExternalOrderHost, ExternalOrderLimits, execute_relation};
 pub use sort::{NativeSpoolDifference, PreparedBufferedOrder, PreparedBufferedSealedOrder};

@@ -7,8 +7,8 @@ use super::{
 use asupersync::fs::{File, Vfs};
 use fgdb::{
     BufferedReadView, EmbeddedReadView, NativeAggregateSpool, NativeResultSpool,
-    PreparedBufferedAggregate, PreparedBufferedOrder, PreparedBufferedSealedOrder,
-    PreparedNativeRead,
+    PreparedBufferedAggregate, PreparedBufferedOrder, PreparedBufferedSealedAggregate,
+    PreparedBufferedSealedOrder, PreparedNativeRead,
 };
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_strata::tiered::memory::{MemoryPool, SpillFile, SpillLimits};
@@ -429,13 +429,13 @@ fn is_aggregate(prepared: &PreparedNativeRead) -> bool {
 
 /// Bind and admit the external physical definition before storage opens. The
 /// native statement class selects one compiler; errors never trigger retries.
-/// Both definitions are boxed: the ordered one is 384 bytes and the
-/// aggregate one 232 (since an edge relation may carry an alternation), and
-/// either would size every prepared buffered query, the streaming ones too.
+/// Physical definitions are boxed so their largest variant does not enlarge
+/// every prepared buffered query, including the streaming ones.
 pub(super) enum PreparedBuffered {
     Ordered(Box<PreparedBufferedOrder>),
     SealedOrdered(Box<PreparedBufferedSealedOrder>),
     Aggregate(Box<PreparedBufferedAggregate>),
+    SealedAggregate(Box<PreparedBufferedSealedAggregate>),
 }
 
 pub(super) fn prepare_buffered(options: &Options) -> Result<PreparedBuffered, Failure> {
@@ -446,6 +446,10 @@ pub(super) fn prepare_buffered(options: &Options) -> Result<PreparedBuffered, Fa
     );
     let prepared = PreparedNativeRead::prepare(text, params, options).map_err(execution_failure)?;
     if options.fnx.is_sealed() {
+        if is_aggregate(&prepared) {
+            return super::fnx::prepare_buffered_sealed_aggregate(options, &prepared, params)
+                .map(|aggregate| PreparedBuffered::SealedAggregate(Box::new(aggregate)));
+        }
         return super::fnx::prepare_buffered_sealed_order(options, &prepared, params)
             .map(|order| PreparedBuffered::SealedOrdered(Box::new(order)));
     }
@@ -475,11 +479,13 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
         PreparedBuffered::Ordered(prepared) => prepared.aggregate_count(),
         PreparedBuffered::SealedOrdered(prepared) => prepared.aggregate_count(),
         PreparedBuffered::Aggregate(prepared) => prepared.aggregate_count(),
+        PreparedBuffered::SealedAggregate(prepared) => prepared.aggregate_count(),
     };
     let stages = match prepared {
         PreparedBuffered::Ordered(prepared) => prepared.stage_count(),
         PreparedBuffered::SealedOrdered(prepared) => prepared.stage_count(),
         PreparedBuffered::Aggregate(prepared) => prepared.stage_count(),
+        PreparedBuffered::SealedAggregate(prepared) => prepared.stage_count(),
     };
     let mut scratch = Scratch::new(cx, options, groupings, stages, true).await?;
     let outcome = async {
@@ -537,6 +543,32 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
                 deliver_ordered(&spool, &mut scratch.destination, cx, resolver, robot, out).await
             }
             PreparedBuffered::Aggregate(prepared) => {
+                let partition = scratch.partition.as_mut().ok_or_else(|| {
+                    Failure::query("aggregate spill is missing its private partition file")
+                })?;
+                let (spool, _) = prepared
+                    .spool_in_view(
+                        view,
+                        cx,
+                        options.budget.policy(),
+                        &mut scratch.source,
+                        partition,
+                        &mut scratch.destination,
+                        scratch.run_rows,
+                        scratch.max_partitions,
+                        scratch.run_rows,
+                        scratch.max_runs,
+                        PAGE_BYTES,
+                        MAX_ROW_BYTES,
+                        scratch.input_rows,
+                        options.spill.work.unwrap_or(DEFAULT_SORT_WORK),
+                        resolver,
+                    )
+                    .await
+                    .map_err(execution_failure)?;
+                deliver_aggregate(&spool, &mut scratch.destination, cx, resolver, robot, out).await
+            }
+            PreparedBuffered::SealedAggregate(prepared) => {
                 let partition = scratch.partition.as_mut().ok_or_else(|| {
                     Failure::query("aggregate spill is missing its private partition file")
                 })?;

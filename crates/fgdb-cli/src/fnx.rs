@@ -477,13 +477,9 @@ pub(super) struct PreparedSealedRead {
     source_limits: RootReadLimits,
 }
 
-/// Bind the explicit external owner without evaluating a reached procedure's
-/// arguments early. The ordinary buffered compiler never admits procedures.
-pub(super) fn prepare_buffered_sealed_order(
+fn buffered_sealed_options(
     options: &Options,
-    native: &PreparedNativeRead,
-    params: &fgdb_gql::GqlParameters,
-) -> Result<fgdb::PreparedBufferedSealedOrder, Failure> {
+) -> Result<(RelationId, FnxMemoryLimits, SealedLimits, usize), Failure> {
     options.fnx.validate_composed()?;
     let name = options
         .fnx
@@ -505,8 +501,37 @@ pub(super) fn prepare_buffered_sealed_order(
             .max_incidences
             .max(sealing.max_incidences)
     });
+    Ok((relation, memory, sealing, incidences))
+}
+
+/// Bind the explicit external owner without evaluating a reached procedure's
+/// arguments early. The ordinary buffered compiler never admits procedures.
+pub(super) fn prepare_buffered_sealed_order(
+    options: &Options,
+    native: &PreparedNativeRead,
+    params: &fgdb_gql::GqlParameters,
+) -> Result<fgdb::PreparedBufferedSealedOrder, Failure> {
+    let (relation, memory, sealing, incidences) = buffered_sealed_options(options)?;
     let prepared = native
         .prepare_buffered_sealed_order(params, relation, memory, sealing, incidences)
+        .map_err(super::execution_failure)?;
+    match options.fnx.as_of {
+        Some(snapshot) => prepared
+            .with_as_of(snapshot)
+            .map_err(|error| Failure::coded(super::refusal::Code::InvalidValue, error)),
+        None => Ok(prepared),
+    }
+}
+
+/// Terminal groups retain the exact aggregate spool and its ordinary renderer.
+pub(super) fn prepare_buffered_sealed_aggregate(
+    options: &Options,
+    native: &PreparedNativeRead,
+    params: &fgdb_gql::GqlParameters,
+) -> Result<fgdb::PreparedBufferedSealedAggregate, Failure> {
+    let (relation, memory, sealing, incidences) = buffered_sealed_options(options)?;
+    let prepared = native
+        .prepare_buffered_sealed_aggregate(params, relation, memory, sealing, incidences)
         .map_err(super::execution_failure)?;
     match options.fnx.as_of {
         Some(snapshot) => prepared
@@ -1244,6 +1269,38 @@ mod tests {
     }
 
     #[test]
+    fn composed_buffered_sealed_aggregate_preflight_retains_the_exact_output_owner() {
+        let flags = [
+            "--sealed",
+            "--graph-relation",
+            "KNOWS",
+            "--buffered",
+            "--spill-dir",
+            "never-opened-spill",
+            "--max-result-rows",
+            "1",
+            "--as-of",
+            "7",
+        ];
+        for text in [
+            "CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node,component \
+             RETURN component,COUNT(*) AS members ORDER BY members DESC,component LIMIT 1",
+            "CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node,component \
+             RETURN COUNT(*) AS n,SUM(1) AS total,AVG(1) AS mean,MIN(component) AS first, \
+             MAX(component) AS last,COLLECT(DISTINCT node) AS members",
+            "CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node,component \
+             WITH component,COUNT(*) AS members RETURN SUM(members) AS total",
+        ] {
+            let options = composed_options(text, &flags).unwrap();
+            let prepared = super::super::spill::prepare_buffered(&options).unwrap();
+            let super::super::spill::PreparedBuffered::SealedAggregate(prepared) = prepared else {
+                panic!("terminal sealed groups must retain the exact aggregate owner");
+            };
+            assert!(prepared.aggregate_count() >= 1, "{text}");
+        }
+    }
+
+    #[test]
     fn composed_buffered_sealed_preflight_refuses_unsupported_shapes_before_open() {
         let flags = [
             "--sealed",
@@ -1255,7 +1312,7 @@ mod tests {
         ];
         for text in [
             "MATCH (n) RETURN n",
-            "CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node RETURN COUNT(*) AS count",
+            "MATCH (n) RETURN COUNT(*) AS count",
             "(CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node RETURN node) \
              UNION ALL (CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node RETURN node)",
         ] {

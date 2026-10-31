@@ -3,6 +3,9 @@
 //! are independent of both the resident and buffered query implementations.
 #![recursion_limit = "256"]
 
+#[path = "buffered_sealed_queries/aggregates.rs"]
+mod aggregates;
+
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{

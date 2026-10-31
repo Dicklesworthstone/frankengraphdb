@@ -29,8 +29,8 @@ mod output;
 #[path = "aggregate_partition.rs"]
 mod partitioning;
 pub use account::NativeAggregateSpoolDifference;
-pub use buffered::PreparedBufferedAggregate;
 pub(super) use buffered::spool_group_stage_with_host;
+pub use buffered::{PreparedBufferedAggregate, PreparedBufferedSealedAggregate};
 use partitioning::split_partition;
 
 type Result<T> = core::result::Result<T, NativeAggregateSpoolError>;

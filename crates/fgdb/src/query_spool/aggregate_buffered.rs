@@ -13,6 +13,10 @@ use fgdb_gql::spill_set::{SpillSetAggregatePlan, SpillSetAggregateRowError};
 use fgdb_gql::stream::AsyncVertexScanSource;
 use fgdb_gql::{GlaExecutionEvent, GqlBudgetDimension, GqlExecutionBudget};
 
+#[path = "aggregate_sealed.rs"]
+mod sealed;
+pub use sealed::PreparedBufferedSealedAggregate;
+
 struct BufferedInput<'q, T> {
     cursor: T,
     cx: &'q QueryCx,
