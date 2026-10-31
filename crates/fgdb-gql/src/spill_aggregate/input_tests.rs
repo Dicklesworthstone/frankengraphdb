@@ -592,3 +592,272 @@ fn synchronous_fusion_never_erases_intermediate_barriers_or_changes_async_owners
         }
     }
 }
+
+
+type OutputError = GqlQueryError<GraphAggregateError<&'static str>, usize>;
+
+#[derive(Default)]
+struct OutputElements {
+    reads: Vec<(fgdb_delta_types::ElementId, PropertyKeyId)>,
+    failure: Option<OutputError>,
+}
+impl crate::GraphElementReader<OutputError> for OutputElements {
+    fn element_property(
+        &mut self,
+        element: fgdb_delta_types::ElementId,
+        key: PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, OutputError> {
+        self.reads.push((element, key));
+        if let Some(error) = self.failure.take() {
+            return Err(error);
+        }
+        Ok(Some(CanonicalScalar::Int(7).into()))
+    }
+}
+
+fn output_property() -> crate::GraphSetValue {
+    crate::GraphSetValue::MapGet {
+        map: Box::new(crate::GraphSetValue::Column(0)),
+        key: "p".into(),
+        property: crate::GraphElementKey::Property(P),
+    }
+}
+
+fn output_query(value: crate::GraphSetValue, ranked: bool) -> PreparedGraphAggregate {
+    use crate::{GraphSetProjection as Projection, GraphSetValue as Value};
+    let query = prepare(
+        "MATCH (n) RETURN n AS v,COUNT(*) AS c,SUM(n.p) AS s,AVG(n.p) AS a GROUP BY n",
+    )
+    .with_output_projection(vec![
+        Projection::new("p", value),
+        Projection::new("c", Value::Column(1)),
+        Projection::new("s", Value::Column(2)),
+        Projection::new("a", Value::Column(3)),
+    ])
+    .unwrap();
+    if !ranked {
+        return query;
+    }
+    query
+        .with_computed_order_by(
+            // Visible aliases follow the four complete evaluation cells.
+            vec![
+                output_property(),
+                Value::Column(5),
+                Value::Column(6),
+                Value::Column(7),
+            ],
+            &[crate::algebra::GraphValueOrder {
+                column: 0,
+                descending: true,
+                nulls_first: false,
+            }],
+        )
+        .unwrap()
+}
+
+fn complete_output_group() -> GraphAggregateRow {
+    GraphAggregateRow::from_group_values(
+        vec![GraphValue::Vertex(VId(u128::MAX))],
+        vec![
+            GraphAggregateValue::Count(u64::MAX),
+            GraphAggregateValue::Integer(i128::MAX - 7),
+            GraphAggregateValue::Average(
+                crate::GraphExactAverage::new(i128::MAX - 12, 3).unwrap(),
+            ),
+        ],
+    )
+}
+
+#[test]
+fn explicit_final_reader_keeps_exact_cells_and_reader_free_rank_admission() {
+    let query = output_query(output_property(), true);
+    assert!(matches!(
+        SpillAggregatePlan::compile(&query),
+        Err(SpillAggregateBuildError::Unsupported)
+    ));
+    assert!(matches!(
+        AsyncSpillAggregatePlan::compile(&query),
+        Err(SpillAggregateBuildError::Unsupported)
+    ));
+    let plan = SpillAggregatePlan::compile_with_element_reads(&query).unwrap();
+    let definition = plan.definition();
+    assert!(definition.output_may_read_elements());
+    assert_eq!(definition.evaluation_key_columns().len(), 1);
+    assert_eq!(definition.evaluation_aggregate_columns().len(), 3);
+    let row = complete_output_group();
+    let mut expected = vec![GraphAggregateValue::Value(int(7))];
+    expected.extend_from_slice(row.values());
+    let mut reader = OutputElements::default();
+    let (projected, rank) = definition
+        .project_output_with_rank_with_elements(row, &mut reader, &mut |_| {
+            Ok::<_, OutputError>(())
+        })
+        .unwrap();
+    assert_eq!(projected, GraphAggregateRow::from_group_values(vec![], expected.clone()));
+    assert_eq!(rank.unwrap(), GraphAggregateRow::from_group_values(vec![], expected));
+    assert_eq!(
+        reader.reads,
+        vec![(fgdb_delta_types::ElementId::Vertex(VId(u128::MAX)), P); 2]
+    );
+}
+
+#[test]
+fn final_reader_relay_restores_source_and_control_errors_and_stops_at_every_event() {
+    let plan =
+        SpillAggregatePlan::compile_with_element_reads(&output_query(output_property(), true))
+            .unwrap();
+    let definition = plan.definition();
+    for source_failure in [false, true] {
+        let mut reader = OutputElements {
+            failure: Some(if source_failure {
+                GqlQueryError::Source(GraphAggregateError::Source("retained source unavailable"))
+            } else {
+                GqlQueryError::Interrupted(91)
+            }),
+            ..OutputElements::default()
+        };
+        let result = definition.project_output_with_rank_with_elements(
+            complete_output_group(),
+            &mut reader,
+            &mut |_| Ok::<_, OutputError>(()),
+        );
+        if source_failure {
+            assert!(matches!(
+                result,
+                Err(GqlQueryError::Source(GraphAggregateError::Source(
+                    "retained source unavailable"
+                )))
+            ));
+        } else {
+            assert!(matches!(result, Err(GqlQueryError::Interrupted(91))));
+        }
+        assert_eq!(reader.reads.len(), 1);
+    }
+
+    let mut total = 0;
+    let mut reader = OutputElements::default();
+    definition
+        .project_output_with_rank_with_elements(
+            complete_output_group(),
+            &mut reader,
+            &mut |_| {
+                total += 1;
+                Ok::<_, OutputError>(())
+            },
+        )
+        .unwrap();
+    assert!(total > 0);
+    assert_eq!(reader.reads.len(), 2);
+    for stop in 1..=total {
+        let mut seen = 0;
+        let mut reader = OutputElements::default();
+        let result = definition.project_output_with_rank_with_elements(
+            complete_output_group(),
+            &mut reader,
+            &mut |_| {
+                seen += 1;
+                if seen == stop {
+                    Err(GqlQueryError::Interrupted(stop))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+        assert_eq!(seen, stop);
+        assert!(reader.reads.len() <= 2);
+    }
+}
+
+#[test]
+fn final_reader_preserves_lazy_branches_and_does_not_tighten_default_admission() {
+    use crate::GraphSetValue as Value;
+    let lazy = Value::Case {
+        arms: vec![(Value::Value(GraphValue::Scalar(CanonicalScalar::Bool(false))), output_property())],
+        otherwise: Some(Box::new(Value::Column(1))),
+    };
+    let query = output_query(lazy, false);
+    let reader_free = SpillAggregatePlan::compile(&query).unwrap();
+    let expected = reader_free
+        .definition()
+        .project_output_with_rank(complete_output_group(), &mut |_| {
+            Ok::<_, OutputError>(())
+        })
+        .unwrap();
+    let plan = SpillAggregatePlan::compile_with_element_reads(&query).unwrap();
+    assert!(plan.definition().output_may_read_elements());
+    let mut reader = OutputElements {
+        failure: Some(GqlQueryError::Interrupted(91)),
+        ..OutputElements::default()
+    };
+    let actual = plan
+        .definition()
+        .project_output_with_rank_with_elements(
+            complete_output_group(),
+            &mut reader,
+            &mut |_| Ok::<_, OutputError>(()),
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.0.values()[0], GraphAggregateValue::Count(u64::MAX));
+    assert!(reader.reads.is_empty());
+    assert!(reader.failure.is_some());
+
+    let plan = SpillAggregatePlan::compile_with_element_reads(
+        &output_query(output_property(), false),
+    )
+    .unwrap();
+    let result = plan.definition().project_output_with_rank_with_elements(
+        complete_output_group(),
+        &mut reader,
+        &mut |_| Ok::<_, OutputError>(()),
+    );
+    assert!(matches!(result, Err(GqlQueryError::Interrupted(91))));
+    assert_eq!(reader.reads.len(), 1);
+}
+
+#[test]
+fn final_record_reads_consume_the_original_cursor_allowance_and_fuse_on_refusal() {
+    for edge in [false, true] {
+        let query = prepare_query(edge, "RETURN COUNT(*) AS n");
+        let source = Source::new(&[Some(1), Some(2), Some(3)]);
+        let drops = source.drops.clone();
+        with_input!(
+            &query,
+            source,
+            GqlQueryPolicy::new(4, u64::MAX, u64::MAX, u64::MAX),
+            || Ok::<_, usize>(()),
+            |cursor| {
+                while cursor.next_input().unwrap().is_some() {}
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert_eq!(cursor.row_stats().snapshot_records, 3);
+                cursor.charge(VertexScanEvent::Work).unwrap();
+                cursor.admit_output_record().unwrap();
+                assert_eq!(cursor.row_stats().snapshot_records, 4);
+                cursor.charge(VertexScanEvent::Work).unwrap();
+                assert!(matches!(
+                    cursor.admit_output_record(),
+                    Err(GqlQueryError::Rows(_))
+                ));
+                assert_eq!(cursor.row_stats().snapshot_records, 4);
+                assert_eq!(cursor.row_stats().result_rows, 0);
+                assert!(cursor.next_input().unwrap().is_none());
+                assert!(cursor.finish_result().is_err());
+            }
+        );
+        let source = Source::new(&[Some(1)]);
+        let drops = source.drops.clone();
+        with_input!(&query, source, wide(), || Ok::<_, usize>(()), |cursor| {
+            assert!(matches!(
+                cursor.admit_output_record(),
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::InvalidReductionInput
+                ))
+            ));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(cursor.row_stats().snapshot_records, 0);
+            assert!(cursor.next_input().unwrap().is_none());
+        });
+    }
+}

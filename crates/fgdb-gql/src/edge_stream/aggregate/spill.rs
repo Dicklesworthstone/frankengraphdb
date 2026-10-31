@@ -124,6 +124,32 @@ impl<S: EdgeScanSource, F> EdgeSpillAggregateCursor<S, F> {
         result
     }
 
+    /// Admit one reached final-output element read on the original source
+    /// allowance. No output reader may reopen or bypass an unfinished input.
+    pub fn admit_output_record<C>(&mut self) -> Result<(), EdgeAggregateError<S::Error, C>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.input.state != EdgeScanState::Exhausted {
+            self.fail();
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        let result = (|| {
+            let meter = &mut self.input.meter;
+            let next = meter
+                .increment(GqlBudgetDimension::SnapshotRecords, meter.rows.snapshot_records)
+                .map_err(lift)?;
+            meter.rows.snapshot_records = next;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.fail();
+        }
+        result
+    }
+
     pub fn finish_result<C>(&mut self) -> Result<(), EdgeAggregateError<S::Error, C>>
     where
         F: FnMut() -> Result<(), C>,

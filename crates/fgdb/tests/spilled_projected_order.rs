@@ -2,6 +2,9 @@
 //! Small run/group capacities force the real authenticated spill pipeline.
 #![recursion_limit = "256"]
 
+#[path = "spilled_projected_order/element_reads.rs"]
+mod element_reads;
+
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
@@ -264,7 +267,7 @@ fn projected_spill_rebinding_changes_rank_without_changing_the_prepared_template
 }
 
 #[test]
-fn external_rank_refuses_unowned_property_reads_before_source_cardinality_matters() {
+fn external_rank_reads_grouped_element_properties_for_empty_and_nonempty_inputs() {
     let ((), report) = run_async_under_lab(0x5ba1_1025, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -281,6 +284,9 @@ fn external_rank_refuses_unowned_property_reads_before_source_cardinality_matter
                 "MATCH (n:L) RETURN n AS v,COUNT(*) AS c ORDER BY v.p + c DESC LIMIT 1",
                 &parameters,
             );
+            let expected = prepared
+                .execute_in_view(&view, &cx, &parameters, policy(10))
+                .unwrap();
             let pool = MemoryPool::new(1_000_000, 0).unwrap();
             let mut a = scratch(&cx, &pool).await;
             let mut b = scratch(&cx, &pool).await;
@@ -305,9 +311,37 @@ fn external_rank_refuses_unowned_property_reads_before_source_cardinality_matter
                     None,
                 )
                 .await;
-            assert!(
-                matches!(result, Err(NativeAggregateSpoolError::Unsupported)),
-                "nonempty={nonempty}"
+            let (spool, _) = result.unwrap_or_else(|error| {
+                panic!("nonempty={nonempty}: {error}");
+            });
+            assert_eq!(pool.used(), 0);
+            let mut rows = Vec::new();
+            {
+                let mut reader = spool.reader(&mut c, None);
+                while let Some(row) = reader.next_row(&cx).await.unwrap() {
+                    rows.push(
+                        spool
+                            .output_slots()
+                            .iter()
+                            .map(|slot| match *slot {
+                                fgdb_gql::GraphAggregateTextSlot::GroupKey(at) => {
+                                    fgdb_gql::GraphAggregateValue::Value(row.keys()[at].clone())
+                                }
+                                fgdb_gql::GraphAggregateTextSlot::Aggregate(at) => {
+                                    row.values()[at].clone()
+                                }
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            assert_eq!(
+                fgdb::QueryResult::Rows {
+                    columns: spool.columns().to_vec(),
+                    rows,
+                },
+                expected,
+                "nonempty={nonempty}",
             );
             assert_eq!(pool.used(), 0);
         }

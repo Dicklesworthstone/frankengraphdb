@@ -9,6 +9,9 @@ use super::super::sort::FrameOrder;
 use super::*;
 use std::cmp::Ordering;
 
+#[path = "aggregate_output_elements.rs"]
+mod elements;
+pub(super) use elements::retain_element_reader;
 #[path = "aggregate_projected_order.rs"]
 mod projected_order;
 
@@ -101,6 +104,12 @@ fn project_computed(
     charge: &mut MemoryCharge,
     cx: &QueryCx,
 ) -> Result<(GraphAggregateRow, Option<GraphAggregateRow>)> {
+    if definition.output_may_read_elements()
+        && let Some(view) = input.output_view()
+    {
+        return elements::project(definition, input, row, charge, cx, view)
+            .map_err(projection_error);
+    }
     definition
         .project_output_with_rank(row, &mut |event| {
             input.controlled_charge(event)?;

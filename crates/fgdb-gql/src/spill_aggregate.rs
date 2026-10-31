@@ -64,7 +64,29 @@ pub enum SpillAggregatePlan {
 }
 impl SpillAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
-        let definition = SpillAggregateDefinition::compile_row_local(aggregate)?;
+        Self::from_definition(
+            aggregate,
+            SpillAggregateDefinition::compile_row_local(aggregate)?,
+        )
+    }
+
+    /// Admit final expressions against the host's retained, exact snapshot.
+    /// The host must provide a live-controlled element reader after every input
+    /// occurrence has completed. This does not admit graph reads in input
+    /// stages or widen asynchronous/reader-free aggregate compilation.
+    pub fn compile_with_element_reads(
+        aggregate: &PreparedGraphAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        Self::from_definition(
+            aggregate,
+            SpillAggregateDefinition::compile_row_local_with_element_reads(aggregate)?,
+        )
+    }
+
+    fn from_definition(
+        aggregate: &PreparedGraphAggregate,
+        definition: SpillAggregateDefinition,
+    ) -> Result<Self, SpillAggregateBuildError> {
         if matches!(
             aggregate.input_pattern().plan().operators().first(),
             Some(GlaOperator::ScanEdges { .. })
@@ -495,6 +517,9 @@ pub struct SpillAggregateDefinition {
     // Shared metadata, never a retained match bag or per-group support set.
     input_pipeline: Option<Arc<InputPipeline>>,
     collections: bool,
+    // Conservative, preparation-time dispatch only. Reader-free admission and
+    // lazy expression semantics do not change when this flag is true.
+    output_elements: bool,
 }
 impl core::fmt::Debug for SpillAggregateDefinition {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -552,6 +577,16 @@ impl SpillAggregateDefinition {
         Ok(definition)
     }
 
+    fn compile_row_local_with_element_reads(
+        aggregate: &PreparedGraphAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let (physical, pipeline) = InputPipeline::prepare_with_element_reads(aggregate)
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        let mut definition = Self::from_physical_output(physical, true)?;
+        definition.input_pipeline = pipeline.map(Arc::new);
+        Ok(definition)
+    }
+
     /// Source-only transformation. The host validates and partitions its final
     /// row, and all later reduction/DISTINCT/output passes consume that row
     /// unchanged. Never call this when replaying an external partition or when
@@ -574,6 +609,13 @@ impl SpillAggregateDefinition {
     }
 
     fn from_physical(aggregate: PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
+        Self::from_physical_output(aggregate, false)
+    }
+
+    fn from_physical_output(
+        aggregate: PreparedGraphAggregate,
+        element_reads: bool,
+    ) -> Result<Self, SpillAggregateBuildError> {
         // Relational owners derive their schema from the real completed input,
         // including zero-column Values. Graph admission metadata is irrelevant
         // to this branch and must never manufacture a source or input width.
@@ -590,7 +632,7 @@ impl SpillAggregateDefinition {
         // Direct graph cursors have separate visitation-order proofs. Only a
         // complete relational owner establishes the order this profile needs;
         // do not silently sort collected values or select a graph-only leaf.
-        if aggregate.computed_order_requires_element_reads()
+        if (!element_reads && aggregate.computed_order_requires_element_reads())
             || (collections && aggregate.input_relation().is_none())
             || input_width > MAX_PATTERN_VERTICES
             || aggregate
@@ -633,11 +675,20 @@ impl SpillAggregateDefinition {
                 },
             })
             .collect();
+        let output_elements = aggregate.output_projection().is_some_and(|projection| {
+            projection
+                .iter()
+                .any(|output| output.value().may_read_element_properties())
+        }) || aggregate
+            .computed_ordering()
+            .iter()
+            .any(crate::GraphSetValue::may_read_element_properties);
         Ok(Self {
             aggregate: Arc::new(aggregate),
             projected_ordering,
             input_pipeline: None,
             collections,
+            output_elements,
         })
     }
 
@@ -680,6 +731,11 @@ impl SpillAggregateDefinition {
     }
     pub fn has_computed_output(&self) -> bool {
         self.aggregate.output_projection().is_some()
+    }
+    /// A conservative dispatch hint for a host that retains an element reader.
+    /// This does not evaluate branches or widen a reader-free owner.
+    pub fn output_may_read_elements(&self) -> bool {
+        self.output_elements
     }
     pub fn has_distinct_output(&self) -> bool {
         self.aggregate.incremental_output_is_distinct()
@@ -807,6 +863,85 @@ impl SpillAggregateDefinition {
             &mut govern,
         )?;
         Ok((projected, Some(rank)))
+    }
+
+    /// Evaluate completed output and private ordering with a pinned element
+    /// reader. The reader uses the SAME typed refusal channel as the control,
+    /// so source-record budgets, memory and cancellation are restored verbatim.
+    /// All ordinary expression errors retain their native aggregate variants.
+    ///
+    /// Only reached operands read storage. The host must evaluate every
+    /// HAVING-qualified group before ranking, DISTINCT or pagination and retain
+    /// these cells instead of evaluating expressions inside a comparator.
+    pub fn project_output_with_rank_with_elements<E, C>(
+        &self,
+        row: GraphAggregateRow,
+        elements: &mut impl crate::GraphElementReader<
+            GqlQueryError<GraphAggregateError<E>, C>,
+        >,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<
+        (GraphAggregateRow, Option<GraphAggregateRow>),
+        GqlQueryError<GraphAggregateError<E>, C>,
+    > {
+        use crate::set_ops::projection::{HostElements, Relay, Stop};
+
+        self.check_complete(&row)?;
+        if self.computed_rank_width() == 0 && !self.aggregate.transforms_streamed_columns() {
+            return Ok((row, None));
+        }
+        // The existing relay erases only the error type, never a value or an
+        // effect. Both property failures and control failures keep their exact
+        // original error in this one slot while the evaluator unwinds.
+        let failed = core::cell::Cell::new(None);
+        let result = {
+            let mut host = HostElements(elements);
+            let mut read = Relay {
+                read: &mut host,
+                failed: &failed,
+            };
+            let mut govern = |event| {
+                control(result_event(event)).map_err(|error| {
+                    failed.set(Some(error));
+                    GqlQueryError::Interrupted(Stop)
+                })
+            };
+            (|| {
+                let projected = self.aggregate.project_complete_output_with_elements(
+                    &row,
+                    &mut read,
+                    &mut govern,
+                )?;
+                let rank = if self.computed_rank_width() == 0 {
+                    None
+                } else {
+                    Some(self.aggregate.project_complete_order_with_elements(
+                        &row,
+                        &projected,
+                        &mut read,
+                        &mut govern,
+                    )?)
+                };
+                Ok((projected, rank))
+            })()
+        };
+        if let Some(error) = failed.into_inner() {
+            return Err(error);
+        }
+        result.map_err(|error| match error {
+            GqlQueryError::Interrupted(Stop) => {
+                unreachable!("an erased output control keeps its original refusal")
+            }
+            GqlQueryError::Source(error) => GqlQueryError::Source(error.map_source(|Stop| {
+                unreachable!("an erased output source keeps its original refusal")
+            })),
+            GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
+            GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
+            GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+            GqlQueryError::Data(error) => GqlQueryError::Data(error),
+        })
     }
 
     /// The SAME exact comparator used by completed in-memory groups. Unsigned
