@@ -395,7 +395,9 @@ impl WriteTxn {
             used.created_edges = used.created_edges.saturating_add(step.created_edges);
         };
         cx.with_restriction(|| {
-            let workspace = MutationProgramWorkspace::for_write_chain(self);
+            let independent_creates = IndependentCreateWrites::admit_chain(self, chain);
+            let mut workspace = MutationProgramWorkspace::for_write_chain(self);
+            workspace.independent_creates = independent_creates;
             // A chain is an ordered program whose steps may write different
             // relation types (`MERGE (a)-[:X]->(b) CREATE (b)-[:Y]->(c)`), each
             // seeing its predecessor, as a mixed write program's do.
@@ -581,12 +583,13 @@ impl WriteTxn {
                         let (insertion_batch, output) = proposal.into_parts();
                         let (stats, vertices, edges) = workspace
                             .txn
-                            .stage_graph_insert_batch(
+                            .stage_graph_insert_batch_with_independent(
                                 database,
                                 cx,
                                 query.insertion().relation(),
                                 insertion_batch,
                                 true,
+                                workspace.independent_creates.as_mut(),
                             )
                             .map_err(|error| error.map_source(insertion))?;
                         let returning = workspace
@@ -633,12 +636,13 @@ impl WriteTxn {
                             }
                             None => workspace
                                 .txn
-                                .stage_graph_insert_batch(
+                                .stage_graph_insert_batch_with_independent(
                                     database,
                                     cx,
                                     prepared.relation(),
                                     proposal,
                                     true,
+                                    workspace.independent_creates.as_mut(),
                                 )
                                 .map_err(|error| error.map_source(insertion))?,
                         };
@@ -1007,6 +1011,16 @@ impl WriteTxn {
                         .write_ordered(database, batches)
                         .map_err(source)?;
                 }
+            }
+            // Reader-free creation loops admit every insertion before the
+            // next iteration, then compose their canonical chunks once. The
+            // guard retains dependencies even if composition or a tail fails.
+            if workspace.independent_creates.is_some() {
+                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                workspace
+                    .finish_independent_creates(database)
+                    .map_err(source)?;
+                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             }
             // Continuation rows belong to the next write, never to an
             // implicit public RETURN. A terminal MERGE may retain them for

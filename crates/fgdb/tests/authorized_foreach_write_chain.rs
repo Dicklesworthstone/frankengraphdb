@@ -161,6 +161,244 @@ fn deleted_element_read(error: &(dyn core::error::Error + 'static)) -> bool {
     false
 }
 
+mod independent_creations {
+    use super::*;
+    use fgdb_gql::insertion::{GraphInsertError, GraphInsertLimitDimension};
+    use fgdb_gql::{GqlQueryError, GraphInsertQueryError, GraphWriteChainError};
+    use fgdb_warden::LimitDimension;
+
+    const NESTED: &str = "FOREACH (x IN range(1,1000) | \
+        FOREACH (y IN [1,2,3,4] | CREATE (:Visible {p:4*(x-1)+y})))";
+
+    fn scoped(rights: Rights) -> Grant {
+        let mut allowed = grant(rights, 0);
+        // Every creation still admits its native before/after image. Keep
+        // nodes from masking the unchanged signed-work allowance in this law.
+        allowed.limits.max_nodes = 100_000;
+        allowed
+    }
+
+    fn bounded(vertices: u64, rows: u64) -> GraphInsertPolicy {
+        GraphInsertPolicy::new(policy(rows).query, vertices, 0).with_mutation_limit(0)
+    }
+
+    #[test]
+    fn flat_and_nested_creations_fit_one_write_only_allowance_and_commit() {
+        let ((), report) = run_async_under_lab(0xf0ea_c030, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            let allowed = scoped(Rights::Write);
+            assert_eq!(allowed.limits.max_work, 2_000_000);
+            let token = issuer.issue_at(&allowed, NOW).unwrap();
+            for (text, count) in [
+                (
+                    "FOREACH (x IN range(1,1000) | CREATE (:Visible {p:x}))",
+                    1_000,
+                ),
+                (NESTED, 4_000),
+            ] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let before = db.frontier().unwrap();
+                let program = chain(text);
+                assert_eq!(program.independent_create_relation(), Some(R));
+                let (stats, rows, completion) = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        bounded(count, 0),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{count} creations: {error:?}"));
+                assert_eq!((stats.created_vertices, stats.created_edges), (count, 0));
+                assert_eq!(stats.selection.snapshot_records, 0);
+                assert_eq!(stats.selection.result_rows, 0);
+                assert_eq!(rows.rows.result_rows, 0);
+                assert!(rows.value.is_empty());
+                let mut values: Vec<_> = db
+                    .vertices()
+                    .unwrap()
+                    .into_iter()
+                    .map(|vertex| {
+                        assert_eq!(vertex.labels, vec![VISIBLE]);
+                        match vertex.props.as_slice() {
+                            [
+                                (
+                                    key,
+                                    fgdb_types::CanonicalPropertyValue::Scalar(
+                                        CanonicalScalar::Int(value),
+                                    ),
+                                ),
+                            ] if *key == P => *value,
+                            properties => panic!("unexpected created properties: {properties:?}"),
+                        }
+                    })
+                    .collect();
+                values.sort_unstable();
+                assert_eq!(values, (1..=count as i64).collect::<Vec<_>>());
+                assert!(db.edges().unwrap().is_empty());
+                assert!(matches!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+                    if commit_seq.0 == before.0 + 1
+                ));
+                assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn late_expression_creation_and_result_refusals_discard_every_held_iteration() {
+        let ((), report) = run_async_under_lab(0xf0ea_c031, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            for case in 0..3 {
+                // Preserve a committed graph containing fields and relations
+                // the creation capability cannot read or write.
+                let mut db = deletion_database(&commit).await;
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let (text, rights, vertices, native_rows) = match case {
+                    0 => (
+                        "FOREACH (x IN range(1,1000) | FOREACH (y IN [1,2,3,4] | \
+                         CREATE (:Visible {p:1/(4000-(4*(x-1)+y))})))"
+                            .to_owned(),
+                        Rights::Write,
+                        4_000,
+                        0,
+                    ),
+                    1 => (NESTED.to_owned(), Rights::Write, 3_999, 0),
+                    _ => (
+                        format!("{NESTED} RETURN 1 AS done"),
+                        Rights::ReadWrite,
+                        4_000,
+                        1,
+                    ),
+                };
+                let token = issuer.issue_at(&scoped(rights), NOW).unwrap();
+                let program = chain(&text);
+                assert_eq!(program.independent_create_relation(), Some(R));
+                let error = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        bounded(vertices, native_rows),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_err();
+                match case {
+                    0 => assert_eq!(
+                        expression_error(&error),
+                        Some(GraphIntegerErrorKind::DivisionByZero),
+                        "the last member fails only after the earlier 3999 creations"
+                    ),
+                    1 => assert!(matches!(
+                        error,
+                        GqlQueryError::Source(GraphWriteChainError::Insert(
+                            GraphInsertQueryError::Insertion(GraphInsertError::Limit {
+                                dimension: GraphInsertLimitDimension::Vertices,
+                                ..
+                            })
+                        ))
+                    )),
+                    _ => assert_eq!(
+                        authorization(&error),
+                        Some(Error::LimitExceeded(LimitDimension::Rows)),
+                        "native output fits; the same signed permit refuses its final row"
+                    ),
+                }
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap(),
+                    ),
+                    before,
+                    "refusal case {case} must not publish a held prefix"
+                );
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn final_host_work_uses_the_creation_permit_and_rolls_back_all_effects() {
+        let ((), report) = run_async_under_lab(0xf0ea_c032, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            let allowed = scoped(Rights::Write);
+            let token = issuer.issue_at(&allowed, NOW).unwrap();
+            let mut db = deletion_database(&commit).await;
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let mut admitted = false;
+            let error = db
+                .execute_graph_write_chain_authorized_checked(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &chain(NESTED),
+                    bounded(4_000, 0),
+                    || NOW,
+                    |rows, work| {
+                        assert!(rows.is_empty());
+                        admitted = true;
+                        // All 4000 creations and their ordered preparation
+                        // precede this hook. They already spent signed work,
+                        // so its full original allowance cannot remain here.
+                        work(allowed.limits.max_work)
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                admitted,
+                "the complete creation reached final host admission"
+            );
+            assert_eq!(
+                authorization(&error),
+                Some(Error::LimitExceeded(LimitDimension::Work))
+            );
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                ),
+                before
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
 #[test]
 fn authorized_foreach_delete_reuses_only_successful_explicit_and_cascade_retirements() {
     let ((), report) = run_async_under_lab(0xf0ea_c020, |root| async move {

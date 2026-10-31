@@ -48,7 +48,21 @@ impl IndependentCreateWrites {
             profile = Some(current);
         }
         let (kind, relation) = profile?;
-        Some(Self {
+        Some(Self::new(kind, relation))
+    }
+
+    fn admit_chain(txn: &WriteTxn, chain: &fgdb_gql::PreparedGraphWriteChain) -> Option<Self> {
+        if !txn.staged.is_empty() || txn.prepared.is_some() {
+            return None;
+        }
+        Some(Self::new(
+            IndependentCreateKind::Standalone,
+            chain.independent_create_relation()?,
+        ))
+    }
+
+    fn new(kind: IndependentCreateKind, relation: RelationId) -> Self {
+        Self {
             kind,
             relation,
             batches: Vec::new(),
@@ -56,7 +70,7 @@ impl IndependentCreateWrites {
             created_vertices: fgdb_gql::id_hash::IdSet::default(),
             created_edges: fgdb_gql::id_hash::IdSet::default(),
             dependencies: crate::prepared_write::PreparedDependencies::default(),
-        })
+        }
     }
 
     fn stage<V: Vfs + Clone>(

@@ -98,6 +98,261 @@ fn allocate(next: &AtomicU64, request: GraphInsertRequest) -> Result<ElementId, 
 }
 
 #[test]
+fn independent_fresh_subgraphs_match_visible_prefix_staging_and_reopen() {
+    let ((), report) = run_async_under_lab(0xf0ec_0040, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let chain = prepare(
+            "UNWIND [2,1] AS outer FOREACH (x IN [outer,outer+10] | \
+             CREATE (a:F {p:x})-[r:R {p:x}]->(b:F {p:x+1})) RETURN outer",
+        );
+        assert_eq!(chain.independent_create_relation(), Some(R));
+        let mut first_graph = None;
+        for prefixed in [false, true] {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let pinned = db.read_session().unwrap();
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            if prefixed {
+                // A nonempty entry workspace must use ordinary visible staging.
+                let mut prefix = WriteBatch::new(R);
+                prefix.create_vertex(VId(7), vec![OUTER], vec![(P, CanonicalScalar::Int(99))]);
+                txn.write(&mut db, prefix).unwrap();
+            }
+            let next = AtomicU64::new(100);
+            let (stats, rows, receipt) = txn
+                .execute_graph_write_chain_governed(
+                    &mut db,
+                    &query,
+                    &chain,
+                    policy(2, HIGH, HIGH, 8, 0),
+                    |request| allocate(&next, request),
+                )
+                .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (8, 4));
+            assert_eq!(receipt.stats().mutation_effects, 0);
+            assert_eq!(receipt.stats().completed_statements, 1);
+            assert_eq!(next.load(Ordering::Relaxed), 112);
+            assert_eq!(rows.value.len(), 2);
+            for (row, outer) in rows.value.iter().zip([2, 1]) {
+                assert_eq!(
+                    row.values(),
+                    &[GraphValue::Scalar(CanonicalScalar::Int(outer))]
+                );
+            }
+            let mut vertices: Vec<_> = txn
+                .vertices(&db)
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.vid != VId(7))
+                .collect();
+            let edges = txn.edges(&db).unwrap();
+            assert_eq!(vertices.len(), 8);
+            assert_eq!(edges.len(), 4);
+            for value in [2, 12, 1, 11] {
+                let edge = edges
+                    .iter()
+                    .find(|edge| edge.props == vec![(P, CanonicalScalar::Int(value).into())])
+                    .unwrap();
+                assert_eq!(edge.entry.relation, R);
+                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(value).into())]);
+                let source = txn.vertex(&db, edge.entry.src).unwrap().unwrap();
+                let destination = txn.vertex(&db, edge.entry.dst).unwrap().unwrap();
+                assert_eq!(source.labels, vec![ITEM]);
+                assert_eq!(destination.labels, vec![ITEM]);
+                assert_eq!(source.props, edge.props);
+                assert_eq!(
+                    destination.props,
+                    vec![(P, CanonicalScalar::Int(value + 1).into())]
+                );
+            }
+            // The ordinary case has exactly one extra creation intent before
+            // this chain. Remove only that known ordinal offset; every other
+            // field, including each relative birth ordinal, must still agree.
+            for vertex in &mut vertices {
+                vertex.birth_ordinal = vertex
+                    .birth_ordinal
+                    .checked_sub(u64::from(prefixed))
+                    .unwrap();
+            }
+            let graph = (vertices, edges);
+            if let Some(first) = &first_graph {
+                assert_eq!(&graph, first);
+            } else {
+                first_graph = Some(graph);
+            }
+            assert!(db.vertices().unwrap().is_empty());
+            assert!(db.edges().unwrap().is_empty());
+            txn.finish(&mut db, &commit).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+            assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+            assert!(pinned.vertices().unwrap().is_empty());
+            assert!(pinned.edges().unwrap().is_empty());
+            let expected = (db.vertices().unwrap(), db.edges().unwrap());
+            drop(db);
+            let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(
+                (reopened.vertices().unwrap(), reopened.edges().unwrap()),
+                expected
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn independent_creation_refuses_collisions_before_later_iteration_errors() {
+    use fgdb_gql::insertion::GraphInsertError;
+    use fgdb_gql::{GqlQueryError, GraphInsertQueryError, GraphWriteChainError};
+
+    let ((), report) = run_async_under_lab(0xf0ec_0041, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let chain = prepare("FOREACH (x IN [0,1,2] | CREATE (:F {p:10/(2-x)}))");
+        assert_eq!(chain.independent_create_relation(), Some(R));
+        for spent in [false, true] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            if spent {
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(100), vec![ITEM], vec![]);
+                db.write(&contexts.commit(), seed).await.unwrap();
+                let mut retire = WriteBatch::new(R);
+                retire.delete_vertex(VId(100));
+                db.write(&contexts.commit(), retire).await.unwrap();
+            }
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            let calls = AtomicU64::new(0);
+            let error = txn
+                .execute_graph_write_chain_governed(
+                    &mut db,
+                    &contexts.query(),
+                    &chain,
+                    generous(),
+                    |request| {
+                        assert!(matches!(request, GraphInsertRequest::Vertex { .. }));
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        Ok::<_, ()>(ElementId::Vertex(VId(100)))
+                    },
+                )
+                .unwrap_err();
+            let GqlQueryError::Source(GraphWriteChainError::Insert(
+                GraphInsertQueryError::Insertion(GraphInsertError::Source(
+                    fgdb::WriteTxnError::Write(write_error),
+                )),
+            )) = error
+            else {
+                panic!("identity admission must precede the later division by zero: {error:?}");
+            };
+            if spent {
+                assert!(matches!(
+                    write_error,
+                    fgdb::WriteError::IdentitySpent {
+                        elem: ElementId::Vertex(VId(100)),
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    write_error,
+                    fgdb::WriteError::AlreadyLive {
+                        elem: ElementId::Vertex(VId(100)),
+                    }
+                ));
+            }
+            assert_eq!(calls.load(Ordering::Relaxed), if spent { 1 } else { 2 });
+            assert!(txn.staged_effect_digest().is_err());
+            assert!(txn.vertices(&db).unwrap().is_empty());
+            assert!(txn.edges(&db).unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert_eq!(db.delta_since(basis).unwrap().count(), 0);
+            txn.abort();
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn dependent_creation_bodies_keep_live_properties_and_imported_endpoints() {
+    let ((), report) = run_async_under_lab(0xf0ec_0042, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        for (text, edge_count) in [
+            (
+                "FOREACH (x IN [1,2] | CREATE (a:F {p:x}) CREATE (:Outer {p:[a][0].p+10}))",
+                0,
+            ),
+            (
+                "FOREACH (x IN [1,2] | CREATE (a:F {p:x}) CREATE (:Outer {p:properties([a][0]).p+10}))",
+                0,
+            ),
+            (
+                "FOREACH (x IN [1,2] | CREATE (a:F {p:x}) CREATE (b:Outer {p:x+10}) CREATE (a)-[:R]->(b))",
+                2,
+            ),
+        ] {
+            let chain = prepare(text);
+            assert_eq!(chain.independent_create_relation(), None, "{text}");
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            let next = AtomicU64::new(100);
+            let (stats, output, _) = txn
+                .execute_graph_write_chain_governed(
+                    &mut db,
+                    &contexts.query(),
+                    &chain,
+                    generous(),
+                    |request| allocate(&next, request),
+                )
+                .unwrap();
+            assert_eq!(
+                (stats.created_vertices, stats.created_edges),
+                (4, edge_count)
+            );
+            assert!(output.value.is_empty());
+            for (label, expected) in [(ITEM, [1, 2]), (OUTER, [11, 12])] {
+                let props: Vec<_> = txn
+                    .vertices(&db)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|vertex| vertex.labels == vec![label])
+                    .map(|vertex| vertex.props)
+                    .collect();
+                assert_eq!(
+                    props,
+                    expected
+                        .into_iter()
+                        .map(|value| vec![(P, CanonicalScalar::Int(value).into())])
+                        .collect::<Vec<_>>()
+                );
+            }
+            for edge in txn.edges(&db).unwrap() {
+                assert_eq!(
+                    txn.vertex(&db, edge.entry.src).unwrap().unwrap().labels,
+                    vec![ITEM]
+                );
+                assert_eq!(
+                    txn.vertex(&db, edge.entry.dst).unwrap().unwrap().labels,
+                    vec![OUTER]
+                );
+            }
+            txn.finish(&mut db, &contexts.commit()).await.unwrap();
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn local_create_set_remove_body_commits_once_and_reopens() {
     let ((), report) = run_async_under_lab(0xf0ec_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

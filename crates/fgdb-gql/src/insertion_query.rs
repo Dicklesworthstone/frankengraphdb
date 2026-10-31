@@ -435,6 +435,26 @@ impl PreparedGraphInsertQuery {
     pub const fn insertion(&self) -> &PreparedGraphInsert {
         &self.insertion
     }
+
+    /// Returning bindings already contain the checked CREATE fields. Only
+    /// reader-free projections and tails may run before its independently
+    /// admitted chunk becomes part of the transaction's visible overlay.
+    pub(crate) fn independent_create_relation(&self) -> Option<fgdb_delta_types::RelationId> {
+        if self.grouping.is_some()
+            || self
+                .projection
+                .iter()
+                .any(|column| column.value().may_read_element_properties())
+            || self
+                .tail
+                .as_ref()
+                .is_some_and(|tail| tail.reads_graph() || tail.reads_elements())
+        {
+            return None;
+        }
+        self.insertion.independent_owned_create_relation()
+    }
+
     /// The frozen occurrence bindings, including private continuation columns.
     /// Authorized hosts use these before execution to admit property reads on
     /// created elements; a hidden WITH column is subject to the same scope as

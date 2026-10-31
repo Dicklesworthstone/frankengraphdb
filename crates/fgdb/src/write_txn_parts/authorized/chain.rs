@@ -787,7 +787,13 @@ impl<V: Vfs + Clone> Database<V> {
                     None => None,
                 };
                 let mut mutation_effects = 0;
-                let mut frozen = frozen_chain(chain).then(FrozenCreations::default);
+                // Independent creation loops have no reads of their held
+                // prefix. stage_batch still checks every original intent's
+                // native before/after images on this same live permit before
+                // the next iteration, then prepares the ordered effects once.
+                let mut frozen = (frozen_chain(chain)
+                    || chain.independent_create_relation().is_some())
+                .then(FrozenCreations::default);
                 let mut cursor = GraphWriteChainCursor::new(chain, continuation.is_none());
                 let mut at = 0;
                 while let Some(task) = cursor.next(&mut rows, &mut |event| {
@@ -953,8 +959,9 @@ impl<V: Vfs + Clone> Database<V> {
                             })
                             .map_err(|error| error.map_source(GraphWriteChainError::Insert))?;
                         let (creation, output) = collection.into_parts();
-                        // The frozen-chain classifier excludes projected
-                        // CREATE. Its complete bag must be visible to output.
+                        // A held projected CREATE is admitted only by the
+                        // independent profile, whose output cannot read the
+                        // graph. Bindings already carry its checked fields.
                         let (stats, _, _) = insert::stage_proposal(
                             workspace.transaction(),
                             self,
@@ -963,7 +970,7 @@ impl<V: Vfs + Clone> Database<V> {
                             creation,
                             &mut execution,
                             false,
-                            None,
+                            frozen.as_mut(),
                         )
                         .map_err(|error| {
                             error.map_source(|error| {

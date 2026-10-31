@@ -612,6 +612,36 @@ impl PreparedGraphInsert {
         .then_some(self.relation)
     }
 
+    /// Creation over immutable carried values. Unlike the standalone profile,
+    /// this accepts a reader-free relational input, including a FOREACH member.
+    /// Every edge must name vertices created by this same insertion: an earlier
+    /// insertion's issued identities are collision witnesses, not live inputs.
+    pub(crate) fn independent_owned_create_relation(&self) -> Option<RelationId> {
+        let reads = match &self.input {
+            Input::Unit => false,
+            Input::Pattern(_) => true,
+            Input::Relation(input) => input.reads_graph() || input.reads_elements(),
+        };
+        if reads
+            || self.vertices.is_empty()
+            || self.edges.iter().any(|edge| {
+                edge.relation != self.relation
+                    || !matches!(edge.source, GraphInsertEndpoint::CreatedVertex(_))
+                    || !matches!(edge.destination, GraphInsertEndpoint::CreatedVertex(_))
+            })
+            || self
+                .vertices
+                .iter()
+                .map(|vertex| &vertex.properties)
+                .chain(self.edges.iter().map(|edge| &edge.properties))
+                .flat_map(|properties| &properties.projection)
+                .any(|column| column.value().may_read_element_properties())
+        {
+            return None;
+        }
+        Some(self.relation)
+    }
+
     /// A native vertex-only selection followed solely by edge creations in
     /// one relation. Appending such edges cannot change this selection or its
     /// frozen property inputs. A host may reuse that fact only while no other

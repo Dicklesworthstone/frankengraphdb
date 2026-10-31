@@ -481,6 +481,41 @@ impl PreparedGraphWriteChain {
         &self.steps
     }
 
+    /// A chain of complete fresh creations whose inputs cannot observe earlier
+    /// writes. Recursive FOREACH sources, collections and outputs participate
+    /// in this proof, including lazy element reads in their expressions.
+    ///
+    /// A host may admit each insertion against the entry snapshot and earlier
+    /// issued identity sets, then compose the admitted chunks once. It must
+    /// retain ordinary per-insertion validation, source order, authorization,
+    /// cumulative allowances and rollback. Imported edge endpoints, graph or
+    /// carried-element reads, grouped creation outputs and mutations require
+    /// the ordinary visible prefix instead.
+    #[must_use]
+    pub fn independent_create_relation(&self) -> Option<fgdb_delta_types::RelationId> {
+        if self.read.is_some() {
+            return None;
+        }
+        let mut relation = None;
+        for step in &self.steps {
+            let current = match step {
+                GraphWriteChainStep::Insert(insertion) => {
+                    insertion.independent_owned_create_relation()?
+                }
+                GraphWriteChainStep::Query(query) => query.independent_create_relation()?,
+                GraphWriteChainStep::Foreach(foreach) if !foreach.requires_read() => {
+                    foreach.body().independent_create_relation()?
+                }
+                _ => return None,
+            };
+            if relation.is_some_and(|previous| previous != current) {
+                return None;
+            }
+            relation = Some(current);
+        }
+        relation
+    }
+
     /// The statement's final result columns, after a terminal read if present.
     #[must_use]
     pub fn columns(&self) -> &[String] {
@@ -530,3 +565,7 @@ impl PreparedGraphWriteChain {
 #[cfg(test)]
 #[path = "write_chain/bindings_tests.rs"]
 mod bindings_tests;
+
+#[cfg(test)]
+#[path = "write_chain/independent_creations_tests.rs"]
+mod independent_creations_tests;
