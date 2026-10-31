@@ -13,3 +13,10 @@ rustflags = ["-Z", "threads=4"]
 # pin changes only the silent default.
 [env]
 ASUPERSYNC_TEST_ARTIFACTS_DIR = { value = "artifacts/test", relative = true }
+
+# fgdb-epic-verif-phi.3: ring emits full native macro debug information even
+# under Rust's line-table profile. Large test links exceed DWARF32 string
+# offsets; widen the native ELF debug format instead of discarding that data.
+# Supplying CFLAGS disables cc-rs's implicit warning groups, so retain both.
+# Other target triples keep their defaults; an explicit same-key export wins.
+CFLAGS_x86_64_unknown_linux_gnu = { value = "-Wall -Wextra -gdwarf64", force = false }
