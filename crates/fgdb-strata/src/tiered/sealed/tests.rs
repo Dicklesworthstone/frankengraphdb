@@ -537,6 +537,87 @@ fn canonical_bytes_round_trip_and_corruption_never_mints_source_authority() {
 }
 
 #[test]
+fn finish_structural_admission_refuses_inconsistent_inline_and_csr_counts() {
+    let limits = SealedLimits::default();
+    for count in [1, 33] {
+        let build = || {
+            let entries: Vec<_> = (0..count)
+                .map(|at| entry(1, at as u128 + 2, at as u128 + 1, 1, None))
+                .collect();
+            let compacted =
+                crate::compact::compact_with_props(&[entries], &[None::<BlockProps>], CommitSeq(1))
+                    .unwrap();
+            image::build(compacted, limits, &mut || Ok(())).unwrap()
+        };
+        let valid = SealedPartition::finish_scoped(
+            scope(1),
+            Some(RelationId(1)),
+            build(),
+            limits,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(collect(&valid, 1, 10, None).len(), count);
+        let mut malformed = build();
+        malformed.rows[0].count += 1;
+        assert!(matches!(
+            SealedPartition::finish_scoped(
+                scope(1),
+                Some(RelationId(1)),
+                malformed,
+                limits,
+                &mut || Ok(()),
+            ),
+            Err(SealedError::NonCanonical)
+        ));
+    }
+}
+
+#[test]
+fn reload_structural_admission_refuses_authenticated_future_incidences() {
+    let limits = SealedLimits::default();
+    for count in [1, 33] {
+        let entries: Vec<_> = (0..count)
+            .map(|at| entry(1, at as u128 + 2, at as u128 + 1, 11, None))
+            .collect();
+        let compacted =
+            crate::compact::compact_with_props(&[entries], &[None::<BlockProps>], CommitSeq(1))
+                .unwrap();
+        let image = image::build(compacted, limits, &mut || Ok(())).unwrap();
+        let valid = SealedPartition::finish_scoped(
+            SealedScope {
+                publication: CommitSeq(11),
+                ..scope(1)
+            },
+            Some(RelationId(1)),
+            image,
+            limits,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let encoded = bytes(&valid);
+        let restored =
+            SealedPartition::reload_inner(valid.anchor(), &encoded, limits, None, &mut || Ok(()))
+                .unwrap();
+        assert_eq!(collect(&restored, 1, 11, None).len(), count);
+        // Test-only receipt forgery: authentication and decoding succeed,
+        // but these exact bytes are structurally invalid at the claimed cut.
+        let mut forged = valid.anchor();
+        forged.scope.publication = CommitSeq(10);
+        assert_eq!(encoded.len(), forged.encoded_bytes);
+        assert_eq!(
+            fingerprint(&encoded, &mut || Ok(())).unwrap(),
+            forged.fingerprint
+        );
+        assert!(wire::decode(&encoded, limits, None, &mut || Ok(())).is_ok());
+        assert!(matches!(
+            SealedPartition::reload_inner(forged, &encoded, limits, None, &mut || Ok(())),
+            Err(SealedError::NonCanonical)
+        ));
+    }
+}
+
+#[test]
 fn cloning_shares_payloads_but_retaining_an_anchor_does_not_pin_them() {
     let partition = seal(&[vec![entry(1, 2, 1, 1, None)]], &[None], 1);
     let cloned = partition.clone();
