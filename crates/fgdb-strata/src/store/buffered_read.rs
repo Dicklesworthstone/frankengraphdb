@@ -310,7 +310,7 @@ impl VertexPropertyAccess {
 }
 
 // A locator only into this reader's immutable, authenticated generation.
-// Metadata selection never retains a candidate's labels or property values.
+// Full-value metadata selection retains no candidate labels or property values.
 #[derive(Clone, Copy)]
 struct VertexPointLocator {
     patch: usize,
@@ -333,10 +333,53 @@ impl VertexPointLocator {
 }
 
 enum VertexPointWinner {
-    // Authenticated routing and row/span bounds proved one possible version,
-    // so the ordinary selected-identity decoder could materialize it once.
+    // Topology is already complete, or authenticated routing and row/span
+    // bounds proved one possible version for the selected-identity decoder.
     Ready(VertexRow),
     Deferred(VertexPointLocator, Option<BufferHandle>),
+}
+
+#[derive(Clone, Copy)]
+enum VertexPointAccess {
+    Properties(Option<PropertyKeyId>),
+    Topology,
+}
+
+#[derive(Clone, Copy)]
+struct VertexPointRead {
+    vid: VId,
+    as_of: CommitSeq,
+    access: VertexPointAccess,
+    admission: Admission,
+}
+
+// Point and governed sources retain their own admission/work policies while
+// sharing historical selection. In particular, a governed endpoint continues
+// the caller's cumulative meter instead of starting another point-read limit.
+enum VertexPointEvent {
+    Directory,
+    Decode(usize),
+    Row,
+    Complete,
+}
+
+impl VertexPointEvent {
+    fn point(
+        self,
+        cx: &QueryCx,
+        work: &mut usize,
+        maximum: usize,
+    ) -> Result<(), BufferedReadError> {
+        match self {
+            Self::Directory => {
+                cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+                advance(work, 1, maximum)
+            }
+            Self::Decode(rows) => advance(work, rows, maximum),
+            Self::Row => Ok(()),
+            Self::Complete => cx.checkpoint().map_err(BufferedReadError::Interrupted),
+        }
+    }
 }
 
 /// One governed source boundary. Identity admission precedes that identity's
@@ -1101,12 +1144,40 @@ impl<V: Vfs> BufferedPartition<V> {
         key: Option<PropertyKeyId>,
         work: &mut usize,
     ) -> Result<Option<VertexPointWinner>, BufferedReadError> {
+        let maximum = self.limits.max_work;
+        self.vertex_point_winner_with(
+            cx,
+            VertexPointRead {
+                vid,
+                as_of,
+                access: VertexPointAccess::Properties(key),
+                admission: Admission::Normal,
+            },
+            None,
+            &mut |event| event.point(cx, work, maximum),
+        )
+        .await
+    }
+
+    async fn vertex_point_winner_with<C: From<BufferedReadError>>(
+        &mut self,
+        cx: &QueryCx,
+        request: VertexPointRead,
+        mut output_charge: Option<&mut Option<MemoryCharge>>,
+        control: &mut (impl FnMut(VertexPointEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<VertexPointWinner>, C> {
+        let VertexPointRead {
+            vid,
+            as_of,
+            access,
+            admission,
+        } = request;
         let mut result: Option<VertexPointLocator> = None;
+        let mut ready = None;
         let mut last: Option<(usize, BufferHandle)> = None;
         let mut candidates = self.patch_directory.candidates(vid);
         while let Some(at) = self.patch_directory.next(&mut candidates, &mut || {
-            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(work, 1, self.limits.max_work)
+            control(VertexPointEvent::Directory)
         })? {
             let descriptor = self.patches[at];
             if self.root.vertex_patches[at].first_seq > as_of || !descriptor.may_contain(vid) {
@@ -1121,36 +1192,51 @@ impl<V: Vfs> BufferedPartition<V> {
             let unique = last.is_none()
                 && candidates.is_exhausted()
                 && (descriptor.rows == 1 || reference.first_seq == reference.last_seq);
-            advance(work, descriptor.rows, self.limits.max_work)?;
+            control(VertexPointEvent::Decode(descriptor.rows))?;
             drop(last.take());
-            let _workspace = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
-            let bytes = self.pin(cx, descriptor.extent, Admission::Normal).await?;
-            if unique {
-                // In a one-row non-flat span, the upper sequence is exactly
-                // that row's retirement. Still authenticate/check all framing,
-                // but never decode values for an already-retired winner.
-                let retired = descriptor.rows == 1
-                    && reference.first_seq < reference.last_seq
-                    && reference.last_seq <= as_of;
-                let rows = if retired {
+            let _workspace = self.reserve_scan_workspace(cx)?;
+            let bytes = self.pin(cx, descriptor.extent, admission).await?;
+            let rows = match (access, unique) {
+                // Initial admission plus the current extent checksum already
+                // authenticate this projection. Retain its one topology parse
+                // and transfer the winning row without a second decode.
+                (VertexPointAccess::Topology, _) => {
+                    self.decode_scan_patch(at, bytes.as_ref(), VertexPropertyAccess::Skip, None)?
+                }
+                (VertexPointAccess::Properties(key), true) => {
+                    // In a one-row non-flat span, the upper sequence is exactly
+                    // that row's retirement. Still authenticate/check all framing,
+                    // but never decode values for an already-retired winner.
+                    let retired = descriptor.rows == 1
+                        && reference.first_seq < reference.last_seq
+                        && reference.last_seq <= as_of;
+                    if retired {
+                        self.decode_vertex_point_patch(at, bytes.as_ref(), None)?
+                    } else {
+                        self.decode_unique_vertex_point_patch(at, bytes.as_ref(), vid, key)?
+                    }
+                }
+                (VertexPointAccess::Properties(_), false) => {
                     self.decode_vertex_point_patch(at, bytes.as_ref(), None)?
-                } else {
-                    self.decode_unique_vertex_point_patch(at, bytes.as_ref(), vid, key)?
-                };
-                cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-                return Ok(rows
-                    .into_iter()
-                    .find(|row| row.vid == vid && row.visible_at(as_of))
-                    .map(VertexPointWinner::Ready));
-            }
-            let rows = self.decode_vertex_point_patch(at, bytes.as_ref(), None)?;
-            for (row_at, row) in rows.iter().enumerate() {
+                }
+            };
+            for (row_at, row) in rows.into_iter().enumerate() {
+                control(VertexPointEvent::Row)?;
                 if row.vid == vid
                     && row.created_at <= as_of
                     && result.is_none_or(|old| {
                         (old.created_at, old.patch, old.row) <= (row.created_at, at, row_at)
                     })
                 {
+                    // Plain points reserve their result before history work.
+                    // Governed sources reserve only at the first winner, just
+                    // as before: missing identities need no output workspace,
+                    // and later history cannot outrun a memory refusal here.
+                    if let Some(charge) = output_charge.as_deref_mut() {
+                        if charge.is_none() {
+                            *charge = Some(self.reserve_scan_workspace(cx)?);
+                        }
+                    }
                     result = Some(VertexPointLocator {
                         patch: at,
                         row: row_at,
@@ -1159,11 +1245,25 @@ impl<V: Vfs> BufferedPartition<V> {
                         created_at: row.created_at,
                         retired_at: row.retired_at,
                     });
+                    if unique || matches!(access, VertexPointAccess::Topology) {
+                        ready = Some(row);
+                    }
                 }
+            }
+            if unique {
+                control(VertexPointEvent::Complete)?;
+                return Ok(ready
+                    .filter(|row| row.visible_at(as_of))
+                    .map(VertexPointWinner::Ready));
             }
             last = Some((at, bytes));
         }
-        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        control(VertexPointEvent::Complete)?;
+        if matches!(access, VertexPointAccess::Topology) {
+            return Ok(ready
+                .filter(|row| row.visible_at(as_of))
+                .map(VertexPointWinner::Ready));
+        }
         Ok(result
             .filter(|row| row.retired_at.is_none_or(|retired| as_of < retired))
             .map(|winner| {
@@ -1182,26 +1282,49 @@ impl<V: Vfs> BufferedPartition<V> {
         key: Option<PropertyKeyId>,
         work: &mut usize,
     ) -> Result<VertexRow, BufferedReadError> {
+        let maximum = self.limits.max_work;
+        self.vertex_point_row_with(
+            cx,
+            VertexPointWinner::Deferred(winner, retained),
+            key,
+            Admission::Normal,
+            &mut |event| event.point(cx, work, maximum),
+        )
+        .await
+    }
+
+    async fn vertex_point_row_with<C: From<BufferedReadError>>(
+        &mut self,
+        cx: &QueryCx,
+        winner: VertexPointWinner,
+        key: Option<PropertyKeyId>,
+        admission: Admission,
+        control: &mut (impl FnMut(VertexPointEvent) -> Result<(), C> + Send),
+    ) -> Result<VertexRow, C> {
+        let (winner, retained) = match winner {
+            VertexPointWinner::Ready(row) => return Ok(row),
+            VertexPointWinner::Deferred(winner, retained) => (winner, retained),
+        };
         let descriptor = self.patches[winner.patch];
         // Materialization reparses the complete bounded row framing, even
         // when its extent is still pinned. Admit that work before decoding.
-        advance(work, descriptor.rows, self.limits.max_work)?;
-        let _workspace = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
+        control(VertexPointEvent::Decode(descriptor.rows))?;
+        let _workspace = self.reserve_scan_workspace(cx)?;
         let bytes = match retained {
             Some(bytes) if bytes.key() == descriptor.extent => bytes,
-            Some(_) => return Err(BufferError::InvalidLoad.into()),
-            None => self.pin(cx, descriptor.extent, Admission::Normal).await?,
+            Some(_) => return Err(BufferedReadError::from(BufferError::InvalidLoad).into()),
+            None => self.pin(cx, descriptor.extent, admission).await?,
         };
         let rows =
             self.decode_vertex_point_patch(winner.patch, bytes.as_ref(), Some((winner.row, key)))?;
         if rows.get(winner.row).is_none_or(|row| !winner.matches(row)) {
-            return Err(BufferError::InvalidLoad.into());
+            return Err(BufferedReadError::from(BufferError::InvalidLoad).into());
         }
         // The unique decoder allocation transfers the selected row's payload;
         // neither an old version nor the winning value needs a clone.
         rows.into_iter()
             .nth(winner.row)
-            .ok_or_else(|| BufferError::InvalidLoad.into())
+            .ok_or_else(|| BufferedReadError::from(BufferError::InvalidLoad).into())
     }
 
     /// Resolve one vertex through an admitted interval directory. Every patch
@@ -2414,6 +2537,7 @@ mod tests {
                 // keeping a previous frame pinned would refuse the next one.
                 let room = 2 * OBJECT_WORKSPACE_BYTES + 16 * 1024;
                 let occupied = pool.reserve(&query, pool.available() - room).unwrap();
+                let mut governed_work = 0;
                 for cut in [3, 4, 5, 6, 7, 0] {
                     let before = view.stats();
                     let full = view
@@ -2440,6 +2564,49 @@ mod tests {
                         selected.as_deref(),
                         (cut == 3 || cut == 4).then_some(&CanonicalScalar::Int(33).into()),
                     );
+                    drop(selected);
+
+                    // Seeded external MATCH and edge endpoints use this same
+                    // governed access seam. They must avoid superseded values
+                    // under the same one-frame/two-workspace headroom, too.
+                    let before = view.stats();
+                    let mut scan = view
+                        .edge_scan(&query, CommitSeq(cut))
+                        .unwrap()
+                        .into_join_scan();
+                    let mut events = Vec::new();
+                    let candidate = scan
+                        .vertex_candidate_with(&query, VId(101), &mut |event| {
+                            events.push(event);
+                            Ok::<_, ()>(())
+                        })
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(events[0], BufferedScanEvent::Identity(VId(101)));
+                    assert!(
+                        events[1..]
+                            .iter()
+                            .all(|event| *event == BufferedScanEvent::Work)
+                    );
+                    assert_eq!(scan.work_used(), events.len() - 1);
+                    if cut == 3 {
+                        governed_work = scan.work_used();
+                    }
+                    assert_eq!(candidate.vid, VId(101));
+                    if cut == 3 || cut == 4 {
+                        assert_eq!(candidate.row.as_deref(), Some(&retired_successor));
+                    } else if cut == 5 || cut == 6 {
+                        assert_eq!(candidate.row.as_ref().unwrap().created_at, CommitSeq(5));
+                    } else {
+                        assert!(candidate.row.is_none());
+                    }
+                    drop(candidate);
+                    drop(scan);
+                    if layout == 0 && cut != 0 {
+                        let after = view.stats();
+                        assert_eq!(after.hits + after.misses, before.hits + before.misses + 1);
+                    }
                 }
                 assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
                 assert!(
@@ -2449,6 +2616,17 @@ mod tests {
                     "the selected historical timestamp must still consult the pinned resolver",
                 );
                 assert!(resolver.calls.load(Ordering::Relaxed) > 0);
+                let mut scan = view
+                    .edge_scan(&query, CommitSeq(1))
+                    .unwrap()
+                    .into_join_scan();
+                assert!(matches!(
+                    scan.vertex_candidate_with(&query, VId(101), &mut |_| Ok::<_, ()>(()))
+                        .await,
+                    Err(BufferedScanError::Read(_)),
+                ));
+                assert!(scan.is_closed());
+                drop(scan);
                 drop(occupied);
 
                 if layout == 0 {
@@ -2510,6 +2688,37 @@ mod tests {
                     root.set_cancel_requested(false);
                     assert_eq!(view.stats(), before);
                     drop(charge);
+
+                    // Cancellation at every governed work prefix, including
+                    // the deferred parse and retained-value measurement, must
+                    // close the public driver and release every in-flight owner.
+                    let baseline = pool.used();
+                    for prefix in 0..governed_work {
+                        let mut scan = view
+                            .edge_scan(&query, CommitSeq(3))
+                            .unwrap()
+                            .into_join_scan();
+                        let mut observed = 0;
+                        let result = scan
+                            .vertex_candidate_with(&query, VId(101), &mut |event| {
+                                observed += usize::from(event == BufferedScanEvent::Work);
+                                if observed == prefix {
+                                    root.set_cancel_requested(true);
+                                }
+                                Ok::<_, ()>(())
+                            })
+                            .await;
+                        root.set_cancel_requested(false);
+                        assert!(matches!(
+                            result,
+                            Err(BufferedScanError::Read(BufferedReadError::Interrupted(_))),
+                        ));
+                        assert_eq!(observed, prefix);
+                        assert_eq!(scan.work_used(), prefix);
+                        assert!(scan.is_closed());
+                        drop(scan);
+                        assert_eq!(pool.used(), baseline);
+                    }
                 }
                 let retained = view
                     .vertex_property_at(&query, VId(101), PropertyKeyId(1), CommitSeq(3))
@@ -2523,6 +2732,76 @@ mod tests {
                 drop(retained);
                 assert_eq!(pool.used(), 0);
             }
+
+            // A later version in the very same candidate extent may need an
+            // artifact that is no longer available. Earlier snapshots and a
+            // retired root must not try to materialize that future value.
+            resolver.available.store(true, Ordering::Relaxed);
+            let past = VertexRow {
+                created_at: CommitSeq(1),
+                retired_at: Some(CommitSeq(3)),
+                ..retired_successor.clone()
+            };
+            let future = VertexRow {
+                created_at: CommitSeq(3),
+                retired_at: Some(CommitSeq(5)),
+                ..birth_template.clone()
+            };
+            let bytes = crate::vertex::encode_patch(&[past.clone(), future]).unwrap();
+            let patch = store.put_patch(&commit, &bytes).await.unwrap();
+            let id = store
+                .put_root(
+                    &commit,
+                    &PartitionRoot {
+                        graph: GraphId(1),
+                        branch: BranchId(1),
+                        partition: 0,
+                        published_at: CommitSeq(7),
+                        blocks: vec![],
+                        vertex_patches: vec![crate::root::PatchRef {
+                            patch_id: patch.0,
+                            first_seq: CommitSeq(1),
+                            last_seq: CommitSeq(5),
+                        }],
+                    },
+                )
+                .await
+                .unwrap();
+            let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+            let mut view = store
+                .open_buffered_root(&query, id, pool.clone(), limits)
+                .await
+                .unwrap();
+            resolver.available.store(false, Ordering::Relaxed);
+            resolver.calls.store(0, Ordering::Relaxed);
+            for (vid, cut) in [(VId(101), 1), (VId(101), 2), (VId(101), 5), (VId(102), 3)] {
+                let mut scan = view
+                    .edge_scan(&query, CommitSeq(cut))
+                    .unwrap()
+                    .into_join_scan();
+                let candidate = scan
+                    .vertex_candidate_with(&query, vid, &mut |_| Ok::<_, ()>(()))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(candidate.vid, vid);
+                assert_eq!(candidate.row.as_deref(), (cut < 3).then_some(&past));
+            }
+            assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
+            let mut scan = view
+                .edge_scan(&query, CommitSeq(3))
+                .unwrap()
+                .into_join_scan();
+            assert!(matches!(
+                scan.vertex_candidate_with(&query, VId(101), &mut |_| Ok::<_, ()>(()))
+                    .await,
+                Err(BufferedScanError::Read(_)),
+            ));
+            assert!(scan.is_closed());
+            assert!(resolver.calls.load(Ordering::Relaxed) > 0);
+            drop(scan);
+            drop(view);
+            assert_eq!(pool.used(), 0);
 
             // A first candidate whose traversal stack is already exhausted
             // can keep the original one-pass cost when admitted row/span
@@ -2639,6 +2918,38 @@ mod tests {
                         drop(selected);
                         drop(output_charge);
                     }
+                    let expected = rows
+                        .iter()
+                        .find(|row| row.vid == VId(101) && row.visible_at(CommitSeq(cut)));
+                    // Governed single-span reads keep their original one-pass
+                    // charge, including every physical row inspection. Exact
+                    // allowance leaves no room for deferred materialization.
+                    let exact = if cut == 0 {
+                        2
+                    } else {
+                        3 + 2 * rows.len() + 4 * usize::from(expected.is_some())
+                    };
+                    view.limits.max_work = exact;
+                    let before = view.stats();
+                    let mut scan = view
+                        .edge_scan(&query, CommitSeq(cut))
+                        .unwrap()
+                        .into_join_scan();
+                    let candidate = scan
+                        .vertex_candidate_with(&query, VId(101), &mut |_| Ok::<_, ()>(()))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(candidate.row.as_deref(), expected);
+                    assert_eq!(scan.work_used(), exact);
+                    drop(candidate);
+                    drop(scan);
+                    let after = view.stats();
+                    assert_eq!(
+                        after.hits + after.misses - before.hits - before.misses,
+                        u64::from(cut != 0),
+                    );
+                    assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
                 }
                 drop(view);
                 assert_eq!(pool.used(), 0);
@@ -2661,6 +2972,17 @@ mod tests {
                     .await
                     .is_err(),
             );
+            let mut scan = view
+                .edge_scan(&query, CommitSeq(3))
+                .unwrap()
+                .into_join_scan();
+            assert!(matches!(
+                scan.vertex_candidate_with(&query, VId(101), &mut |_| Ok::<_, ()>(()))
+                    .await,
+                Err(BufferedScanError::Read(_)),
+            ));
+            assert!(scan.is_closed());
+            drop(scan);
             drop(view);
             assert_eq!(pool.used(), 0);
         });

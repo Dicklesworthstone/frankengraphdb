@@ -362,59 +362,48 @@ impl<V: Vfs> BufferedPartition<V> {
         work: &mut EdgeScanWork,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedValue<VertexRow>>, BufferedScanError<C>> {
-        let mut result: Option<BufferedValue<VertexRow>> = None;
-        let mut winner_at = 0;
-        let mut candidates = self.patch_directory.candidates(vid);
-        while let Some(at) = self
-            .patch_directory
-            .next(&mut candidates, &mut || work.step(cx, observe))?
-        {
-            let descriptor = self.patches[at];
-            if self.root.vertex_patches[at].first_seq > as_of || !descriptor.may_contain(vid) {
-                continue;
-            }
-            // Charge the complete bounded decode before fetching a patch.
-            work.step(cx, observe)?;
-            for _ in 0..descriptor.rows {
+        let mut output_charge = None;
+        let row = {
+            let mut control = |event| {
+                // Keep the source's existing directory/row/completion charges
+                // and admit the complete bounded decode before every parse,
+                // including a deferred winning row's materialization.
                 work.step(cx, observe)?;
-            }
-            let _workspace = self.reserve_scan_workspace(cx)?;
-            let bytes = self
-                .pin(cx, descriptor.extent, Admission::ScanBypass)
-                .await?;
-            // Every row keeps its framing and topology checks, but only the
-            // requested identity's properties can become an endpoint result.
-            // Initial admission and the current checksum still cover the
-            // complete patch, including all unrelated property payloads.
-            let rows = self.decode_scan_patch(at, bytes.as_ref(), properties, Some(vid))?;
-            for row in &rows {
-                work.step(cx, observe)?;
-                if row.vid == vid
-                    && row.created_at <= as_of
-                    && result
-                        .as_ref()
-                        .is_none_or(|old| (old.created_at, winner_at) <= (row.created_at, at))
-                {
-                    match result.as_mut() {
-                        Some(old) => old.value = properties.copy_row(row),
-                        None => {
-                            let charge = self.reserve_scan_workspace(cx)?;
-                            result = Some(BufferedValue::from_reserved(
-                                properties.copy_row(row),
-                                charge,
-                            ));
-                        }
+                if let VertexPointEvent::Decode(rows) = event {
+                    for _ in 0..rows {
+                        work.step(cx, observe)?;
                     }
-                    winner_at = at;
                 }
-            }
-        }
-        work.step(cx, observe)?;
-        // All historical replacements and patch temporaries have finished.
-        // Shrinking earlier would under-admit a later, larger replacement.
-        result
-            .filter(|row| row.visible_at(as_of))
-            .map(|row| row.retain_scan_vertex(&mut || work.step(cx, observe)))
-            .transpose()
+                Ok::<_, BufferedScanError<C>>(())
+            };
+            let access = match properties {
+                VertexPropertyAccess::Read => VertexPointAccess::Properties(None),
+                VertexPropertyAccess::Skip => VertexPointAccess::Topology,
+            };
+            let Some(winner) = self
+                .vertex_point_winner_with(
+                    cx,
+                    VertexPointRead {
+                        vid,
+                        as_of,
+                        access,
+                        admission: Admission::ScanBypass,
+                    },
+                    Some(&mut output_charge),
+                    &mut control,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            self.vertex_point_row_with(cx, winner, None, Admission::ScanBypass, &mut control)
+                .await?
+        };
+        let charge = output_charge.ok_or(BufferedReadError::Buffer(BufferError::InvalidLoad))?;
+        // The one reserved result workspace spans all historical candidates
+        // and winning-value decoding; retain only its exact output ownership.
+        BufferedValue::from_reserved(row, charge)
+            .retain_scan_vertex(&mut || work.step(cx, observe))
+            .map(Some)
     }
 }

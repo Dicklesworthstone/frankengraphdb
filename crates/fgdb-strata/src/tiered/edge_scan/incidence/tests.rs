@@ -907,6 +907,139 @@ fn point_vertex_candidates_preserve_history_admission_and_cumulative_work() {
 }
 
 #[test]
+fn point_history_controls_charge_materialization_and_keep_topology_single_pass() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        // Start cold so a refused read cannot hide a retained scan frame in
+        // admission's cache. Every ScanBypass lease must release to baseline.
+        drop(view.reserve_scan_bytes(&cx, pool.limit()));
+        let baseline = pool.used();
+        // Two directory nodes, two parses of seven total rows, seven row
+        // inspections, completion and three ownership-measurement steps.
+        let mut work = EdgeScanWork { used: 0, limit: 22 };
+        let before = view.stats();
+        let topology = view
+            .edge_scan_vertex_topology(&cx, VId(1), CommitSeq(3), &mut work, &mut |_| {
+                Ok::<_, ()>(())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(topology.vid(), VId(1));
+        assert_eq!(topology.created_at(), CommitSeq(3));
+        assert_eq!(topology.labels(), &[LabelId(9)]);
+        assert_eq!(work.used, 22, "topology never reparses the winning extent");
+        let after = view.stats();
+        assert_eq!(after.hits + after.misses, before.hits + before.misses + 2);
+        drop(topology);
+        assert_eq!(pool.used(), baseline);
+
+        // Full output additionally admits the winner's two-row framing pass
+        // and measures its one scalar. No second buffer lookup is necessary.
+        let exact = 26;
+        for allowed in 0..=exact {
+            let before = view.stats();
+            let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+            scan.driver.as_mut().unwrap().root.work.limit = allowed;
+            let mut observed = 0;
+            let result = scan
+                .vertex_candidate_with(&cx, VId(1), &mut |event| {
+                    observed += usize::from(event == BufferedScanEvent::Work);
+                    Ok::<_, ()>(())
+                })
+                .await;
+            assert_eq!(observed, allowed);
+            assert_eq!(scan.work_used(), allowed);
+            if allowed == exact {
+                assert_eq!(
+                    result.unwrap().unwrap().row.as_deref(),
+                    Some(&vertex(1, 3, None, 11)),
+                );
+                assert!(!scan.is_closed());
+            } else {
+                assert!(
+                    matches!(result, Err(BufferedScanError::Read(BufferedReadError::Limit { resource: "buffered source work", requested, limit })) if requested == allowed + 1 && limit == allowed)
+                );
+                assert!(scan.is_closed());
+            }
+            drop(scan);
+            if allowed >= 19 {
+                let after = view.stats();
+                assert_eq!(after.hits + after.misses, before.hits + before.misses + 2);
+            }
+            assert_eq!(pool.used(), baseline);
+        }
+        for refused_at in 1..=exact {
+            let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+            let mut observed = 0;
+            let result = scan
+                .vertex_candidate_with(&cx, VId(1), &mut |event| {
+                    if event == BufferedScanEvent::Work {
+                        observed += 1;
+                        if observed == refused_at {
+                            return Err(refused_at);
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+            assert!(matches!(result, Err(BufferedScanError::Control(at)) if at == refused_at));
+            assert_eq!(observed, refused_at);
+            assert_eq!(scan.work_used(), refused_at - 1);
+            assert!(scan.is_closed());
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+        }
+
+        // A missing identity inside a broad patch fence needs only decode
+        // scratch. The first historical winner still reserves output before
+        // advancing to another candidate, even when its values are deferred.
+        let workspace = view.reserve_scan_workspace(&cx).unwrap();
+        let bytes = workspace.bytes();
+        drop(workspace);
+        let hold = pool
+            .reserve(&cx, pool.available() - bytes - 16 * 1024)
+            .unwrap();
+        let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+        assert!(
+            scan.vertex_candidate_with(&cx, VId(4), &mut |_| Ok::<_, ()>(()))
+                .await
+                .unwrap()
+                .unwrap()
+                .row
+                .is_none()
+        );
+        drop(scan);
+        let before = view.stats();
+        let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+        let result = scan
+            .vertex_candidate_with(&cx, VId(1), &mut |_| Ok::<_, ()>(()))
+            .await;
+        assert!(matches!(
+            result,
+            Err(BufferedScanError::Read(BufferedReadError::Buffer(
+                BufferError::Memory(MemoryError::ResourceExhausted { requested, .. })
+            ))) if requested == bytes
+        ));
+        assert_eq!(scan.work_used(), 8);
+        assert!(scan.is_closed());
+        drop(scan);
+        let after = view.stats();
+        assert_eq!(after.hits + after.misses, before.hits + before.misses + 1);
+        drop(hold);
+        assert_eq!(pool.used(), baseline);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn vertex_and_edge_work_cannot_restart_each_others_allowance() {
     run(|contexts, path| async move {
         let (store, id) = fixture(&contexts, &path).await;
