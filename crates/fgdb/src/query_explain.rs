@@ -734,7 +734,7 @@ impl PreparedNativeRead {
                 .map_err(QueryError::TemporalSetText)?
                 .as_of()),
             Self::TemporalAggregate(prepared) => Ok(prepared
-                .bind_parameters(params)
+                .bind_source_parameters(params)
                 .map_err(QueryError::TemporalText)?
                 .as_of()),
             _ => Ok(default),
@@ -771,13 +771,26 @@ impl PreparedNativeRead {
         match self {
             Self::TemporalAggregate(prepared) => {
                 let query = prepared
-                    .bind_parameters(params)
+                    .bind_source_parameters(params)
                     .map_err(QueryError::TemporalText)?;
-                let columns = prepared.columns().to_vec();
-                let result = db
-                    .execute_temporal_graph_aggregate_text_governed(cx, &query, budget)
-                    .map_err(QueryError::Aggregate)?;
-                Ok(aggregates(columns, prepared.output_slots(), result.value))
+                let result = match query.aggregate() {
+                    TemporalAggregatePlan::Graph(aggregate) => db
+                        .execute_graph_aggregate_governed_at(cx, aggregate, query.as_of(), budget),
+                    TemporalAggregatePlan::Relation(aggregate) => db
+                        .execute_graph_set_aggregate_evidenced_at(
+                            cx,
+                            aggregate,
+                            query.as_of(),
+                            budget,
+                            evidence,
+                        ),
+                }
+                .map_err(QueryError::Aggregate)?;
+                Ok(aggregates(
+                    prepared.columns().to_vec(),
+                    prepared.output_slots(),
+                    result.value,
+                ))
             }
             Self::TemporalPattern(prepared) => {
                 let query = prepared

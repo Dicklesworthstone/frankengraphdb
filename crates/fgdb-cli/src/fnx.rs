@@ -565,37 +565,39 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
     // Bind values now, including parameters in a page or kernel argument, so
     // malformed input cannot reach the filesystem. Execution reuses the same
     // immutable template and parameter set for the selected historical cut.
-    let mut as_of = options.fnx.as_of;
-    let calls_procedure = match &native {
-        PreparedNativeRead::Set(prepared) => prepared
-            .bind_parameters(params)
-            .map_err(|error| super::read_failure(options, QueryError::SetText(error)))?
-            .calls_procedure(),
-        PreparedNativeRead::PipelineAggregate(prepared) if prepared.requires_relational_input() => {
+    let (calls_procedure, selected) = match &native {
+        PreparedNativeRead::Set(prepared) => (
+            prepared
+                .bind_parameters(params)
+                .map_err(|error| super::read_failure(options, QueryError::SetText(error)))?
+                .calls_procedure(),
+            None,
+        ),
+        PreparedNativeRead::PipelineAggregate(prepared) if prepared.requires_relational_input() => (
             prepared
                 .bind_relation_parameters(params)
                 .map_err(|error| super::read_failure(options, QueryError::PipelineText(error)))?
                 .input()
-                .calls_procedure()
-        }
+                .calls_procedure(),
+            None,
+        ),
         PreparedNativeRead::TemporalSet(prepared) => {
             let query = prepared.bind_parameters(params).map_err(|error| {
                 super::read_failure(options, QueryError::TemporalSetText(error))
             })?;
-            let requested = query.as_of();
-            if let Some(retained) = as_of
-                && retained != requested
-            {
-                return Err(Failure::coded(
-                    super::refusal::Code::InvalidValue,
-                    SealedQueryError::SnapshotMismatch {
-                        requested,
-                        retained,
-                    },
-                ));
-            }
-            as_of = Some(requested);
-            query.query().calls_procedure()
+            (query.query().calls_procedure(), Some(query.as_of()))
+        }
+        PreparedNativeRead::TemporalAggregate(prepared) => {
+            let query = prepared.bind_source_parameters(params).map_err(|error| {
+                super::read_failure(options, QueryError::TemporalText(error))
+            })?;
+            let calls = match query.aggregate() {
+                fgdb_gql::TemporalAggregatePlan::Graph(_) => false,
+                fgdb_gql::TemporalAggregatePlan::Relation(aggregate) => {
+                    aggregate.input().calls_procedure()
+                }
+            };
+            (calls, Some(query.as_of()))
         }
         other => {
             return Err(Failure::coded(
@@ -607,6 +609,21 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
             ));
         }
     };
+    let mut as_of = options.fnx.as_of;
+    if let Some(requested) = selected {
+        if let Some(retained) = as_of
+            && retained != requested
+        {
+            return Err(Failure::coded(
+                super::refusal::Code::InvalidValue,
+                SealedQueryError::SnapshotMismatch {
+                    requested,
+                    retained,
+                },
+            ));
+        }
+        as_of = Some(requested);
+    }
     if !calls_procedure {
         return Err(Failure::coded(
             super::refusal::Code::Unsupported,
@@ -1146,6 +1163,118 @@ mod tests {
         let failure = super::prepare_sealed_read(&options).err().unwrap();
         assert_eq!(failure.code, 3);
         assert_eq!(failure.refusal, super::super::refusal::Code::InvalidValue);
+    }
+
+    #[test]
+    fn temporal_sealed_aggregate_preflight_binds_all_sources_and_the_selected_cut() {
+        for text in [
+            "CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node AS a \
+             MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at \
+             RETURN COUNT(*) AS n LIMIT $top",
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at WITH n \
+             CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node AS a \
+             CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node AS b \
+             WHERE a = b RETURN COUNT(*) AS n LIMIT $top",
+            "UNWIND [1,2] AS copies \
+             CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node AS a \
+             MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at \
+             RETURN COUNT(*) AS n LIMIT $top",
+        ] {
+            for buffered in [false, true] {
+                for explicit in [false, true] {
+                    let mut flags = vec!["--sealed", "--graph-relation", "KNOWS"];
+                    if buffered {
+                        flags.extend(["--buffered", "--spill-dir", "never-opened-spill"]);
+                    }
+                    if explicit {
+                        flags.extend(["--as-of", "7"]);
+                    }
+                    let mut options = composed_options(text, &flags).unwrap();
+                    options.params = fgdb_gql::GqlParameters::new()
+                        .with_uint64("at", 7)
+                        .unwrap()
+                        .with_int64("top", 0)
+                        .unwrap();
+                    if buffered {
+                        let prepared = super::super::spill::prepare_buffered(&options).unwrap();
+                        let super::super::spill::PreparedBuffered::SealedAggregate(prepared) =
+                            prepared
+                        else {
+                            panic!("historical terminal groups require the sealed aggregate owner");
+                        };
+                        let prepared = *prepared;
+                        assert!(prepared.clone().with_as_of(fgdb_types::CommitSeq(7)).is_ok());
+                        assert!(matches!(
+                            prepared.with_as_of(fgdb_types::CommitSeq(8)),
+                            Err(super::SealedQueryError::SnapshotMismatch {
+                                requested: fgdb_types::CommitSeq(8),
+                                retained: fgdb_types::CommitSeq(7),
+                            })
+                        ));
+                    } else {
+                        let prepared = super::prepare_sealed_read(&options).unwrap();
+                        assert_eq!(prepared.as_of, Some(fgdb_types::CommitSeq(7)));
+                        assert_eq!(
+                            prepared
+                                .native
+                                .bound_snapshot_seq(&options.params, fgdb_types::CommitSeq(99))
+                                .unwrap(),
+                            fgdb_types::CommitSeq(7)
+                        );
+                    }
+
+                    for params in [
+                        fgdb_gql::GqlParameters::new().with_int64("top", 0).unwrap(),
+                        fgdb_gql::GqlParameters::new()
+                            .with_int64("at", 7)
+                            .unwrap()
+                            .with_int64("top", 0)
+                            .unwrap(),
+                        fgdb_gql::GqlParameters::new().with_uint64("at", 7).unwrap(),
+                        fgdb_gql::GqlParameters::new()
+                            .with_uint64("at", 7)
+                            .unwrap()
+                            .with_int64("top", 0)
+                            .unwrap()
+                            .with_int64("unused", 1)
+                            .unwrap(),
+                    ] {
+                        options.params = params;
+                        let failure = if buffered {
+                            super::super::spill::prepare_buffered(&options).err().unwrap()
+                        } else {
+                            super::prepare_sealed_read(&options).err().unwrap()
+                        };
+                        assert_eq!(failure.code, 3, "{text}");
+                    }
+                }
+                let mut flags = vec!["--sealed", "--graph-relation", "KNOWS", "--as-of", "8"];
+                if buffered {
+                    flags.extend(["--buffered", "--spill-dir", "never-opened-spill"]);
+                }
+                let mut options = composed_options(text, &flags).unwrap();
+                options.params = fgdb_gql::GqlParameters::new()
+                    .with_uint64("at", 7)
+                    .unwrap()
+                    .with_int64("top", 0)
+                    .unwrap();
+                let failure = if buffered {
+                    super::super::spill::prepare_buffered(&options).err().unwrap()
+                } else {
+                    super::prepare_sealed_read(&options).err().unwrap()
+                };
+                assert_eq!(failure.code, 3);
+                assert_eq!(failure.refusal, super::super::refusal::Code::InvalidValue);
+            }
+        }
+
+        let text = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 7 RETURN COUNT(*) AS n";
+        let options =
+            composed_options(text, &["--sealed", "--graph-relation", "KNOWS"]).unwrap();
+        assert_eq!(
+            super::prepare_sealed_read(&options).err().unwrap().refusal,
+            super::super::refusal::Code::Unsupported
+        );
     }
 
     #[test]

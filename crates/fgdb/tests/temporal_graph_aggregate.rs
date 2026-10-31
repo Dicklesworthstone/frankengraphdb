@@ -187,3 +187,125 @@ fn temporal_grouping_and_having_rebind_snapshot_without_recompilation() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn temporal_leading_unwind_aggregates_keep_the_selected_generation_after_rebinding() {
+    use fgdb::{PreparedNativeRead, QueryError, QueryResult, QueryValue};
+    use fgdb_gql::{GqlParameterType, GraphTemporalTextErrorKind};
+
+    let ((), report) = run_async_under_lab(0x7e4a_0003, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut first = WriteBatch::new(R);
+        for (id, value) in [
+            (1, CanonicalScalar::Int(2)),
+            (2, CanonicalScalar::Int(3)),
+            (3, CanonicalScalar::Null),
+        ] {
+            first.create_vertex(VId(id), vec![], vec![(P, value)]);
+        }
+        let earlier = db.write(&commit, first).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let text = "UNWIND [1,2] AS factor MATCH (n) \
+                    FOR SYSTEM_TIME AS OF SEQ $at \
+                    RETURN COUNT(*) AS c,SUM(n.p*factor) AS s";
+        let arguments = |at: CommitSeq| GqlParameters::new().with_uint64("at", at.0).unwrap();
+        let prepared = PreparedNativeRead::prepare(text, &arguments(earlier), symbols).unwrap();
+        assert!(matches!(&prepared, PreparedNativeRead::TemporalAggregate(_)));
+
+        let mut second = WriteBatch::new(R);
+        second.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(20)));
+        second.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(10)));
+        second.create_vertex(VId(4), vec![], vec![(P, CanonicalScalar::Int(7))]);
+        let later = db.write(&commit, second).await.unwrap();
+
+        let expected = |count, sum| QueryResult::Rows {
+            columns: vec!["c".to_owned(), "s".to_owned()],
+            rows: vec![vec![QueryValue::Count(count), QueryValue::Integer(sum)]],
+        };
+        for (at, count, sum) in [(earlier, 6, 15), (later, 8, 120), (earlier, 6, 15)] {
+            let params = arguments(at);
+            assert_eq!(
+                prepared
+                    .bound_snapshot_seq(&params, CommitSeq(u64::MAX))
+                    .unwrap(),
+                at
+            );
+            assert_eq!(
+                prepared.execute(&db, &query, &params, policy()).unwrap(),
+                expected(count, sum)
+            );
+            let current = db.read_session().unwrap();
+            let (answer, selected) = prepared
+                .execute_in_view_with_snapshot(&current, &query, &params, policy())
+                .unwrap();
+            assert_eq!(selected, at);
+            assert_eq!(answer, expected(count, sum));
+        }
+        assert_eq!(
+            prepared
+                .execute_in_view(&pinned, &query, &arguments(earlier), policy())
+                .unwrap(),
+            expected(6, 15)
+        );
+        assert!(
+            prepared
+                .execute_in_view(&pinned, &query, &arguments(later), policy())
+                .is_err(),
+            "a newer binding must not escape the pinned generation"
+        );
+        assert!(
+            prepared
+                .execute(&db, &query, &arguments(CommitSeq(later.0 + 1)), policy())
+                .is_err(),
+            "a future selector must not be clamped to the current frontier"
+        );
+
+        for (params, kind) in [
+            (
+                GqlParameters::new(),
+                GraphTemporalTextErrorKind::MissingParameter,
+            ),
+            (
+                GqlParameters::new().with_int64("at", 1).unwrap(),
+                GraphTemporalTextErrorKind::ParameterTypeMismatch {
+                    found: GqlParameterType::Int64,
+                },
+            ),
+            (
+                arguments(earlier).with_int64("surplus", 1).unwrap(),
+                GraphTemporalTextErrorKind::UnexpectedArguments,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    prepared.execute(&db, &query, &params, policy()),
+                    Err(QueryError::TemporalText(error)) if error.kind == kind
+                ),
+                "source-aware temporal binding must retain its typed argument refusal"
+            );
+        }
+
+        db.compact(&commit).await.unwrap();
+        drop(pinned);
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        for (at, count, sum) in [(earlier, 6, 15), (later, 8, 120)] {
+            assert_eq!(
+                prepared
+                    .execute(&db, &query, &arguments(at), policy())
+                    .unwrap(),
+                expected(count, sum)
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

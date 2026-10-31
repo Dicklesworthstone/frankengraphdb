@@ -58,6 +58,28 @@ impl PreparedNativeRead {
                     None,
                 )
             }
+            Self::TemporalAggregate(template) => {
+                let aggregate = template.bind_source_parameters(params).map_err(|error| {
+                    NativeAggregateSpoolError::Prepare(Box::new(QueryError::TemporalText(error)))
+                })?;
+                let plan = match aggregate.aggregate() {
+                    fgdb_gql::TemporalAggregatePlan::Graph(definition) => {
+                        AsyncSpillAggregatePlan::compile_with_independent_procedures(definition)
+                    }
+                    fgdb_gql::TemporalAggregatePlan::Relation(definition) => {
+                        AsyncSpillAggregatePlan::compile_relation_with_independent_procedures(
+                            definition,
+                        )
+                    }
+                }
+                .map_err(|_| NativeAggregateSpoolError::Unsupported)?;
+                (
+                    plan,
+                    template.columns().to_vec(),
+                    template.output_slots().to_vec(),
+                    Some(aggregate.as_of()),
+                )
+            }
             _ => {
                 let BoundAggregate {
                     definition,

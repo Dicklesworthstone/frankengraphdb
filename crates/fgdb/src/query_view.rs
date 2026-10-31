@@ -208,12 +208,16 @@ impl PreparedNativeRead {
             }
             Self::TemporalAggregate(prepared) => {
                 let query = prepared
-                    .bind_parameters(params)
+                    .bind_source_parameters(params)
                     .map_err(QueryError::TemporalText)?;
                 snapshot_seq = query.as_of();
-                let result = view
-                    .execute_temporal_graph_aggregate_text_governed(cx, &query, policy)
-                    .map_err(QueryError::Aggregate)?;
+                let result = match query.aggregate() {
+                    fgdb_gql::TemporalAggregatePlan::Graph(aggregate) => view
+                        .execute_graph_aggregate_governed_at(cx, aggregate, snapshot_seq, policy),
+                    fgdb_gql::TemporalAggregatePlan::Relation(aggregate) => view
+                        .execute_graph_set_aggregate_governed_at(cx, aggregate, snapshot_seq, policy),
+                }
+                .map_err(QueryError::Aggregate)?;
                 aggregates(
                     prepared.columns().to_vec(),
                     prepared.output_slots(),

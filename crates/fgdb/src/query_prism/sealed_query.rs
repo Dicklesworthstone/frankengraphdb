@@ -375,11 +375,28 @@ impl SealedReadView {
                     result.value,
                 ))
             }
+            PreparedNativeRead::TemporalAggregate(prepared) => {
+                let query = prepared
+                    .bind_source_parameters(params)
+                    .map_err(QueryError::TemporalText)?;
+                let result = match query.aggregate() {
+                    fgdb_gql::TemporalAggregatePlan::Graph(aggregate) => self
+                        .view
+                        .execute_graph_aggregate_governed_at(cx, aggregate, self.as_of, policy),
+                    fgdb_gql::TemporalAggregatePlan::Relation(aggregate) => self
+                        .execute_graph_set_aggregate_governed(cx, aggregate, policy, memory),
+                }
+                .map_err(QueryError::Aggregate)?;
+                Ok(crate::query::aggregates(
+                    prepared.columns().to_vec(),
+                    prepared.output_slots(),
+                    result.value,
+                ))
+            }
             PreparedNativeRead::Pattern(_)
             | PreparedNativeRead::Aggregate(_)
             | PreparedNativeRead::PipelineAggregate(_)
-            | PreparedNativeRead::TemporalPattern(_)
-            | PreparedNativeRead::TemporalAggregate(_) => prepared
+            | PreparedNativeRead::TemporalPattern(_) => prepared
                 .execute_in_view_at_seq(&self.view, cx, params, policy, self.as_of)
                 .map_err(SealedQueryError::Query),
         }
