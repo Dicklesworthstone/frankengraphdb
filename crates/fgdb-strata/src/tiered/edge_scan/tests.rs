@@ -1739,12 +1739,28 @@ fn selected_property_candidates_preserve_history_and_mode_upgrades() {
                         rows.push((*row.entry(), row.value().cloned()));
                     }
                 }
-                assert_eq!(ids, [EId(0), EId(2), EId(4), EId(6), EId(8), EId(90), EId(u128::MAX)]);
-                assert_eq!(admitted, ids, "one admission per identity, including invisible histories");
+                assert_eq!(
+                    ids,
+                    [
+                        EId(0),
+                        EId(2),
+                        EId(4),
+                        EId(6),
+                        EId(8),
+                        EId(90),
+                        EId(u128::MAX)
+                    ]
+                );
+                assert_eq!(
+                    admitted, ids,
+                    "one admission per identity, including invisible histories"
+                );
                 let oracle: Vec<_> = expected(cut)
                     .into_iter()
                     .map(|row| {
-                        let value = row.props.into_iter()
+                        let value = row
+                            .props
+                            .into_iter()
                             .find(|(candidate, _)| *candidate == key)
                             .map(|(_, value)| value);
                         (row.entry, value)
@@ -1771,42 +1787,77 @@ fn selected_property_candidates_preserve_history_and_mode_upgrades() {
                 let before = scan.partition.stats().misses;
                 let (eid, row) = match mode {
                     Read => {
-                        let candidate = scan.next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
-                            .await.unwrap().unwrap();
-                        (candidate.eid, candidate.row.map(|row| (row.entry, row.props.clone())))
+                        let candidate = scan
+                            .next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        (
+                            candidate.eid,
+                            candidate.row.map(|row| (row.entry, row.props.clone())),
+                        )
                     }
                     Property(key) => {
-                        let candidate = scan.next_property_candidate_with(
-                            &cx, key, &mut |_| Ok::<_, ()>(()),
-                        ).await.unwrap().unwrap();
-                        (candidate.eid, candidate.row.map(|row| (
-                            *row.entry(),
-                            row.value().cloned().map(|value| vec![(key, value)]).unwrap_or_default(),
-                        )))
+                        let candidate = scan
+                            .next_property_candidate_with(&cx, key, &mut |_| Ok::<_, ()>(()))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        (
+                            candidate.eid,
+                            candidate.row.map(|row| {
+                                (
+                                    *row.entry(),
+                                    row.value()
+                                        .cloned()
+                                        .map(|value| vec![(key, value)])
+                                        .unwrap_or_default(),
+                                )
+                            }),
+                        )
                     }
                     Skip => {
-                        let candidate = scan.next_topology_candidate_with(
-                            &cx, &mut |_| Ok::<_, ()>(()),
-                        ).await.unwrap().unwrap();
-                        (candidate.eid, candidate.row.map(|row| (*row.entry(), Vec::new())))
+                        let candidate = scan
+                            .next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        (
+                            candidate.eid,
+                            candidate.row.map(|row| (*row.entry(), Vec::new())),
+                        )
                     }
                 };
                 let expected_id = [EId(0), EId(2), EId(8)][ordinal];
                 assert_eq!(eid, expected_id);
-                let mut expected = expected(5).into_iter()
-                    .find(|row| row.entry.eid == expected_id).unwrap();
+                let mut expected = expected(5)
+                    .into_iter()
+                    .find(|row| row.entry.eid == expected_id)
+                    .unwrap();
                 match mode {
                     Read => {}
                     Property(key) => expected.props.retain(|(candidate, _)| *candidate == key),
                     Skip => expected.props.clear(),
                 }
-                assert_eq!(row, Some((expected.entry, expected.props)), "case {case}, row {ordinal}");
+                assert_eq!(
+                    row,
+                    Some((expected.entry, expected.props)),
+                    "case {case}, row {ordinal}"
+                );
                 if case == 3 && ordinal != 0 {
-                    assert_eq!(scan.partition.stats().misses, before, "same-key/topology reuse");
+                    assert_eq!(
+                        scan.partition.stats().misses,
+                        before,
+                        "same-key/topology reuse"
+                    );
                 }
             }
-            assert!(scan.next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
-                .await.unwrap().is_none());
+            assert!(
+                scan.next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
             drop(scan);
             assert_eq!(pool.used(), baseline);
         }
@@ -1828,13 +1879,15 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
         let baseline = pool.used();
         // Exercise the actual QueryCx checkpoint boundary before the first
         // payload read; this simulation probe does not cancel the whole task.
-        let probe = std::sync::Arc::new(fgdb_types::context::SimulationCheckpointProbe::new(Some(1)));
+        let probe =
+            std::sync::Arc::new(fgdb_types::context::SimulationCheckpointProbe::new(Some(1)));
         let interrupted = cx.with_checkpoint_probe(probe.clone());
         let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
         assert!(matches!(
             scan.next_property_candidate_with(&interrupted, P, &mut |_| -> Result<(), ()> {
                 panic!("the first checkpoint must refuse before source consumption")
-            }).await,
+            })
+            .await,
             Err(BufferedScanError::Read(_))
         ));
         assert_eq!(probe.calls(), 1);
@@ -1858,7 +1911,8 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
                 } else {
                     Ok(())
                 }
-            }).await,
+            })
+            .await,
             Err(BufferedScanError::Control(7))
         ));
         assert!(scan.is_finished());
@@ -1870,10 +1924,15 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
             let mut total = 0;
             let work = {
                 let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
-                while scan.next_property_candidate_with(&cx, key, &mut |_| {
-                    total += 1;
-                    Ok::<_, usize>(())
-                }).await.unwrap().is_some() {}
+                while scan
+                    .next_property_candidate_with(&cx, key, &mut |_| {
+                        total += 1;
+                        Ok::<_, usize>(())
+                    })
+                    .await
+                    .unwrap()
+                    .is_some()
+                {}
                 scan.work_used()
             };
             assert!(total > 0 && work > 0);
@@ -1881,11 +1940,14 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
                 let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
                 let mut seen = 0;
                 loop {
-                    match scan.next_property_candidate_with(&cx, key, &mut |_| {
-                        let at = seen;
-                        seen += 1;
-                        if at == stop { Err(stop) } else { Ok(()) }
-                    }).await {
+                    match scan
+                        .next_property_candidate_with(&cx, key, &mut |_| {
+                            let at = seen;
+                            seen += 1;
+                            if at == stop { Err(stop) } else { Ok(()) }
+                        })
+                        .await
+                    {
                         Ok(Some(_)) => {}
                         Err(BufferedScanError::Control(at)) => {
                             assert_eq!(at, stop);
@@ -1896,9 +1958,14 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
                     }
                 }
                 assert!(scan.is_finished());
-                assert!(scan.next_property_candidate_with(&cx, key, &mut |_| -> Result<(), ()> {
-                    panic!("fused selected-property source")
-                }).await.unwrap().is_none());
+                assert!(
+                    scan.next_property_candidate_with(&cx, key, &mut |_| -> Result<(), ()> {
+                        panic!("fused selected-property source")
+                    })
+                    .await
+                    .unwrap()
+                    .is_none()
+                );
                 drop(scan);
                 assert_eq!(pool.used(), baseline, "property {key:?}, control {stop}");
             }
@@ -1907,11 +1974,16 @@ fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
                 scan.work.limit = limit;
                 let mut refused = false;
                 loop {
-                    match scan.next_property_candidate_with(&cx, key, &mut |_| Ok::<_, ()>(())).await {
+                    match scan
+                        .next_property_candidate_with(&cx, key, &mut |_| Ok::<_, ()>(()))
+                        .await
+                    {
                         Ok(Some(_)) => {}
                         Ok(None) => break,
                         Err(BufferedScanError::Read(BufferedReadError::Limit {
-                            resource: "buffered source work", requested, limit: found,
+                            resource: "buffered source work",
+                            requested,
+                            limit: found,
                         })) => {
                             assert_eq!((requested, found), (work, work - 1));
                             refused = true;
@@ -1937,12 +2009,16 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
         let commit = contexts.commit();
         let cx = contexts.query();
         let store = BlockStore::open(
-            &commit, &path, [0x37; 32], DatabaseSecurityNamespaceId([0x63; 32]),
-        ).await.unwrap();
+            &commit,
+            &path,
+            [0x37; 32],
+            DatabaseSecurityNamespaceId([0x63; 32]),
+        )
+        .await
+        .unwrap();
         let unrelated = PropertyKeyId(10); // Before P: selecting the first value would be wrong.
-        let wide = || CanonicalPropertyValue::from(
-            CanonicalScalar::bytes(vec![0x6d; 2048]).unwrap()
-        );
+        let wide =
+            || CanonicalPropertyValue::from(CanonicalScalar::bytes(vec![0x6d; 2048]).unwrap());
         let properties = |value: CanonicalPropertyValue| vec![(unrelated, wide()), (P, value)];
         let definitions = [
             (
@@ -1981,79 +2057,148 @@ fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload
         for (entries, locators, rows) in definitions {
             let bytes = encode_property_patch(&rows).unwrap();
             assert!(bytes.len() <= limits().buffer.max_extent_bytes);
-            let patch = store.put_edge_property_patch(&commit, &bytes).await.unwrap();
-            let encoded = encode_block_with_properties(
-                0, predecessor, &entries, patch.0, &locators, &rows,
-            ).unwrap();
+            let patch = store
+                .put_edge_property_patch(&commit, &bytes)
+                .await
+                .unwrap();
+            let encoded =
+                encode_block_with_properties(0, predecessor, &entries, patch.0, &locators, &rows)
+                    .unwrap();
             let block = store.put(&commit, &encoded).await.unwrap();
             blocks.push(BlockRef {
                 block_id: block.0,
                 first_seq: CommitSeq(1),
-                last_seq: entries.iter()
+                last_seq: entries
+                    .iter()
                     .map(|row| row.retired_at.unwrap_or(row.created_at))
-                    .max().unwrap(),
+                    .max()
+                    .unwrap(),
             });
             predecessor = Some(block);
         }
-        let vertices = [vertex(1, 1, None, 10), vertex(2, 1, None, 20), vertex(3, 1, None, 30)];
-        let patch = store.put_patch(&commit, &encode_patch(&vertices).unwrap()).await.unwrap();
-        let id = store.put_root(&commit, &PartitionRoot {
-            graph: GraphId(1), branch: BranchId(2), partition: 0,
-            published_at: CommitSeq(3), blocks,
-            vertex_patches: vec![PatchRef {
-                patch_id: patch.0, first_seq: CommitSeq(1), last_seq: CommitSeq(1),
-            }],
-        }).await.unwrap();
+        let vertices = [
+            vertex(1, 1, None, 10),
+            vertex(2, 1, None, 20),
+            vertex(3, 1, None, 30),
+        ];
+        let patch = store
+            .put_patch(&commit, &encode_patch(&vertices).unwrap())
+            .await
+            .unwrap();
+        let id = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(3),
+                    blocks,
+                    vertex_patches: vec![PatchRef {
+                        patch_id: patch.0,
+                        first_seq: CommitSeq(1),
+                        last_seq: CommitSeq(1),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
         let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
-        let mut view = store.open_buffered_root(&cx, id, pool.clone(), limits()).await.unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
         let baseline = pool.used();
         for cut in [1, 3, 1] {
             let mut scan = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
             let mut found = Vec::new();
-            while let Some(candidate) = scan.next_property_candidate_with(
-                &cx, P, &mut |_| Ok::<_, ()>(()),
-            ).await.unwrap() {
+            while let Some(candidate) = scan
+                .next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
+                .await
+                .unwrap()
+            {
                 let row = candidate.row.unwrap();
                 let changed = matches!(candidate.eid, EId(3) | EId(u128::MAX));
-                assert_eq!(row.entry().created_at, CommitSeq(if cut >= 3 && changed { 3 } else { 1 }));
-                assert_eq!(row.entry().retired_at, (cut < 3 && changed).then_some(CommitSeq(3)));
+                assert_eq!(
+                    row.entry().created_at,
+                    CommitSeq(if cut >= 3 && changed { 3 } else { 1 })
+                );
+                assert_eq!(
+                    row.entry().retired_at,
+                    (cut < 3 && changed).then_some(CommitSeq(3))
+                );
                 found.push((candidate.eid, row.value().cloned()));
             }
-            assert_eq!(found, vec![
-                (EId(0), Some(CanonicalScalar::Int(0).into())),
-                (EId(1), Some(CanonicalScalar::Null.into())),
-                (EId(2), None),
-                (EId(3), (cut < 3).then(|| CanonicalScalar::Int(3).into())),
-                (EId(u128::MAX), (cut < 3).then(|| CanonicalScalar::Int(99).into())),
-            ], "a newer missing key or locator zero must clear the earlier value");
+            assert_eq!(
+                found,
+                vec![
+                    (EId(0), Some(CanonicalScalar::Int(0).into())),
+                    (EId(1), Some(CanonicalScalar::Null.into())),
+                    (EId(2), None),
+                    (EId(3), (cut < 3).then(|| CanonicalScalar::Int(3).into())),
+                    (
+                        EId(u128::MAX),
+                        (cut < 3).then(|| CanonicalScalar::Int(99).into())
+                    ),
+                ],
+                "a newer missing key or locator zero must clear the earlier value"
+            );
             drop(scan);
             assert_eq!(pool.used(), baseline);
         }
 
         let mut complete = view.edge_scan(&cx, CommitSeq(1)).unwrap();
-        let full = complete.next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
-            .await.unwrap().unwrap().row.unwrap();
+        let full = complete
+            .next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
         let full_charge = full.charged_bytes();
         // A full active image can serve a selected pull, but only P may escape.
-        let next = complete.next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
-            .await.unwrap().unwrap().row.unwrap();
+        let next = complete
+            .next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
         assert_eq!(next.entry().eid, EId(1));
-        assert_eq!(next.value(), Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Null)));
+        assert_eq!(
+            next.value(),
+            Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Null))
+        );
         drop(next);
         drop(full);
         drop(complete);
         assert_eq!(pool.used(), baseline);
         let mut selected = view.edge_scan(&cx, CommitSeq(1)).unwrap();
-        let held = selected.next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
-            .await.unwrap().unwrap().row.unwrap();
+        let held = selected
+            .next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
         assert_eq!(held.entry().eid, EId(0));
-        assert_eq!(held.value(), Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0))));
-        assert!(held.charged_bytes() + 2048 <= full_charge, "unrelated payload stays unmaterialized");
+        assert_eq!(
+            held.value(),
+            Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0)))
+        );
+        assert!(
+            held.charged_bytes() + 2048 <= full_charge,
+            "unrelated payload stays unmaterialized"
+        );
         assert_eq!(format!("{held:?}"), "BufferedEdgeProperty([REDACTED])");
         drop(selected);
         assert_eq!(pool.used(), baseline + held.charged_bytes());
         drop(view);
-        assert_eq!(pool.used(), held.charged_bytes(), "returned value owns its reservation");
+        assert_eq!(
+            pool.used(),
+            held.charged_bytes(),
+            "returned value owns its reservation"
+        );
         drop(held);
         assert_eq!(pool.used(), 0);
     });

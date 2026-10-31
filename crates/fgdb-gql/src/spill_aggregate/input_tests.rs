@@ -593,7 +593,6 @@ fn synchronous_fusion_never_erases_intermediate_barriers_or_changes_async_owners
     }
 }
 
-
 type OutputError = GqlQueryError<GraphAggregateError<&'static str>, usize>;
 
 #[derive(Default)]
@@ -625,16 +624,15 @@ fn output_property() -> crate::GraphSetValue {
 
 fn output_query(value: crate::GraphSetValue, ranked: bool) -> PreparedGraphAggregate {
     use crate::{GraphSetProjection as Projection, GraphSetValue as Value};
-    let query = prepare(
-        "MATCH (n) RETURN n AS v,COUNT(*) AS c,SUM(n.p) AS s,AVG(n.p) AS a GROUP BY n",
-    )
-    .with_output_projection(vec![
-        Projection::new("p", value),
-        Projection::new("c", Value::Column(1)),
-        Projection::new("s", Value::Column(2)),
-        Projection::new("a", Value::Column(3)),
-    ])
-    .unwrap();
+    let query =
+        prepare("MATCH (n) RETURN n AS v,COUNT(*) AS c,SUM(n.p) AS s,AVG(n.p) AS a GROUP BY n")
+            .with_output_projection(vec![
+                Projection::new("p", value),
+                Projection::new("c", Value::Column(1)),
+                Projection::new("s", Value::Column(2)),
+                Projection::new("a", Value::Column(3)),
+            ])
+            .unwrap();
     if !ranked {
         return query;
     }
@@ -662,9 +660,7 @@ fn complete_output_group() -> GraphAggregateRow {
         vec![
             GraphAggregateValue::Count(u64::MAX),
             GraphAggregateValue::Integer(i128::MAX - 7),
-            GraphAggregateValue::Average(
-                crate::GraphExactAverage::new(i128::MAX - 12, 3).unwrap(),
-            ),
+            GraphAggregateValue::Average(crate::GraphExactAverage::new(i128::MAX - 12, 3).unwrap()),
         ],
     )
 }
@@ -690,12 +686,16 @@ fn explicit_final_reader_keeps_exact_cells_and_reader_free_rank_admission() {
     expected.extend_from_slice(row.values());
     let mut reader = OutputElements::default();
     let (projected, rank) = definition
-        .project_output_with_rank_with_elements(row, &mut reader, &mut |_| {
-            Ok::<_, OutputError>(())
-        })
+        .project_output_with_rank_with_elements(row, &mut reader, &mut |_| Ok::<_, OutputError>(()))
         .unwrap();
-    assert_eq!(projected, GraphAggregateRow::from_group_values(vec![], expected.clone()));
-    assert_eq!(rank.unwrap(), GraphAggregateRow::from_group_values(vec![], expected));
+    assert_eq!(
+        projected,
+        GraphAggregateRow::from_group_values(vec![], expected.clone())
+    );
+    assert_eq!(
+        rank.unwrap(),
+        GraphAggregateRow::from_group_values(vec![], expected)
+    );
     assert_eq!(
         reader.reads,
         vec![(fgdb_delta_types::ElementId::Vertex(VId(u128::MAX)), P); 2]
@@ -738,14 +738,10 @@ fn final_reader_relay_restores_source_and_control_errors_and_stops_at_every_even
     let mut total = 0;
     let mut reader = OutputElements::default();
     definition
-        .project_output_with_rank_with_elements(
-            complete_output_group(),
-            &mut reader,
-            &mut |_| {
-                total += 1;
-                Ok::<_, OutputError>(())
-            },
-        )
+        .project_output_with_rank_with_elements(complete_output_group(), &mut reader, &mut |_| {
+            total += 1;
+            Ok::<_, OutputError>(())
+        })
         .unwrap();
     assert!(total > 0);
     assert_eq!(reader.reads.len(), 2);
@@ -774,16 +770,17 @@ fn final_reader_relay_restores_source_and_control_errors_and_stops_at_every_even
 fn final_reader_preserves_lazy_branches_and_does_not_tighten_default_admission() {
     use crate::GraphSetValue as Value;
     let lazy = Value::Case {
-        arms: vec![(Value::Value(GraphValue::Scalar(CanonicalScalar::Bool(false))), output_property())],
+        arms: vec![(
+            Value::Value(GraphValue::Scalar(CanonicalScalar::Bool(false))),
+            output_property(),
+        )],
         otherwise: Some(Box::new(Value::Column(1))),
     };
     let query = output_query(lazy, false);
     let reader_free = SpillAggregatePlan::compile(&query).unwrap();
     let expected = reader_free
         .definition()
-        .project_output_with_rank(complete_output_group(), &mut |_| {
-            Ok::<_, OutputError>(())
-        })
+        .project_output_with_rank(complete_output_group(), &mut |_| Ok::<_, OutputError>(()))
         .unwrap();
     let plan = SpillAggregatePlan::compile_with_element_reads(&query).unwrap();
     assert!(plan.definition().output_may_read_elements());
@@ -793,21 +790,18 @@ fn final_reader_preserves_lazy_branches_and_does_not_tighten_default_admission()
     };
     let actual = plan
         .definition()
-        .project_output_with_rank_with_elements(
-            complete_output_group(),
-            &mut reader,
-            &mut |_| Ok::<_, OutputError>(()),
-        )
+        .project_output_with_rank_with_elements(complete_output_group(), &mut reader, &mut |_| {
+            Ok::<_, OutputError>(())
+        })
         .unwrap();
     assert_eq!(actual, expected);
     assert_eq!(actual.0.values()[0], GraphAggregateValue::Count(u64::MAX));
     assert!(reader.reads.is_empty());
     assert!(reader.failure.is_some());
 
-    let plan = SpillAggregatePlan::compile_with_element_reads(
-        &output_query(output_property(), false),
-    )
-    .unwrap();
+    let plan =
+        SpillAggregatePlan::compile_with_element_reads(&output_query(output_property(), false))
+            .unwrap();
     let result = plan.definition().project_output_with_rank_with_elements(
         complete_output_group(),
         &mut reader,

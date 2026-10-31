@@ -461,14 +461,162 @@ pub(crate) fn run_prepared_batch<'a>(
                 PreparedParameters::Batch(argument_sets),
             ))
         }
-        PreparedDefinition::Read(_)
-        | PreparedDefinition::Write(PreparedWrite::Chain(_))
-        | PreparedDefinition::WriteReturning(_) => {
-            // A chain has one frozen native input, not an atomic script-batch
-            // owner. Do not emulate a batch with separately committed calls.
+        PreparedDefinition::Write(PreparedWrite::Chain(prepared)) => Box::pin(
+            write_chain_prepared_batch(cx, db, token, prepared, argument_sets),
+        ),
+        PreparedDefinition::Read(_) | PreparedDefinition::WriteReturning(_) => {
             Box::pin(async { Err(mode_refusal()) })
         }
     }
+}
+
+/// Bind every record before graph access, then pass the ordered definitions to
+/// the native batch owner. Local rows belong to one chain; staged graph effects
+/// and every native or signed allowance belong to the whole batch.
+async fn write_chain_prepared_batch(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    prepared: &PreparedReturning,
+    argument_sets: &[Vec<(String, WireValue)>],
+) -> Result<Answer, Refusal> {
+    let _operation = prepared.generation.enter().map_err(Refusal::from)?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = crate::query_cx(&contexts);
+    let (chains, execution_token) = {
+        let now = unix_millis();
+        let capability = db
+            .authority
+            .verify_at(token, TRUNK, now)
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        let mut permit = capability
+            .begin_write_at(TRUNK, now)
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        if argument_sets.is_empty() {
+            return Err(write_refusal(&fgdb_gql::GraphWriteScriptBatchError::Empty));
+        }
+        let max_statements = db
+            .max_statements
+            .min(PreparedGraphWriteScript::MAX_BATCH_STATEMENTS);
+        if argument_sets.len() > max_statements {
+            return Err(write_refusal(
+                &fgdb_gql::GraphWriteScriptBatchError::TooManyStatements {
+                    limit: max_statements,
+                    observed: argument_sets.len() as u128,
+                },
+            ));
+        }
+        let mut chains = Vec::with_capacity(argument_sets.len());
+        for (index, parameters) in argument_sets.iter().enumerate() {
+            permit
+                .charge_work_at(unix_millis(), parameters.len() as u64 + 1)
+                .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+            query
+                .checkpoint()
+                .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+            let bound = query.with_restriction(|| {
+                let parameters = convert::parameters(parameters, None)
+                    .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+                prepared.template.bind(&parameters)
+            });
+            // Expiry or generation fencing wins over a binding error as it
+            // does for one prepared chain. Representative values are never
+            // reused as defaults for a missing argument in a later record.
+            permit
+                .checkpoint_at(unix_millis())
+                .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+            query
+                .checkpoint()
+                .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+            prepared.generation.check().map_err(Refusal::from)?;
+            let bound = bound.map_err(|error| {
+                Refusal::new(
+                    error.code,
+                    format!("argument set {index}: {}", error.message),
+                )
+            })?;
+            let Returning::Chain(chain) = bound else {
+                return Err(mode_refusal());
+            };
+            chains.push(*chain);
+        }
+        let remaining = permit.predicates().limits().max_work - permit.usage().work;
+        let execution_token = token
+            .attenuate(fgdb_warden::Restriction::MaxWork(remaining))
+            .map_err(|error| {
+                let code = if matches!(error, fgdb_warden::Error::TooLarge) {
+                    ErrorCode::Budget
+                } else {
+                    warden_code(error)
+                };
+                Refusal::new(code, error.to_string())
+            })?;
+        (chains, execution_token)
+    };
+    let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
+    prepared.generation.check().map_err(Refusal::from)?;
+    let generation = guard.generation();
+    let mut output_refusal = None;
+    let result = guard
+        .execute_graph_write_chain_batch_authorized_checked(
+            &contexts.txn(),
+            &query,
+            &contexts.commit(),
+            &db.authority,
+            &execution_token,
+            TRUNK,
+            &chains,
+            prepared.source_bytes,
+            db.max_statements,
+            db.write_policy,
+            unix_millis,
+            |_, _| match prepared.generation.check() {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    output_refusal = Some(Refusal::from(error));
+                    Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                }
+            },
+        )
+        .await;
+    drop(guard);
+    let (stats, completion) = result.map_err(|error| {
+        output_refusal.unwrap_or_else(|| {
+            let message = error.to_string();
+            match error {
+                fgdb_gql::GraphWriteScriptExecutionError::Chain(error) => returning_refusal(error),
+                fgdb_gql::GraphWriteScriptExecutionError::BatchChain { source, .. } => {
+                    let refusal = returning_refusal(source);
+                    Refusal::new(refusal.code, message)
+                }
+                other => write_refusal(&other),
+            }
+        })
+    })?;
+    let statements = stats.completed_statements as u64;
+    let outcome = match completion {
+        EmbeddedTxnCompletion::WriteCommitted { commit_seq } => {
+            db.commits.committed();
+            Outcome::WriteCommitted {
+                seq: commit_seq.0,
+                statements,
+            }
+        }
+        EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => Outcome::ReadClosed {
+            seq: snapshot_seq.0,
+            statements,
+        },
+    };
+    Ok(Answer {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        outcome,
+        generation,
+        created: Created {
+            vertices: stats.created_vertices,
+            edges: stats.created_edges,
+        },
+    })
 }
 
 async fn write_returning_prepared(

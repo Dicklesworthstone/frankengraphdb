@@ -121,15 +121,8 @@ fn selected_weights_preserve_missing_null_propertyless_history_and_pinned_result
             Q,
             Some(CanonicalScalar::bytes(vec![0xa7; 8400]).unwrap()),
         );
-        payload.set_edge_property(
-            HIGH_EDGE,
-            Q,
-            Some(CanonicalScalar::Bool(false)),
-        );
-        assert_eq!(
-            writer.write(&commit, payload).await.unwrap(),
-            CommitSeq(3)
-        );
+        payload.set_edge_property(HIGH_EDGE, Q, Some(CanonicalScalar::Bool(false)));
+        assert_eq!(writer.write(&commit, payload).await.unwrap(), CommitSeq(3));
         let old_resident = writer.read_session().unwrap();
         let old_source = pool();
         let mut old = selected_weight_cold(&contexts, &vfs, old_source.clone()).await;
@@ -154,10 +147,7 @@ fn selected_weights_preserve_missing_null_propertyless_history_and_pinned_result
         missing.set_edge_property(HIGH_EDGE, Q, None);
         missing.set_edge_property(EId(2), P, Some(CanonicalScalar::Null));
         missing.delete_edge(EId(3));
-        assert_eq!(
-            writer.write(&commit, missing).await.unwrap(),
-            CommitSeq(4)
-        );
+        assert_eq!(writer.write(&commit, missing).await.unwrap(), CommitSeq(4));
         // At cut 4 the three inputs have different representations: Q-only,
         // a completely propertyless winner, and an explicit NULL weight.
         let mut restored = WriteBatch::new(R);
@@ -174,10 +164,7 @@ fn selected_weights_preserve_missing_null_propertyless_history_and_pinned_result
             VId(1),
             vec![(P, CanonicalScalar::Int(7))],
         );
-        assert_eq!(
-            writer.write(&commit, restored).await.unwrap(),
-            CommitSeq(5)
-        );
+        assert_eq!(writer.write(&commit, restored).await.unwrap(), CommitSeq(5));
         let resident = writer.read_session().unwrap();
         let source = pool();
         let retention = pool();
@@ -284,9 +271,9 @@ fn selected_weights_preserve_missing_null_propertyless_history_and_pinned_result
                 .unwrap(),
             old_answer,
         );
-        assert!(retained.shares_cache_with(
-            &project_buffered(&mut old, &cx, options()).await.unwrap()
-        ));
+        assert!(
+            retained.shares_cache_with(&project_buffered(&mut old, &cx, options()).await.unwrap())
+        );
         assert_eq!(old.frontier(), CommitSeq(3));
         assert_eq!(old.buffer_stats(), old_faults);
         drop(writer);

@@ -1,4 +1,4 @@
-//! Reusing a connection-owned script must preserve the native batch boundary:
+//! Reusing a connection-owned script or chain preserves the native batch boundary:
 //! one cumulative allowance, no failed prefix, and one durable completion.
 
 use super::*;
@@ -337,5 +337,228 @@ fn prepared_batch_handles_are_write_only_connection_owned_and_invalidated_by_ref
         foreign.close(cx).await.unwrap();
         writer.close(cx).await.unwrap();
         fixture.stop(cx, 1, 2, 0).await;
+    });
+}
+
+fn relationship_arguments(
+    source: &str,
+    target: &str,
+    weight: i64,
+    divisor: i64,
+) -> Vec<(String, WireValue)> {
+    vec![(
+        "rows".into(),
+        WireValue::List(vec![WireValue::Map(vec![
+            ("d".into(), WireValue::Text(target.into())),
+            ("divisor".into(), WireValue::Int(divisor)),
+            ("s".into(), WireValue::Text(source.into())),
+            ("w".into(), WireValue::Int(weight)),
+        ])]),
+    )]
+}
+
+#[test]
+fn prepared_chain_batches_preserve_input_order_atomicity_and_zero_row_grants() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "prepared-chain-batch", |config| {
+            config.max_statements = 3;
+        })
+        .await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        let statement = "UNWIND $rows AS row MERGE (a:Person {name:row.s}) \
+            MERGE (b:Person {name:row.d}) MERGE (a)-[r:KNOWS]->(b) \
+            ON CREATE SET r.age=row.w/row.divisor \
+            ON MATCH SET r.age=r.age*10+row.w/row.divisor";
+        let handle = writer
+            .prepare_write(
+                cx,
+                statement,
+                relationship_arguments("sample", "only", 99, 1),
+            )
+            .await
+            .unwrap();
+        assert!(state(cx, &mut observer).await.0.rows.is_empty());
+        assert_eq!(
+            writer
+                .execute_prepared_batch(
+                    cx,
+                    handle,
+                    vec![
+                        relationship_arguments("Ada", "Bob", 1, 1),
+                        relationship_arguments("Ada", "Bob", 2, 1),
+                        relationship_arguments("Bob", "Cy", 3, 1),
+                    ],
+                )
+                .await
+                .unwrap(),
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 3,
+            },
+            "all three chains share one completion and require no result-row allowance"
+        );
+        let committed = state(cx, &mut observer).await;
+        assert_eq!((committed.0.rows.len(), committed.1.rows.len()), (3, 2));
+        assert_eq!(
+            committed
+                .1
+                .rows
+                .iter()
+                .map(|row| (row[0].clone(), row[1].clone(), row[3].clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    WireValue::Text("Ada".into()),
+                    WireValue::Text("Bob".into()),
+                    WireValue::Int(12),
+                ),
+                (
+                    WireValue::Text("Bob".into()),
+                    WireValue::Text("Cy".into()),
+                    WireValue::Int(3),
+                ),
+            ],
+            "a later argument set sees earlier staged endpoints and relationship updates"
+        );
+
+        let arithmetic = writer
+            .execute_prepared_batch(
+                cx,
+                handle,
+                vec![
+                    relationship_arguments("Cy", "De", 4, 1),
+                    relationship_arguments("Ada", "Bob", 5, 0),
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &arithmetic,
+                ClientError::Server { message, .. } if message.contains("argument set 1")
+            ),
+            "a late arithmetic failure identifies its record and rolls back the entire batch: {arithmetic:?}"
+        );
+        assert_eq!(state(cx, &mut observer).await, committed);
+        let missing = writer
+            .execute_prepared_batch(
+                cx,
+                handle,
+                vec![relationship_arguments("Cy", "De", 4, 1), vec![]],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &missing,
+                ClientError::Server {
+                    code: ErrorCode::Statement,
+                    message,
+                } if message.contains("argument set 1:")
+            ),
+            "every record binds independently and identifies its missing operand: {missing:?}"
+        );
+        assert_eq!(
+            refusal(
+                writer
+                    .execute_prepared_batch(
+                        cx,
+                        handle,
+                        vec![relationship_arguments("Cy", "De", 4, 1); 4],
+                    )
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Budget,
+        );
+        assert!(matches!(
+            writer.execute_prepared_batch(cx, handle, vec![]).await,
+            Err(ClientError::Body(
+                fgdb_protocol::body::BodyError::Noncanonical
+            ))
+        ));
+        assert_eq!(state(cx, &mut observer).await, committed);
+
+        let no_effect = writer
+            .prepare_write(
+                cx,
+                "UNWIND $rows AS row MERGE (a:Person {name:row.s}) \
+                 MERGE (b:Person {name:row.d}) MERGE (a)-[:KNOWS]->(b)",
+                relationship_arguments("sample", "only", 99, 1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            writer
+                .execute_prepared_batch(
+                    cx,
+                    no_effect,
+                    vec![
+                        relationship_arguments("Ada", "Bob", 1, 1),
+                        relationship_arguments("Bob", "Cy", 2, 1),
+                    ],
+                )
+                .await
+                .unwrap(),
+            Outcome::ReadClosed {
+                seq: 1,
+                statements: 2,
+            },
+            "an effect-free chain batch closes at its snapshot without a synthetic commit"
+        );
+        assert_eq!(state(cx, &mut observer).await, committed);
+        observer.close(cx).await.unwrap();
+        writer.close(cx).await.unwrap();
+        fixture.stop(cx, 1, 3, 2).await;
+    });
+}
+
+#[test]
+fn prepared_chain_batches_share_native_creation_limits_without_committed_prefixes() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "prepared-chain-batch-creation-limit", |config| {
+            config.write_policy.max_created_vertices = 3;
+        })
+        .await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        let handle = writer
+            .prepare_write(
+                cx,
+                "CREATE (a:Person {name:$name}) WITH a \
+                 CREATE (b:Person {name:$tail}) CREATE (a)-[:KNOWS]->(b)",
+                arguments("sample", "sample-tail", 1, 0),
+            )
+            .await
+            .unwrap();
+        assert!(
+            writer
+                .execute_prepared_batch(
+                    cx,
+                    handle,
+                    vec![arguments("Ada", "Bob", 1, 0), arguments("Cy", "De", 1, 0),],
+                )
+                .await
+                .is_err(),
+            "each record fits, but their four creations exceed the one batch allowance"
+        );
+        let unchanged = state(cx, &mut observer).await;
+        assert!(unchanged.0.rows.is_empty() && unchanged.1.rows.is_empty());
+        assert_eq!(unchanged.0.outcome, Outcome::Rows { seq: 0 });
+        assert_eq!(
+            writer
+                .execute_prepared_batch(cx, handle, vec![arguments("Ada", "Bob", 1, 0)])
+                .await
+                .unwrap(),
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 1,
+            },
+            "the connection and retained template remain usable after a failed batch"
+        );
+        observer.close(cx).await.unwrap();
+        writer.close(cx).await.unwrap();
+        fixture.stop(cx, 1, 2, 1).await;
     });
 }

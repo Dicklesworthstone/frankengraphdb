@@ -876,9 +876,7 @@ impl SpillAggregateDefinition {
     pub fn project_output_with_rank_with_elements<E, C>(
         &self,
         row: GraphAggregateRow,
-        elements: &mut impl crate::GraphElementReader<
-            GqlQueryError<GraphAggregateError<E>, C>,
-        >,
+        elements: &mut impl crate::GraphElementReader<GqlQueryError<GraphAggregateError<E>, C>>,
         control: &mut impl FnMut(
             VertexScanEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,

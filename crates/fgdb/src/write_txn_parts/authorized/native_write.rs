@@ -381,7 +381,9 @@ fn restored(lowered: Option<&GqlMapArgumentText>, mut fault: Fault) -> Fault {
             source: error,
             ..
         }) => lowered.restore(error),
-        Fault::ChainBinding(error) => lowered.restore(error),
+        Fault::ChainBinding(error) | Fault::BatchChainBinding { source: error, .. } => {
+            lowered.restore(error)
+        }
         _ => {}
     }
     fault

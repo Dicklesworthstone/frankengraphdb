@@ -1202,7 +1202,11 @@ mod selected_row_tests {
                         .collect();
                     let selected = select_column(&bytes, key).unwrap();
                     assert_eq!(selected, expected);
-                    assert_eq!(selected.len(), count, "missing keys keep physical row positions");
+                    assert_eq!(
+                        selected.len(),
+                        count,
+                        "missing keys keep physical row positions"
+                    );
                     let locators: Vec<_> = std::iter::once(0)
                         .chain((1..=count).map(|at| at as u8))
                         .collect();
@@ -1258,8 +1262,7 @@ mod selected_row_tests {
         // These self-identified mutations exercise the private parser's checks;
         // they are not evidence that a malformed image can pass root admission.
         let second = encode_property_patch(&rows[..1]).unwrap().len();
-        let second_key =
-            second + 4 + 8 + 4 + CanonicalScalar::Bool(true).encode().unwrap().len();
+        let second_key = second + 4 + 8 + 4 + CanonicalScalar::Bool(true).encode().unwrap().len();
         for replacement in [11_u64, 7] {
             let mut malformed = bytes.clone();
             malformed[second_key..second_key + 8].copy_from_slice(&replacement.to_le_bytes());
@@ -1341,34 +1344,27 @@ mod selected_row_tests {
                 })
                 .collect();
             assert_eq!(
-                read_admitted_property_column(&KEY, NS, &bytes, id, Some(&resolver), key)
-                    .unwrap(),
+                read_admitted_property_column(&KEY, NS, &bytes, id, Some(&resolver), key).unwrap(),
                 expected
             );
         }
-        assert_eq!(resolver.calls.get(), 0, "unselected artifacts are not decoded");
+        assert_eq!(
+            resolver.calls.get(),
+            0,
+            "unselected artifacts are not decoded"
+        );
         assert!(
-            read_admitted_property_column(
-                &KEY,
-                NS,
-                &bytes,
-                id,
-                Some(&resolver),
-                PropertyKeyId(3),
-            )
-            .is_err()
+            read_admitted_property_column(&KEY, NS, &bytes, id, Some(&resolver), PropertyKeyId(3),)
+                .is_err()
         );
         assert!(decode_property_patch_with_resolver(&bytes, &resolver).is_err());
         resolver.reject.set(false);
-        let selected = read_admitted_property_column(
-            &KEY,
-            NS,
-            &bytes,
-            id,
-            Some(&resolver),
-            PropertyKeyId(3),
-        )
-        .unwrap();
-        assert_eq!(selected, vec![vec![rows[0][0].clone()], vec![rows[1][0].clone()], vec![]]);
+        let selected =
+            read_admitted_property_column(&KEY, NS, &bytes, id, Some(&resolver), PropertyKeyId(3))
+                .unwrap();
+        assert_eq!(
+            selected,
+            vec![vec![rows[0][0].clone()], vec![rows[1][0].clone()], vec![]]
+        );
     }
 }

@@ -291,8 +291,7 @@ impl<V: Vfs> BufferedPartition<V> {
                 .await?
             }
             EdgePropertyAccess::Property(property) => {
-                let (entries, locators) =
-                    self.block_keys(cx, at, Admission::ScanBypass).await?;
+                let (entries, locators) = self.block_keys(cx, at, Admission::ScanBypass).await?;
                 let properties = if let Some(locators) = locators {
                     // The same sidecar visit is admitted before its pin.
                     work.step(cx, observe)?;

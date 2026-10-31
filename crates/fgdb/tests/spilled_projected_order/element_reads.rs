@@ -123,7 +123,9 @@ fn expected(changed: bool, edge: bool) -> Vec<Vec<GraphAggregateValue>> {
         GraphAggregateValue::Integer(total),
         GraphAggregateValue::Average(GraphExactAverage::new(total, 3).unwrap()),
         value(metadata),
-        value(GraphValue::List(vec![text("p"), text("q")].into_boxed_slice())),
+        value(GraphValue::List(
+            vec![text("p"), text("q")].into_boxed_slice(),
+        )),
         value(
             GraphValue::map(vec![
                 ("p".into(), scalar(first)),
@@ -175,7 +177,11 @@ async fn external(
             None,
         )
         .await;
-    assert_eq!(pool.used(), 0, "completion or refusal releases every scratch grant");
+    assert_eq!(
+        pool.used(),
+        0,
+        "completion or refusal releases every scratch grant"
+    );
     let (spool, _) = result?;
     let mut answer = Answer {
         columns: spool.columns().to_vec(),
@@ -194,9 +200,7 @@ async fn external(
                     .output_slots()
                     .iter()
                     .map(|slot| match *slot {
-                        GraphAggregateTextSlot::GroupKey(at) => {
-                            value(row.keys()[at].clone())
-                        }
+                        GraphAggregateTextSlot::GroupKey(at) => value(row.keys()[at].clone()),
                         GraphAggregateTextSlot::Aggregate(at) => row.values()[at].clone(),
                     })
                     .collect(),
@@ -291,7 +295,11 @@ fn private_property_rank_runs_once_per_group_before_distinct_and_pagination() {
         let query = prepared(RANK);
         // Computed element ranking still needs an explicit resident reader;
         // the reader-free async compiler keeps its existing static refusal.
-        assert!(query.prepare_buffered_aggregate(&GqlParameters::new()).is_err());
+        assert!(
+            query
+                .prepare_buffered_aggregate(&GqlParameters::new())
+                .is_err()
+        );
         let before = external(&query, &old, &cx, policy(2)).await.unwrap();
         assert_eq!(before.columns, vec!["c"]);
         assert_eq!(before.rows, vec![count(1), count(2)]);
@@ -340,8 +348,18 @@ fn completed_reads_share_all_counters_and_preserve_null_lazy_and_late_error_sema
         let repeated = external(&query, &view, &cx, exact).await.unwrap();
         assert_eq!(repeated.rows, complete.rows);
         assert_eq!(
-            (repeated.records, repeated.results, repeated.work, repeated.scratch),
-            (complete.records, complete.results, complete.work, complete.scratch),
+            (
+                repeated.records,
+                repeated.results,
+                repeated.work,
+                repeated.scratch
+            ),
+            (
+                complete.records,
+                complete.results,
+                complete.work,
+                complete.scratch
+            ),
         );
         for limits in [
             GqlQueryPolicy::new(complete.records - 1, u64::MAX, u64::MAX, u64::MAX),
@@ -423,8 +441,14 @@ fn completed_reads_share_all_counters_and_preserve_null_lazy_and_late_error_sema
         assert_eq!(
             answer.rows,
             vec![vec![
-                null(), null(), GraphAggregateValue::Count(0), null(),
-                null(), null(), null(), null(),
+                null(),
+                null(),
+                GraphAggregateValue::Count(0),
+                null(),
+                null(),
+                null(),
+                null(),
+                null(),
             ]],
         );
         assert_eq!(answer.records, 0);

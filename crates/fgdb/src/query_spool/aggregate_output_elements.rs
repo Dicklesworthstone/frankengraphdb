@@ -76,11 +76,11 @@ impl ProjectionControl<'_> {
             // The same per-allocation grant as ordinary computed output:
             // payload, vector growth and its encoded-envelope overlap remain
             // owned until this group's complete frame has been written.
-            let bytes = 8 * size_of::<GraphValue>()
-                .max(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
-            self.charge.grow(self.cx, bytes).map_err(|error| {
-                GqlQueryError::Interrupted(SpillError::Memory(error).into())
-            })?;
+            let bytes =
+                8 * size_of::<GraphValue>().max(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+            self.charge
+                .grow(self.cx, bytes)
+                .map_err(|error| GqlQueryError::Interrupted(SpillError::Memory(error).into()))?;
         }
         Ok(())
     }
@@ -119,15 +119,17 @@ impl Elements<'_, '_> {
     ) -> core::result::Result<Option<MetadataRecord<'_>>, E> {
         let snapshot = &self.view.snapshot;
         Ok(match element {
-            ElementId::Vertex(id) => source::find_vertex(snapshot, id, self.as_of, control)?
-                .map(MetadataRecord::Vertex),
+            ElementId::Vertex(id) => {
+                source::find_vertex(snapshot, id, self.as_of, control)?.map(MetadataRecord::Vertex)
+            }
             ElementId::Edge(id) => {
                 let Some((block, row)) = snapshot.adjacency_index().statement_at_controlled(
                     &snapshot.blocks,
                     id,
                     self.as_of,
                     &mut |_| control(SourceEvent::Work),
-                )? else {
+                )?
+                else {
                     return Ok(None);
                 };
                 Some(MetadataRecord::Edge(
@@ -141,12 +143,8 @@ impl Elements<'_, '_> {
 
 fn read_error(element: ElementId, error: ReadError) -> ControlledExecutionError {
     GqlQueryError::Source(fgdb_gql::GraphAggregateError::Source(match element {
-        ElementId::Vertex(_) => {
-            ScanError::Vertex(fgdb_gql::stream::VertexScanError::Source(error))
-        }
-        ElementId::Edge(_) => {
-            ScanError::Edge(fgdb_gql::edge_stream::EdgeScanError::Source(error))
-        }
+        ElementId::Vertex(_) => ScanError::Vertex(fgdb_gql::stream::VertexScanError::Source(error)),
+        ElementId::Edge(_) => ScanError::Edge(fgdb_gql::edge_stream::EdgeScanError::Source(error)),
     }))
 }
 
@@ -187,9 +185,7 @@ impl GraphElementReader<ControlledExecutionError> for Elements<'_, '_> {
                         })?;
                     // Reserve the selected canonical value BEFORE cloning.
                     // Unrelated properties and complete records stay borrowed.
-                    for _ in 0..bytes.div_ceil(
-                        fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES,
-                    ) {
+                    for _ in 0..bytes.div_ceil(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
                         control(SourceEvent::ScratchEntry)?;
                     }
                     return Ok(Some(value.clone()));
@@ -250,10 +246,8 @@ pub(super) fn project(
     charge: &mut MemoryCharge,
     cx: &QueryCx,
     view: EmbeddedReadView,
-) -> core::result::Result<
-    (GraphAggregateRow, Option<GraphAggregateRow>),
-    ControlledExecutionError,
-> {
+) -> core::result::Result<(GraphAggregateRow, Option<GraphAggregateRow>), ControlledExecutionError>
+{
     let as_of = input.snapshot_seq();
     let control = RefCell::new(ProjectionControl { input, charge, cx });
     let mut elements = Elements {
@@ -261,9 +255,7 @@ pub(super) fn project(
         as_of,
         control: &control,
     };
-    definition.project_output_with_rank_with_elements(
-        row,
-        &mut elements,
-        &mut |event| control.borrow_mut().event(event),
-    )
+    definition.project_output_with_rank_with_elements(row, &mut elements, &mut |event| {
+        control.borrow_mut().event(event)
+    })
 }

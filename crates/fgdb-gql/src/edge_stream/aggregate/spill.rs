@@ -139,7 +139,10 @@ impl<S: EdgeScanSource, F> EdgeSpillAggregateCursor<S, F> {
         let result = (|| {
             let meter = &mut self.input.meter;
             let next = meter
-                .increment(GqlBudgetDimension::SnapshotRecords, meter.rows.snapshot_records)
+                .increment(
+                    GqlBudgetDimension::SnapshotRecords,
+                    meter.rows.snapshot_records,
+                )
                 .map_err(lift)?;
             meter.rows.snapshot_records = next;
             Ok(())

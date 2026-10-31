@@ -168,6 +168,19 @@ pub enum GraphWriteScriptExecutionError<E, A, C> {
     ChainBinding(crate::GraphWriteChainTextError),
     /// Retain the chain's native source, control and publication failure.
     Chain(crate::GqlQueryError<crate::GraphWriteChainError<E, A>, C>),
+    /// One independently bound chain failed before any batch execution. The
+    /// native text error and the original record's statement/bytes survive.
+    BatchChainBinding {
+        location: GraphWriteScriptBatchLocation,
+        source: crate::GraphWriteChainTextError,
+    },
+    /// Preserve a chain batch's native execution or publication error. Record
+    /// failures name their input; workspace creation, final admission and
+    /// completion use None and never blame the final successfully run record.
+    BatchChain {
+        location: Option<GraphWriteScriptBatchLocation>,
+        source: crate::GqlQueryError<crate::GraphWriteChainError<E, A>, C>,
+    },
     /// The entire batch was refused before any execution began.
     BatchBinding(GraphWriteScriptBatchError),
     /// Native UNWIND syntax, row admission or binding failed before execution.
@@ -191,6 +204,30 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display> core::
             Self::Program(source) => source.fmt(f),
             Self::ChainBinding(source) => source.fmt(f),
             Self::Chain(source) => source.fmt(f),
+            Self::BatchChainBinding { location, source } => {
+                write!(
+                    f,
+                    "graph write chain batch argument set {}, statement {} at bytes {}..{}: ",
+                    location.argument_set,
+                    location.statement,
+                    location.span.start,
+                    location.span.end
+                )?;
+                source.fmt(f)
+            }
+            Self::BatchChain { location, source } => {
+                if let Some(location) = location {
+                    write!(
+                        f,
+                        "graph write chain batch argument set {}, statement {} at bytes {}..{}: ",
+                        location.argument_set,
+                        location.statement,
+                        location.span.start,
+                        location.span.end
+                    )?;
+                }
+                source.fmt(f)
+            }
             Self::BatchBinding(source) => source.fmt(f),
             Self::UnwindBinding(source) => source.fmt(f),
             Self::BatchProgram { location, source } => {
@@ -221,6 +258,8 @@ impl<
             Self::Program(source) => Some(source),
             Self::ChainBinding(source) => Some(source),
             Self::Chain(source) => Some(source),
+            Self::BatchChainBinding { source, .. } => Some(source),
+            Self::BatchChain { source, .. } => Some(source),
             Self::BatchBinding(source) => Some(source),
             Self::UnwindBinding(source) => Some(source),
             Self::BatchProgram { source, .. } => Some(source),
