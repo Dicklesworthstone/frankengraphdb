@@ -9,6 +9,7 @@ use std::task::{Context, Poll, Waker};
 
 const R: RelationId = RelationId(7);
 const P: PropertyKeyId = PropertyKeyId(3);
+const Q: PropertyKeyId = PropertyKeyId(4);
 const IDS: [VId; 4] = [VId(0), VId(1 << 100), VId(u128::MAX - 1), VId(u128::MAX)];
 const EDGES: [(u128, usize, usize); 5] = [
     (0, 0, 1),
@@ -32,6 +33,8 @@ fn prepared(text: &str) -> PreparedGraphPattern<GraphValueRow> {
     PreparedGraphText::prepare(text, |kind, name| match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+        (GraphSymbolKind::Property, "missing") => Some(GraphSymbol::Property(PropertyKeyId(5))),
         _ => None,
     })
     .unwrap()
@@ -83,6 +86,7 @@ struct Counts {
 }
 struct Data {
     edges: Vec<(EId, VId, VId)>,
+    edge_properties: BTreeMap<EId, Vec<(PropertyKeyId, CanonicalPropertyValue)>>,
     vertices: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>>,
 }
 struct Root {
@@ -113,12 +117,17 @@ struct Record {
 }
 impl AsyncEdgeScanRecord for Record {
     fn edge(&self) -> EdgeScanRow<'_> {
-        let (_, source, target) = self.data.edges[self.index];
+        let (eid, source, target) = self.data.edges[self.index];
         EdgeScanRow {
             source,
             target,
             relation: R,
-            properties: &[],
+            properties: self
+                .data
+                .edge_properties
+                .get(&eid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
         }
     }
     fn vertex(&self, vid: VId) -> Option<VertexScanRow<'_>> {
@@ -171,6 +180,7 @@ struct Source {
     hidden: Option<EId>,
     refuse_backing: bool,
     refuse_output: bool,
+    refuse_evaluation: bool,
     scratch_limit: usize,
 }
 impl Source {
@@ -183,6 +193,7 @@ impl Source {
                     .filter(|(at, _)| mask & (1 << at) != 0)
                     .map(|(_, &(id, from, to))| (EId(id), IDS[from], IDS[to]))
                     .collect(),
+                edge_properties: BTreeMap::new(),
                 vertices: IDS
                     .iter()
                     .enumerate()
@@ -196,8 +207,16 @@ impl Source {
             hidden: None,
             refuse_backing: false,
             refuse_output: false,
+            refuse_evaluation: false,
             scratch_limit: usize::MAX,
         }
+    }
+    fn with_edge_properties(
+        mut self,
+        properties: Vec<(EId, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>,
+    ) -> Self {
+        Arc::get_mut(&mut self.data).unwrap().edge_properties = properties.into_iter().collect();
+        self
     }
     fn live(&self) {
         let live = self.counts.records.fetch_add(1, Ordering::SeqCst) + 1;
@@ -253,6 +272,9 @@ impl AsyncEdgeScanSource for Source {
         record: &Record,
         event: GlaExecutionEvent,
     ) -> Result<(), Self::Error> {
+        if self.refuse_evaluation {
+            return Err("candidate evaluation refused");
+        }
         self.scratch(&record.scratch, event)
     }
 }
@@ -644,7 +666,8 @@ fn unsupported_definitions_refuse_before_a_zero_limit_or_source() {
         "MATCH p = (a)-[:R*]->(b) RETURN p LIMIT 0",
         "MATCH p = shortestPath((a)-[:R*0..3]->(b)) RETURN p LIMIT 0",
         "MATCH p = (a)-[:R*1..2]->(b)-[:R]->(c) RETURN p LIMIT 0",
-        "MATCH (a)-[:R*0..2 {p:1}]->(b) RETURN b LIMIT 0",
+        "MATCH (a)-[:R*0..2 {p:[]}]->(b) RETURN b LIMIT 0",
+        "MATCH (a)-[:R*0..2 {p:{nested:1}}]->(b) RETURN b LIMIT 0",
         "MATCH (a)-[:R*0..2]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN b LIMIT 0",
         "MATCH (a)-[:R*0..2]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN b LIMIT 0",
     ] {
@@ -744,9 +767,28 @@ fn all_live_checkpoints_and_exact_cumulative_limits_are_terminal() {
         true,
     );
     let plan = AsyncGraphWalkPlan::compile_sort_input(&logical).unwrap().0;
+    check_all_live_limits(plan, || Source::new(1));
+}
+
+#[test]
+fn scalar_edge_filter_payload_checkpoints_and_limits_are_terminal() {
+    let payload = "x".repeat(4096);
+    let logical = prepared(&format!(
+        "MATCH (a)-[:R*1..2 {{p:'{payload}'}}]->(b) RETURN b LIMIT 0"
+    ));
+    let plan = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap().0;
+    check_all_live_limits(plan, || {
+        Source::new(1).with_edge_properties(vec![(
+            EId(0),
+            vec![(P, CanonicalScalar::ucs_basic_text(&payload).unwrap().into())],
+        )])
+    });
+}
+
+fn check_all_live_limits(plan: AsyncGraphWalkPlan, source: impl Fn() -> Source) {
     let seen = Arc::new(AtomicUsize::new(0));
     let count = seen.clone();
-    let mut cursor = AsyncGraphWalkCursor::new(Source::new(1), plan.clone(), wide(), move || {
+    let mut cursor = AsyncGraphWalkCursor::new(source(), plan.clone(), wide(), move || {
         count.fetch_add(1, Ordering::SeqCst);
         Ok::<_, usize>(())
     });
@@ -757,10 +799,10 @@ fn all_live_checkpoints_and_exact_cumulative_limits_are_terminal() {
     let stats = cursor.row_stats();
     let evaluator = cursor.evaluator_stats();
     for fail_at in 0..checkpoints {
-        let source = Source::new(1);
-        let counts = source.counts.clone();
+        let input = source();
+        let counts = input.counts.clone();
         let mut called = 0;
-        let mut cursor = AsyncGraphWalkCursor::new(source, plan.clone(), wide(), move || {
+        let mut cursor = AsyncGraphWalkCursor::new(input, plan.clone(), wide(), move || {
             let n = called;
             called += 1;
             if n == fail_at { Err(n) } else { Ok(()) }
@@ -791,7 +833,7 @@ fn all_live_checkpoints_and_exact_cumulative_limits_are_terminal() {
             limits[dimension] -= 1
         }
         let policy = GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]);
-        let mut cursor = AsyncGraphWalkCursor::new(Source::new(1), plan.clone(), policy, ok);
+        let mut cursor = AsyncGraphWalkCursor::new(source(), plan.clone(), policy, ok);
         let mut failed = false;
         while let Some(row) = run(cursor.next()) {
             if row.is_err() {
@@ -851,4 +893,216 @@ fn pending_drop_is_terminal_and_outputs_keep_their_independent_guards() {
         assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
         assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
     }
+}
+
+
+fn scalar_edges(mask: usize) -> Source {
+    use fgdb_types::CanonicalF64;
+
+    Source::new(mask).with_edge_properties(vec![
+        (
+            EId(0),
+            vec![
+                (P, CanonicalScalar::Int(7).into()),
+                (Q, CanonicalScalar::Bool(true).into()),
+            ],
+        ),
+        (
+            EId(5),
+            vec![
+                (P, CanonicalScalar::Float(CanonicalF64::new(7.0)).into()),
+                (Q, CanonicalScalar::Bool(false).into()),
+            ],
+        ),
+        (EId(9), vec![(P, CanonicalScalar::Int(7).into())]),
+        (
+            EId(12),
+            vec![(P, CanonicalScalar::ucs_basic_text("7").unwrap().into())],
+        ),
+        (
+            EId(u128::MAX),
+            vec![
+                (P, CanonicalScalar::Bool(true).into()),
+                (Q, CanonicalScalar::Bool(true).into()),
+            ],
+        ),
+    ])
+}
+
+fn native_with_edge_properties(
+    plan: &GlaPlan<GraphValueRow>,
+    data: &Data,
+) -> Vec<Vec<GraphValue>> {
+    plan.execute_with_element_properties_control(
+        data.vertices.keys().copied(),
+        data.edges.iter().map(|&(eid, a, b)| (eid, a, R, b)),
+        |vid, predicates| {
+            Ok::<_, crate::GraphIntegerError>(
+                predicates.iter().all(|p| p.matches(&[], &data.vertices[&vid])),
+            )
+        },
+        |vid, key| Ok(data.vertices[&vid].iter().find(|p| p.0 == key).map(|p| &p.1)),
+        |eid, key| {
+            Ok(data
+                .edge_properties
+                .get(&eid)
+                .and_then(|properties| properties.iter().find(|p| p.0 == key))
+                .map(|p| &p.1))
+        },
+        |_| Ok(None),
+        |_| Ok(None),
+        |_| Ok(()),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|row| row.values().to_vec())
+    .collect()
+}
+
+#[test]
+fn scalar_edge_maps_match_literal_edge_selection_and_native_complete_routes() {
+    // Accepted identities are literal facts about this fixture, independent
+    // of the native comparator and the cursor's per-candidate pruning.
+    let mut cases = 0;
+    for mask in [0, 1, 3, 7, 15, 31] {
+        for direction in [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ] {
+            for search in [
+                GraphWalkSearch::All,
+                GraphWalkSearch::Trail,
+                GraphWalkSearch::Acyclic,
+                GraphWalkSearch::Simple,
+            ] {
+                for different in [false, true] {
+                    for (minimum, maximum) in [(0, 0), (0, 3), (1, 2)] {
+                        let source = scalar_edges(mask);
+                        let text = statement(direction, minimum, maximum)
+                            .replacen(']', " {p:7}]", 1);
+                        let logical = definition(&text, search, different);
+                        let accepted = Data {
+                            edges: source
+                                .data
+                                .edges
+                                .iter()
+                                .copied()
+                                .filter(|(eid, _, _)| [EId(0), EId(5), EId(9)].contains(eid))
+                                .collect(),
+                            edge_properties: BTreeMap::new(),
+                            vertices: source.data.vertices.clone(),
+                        };
+                        let expected =
+                            oracle(&accepted, direction, minimum, maximum, search, different);
+                        assert_eq!(native_with_edge_properties(&logical, &source.data), expected);
+                        assert_eq!(drain(logical, source), expected, "{text} {search:?}");
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 432);
+}
+
+#[test]
+fn scalar_edge_maps_keep_numeric_domains_nulls_and_conjunctions_native() {
+    for (map, accepted) in [
+        ("p:7", vec![EId(0), EId(5), EId(9)]),
+        ("p:7.0", vec![EId(0), EId(5), EId(9)]),
+        ("p:'7'", vec![EId(12)]),
+        ("p:true", vec![EId(u128::MAX)]),
+        ("p:false", vec![]),
+        ("p:null", vec![]),
+        ("missing:7", vec![]),
+        ("p:7,q:true", vec![EId(0)]),
+        ("p:7,q:false", vec![EId(5)]),
+    ] {
+        for search in [
+            GraphWalkSearch::All,
+            GraphWalkSearch::Trail,
+            GraphWalkSearch::Acyclic,
+            GraphWalkSearch::Simple,
+        ] {
+            let source = scalar_edges(31);
+            let text = statement(GlaDirection::Undirected, 0, 3)
+                .replacen(']', &format!(" {{{map}}}]"), 1);
+            let logical = definition(&text, search, false);
+            let selected = Data {
+                edges: source
+                    .data
+                    .edges
+                    .iter()
+                    .copied()
+                    .filter(|(eid, _, _)| accepted.contains(eid))
+                    .collect(),
+                edge_properties: BTreeMap::new(),
+                vertices: source.data.vertices.clone(),
+            };
+            let expected = oracle(&selected, GlaDirection::Undirected, 0, 3, search, false);
+            assert_eq!(native_with_edge_properties(&logical, &source.data), expected);
+            assert_eq!(drain(logical, source), expected, "{map} {search:?}");
+        }
+    }
+    // Vertex 0 has p=1, but its outgoing edge has explicit NULL. The lookup
+    // must stay in the relationship property domain and NULL must not match.
+    let source = Source::new(1).with_edge_properties(vec![(
+        EId(0),
+        vec![(P, CanonicalScalar::Null.into())],
+    )]);
+    let logical = definition(
+        "MATCH p = (a)-[:R*1..2 {p:1}]->(b) RETURN p",
+        GraphWalkSearch::All,
+        false,
+    );
+    assert!(native_with_edge_properties(&logical, &source.data).is_empty());
+    assert!(drain(logical, source).is_empty());
+}
+
+#[test]
+fn scalar_edge_filter_charges_payloads_and_propagates_candidate_control() {
+    fn measured(payload: &str) -> GlaExecutionStats {
+        let logical = prepared(&format!(
+            "MATCH (a)-[:R*1..1 {{p:'{payload}'}}]->(b) RETURN b"
+        ));
+        let plan = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap().0;
+        let source = Source::new(1).with_edge_properties(vec![(
+            EId(0),
+            vec![(P, CanonicalScalar::ucs_basic_text(payload).unwrap().into())],
+        )]);
+        let mut cursor = AsyncGraphWalkCursor::new(source, plan, wide(), ok);
+        let future = cursor.next::<usize>();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&future);
+        run(future).unwrap().unwrap();
+        assert!(run(cursor.next()).is_none());
+        cursor.evaluator_stats()
+    }
+    let short = measured("x");
+    let long = measured(&"x".repeat(4096));
+    let unit = crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES;
+    assert_eq!(
+        long.work_units - short.work_units,
+        (2 * (4096usize.div_ceil(unit) - 1usize.div_ceil(unit))) as u64
+    );
+    assert_eq!(long.scratch_entries, short.scratch_entries);
+
+    let logical = prepared("MATCH (a)-[:R*1..2 {p:7}]->(b) RETURN b LIMIT 0");
+    let plan = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap().0;
+    let mut source = scalar_edges(1);
+    source.refuse_evaluation = true;
+    let counts = source.counts.clone();
+    let mut cursor = AsyncGraphWalkCursor::new(source, plan, wide(), ok);
+    assert!(matches!(
+        run(cursor.next()).unwrap(),
+        Err(GqlQueryError::Source(EdgeScanError::Source(
+            "candidate evaluation refused"
+        )))
+    ));
+    assert_eq!(cursor.state(), EdgeScanState::Failed);
+    assert!(run(cursor.next()).is_none());
+    assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
 }

@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::GraphWalkBounds;
-use crate::algebra::{EdgeRelation, GraphWalkSearch};
+use crate::algebra::{EdgeRelation, GraphWalkSearch, IntegerComparison, WalkEdgePredicate};
 use crate::stream::{AsyncVertexCandidate, AsyncVertexScanEvent, AsyncVertexScanRecord};
 
 /// One immutable vertex-root and indexed-incidence source. Root candidates
@@ -52,13 +52,15 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
 /// A single finite variable-length atom rooted at an admitted vertex scan.
 /// WALK, TRAIL, ACYCLIC and SIMPLE retain their native occurrence semantics.
 /// Zero hops include isolates; terminal endpoint filters never prune transit.
+/// Scalar edge property maps filter every traversed hop before route selection.
 /// Captures expose real full-width identities, never reconstructed edge IDs.
 ///
 /// This is a private input contract for a blocking consumer. There is no
 /// canonical-order claim about DFS output. The returned ScanSortTail must be
 /// applied once after complete intake, even for LIMIT zero. Shortest selectors,
-/// unbounded intervals, further atoms, OPTIONAL/probes and per-edge predicates
-/// refuse during preparation, before any source or budget is observed.
+/// unbounded intervals, further atoms, OPTIONAL/probes and collection-valued
+/// edge predicates refuse during preparation, before any source or budget is
+/// observed.
 #[derive(Clone)]
 pub struct AsyncGraphWalkPlan {
     relation: EdgeRelation,
@@ -66,6 +68,7 @@ pub struct AsyncGraphWalkPlan {
     bounds: GraphWalkBounds,
     search: GraphWalkSearch,
     different_edges: bool,
+    edge_predicates: Arc<[WalkEdgePredicate]>,
     prefix: Arc<[GlaOperator]>,
     suffix: Arc<[GlaOperator]>,
     projection: Arc<GlaOperator>,
@@ -105,7 +108,13 @@ impl AsyncGraphWalkPlan {
         };
         if source.ordinal() != 0
             || !bounds.is_bounded()
-            || !edge_predicates.is_empty()
+            // Native collection comparison can raise StoredValueBounds even
+            // for an edge unreachable from the selected roots: its incidence
+            // filtering precedes root selection. Scalar operands cannot raise
+            // that data error, so their reached-candidate evaluation is safe.
+            || edge_predicates
+                .iter()
+                .any(|predicate| predicate.value.as_scalar().is_none())
             || !matches!(
                 search,
                 GraphWalkSearch::All
@@ -213,6 +222,7 @@ impl AsyncGraphWalkPlan {
                 bounds: *bounds,
                 search: *search,
                 different_edges,
+                edge_predicates: Arc::from(edge_predicates.as_slice()),
                 prefix: Arc::from(&ops[1..expansion]),
                 suffix: Arc::from(&ops[expansion + 1..projection]),
                 projection: Arc::new(ops[projection].clone()),
@@ -638,6 +648,35 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
                 }
             }
             let mut keep = true;
+            // Filter the admitted edge before path-local uniqueness checks or
+            // retaining it as transit. The parent EId continuation has already
+            // advanced, so a rejected edge cannot be retried indefinitely.
+            for predicate in self.plan.edge_predicates.iter() {
+                let mut control = |event| {
+                    meter.event(event)?;
+                    source
+                        .evaluation_event(&record, event)
+                        .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
+                };
+                control(GlaExecutionEvent::Work)?;
+                let actual = seek(edge.properties, &predicate.key, |entry| entry.0, &mut control)?
+                    .map(|(_, value)| value);
+                if let Some(actual) = actual {
+                    crate::algebra_exec::charge_stored_payload(actual, &mut control)?;
+                }
+                crate::algebra_exec::charge_stored_payload(&predicate.value, &mut control)?;
+                if !IntegerComparison::Equal.accepts_property_pair(
+                    actual,
+                    Some(&predicate.value),
+                    &mut control,
+                )? {
+                    keep = false;
+                    break;
+                }
+            }
+            if !keep {
+                continue;
+            }
             if self.plan.different_edges || self.plan.search == GraphWalkSearch::Trail {
                 for &(eid, _) in &active.steps {
                     meter.event(GlaExecutionEvent::Work)?;

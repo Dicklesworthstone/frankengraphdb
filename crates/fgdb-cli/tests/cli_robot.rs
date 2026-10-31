@@ -5705,7 +5705,7 @@ fn buffered_query_dispatch_uses_cold_admission_and_preserves_native_stream_contr
 fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
     let db = TestDb::new("buffered-external-query");
     db.create();
-    let basis = db.write(&["INSERT (a:Person {team:1}),(b:Person {team:2}),(c:Person {team:2}),(a)-[:KNOWS]->(b),(a)-[:KNOWS]->(c)"]);
+    let basis = db.write(&["INSERT (a:Person {team:1}),(b:Person {team:2}),(c:Person {team:2}),(a)-[:KNOWS {team:7}]->(b),(a)-[:KNOWS {team:7}]->(c)"]);
     let latest = db.write(&["MATCH (n:Person) WHERE n.team=1 SET n.team=3"]);
     let directory = scratch("buffered-external-files");
     std::fs::create_dir(&directory).unwrap();
@@ -5719,6 +5719,9 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
         ("MATCH p = WALK (a:Person)-[:KNOWS*0..2]->(b) RETURN a,b,p,length(p) AS hops ORDER BY hops,a,b,p".to_owned(), latest),
         ("MATCH REPEATABLE ELEMENTS p = WALK (a)-[:KNOWS*0..2]-(b) RETURN p ORDER BY length(p),p".to_owned(), latest),
         ("MATCH p = TRAIL (a)-[:KNOWS*0..2]-(b) RETURN DISTINCT a,b ORDER BY a,b".to_owned(), latest),
+        ("MATCH p = WALK (a)-[:KNOWS*0..2 {team:7.0}]->(b) RETURN p ORDER BY p".to_owned(), latest),
+        ("MATCH REPEATABLE ELEMENTS p = WALK (a)-[:KNOWS*1..3 {team:7}]-(b) RETURN count(*) AS paths,sum(b.team) AS total".to_owned(), latest),
+        ("MATCH p = WALK (a)-[:KNOWS*0..2 {team:null}]->(b) RETURN count(*) AS paths".to_owned(), latest),
         ("MATCH p = ACYCLIC (a)-[:KNOWS*0..2]-(b) RETURN count(*) AS paths,count(DISTINCT b) AS endpoints,sum(b.team) AS total".to_owned(), latest),
         ("MATCH p = SIMPLE (a)-[:KNOWS*0..2]-(b) WITH length(p) AS hops ORDER BY hops DESC SKIP 1 LIMIT 3 RETURN hops,count(*) AS paths GROUP BY hops ORDER BY hops".to_owned(), latest),
         (format!("MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {basis} RETURN n.team AS team ORDER BY team DESC"), basis),
@@ -5762,6 +5765,7 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
         "MATCH (n) WHERE 10/(n.team-2)>0 RETURN n.team AS value LIMIT 0",
         "MATCH (n) RETURN 10/(sum(n.team)-4) AS value GROUP BY n.team LIMIT 0",
         "MATCH p = WALK (a)-[:KNOWS*0..2]->(b) WHERE 10/(b.team-2)>0 RETURN p LIMIT 0",
+        "MATCH p = WALK (a)-[:KNOWS*0..2 {team:7}]->(b) WHERE 10/(b.team-2)>0 RETURN p LIMIT 0",
     ] {
         let failed = db.command("query", &["--buffered", "--spill-dir", spill, text]);
         failed.failure(3, "query");
@@ -5805,6 +5809,26 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
             vec![
                 "--buffered",
                 "MATCH p = WALK (a)-[:KNOWS*0..3]->(b) RETURN p LIMIT 0",
+            ],
+            3,
+            "query",
+        ),
+        (
+            vec![
+                "--buffered",
+                "--spill-dir",
+                spill,
+                "MATCH p = WALK (a)-[:KNOWS*0..3 {team:7}]->(b) RETURN p LIMIT 0",
+            ],
+            4,
+            "open",
+        ),
+        (
+            vec![
+                "--buffered",
+                "--spill-dir",
+                spill,
+                "MATCH p = WALK (a)-[:KNOWS*0..3 {team:[]}]->(b) RETURN p LIMIT 0",
             ],
             3,
             "query",
