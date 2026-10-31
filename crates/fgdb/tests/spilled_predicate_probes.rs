@@ -408,6 +408,15 @@ fn mapped_repeated_and_dynamic_probe_keys_match_the_live_unindexed_predicate() {
                 GraphValue::Edge(EId(u128::MAX)),
             ],
             [GraphValue::List(vec![int(7)].into_boxed_slice()), int(7)],
+            [
+                GraphValue::map(vec![("value".into(), int(7))]).unwrap(),
+                int(7),
+            ],
+            [GraphValue::List(vec![null()].into_boxed_slice()), int(7)],
+            [
+                GraphValue::map(vec![("value".into(), null())]).unwrap(),
+                int(7),
+            ],
         ];
         for pairs in [
             vec![(0, 3), (1, 2)],

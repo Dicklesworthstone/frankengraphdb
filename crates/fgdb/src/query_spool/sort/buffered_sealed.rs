@@ -605,50 +605,48 @@ struct ProcedureInput<'q> {
 }
 
 impl SpoolInput for ProcedureInput<'_> {
-    fn pull(&mut self) -> impl Future<Output = Option<Result<SpoolRow>>> + Send {
-        async move {
-            if self.state != ScanState::Open {
-                return None;
-            }
-            self.state = ScanState::Failed;
-            let result = (|| {
-                let charge = reserve_values::<GraphValue>(
-                    &self.pool,
-                    self.cx,
-                    self.width,
-                    size_of::<GraphValueRow>(),
-                )?;
-                let row = self
-                    .cursor
-                    .next_row(&mut || self.cx.with_restriction(|| self.cx.checkpoint()))
-                    .map_err(procedure_error)?;
-                if row.is_none() {
-                    self.cx
-                        .with_restriction(|| self.cx.checkpoint())
-                        .map_err(|error| procedure_error(GqlQueryError::Interrupted(error)))?;
-                }
-                if let Some(row) = row {
-                    if row.len() != self.width {
-                        return Err(NativeSpoolError::IncompleteCursor);
-                    }
-                    self.delivered = self
-                        .delivered
-                        .checked_add(1)
-                        .ok_or(SpillError::SizeOverflow)?;
-                    if self.delivered > self.rows.result_rows {
-                        return Err(NativeSpoolError::IncompleteCursor);
-                    }
-                    self.state = ScanState::Open;
-                    Ok(Some(SpoolRow::buffered((row, charge))))
-                } else if self.delivered == self.rows.result_rows {
-                    self.state = ScanState::Exhausted;
-                    Ok(None)
-                } else {
-                    Err(NativeSpoolError::IncompleteCursor)
-                }
-            })();
-            result.transpose()
+    async fn pull(&mut self) -> Option<Result<SpoolRow>> {
+        if self.state != ScanState::Open {
+            return None;
         }
+        self.state = ScanState::Failed;
+        let result = (|| {
+            let charge = reserve_values::<GraphValue>(
+                &self.pool,
+                self.cx,
+                self.width,
+                size_of::<GraphValueRow>(),
+            )?;
+            let row = self
+                .cursor
+                .next_row(&mut || self.cx.with_restriction(|| self.cx.checkpoint()))
+                .map_err(procedure_error)?;
+            if row.is_none() {
+                self.cx
+                    .with_restriction(|| self.cx.checkpoint())
+                    .map_err(|error| procedure_error(GqlQueryError::Interrupted(error)))?;
+            }
+            if let Some(row) = row {
+                if row.len() != self.width {
+                    return Err(NativeSpoolError::IncompleteCursor);
+                }
+                self.delivered = self
+                    .delivered
+                    .checked_add(1)
+                    .ok_or(SpillError::SizeOverflow)?;
+                if self.delivered > self.rows.result_rows {
+                    return Err(NativeSpoolError::IncompleteCursor);
+                }
+                self.state = ScanState::Open;
+                Ok(Some(SpoolRow::buffered((row, charge))))
+            } else if self.delivered == self.rows.result_rows {
+                self.state = ScanState::Exhausted;
+                Ok(None)
+            } else {
+                Err(NativeSpoolError::IncompleteCursor)
+            }
+        })();
+        result.transpose()
     }
     fn spool_state(&self) -> ScanState {
         self.state

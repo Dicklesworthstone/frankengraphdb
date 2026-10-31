@@ -237,10 +237,10 @@ where
     )
     .await?
     {
-        // Necessary NULL equalities can never be TRUE. Composite Any cells
-        // likewise cannot satisfy this predicate IR's equality. Keep them as
-        // original unmatched occurrences, without replaying a useless group.
-        // Explicit typed keys retain their original (NULL-only) exclusion.
+        // Necessary NULL equalities can never be TRUE. Collection-valued Any
+        // cells can: the language-order sorter groups their candidate peers,
+        // and the complete native predicate decides each nested comparison.
+        // Keep NULL as an original unmatched occurrence without a group scan.
         let mut nonnull = true;
         for &(left, right) in keys {
             staged::native_event(cx, policy, evaluator, GlaExecutionEvent::Work)?;
@@ -249,13 +249,7 @@ where
                 Pass::RightAbsence => right,
             };
             let value = &row.row.values()[column];
-            if value.is_null()
-                || (plan.keys().is_empty()
-                    && !matches!(
-                        value,
-                        GraphValue::Scalar(_) | GraphValue::Vertex(_) | GraphValue::Edge(_)
-                    ))
-            {
+            if value.is_null() {
                 nonnull = false;
                 break;
             }
