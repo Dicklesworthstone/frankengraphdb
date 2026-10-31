@@ -1,5 +1,7 @@
 //! Repeated analytics use the same complete-body and cumulative-budget owner.
 use super::*;
+use fgdb_gql::GlaLimitDimension;
+use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetApplyKind};
 
 #[test]
 fn row_arguments_preserve_full_width_ids_duplicate_seeds_and_nested_scope() {
@@ -371,7 +373,7 @@ fn repeated_calls_preserve_bags_outer_filters_nested_frames_and_allowances() {
         .unwrap();
         assert_eq!(limited.rows.as_slice(), &expected[..2]);
         assert_eq!(limited.records, full.records);
-        for (allowance, physical) in [
+        for (trial, (allowance, physical)) in [
             (GqlQueryPolicy::new(full.records - 1, 100, WORK, WORK), WORK),
             (
                 GqlQueryPolicy::new(10_000, 100, full.evaluator_work - 1, WORK),
@@ -382,20 +384,113 @@ fn repeated_calls_preserve_bags_outer_filters_nested_frames_and_allowances() {
                 WORK,
             ),
             (policy(), full.sort_work - 1),
-        ] {
-            assert!(
-                execute(
-                    &prepared,
-                    &mut cold,
-                    &cx,
-                    allowance,
-                    &spill_pool,
-                    4,
-                    physical
-                )
-                .await
-                .is_err()
-            );
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let error = execute(
+                &prepared,
+                &mut cold,
+                &cx,
+                allowance,
+                &spill_pool,
+                4,
+                physical,
+            )
+            .await
+            .unwrap_err();
+            match trial {
+                0 => {
+                    let refusal = match &error {
+                        NativeSpoolError::Procedure(inner) => match inner.as_ref() {
+                            GqlQueryError::Rows(refusal) => Some(*refusal),
+                            _ => None,
+                        },
+                        NativeSpoolError::BufferedExecute(inner) => match inner.as_ref() {
+                            GqlQueryError::Rows(refusal) => Some(*refusal),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(refusal) = refusal {
+                        assert_eq!(refusal.dimension, GqlBudgetDimension::SnapshotRecords);
+                        assert_eq!(refusal.limit, full.records - 1);
+                        assert_eq!(refusal.observed, full.records);
+                    } else {
+                        // FnX counts both source Work and SnapshotRecord events,
+                        // so its conservative per-call guard can refuse before
+                        // the distinct GQL record counter. Its allocation is the
+                        // original cap minus already completed call receipts.
+                        let refusal = match &error {
+                            NativeSpoolError::Procedure(inner) => match inner.as_ref() {
+                                GqlQueryError::Source(GqlError::Procedure(
+                                    ProcedureError::Read(inner),
+                                )) => match inner.as_ref() {
+                                    FnxReadError::SourceLimit {
+                                        resource,
+                                        limit,
+                                        requested,
+                                    } => Some((*resource, *limit, *requested)),
+                                    _ => None,
+                                },
+                                GqlQueryError::Source(GqlError::Procedure(
+                                    ProcedureError::BufferedSealedRead(inner),
+                                )) => match inner.as_ref() {
+                                    FnxSealedReadError::Input(FnxReadError::SourceLimit {
+                                        resource,
+                                        limit,
+                                        requested,
+                                    }) => Some((*resource, *limit, *requested)),
+                                    _ => None,
+                                },
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        let (resource, limit, requested) = refusal.unwrap_or_else(|| {
+                            panic!("expected a typed source refusal: {error:?}")
+                        });
+                        assert_eq!(resource, "work units");
+                        assert!(
+                            (0..3).any(|completed| {
+                                limit == u128::from(full.records - 1 - completed * once.records)
+                            }),
+                            "{error:?}"
+                        );
+                        assert!(requested > limit, "{error:?}");
+                    }
+                }
+                1 | 2 => {
+                    let refusal = match &error {
+                        NativeSpoolError::BufferedExecute(inner) => match inner.as_ref() {
+                            GqlQueryError::Evaluator(refusal) => Some(*refusal),
+                            _ => None,
+                        },
+                        NativeSpoolError::Procedure(inner) => match inner.as_ref() {
+                            GqlQueryError::Evaluator(refusal) => Some(*refusal),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| panic!("expected a typed evaluator refusal: {error:?}"));
+                    let (dimension, total) = if trial == 1 {
+                        (GlaLimitDimension::WorkUnits, full.evaluator_work)
+                    } else {
+                        (GlaLimitDimension::ScratchEntries, full.evaluator_scratch)
+                    };
+                    assert_eq!(refusal.dimension, dimension);
+                    assert_eq!(refusal.limit, total - 1);
+                    assert_eq!(refusal.observed, u128::from(total));
+                }
+                3 => assert!(
+                    matches!(error,
+                        NativeSpoolError::SortWorkLimit { attempted, limit }
+                            if attempted == full.sort_work && limit == full.sort_work - 1
+                    ),
+                    "{error:?}"
+                ),
+                _ => unreachable!(),
+            }
             assert_eq!(spill_pool.used(), 0);
         }
         let nested = format!(
@@ -427,6 +522,193 @@ fn repeated_calls_preserve_bags_outer_filters_nested_frames_and_allowances() {
                 .await
                 .unwrap(),
             full,
+        );
+        assert_eq!(spill_pool.used(), 0);
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+        assert_eq!(retained.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn repeated_optional_empty_witnesses_keep_outer_rows_and_source_charges() {
+    let ((), report) = run_async_under_lab(0x6273_5304, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let (vfs, writer) = fixture(&commit).await;
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let retained = cold.sealed_read_cache_pool().clone();
+        let params = parameters();
+        let single = prepare(
+            &format!("{BFS} YIELD node,distance RETURN node,distance"),
+            &params,
+        );
+        let once = execute(&single, &mut cold, &cx, policy(), &spill_pool, 4, WORK)
+            .await
+            .unwrap();
+        assert!(once.records > 0);
+        let text = format!(
+            "UNWIND [1,3,1] AS target RETURN target,EXISTS {{ \
+             {BFS} YIELD node,distance WHERE distance=target RETURN node \
+             }} AS found ORDER BY target"
+        );
+        let native = PreparedNativeRead::prepare(&text, &params, resolve).unwrap();
+        let PreparedNativeRead::Set(template) = &native else {
+            panic!("a returning EXISTS body must retain its native relation");
+        };
+        let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(
+            &template.bind_parameters(&params).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            matches!(plan.source(), AsyncSpillSetSourcePlan::Apply(apply)
+            if apply.kind() == SpillSetApplyKind::Optional)
+        );
+        assert_eq!(plan.source_count(), 1);
+        assert!(native.prepare_buffered_order(&params).is_err());
+        let prepared = prepare(&text, &params);
+        let answer = execute(&prepared, &mut cold, &cx, policy(), &spill_pool, 4, WORK)
+            .await
+            .unwrap();
+        // The absent witness is NULL-extended by Optional Apply; the native
+        // EXISTS projection maps that NULL to false while retaining target=3.
+        let boolean = |value| GraphValue::Scalar(CanonicalScalar::Bool(value));
+        let expected = vec![
+            vec![integer(1), boolean(true)],
+            vec![integer(1), boolean(true)],
+            vec![integer(3), boolean(false)],
+        ];
+        assert_eq!(answer.rows, expected);
+        assert_eq!(answer.records, 3 * once.records);
+        assert_eq!(
+            resident_rows(
+                writer
+                    .query(&cx, &text, &params, resolve, policy())
+                    .unwrap()
+            ),
+            expected
+        );
+        assert_eq!(
+            execute(&prepared, &mut cold, &cx, policy(), &spill_pool, 4, WORK)
+                .await
+                .unwrap(),
+            answer
+        );
+        assert_eq!(spill_pool.used(), 0);
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+        assert_eq!(retained.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn repeated_collections_preserve_occurrence_order_and_skip_null_bodies() {
+    let ((), report) = run_async_under_lab(0x6273_5305, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let (vfs, writer) = fixture(&commit).await;
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let retained = cold.sealed_read_cache_pool().clone();
+        let params = parameters()
+            .with_list("targets", vec![integer(1), integer(3), integer(1)])
+            .unwrap();
+        let single_params = parameters();
+        let single = prepare(
+            &format!("{BFS} YIELD node,distance RETURN node,distance"),
+            &single_params,
+        );
+        let once = execute(&single, &mut cold, &cx, policy(), &spill_pool, 4, WORK)
+            .await
+            .unwrap();
+        assert!(once.records > 0);
+        let text = format!(
+            "WITH $targets AS targets RETURN [target IN targets | EXISTS {{ \
+             {BFS} YIELD node,distance WHERE distance=target RETURN node \
+             }}] AS found"
+        );
+        let native = PreparedNativeRead::prepare(&text, &params, resolve).unwrap();
+        let PreparedNativeRead::Set(template) = &native else {
+            panic!("a graph-reading list must retain its native relation");
+        };
+        let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(
+            &template.bind_parameters(&params).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            matches!(plan.source(), AsyncSpillSetSourcePlan::Apply(apply)
+            if matches!(apply.kind(), SpillSetApplyKind::Collect { .. }))
+        );
+        assert_eq!(plan.source_count(), 1);
+        assert!(native.prepare_buffered_order(&params).is_err());
+        let prepared = prepare(&text, &params);
+        let answer = execute(&prepared, &mut cold, &cx, policy(), &spill_pool, 4, WORK)
+            .await
+            .unwrap();
+        let expected = vec![vec![GraphValue::List(
+            [true, false, true]
+                .map(|value| GraphValue::Scalar(CanonicalScalar::Bool(value)))
+                .to_vec()
+                .into_boxed_slice(),
+        )]];
+        assert_eq!(answer.rows, expected);
+        assert_eq!(answer.records, 3 * once.records);
+        assert_eq!(
+            resident_rows(
+                writer
+                    .query(&cx, &text, &params, resolve, policy())
+                    .unwrap()
+            ),
+            expected
+        );
+        assert_eq!(
+            execute(&prepared, &mut cold, &cx, policy(), &spill_pool, 4, WORK)
+                .await
+                .unwrap(),
+            answer
+        );
+        let text = "WITH NULL AS targets RETURN [target IN targets | EXISTS { \
+            CALL fnx.single_source_shortest_path_length(args => [1/0],relation => 'R') \
+            YIELD node RETURN node }] AS found";
+        let params = GqlParameters::new();
+        let native = PreparedNativeRead::prepare(text, &params, resolve).unwrap();
+        let PreparedNativeRead::Set(template) = &native else {
+            panic!("a NULL list must retain static admission of its graph-reading body");
+        };
+        let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(
+            &template.bind_parameters(&params).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            matches!(plan.source(), AsyncSpillSetSourcePlan::Apply(apply)
+            if matches!(apply.kind(), SpillSetApplyKind::Collect { .. }))
+        );
+        assert_eq!(plan.source_count(), 1);
+        assert!(plan.procedure_source().is_some());
+        let answer = execute(
+            &prepare(text, &params),
+            &mut cold,
+            &cx,
+            policy(),
+            &spill_pool,
+            4,
+            WORK,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            answer.rows,
+            vec![vec![GraphValue::Scalar(CanonicalScalar::Null)]]
+        );
+        assert_eq!(answer.records, 0);
+        assert_eq!(
+            resident_rows(writer.query(&cx, text, &params, resolve, policy()).unwrap()),
+            answer.rows
         );
         assert_eq!(spill_pool.used(), 0);
         drop(cold);
