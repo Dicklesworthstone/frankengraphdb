@@ -1267,3 +1267,60 @@ fn visible_prefix_borrows_exact_frames_and_refuses_a_malformed_discarded_tail() 
 
 #[path = "native_edge_order_tests.rs"]
 mod edge_tests;
+
+#[test]
+fn small_native_windows_use_one_sort_run_but_distinct_keeps_full_sort_admission() {
+    let ((), report) = run_async_under_lab(0x50ed_0025, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = seed(&c.commit(), 60).await;
+        let view = db.read_session().unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        for (distinct, max_runs) in [(false, 1), (true, 1), (true, 8)] {
+            let text = format!(
+                "MATCH (n:L) RETURN {}n.p AS p,n.q AS payload \
+                 ORDER BY p DESC NULLS FIRST SKIP 1 LIMIT 4",
+                if distinct { "DISTINCT " } else { "" },
+            );
+            let wanted = expected(&view, &cx, &text);
+            let (mut scratch, _) = file(&cx, &pool).await;
+            let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
+            let mut allowance = policy();
+            allowance.rows = GqlExecutionBudget::new(60, 4);
+            let result = plan(&text)
+                .spool_ordered(
+                    &db,
+                    &cx,
+                    &GqlParameters::new(),
+                    allowance,
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
+                    8,
+                    max_runs,
+                    127,
+                    4096,
+                    60,
+                    100_000_000,
+                )
+                .await;
+            if distinct && max_runs == 1 {
+                assert!(matches!(
+                    result,
+                    Err(NativeSpoolError::SortRunLimit { required: 8, limit: 1 })
+                ));
+            } else {
+                let (spool, _) = result.unwrap();
+                assert_eq!(spool.row_count(), 4);
+                assert_eq!(spool.row_stats().snapshot_records, 60);
+                assert_eq!(spool.snapshot_seq(), view.frontier());
+                assert_eq!(contents(&spool, &mut destination, &cx).await, wanted);
+            }
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

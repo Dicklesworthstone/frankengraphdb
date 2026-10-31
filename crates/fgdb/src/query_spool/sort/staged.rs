@@ -516,12 +516,13 @@ where
             charge,
         );
         let (sorted, used) = transformed
-            .sort_query_continuing(
+            .sort_query_window_continuing(
                 work.cx,
                 destination,
                 source,
                 &order.0,
                 !requested.is_empty(),
+                bounded_prefix(stage, limits.run_rows),
                 limits.run_rows,
                 limits.max_runs,
                 limits.page_bytes,

@@ -224,6 +224,69 @@ impl NativeResultSpool {
             .await
         })
     }
+
+    /// A small non-DISTINCT window may keep only its required ordered prefix.
+    /// One extra row slot is reserved within run_rows for the next candidate.
+    /// Full source validation remains mandatory; memory pressure retries the
+    /// ordinary external sort with all attempted selection work still charged.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sort_query_window_continuing<'a, A, B>(
+        &'a self,
+        cx: &'a QueryCx,
+        source: &'a mut SpillFile<A>,
+        destination: &'a mut SpillFile<B>,
+        keys: &'a [GraphValueOrder],
+        explicit: bool,
+        prefix_rows: Option<usize>,
+        run_rows: usize,
+        max_runs: usize,
+        page_bytes: usize,
+        max_work_units: u64,
+        prior_work: u64,
+    ) -> crate::SendFuture<'a, Result<(Self, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'a,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'a,
+    {
+        Box::pin(async move {
+            let mut work = Work {
+                cx,
+                used: prior_work,
+                limit: max_work_units,
+            };
+            if let Some(prefix) = prefix_rows.filter(|prefix| *prefix < run_rows)
+                && max_runs != 0
+            {
+                let mut order = QueryOrder { keys, explicit };
+                if let Some(result) = cx
+                    .with_restriction_async(self.sort_prefix_inner(
+                        source,
+                        destination,
+                        &mut order,
+                        prefix,
+                        page_bytes,
+                        &mut work,
+                    ))
+                    .await?
+                {
+                    return Ok((result, work.used));
+                }
+            }
+            self.sort_query_continuing(
+                cx,
+                source,
+                destination,
+                keys,
+                explicit,
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_work_units,
+                work.used,
+            )
+            .await
+        })
+    }
 }
 
 #[cfg(test)]

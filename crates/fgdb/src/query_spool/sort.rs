@@ -548,6 +548,148 @@ impl NativeResultSpool {
             work.used,
         ))
     }
+
+    /// Select a bounded prefix of a COMPLETE immutable input. The source still
+    /// authenticates and validates every frame, including discarded rows and a
+    /// zero-sized prefix. Only query order uses this: join/group comparators may
+    /// equate different rows and require their ordinary complete merge.
+    ///
+    /// Nothing is appended until selection finishes. A resident reservation
+    /// refusal releases the heap and returns None so the caller can use the
+    /// existing external sort without refunding already-spent work.
+    #[allow(clippy::too_many_arguments)]
+    async fn sort_prefix_inner<A, B, O>(
+        &self,
+        source: &mut SpillFile<A>,
+        destination: &mut SpillFile<B>,
+        order: &mut O,
+        prefix_rows: usize,
+        page_bytes: usize,
+        work: &mut Work<'_>,
+    ) -> Result<Option<Self>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        O: FrameOrder<Error = NativeSpoolError> + Send,
+    {
+        work.charge(1)?;
+        order.admit(self.encoded_columns)?;
+        if page_bytes == 0 || page_bytes > 64 * 1024 {
+            return Err(SpillError::InvalidLimits.into());
+        }
+        let prefix = u64::try_from(prefix_rows).map_err(|_| SpillError::SizeOverflow)?;
+        let capacity = usize::try_from(prefix.min(self.row_count()))
+            .map_err(|_| SpillError::SizeOverflow)?;
+        let pool = source.memory_pool().clone();
+        let Some(mut rows) = prefix_reservation(ChargedVec::<TrackedBytes>::new(
+            &pool,
+            work.cx,
+            capacity,
+        ))? else {
+            return Ok(None);
+        };
+        let mut input = Input::new(
+            Run {
+                pages: self.run.clone(),
+                rows: self.row_count(),
+            },
+            self.max_row_bytes,
+        );
+        for _ in 0..self.row_count() {
+            work.charge(1)?;
+            let Some(row) = prefix_reservation(input.next(source, work.cx).await)? else {
+                return Ok(None);
+            };
+            let row = row.ok_or(NativeSpoolError::IncompleteCursor)?;
+            order.validate(row.as_ref(), self.encoded_columns, work)?;
+            if capacity == 0 {
+                continue;
+            }
+            if rows.values.len() < capacity {
+                rows.values.push(row);
+                if rows.values.len() == capacity {
+                    for root in (0..capacity / 2).rev() {
+                        sift(
+                            &mut rows.values,
+                            root,
+                            capacity,
+                            order,
+                            self.encoded_columns,
+                            work,
+                        )?;
+                    }
+                }
+            } else if order.compare(
+                row.as_ref(),
+                rows.values[0].as_ref(),
+                self.encoded_columns,
+                work,
+            )? == Ordering::Less
+            {
+                // The largest retained row is the only possible victim.
+                // Equal complete query keys identify the same typed row;
+                // retaining the earlier occurrence preserves its multiplicity.
+                rows.values[0] = row;
+                sift(
+                    &mut rows.values,
+                    0,
+                    capacity,
+                    order,
+                    self.encoded_columns,
+                    work,
+                )?;
+            }
+        }
+        if input.next(source, work.cx).await?.is_some()
+            || input.remaining != 0
+            || input.offset != self.encoded_len()
+            || rows.values.len() != capacity
+        {
+            return Err(NativeSpoolError::IncompleteCursor);
+        }
+        drop(input);
+        heap_sort(&mut rows.values, order, self.encoded_columns, work)?;
+        // paged_writer admits its buffer before reserving a run or setting
+        // io_pending. Only this pre-publication memory refusal may fall back.
+        let Some(mut writer) = prefix_reservation(
+            destination
+                .paged_writer(work.cx, page_bytes)
+                .map_err(NativeSpoolError::Spill),
+        )? else {
+            return Ok(None);
+        };
+        let mut largest = 0;
+        for row in &rows.values {
+            write_row(&mut writer, row.as_ref(), work).await?;
+            largest = largest.max(row.len());
+        }
+        drop(rows);
+        work.charge(1)?;
+        let run = writer.finish(work.cx).await?;
+        Ok(Some(Self {
+            columns: Arc::clone(&self.columns),
+            encoded_columns: self.encoded_columns,
+            snapshot: self.snapshot,
+            kind: self.kind,
+            rows: GqlExecutionStats {
+                snapshot_records: self.rows.snapshot_records,
+                result_rows: prefix.min(self.row_count()),
+            },
+            evaluator: self.evaluator,
+            max_row_bytes: largest,
+            run,
+        }))
+    }
+}
+
+fn prefix_reservation<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(NativeSpoolError::Spill(SpillError::Memory(
+            MemoryError::ResourceExhausted { .. },
+        ))) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 async fn write_row<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(

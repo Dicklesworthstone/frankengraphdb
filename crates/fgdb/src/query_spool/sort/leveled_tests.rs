@@ -426,3 +426,246 @@ fn dropped_carry_merge_releases_generation_and_catalog_memory() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn bounded_query_prefix_matches_native_order_and_writes_one_run() {
+    use fgdb_types::{CanonicalDecimal, CanonicalF64};
+
+    let ((), report) = run_async_under_lab(0x50a7_1010, |root| async move {
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let values = [
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Scalar(CanonicalScalar::Int(7)),
+            GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(7.0))),
+            GraphValue::Scalar(CanonicalScalar::Decimal(
+                CanonicalDecimal::from_scaled_half_even(70, 1).unwrap(),
+            )),
+            GraphValue::Scalar(CanonicalScalar::Int(-4)),
+            GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(7))].into_boxed_slice()),
+            GraphValue::List(
+                vec![GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(7.0)))]
+                    .into_boxed_slice(),
+            ),
+        ];
+        let mut input: Vec<_> = (0..70)
+            .map(|at| {
+                GraphValueRow::from_owned_values(vec![
+                    values[at % values.len()].clone(),
+                    GraphValue::Scalar(CanonicalScalar::Int((at * 11 % 5) as i64)),
+                ])
+            })
+            .collect();
+        input.rotate_left(13);
+        input.reverse();
+        for descending in [false, true] {
+            for nulls_first in [false, true] {
+                for key_count in [1, 2] {
+                    let keys = [
+                        GraphValueOrder {
+                            column: 0,
+                            descending,
+                            nulls_first,
+                        },
+                        GraphValueOrder {
+                            column: 1,
+                            descending: !descending,
+                            nulls_first: true,
+                        },
+                    ];
+                    let order = &keys[..key_count];
+                    // Numeric/list representation ties must reach every explicit
+                    // key before typed row identity. Native values are the oracle.
+                    let mut expected = input.clone();
+                    expected.sort_by(|a, b| {
+                        for key in order {
+                            let left = &a.values()[key.column];
+                            let right = &b.values()[key.column];
+                            let comparison = match (left.is_null(), right.is_null()) {
+                                (true, false) if key.nulls_first => Ordering::Less,
+                                (true, false) => Ordering::Greater,
+                                (false, true) if key.nulls_first => Ordering::Greater,
+                                (false, true) => Ordering::Less,
+                                _ if key.descending => right.compare_orderability(left),
+                                _ => left.compare_orderability(right),
+                            };
+                            if comparison != Ordering::Equal {
+                                return comparison;
+                            }
+                        }
+                        a.cmp(b)
+                    });
+                    let expected = encoded(&expected);
+                    let pool = MemoryPool::new(1_000_000, 0).unwrap();
+                    let (mut source, _) = file(&cx, &pool).await;
+                    let (mut destination, _) = file(&cx, &pool).await;
+                    let spool = seed(&cx, &mut source, &input).await;
+                    let (complete, _) = spool
+                        .sort_query_continuing(
+                            &cx, &mut source, &mut destination, order, true,
+                            9, 8, 127, u64::MAX, 0,
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(read(&cx, &mut destination, &complete).await, expected);
+                    for prefix in [0, 1, 2, 7, 19, 70, 77] {
+                        let before = destination.stats().published_runs;
+                        let (selected, _) = spool
+                            .sort_query_window_continuing(
+                                &cx, &mut source, &mut destination, order, true,
+                                Some(prefix), prefix + 1, 1, 127, u64::MAX, 23,
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(destination.stats().published_runs, before + 1);
+                        assert_eq!(selected.row_count(), prefix.min(input.len()) as u64);
+                        assert_eq!(selected.snapshot_seq(), spool.snapshot_seq());
+                        assert_eq!(selected.row_stats().snapshot_records, 91);
+                        assert_eq!(selected.evaluator_stats(), spool.evaluator_stats());
+                        assert_eq!(
+                            read(&cx, &mut destination, &selected).await,
+                            expected[..prefix.min(expected.len())]
+                        );
+                        assert_eq!(pool.used(), 0);
+                    }
+                    assert_eq!(read(&cx, &mut source, &spool).await, encoded(&input));
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn bounded_query_prefix_rejects_discarded_malformed_frames_and_false_counts() {
+    let ((), report) = run_async_under_lab(0x50a7_1011, |root| async move {
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let pool = MemoryPool::new(1_000_000, 0).unwrap();
+        let (mut source, _) = file(&cx, &pool).await;
+        let (mut destination, _) = file(&cx, &pool).await;
+        let input = rows(2);
+        let good = seed(&cx, &mut source, &input).await;
+        let keys = [GraphValueOrder {
+            column: 0,
+            descending: false,
+            nulls_first: true,
+        }];
+        for prefix in [0, 1] {
+            for declared in [0, 1, 3] {
+                let mut forged = good.clone();
+                forged.rows.result_rows = declared;
+                let before = destination.stats();
+                let error = forged
+                    .sort_query_window_continuing(
+                        &cx, &mut source, &mut destination, &keys, true,
+                        Some(prefix), 8, 1, 127, u64::MAX, 0,
+                    )
+                    .await
+                    .unwrap_err();
+                if declared == 0 {
+                    assert!(matches!(error, NativeSpoolError::IncompleteCursor));
+                }
+                assert_eq!(destination.stats(), before);
+                assert!(!source.is_poisoned());
+                assert!(!destination.is_poisoned());
+                assert_eq!(pool.used(), 0);
+            }
+        }
+        // The authentic tail is structurally invalid. Its key would lose to
+        // the first NULL row, and LIMIT 0 retains neither row.
+        let mut frames = encoded(&input);
+        frames.last_mut().unwrap().push(0);
+        let mut writer = source.paged_writer(&cx, 127).unwrap();
+        for frame in &frames {
+            writer.write(&cx, &(frame.len() as u64).to_be_bytes()).await.unwrap();
+            writer.write(&cx, frame).await.unwrap();
+        }
+        let mut malformed = good.clone();
+        malformed.run = writer.finish(&cx).await.unwrap();
+        malformed.max_row_bytes = frames.iter().map(Vec::len).max().unwrap();
+        for prefix in [0, 1] {
+            let before = destination.stats();
+            assert!(matches!(
+                malformed
+                    .sort_query_window_continuing(
+                        &cx, &mut source, &mut destination, &keys, true,
+                        Some(prefix), 8, 1, 127, u64::MAX, 0,
+                    )
+                    .await,
+                Err(NativeSpoolError::Spill(SpillError::InvalidRun))
+            ));
+            assert_eq!(destination.stats(), before);
+            assert_eq!(pool.used(), 0);
+        }
+        assert_eq!(read(&cx, &mut source, &good).await, encoded(&input));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn bounded_query_prefix_memory_fallback_keeps_original_work_allowance() {
+    let ((), report) = run_async_under_lab(0x50a7_1012, |root| async move {
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let pool = MemoryPool::new(32 * 1024, 0).unwrap();
+        let (mut source, _) = file(&cx, &pool).await;
+        let (mut destination, _) = file(&cx, &pool).await;
+        // Seven wide winners cannot coexist. Each ordinary eight-row run has
+        // only one, and a merge needs at most two row heads.
+        let input: Vec<_> = (0..64)
+            .map(|at| {
+                let wide = at % 8 == 0;
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(if wide { -1 } else { 0 })),
+                    GraphValue::Scalar(
+                        CanonicalScalar::bytes(if wide { vec![7; 8000] } else { vec![] })
+                            .unwrap(),
+                    ),
+                ])
+            })
+            .collect();
+        let spool = seed(&cx, &mut source, &input).await;
+        let order = [GraphValueOrder::ascending(0)];
+        let (complete, complete_work) = spool
+            .sort_query_continuing(
+                &cx, &mut source, &mut destination, &order, true,
+                8, 8, 127, u64::MAX, 0,
+            )
+            .await
+            .unwrap();
+        let expected = read(&cx, &mut destination, &complete).await;
+        let (fallback, measured) = spool
+            .sort_query_window_continuing(
+                &cx, &mut source, &mut destination, &order, true,
+                Some(7), 8, 8, 127, u64::MAX, 29,
+            )
+            .await
+            .unwrap();
+        // Fallback returns the complete sorted relation to the final window.
+        assert_eq!(fallback.row_count(), input.len() as u64);
+        assert!(measured > complete_work + 29);
+        assert_eq!(read(&cx, &mut destination, &fallback).await, expected);
+        assert_eq!(fallback.evaluator_stats(), spool.evaluator_stats());
+        assert_eq!(pool.used(), 0);
+        let (exact, exact_work) = spool
+            .sort_query_window_continuing(
+                &cx, &mut source, &mut destination, &order, true,
+                Some(7), 8, 8, 127, measured, 29,
+            )
+            .await
+            .unwrap();
+        assert_eq!(exact_work, measured);
+        assert_eq!(read(&cx, &mut destination, &exact).await, expected);
+        assert!(matches!(
+            spool
+                .sort_query_window_continuing(
+                    &cx, &mut source, &mut destination, &order, true,
+                    Some(7), 8, 8, 127, measured - 1, 29,
+                )
+                .await,
+            Err(NativeSpoolError::SortWorkLimit { limit, .. }) if limit == measured - 1
+        ));
+        assert_eq!(pool.used(), 0);
+        assert_eq!(read(&cx, &mut source, &spool).await, encoded(&input));
+        assert_eq!(read(&cx, &mut destination, &complete).await, expected);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

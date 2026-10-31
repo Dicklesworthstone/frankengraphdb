@@ -678,12 +678,13 @@ where
         // canonical key vector can equal an explicit ASC NULLS FIRST vector;
         // never infer language ordering from that vector or from observed rows.
         let (sorted, used) = input
-            .sort_query_continuing(
+            .sort_query_window_continuing(
                 cx,
                 destination,
                 scratch,
                 tail.order(),
                 tail.has_explicit_order(),
+                bounded_prefix(&tail, run_rows),
                 run_rows,
                 max_runs,
                 page_bytes,
@@ -748,6 +749,23 @@ impl Window for fgdb_gql::spill_set::SpillSetStage {
     fn count(&self) -> Option<u64> {
         fgdb_gql::spill_set::SpillSetStage::count(self)
     }
+}
+
+fn bounded_prefix(tail: &impl Window, run_rows: usize) -> Option<usize> {
+    if tail.distinct() {
+        // LIMIT counts equivalence classes only after DISTINCT. A prefix of
+        // occurrences may contain arbitrarily many duplicates of one class.
+        return None;
+    }
+    let count = tail.count()?;
+    let prefix = if count == 0 {
+        0
+    } else {
+        usize::try_from(tail.offset().checked_add(count)?).ok()?
+    };
+    // Selection retains this heap plus one incoming candidate. Falling back
+    // preserves the original resident row bound even at an exact pool limit.
+    (prefix < run_rows).then_some(prefix)
 }
 
 async fn window<A, B>(
