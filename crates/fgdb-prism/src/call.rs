@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 23;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 24;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -190,6 +190,17 @@ const DIJKSTRA_PARAMETERS: &[FnxParameterSpec] = &[
         positional: true,
         default: Some(FnxArgument::Boolean(false)),
     },
+];
+const DIJKSTRA_TARGET_PARAMETERS: &[FnxParameterSpec] = &[
+    DIJKSTRA_PARAMETERS[0],
+    FnxParameterSpec {
+        name: "target",
+        value_type: FnxParameterType::Vertex,
+        positional: true,
+        default: None,
+    },
+    DIJKSTRA_PARAMETERS[1],
+    DIJKSTRA_PARAMETERS[2],
 ];
 const CDLP_PARAMETERS: &[FnxParameterSpec] = &[FnxParameterSpec {
     name: "max_iter",
@@ -432,6 +443,19 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_laws: "explicit undirected simple projection; caller-selected parallel-edge reduction; weights ignored; self-loops ignored; projected edges whose removal increases connected-component count; vertex < neighbor, lexicographic full-width VId pair order; endpoints identify a projected edge, not a raw EId",
         complexity: "O(|V| + |E|) logical traversal and canonical ordering plus separately bounded compressed history/lookup work; O(|V|) integer workspace and depth-bounded compressed cursors",
         execution_kernel: "fgdb-prism/bridges-lowlink-v1",
+    },
+    FnxSignature {
+        name: "fnx.dijkstra_path_length",
+        graph_input_arity: 1,
+        parameters: DIJKSTRA_TARGET_PARAMETERS,
+        outputs: &[FnxOutput::Vertex, FnxOutput::Distance],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Any,
+        numeric_profile: "dijkstra-target-f64-policy-selected-by-strict-v1",
+        rng_policy: "none",
+        graph_laws: "explicit projection; known source and target; complete finite nonnegative weight admission; inclusive cost cutoff; FIFO ties; fnx 1e-12 relaxation unless strict; only the target row, or no row when unreachable/beyond cutoff; stop at target finalization between drained rows; a settled target ignores unneeded distance overflows, otherwise retain whole-source overflow refusal",
+        complexity: "O((|V| + |E|) * log(1 + |V|)) worst case, stopping at the target; O(|V| + |E|) for proven unit weights; O(1) retained result",
+        execution_kernel: "fgdb-prism/dijkstra-target-unit-or-indexed-heap-v1",
     },
 ];
 
@@ -749,6 +773,11 @@ pub enum FnxAlgorithm {
     WeaklyConnectedComponents,
     StronglyConnectedComponents,
     SingleSourceDijkstraPathLength(DijkstraOptions),
+    /// One destination, with the same projected weight and comparison laws.
+    DijkstraPathLength {
+        options: DijkstraOptions,
+        target: VId,
+    },
     Triangles,
     ClusteringCoefficient,
     /// A pinned catalog procedure whose signature identifies its executor.
@@ -774,6 +803,7 @@ impl FnxAlgorithm {
             Self::WeaklyConnectedComponents => 3,
             Self::StronglyConnectedComponents => 4,
             Self::SingleSourceDijkstraPathLength(_) => 5,
+            Self::DijkstraPathLength { .. } => 22,
             Self::Triangles => 6,
             Self::ClusteringCoefficient => 7,
             Self::Foundation(FoundationAlgorithm::LoadCentrality) => 18,
@@ -850,6 +880,14 @@ impl FnxCallSpec {
     pub fn single_source_dijkstra_path_length(options: DijkstraOptions) -> Self {
         Self::new(FnxAlgorithm::SingleSourceDijkstraPathLength(options))
     }
+    /// Return only the requested destination's distance. Intermediate vertices
+    /// consume bounded kernel workspace, never the 0/1 result-row allowance.
+    /// Complete weight admission precedes early termination. A settled target
+    /// does not depend on overflowing distances to other destinations; if no
+    /// target settles, the all-source overflow refusal still applies.
+    pub fn dijkstra_path_length(options: DijkstraOptions, target: VId) -> Self {
+        Self::new(FnxAlgorithm::DijkstraPathLength { options, target })
+    }
     pub fn triangles() -> Self {
         Self::new(FnxAlgorithm::Triangles)
     }
@@ -900,6 +938,10 @@ impl FnxCallSpec {
             FnxAlgorithm::SingleSourceDijkstraPathLength(options) => match options.comparison() {
                 DijkstraComparison::Strict => "fgdb-f64-dijkstra-strict-fifo-v1",
                 DijkstraComparison::FnxEpsilon => "fnx-f64-dijkstra-epsilon-1e-12-fifo-v1",
+            },
+            FnxAlgorithm::DijkstraPathLength { options, .. } => match options.comparison() {
+                DijkstraComparison::Strict => "fgdb-f64-dijkstra-target-strict-fifo-v1",
+                DijkstraComparison::FnxEpsilon => "fnx-f64-dijkstra-target-epsilon-1e-12-fifo-v1",
             },
             _ => self.signature().numeric_profile,
         }
@@ -1178,36 +1220,52 @@ impl FnxCallSpec {
                 };
                 FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff }
             }
-            "fnx.single_source_dijkstra_path_length" => {
+            "fnx.single_source_dijkstra_path_length" | "fnx.dijkstra_path_length" => {
                 let source = match arguments[0] {
                     FnxArgument::Vertex(vertex) => vertex,
                     FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
                     _ => return Err(invalid(0, "VId or nonnegative integer source required")),
                 };
-                let cutoff = if arguments[1] == FnxArgument::Null {
+                let target = if signature.name == "fnx.dijkstra_path_length" {
+                    Some(match arguments[1] {
+                        FnxArgument::Vertex(vertex) => vertex,
+                        FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
+                        _ => return Err(invalid(1, "VId or nonnegative integer target required")),
+                    })
+                } else {
+                    None
+                };
+                let cutoff_index = 1 + usize::from(target.is_some());
+                let strict_index = cutoff_index + 1;
+                let cutoff = if arguments[cutoff_index] == FnxArgument::Null {
                     None
                 } else {
                     Some(
-                        float_argument(arguments[1])
+                        float_argument(arguments[cutoff_index])
                             .filter(|&value| value >= 0.0)
                             .ok_or_else(|| {
-                                invalid(1, "finite nonnegative exact cost or NULL required")
+                                invalid(
+                                    cutoff_index,
+                                    "finite nonnegative exact cost or NULL required",
+                                )
                             })?,
                     )
                 };
-                let FnxArgument::Boolean(strict) = arguments[2] else {
-                    return Err(invalid(2, "boolean strict required"));
+                let FnxArgument::Boolean(strict) = arguments[strict_index] else {
+                    return Err(invalid(strict_index, "boolean strict required"));
                 };
                 let comparison = if strict {
                     DijkstraComparison::Strict
                 } else {
                     DijkstraComparison::FnxEpsilon
                 };
-                FnxAlgorithm::SingleSourceDijkstraPathLength(
-                    DijkstraOptions::new(source, cutoff)
-                        .map_err(whole)?
-                        .with_comparison(comparison),
-                )
+                let options = DijkstraOptions::new(source, cutoff)
+                    .map_err(whole)?
+                    .with_comparison(comparison);
+                match target {
+                    Some(target) => FnxAlgorithm::DijkstraPathLength { options, target },
+                    None => FnxAlgorithm::SingleSourceDijkstraPathLength(options),
+                }
             }
             "fnx.connected_components" => FnxAlgorithm::ConnectedComponents,
             "fnx.weakly_connected_components" => FnxAlgorithm::WeaklyConnectedComponents,
@@ -1492,7 +1550,13 @@ impl FnxCallSpec {
     fn compiled(algorithm: FnxAlgorithm, outputs: Vec<FnxOutputColumn>) -> Self {
         let mut hash = Hasher::new();
         hash.update(b"fgdb:prism:bound-call:v3");
-        hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
+        // Each signature retains its parameter/output binding version when
+        // unrelated signatures are appended to the public registry.
+        let binding_version: u16 = match algorithm {
+            FnxAlgorithm::DijkstraPathLength { .. } => 24,
+            _ => 23,
+        };
+        hash.update(&binding_version.to_le_bytes());
         let name = algorithm.signature().name;
         hash.update(&(name.len() as u128).to_le_bytes());
         hash.update(name.as_bytes());
@@ -1527,7 +1591,8 @@ impl FnxCallSpec {
                     }
                 }
             }
-            FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
+            FnxAlgorithm::SingleSourceDijkstraPathLength(options)
+            | FnxAlgorithm::DijkstraPathLength { options, .. } => {
                 hash.update(&options.source().0.to_le_bytes());
                 match options.cutoff() {
                     None => {
@@ -1539,6 +1604,9 @@ impl FnxCallSpec {
                     }
                 }
                 hash.update(&[options.comparison() as u8]);
+                if let FnxAlgorithm::DijkstraPathLength { target, .. } = algorithm {
+                    hash.update(&target.0.to_le_bytes());
+                }
             }
             FnxAlgorithm::Cdlp { max_iter } => {
                 hash.update(&(max_iter as u128).to_le_bytes());

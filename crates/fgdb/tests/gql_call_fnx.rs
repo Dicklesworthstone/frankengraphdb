@@ -63,7 +63,7 @@ fn graph() -> WriteBatch {
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected. An empty value field names a
 /// vertex-only result, such as the sparse set of articulation points.
-const CALLS: [(&str, &str, &str, bool); 22] = [
+const CALLS: [(&str, &str, &str, bool); 23] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -90,6 +90,7 @@ const CALLS: [(&str, &str, &str, bool); 22] = [
     ("hits_centrality", "", "hub", false),
     ("articulation_points", "", "", true),
     ("bridges", "", "neighbor", true),
+    ("dijkstra_path_length", "1,5", "distance", false),
 ];
 
 /// The whole graph spelled out field by field, independent of

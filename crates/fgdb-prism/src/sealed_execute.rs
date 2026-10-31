@@ -800,6 +800,7 @@ impl FnxCallSpec {
             FnxAlgorithm::PageRank(_)
                 | FnxAlgorithm::SingleSourceShortestPathLength { .. }
                 | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+                | FnxAlgorithm::DijkstraPathLength { .. }
                 | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
@@ -1064,17 +1065,28 @@ impl FnxCallSpec {
                     Some(ordinal),
                 )
             }
-            FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
+            FnxAlgorithm::SingleSourceDijkstraPathLength(options)
+            | FnxAlgorithm::DijkstraPathLength { options, .. } => {
                 let ordinal = graph
                     .vertex_ordinal(options.source())
                     .ok_or(ExecutionError::UnknownSource(options.source()))?;
-                admission.rows(1)?;
+                let targeted =
+                    if let FnxAlgorithm::DijkstraPathLength { target, .. } = self.algorithm() {
+                        graph
+                            .vertex_ordinal(target)
+                            .ok_or(ExecutionError::UnknownTarget(target))?;
+                        true
+                    } else {
+                        false
+                    };
+                admission.rows(usize::from(!targeted))?;
                 let unit = shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
                 (
-                    if unit {
-                        "fgdb-prism/sealed-dijkstra-unit-fifo-v2"
-                    } else {
-                        "fgdb-prism/sealed-dijkstra-indexed-heap-v2"
+                    match (unit, targeted) {
+                        (true, false) => "fgdb-prism/sealed-dijkstra-unit-fifo-v2",
+                        (false, false) => "fgdb-prism/sealed-dijkstra-indexed-heap-v2",
+                        (true, true) => "fgdb-prism/sealed-dijkstra-target-unit-fifo-v1",
+                        (false, true) => "fgdb-prism/sealed-dijkstra-target-indexed-heap-v1",
                     },
                     shortest_path::work(n, graph.adjacency_entry_count(), pass, unit)?,
                     shortest_path::workspace(n, unit)?,
@@ -1137,6 +1149,16 @@ impl FnxCallSpec {
                 &rows,
                 source.ok_or(ExecutionError::InvalidUpstreamResult)?,
                 options,
+                &admission,
+                &mut control,
+            )?,
+            FnxAlgorithm::DijkstraPathLength { options, target } => shortest_path::run_target(
+                &rows,
+                source.ok_or(ExecutionError::InvalidUpstreamResult)?,
+                options,
+                graph
+                    .vertex_ordinal(target)
+                    .ok_or(ExecutionError::UnknownTarget(target))?,
                 &admission,
                 &mut control,
             )?,
@@ -1206,7 +1228,7 @@ fn finish_bfs(
 ) -> Result<Finished> {
     checkpoint()?;
     let mut encoded = EncodedRows::new(call, output.row_count, admission)?;
-    for index in 0..graph.node_count() {
+    for index in 0..output.values.scan_len(graph.node_count()) {
         encoded.push(call, graph, &output.values, index, checkpoint)?;
     }
     finish_encoded_bfs(
@@ -1362,6 +1384,18 @@ impl EncodedRows {
                     .get(index)
                     .ok_or(ExecutionError::InvalidUpstreamResult)?
                 else {
+                    return Ok(());
+                };
+                if !distance.is_finite() || distance < 0.0 {
+                    return Err(ExecutionError::InvalidNumericResult.into());
+                }
+                FnxValue::Float(distance)
+            }
+            KernelValues::TargetDistance { distance, .. } => {
+                if index != 0 {
+                    return Err(ExecutionError::InvalidUpstreamResult.into());
+                }
+                let Some(distance) = *distance else {
                     return Ok(());
                 };
                 if !distance.is_finite() || distance < 0.0 {

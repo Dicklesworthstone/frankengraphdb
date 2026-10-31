@@ -305,6 +305,7 @@ pub(crate) fn run<C>(
         }
         FnxAlgorithm::PageRank(_)
         | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+        | FnxAlgorithm::DijkstraPathLength { .. }
         | FnxAlgorithm::Triangles
         | FnxAlgorithm::ClusteringCoefficient
         | FnxAlgorithm::Cdlp { .. }

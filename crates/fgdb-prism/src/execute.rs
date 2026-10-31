@@ -52,6 +52,7 @@ pub enum FnxExecutionError<C> {
     InvalidNumericResult,
     InvalidUpstreamResult,
     UnknownSource(VId),
+    UnknownTarget(VId),
     GraphKind {
         required: FnxGraphKind,
     },
@@ -87,6 +88,7 @@ impl<C> FnxExecutionError<C> {
             Self::InvalidNumericResult => FnxExecutionError::InvalidNumericResult,
             Self::InvalidUpstreamResult => FnxExecutionError::InvalidUpstreamResult,
             Self::UnknownSource(vertex) => FnxExecutionError::UnknownSource(vertex),
+            Self::UnknownTarget(vertex) => FnxExecutionError::UnknownTarget(vertex),
             Self::GraphKind { required } => FnxExecutionError::GraphKind { required },
             Self::NotConverged {
                 max_iterations,
@@ -125,6 +127,9 @@ impl<C: core::fmt::Display> core::fmt::Display for FnxExecutionError<C> {
             }
             Self::UnknownSource(_) => {
                 f.write_str("analytics source vertex is absent from the projection")
+            }
+            Self::UnknownTarget(_) => {
+                f.write_str("analytics target vertex is absent from the projection")
             }
             Self::GraphKind { required } => {
                 write!(f, "analytics requires a {required:?} projection")
@@ -389,7 +394,7 @@ impl FnxRowCursor {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<bool, FnxExecutionError<C>> {
         row.clear();
-        while self.next_index < self.graph.vertex_ids().len() {
+        while self.next_index < self.values.scan_len(self.graph.vertex_ids().len()) {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
             let index = self.next_index;
             if !self.values.contains(index) {
@@ -472,6 +477,12 @@ pub(crate) enum KernelValues {
     WideDistances(Vec<Option<usize>>),
     Components(Vec<usize>),
     WeightedDistances(Vec<Option<f64>>),
+    /// A single requested destination. Index zero selects this result rather
+    /// than the first projected vertex; the search's private vectors are gone.
+    TargetDistance {
+        target: usize,
+        distance: Option<f64>,
+    },
     Counts(Vec<u64>),
     SelectedVertices(Vec<bool>),
     /// At most V-1 canonical bridge pairs; output indexes select pairs rather
@@ -484,6 +495,13 @@ pub(crate) struct KernelOutput {
     pub witness: ComplexityWitness,
 }
 impl KernelValues {
+    pub(crate) fn scan_len(&self, population: usize) -> usize {
+        match self {
+            Self::TargetDistance { distance, .. } => usize::from(distance.is_some()),
+            _ => population,
+        }
+    }
+
     fn contains(&self, index: usize) -> bool {
         match self {
             Self::Scores(values) => index < values.len(),
@@ -495,6 +513,7 @@ impl KernelValues {
             Self::WideDistances(values) => values.get(index).is_some_and(Option::is_some),
             Self::Components(values) => index < values.len(),
             Self::WeightedDistances(values) => values.get(index).is_some_and(Option::is_some),
+            Self::TargetDistance { distance, .. } => index == 0 && distance.is_some(),
             Self::Counts(values) => index < values.len(),
             Self::SelectedVertices(values) => values.get(index).copied().unwrap_or(false),
             Self::EndpointPairs(values) => index < values.len(),
@@ -507,6 +526,16 @@ impl KernelValues {
         vertices: &[VId],
     ) -> Result<FnxValue, FnxExecutionError<C>> {
         match (field, self) {
+            (FnxOutput::Vertex, Self::TargetDistance { target, distance }) => {
+                if index != 0 || distance.is_none() {
+                    return Err(FnxExecutionError::InvalidUpstreamResult);
+                }
+                vertices
+                    .get(*target)
+                    .copied()
+                    .map(FnxValue::Vertex)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)
+            }
             (FnxOutput::Vertex | FnxOutput::Neighbor, Self::EndpointPairs(values)) => {
                 let &(vertex, neighbor) = values
                     .get(index)
@@ -577,6 +606,9 @@ impl KernelValues {
                 .get(index)
                 .copied()
                 .flatten()
+                .map(FnxValue::Float)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult),
+            (FnxOutput::Distance, Self::TargetDistance { distance, .. }) if index == 0 => distance
                 .map(FnxValue::Float)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult),
             (FnxOutput::Triangles | FnxOutput::Core, Self::Counts(values)) => values
@@ -1373,7 +1405,7 @@ impl FnxCallSpec {
     ) -> Result<(usize, Option<u64>), FnxExecutionError<C>> {
         let mut emitted = 0usize;
         let mut max_integer = None;
-        for index in 0..graph.node_count() {
+        for index in 0..values.scan_len(graph.node_count()) {
             checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
             if !values.contains(index) {
                 continue;
@@ -1436,6 +1468,7 @@ impl FnxCallSpec {
             algorithm,
             FnxAlgorithm::SingleSourceShortestPathLength { .. }
                 | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+                | FnxAlgorithm::DijkstraPathLength { .. }
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
         ) {
@@ -1464,7 +1497,8 @@ impl FnxCallSpec {
             FnxAlgorithm::StronglyConnectedComponents => {
                 n.checked_add(arcs).and_then(|step| step.checked_mul(2))
             }
-            FnxAlgorithm::SingleSourceDijkstraPathLength(_) => {
+            FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+            | FnxAlgorithm::DijkstraPathLength { .. } => {
                 Some(crate::shortest_path::decoded_work::<C>(graph, arcs)?)
             }
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
@@ -1498,7 +1532,8 @@ impl FnxCallSpec {
             // Successful PageRank returns its measured allocation peak below.
             FnxAlgorithm::PageRank(_)
             | FnxAlgorithm::Cdlp { .. }
-            | FnxAlgorithm::SingleSourceDijkstraPathLength(_) => 0,
+            | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+            | FnxAlgorithm::DijkstraPathLength { .. } => 0,
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 crate::clustering::workspace_bytes::<C>(n, graph.edge_count())?
             }
@@ -1551,6 +1586,25 @@ impl FnxCallSpec {
                     values: KernelValues::WeightedDistances(output.distances),
                     row_count: output.row_count,
                     witness: output.witness,
+                }
+            }
+            FnxAlgorithm::DijkstraPathLength { options, target } => {
+                let (target, run) = crate::shortest_path::run_target(
+                    graph,
+                    options,
+                    target,
+                    limits.max_result_rows,
+                    &mut checkpoint,
+                )?;
+                kernel_workspace_bytes = run.workspace_bytes;
+                execution_kernel = run.execution_kernel;
+                KernelOutput {
+                    values: KernelValues::TargetDistance {
+                        target,
+                        distance: run.output.distances[target],
+                    },
+                    row_count: run.output.row_count,
+                    witness: run.output.witness,
                 }
             }
             FnxAlgorithm::Triangles => {
@@ -1635,7 +1689,7 @@ impl FnxCallSpec {
         let emitted = match sink {
             ResultSink::Collected(rows) => {
                 *rows = reserve(output.row_count)?;
-                for index in 0..n {
+                for index in 0..output.values.scan_len(n) {
                     checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
                     if !output.values.contains(index) {
                         continue;
@@ -1656,7 +1710,7 @@ impl FnxCallSpec {
                 sink.begin(output.row_count, self.outputs().len())?;
                 let mut row = Vec::new();
                 let mut emitted = 0usize;
-                for index in 0..n {
+                for index in 0..output.values.scan_len(n) {
                     checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
                     if !output.values.contains(index) {
                         continue;

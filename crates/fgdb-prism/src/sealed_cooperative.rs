@@ -127,6 +127,7 @@ impl FnxCallSpec {
             FnxAlgorithm::PageRank(_)
                 | FnxAlgorithm::SingleSourceShortestPathLength { .. }
                 | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+                | FnxAlgorithm::DijkstraPathLength { .. }
                 | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
@@ -608,17 +609,34 @@ impl FnxCallSpec {
                         Some(ordinal),
                     )
                 }
-                FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
+                FnxAlgorithm::SingleSourceDijkstraPathLength(options)
+                | FnxAlgorithm::DijkstraPathLength { options, .. } => {
                     let ordinal = graph
                         .vertex_ordinal(options.source())
                         .ok_or(ExecutionError::UnknownSource(options.source()))?;
-                    admission.rows(1)?;
+                    let targeted =
+                        if let FnxAlgorithm::DijkstraPathLength { target, .. } = self.algorithm() {
+                            graph
+                                .vertex_ordinal(target)
+                                .ok_or(ExecutionError::UnknownTarget(target))?;
+                            true
+                        } else {
+                            false
+                        };
+                    admission.rows(usize::from(!targeted))?;
                     let unit = super::shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
                     (
-                        if unit {
-                            "fgdb-prism/sealed-dijkstra-unit-fifo-cooperative-v2"
-                        } else {
-                            "fgdb-prism/sealed-dijkstra-indexed-heap-cooperative-v2"
+                        match (unit, targeted) {
+                            (true, false) => "fgdb-prism/sealed-dijkstra-unit-fifo-cooperative-v2",
+                            (false, false) => {
+                                "fgdb-prism/sealed-dijkstra-indexed-heap-cooperative-v2"
+                            }
+                            (true, true) => {
+                                "fgdb-prism/sealed-dijkstra-target-unit-fifo-cooperative-v1"
+                            }
+                            (false, true) => {
+                                "fgdb-prism/sealed-dijkstra-target-indexed-heap-cooperative-v1"
+                            }
                         },
                         super::shortest_path::work(n, graph.adjacency_entry_count(), pass, unit)?,
                         super::shortest_path::workspace(n, unit)?,
@@ -691,6 +709,22 @@ impl FnxCallSpec {
                         graph,
                         source.ok_or(ExecutionError::InvalidUpstreamResult)?,
                         options,
+                        None,
+                        &admission,
+                        &mut control,
+                    )
+                    .await?
+                }
+                FnxAlgorithm::DijkstraPathLength { options, target } => {
+                    dijkstra(
+                        graph,
+                        source.ok_or(ExecutionError::InvalidUpstreamResult)?,
+                        options,
+                        Some(
+                            graph
+                                .vertex_ordinal(target)
+                                .ok_or(ExecutionError::UnknownTarget(target))?,
+                        ),
                         &admission,
                         &mut control,
                     )
@@ -709,7 +743,7 @@ impl FnxCallSpec {
             };
             control.tick().await?;
             let mut encoded = EncodedRows::new(self, output.row_count, &admission)?;
-            for index in 0..n {
+            for index in 0..output.values.scan_len(n) {
                 control.tick().await?;
                 encoded.push(self, graph, &output.values, index, &mut || checkpoint(cx))?;
             }
@@ -801,6 +835,7 @@ async fn dijkstra<Yield, YieldFuture>(
     graph: &SealedGraphView,
     source: usize,
     options: DijkstraOptions,
+    destination: Option<usize>,
     admission: &ResultAdmission,
     control: &mut Cooperate<'_, Yield>,
 ) -> Result<KernelOutput>
@@ -809,10 +844,10 @@ where
     YieldFuture: Future<Output = ()>,
 {
     let n = graph.node_count();
-    if source >= n {
+    if source >= n || destination.is_some_and(|target| target >= n) {
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
-    admission.rows(1)?;
+    admission.rows(usize::from(destination.is_none()))?;
     let unit = super::shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
     // Complete immutable admission can prove every reduced weight compatible.
     // Otherwise a cutoff or unreachable component must not hide a negative
@@ -839,7 +874,15 @@ where
         }
     }
     if unit {
-        return dijkstra_unit_fifo(graph, source, options.cutoff(), admission, control).await;
+        return dijkstra_unit_fifo(
+            graph,
+            source,
+            options.cutoff(),
+            destination,
+            admission,
+            control,
+        )
+        .await;
     }
     control.tick().await?;
     let mut distances = reserve(n)?;
@@ -878,6 +921,10 @@ where
         }
         distances[node] = Some(cost);
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
+        if destination == Some(node) {
+            admission.rows(1)?;
+            break;
+        }
         let mut row = graph.neighbor_cursor_controlled(control.cx, node, None)?;
         while let Some((target, weight)) = control.next(&mut row).await? {
             control.tick().await?;
@@ -911,21 +958,35 @@ where
                 .ok_or(ExecutionError::InvalidUpstreamResult)?
             {
                 let requested = add(discovered, 1)?;
-                admission.rows(requested)?;
+                if destination.is_none() {
+                    admission.rows(requested)?;
+                }
                 discovered = requested;
             }
             control.offer(&mut heap, target, candidate).await?;
             witness.queue_peak = witness.queue_peak.max(heap.len());
         }
     }
-    for vertex in 0..n {
-        control.tick().await?;
-        if overflowed[vertex] && distances[vertex].is_none() {
-            return Err(ExecutionError::InvalidNumericResult.into());
+    let settled_target = destination.is_some_and(|target| distances[target].is_some());
+    if !settled_target {
+        for vertex in 0..n {
+            control.tick().await?;
+            if overflowed[vertex] && distances[vertex].is_none() {
+                return Err(ExecutionError::InvalidNumericResult.into());
+            }
         }
     }
-    if witness.nodes_touched != discovered {
+    if !settled_target && witness.nodes_touched != discovered {
         return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
+    if let Some(target) = destination {
+        witness.algorithm = "dijkstra_target_compressed_indexed_heap".to_owned();
+        let distance = distances[target];
+        return Ok(KernelOutput {
+            values: KernelValues::TargetDistance { target, distance },
+            row_count: usize::from(distance.is_some()),
+            witness,
+        });
     }
     Ok(KernelOutput {
         values: KernelValues::WeightedDistances(distances),
@@ -940,6 +1001,7 @@ async fn dijkstra_unit_fifo<Yield, YieldFuture>(
     graph: &SealedGraphView,
     source: usize,
     cutoff: Option<f64>,
+    destination: Option<usize>,
     admission: &ResultAdmission,
     control: &mut Cooperate<'_, Yield>,
 ) -> Result<KernelOutput>
@@ -948,7 +1010,12 @@ where
     YieldFuture: Future<Output = ()>,
 {
     control.tick().await?;
-    let mut traversal = super::shortest_path::UnitTraversal::new(graph.node_count())?;
+    let mut traversal = match destination {
+        None => super::shortest_path::UnitTraversal::new(graph.node_count())?,
+        Some(_) => {
+            super::shortest_path::UnitTraversal::new_selected(graph.node_count(), destination)?
+        }
+    };
     loop {
         control.tick().await?;
         if traversal.initialize_step() {
@@ -962,6 +1029,10 @@ where
         let Some((node, cost)) = traversal.pop()? else {
             break;
         };
+        if traversal.is_target(node) {
+            admission.rows(1)?;
+            break;
+        }
         let mut row = graph.neighbor_cursor_controlled(control.cx, node, None)?;
         while let Some((target, weight)) = control.next(&mut row).await? {
             control.tick().await?;

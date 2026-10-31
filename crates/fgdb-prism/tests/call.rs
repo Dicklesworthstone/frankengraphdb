@@ -107,8 +107,8 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 23);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 22);
+    assert_eq!(FnxSignatureRegistry::version(), 24);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 23);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);
@@ -161,6 +161,76 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
     // and witness on non-convergence, so a refusal would have to invent one.
     assert!(FnxSignatureRegistry::lookup("fnx.katz_centrality").is_none());
     assert!(FnxSignatureRegistry::lookup("pagerank").is_none());
+}
+
+#[test]
+fn target_dijkstra_binds_full_width_endpoints_and_keeps_legacy_call_identity() {
+    let source = VId((1 << 113) + 5);
+    let target = VId(u128::MAX);
+    let parameters = FnxParameters::from([
+        ("s".to_owned(), FnxArgument::Vertex(source)),
+        ("t".to_owned(), FnxArgument::Vertex(target)),
+    ]);
+    let positional = FnxCallSpec::bind(
+        "CALL fnx.dijkstra_path_length($s,$t,NULL,false) YIELD distance AS cost,vertex AS destination",
+        &parameters,
+    ).unwrap();
+    let named = FnxCallSpec::bind(
+        "CALL fnx.dijkstra_path_length(target => $t,source => $s) YIELD distance AS cost,vertex AS destination",
+        &parameters,
+    ).unwrap();
+    assert_eq!(positional, named);
+    assert_eq!(positional.signature().name, "fnx.dijkstra_path_length");
+    assert!(
+        matches!(positional.algorithm(), FnxAlgorithm::DijkstraPathLength {
+        options, target: found,
+    } if options.source() == source && found == target
+        && options.comparison() == DijkstraComparison::FnxEpsilon)
+    );
+    let changed = FnxCallSpec::dijkstra_path_length(
+        DijkstraOptions::new(source, None).unwrap(),
+        VId(target.0 - 1),
+    );
+    assert_ne!(
+        FnxCallSpec::dijkstra_path_length(DijkstraOptions::new(source, None).unwrap(), target)
+            .digest(),
+        changed.digest(),
+    );
+    for invalid in [
+        "CALL fnx.dijkstra_path_length(1)",
+        "CALL fnx.dijkstra_path_length(1,NULL)",
+        "CALL fnx.dijkstra_path_length(1,-1)",
+        "CALL fnx.dijkstra_path_length(1,2,-0.5)",
+        "CALL fnx.dijkstra_path_length(1,2,NULL,0)",
+        "CALL fnx.dijkstra_path_length(source => 1,target => 2,target => 3)",
+    ] {
+        assert!(
+            FnxCallSpec::bind(invalid, &FnxParameters::new()).is_err(),
+            "{invalid}"
+        );
+    }
+
+    // Freeze the pre-extension v23 transcript, independent of the current
+    // registry version and constructor dispatch. Appending a procedure must
+    // not change the identity of a previously bound all-destinations call.
+    let mut legacy = fgdb_crypto::Hasher::new();
+    legacy.update(b"fgdb:prism:bound-call:v3");
+    legacy.update(&23_u16.to_le_bytes());
+    let name = b"fnx.single_source_dijkstra_path_length";
+    legacy.update(&(name.len() as u128).to_le_bytes());
+    legacy.update(name);
+    legacy.update(&1_u128.to_le_bytes());
+    legacy.update(&[0, 1]); // no cutoff; pinned FNX epsilon comparison
+    legacy.update(&2_u128.to_le_bytes());
+    for (field, name) in [(0_u8, "vertex"), (2_u8, "distance")] {
+        legacy.update(&[field]);
+        legacy.update(&(name.len() as u128).to_le_bytes());
+        legacy.update(name.as_bytes());
+    }
+    assert_eq!(
+        bind("CALL fnx.single_source_dijkstra_path_length(1) YIELD vertex,distance").digest(),
+        legacy.finalize(),
+    );
 }
 
 #[test]
