@@ -44,6 +44,18 @@ impl Endpoints {
         // Identity paths still require a live vertex; no lookup capability is
         // needed when maximum=0, and missing/NULL roots are not invented.
         vertex(source, start, control)?;
+        Self::from_admitted_start(start, bounds, search, control)
+    }
+
+    /// The async owner proves this vertex from an already admitted binding
+    /// record. Keep initialization and mode history identical to the ordinary
+    /// cursor; this method never establishes visibility by itself.
+    pub(super) fn from_admitted_start<E>(
+        start: VId,
+        bounds: GraphWalkBounds,
+        search: GraphWalkSearch,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
         let mut cursor = Self {
             start,
             bounds,
@@ -75,6 +87,17 @@ impl Endpoints {
             self.search,
             GraphWalkSearch::All | GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest
         )
+    }
+
+    fn allows(&self, depth: usize, vertex: VId, edge: EId) -> bool {
+        match self.search {
+            GraphWalkSearch::All | GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest => {
+                !self.visited.contains(&(self.depth_class(depth), vertex))
+            }
+            GraphWalkSearch::Trail => !self.edges.contains(&edge),
+            GraphWalkSearch::Acyclic => !self.vertices.contains(&vertex),
+            GraphWalkSearch::Simple => vertex == self.start || !self.vertices.contains(&vertex),
+        }
     }
 
     fn push<E>(
@@ -180,22 +203,130 @@ impl Endpoints {
                 continue;
             };
             control(GlaExecutionEvent::Work)?;
-            let allowed = match self.search {
-                GraphWalkSearch::All
-                | GraphWalkSearch::AllShortest
-                | GraphWalkSearch::AnyShortest => {
-                    !self.visited.contains(&(self.depth_class(depth + 1), to))
-                }
-                GraphWalkSearch::Trail => !self.edges.contains(&eid),
-                GraphWalkSearch::Acyclic => !self.vertices.contains(&to),
-                GraphWalkSearch::Simple => to == self.start || !self.vertices.contains(&to),
-            };
-            if allowed {
+            if self.allows(depth + 1, to, eid) {
                 self.push(to, Some(eid), control)?;
             }
         }
         Ok(None)
     }
+
+    /// Awaitable intake for this exact support state, not a second path mode
+    /// implementation. Only the selected endpoint record survives a yield;
+    /// transit records are dropped before another source read. Identity paths
+    /// borrow their already admitted seed through the enclosing probe's loan.
+    ///
+    /// All growing state is charged to a live outer record before allocation.
+    /// That record outlives the complete probe, including backtracking across
+    /// local atoms and awaits. Charges are conservative until the outer binding
+    /// completes; dropping a transit record cannot refund retained history.
+    pub(super) async fn next_async<S, F, C>(
+        &mut self,
+        expansion: Expansion,
+        source: &mut S,
+        meter: &mut Meter<F>,
+        owner: &mut S::Record,
+    ) -> ScanResult<Option<(VId, Option<S::Record>)>, S::Error, C>
+    where
+        S: AsyncEdgeJoinSource,
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
+        use super::super::asynchronous::{admit, check_admission};
+
+        let mut selected = None;
+        while !self.stack.is_empty() {
+            async_event(source, owner, meter, GlaExecutionEvent::Work)?;
+            let depth = self.stack.len() - 1;
+            let frame = self.stack.last_mut().expect("nonempty traversal");
+            let from = frame.vertex;
+            if !frame.offered {
+                frame.offered = true;
+                if depth >= self.bounds.minimum() as usize && !self.emitted.contains(&from) {
+                    async_event(source, owner, meter, GlaExecutionEvent::ScratchEntry)?;
+                    self.emitted.insert(from);
+                    return Ok(Some((from, selected)));
+                }
+            }
+            // A transit record is not the owner of path state and is not
+            // needed to open its endpoint's next strict-successor incidence.
+            selected = None;
+            if depth == self.bounds.maximum() as usize
+                || (self.search == GraphWalkSearch::Simple && depth > 0 && from == self.start)
+            {
+                self.pop(&mut |event| async_event(source, owner, meter, event))?;
+                continue;
+            }
+            let mut after = self.stack.last().expect("nonempty traversal").after;
+            let mut admitted = None;
+            let result = source
+                .next_incident_candidate(
+                    from,
+                    expansion.relation,
+                    expansion.direction,
+                    after,
+                    &mut |event| admit(meter, &mut after, &mut admitted, event),
+                )
+                .await;
+            let candidate = match result {
+                Ok(candidate) => candidate,
+                Err(EdgeExpansionSourceError::Read(error)) => flatten(Err(error))?,
+                Err(EdgeExpansionSourceError::Unavailable) => {
+                    return Err(GqlQueryError::Source(EdgeScanError::ExpansionUnavailable));
+                }
+            };
+            check_admission(&candidate, admitted)?;
+            self.stack.last_mut().expect("nonempty traversal").after = after;
+            let Some(candidate) = candidate else {
+                self.pop(&mut |event| async_event(source, owner, meter, event))?;
+                continue;
+            };
+            let Some(record) = candidate.record else {
+                continue; // Invisible candidates advance, but never create a witness.
+            };
+            async_event(source, owner, meter, GlaExecutionEvent::Work)?;
+            let edge = record.edge();
+            if !expansion.relation.matches(edge.relation) {
+                continue;
+            }
+            let to = match expansion.direction {
+                GlaDirection::Forward if edge.source == from => edge.target,
+                GlaDirection::Reverse if edge.target == from => edge.source,
+                GlaDirection::Undirected if edge.source == from => edge.target,
+                GlaDirection::Undirected if edge.target == from => edge.source,
+                _ => continue,
+            };
+            for vid in [from, to] {
+                async_event(source, owner, meter, GlaExecutionEvent::Work)?;
+                if record.vertex(vid).is_none() {
+                    return Err(GqlQueryError::Source(EdgeScanError::DanglingEndpoint));
+                }
+            }
+            async_event(source, owner, meter, GlaExecutionEvent::Work)?;
+            if self.allows(depth + 1, to, candidate.eid) {
+                self.push(to, Some(candidate.eid), &mut |event| {
+                    async_event(source, owner, meter, event)
+                })?;
+                selected = Some(record);
+            }
+        }
+        Ok(None)
+    }
+}
+
+pub(super) fn async_event<S, F, C>(
+    source: &S,
+    owner: &S::Record,
+    meter: &mut Meter<F>,
+    event: GlaExecutionEvent,
+) -> ScanResult<(), S::Error, C>
+where
+    S: AsyncEdgeJoinSource,
+    F: FnMut() -> Result<(), C>,
+{
+    meter.event(event)?;
+    source
+        .evaluation_event(owner, event)
+        .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
 }
 
 #[cfg(test)]

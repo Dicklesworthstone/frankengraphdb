@@ -27,7 +27,9 @@ pub type AsyncIncidentCandidateResult<Record, Error, Control> =
 ///
 /// The outer traversal holds at most `hops` records. A running correlated probe
 /// separately reserves its definition-bounded binding slots and holds at most
-/// one additional record per active fixed expansion. reserve_traversal admits fixed
+/// one additional record per active expansion. Variable-length probes retain
+/// identities and mode history, admitting every growing container through
+/// evaluation_event on a live outer record before allocating. reserve_traversal admits fixed
 /// cursor vectors (record slots, choices, bindings and successor positions)
 /// before allocation and retains its guard until that traversal is dropped.
 /// Each record owns its source payload reservation. reserve_join_output admits
@@ -64,8 +66,9 @@ pub trait AsyncEdgeJoinSource: AsyncEdgeScanSource {
 
 /// The ordinary fixed-hop compiler with awaitable correlated semi/anti probes.
 /// Its identity prefix proves canonical order and DISTINCT without a seen set.
-/// Probe bindings copy outer values or expand indexed fixed edges. Independent
-/// vertex scans, OPTIONAL and variable-length traversal remain typed refusals;
+/// Probe bindings copy outer values or expand indexed fixed/variable-length
+/// edges through the same native endpoint-support semantics. Independent vertex
+/// scans, OPTIONAL and returned variable-length paths remain typed refusals;
 /// missing indexes and interrupted reads never establish existential absence.
 #[derive(Clone)]
 pub struct AsyncEdgeJoinPlan {
@@ -111,12 +114,11 @@ impl AsyncEdgeJoinPlan {
     }
 
     fn check_access(plan: &GlaPlan<GraphValueRow>) -> Result<(), EdgeScanBuildError> {
-        if let Some(operator) = plan.operators().iter().position(|op| {
-            matches!(
-                op,
-                GlaOperator::ScanVertices | GlaOperator::VarLengthExpand { .. }
-            )
-        }) {
+        if let Some(operator) = plan
+            .operators()
+            .iter()
+            .position(|op| matches!(op, GlaOperator::ScanVertices))
+        {
             return Err(EdgeScanBuildError { operator });
         }
         Ok(())

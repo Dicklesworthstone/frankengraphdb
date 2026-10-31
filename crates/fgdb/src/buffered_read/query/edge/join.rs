@@ -142,6 +142,12 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// requires exhaustion. Child records never multiply or escape the outer
     /// result. Each active probe has its own definition-bounded frame charge;
     /// histories, decoding and predicates share the outer cumulative policy.
+    /// Uncaptured variable-length probe atoms use native endpoint support with
+    /// WALK/TRAIL/ACYCLIC/SIMPLE history and the supported shortest selectors.
+    /// Each growing history container is admitted against a retained outer
+    /// record before allocation. Zero hops reuse the admitted seed; transit
+    /// payloads are released before the next incidence read, while selected
+    /// endpoints retain their property records through local predicates.
     ///
     /// One bounded source record per active hop is retained. Authenticated block
     /// directories, decode workspaces, traversal and copied results all use this
@@ -161,7 +167,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// The view/context are borrowed, but the prepared definition is not.
     /// Initial admission/recovery retain their existing bounds. Owner-level API:
     /// no Warden grant, durable result lease, OPTIONAL, independent probe scans,
-    /// nested probes or variable-length probe/outer traversal. These profiles
+    /// nested probes or captured/returned variable-length traversal. These profiles
     /// refuse during physical preparation, never as an empty neighborhood.
     // The cursor's source and checkpoint are opaque, and stable Rust cannot
     // name an opaque type in an alias, so this and the three join openers

@@ -42,6 +42,7 @@ impl Probe {
             .map(|step| Position::new(step.binding))
             .collect();
         let mut records: Vec<Option<S::Record>> = (0..self.steps.len()).map(|_| None).collect();
+        let mut walks = BTreeMap::<usize, walk::Endpoints>::new();
         let mut depth = 0;
         loop {
             meter.event(GlaExecutionEvent::Work)?;
@@ -130,13 +131,70 @@ impl Probe {
                         None // A NULL capture cannot seed a positive edge match.
                     }
                 }
-                // Physical admission rejects these before constructing a
-                // source. Keep an explicit failure if that invariant regresses.
-                Binding::Scan | Binding::Walk { .. } => {
+                Binding::Walk {
+                    expansion,
+                    bounds,
+                    search,
+                } => match ids[expansion.source] {
+                    None => None, // An identity path cannot manufacture a NULL seed.
+                    Some(from) => {
+                        if let std::collections::btree_map::Entry::Vacant(slot) = walks.entry(depth)
+                        {
+                            // Validate even an identity path without opening
+                            // an index. Existing local/outer records are the
+                            // only authority for this correlated seed.
+                            {
+                                let loan = Records::<_, S::Error> {
+                                    outer: FrameSource {
+                                        records: outer_records,
+                                        choices: &outer.choices,
+                                        seq,
+                                        error: core::marker::PhantomData,
+                                    },
+                                    records: &records,
+                                    positions: &positions,
+                                };
+                                vertex(&loan, from, &mut |event| meter.event(event))?;
+                            }
+                            let owner = outer_records.last().expect("outer record");
+                            let walk = walk::Endpoints::from_admitted_start(
+                                from,
+                                bounds,
+                                search,
+                                &mut |event| walk::async_event(source, owner, meter, event),
+                            )?;
+                            walk::async_event(
+                                source,
+                                owner,
+                                meter,
+                                GlaExecutionEvent::ScratchEntry,
+                            )?;
+                            slot.insert(walk);
+                        }
+                        let candidate = walks
+                            .get_mut(&depth)
+                            .expect("initialized path support")
+                            .next_async(
+                                expansion,
+                                source,
+                                meter,
+                                outer_records.last_mut().expect("outer record"),
+                            )
+                            .await?;
+                        candidate.map(|(vertex, record)| {
+                            records[depth] = record;
+                            Some(vertex)
+                        })
+                    }
+                },
+                // Physical admission rejects independent scans before source
+                // construction; do not reinterpret a missing owner as EOF.
+                Binding::Scan => {
                     return Err(GqlQueryError::Source(EdgeScanError::ExpansionUnavailable));
                 }
             };
             let Some(candidate) = candidate else {
+                walks.remove(&depth);
                 if depth == 0 {
                     return Ok(self.anti);
                 }
@@ -180,6 +238,7 @@ impl Probe {
             depth += 1;
             if depth < self.steps.len() {
                 positions[depth] = Position::new(self.steps[depth].binding);
+                walks.remove(&depth); // Each new local prefix owns fresh history.
             }
         }
     }

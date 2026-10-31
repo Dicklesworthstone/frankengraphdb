@@ -1,5 +1,5 @@
 use super::*;
-use crate::algebra::{GraphValue, PreparedGraphPattern};
+use crate::algebra::{GlaPlan, GraphValue, GraphWalkSearch, PreparedGraphPattern};
 use crate::edge_stream::{AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, EdgeScanState};
 use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
 use std::cell::Cell;
@@ -580,17 +580,331 @@ fn probes_share_all_four_limits_and_every_checkpoint_with_the_outer_query() {
     }
 }
 #[test]
-fn all_async_consumers_admit_only_correlated_fixed_probe_sources() {
+fn all_async_consumers_admit_correlated_path_support_but_keep_other_source_refusals() {
     let accepted = definition(&text(0, true, false, true));
     assert!(AsyncEdgeJoinPlan::compile(accepted.plan()).is_ok());
     assert!(AsyncEdgeJoinPlan::compile_aggregate(accepted.plan()).is_ok());
     assert!(AsyncEdgeJoinPlan::compile_sort_input(accepted.plan()).is_ok());
-    for body in ["MATCH (c)", "MATCH WALK (b)-[:S*1..2]->(c)"] {
+    let accepted = definition(
+        "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH WALK (b)-[:S*1..2]->(c) } RETURN r,a,b",
+    );
+    assert!(AsyncEdgeJoinPlan::compile(accepted.plan()).is_ok());
+    assert!(AsyncEdgeJoinPlan::compile_aggregate(accepted.plan()).is_ok());
+    assert!(AsyncEdgeJoinPlan::compile_sort_input(accepted.plan()).is_ok());
+    for body in [
+        "MATCH (c)",
+        "MATCH (c)-[:S*1..2]->(d)",
+        "MATCH p = (b)-[:S*1..2]->(c) WHERE length(p)=2",
+    ] {
         let query = definition(&format!(
             "MATCH (a)-[r:R]->(b) WHERE EXISTS {{ {body} }} RETURN r,a,b"
         ));
         assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
         assert!(AsyncEdgeJoinPlan::compile_aggregate(query.plan()).is_err());
         assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+    }
+    for text in [
+        "MATCH (a)-[r:R]->(b)-[:S*1..2]->(c) RETURN r,a,b,c",
+        "MATCH p = (a)-[:R*1..2]->(b) RETURN p",
+    ] {
+        let query = definition(text);
+        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
+        assert!(AsyncEdgeJoinPlan::compile_aggregate(query.plan()).is_err());
+        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+    }
+}
+
+fn walk_text(direction: usize, lo: u32, hi: u32, anti: bool) -> String {
+    let atom = match direction {
+        0 => format!("-[:S*{lo}..{hi}]->"),
+        1 => format!("<-[:S*{lo}..{hi}]-"),
+        _ => format!("-[:S*{lo}..{hi}]-"),
+    };
+    format!(
+        "MATCH (a)-[r:R]->(b) WHERE {}EXISTS {{ MATCH REPEATABLE ELEMENTS (b){atom}(c) WHERE c.p = a.p }} RETURN r,a,b",
+        if anti { "NOT " } else { "" },
+    )
+}
+
+fn walk_plan(query: &str, mode: GraphWalkSearch) -> AsyncEdgeJoinPlan {
+    let definition = definition(query);
+    let mut operators = definition.plan().operators().to_vec();
+    for operator in &mut operators {
+        if let GlaOperator::VarLengthExpand { search, .. } = operator {
+            *search = mode;
+        }
+    }
+    AsyncEdgeJoinPlan::compile(&GlaPlan::from_operators(operators)).unwrap()
+}
+
+// Complete bounded routes, followed by whole-route legality checks. This does
+// not use endpoint support, depth dominance, cursor positions or the evaluator.
+fn walk_oracle(
+    mask: usize,
+    direction: usize,
+    lo: u32,
+    hi: u32,
+    mode: GraphWalkSearch,
+    anti: bool,
+    hidden: Option<EId>,
+) -> Vec<EId> {
+    let edges: Vec<_> = EDGES
+        .iter()
+        .enumerate()
+        .filter(|(at, edge)| mask & (1 << at) != 0 && hidden != Some(EId(edge.0)))
+        .map(|(_, edge)| *edge)
+        .collect();
+    edges
+        .iter()
+        .filter(|edge| edge.3 == R)
+        .filter_map(|&(id, a, b, _, _)| {
+            let mut layer = vec![(vec![b], Vec::<u128>::new())];
+            let mut witness = false;
+            for depth in 0..=hi {
+                if depth >= lo {
+                    for (vertices, identities) in &layer {
+                        let valid = match mode {
+                            GraphWalkSearch::Trail => {
+                                identities
+                                    .iter()
+                                    .collect::<std::collections::BTreeSet<_>>()
+                                    .len()
+                                    == identities.len()
+                            }
+                            GraphWalkSearch::Acyclic => {
+                                vertices
+                                    .iter()
+                                    .collect::<std::collections::BTreeSet<_>>()
+                                    .len()
+                                    == vertices.len()
+                            }
+                            GraphWalkSearch::Simple => {
+                                let count = vertices.len()
+                                    - usize::from(
+                                        vertices.len() > 1 && vertices.last() == Some(&b),
+                                    );
+                                vertices[..count]
+                                    .iter()
+                                    .collect::<std::collections::BTreeSet<_>>()
+                                    .len()
+                                    == count
+                            }
+                            _ => true,
+                        };
+                        witness |= valid && a != 2 && vertices.last() == Some(&a);
+                    }
+                }
+                if depth == hi {
+                    break;
+                }
+                let mut next = Vec::new();
+                for (vertices, identities) in layer {
+                    let from = *vertices.last().unwrap();
+                    for &(eid, start, end, relation, _) in &edges {
+                        if relation != S {
+                            continue;
+                        }
+                        let target = match direction {
+                            0 if start == from => Some(end),
+                            1 if end == from => Some(start),
+                            2 if start == from => Some(end),
+                            2 if end == from => Some(start),
+                            _ => None,
+                        };
+                        if let Some(target) = target {
+                            let mut vertices = vertices.clone();
+                            vertices.push(target);
+                            let mut identities = identities.clone();
+                            identities.push(eid);
+                            next.push((vertices, identities));
+                        }
+                    }
+                }
+                layer = next;
+            }
+            (witness != anti).then_some(EId(id))
+        })
+        .collect()
+}
+
+#[test]
+fn async_path_support_matches_complete_routes_for_modes_bounds_directions_and_multigraphs() {
+    let mut cases = 0;
+    for mask in 0..64 {
+        for direction in 0..3 {
+            for (lo, hi) in [(0, 0), (0, 3), (1, 3), (3, 3)] {
+                for mode in [
+                    GraphWalkSearch::All,
+                    GraphWalkSearch::AllShortest,
+                    GraphWalkSearch::AnyShortest,
+                    GraphWalkSearch::Trail,
+                    GraphWalkSearch::Acyclic,
+                    GraphWalkSearch::Simple,
+                ] {
+                    for anti in [false, true] {
+                        let query = walk_text(direction, lo, hi, anti);
+                        let source = Source::new(mask);
+                        let counts = source.counts.clone();
+                        let mut cursor =
+                            AsyncEdgeJoinCursor::new(source, walk_plan(&query, mode), wide(), ok);
+                        assert_eq!(
+                            drain(&mut cursor).unwrap(),
+                            walk_oracle(mask, direction, lo, hi, mode, anti, None),
+                            "{query}, mask={mask}, mode={mode:?}"
+                        );
+                        assert!(counts.peak.load(Ordering::SeqCst) <= 2);
+                        assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+                        assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 9216);
+}
+
+#[test]
+fn async_paths_preserve_masking_zero_hops_chained_atoms_and_local_endpoint_properties() {
+    for hidden in [EId(3), EId(4), EId(u128::MAX)] {
+        for anti in [false, true] {
+            let query = walk_text(2, 2, 3, anti);
+            let mut source = Source::new(63);
+            source.hidden = Some(hidden);
+            let mut cursor = AsyncEdgeJoinCursor::new(
+                source,
+                walk_plan(&query, GraphWalkSearch::Trail),
+                wide(),
+                ok,
+            );
+            assert_eq!(
+                drain(&mut cursor).unwrap(),
+                walk_oracle(63, 2, 2, 3, GraphWalkSearch::Trail, anti, Some(hidden))
+            );
+        }
+    }
+    for (body, expected) in [
+        (
+            "MATCH WALK (b)-[:S*0..0]->(c) WHERE c.p IS NULL",
+            vec![EId(2)],
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS (b)-[:S*1..3]->(c)-[:R]->(d) WHERE c.p=a.p AND d.p=2",
+            vec![EId(0), EId(1)],
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS (b)-[:S*1..3]->(c)-[:S*0..0]->(d) WHERE d.p=a.p",
+            vec![EId(0), EId(1)],
+        ),
+        (
+            "MATCH REPEATABLE ELEMENTS (b)-[:S]->(c)-[:S*0..2]->(d) WHERE d.p=a.p",
+            vec![EId(0), EId(1)],
+        ),
+    ] {
+        let query = format!("MATCH (a)-[r:R]->(b) WHERE EXISTS {{ {body} }} RETURN r,a,b");
+        let mut cursor = AsyncEdgeJoinCursor::new(Source::new(63), plan(&query), wide(), ok);
+        assert_eq!(drain(&mut cursor).unwrap(), expected, "{query}");
+    }
+    let query = "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH WALK (b)-[:S*0..0]->(c) } RETURN r,a,b";
+    let mut source = Source::new(63);
+    source.fault = Fault::Unavailable;
+    let counts = source.counts.clone();
+    let mut cursor = AsyncEdgeJoinCursor::new(source, plan(query), wide(), ok);
+    assert_eq!(drain(&mut cursor).unwrap(), vec![EId(0), EId(1), EId(2)]);
+    assert_eq!(counts.seeks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn async_path_source_errors_and_pending_cancellation_never_prove_absence() {
+    let query = "MATCH (a)-[r:R]->(b) WHERE NOT EXISTS { MATCH WALK (b)-[:S*1..3]->(c) WHERE c.p=999 } RETURN r,a,b";
+    for fault in [
+        Fault::Unavailable,
+        Fault::Io,
+        Fault::Missing,
+        Fault::Twice,
+        Fault::Mismatch,
+        Fault::FalseEof,
+        Fault::Repeat,
+    ] {
+        let mut source = Source::new(63);
+        source.fault = fault;
+        let counts = source.counts.clone();
+        let mut cursor = AsyncEdgeJoinCursor::new(source, plan(query), wide(), ok);
+        assert!(run(cursor.next()).unwrap().is_err(), "fault failed to stop");
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert!(run(cursor.next()).is_none());
+        assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+    }
+    let mut source = Source::new(63);
+    source.fault = Fault::Pending;
+    let counts = source.counts.clone();
+    let mut cursor = AsyncEdgeJoinCursor::new(source, plan(query), wide(), ok);
+    let mut future = Box::pin(cursor.next());
+    fn assert_send<T: Send>(_: &T) {}
+    assert_send(&future);
+    assert!(
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    drop(future);
+    assert_eq!(cursor.state(), EdgeScanState::Failed);
+    assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn async_path_support_shares_exact_limits_and_every_checkpoint_with_its_outer_binding() {
+    let query = "MATCH (a)-[r:R]->(b) WHERE NOT EXISTS { MATCH WALK (b)-[:S*1..3]->(c) WHERE c.p=999 } RETURN r,a,b";
+    let mut calls = 0;
+    let mut cursor = AsyncEdgeJoinCursor::new(Source::new(63), plan(query), wide(), || {
+        calls += 1;
+        Ok::<_, usize>(())
+    });
+    let expected = drain(&mut cursor).unwrap();
+    let rows = cursor.row_stats();
+    let evaluator = cursor.evaluator_stats();
+    drop(cursor);
+    assert_eq!(expected, vec![EId(0), EId(1), EId(2)]);
+    for stop in 0..calls {
+        let source = Source::new(63);
+        let counts = source.counts.clone();
+        let mut calls = 0;
+        let mut cursor = AsyncEdgeJoinCursor::new(source, plan(query), wide(), || {
+            let at = calls;
+            calls += 1;
+            if at == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(drain(&mut cursor), Err(GqlQueryError::Interrupted(at)) if at == stop));
+        assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+    }
+    let exact = [
+        rows.snapshot_records,
+        rows.result_rows,
+        evaluator.work_units,
+        evaluator.scratch_entries,
+    ];
+    for dimension in 0..4 {
+        for below in [false, true] {
+            let mut limits = exact;
+            limits[dimension] -= u64::from(below);
+            let mut cursor = AsyncEdgeJoinCursor::new(
+                Source::new(63),
+                plan(query),
+                GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                ok,
+            );
+            let result = drain(&mut cursor);
+            if below {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), expected);
+            }
+        }
     }
 }

@@ -533,3 +533,103 @@ fn dropped_pending_join_spill_refunds_native_records_output_and_encoder_but_not_
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn cold_variable_path_existence_keeps_historical_properties_modes_and_external_barriers() {
+    let ((), report) = run_async_under_lab(0xc01d_3005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let source_pool = MemoryPool::new(1_000_000, 0).unwrap();
+        let spill_pool = MemoryPool::new(1_000_000, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        for cut in [1, 2] {
+            let end = if cut == 1 { 4 } else { 14 };
+            let selected = if cut == 1 {
+                vec![9, 8, 7]
+            } else {
+                vec![17, 9, 8]
+            };
+            for (mode, interval, anti, expected) in [
+                ("WALK", "1..3", false, selected.clone()),
+                ("TRAIL", "2..2", false, selected.clone()),
+                ("ACYCLIC", "2..2", false, vec![]),
+                ("SIMPLE", "2..2", false, vec![]),
+                ("WALK", "0..0", false, vec![10]),
+                ("WALK", "1..3", true, vec![10]),
+            ] {
+                let text = format!(
+                    "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ {cut} WHERE {}EXISTS {{ MATCH {mode} (b)-[:R*{interval}]->(c) WHERE c.p={end} }} WITH r.p AS value ORDER BY value DESC RETURN value ORDER BY value DESC",
+                    if anti { "NOT " } else { "" },
+                );
+                let prepared = prepare(&text);
+                let (mut scratch, _) = file(&cx, &spill_pool).await;
+                let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+                let (spool, _) = prepared
+                    .spool_in_view(
+                        &mut view,
+                        &cx,
+                        policy(expected.len() as u64),
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        1,
+                        32,
+                        1,
+                        32,
+                        31,
+                        8192,
+                        100,
+                        WORK,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{text}: {error}"));
+                assert_eq!(spool.snapshot_seq(), CommitSeq(cut));
+                assert_eq!(
+                    contents(&spool, &mut destination, &cx).await,
+                    frames(expected.into_iter().map(scalar).collect()),
+                    "{text}"
+                );
+                assert_eq!(source_pool.used(), baseline);
+                assert_eq!(spill_pool.used(), 0);
+            }
+        }
+        // The complete source must evaluate a reached native predicate even
+        // when its blocking parent's final page has no rows to publish.
+        let prepared = prepare(
+            "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH WALK (b)-[:R*1..2]->(c) WHERE 1/(c.p-c.p)=0 } RETURN r.p AS value LIMIT 0",
+        );
+        let (mut scratch, _) = file(&cx, &spill_pool).await;
+        let (mut destination, _) = file(&cx, &spill_pool).await;
+        let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+        assert!(
+            prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    policy(0),
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    1,
+                    32,
+                    1,
+                    32,
+                    31,
+                    8192,
+                    100,
+                    WORK,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(destination.stats().published_runs, 0);
+        assert_eq!(source_pool.used(), baseline);
+        assert_eq!(spill_pool.used(), 0);
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
