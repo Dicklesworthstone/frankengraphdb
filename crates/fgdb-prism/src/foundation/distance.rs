@@ -1,7 +1,11 @@
-//! Exact distance centralities over the admitted undirected CSR.
+//! Exact incoming-distance centralities over the admitted CSR.
+//!
+//! Directed scores measure distances into each vertex, as in pinned FNX.
+//! Reversing the requested projection therefore measures stored outgoing
+//! distances. Undirected projections share their outgoing and incoming face.
 //!
 //! The pinned foundation's multi-source BFS advances 64--512 sources in each
-//! word-parallel traversal. Keep that advantage: low-diameter graphs use the
+//! word-parallel traversal. Undirected low-diameter graphs use the
 //! same bit operations and high-diameter or disconnected graphs use independent
 //! FIFO source traversals. A fixed eight-worker policy selects source batches;
 //! fewer physical workers change scheduling, never the witness or score bits.
@@ -126,6 +130,12 @@ fn lane_width<C>(
     checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<(usize, usize), FnxExecutionError<C>> {
     let n = graph.node_count();
+    // One source's eccentricity bounds an undirected diameter only. Directed
+    // reachability cannot justify that gate; exact independent reverse BFS
+    // retains the registered worst-case work bound without a probe.
+    if graph.is_directed() {
+        return Ok((0, 0));
+    }
     if n < PARALLEL_SOURCES {
         return Ok((n.div_ceil(64).clamp(1, 8), 0));
     }
@@ -157,7 +167,7 @@ fn lane_width<C>(
         head += 1;
         let next_distance = distance[source] + 1;
         for &target in graph
-            .neighbors_indices(source)
+            .in_neighbors_indices(source)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?
         {
             arithmetic.step()?;
@@ -383,7 +393,7 @@ impl<const W: usize, const HARMONIC: bool> Worker<W, HARMONIC> {
                 }
                 let next_distance = code.checked_add(1).ok_or(WorkerError::SizeOverflow)?;
                 let mut row = graph
-                    .neighbors_indices(vertex)
+                    .in_neighbors_indices(vertex)
                     .ok_or(WorkerError::InvalidProjection)?;
                 while !row.is_empty() {
                     let count = live.take(row.len())?;
@@ -454,7 +464,7 @@ impl<const W: usize, const HARMONIC: bool> Worker<W, HARMONIC> {
                     continue;
                 }
                 let mut row = graph
-                    .neighbors_indices(vertex)
+                    .in_neighbors_indices(vertex)
                     .ok_or(WorkerError::InvalidProjection)?;
                 while !row.is_empty() {
                     let admitted_count = live.take(row.len())?;

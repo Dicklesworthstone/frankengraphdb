@@ -216,7 +216,7 @@ fn every_small_distance_centrality_matches_pinned_fnx_and_independent_distances(
                 let source_pass = 2 * n + projected_arcs;
                 assert!(
                     ticks + graph.source_steps.get()
-                        <= work(n, projected_arcs, source_pass, 2).unwrap()
+                        <= work(n, projected_arcs, source_pass, 2, false).unwrap()
                 );
             }
             cases += 1;
@@ -252,7 +252,7 @@ fn long_paths_disconnected_components_and_hubs_preserve_score_bits() {
 fn isolates_only_initialize_once_and_never_clear_unreached_vertices() {
     let n = 4096;
     let pass = directional_pass_work(n, 0, crate::Directedness::Undirected).unwrap();
-    let estimated = work(n, 0, pass, 2).unwrap();
+    let estimated = work(n, 0, pass, 2, false).unwrap();
     assert_eq!(estimated, 33 * n + 18);
     assert!(estimated < n * n);
     for harmonic in [false, true] {
@@ -284,7 +284,7 @@ fn sparse_components_admit_all_source_and_retained_history_work() {
     // the reduced arcs. The entire physical pass must remain in admission.
     let retained = 8192;
     let pass = directional_pass_work(n, retained, crate::Directedness::Undirected).unwrap();
-    let estimated = work(n, projected_arcs, pass, 2).unwrap();
+    let estimated = work(n, projected_arcs, pass, 2, false).unwrap();
     let component_bound = pairs.len() + 1;
     let fixed = n * 13 + 18;
     assert!(estimated >= component_bound * pass + fixed);
@@ -309,7 +309,7 @@ fn sparse_components_admit_all_source_and_retained_history_work() {
         // The scalar/source bound is valid even without retained history.
         assert!(
             ticks + graph.source_steps.get()
-                <= work(n, projected_arcs, 2 * n + projected_arcs, 2).unwrap()
+                <= work(n, projected_arcs, 2 * n + projected_arcs, 2, false).unwrap()
         );
     }
 }
@@ -397,10 +397,10 @@ fn workspace_overflow_and_malformed_rows_fail_before_a_result() {
         ));
     }
     assert!(workspace(usize::MAX).is_err());
-    assert!(work(usize::MAX, 0, 0, 2).is_err());
-    assert!(work(2, 0, usize::MAX, 2).is_err());
-    assert!(work(1, usize::MAX, 0, 2).is_err());
-    assert!(work(1, 0, 0, usize::MAX).is_err());
+    assert!(work(usize::MAX, 0, 0, 2, false).is_err());
+    assert!(work(2, 0, usize::MAX, 2, false).is_err());
+    assert!(work(1, usize::MAX, 0, 2, false).is_err());
+    assert!(work(1, 0, 0, usize::MAX, false).is_err());
 }
 
 fn policy(rows: &[Vec<usize>]) -> BatchPolicy {
@@ -411,7 +411,7 @@ fn policy(rows: &[Vec<usize>]) -> BatchPolicy {
         pass,
         arcs,
         columns: 2,
-        admitted: work(nodes, arcs, pass, 2).unwrap(),
+        admitted: work(nodes, arcs, pass, 2, false).unwrap(),
     }
 }
 
@@ -639,4 +639,59 @@ fn batch_rows_validate_targets_and_loops_after_optional_selection() {
             ))
         ));
     }
+}
+
+#[test]
+fn directed_incoming_traversals_match_independent_distances_and_work_bounds() {
+    let mut cases = 0;
+    for n in 0..=4 {
+        let pairs: Vec<_> = (0..n)
+            .flat_map(|source| {
+                (0..n)
+                    .filter(move |&target| source != target)
+                    .map(move |target| (source, target))
+            })
+            .collect();
+        for mask in 0usize..(1 << pairs.len()) {
+            let mut outgoing = vec![Vec::new(); n];
+            let mut incoming = vec![Vec::new(); n];
+            for (bit, &(source, target)) in pairs.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    outgoing[source].push(target);
+                    incoming[target].push(source);
+                }
+            }
+            let shortest = distances(&outgoing);
+            let into: Vec<Vec<_>> = (0..n)
+                .map(|target| (0..n).map(|source| shortest[source][target]).collect())
+                .collect();
+            let arcs = outgoing.iter().map(Vec::len).sum::<usize>();
+            let source_pass = 2 * n + arcs;
+            for harmonic in [false, true] {
+                let graph = Fixture::new(incoming.clone());
+                let mut ticks = 0;
+                let (output, peak) = run(&graph, harmonic, workspace(n).unwrap(), &mut || {
+                    ticks += 1;
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(
+                    bits(&output),
+                    score_bits(&into, harmonic),
+                    "n={n}, mask={mask}, harmonic={harmonic}"
+                );
+                assert_eq!(output.row_count, n);
+                assert_eq!(peak, workspace(n).unwrap());
+                assert!(
+                    ticks + graph.source_steps.get()
+                        <= work(n, arcs, source_pass, 2, true).unwrap(),
+                    "n={n}, mask={mask}, harmonic={harmonic}"
+                );
+            }
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 4166);
+    assert!(work(64, 8, 0, 2, true).unwrap() > work(64, 8, 0, 2, false).unwrap());
+    assert!(work(1, usize::MAX, 0, 2, true).is_err());
 }

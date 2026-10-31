@@ -1310,11 +1310,11 @@ fn native_distance_calls_certify_vertex_scratch_and_stop_at_every_live_poll() {
     for (name, kernel) in [
         (
             "closeness_centrality",
-            "fgdb-prism/closeness-csr-batched-policy-v2",
+            "fgdb-prism/closeness-incoming-csr-batched-policy-v3",
         ),
         (
             "harmonic_centrality",
-            "fgdb-prism/harmonic-csr-batched-policy-v2",
+            "fgdb-prism/harmonic-incoming-csr-batched-policy-v3",
         ),
     ] {
         let mut workspace = None;

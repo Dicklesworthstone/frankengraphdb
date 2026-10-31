@@ -1,17 +1,23 @@
-//! Exact closeness and harmonic centrality over compressed adjacency.
+//! Exact incoming closeness and harmonic centrality over compressed adjacency.
+//!
+//! Directed inputs borrow a separately admitted opposite projection, preserving
+//! the requested projection identity in the result. Reversed inputs therefore
+//! measure outgoing distances in the stored graph. No decoded fallback exists.
 //!
 //! Reuse one FIFO and one distance vector for successive source traversals.
 //! Only reached vertices are reset between sources, so isolated populations
 //! do not incur a quadratic clear. Scores retain the registered FNX arithmetic:
 //! Wasserman-Faust reachable-set correction for closeness, and one reciprocal
 //! addition per reached vertex in ascending distance for harmonic centrality.
-//! Neither driver retains adjacency or an all-pairs distance matrix.
+//! Undirected drivers borrow their admitted rows; directed drivers retain a
+//! charged opposite projection and compressed index. Neither retains an
+//! all-pairs distance matrix.
 //! Connected low-diameter projections may advance 64 sources with each row
 //! visit. The ordinary first source earns that decision; no probe scan is
 //! added. Both drivers share the word frontier and every scalar transition.
 
 use super::{
-    ComplexityWitness, Cursor, Delivery, ExecutionError, Finished, FnxAlgorithm, FnxCallSpec,
+    ComplexityWitness, Cursor, Delivery, Directedness, ExecutionError, Finished, FnxAlgorithm, FnxCallSpec,
     FnxExecutionLimits, FnxMemoryLimits, FoundationAlgorithm, KernelOutput, KernelValues, Result,
     ResultAdmission, Rows, SealedGraphView, SealedRows, add, admit, checkpoint,
     directional_pass_work, finish, finish_encoded, mul, require_loop_free_degree, reserve,
@@ -112,13 +118,14 @@ fn workspace(n: usize) -> Result<usize> {
     mul(n, 2 * size_of::<usize>() + size_of::<f64>())
 }
 
-fn work(n: usize, arcs: usize, pass: usize, columns: usize) -> Result<usize> {
-    // The registered graph is simple, undirected and loop-free. A component
-    // of c vertices needs at least c-1 edges, so no row can be reached from
-    // more than min(V,E+1) sources. Reached-only resets share the same bound.
-    // `pass` still prices BOTH compressed faces and all retained/excluded
+fn work(n: usize, arcs: usize, pass: usize, columns: usize, directed: bool) -> Result<usize> {
+    // A weak component of c vertices needs at least c-1 edges. Directed arcs
+    // count once, undirected arcs twice. Incoming reachability stays inside
+    // that component, so reached-only resets share this source bound.
+    // `pass` prices the traversed compressed face and all retained/excluded
     // history: reducing the number of visits never makes a visit cheaper.
-    let component = n.min(add(arcs / 2, 1)?);
+    let edges = if directed { arcs } else { arcs / 2 };
+    let component = n.min(add(edges, 1)?);
     let traversals = add(pass, add(arcs, mul(n, 4)?)?)?;
     // Initialization/output and every source's start/finish transitions stay
     // linear in the full population, including sources that are isolates.
@@ -720,7 +727,32 @@ fn run_with_policy(
     state.finish()
 }
 
-fn kernel(output: &KernelOutput, harmonic: bool, cooperative: bool) -> &'static str {
+fn incoming_witness(output: &mut KernelOutput, harmonic: bool, directed: bool) {
+    if directed {
+        output.witness.algorithm = if harmonic {
+            "harmonic_centrality_incoming_fifo_cursor"
+        } else {
+            "closeness_centrality_incoming_fifo_cursor"
+        }
+        .to_owned();
+        output.witness.complexity_claim = "O(V + C*(V*(1+log(1+H)) + H*(1+log(1+H)+log(1+V)))); C <= min(V,E+1) bounds weak-component size, E is projected directed edges and H is retained incidence count; O(V) scalar workspace plus an admitted opposite projection including compressed index construction".to_owned();
+    }
+}
+
+fn kernel(
+    output: &KernelOutput,
+    harmonic: bool,
+    cooperative: bool,
+    directed: bool,
+) -> &'static str {
+    if directed {
+        return match (harmonic, cooperative) {
+            (false, false) => "fgdb-prism/sealed-closeness-incoming-fifo-v2",
+            (true, false) => "fgdb-prism/sealed-harmonic-incoming-fifo-v2",
+            (false, true) => "fgdb-prism/sealed-closeness-incoming-fifo-cooperative-v2",
+            (true, true) => "fgdb-prism/sealed-harmonic-incoming-fifo-cooperative-v2",
+        };
+    }
     let batched = output.witness.algorithm == "harmonic_centrality_batch64_cursor_v1"
         || output.witness.algorithm == "closeness_centrality_batch64_cursor_v1";
     match (harmonic, batched, cooperative) {
@@ -752,15 +784,47 @@ fn prepare(
 ) -> Result<usize> {
     let n = graph.node_count();
     admission.rows(n)?;
-    let pass = directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
-    let estimated = work(n, graph.adjacency_entry_count(), pass, call.outputs().len())?;
+    let direction = graph.spec().directedness;
+    let directed = direction != Directedness::Undirected;
+    let retained = graph.scan_incidence_bound();
+    let (pass, setup) = if directed && n != 0 {
+        let opposite = if direction == Directedness::Directed {
+            Directedness::Reversed
+        } else {
+            Directedness::Directed
+        };
+        let incoming = directional_pass_work(n, retained, opposite)?;
+        // The temporary face authenticates the same selection and may build
+        // a compressed incoming index. Admit its sort/encode work before any
+        // construction allocation, as for directed Brandes.
+        let height = (usize::BITS - retained.leading_zeros()) as usize;
+        let index = mul(retained, add(32, mul(height, 4)?)?)?;
+        let setup = add(mul(incoming, 2)?, add(index, mul(n, 8)?)?)?;
+        (incoming, setup)
+    } else {
+        (directional_pass_work(n, retained, direction)?, 0)
+    };
+    let estimated = add(
+        work(
+            n,
+            graph.adjacency_entry_count(),
+            pass,
+            call.outputs().len(),
+            directed,
+        )?,
+        setup,
+    )?;
     admit("estimated work", estimated, limits.max_estimated_work)?;
     admit(
         "kernel workspace bytes",
         workspace(n)?,
         memory.max_kernel_workspace_bytes,
     )?;
-    require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+    if !directed {
+        require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+    }
+    // Directed arcs cannot prove loop absence from counts. Every vertex is
+    // a BFS source, and visit refuses its self-loop before any result escapes.
     Ok(estimated)
 }
 
@@ -774,16 +838,39 @@ pub(super) fn execute(
 ) -> Result<Finished> {
     let harmonic = harmonic(call)?;
     let estimated = prepare(call, graph, limits, memory, admission)?;
-    let rows = SealedRows { cx, graph };
+    let directed = graph.spec().directedness != Directedness::Undirected;
+    let reverse = if directed && graph.node_count() != 0 {
+        let remaining = memory
+            .max_kernel_workspace_bytes
+            .checked_sub(workspace(graph.node_count())?)
+            .ok_or(ExecutionError::SizeOverflow)?;
+        Some(graph.reverse_projection_controlled(cx, remaining)?)
+    } else {
+        None
+    };
+    let auxiliary = reverse
+        .as_ref()
+        .map_or(0, SealedGraphView::charged_workspace_bytes);
+    let remaining = memory
+        .max_kernel_workspace_bytes
+        .checked_sub(auxiliary)
+        .ok_or(ExecutionError::SizeOverflow)?;
+    let rows = SealedRows {
+        cx,
+        graph: reverse.as_ref().unwrap_or(graph),
+    };
     let mut control = || checkpoint(cx);
-    let (output, peak) = run_with_policy(
+    let (mut output, peak) = run_with_policy(
         &rows,
         harmonic,
-        memory.max_kernel_workspace_bytes,
+        remaining,
         batch_policy(graph, estimated, call.outputs().len())?,
         &mut control,
     )?;
-    let kernel = kernel(&output, harmonic, false);
+    let peak = add(peak, auxiliary)?;
+    drop(reverse);
+    incoming_witness(&mut output, harmonic, directed);
+    let kernel = kernel(&output, harmonic, false, directed);
     finish(
         call,
         graph,
@@ -815,10 +902,28 @@ where
     let n = graph.node_count();
     let mut state = Traversals::new(n, harmonic, memory.max_kernel_workspace_bytes)?;
     state.policy = batch_policy(graph, estimated, call.outputs().len())?;
+    let directed = graph.spec().directedness != Directedness::Undirected;
+    let reverse = if directed && n != 0 {
+        let remaining = memory
+            .max_kernel_workspace_bytes
+            .checked_sub(state.peak)
+            .ok_or(ExecutionError::SizeOverflow)?;
+        let reverse = control.reverse_projection(graph, remaining).await?;
+        state.peak = add(state.peak, reverse.charged_workspace_bytes())?;
+        admit(
+            "kernel workspace bytes",
+            state.peak,
+            memory.max_kernel_workspace_bytes,
+        )?;
+        Some(reverse)
+    } else {
+        None
+    };
+    let incoming = reverse.as_ref().unwrap_or(graph);
     while !state.complete() {
         control.tick().await?;
         if let Some(vertex) = state.row() {
-            let mut row = graph.neighbor_cursor_controlled(control.cx, vertex, None)?;
+            let mut row = incoming.neighbor_cursor_controlled(control.cx, vertex, None)?;
             while let Some((neighbor, _)) = control.next(&mut row).await? {
                 control.tick().await?;
                 state.visit(neighbor)?;
@@ -829,8 +934,10 @@ where
         }
     }
     control.tick().await?;
-    let (output, peak) = state.finish()?;
-    let kernel = kernel(&output, harmonic, true);
+    let (mut output, peak) = state.finish()?;
+    drop(reverse);
+    incoming_witness(&mut output, harmonic, directed);
+    let kernel = kernel(&output, harmonic, true, directed);
     let mut encoded = super::EncodedRows::new(call, n, &admission)?;
     for vertex in 0..n {
         control.tick().await?;

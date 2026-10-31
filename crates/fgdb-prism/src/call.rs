@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 22;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 23;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -309,20 +309,26 @@ const SIGNATURES: &[FnxSignature] = &[
         "O(|V| + |E|)",
         "fgdb-prism/degree-centrality-csr-v1",
     ),
-    foundation(
-        "fnx.closeness_centrality",
-        FnxOutput::Score,
-        "explicit undirected simple projection; unweighted; self-loops refused; Wasserman-Faust reachable-set closeness per connected component",
-        "O(|V| * (|V| + |E|))",
-        "fgdb-prism/closeness-csr-batched-policy-v2",
-    ),
-    foundation(
-        "fnx.harmonic_centrality",
-        FnxOutput::Score,
-        "explicit undirected simple projection; unweighted; self-loops refused; sum of reciprocal hop distances to every other reachable vertex",
-        "O(|V| * (|V| + |E|))",
-        "fgdb-prism/harmonic-csr-batched-policy-v2",
-    ),
+    FnxSignature {
+        graph_kind: FnxGraphKind::Any,
+        ..foundation(
+            "fnx.closeness_centrality",
+            FnxOutput::Score,
+            "unqualified whole-graph input defaults to undirected; explicit directed, reversed or undirected simple projection; unweighted; self-loops refused; incoming hop distances to each vertex, so a reversed projection measures outgoing distances in the stored graph; Wasserman-Faust reachable-set correction; isolates score zero",
+            "O(|V| * (|V| + |E|))",
+            "fgdb-prism/closeness-incoming-csr-batched-policy-v3",
+        )
+    },
+    FnxSignature {
+        graph_kind: FnxGraphKind::Any,
+        ..foundation(
+            "fnx.harmonic_centrality",
+            FnxOutput::Score,
+            "unqualified whole-graph input defaults to undirected; explicit directed, reversed or undirected simple projection; unweighted; self-loops refused; sum of reciprocal incoming hop distances from every other reachable vertex, so a reversed projection measures outgoing distances in the stored graph; isolates score zero",
+            "O(|V| * (|V| + |E|))",
+            "fgdb-prism/harmonic-incoming-csr-batched-policy-v3",
+        )
+    },
     FnxSignature {
         name: "fnx.betweenness_centrality",
         graph_input_arity: 1,

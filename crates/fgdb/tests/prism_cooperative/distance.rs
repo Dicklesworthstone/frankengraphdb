@@ -509,13 +509,12 @@ fn compressed_distance_centralities_preserve_empty_isolate_and_graph_kind_laws()
                             .await
                     }
                     .unwrap_err();
+                    // Directed admission now reaches the zero-byte image limit.
                     assert!(matches!(
                         error,
-                        FnxSealedReadError::Execution(FnxSealedExecutionError::Execution(
-                            FnxExecutionError::GraphKind {
-                                required: FnxGraphKind::Undirected
-                            }
-                        ))
+                        FnxSealedReadError::Seal(
+                            fgdb_strata::tiered::sealed::SealedError::Identity(_)
+                        )
                     ));
                 }
             }
@@ -1016,5 +1015,153 @@ fn compressed_distance_batches_stop_at_scalar_row_and_output_checkpoints() {
                 assert_eq!(contexts.outstanding_obligations(), 0);
             }
         }
+    });
+}
+
+#[test]
+fn directed_distance_centralities_preserve_incoming_scores_history_and_projection_identity() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let (mut db, original) = database(&contexts.commit()).await;
+        let mut change = WriteBatch::new(RelationId(1));
+        change.create_vertex(VId(3), vec![LabelId(1)], vec![]);
+        change.add_edge(
+            EId(7),
+            VId(2),
+            VId(0),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(-4))],
+        );
+        db.write(&contexts.commit(), change).await.unwrap();
+        let mut unrelated = WriteBatch::new(RelationId(2));
+        unrelated.add_edge(
+            EId(8),
+            VId(0),
+            VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+        );
+        db.write(&contexts.commit(), unrelated).await.unwrap();
+        let current = db.frontier().unwrap();
+        let view = db.read_session().unwrap();
+        // Original arcs: 0->1, 1->0, 1->2, 2->MAX. The current cut adds
+        // 2->0 and isolated vertex 3. Excluded label 99 and relation 2 must
+        // not affect either orientation or expose excluded Bool weights.
+        let third = 1.0 / 3.0;
+        let four_ninths = (2.0 / 3.0) * (2.0 / 3.0);
+        let harmonic_three = (1.0 + 0.5) + 1.0 / 3.0;
+        for harmonic in [false, true] {
+            let call = call(harmonic);
+            assert_eq!(call.signature().graph_kind, FnxGraphKind::Any);
+            assert_eq!(
+                FnxReadOptions::whole_graph_for(&call, None).projection.directedness,
+                Directedness::Undirected
+            );
+            for direction in [Directedness::Directed, Directedness::Reversed] {
+                for at in [original, current] {
+                    let mut opt = options(direction);
+                    opt.as_of = Some(at);
+                    opt.projection.self_loops = SelfLoopPolicy::Drop;
+                    let values = match (harmonic, direction, at == original) {
+                        (false, Directedness::Directed, true) => {
+                            vec![third, third, four_ninths, 0.5]
+                        }
+                        (false, Directedness::Reversed, true) => {
+                            vec![0.5, 0.75, third, 0.0]
+                        }
+                        (false, Directedness::Directed, false) => {
+                            vec![0.5, third, third, 0.0, 0.375]
+                        }
+                        (false, Directedness::Reversed, false) => {
+                            vec![0.375, 0.5625, 0.5625, 0.0, 0.0]
+                        }
+                        (true, Directedness::Directed, true) => {
+                            vec![1.0, 1.0, 1.5, harmonic_three]
+                        }
+                        (true, Directedness::Reversed, true) => {
+                            vec![harmonic_three, 2.5, 1.0, 0.0]
+                        }
+                        (true, Directedness::Directed, false) => {
+                            vec![2.0, 1.5, 1.5, 0.0, harmonic_three]
+                        }
+                        (true, Directedness::Reversed, false) => {
+                            vec![harmonic_three, 2.5, 2.5, 0.0, 0.0]
+                        }
+                        _ => unreachable!(),
+                    };
+                    let ids = if at == original {
+                        vec![0, 1, 2, u128::MAX]
+                    } else {
+                        vec![0, 1, 2, 3, u128::MAX]
+                    };
+                    let literal: Vec<_> = ids
+                        .into_iter()
+                        .zip(values)
+                        .map(|(id, score)| vec![FnxValue::Score(score), FnxValue::Vertex(VId(id))])
+                        .collect();
+                    let graph = projection(&db, &cx, opt).await;
+                    let expected = call
+                        .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                        .unwrap();
+                    assert_eq!(expected.rows, literal, "{direction:?}, {at:?}");
+                    assert_eq!(expected.certificate.projection_digest, graph.digest());
+                    assert_eq!(expected.certificate.snapshot, graph.binding());
+                    let native = view.execute_fnx(&cx, &call, opt).unwrap().analytics;
+                    assert_eq!(native.rows, literal);
+                    assert_eq!(native.certificate.result_digest, expected.certificate.result_digest);
+                    let exact = expected.certificate.estimated_work;
+                    assert!(matches!(
+                        call.execute_sealed(
+                            &cx,
+                            &graph,
+                            FnxExecutionLimits {
+                                max_estimated_work: exact - 1,
+                                ..opt.execution_limits
+                            },
+                            memory(),
+                        ),
+                        Err(FnxSealedExecutionError::Execution(
+                            FnxExecutionError::LimitExceeded {
+                                resource: "estimated work",
+                                requested,
+                                limit,
+                            }
+                        )) if requested == exact && limit == exact - 1
+                    ));
+                    for q in [1, 7] {
+                        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                        let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                        let (actual, pending) = drive(
+                            call.execute_sealed_cooperative(
+                                &controlled,
+                                &graph,
+                                opt.execution_limits,
+                                memory(),
+                                quantum(q),
+                                yield_now,
+                            ),
+                            &probe,
+                            q,
+                        );
+                        compare_execution(&actual.unwrap(), &expected);
+                        assert!(pending > 0);
+                    }
+                    let hosted = db
+                        .execute_fnx_sealed_cooperative(
+                            &cx,
+                            &call,
+                            opt,
+                            memory(),
+                            SealedLimits::default(),
+                            quantum(7),
+                        )
+                        .await
+                        .unwrap();
+                    compare_execution(&hosted.analytics, &expected);
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
