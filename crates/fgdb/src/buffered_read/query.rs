@@ -180,6 +180,14 @@ pub(crate) enum BufferedVertexSeeds {
 }
 
 impl BufferedVertexSeeds {
+    fn as_slice(&self) -> &[VId] {
+        match self {
+            Self::Empty => &[],
+            Self::One(vid) => std::slice::from_ref(vid),
+            Self::Many { remaining, .. } => remaining.as_slice(),
+        }
+    }
+
     fn next(&mut self) -> Option<VId> {
         match self {
             Self::Empty => None,

@@ -590,6 +590,56 @@ impl<V: Vfs + Clone> ExternalOrderHost for BufferedHost<'_, V> {
                     )
                     .await
                 }
+                AsyncSpillSetSourcePlan::Edge(source) => {
+                    let cursor = self
+                        .view
+                        .open_seeded_edge_input(cx, source.clone(), seeds, snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Edge),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
+                AsyncSpillSetSourcePlan::Join(source) => {
+                    let cursor = self
+                        .view
+                        .open_seeded_edge_join_input(cx, source.clone(), seeds, snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Edge),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
                 AsyncSpillSetSourcePlan::Walk(source) => {
                     let cursor = self
                         .view

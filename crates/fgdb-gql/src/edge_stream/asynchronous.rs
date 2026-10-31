@@ -105,6 +105,12 @@ impl AsyncEdgeScanPlan {
         self.inner.relation
     }
 
+    /// Which stored endpoint supplies the root vertex in binding slot zero.
+    /// Undirected roots retain both native orientations after source pruning.
+    pub fn root_direction(&self) -> GlaDirection {
+        self.inner.direction
+    }
+
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         if let Some(operator) = plan.operators().iter().position(|operator| {
             matches!(

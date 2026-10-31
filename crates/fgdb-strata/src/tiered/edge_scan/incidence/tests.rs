@@ -16,6 +16,9 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "selected_root_tests.rs"]
+mod selected_roots;
+
 const R: RelationId = RelationId(5);
 const S: RelationId = RelationId(8);
 const P: PropertyKeyId = PropertyKeyId(11);

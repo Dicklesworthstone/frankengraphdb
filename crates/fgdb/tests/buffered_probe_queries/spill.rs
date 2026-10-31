@@ -4,6 +4,9 @@
 #[path = "walk_seeds.rs"]
 mod walk_seeds;
 
+#[path = "edge_seeds.rs"]
+mod edge_seeds;
+
 use super::*;
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use fgdb::{NativeAggregateSpoolError, NativeSpoolError, PreparedNativeRead};

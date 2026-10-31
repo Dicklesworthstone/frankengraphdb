@@ -9,6 +9,8 @@ use fgdb_types::VId;
 mod stream;
 pub use stream::BufferedEdgeIncidenceScan;
 
+mod selected_roots;
+
 /// Stored incidence direction, independent of a query language's operator IR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferedEdgeDirection {

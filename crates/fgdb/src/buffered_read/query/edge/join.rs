@@ -249,6 +249,34 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         Ok(AsyncEdgeJoinCursor::new(source, plan, policy, checkpoint))
     }
 
+    /// Restrict only the first edge's slot-zero domain. The native fixed-hop
+    /// cursor keeps every expansion, capture, direction and parallel occurrence;
+    /// its independent incidence requests use the same pinned source unchanged.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn open_seeded_edge_join_input<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncEdgeJoinPlan,
+        seeds: BufferedVertexSeeds,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        AsyncEdgeJoinCursor<
+            impl AsyncEdgeJoinSource<
+                Error = BufferedReadError,
+                OutputGuard = MemoryCharge,
+                TraversalGuard = MemoryCharge,
+            > + use<'view, 'q, V>,
+            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
+        >,
+        EdgeQueryError,
+    > {
+        let (mut source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
+        source.edge_seed_direction = Some(seed_direction(plan.root_direction()));
+        source.vertex_seeds = Some(seeds);
+        Ok(AsyncEdgeJoinCursor::new(source, plan, policy, checkpoint))
+    }
+
     // Numeric reducers consume private occurrences, not delivered join rows.
     // Preserve the same routed source, cut, QueryCx and resident reservations;
     // only the sealed native aggregate-input plan selects its accounting mode.

@@ -434,15 +434,124 @@ fn walk_seed_proof_keeps_native_path_modes_and_requires_the_root_identity() {
             assert_eq!(selected(right, &[equal(0, 2)]).vertex_seed_column(), None);
         }
     }
-    for right in [
-        pattern("MATCH WALK (a)-[:R*1..2]->(b) WHERE 1/(b.p-2)>0 RETURN b,a"),
-        pattern("MATCH (a)-[:R]->(b) RETURN b,a"),
-        pattern("MATCH (a)-[:R]->(c)-[:R]->(b) RETURN b,a"),
+    assert_eq!(
+        selected(
+            pattern("MATCH WALK (a)-[:R*1..2]->(b) WHERE 1/(b.p-2)>0 RETURN b,a"),
+            &[equal(0, 2)],
+        )
+        .vertex_seed_column(),
+        None,
+        "fallible predicates retain their full input"
+    );
+}
+
+#[test]
+fn fixed_edge_seed_proof_keeps_root_direction_and_rejects_other_endpoints_and_errors() {
+    use crate::algebra::GlaDirection;
+
+    let pattern = |text: &str| -> PreparedGraphSet {
+        PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => {
+                Some(GraphSymbol::Relation(fgdb_delta_types::RelationId(7)))
+            }
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .with_duplicates()
+        .into()
+    };
+    let left = pattern("MATCH (wanted) RETURN wanted");
+    let selected = |right: PreparedGraphSet, predicate: &[GraphSetPredicateOp]| {
+        cross(
+            &left
+                .clone()
+                .cross_join(right)
+                .unwrap()
+                .filter(predicate)
+                .unwrap(),
+        )
+    };
+    for (text, direction, joined) in [
+        (
+            "MATCH (a)-[:R]->(b) RETURN b,a",
+            GlaDirection::Forward,
+            false,
+        ),
+        (
+            "MATCH (a)<-[:R]-(b) RETURN b,a",
+            GlaDirection::Reverse,
+            false,
+        ),
+        (
+            "MATCH (a)-[:R]-(b) RETURN b,a",
+            GlaDirection::Undirected,
+            false,
+        ),
+        (
+            "MATCH (a)-[:R]->(c)-[:R]->(b) RETURN b,a",
+            GlaDirection::Forward,
+            true,
+        ),
+        (
+            "MATCH (a)<-[:R]-(c)-[:R]->(b) RETURN b,a",
+            GlaDirection::Reverse,
+            true,
+        ),
+        (
+            "MATCH (a)-[:R]-(b),(a)-[:R]->(c) RETURN b,a",
+            GlaDirection::Undirected,
+            true,
+        ),
+    ] {
+        let right = pattern(text);
+        let plan = selected(right.clone(), &[equal(0, 2)]);
+        assert_eq!(plan.vertex_seed_column(), Some(0), "{text}");
+        match plan.right().source() {
+            AsyncSpillSetSourcePlan::Edge(plan) if !joined => {
+                assert_eq!(plan.root_direction(), direction);
+            }
+            AsyncSpillSetSourcePlan::Join(plan) if joined => {
+                assert_eq!(plan.root_direction(), direction);
+            }
+            _ => panic!("expected the native fixed-edge source: {text}"),
+        }
+        assert_eq!(
+            selected(right.clone(), &[equal(0, 1)]).vertex_seed_column(),
+            None
+        );
+        assert_eq!(
+            selected(
+                right.clone(),
+                &[
+                    equal(0, 2),
+                    GraphSetPredicateOp::Truth(Some(true)),
+                    GraphSetPredicateOp::Or,
+                ],
+            )
+            .vertex_seed_column(),
+            None,
+        );
+        for right in [
+            right.clone().with_page(0, Some(0)),
+            right.clone().with_page(1, None),
+            right
+                .with_order_by(&[GraphValueOrder::ascending(0)])
+                .unwrap(),
+        ] {
+            assert_eq!(selected(right, &[equal(0, 2)]).vertex_seed_column(), None);
+        }
+    }
+    for text in [
+        "MATCH (a)-[:R]->(b) WHERE 1/(b.p-2)>0 RETURN b,a",
+        "MATCH (a)-[:R]->(c)-[:R]->(b) WHERE 1/(b.p-2)>0 RETURN b,a",
+        "MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN b,a",
     ] {
         assert_eq!(
-            selected(right, &[equal(0, 2)]).vertex_seed_column(),
-            None,
-            "fallible predicates and edge-ordered sources retain their full input"
+            selected(pattern(text), &[equal(0, 2)]).vertex_seed_column(),
+            None
         );
     }
 }
