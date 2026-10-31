@@ -82,4 +82,9 @@ debug = "line-tables-only"
 opt-level = 1
 debug-assertions = true
 overflow-checks = true
+# Large test CUs also overflow merged DWARF32 string offsets. Keep their
+# debug information in unpacked sidecars, retaining line tables and backtraces.
+# Retain those sidecars with cached test artifacts. Supported 1.0 test targets
+# are Linux/Darwin; Windows is the plan's explicit post-1.0 platform roadmap.
+split-debuginfo = "unpacked"
 
