@@ -619,6 +619,60 @@ closed state is preserved as provenance, earning no new closure credit.
 `fgdb-016qw` remains unrecovered and the historical audit remains open. Current
 qualification and capability records carry explicit pending-runtime comments.
 
+Later native execution resolves the oversized authorized-count integration
+link: all eight tests pass. The repaired cooperative target passes80 tests,
+with its one existing manual benchmark ignored. Buffered execution progresses
+from19 passed/six failed to24 passed/one failed. Real matched-row procedure
+identity/property arguments, historical bags, source-budget negatives, carried
+scalar predicates and canonical bridge projections now execute successfully.
+The remaining encountered case is path-valued ORDER BY after CALL; its existing
+row-path operator is connected in the current repair, pending execution.
+
+The complete GQL library binary also links, but its first full run aborts
+on a genuine stack overflow in the unchanged nested-FOREACH depth test.
+The separate diagnostic run excluding only that known abort collects1,835
+passes and eleven failures; it is explicitly **not** a mandatory passing run.
+GDB identifies approximately100KB retained per recursive preparation frame.
+Current `7e83367ce` replaces that descent with bounded suspended parser frames
+and retains the original depth64/depth65/forged-executor law. Further repairs
+restore selected ON plus common SET per occurrence, complete Boolean write
+expressions, typed Path aliases and hidden-boundary routing. Reader-free and
+incorrectly typed unit inputs remain explicit refusal controls rather than
+being silently removed. All-target/all-feature Clippy and formatting pass;
+the new depth probe, full unfiltered library and public MERGE/buffered targets
+remain the next required runtime evidence.
+
+The next actual public batch passes all86 tests: authorized chained edge
+merges50, buffered sealed queries25, and edge-upsert returning11. This includes
+the unchanged per-occurrence32 result, frozen creation/ON laws, Path ORDER BY,
+property reads, source-budget refusals and rollback controls. The diagnostic
+library remainder improves to1,848 passed/one failed/one known depth case
+excluded; that is still not a mandatory passing library run. The rebuilt depth
+probe shows preparation now completes, then binding overflows: roughly47KB
+of sibling-dispatch frame plus7.5KB of FOREACH binding state per nesting.
+The original boundary test remains intact. Binding-frame repair and the
+new reader-count fixture correction remain open before a full library verdict.
+
+On `b77948305`, the unchanged normal-stack depth test now passes preparation,
+binding, execution, depth65 refusal and the forged-body refusal. The full
+unfiltered GQL library then passes **1,850 tests, zero failures, zero ignored,
+zero filtered**. The reader fixture pins its actual four-call identity/key
+trace: WHERE uses admitted property cells and UNWIND reads vertices2,2,3,3.
+This completes that library's current native verification; the complete
+workspace, registered gates and committed-tree proof remain required.
+
+The modern scanner's complete `ae393f938` scan and the `d0f71c3ff` compositional
+refresh retain exactly277 critical sites with no additions, removals or
+severity changes between those cuts. Thirty unchanged native receipts and
+two fresh partitions cover2,429 Rust files, with all Cargo/tool context bound.
+Actual production-panic and explicitly named credential-byte controls remain
+critical and make the unchanged native parser reject their appended output.
+A separate generic-token byte comparison is missed by the tool's naming
+heuristic; that failed control remains recorded. Calibration maintenance is
+tracked separately as `fgdb-epic-verif-phi.4`. The review-only candidate remains
+outside the project, the canonical gate is unchanged, and the subsequent GQL
+repairs require fresh static coverage before any calibration can land.
+
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,
 not a new gate or capability. Retire it from active use when these work units
