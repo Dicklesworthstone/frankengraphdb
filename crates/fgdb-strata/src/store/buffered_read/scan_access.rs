@@ -182,11 +182,19 @@ impl<V: Vfs> BufferedPartition<V> {
         let row = usize::from(locator)
             .checked_sub(1)
             .ok_or(BufferError::InvalidLoad)?;
-        self.block_property_patch(cx, at, admission)
-            .await?
-            .get(row)
-            .cloned()
-            .ok_or_else(|| BufferError::InvalidLoad.into())
+        let key = self.blocks[at].properties.ok_or(BufferError::InvalidLoad)?;
+        let bytes = self.pin(cx, key, admission).await?;
+        crate::edge_props::read_admitted_property_row(
+            self.store.k_oid.expose(),
+            self.store.namespace,
+            bytes.as_ref(),
+            crate::edge_props::EdgePropertyPatchVersion(key.object()),
+            self.store.decode_resolver(),
+            row,
+        )
+        .map_err(StoreError::MalformedEdgePropertyPatch)
+        .map_err(BufferedReadError::from)?
+        .ok_or_else(|| BufferError::InvalidLoad.into())
     }
 
     // Streaming callers still receive the complete native block image. Both

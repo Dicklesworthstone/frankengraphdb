@@ -325,6 +325,18 @@ fn decode_property_patch_inner(
     bytes: &[u8],
     resolver: Option<&dyn CanonicalScalarResolver>,
 ) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
+    decode_property_patch_fields(bytes, resolver, None)
+}
+
+// A selection is legal only behind the already-admitted read below. All public
+// decoders pass None and independently validate every value and format profile.
+// Selected reads still parse every row, including skipped rows' lengths and key
+// order, but retain only the requested row rather than a partial patch image.
+fn decode_property_patch_fields(
+    bytes: &[u8],
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    selected: Option<usize>,
+) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
     let mut at = 0usize;
     let take = |at: &mut usize, n: usize| -> Result<usize, EdgePropertyPatchError> {
         let end = at
@@ -352,12 +364,20 @@ fn decode_property_patch_inner(
     if declared > MAX_PROPERTY_PATCH_ROWS {
         return Err(EdgePropertyPatchError::ImplausibleRowCount { declared });
     }
-    let mut rows = Vec::with_capacity(declared as usize);
+    let capacity = selected.map_or(declared as usize, |row| {
+        usize::from(row < declared as usize)
+    });
+    let mut rows = Vec::with_capacity(capacity);
     for row_at in 0..declared as usize {
         let start = take(&mut at, 4)?;
         let props = u32::from_le_bytes(bytes[start..start + 4].try_into().expect("four bytes"));
-        let mut row: EdgePropertyRow =
-            Vec::with_capacity(props.min(MAX_PROPERTY_PATCH_ROWS) as usize);
+        let decode = selected.is_none_or(|selected| selected == row_at);
+        let mut row: EdgePropertyRow = Vec::with_capacity(if decode {
+            props.min(MAX_PROPERTY_PATCH_ROWS) as usize
+        } else {
+            0
+        });
+        let mut previous_key = None;
         for _ in 0..props {
             let start = take(&mut at, 8)?;
             let key = PropertyKeyId(u64::from_le_bytes(
@@ -367,6 +387,13 @@ fn decode_property_patch_inner(
             let len = u32::from_le_bytes(bytes[start..start + 4].try_into().expect("four bytes"))
                 as usize;
             let start = take(&mut at, len)?;
+            if !decode {
+                if previous_key.is_some_and(|previous| previous >= key.0) {
+                    return Err(EdgePropertyPatchError::NonCanonicalRow { at: row_at });
+                }
+                previous_key = Some(key.0);
+                continue;
+            }
             let encoded = &bytes[start..start + len];
             let value = if CanonicalPropertyValue::is_collection_encoding(encoded) {
                 match resolver {
@@ -388,8 +415,12 @@ fn decode_property_patch_inner(
             };
             row.push((key, value));
         }
-        validate_row(row_at, &row)?;
-        rows.push(row);
+        if decode {
+            validate_row(row_at, &row)?;
+            rows.push(row);
+        } else if props == 0 {
+            return Err(EdgePropertyPatchError::EmptyRow { at: row_at });
+        }
     }
     if at != bytes.len() {
         return Err(EdgePropertyPatchError::TrailingBytes {
@@ -398,9 +429,14 @@ fn decode_property_patch_inner(
     }
     // The value decoder admits every tag this build knows under every
     // header, so the header is checked against what the rows hold.
-    let required = property_patch_format_for(&rows);
-    if format != required {
-        return Err(EdgePropertyPatchError::FormatMismatch { format, required });
+    // An admitted selection cannot infer the complete patch's required format
+    // from one row. Initial admission already proved that exact format, and the
+    // keyed identity plus current extent checksum bind all skipped payloads.
+    if selected.is_none() {
+        let required = property_patch_format_for(&rows);
+        if format != required {
+            return Err(EdgePropertyPatchError::FormatMismatch { format, required });
+        }
     }
     Ok(rows)
 }
@@ -460,6 +496,33 @@ pub(crate) fn read_property_patch_inner(
     decode_property_patch_inner(bytes, resolver)
 }
 
+/// Read one positional property row from an already admitted immutable patch.
+///
+/// The buffered reader's complete initial admission must have validated every
+/// value, the exact format profile and the block/patch locator bijection. Its
+/// current fault must also match the admitted extent checksum. Recheck the
+/// complete keyed identity and every row's framing and property-key order, but
+/// decode values only for the requested zero-based row. Unselected rows are
+/// never returned with empty properties that could be mistaken for absence.
+/// An out-of-range selection returns None only after complete framing checks.
+pub(crate) fn read_admitted_property_row(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    expected: EdgePropertyPatchVersion,
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    row: usize,
+) -> Result<Option<EdgePropertyRow>, EdgePropertyPatchError> {
+    let actual = property_patch_id(k_oid, namespace, bytes);
+    if actual != expected.0 {
+        return Err(EdgePropertyPatchError::IdentityMismatch {
+            expected: expected.0,
+            actual,
+        });
+    }
+    Ok(decode_property_patch_fields(bytes, resolver, Some(row))?.pop())
+}
+
 /// The locator column's own canonical law: non-zero locators are exactly
 /// `1..=n` in entry order — each patch row referenced once, in the order the
 /// entries appear. Returns `n`. The block decoder enforces this WITHOUT the
@@ -508,4 +571,355 @@ pub fn validate_block_patch_consistency(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod selected_row_tests {
+    use super::*;
+    use fgdb_types::{
+        CanonicalList, CanonicalLocalTime, CanonicalMap, CanonicalMapEntry, CanonicalText,
+        CanonicalTime, CanonicalTimestamp, CollationResolver, CollationResolverError,
+        NonBinaryTextBinding, TzdbResolver,
+    };
+    use std::cell::Cell;
+
+    const KEY: [u8; 32] = [0x38; 32];
+    const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x97; 32]);
+
+    fn select(bytes: &[u8], row: usize) -> Result<Option<EdgePropertyRow>, EdgePropertyPatchError> {
+        read_admitted_property_row(
+            &KEY,
+            NS,
+            bytes,
+            EdgePropertyPatchVersion(property_patch_id(&KEY, NS, bytes)),
+            None,
+            row,
+        )
+    }
+
+    fn values() -> [CanonicalPropertyValue; 3] {
+        [
+            CanonicalScalar::ucs_basic_text("selected edge")
+                .unwrap()
+                .into(),
+            CanonicalScalar::Time(
+                CanonicalTime::new(
+                    CanonicalLocalTime::from_hms_nano(17, 23, 41, 987_654_321).unwrap(),
+                    -18_000,
+                )
+                .unwrap(),
+            )
+            .into(),
+            CanonicalPropertyValue::Map(
+                CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+                    CanonicalText::new_ucs_basic("nested").unwrap(),
+                    CanonicalPropertyValue::List(
+                        CanonicalList::try_new(vec![
+                            CanonicalScalar::Int(i64::MIN).into(),
+                            CanonicalScalar::bytes(vec![0x57; 31]).unwrap().into(),
+                        ])
+                        .unwrap(),
+                    ),
+                )])
+                .unwrap(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn selected_rows_equal_full_decode_for_every_locator_and_format() {
+        for (profile, value) in values().into_iter().enumerate() {
+            for count in [0, 1, 2, 17, MAX_PROPERTY_PATCH_ROWS as usize] {
+                let rows: Vec<_> = (0..count)
+                    .map(|at| {
+                        vec![
+                            (
+                                PropertyKeyId(3),
+                                CanonicalScalar::Int(at as i64 - 113).into(),
+                            ),
+                            (PropertyKeyId(u64::MAX), value.clone()),
+                        ]
+                    })
+                    .collect();
+                let bytes = encode_property_patch(&rows).unwrap();
+                let complete = decode_property_patch(&bytes).unwrap();
+                assert_eq!(complete, rows);
+                if count != 0 {
+                    assert_eq!(property_patch_format_for(&rows), profile as u16 + 1);
+                }
+                for at in 0..count {
+                    assert_eq!(select(&bytes, at).unwrap().as_ref(), rows.get(at));
+                }
+                for at in [count, count.saturating_add(1), usize::MAX] {
+                    assert!(select(&bytes, at).unwrap().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_rows_still_require_complete_framing_and_canonical_keys() {
+        let rows = vec![
+            vec![(PropertyKeyId(5), CanonicalScalar::Int(-7).into())],
+            vec![
+                (PropertyKeyId(11), CanonicalScalar::Bool(true).into()),
+                (PropertyKeyId(19), CanonicalScalar::Int(29).into()),
+            ],
+            vec![(PropertyKeyId(31), CanonicalScalar::Null.into())],
+        ];
+        let bytes = encode_property_patch(&rows).unwrap();
+        for selection in [0, 1, 2, 3, usize::MAX] {
+            for cut in 0..bytes.len() {
+                assert!(
+                    matches!(
+                        select(&bytes[..cut], selection),
+                        Err(EdgePropertyPatchError::Truncated { .. })
+                    ),
+                    "selection {selection}, strict prefix {cut}"
+                );
+            }
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert_eq!(
+                select(&extra, selection),
+                Err(EdgePropertyPatchError::TrailingBytes { extra: 1 })
+            );
+        }
+
+        // These bytes are deliberately self-identified malformed inputs to the
+        // parser, not admitted patches. They prove framing/key checks remain
+        // present even when the selected row is earlier, later, or absent.
+        let first_bytes = encode_property_patch(&rows[..1]).unwrap().len() - 10;
+        let second = 10 + first_bytes;
+        let second_key = second + 4 + 8 + 4 + CanonicalScalar::Bool(true).encode().unwrap().len();
+        let mut duplicate = bytes.clone();
+        duplicate[second_key..second_key + 8].copy_from_slice(&11_u64.to_le_bytes());
+        let mut descending = duplicate.clone();
+        descending[second_key..second_key + 8].copy_from_slice(&7_u64.to_le_bytes());
+        for selection in [0, 1, 2, usize::MAX] {
+            for malformed in [&duplicate, &descending] {
+                assert_eq!(
+                    select(malformed, selection),
+                    Err(EdgePropertyPatchError::NonCanonicalRow { at: 1 })
+                );
+            }
+        }
+        let mut empty = bytes[..second].to_vec();
+        empty.extend_from_slice(&0_u32.to_le_bytes());
+        let third = encode_property_patch(&rows[2..]).unwrap();
+        empty.extend_from_slice(&third[10..]);
+        for selection in [0, 1, 2, usize::MAX] {
+            assert_eq!(
+                select(&empty, selection),
+                Err(EdgePropertyPatchError::EmptyRow { at: 1 })
+            );
+        }
+    }
+
+    #[test]
+    fn a_selected_row_authenticates_unselected_bytes_and_all_identity_coordinates() {
+        let rows: Vec<_> = values()
+            .into_iter()
+            .map(|value| vec![(PropertyKeyId(13), value)])
+            .collect();
+        let bytes = encode_property_patch(&rows).unwrap();
+        let expected = EdgePropertyPatchVersion(property_patch_id(&KEY, NS, &bytes));
+        for at in 0..bytes.len() {
+            let mut changed = bytes.clone();
+            changed[at] ^= 1;
+            assert!(matches!(
+                read_admitted_property_row(&KEY, NS, &changed, expected, None, 0),
+                Err(EdgePropertyPatchError::IdentityMismatch { .. })
+            ));
+        }
+        for (key, namespace) in [
+            ([0x39; 32], NS),
+            (KEY, DatabaseSecurityNamespaceId([0x98; 32])),
+        ] {
+            assert!(matches!(
+                read_admitted_property_row(&key, namespace, &bytes, expected, None, 0),
+                Err(EdgePropertyPatchError::IdentityMismatch { .. })
+            ));
+        }
+        let mut format = bytes.clone();
+        format[4..6].copy_from_slice(&99_u16.to_le_bytes());
+        assert_eq!(
+            select(&format, usize::MAX),
+            Err(EdgePropertyPatchError::UnsupportedFormat { format: 99 })
+        );
+        let mut count = bytes;
+        count[6..10].copy_from_slice(&256_u32.to_le_bytes());
+        assert_eq!(
+            select(&count, usize::MAX),
+            Err(EdgePropertyPatchError::ImplausibleRowCount { declared: 256 })
+        );
+    }
+
+    #[test]
+    fn complete_admission_still_checks_every_value_and_the_exact_format_profile() {
+        for value in values() {
+            let rows = vec![
+                vec![(PropertyKeyId(3), CanonicalScalar::Int(17).into())],
+                vec![(PropertyKeyId(7), value)],
+            ];
+            let bytes = encode_property_patch(&rows).unwrap();
+            let required = property_patch_format_for(&rows);
+            for format in [
+                PROPERTY_PATCH_FORMAT_V1,
+                PROPERTY_PATCH_FORMAT_V2,
+                PROPERTY_PATCH_FORMAT_V3,
+            ] {
+                if format == required {
+                    continue;
+                }
+                let mut mismatched = bytes.clone();
+                mismatched[4..6].copy_from_slice(&format.to_le_bytes());
+                let id = EdgePropertyPatchVersion(property_patch_id(&KEY, NS, &mismatched));
+                assert_eq!(
+                    read_property_patch(&KEY, NS, &mismatched, id),
+                    Err(EdgePropertyPatchError::FormatMismatch { format, required })
+                );
+            }
+            // The second row is unrelated to a point selecting row zero, but
+            // initial full admission must still reject its invalid value tag.
+            let second = encode_property_patch(&rows[..1]).unwrap().len();
+            let mut malformed = bytes;
+            malformed[second + 4 + 8 + 4] = 0xff;
+            let id = EdgePropertyPatchVersion(property_patch_id(&KEY, NS, &malformed));
+            assert!(matches!(
+                read_property_patch(&KEY, NS, &malformed, id),
+                Err(EdgePropertyPatchError::ScalarDecode { at: 1, .. })
+            ));
+        }
+    }
+
+    #[derive(Default)]
+    struct Resolver {
+        calls: Cell<usize>,
+        reject: Cell<bool>,
+    }
+
+    impl CollationResolver for Resolver {
+        fn artifact_available(&self, _: &ObjectId) -> bool {
+            false
+        }
+
+        fn canonical_sort_key_len(
+            &self,
+            _: &NonBinaryTextBinding,
+            _: &str,
+        ) -> Result<usize, CollationResolverError> {
+            Err(CollationResolverError::new(1))
+        }
+
+        fn write_canonical_sort_key(
+            &self,
+            _: &NonBinaryTextBinding,
+            _: &str,
+            _: &mut [u8],
+        ) -> Result<usize, CollationResolverError> {
+            Err(CollationResolverError::new(1))
+        }
+
+        fn canonical_sort_key_matches(
+            &self,
+            _: &NonBinaryTextBinding,
+            _: &str,
+            _: &[u8],
+        ) -> Result<bool, CollationResolverError> {
+            Err(CollationResolverError::new(1))
+        }
+    }
+
+    impl TzdbResolver for Resolver {
+        fn contains_tzdb(&self, oid: &ObjectId) -> bool {
+            self.calls.set(self.calls.get() + 1);
+            !self.reject.get() && *oid == ObjectId([9; 32])
+        }
+
+        fn canonical_utc_offset_seconds(
+            &self,
+            oid: &ObjectId,
+            zone: &str,
+            instant: i128,
+        ) -> Option<i32> {
+            self.calls.set(self.calls.get() + 1);
+            (!self.reject.get()
+                && *oid == ObjectId([9; 32])
+                && zone == "America/New_York"
+                && instant == 1_735_689_600_123_456_789)
+                .then_some(-18_000)
+        }
+    }
+
+    #[test]
+    fn selected_values_use_the_resolver_but_unselected_values_are_not_decoded() {
+        let resolver = Resolver::default();
+        let timestamp = CanonicalScalar::Timestamp(
+            CanonicalTimestamp::zoned(
+                1_735_689_600_123_456_789,
+                -18_000,
+                "America/New_York",
+                ObjectId([9; 32]),
+                &resolver,
+            )
+            .unwrap(),
+        );
+        let rows = vec![
+            vec![(PropertyKeyId(3), timestamp.clone().into())],
+            vec![(PropertyKeyId(7), CanonicalScalar::Int(101).into())],
+            vec![(
+                PropertyKeyId(11),
+                CanonicalPropertyValue::List(
+                    CanonicalList::try_new(vec![timestamp.into()]).unwrap(),
+                ),
+            )],
+        ];
+        let bytes = encode_property_patch(&rows).unwrap();
+        let id = EdgePropertyPatchVersion(property_patch_id(&KEY, NS, &bytes));
+        assert_eq!(
+            decode_property_patch_with_resolver(&bytes, &resolver).unwrap(),
+            rows
+        );
+        // Stored timestamps can be decoded without supplying artifacts, but
+        // an explicitly supplied resolver must still validate selected values.
+        assert_eq!(decode_property_patch(&bytes).unwrap(), rows);
+        resolver.calls.set(0);
+        resolver.reject.set(true);
+        for selection in [1, rows.len(), usize::MAX] {
+            assert_eq!(
+                read_admitted_property_row(&KEY, NS, &bytes, id, None, selection)
+                    .unwrap()
+                    .as_ref(),
+                rows.get(selection)
+            );
+            assert_eq!(
+                read_admitted_property_row(&KEY, NS, &bytes, id, Some(&resolver), selection)
+                    .unwrap()
+                    .as_ref(),
+                rows.get(selection)
+            );
+        }
+        assert_eq!(
+            resolver.calls.get(),
+            0,
+            "unrelated artifacts are not resolved"
+        );
+        for selection in [0, 2] {
+            resolver.reject.set(true);
+            assert!(
+                read_admitted_property_row(&KEY, NS, &bytes, id, Some(&resolver), selection)
+                    .is_err()
+            );
+            resolver.reject.set(false);
+            let before = resolver.calls.get();
+            assert_eq!(
+                read_admitted_property_row(&KEY, NS, &bytes, id, Some(&resolver), selection)
+                    .unwrap()
+                    .as_ref(),
+                rows.get(selection)
+            );
+            assert!(resolver.calls.get() > before);
+        }
+    }
 }

@@ -657,6 +657,203 @@ fn cold_points_select_all_matching_histories_and_only_the_winning_property_patch
 }
 
 #[test]
+fn cold_edge_points_decode_only_the_selected_property_row_after_complete_admission() {
+    use fgdb_types::{
+        CanonicalList, CanonicalTimestamp, CollationResolver, CollationResolverError,
+        NonBinaryTextBinding, ObjectId, TzdbResolver,
+    };
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct Resolver(AtomicU64);
+
+    impl CollationResolver for Resolver {
+        fn artifact_available(&self, _: &ObjectId) -> bool {
+            false
+        }
+        fn canonical_sort_key_len(
+            &self,
+            _: &NonBinaryTextBinding,
+            _: &str,
+        ) -> Result<usize, CollationResolverError> {
+            Err(CollationResolverError::new(1))
+        }
+        fn write_canonical_sort_key(
+            &self,
+            _: &NonBinaryTextBinding,
+            _: &str,
+            _: &mut [u8],
+        ) -> Result<usize, CollationResolverError> {
+            Err(CollationResolverError::new(1))
+        }
+        fn canonical_sort_key_matches(
+            &self,
+            _: &NonBinaryTextBinding,
+            _: &str,
+            _: &[u8],
+        ) -> Result<bool, CollationResolverError> {
+            Err(CollationResolverError::new(1))
+        }
+    }
+
+    impl TzdbResolver for Resolver {
+        fn contains_tzdb(&self, oid: &ObjectId) -> bool {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            *oid == ObjectId([9; 32])
+        }
+        fn canonical_utc_offset_seconds(
+            &self,
+            oid: &ObjectId,
+            zone: &str,
+            instant: i128,
+        ) -> Option<i32> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            (*oid == ObjectId([9; 32])
+                && zone == "America/New_York"
+                && instant == 1_735_689_600_123_456_789)
+                .then_some(-18_000)
+        }
+    }
+
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let resolver = Arc::new(Resolver::default());
+        let store = BlockStore::open(&commit, &dir, KEY, NS)
+            .await
+            .unwrap()
+            .with_scalar_resolver(resolver.clone());
+        let timestamp = CanonicalScalar::Timestamp(
+            CanonicalTimestamp::zoned(
+                1_735_689_600_123_456_789,
+                -18_000,
+                "America/New_York",
+                ObjectId([9; 32]),
+                resolver.as_ref(),
+            )
+            .unwrap(),
+        );
+        let rows = vec![
+            vec![(PropertyKeyId(3), timestamp.clone().into())],
+            vec![(PropertyKeyId(u64::MAX), CanonicalScalar::Int(29).into())],
+            vec![(
+                PropertyKeyId(17),
+                CanonicalPropertyValue::List(
+                    CanonicalList::try_new(vec![timestamp.into()]).unwrap(),
+                ),
+            )],
+        ];
+        // Adjacency order and EId order differ, so the selected property row
+        // must come from the winning block's locator rather than EId rank.
+        let entries = [
+            edge(u128::MAX, 7, 11, 1, None),
+            edge(3, 7, 13, 1, None),
+            edge(91, 7, 17, 1, None),
+        ];
+        let patch_bytes = encode_property_patch(&rows).unwrap();
+        let patch = store
+            .put_edge_property_patch(&commit, &patch_bytes)
+            .await
+            .unwrap();
+        let block = store
+            .put(
+                &commit,
+                &encode_block_with_properties(0, None, &entries, patch.0, &[1, 2, 3], &rows)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(2),
+            partition: 0,
+            published_at: CommitSeq(1),
+            blocks: vec![BlockRef {
+                block_id: block.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(1),
+            }],
+            vertex_patches: vec![],
+        };
+        let id = store.put_root(&commit, &root).await.unwrap();
+        resolver.0.store(0, Ordering::Relaxed);
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&query, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let full_calls = resolver.0.load(Ordering::Relaxed);
+        let admitted_bytes = pool.used();
+        assert!(
+            full_calls > 0,
+            "initial admission still validates every artifact"
+        );
+        for selected in [1, 2, 0, 1] {
+            resolver.0.store(0, Ordering::Relaxed);
+            let before = extent_visits(view.stats());
+            let found = view
+                .edge_at(&query, entries[selected].eid, CommitSeq(1))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.entry, entries[selected]);
+            assert_eq!(found.props, rows[selected]);
+            assert_eq!(
+                extent_visits(view.stats()) - before,
+                2,
+                "topology plus property extent"
+            );
+            let calls = resolver.0.load(Ordering::Relaxed);
+            if selected == 1 {
+                assert_eq!(
+                    calls, 0,
+                    "a scalar point must not decode other rows' values"
+                );
+            } else {
+                assert!(
+                    calls > 0 && calls < full_calls,
+                    "only the selected artifact row is decoded"
+                );
+            }
+        }
+        // Evict the one-frame property extent, then corrupt an unselected
+        // value. A later scalar-only point still authenticates the whole patch.
+        drop(
+            view.adjacency_at(&query, VId(7), Some(REL), false, CommitSeq(1), 3)
+                .await
+                .unwrap(),
+        );
+        let path = store.path(patch.0);
+        let mut corrupted = patch_bytes;
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 1;
+        std::fs::write(path, corrupted).unwrap();
+        assert!(matches!(
+            view.edge_at(&query, EId(3), CommitSeq(1)).await,
+            Err(BufferedReadError::Buffer(BufferError::ChecksumMismatch))
+        ));
+        assert_eq!(
+            pool.used(),
+            admitted_bytes,
+            "the old one-frame extent was evicted; failed load and result charges are refunded"
+        );
+        drop(view);
+        assert_eq!(pool.used(), 0);
+        assert!(
+            store
+                .open_buffered_root(&query, id, pool.clone(), limits())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            pool.used(),
+            0,
+            "initial admission also refuses the corruption"
+        );
+    });
+}
+
+#[test]
 fn cold_adjacency_routes_by_direction_and_relation_without_property_payloads() {
     run(|contexts, dir| async move {
         let (store, id) = routed_fixture(&contexts, &dir).await;
