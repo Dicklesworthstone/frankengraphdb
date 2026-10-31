@@ -214,6 +214,199 @@ fn inline_call_imports_preserve_bags_nulls_and_local_pages() {
 }
 
 #[test]
+fn inline_call_union_keeps_branch_imports_bags_nulls_and_local_pages() {
+    let row = |cells: &[Option<i64>]| {
+        GraphValueRow::from_owned_values(
+            cells
+                .iter()
+                .map(|value| {
+                    GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                })
+                .collect(),
+        )
+    };
+    for quantifier in ["UNION", "UNION DISTINCT"] {
+        assert_eq!(
+            execute(&format!(
+                "UNWIND [1,1,null] AS x CALL (x) {{ RETURN x AS y {quantifier} RETURN x AS y }} RETURN x,y"
+            )),
+            vec![
+                row(&[Some(1), Some(1)]),
+                row(&[Some(1), Some(1)]),
+                row(&[None, None])
+            ],
+            "DISTINCT belongs inside each correlated invocation"
+        );
+    }
+    assert_eq!(
+        execute("CALL { RETURN null AS v UNION ALL RETURN null AS v } RETURN v"),
+        vec![row(&[None]), row(&[None])]
+    );
+    for text in [
+        "WITH 2 AS x,3 AS z CALL { WITH x RETURN x AS v UNION ALL WITH z RETURN z AS v } RETURN v ORDER BY v",
+        "WITH 2 AS x CALL { WITH x RETURN x AS v UNION ALL WITH 3 AS x RETURN x AS v } RETURN v ORDER BY v",
+        "WITH 2 AS x CALL { RETURN 3 AS v UNION ALL WITH x RETURN x AS v } RETURN v ORDER BY v",
+        "WITH 2 AS x CALL { WITH x RETURN x AS v UNION ALL RETURN 3 AS v } RETURN v ORDER BY v",
+    ] {
+        assert_eq!(
+            execute(text),
+            vec![row(&[Some(2)]), row(&[Some(3)])],
+            "{text}"
+        );
+    }
+    assert_eq!(
+        execute(
+            "WITH 2 AS x,3 AS z CALL { WITH x,z RETURN x-z AS v UNION ALL WITH z,x RETURN z-x AS v } RETURN v ORDER BY v"
+        ),
+        vec![row(&[Some(-1)]), row(&[Some(1)])]
+    );
+    assert_eq!(
+        execute(
+            "WITH 2 AS x,3 AS z CALL (z,x) { RETURN z AS a,x AS b UNION ALL RETURN x AS b,z AS a } RETURN a,b"
+        ),
+        vec![row(&[Some(3), Some(2)]), row(&[Some(3), Some(2)])]
+    );
+    assert_eq!(
+        execute(
+            "CALL { UNWIND [1,3,2] AS x RETURN x AS v ORDER BY v DESC LIMIT 1 UNION ALL UNWIND [9,8] AS x RETURN x AS v ORDER BY v LIMIT 1 } RETURN v ORDER BY v"
+        ),
+        vec![row(&[Some(3)]), row(&[Some(8)])]
+    );
+    assert_eq!(
+        execute(
+            "WITH 2 AS x CALL (x) { CALL (x) { RETURN x AS z UNION ALL RETURN x+1 AS z } RETURN z AS v UNION ALL UNWIND [] AS absent RETURN absent AS v } RETURN v ORDER BY v"
+        ),
+        vec![row(&[Some(2)]), row(&[Some(3)])]
+    );
+    assert_eq!(
+        execute(
+            "CALL { UNWIND [1,2] AS x RETURN x AS v UNION ALL RETURN 3 AS v } WITH sum(v) AS total RETURN total"
+        ),
+        vec![row(&[Some(6)])]
+    );
+}
+
+#[test]
+fn inline_call_union_keeps_graph_elements_and_all_branches_in_one_allowance() {
+    let text = "MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) RETURN m UNION ALL MATCH (m)-[:R]->(n) RETURN m } RETURN n,m ORDER BY n,m";
+    let mut pairs: Vec<_> = EDGES
+        .iter()
+        .flat_map(|&(left, _, right)| [[left.0, right.0], [right.0, left.0]])
+        .collect();
+    pairs.sort_unstable();
+    let query = prepare(text);
+    let expected: Vec<_> = pairs.iter().map(|pair| vertices(pair)).collect();
+    let full = run(&query, wide(), &mut || Ok(())).unwrap();
+    assert_eq!(full.value, expected);
+    assert!(matches!(
+        run(
+            &query,
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, full.evaluator.work_units - 1, u64::MAX),
+            &mut || Ok(())
+        ),
+        Err(GqlQueryError::Evaluator(_))
+    ));
+    let mut checkpoints = 0;
+    run(&query, wide(), &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    let mut seen = 0;
+    assert!(matches!(
+        run(&query, wide(), &mut || {
+            seen += 1;
+            if seen == checkpoints { Err(7) } else { Ok(()) }
+        }),
+        Err(GqlQueryError::Interrupted(7))
+    ));
+    let distinct = text.replace("UNION ALL", "UNION");
+    pairs.dedup();
+    assert_eq!(
+        execute(&distinct),
+        pairs.iter().map(|pair| vertices(pair)).collect::<Vec<_>>()
+    );
+    let property = "MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) RETURN m UNION ALL MATCH (m)-[:R]->(n) RETURN m } RETURN m.p AS value";
+    assert!(run_reading(&prepare(property), wide(), &mut || Ok(()), true).is_err());
+    for text in [
+        "CALL { RETURN 1 AS v UNION ALL RETURN 1/0 AS v } RETURN v LIMIT 0",
+        "CALL { RETURN 1/0 AS v UNION ALL RETURN 1 AS v } RETURN v LIMIT 0",
+    ] {
+        assert!(
+            run(&prepare(text), wide(), &mut || Ok(())).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn inline_call_union_checks_all_schemas_and_scopes_before_catalog_even_on_empty_input() {
+    for text in [
+        "UNWIND [] AS outer CALL { MATCH (n {p:1}) RETURN n AS v UNION ALL RETURN [1] AS v } RETURN v",
+        "UNWIND [] AS outer CALL { RETURN 1 AS v UNION RETURN 2 AS other } RETURN v",
+        "UNWIND [] AS outer CALL { RETURN 1 AS v UNION RETURN 2 AS v UNION ALL RETURN 3 AS v } RETURN v",
+        "WITH 1 AS x,2 AS z CALL { WITH x RETURN x AS v UNION ALL WITH z RETURN x AS v } RETURN v",
+        "WITH 1 AS x CALL { WITH x RETURN x AS v UNION ALL RETURN x AS v } RETURN v",
+        "CALL { WITH 1 AS hidden RETURN hidden AS v UNION ALL RETURN hidden AS v } RETURN v",
+        "UNWIND [] AS outer CALL { RETURN 1 AS v UNION ALL CREATE (n) RETURN 2 AS v } RETURN v",
+    ] {
+        let calls = std::cell::Cell::new(0);
+        let result = PreparedGraphSetText::prepare(text, |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "{text}");
+        assert_eq!(
+            calls.get(),
+            0,
+            "structural refusal precedes catalog: {text}"
+        );
+    }
+    let template = PreparedGraphSetText::prepare(
+        "WITH $base AS x CALL (x) { RETURN x+$left AS v UNION ALL RETURN x+$right AS v } RETURN v ORDER BY v",
+        symbols,
+    ).unwrap();
+    let definition = template.canonical_template_bytes();
+    for (base, left, right) in [(10, 1, 2), (20, 4, 3)] {
+        let arguments = GqlParameters::new()
+            .with_int64("base", base)
+            .unwrap()
+            .with_int64("left", left)
+            .unwrap()
+            .with_int64("right", right)
+            .unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        let actual: Vec<_> = run(&query, wide(), &mut || Ok(()))
+            .unwrap()
+            .value
+            .into_iter()
+            .map(|row| row.values()[0].as_scalar().unwrap().clone())
+            .collect();
+        let mut expected = vec![
+            CanonicalScalar::Int(base + left),
+            CanonicalScalar::Int(base + right),
+        ];
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
+    assert_eq!(template.canonical_template_bytes(), definition);
+    let all = PreparedGraphSetText::prepare(
+        "CALL { RETURN 1 AS v UNION ALL RETURN 1 AS v } RETURN v",
+        symbols,
+    )
+    .unwrap();
+    let distinct = PreparedGraphSetText::prepare(
+        "CALL { RETURN 1 AS v UNION RETURN 1 AS v } RETURN v",
+        symbols,
+    )
+    .unwrap();
+    assert_ne!(
+        all.canonical_template_bytes(),
+        distinct.canonical_template_bytes()
+    );
+}
+
+#[test]
 fn inline_call_correlates_actual_graph_sources_before_export() {
     let expected: Vec<_> = EDGES
         .iter()

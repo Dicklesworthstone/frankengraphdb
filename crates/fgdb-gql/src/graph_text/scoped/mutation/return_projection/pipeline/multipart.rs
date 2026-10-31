@@ -20,6 +20,11 @@ struct UnresolvedContinuation<'a> {
 
 enum UnresolvedContinuationOperation<'a> {
     Match(RowJoinSpec),
+    /// Another returning branch of an inline CALL, combined before Apply.
+    Union {
+        body: Box<UnresolvedReadInput<'a>>,
+        quantifier: GraphSetQuantifier,
+    },
     Pattern {
         pattern: Box<UnresolvedGraphText<'a>>,
         join: RowJoinSpec,
@@ -79,6 +84,7 @@ impl<'a> UnresolvedReadInput<'a> {
                     );
                 }
                 UnresolvedContinuationOperation::Apply { body, .. }
+                | UnresolvedContinuationOperation::Union { body, .. }
                 | UnresolvedContinuationOperation::ExistsBody { body, .. }
                 | UnresolvedContinuationOperation::List { body, .. } => {
                     slots.extend(body.element_key_slots());
@@ -133,6 +139,7 @@ impl<'a> UnresolvedReadInput<'a> {
             part.input.syntax.parameters = parameters.to_vec();
             part.input.syntax.parameter_offsets = offsets.to_vec();
             if let UnresolvedContinuationOperation::Apply { body, .. }
+            | UnresolvedContinuationOperation::Union { body, .. }
             | UnresolvedContinuationOperation::ExistsBody { body, .. }
             | UnresolvedContinuationOperation::List { body, .. } = &mut part.operation
             {
@@ -154,44 +161,51 @@ impl<'a> UnresolvedReadInput<'a> {
     pub(crate) fn depth(&self) -> usize {
         // Each continuation contributes one Join plus its post-join stages.
         // Its hidden source is a depth-one graph leaf, not a second pipeline.
-        self.first.depth()
-            + self
-                .continuations
-                .iter()
-                .map(|part| {
-                    let source_depth = match &part.operation {
-                        UnresolvedContinuationOperation::Match(_) => 1,
-                        // Arguments + graph join + witness projection, then
-                        // Apply + filter + ordered removal of the witness.
-                        UnresolvedContinuationOperation::Pattern { result, .. } => match result {
-                            RowPatternResult::Filter { .. } => 6,
-                            RowPatternResult::Exists
-                            | RowPatternResult::Count
-                            | RowPatternResult::Collect { .. } => 4,
-                        },
-                        UnresolvedContinuationOperation::ExistsBody { body, negated, .. } => {
-                            body.depth() + if negated.is_some() { 4 } else { 2 }
-                        }
-                        UnresolvedContinuationOperation::Apply { body, .. }
-                        | UnresolvedContinuationOperation::List { body, .. } => 1 + body.depth(),
-                    };
-                    source_depth
-                        + part
-                            .input
-                            .leading
-                            .iter()
-                            .map(ReadStageTemplate::depth)
-                            .sum::<usize>()
-                        + usize::from(part.input.projection.is_some())
-                        + 2 * usize::from(!part.input.row_fields.is_empty())
-                        + part
-                            .input
-                            .pipeline
-                            .iter()
-                            .map(ReadStageTemplate::depth)
-                            .sum::<usize>()
-                })
-                .sum::<usize>()
+        self.continuations
+            .iter()
+            .fold(self.first.depth(), |depth, part| {
+                let source_depth = match &part.operation {
+                    UnresolvedContinuationOperation::Match(_) => 1,
+                    UnresolvedContinuationOperation::Union { .. } => 0,
+                    // Arguments + graph join + witness projection, then
+                    // Apply + filter + ordered removal of the witness.
+                    UnresolvedContinuationOperation::Pattern { result, .. } => match result {
+                        RowPatternResult::Filter { .. } => 6,
+                        RowPatternResult::Exists
+                        | RowPatternResult::Count
+                        | RowPatternResult::Collect { .. } => 4,
+                    },
+                    UnresolvedContinuationOperation::ExistsBody { body, negated, .. } => {
+                        body.depth() + if negated.is_some() { 4 } else { 2 }
+                    }
+                    UnresolvedContinuationOperation::Apply { body, .. }
+                    | UnresolvedContinuationOperation::List { body, .. } => 1 + body.depth(),
+                };
+                let joined = match &part.operation {
+                    // A binary set's height is its taller child, plus
+                    // UNION and a possible right-column alignment. The
+                    // merged-schema projection below is another level.
+                    UnresolvedContinuationOperation::Union { body, .. } => {
+                        1 + depth.max(body.depth() + 1)
+                    }
+                    _ => depth + source_depth,
+                };
+                joined
+                    + part
+                        .input
+                        .leading
+                        .iter()
+                        .map(ReadStageTemplate::depth)
+                        .sum::<usize>()
+                    + usize::from(part.input.projection.is_some())
+                    + 2 * usize::from(!part.input.row_fields.is_empty())
+                    + part
+                        .input
+                        .pipeline
+                        .iter()
+                        .map(ReadStageTemplate::depth)
+                        .sum::<usize>()
+            })
     }
 
     pub(crate) fn operand_count(&self) -> usize {
@@ -203,6 +217,7 @@ impl<'a> UnresolvedReadInput<'a> {
                     UnresolvedContinuationOperation::Match(_) => 1,
                     UnresolvedContinuationOperation::Pattern { .. } => 1,
                     UnresolvedContinuationOperation::Apply { body, .. }
+                    | UnresolvedContinuationOperation::Union { body, .. }
                     | UnresolvedContinuationOperation::ExistsBody { body, .. }
                     | UnresolvedContinuationOperation::List { body, .. } => body.operand_count(),
                 })
@@ -215,6 +230,53 @@ impl<'a> UnresolvedReadInput<'a> {
 
     pub(crate) fn parameter_offsets(&self) -> &[usize] {
         self.first.parameter_offsets()
+    }
+
+    /// Each legacy UNION branch imports its own names, possibly in a
+    /// different order. All branches receive one Apply frame, then project
+    /// only their declared imports before their ordinary row stages. Names
+    /// imported by a sibling never enter this branch's parser scope.
+    fn align_call_arguments(
+        &mut self,
+        imports: &[usize],
+        shared: &[usize],
+        incoming: &RowSchema<'a>,
+        at: usize,
+    ) -> Result<(), GraphSetTextError> {
+        if imports.is_empty() || imports == shared {
+            return Ok(());
+        }
+        let Some(ReadStageTemplate::Arguments { columns, types }) = self.first.pipeline.first_mut()
+        else {
+            return Err(expected(at, "the CALL branch's imported argument frame"));
+        };
+        let projection = columns
+            .iter()
+            .zip(imports)
+            .map(|(name, import)| ReadProjectionTemplate {
+                name: name.clone(),
+                value: ReadValueTemplate::Column(
+                    shared
+                        .iter()
+                        .position(|column| column == import)
+                        .expect("every branch import belongs to the shared frame"),
+                ),
+            })
+            .collect();
+        *columns = shared
+            .iter()
+            .map(|&column| incoming[column].0.text.to_owned())
+            .collect();
+        *types = shared.iter().map(|&column| incoming[column].1).collect();
+        self.first.pipeline.insert(
+            1,
+            ReadStageTemplate::Project {
+                at,
+                projection,
+                quantifier: GraphSetQuantifier::All,
+            },
+        );
+        Ok(())
     }
 
     /// Every part reads the lender's reverse catalog for `labels(n)` and
@@ -235,6 +297,12 @@ impl<'a> UnresolvedReadInput<'a> {
                 operation: match part.operation {
                     UnresolvedContinuationOperation::Match(join) => {
                         BoundContinuationOperation::Match(join)
+                    }
+                    UnresolvedContinuationOperation::Union { body, quantifier } => {
+                        BoundContinuationOperation::Union {
+                            body: Box::new(body.resolve(resolve)?),
+                            quantifier,
+                        }
                     }
                     UnresolvedContinuationOperation::Pattern {
                         pattern,
@@ -2828,11 +2896,12 @@ impl<'a> Parser<'a> {
         let previous_reads = core::mem::replace(&mut self.call_element_reads, true);
         let previous_body = core::mem::replace(&mut self.call_body, true);
         let previous_existence = core::mem::take(&mut self.existence_body);
-        let body = self.multipart_parts_from(statement, false, schema, call_depth + 1);
+        let body =
+            self.multipart_call_body(statement, incoming, scoped, imports, schema, call_depth + 1);
         self.call_body = previous_body;
         self.call_element_reads = previous_reads;
         self.existence_body = previous_existence;
-        let (body, exports) = body?;
+        let (body, exports, imports) = body?;
         self.punct(b'}', "} after a read-only CALL body ending in RETURN")?;
         self.read_row_bindings.clear();
         self.boundary_reads = None;
@@ -2886,6 +2955,132 @@ impl<'a> Parser<'a> {
             next,
             terminal,
         ))
+    }
+
+    /// Parse complete returning branches with the same lexer and parameter
+    /// table. The body remains a native relation: UNION is built before the
+    /// caller's Apply, so DISTINCT is local to each outer occurrence.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn multipart_call_body(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        scoped: bool,
+        imports: Vec<usize>,
+        schema: RowSchema<'a>,
+        call_depth: usize,
+    ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>, Vec<usize>), GraphSetTextError> {
+        let (mut body, mut exports) =
+            self.multipart_parts_from(statement, false, schema.clone(), call_depth)?;
+        let mut branches = Vec::new();
+        let mut shared = imports.clone();
+        let mut union_quantifier = None;
+        while self.is_word("UNION") {
+            let at = self.current.at;
+            self.advance()?;
+            let quantifier = if self.take_word("ALL")? {
+                GraphSetQuantifier::All
+            } else {
+                self.take_word("DISTINCT")?;
+                GraphSetQuantifier::Distinct
+            };
+            if union_quantifier.is_some_and(|previous| previous != quantifier) {
+                return Err(GraphSetTextError {
+                    offset: at,
+                    kind: GraphSetTextErrorKind::InvalidClauseComposition,
+                });
+            }
+            union_quantifier = Some(quantifier);
+            // Even values-only branches add one relational level each.
+            if branches.len() + 1 >= crate::MAX_GRAPH_SET_DEPTH {
+                return Err(GraphSetTextError {
+                    offset: at,
+                    kind: GraphSetTextErrorKind::SetBuild(crate::GraphSetBuildError::TooDeep {
+                        limit: crate::MAX_GRAPH_SET_DEPTH,
+                        observed: branches.len() + 2,
+                    }),
+                });
+            }
+            let (branch_imports, branch_schema) = if scoped {
+                (imports.clone(), schema.clone())
+            } else {
+                self.legacy_call_imports(incoming)?.unwrap_or_default()
+            };
+            self.read_row_bindings.clear();
+            self.boundary_reads = None;
+            self.projected_sources = None;
+            let (branch, returned) =
+                self.multipart_parts_from(statement, false, branch_schema, call_depth)?;
+            let columns: Vec<_> = exports
+                .iter()
+                .map(|(name, _)| name.text.to_owned())
+                .collect();
+            let right: Vec<_> = returned
+                .iter()
+                .map(|(name, _)| name.text.to_owned())
+                .collect();
+            let alignment =
+                crate::set_text::union_column_order(&columns, &right).map_err(|()| {
+                    GraphSetTextError {
+                        offset: at,
+                        kind: GraphSetTextErrorKind::DifferentColumnsInUnion,
+                    }
+                })?;
+            for (column, (_, left)) in exports.iter_mut().enumerate() {
+                let right = returned[alignment[column]].1;
+                *left = left.common_set_domain(right).ok_or(GraphSetTextError {
+                    offset: at,
+                    kind: GraphSetTextErrorKind::SetBuild(crate::GraphSetBuildError::ColumnType {
+                        column,
+                        left: *left,
+                        right,
+                    }),
+                })?;
+            }
+            for &column in &branch_imports {
+                if !shared.contains(&column) {
+                    shared.push(column);
+                }
+            }
+            branches.push((at, quantifier, branch, branch_imports, exports.clone()));
+        }
+        if branches.is_empty() {
+            return Ok((body, exports, imports));
+        }
+        body.align_call_arguments(&imports, &shared, incoming, self.current.at)?;
+        for (at, quantifier, mut branch, branch_imports, merged) in branches {
+            branch.align_call_arguments(&branch_imports, &shared, incoming, at)?;
+            let mut syntax = self.take_part_syntax()?;
+            syntax.return_at = at;
+            body.continuations.push(UnresolvedContinuation {
+                input: UnresolvedGraphText {
+                    statement,
+                    syntax,
+                    projection: Some(
+                        merged
+                            .iter()
+                            .enumerate()
+                            .map(|(column, (name, _))| ReadProjectionTemplate {
+                                name: name.text.to_owned(),
+                                value: ReadValueTemplate::Column(column),
+                            })
+                            .collect(),
+                    ),
+                    pipeline: Vec::new(),
+                    singleton: true,
+                    leading: Vec::new(),
+                    leading_types: merged.iter().map(|(_, kind)| *kind).collect(),
+                    correlations: Vec::new(),
+                    row_fields: Vec::new(),
+                },
+                operation: UnresolvedContinuationOperation::Union {
+                    body: Box::new(branch),
+                    quantifier,
+                },
+            });
+            self.admit_multipart_size(&body)?;
+        }
+        Ok((body, exports, shared))
     }
 
     /// A completed CALL or OPTIONAL Apply owns a typed row, including NULL
@@ -3777,6 +3972,51 @@ impl BoundReadInput {
         let mut input = self.first.bind_values(values)?;
         for part in &self.continuations {
             let source = &part.input;
+            if let BoundContinuationOperation::Union { body, quantifier } = &part.operation {
+                // Bind every branch before execution, including when the
+                // outer relation will be empty. Argument/type/resource
+                // admission never depends on a branch producing witnesses.
+                let mut right = body.bind_values(values)?;
+                if input.columns() != right.columns() {
+                    let columns =
+                        crate::set_text::union_column_order(input.columns(), right.columns())
+                            .map_err(|()| GraphSetTextError {
+                                offset: source.return_at,
+                                kind: GraphSetTextErrorKind::DifferentColumnsInUnion,
+                            })?;
+                    let projection = input
+                        .columns()
+                        .iter()
+                        .zip(columns)
+                        .map(|(name, column)| {
+                            GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
+                        })
+                        .collect();
+                    right = right
+                        .project(projection, GraphSetQuantifier::All)
+                        .map_err(|kind| GraphSetTextError {
+                            offset: source.return_at,
+                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                        })?;
+                }
+                input = input
+                    .combine(crate::GraphSetOperation::Union, *quantifier, right)
+                    .map_err(|kind| GraphSetTextError {
+                        offset: source.return_at,
+                        kind: GraphSetTextErrorKind::SetBuild(kind),
+                    })?;
+                if let Some(projection) = &source.projection {
+                    input = super::super::bind_projection(
+                        input,
+                        projection,
+                        source.quantifier,
+                        values,
+                        source.return_at,
+                    )?;
+                }
+                input = super::super::bind_stages(input, &source.pipeline, values)?;
+                continue;
+            }
             if matches!(
                 &part.operation,
                 BoundContinuationOperation::Pattern { .. }

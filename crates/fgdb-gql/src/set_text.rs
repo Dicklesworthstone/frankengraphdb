@@ -1459,7 +1459,7 @@ struct Schema {
     returned: Vec<Option<(String, String)>>,
 }
 
-fn union_column_order(left: &[String], right: &[String]) -> Result<Vec<usize>, ()> {
+pub(crate) fn union_column_order(left: &[String], right: &[String]) -> Result<Vec<usize>, ()> {
     if left.len() != right.len() {
         return Err(());
     }

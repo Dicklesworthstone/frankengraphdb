@@ -15,6 +15,11 @@ pub(crate) struct BoundContinuation {
 #[derive(Clone)]
 pub(crate) enum BoundContinuationOperation {
     Match(RowJoinSpec),
+    /// A returning CALL branch; its set operation precedes correlation.
+    Union {
+        body: Box<BoundReadInput>,
+        quantifier: GraphSetQuantifier,
+    },
     /// A graph expression over a completed row. Its witnesses remain inside
     /// an Apply body; each outer occurrence keeps its order and multiplicity.
     Pattern {
@@ -484,6 +489,7 @@ impl BoundReadInput {
                         usize::from(pattern.selection.is_some())
                     }
                     BoundContinuationOperation::Apply { body, .. }
+                    | BoundContinuationOperation::Union { body, .. }
                     | BoundContinuationOperation::ExistsBody { body, .. }
                     | BoundContinuationOperation::List { body, .. } => body.graph_source_count(),
                 })
@@ -504,6 +510,7 @@ impl BoundReadInput {
             matches!(
                 part.operation,
                 BoundContinuationOperation::Apply { .. }
+                    | BoundContinuationOperation::Union { .. }
                     | BoundContinuationOperation::Pattern { .. }
                     | BoundContinuationOperation::ExistsBody { .. }
                     | BoundContinuationOperation::List { .. }
@@ -518,6 +525,14 @@ impl BoundReadInput {
                     BoundContinuationOperation::Match(join) => {
                         bytes.push(0);
                         join.append_template_transcript(bytes);
+                    }
+                    BoundContinuationOperation::Union { body, quantifier } => {
+                        bytes.push(9);
+                        bytes.push(match quantifier {
+                            GraphSetQuantifier::All => 0,
+                            GraphSetQuantifier::Distinct => 1,
+                        });
+                        body.append_template_transcript(bytes);
                     }
                     BoundContinuationOperation::Pattern {
                         pattern,

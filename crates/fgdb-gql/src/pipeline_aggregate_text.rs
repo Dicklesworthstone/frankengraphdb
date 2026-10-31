@@ -356,6 +356,10 @@ impl PreparedGraphPipelineAggregateText {
             stages(operators, &input.first.pipeline);
             for part in &input.continuations {
                 match &part.operation {
+                    BoundContinuationOperation::Union { body, .. } => {
+                        input_operators(operators, body);
+                        operators.push("Union");
+                    }
                     BoundContinuationOperation::Apply { body, .. } => {
                         input_operators(operators, body);
                         operators.push("Apply");
