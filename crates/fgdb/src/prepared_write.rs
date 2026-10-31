@@ -13,7 +13,7 @@ use crate::{
 };
 use asupersync::fs::Vfs;
 use fgdb_strata::writer::BlockWriter;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 #[derive(Clone, Default)]
@@ -165,14 +165,31 @@ impl<V: Vfs + Clone> Database<V> {
     /// One ordinary canonical authority for already-admitted independent
     /// chunks. No row is re-derived from storage, and no earlier prefix is
     /// cloned or sorted while another program statement is being evaluated.
+    /// A fixed relation allows complete standalone creations. Without one,
+    /// every chunk must contain only fresh edges over unchanged basis vertices.
     pub(super) fn compose_independent_create_chunks(
         &self,
-        relation: crate::RelationId,
+        relation: Option<crate::RelationId>,
         chunks: &[crate::LogicalDeltaTemplate],
         dependencies: PreparedDependencies,
         replay_row_allowance: Option<u64>,
     ) -> Result<PreparedWrite, crate::WriteTxnError> {
-        let mut rows = Vec::new();
+        let mut coordinates = BTreeMap::new();
+        if let Some(relation) = relation {
+            // Preserve the fixed-coordinate seam even for an empty chunk set.
+            // Real independent programs compose only nonempty create chunks.
+            coordinates.insert(
+                relation,
+                crate::CoordinateEntry {
+                    graph: crate::GRAPH,
+                    branch: crate::BRANCH,
+                    relation,
+                    schema_epoch: crate::SchemaEpoch(0),
+                    schema_transition: None,
+                    rows: Vec::new(),
+                },
+            );
+        }
         let mut offset = 0_u64;
         for chunk in chunks {
             let [coordinate] = chunk.coordinate_entries() else {
@@ -180,7 +197,7 @@ impl<V: Vfs + Clone> Database<V> {
             };
             if coordinate.graph != crate::GRAPH
                 || coordinate.branch != crate::BRANCH
-                || coordinate.relation != relation
+                || relation.is_some_and(|relation| coordinate.relation != relation)
                 || coordinate.schema_epoch != crate::SchemaEpoch(0)
                 || coordinate.schema_transition.is_some()
             {
@@ -189,14 +206,27 @@ impl<V: Vfs + Clone> Database<V> {
             for row in &coordinate.rows {
                 let mut row = row.clone();
                 let birth_ordinal = match &mut row {
-                    crate::DeltaRow::CreateVertex { birth_ordinal, .. }
-                    | crate::DeltaRow::CreateEdge { birth_ordinal, .. } => birth_ordinal,
+                    crate::DeltaRow::CreateVertex { birth_ordinal, .. } if relation.is_some() => {
+                        birth_ordinal
+                    }
+                    crate::DeltaRow::CreateEdge { birth_ordinal, .. } => birth_ordinal,
                     _ => return Err(crate::WriteTxnError::UnsupportedAtomicMutation),
                 };
                 *birth_ordinal = birth_ordinal
                     .checked_add(offset)
                     .ok_or(crate::WriteTxnError::AtomicOrdinalOverflow)?;
-                rows.push(row);
+                coordinates
+                    .entry(coordinate.relation)
+                    .or_insert_with(|| crate::CoordinateEntry {
+                        graph: coordinate.graph,
+                        branch: coordinate.branch,
+                        relation: coordinate.relation,
+                        schema_epoch: coordinate.schema_epoch,
+                        schema_transition: None,
+                        rows: Vec::new(),
+                    })
+                    .rows
+                    .push(row);
             }
             offset = offset
                 .checked_add(
@@ -208,14 +238,7 @@ impl<V: Vfs + Clone> Database<V> {
         let template = crate::LogicalDeltaTemplate::build(
             crate::intent_semantics_oid(),
             [0_u8; 32],
-            vec![crate::CoordinateEntry {
-                graph: crate::GRAPH,
-                branch: crate::BRANCH,
-                relation,
-                schema_epoch: crate::SchemaEpoch(0),
-                schema_transition: None,
-                rows,
-            }],
+            coordinates.into_values().collect(),
         )
         .map_err(WriteError::Canonical)?;
         Ok(PreparedWrite {

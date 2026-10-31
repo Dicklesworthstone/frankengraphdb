@@ -15,11 +15,17 @@ enum IndependentCreateKind {
 /// inputs as the ordinary canonical prefix overlay.
 struct IndependentCreateWrites {
     kind: IndependentCreateKind,
-    relation: RelationId,
+    /// None admits edge-only statements in different relations. Standalone
+    /// subgraphs still require one coordinate: their vertices are shared by
+    /// their own statement's edges, not by another independently checked chunk.
+    relation: Option<RelationId>,
     batches: Vec<WriteBatch>,
     chunks: Vec<crate::LogicalDeltaTemplate>,
     created_vertices: fgdb_gql::id_hash::IdSet<VId>,
     created_edges: fgdb_gql::id_hash::IdSet<EId>,
+    edge_relations: fgdb_gql::id_hash::IdMap<EId, RelationId>,
+    first_staged_relation: Option<RelationId>,
+    multiple_staged_relations: bool,
     dependencies: crate::prepared_write::PreparedDependencies,
 }
 
@@ -42,10 +48,17 @@ impl IndependentCreateWrites {
                     insertion.independent_edge_append_relation()?,
                 )
             };
-            if profile.is_some_and(|previous| previous != current) {
-                return None;
-            }
-            profile = Some(current);
+            profile = Some(match profile {
+                None => (current.0, Some(current.1)),
+                Some((kind, relation))
+                    if kind == current.0
+                        && (kind == IndependentCreateKind::Edges
+                            || relation == Some(current.1)) =>
+                {
+                    (kind, relation.filter(|previous| *previous == current.1))
+                }
+                Some(_) => return None,
+            });
         }
         let (kind, relation) = profile?;
         Some(Self::new(kind, relation))
@@ -57,11 +70,11 @@ impl IndependentCreateWrites {
         }
         Some(Self::new(
             IndependentCreateKind::Standalone,
-            chain.independent_create_relation()?,
+            Some(chain.independent_create_relation()?),
         ))
     }
 
-    fn new(kind: IndependentCreateKind, relation: RelationId) -> Self {
+    fn new(kind: IndependentCreateKind, relation: Option<RelationId>) -> Self {
         Self {
             kind,
             relation,
@@ -69,6 +82,9 @@ impl IndependentCreateWrites {
             chunks: Vec::new(),
             created_vertices: fgdb_gql::id_hash::IdSet::default(),
             created_edges: fgdb_gql::id_hash::IdSet::default(),
+            edge_relations: fgdb_gql::id_hash::IdMap::default(),
+            first_staged_relation: None,
+            multiple_staged_relations: false,
             dependencies: crate::prepared_write::PreparedDependencies::default(),
         }
     }
@@ -80,7 +96,9 @@ impl IndependentCreateWrites {
     ) -> Result<(), WriteTxnError> {
         // The checked insertion definition proves this shape. Keep the storage
         // seam closed even if a future caller forgets that eligibility proof.
-        if batch.relation != self.relation
+        if self
+            .relation
+            .is_some_and(|relation| batch.relation != relation)
             || batch.rows.iter().any(|row| {
                 !matches!(
                     (self.kind, row),
@@ -105,6 +123,38 @@ impl IndependentCreateWrites {
                 &database.writer,
                 &batch,
             ));
+        let multiple_relations = self.multiple_staged_relations
+            || self
+                .first_staged_relation
+                .is_some_and(|relation| relation != batch.relation);
+        if self.relation.is_none() && multiple_relations {
+            // Ordinary ordered preparation checks all edge declarations before
+            // admitting values. Earlier chunks already passed that check; only
+            // this statement can introduce a new ownership conflict. Before
+            // the first actual relation change, ordinary same-relation value
+            // admission still wins over AlreadyLive. Empty selections never
+            // enter stage and therefore cannot change this error precedence.
+            for row in &batch.rows {
+                let PendingRow::Edge { eid, .. } = row else {
+                    return Err(WriteTxnError::UnsupportedAtomicMutation);
+                };
+                let owner = self.edge_relations.get(eid).copied().or_else(|| {
+                    database
+                        .writer
+                        .live_edge(*eid)
+                        .map(|(_, relation, _, _)| relation)
+                });
+                if let Some(first) = owner
+                    && first != batch.relation
+                {
+                    return Err(WriteTxnError::AtomicRelationConflict {
+                        first,
+                        second: batch.relation,
+                        element: ElementId::Edge(*eid),
+                    });
+                }
+            }
+        }
         let chunk = match self.kind {
             IndependentCreateKind::Standalone => database.prepare_independent_standalone_chunk(
                 batch.clone(),
@@ -122,10 +172,15 @@ impl IndependentCreateWrites {
                 }
                 (_, crate::DeltaRow::CreateEdge { eid, .. }) => {
                     self.created_edges.insert(*eid);
+                    if self.relation.is_none() {
+                        self.edge_relations.insert(*eid, batch.relation);
+                    }
                 }
                 _ => return Err(WriteTxnError::UnsupportedAtomicMutation),
             }
         }
+        self.first_staged_relation.get_or_insert(batch.relation);
+        self.multiple_staged_relations = multiple_relations;
         self.chunks.push(chunk);
         self.batches.push(batch);
         Ok(())
@@ -153,10 +208,13 @@ impl<'txn> MutationProgramWorkspace<'txn> {
         if independent.chunks.is_empty() {
             return Ok(());
         }
-        // Every admitted standalone creation intent creates exactly one distinct
-        // row. Keep ordinary preparation's replay allowance; the existing edge
-        // profile retains its conservative no-replay contract.
-        let replay_row_allowance = if independent.kind == IndependentCreateKind::Standalone {
+        // Each admitted creation intent creates one distinct row. Mixed edge
+        // relations have no repeated vertex backbone, so ordinary ordered
+        // preparation visits each raw row once too. Preserve its replay budget;
+        // the existing same-relation edge profile keeps its no-replay contract.
+        let replay_row_allowance = if independent.kind == IndependentCreateKind::Standalone
+            || independent.relation.is_none()
+        {
             Some(
                 u64::try_from(independent.created_vertices.len())
                     .ok()
@@ -181,6 +239,125 @@ impl<'txn> MutationProgramWorkspace<'txn> {
         self.txn.staged = core::mem::take(&mut independent.batches);
         self.txn.prepared = Some(std::sync::Arc::new(prepared));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod independent_relation_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn mixed_edge_chunks_preserve_replay_authority_and_failed_observations() {
+        let ((), report) = run_async_under_lab(0x6d17_0114, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let keys = crate::DatabaseKeys::new(
+                [0x91; 32],
+                DatabaseSecurityNamespaceId([0x92; 32]),
+                [0x93; 32],
+            );
+            let mut db = Database::open_memory(&c.commit(), keys).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            seed.create_vertex(VId(1), vec![], vec![]);
+            seed.create_vertex(VId(2), vec![], vec![]);
+            seed.add_edge(EId(11), VId(1), VId(2), vec![]);
+            db.write(&c.commit(), seed).await.unwrap();
+
+            for relations in [
+                [RelationId(2), RelationId(2)],
+                [RelationId(3), RelationId(1)],
+            ] {
+                let mut chunks = IndependentCreateWrites::new(IndependentCreateKind::Edges, None);
+                let mut batches = Vec::new();
+                for (index, relation) in relations.into_iter().enumerate() {
+                    let mut batch = WriteBatch::new(relation);
+                    batch.add_edge(EId(100 + index as u128), VId(1), VId(2), vec![]);
+                    chunks.stage(&mut db, batch.clone()).unwrap();
+                    batches.push(batch);
+                }
+                let expected = db.prepare_ordered_writes(batches).unwrap();
+                let mut txn = db.begin(&c.txn()).unwrap();
+                let mut workspace = MutationProgramWorkspace::new(&mut txn);
+                workspace.independent_creates = Some(chunks);
+                workspace.finish_independent_creates(&db).unwrap();
+                workspace.accept();
+                let actual = txn.prepared.as_ref().unwrap();
+                assert_eq!(
+                    actual.template.canonical_bytes().unwrap(),
+                    expected.template.canonical_bytes().unwrap()
+                );
+                assert_eq!(actual.replay_row_allowance, Some(2));
+                assert_eq!(actual.replay_row_allowance, expected.replay_row_allowance);
+                assert_eq!(
+                    actual.dependencies.observations().collect::<BTreeSet<_>>(),
+                    expected
+                        .dependencies
+                        .observations()
+                        .collect::<BTreeSet<_>>()
+                );
+                txn.abort();
+            }
+
+            let empty = db
+                .compose_independent_create_chunks(
+                    Some(RelationId(1)),
+                    &[],
+                    crate::prepared_write::PreparedDependencies::default(),
+                    Some(0),
+                )
+                .unwrap();
+            let [coordinate] = empty.template.coordinate_entries() else {
+                panic!("the fixed-coordinate empty seam must retain its coordinate");
+            };
+            assert_eq!(coordinate.relation, RelationId(1));
+            assert!(coordinate.rows.is_empty());
+
+            let mut txn = db.begin(&c.txn()).unwrap();
+            {
+                let mut workspace = MutationProgramWorkspace::new(&mut txn);
+                workspace.independent_creates = Some(IndependentCreateWrites::new(
+                    IndependentCreateKind::Edges,
+                    None,
+                ));
+                let chunks = workspace.independent_creates.as_mut().unwrap();
+                let mut first = WriteBatch::new(RelationId(1));
+                first.add_edge(EId(100), VId(1), VId(2), vec![]);
+                chunks.stage(&mut db, first).unwrap();
+                let mut refused = WriteBatch::new(RelationId(2));
+                refused.add_edge(EId(11), VId(2), VId(1), vec![]);
+                assert!(matches!(
+                    chunks.stage(&mut db, refused),
+                    Err(WriteTxnError::AtomicRelationConflict {
+                        element: ElementId::Edge(EId(11)),
+                        ..
+                    })
+                ));
+            }
+            assert!(txn.staged.is_empty() && txn.prepared.is_none());
+            assert_eq!(
+                *txn.read_set.borrow(),
+                BTreeSet::from([
+                    ElementId::Vertex(VId(1)),
+                    ElementId::Vertex(VId(2)),
+                    ElementId::Edge(EId(11)),
+                    ElementId::Edge(EId(100)),
+                ])
+            );
+            let mut concurrent = WriteBatch::new(RelationId(1));
+            concurrent.delete_edge(EId(11));
+            db.write(&c.commit(), concurrent).await.unwrap();
+            assert!(matches!(
+                txn.finish_strict(&mut db, &c.commit()).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }))
+            ));
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
 

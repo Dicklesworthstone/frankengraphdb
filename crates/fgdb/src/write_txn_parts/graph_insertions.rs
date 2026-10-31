@@ -1287,9 +1287,13 @@ impl WriteTxn {
                         live,
                     }));
                 }
-                if batches
-                    .iter()
-                    .any(|batch| batch.relation != independent.relation)
+                let statement_relation = batches[0].relation;
+                if independent
+                    .relation
+                    .is_some_and(|relation| relation != statement_relation)
+                    || batches
+                        .iter()
+                        .any(|batch| batch.relation != statement_relation)
                 {
                     return Err(source(WriteTxnError::UnsupportedAtomicMutation));
                 }
