@@ -8,7 +8,8 @@ use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphIntegerError, GraphIntegerErrorKind, GraphSymbol,
-    GraphSymbolKind, PreparedGraphWriteChain, PreparedGraphWriteChainText,
+    GraphSymbolKind, GraphSymbolResolver, PreparedGraphWriteChain, PreparedGraphWriteChainText,
+    ReverseSymbolCatalog,
 };
 use fgdb_types::{
     CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
@@ -118,11 +119,50 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 
+struct Catalog;
+
+impl GraphSymbolResolver for Catalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_label(VISIBLE, "Visible");
+        catalog.insert_label(HIDDEN, "Hidden");
+        catalog.insert_relation(R, "R");
+        catalog.insert_relation(S, "S");
+        catalog.insert_property(P, "p");
+        catalog.insert_property(SECRET, "secret");
+        catalog.insert_property(Q, "q");
+        Some(catalog)
+    }
+}
+
 fn chain(text: &str) -> PreparedGraphWriteChain {
-    PreparedGraphWriteChainText::prepare(text, R, symbols)
+    PreparedGraphWriteChainText::prepare(text, R, Catalog)
         .unwrap_or_else(|error| panic!("{text}: {error:?}"))
         .bind_parameters(&GqlParameters::new())
         .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+}
+
+#[test]
+fn a_literal_backslash_does_not_separate_authorized_foreach_clauses() {
+    let error = PreparedGraphWriteChainText::prepare(
+        r"MATCH (n:Visible {p:1})-[r:R]->(:Visible {p:2}) \ FOREACH (i IN [1,2] | DETACH DELETE n,r)",
+        R,
+        Catalog,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        fgdb_gql::GraphWriteChainTextError::Insert(fgdb_gql::GraphInsertTextError {
+            kind: fgdb_gql::GraphInsertTextErrorKind::Query(
+                fgdb_gql::GraphPatternTextErrorKind::InvalidToken
+            ),
+            ..
+        })
+    ));
 }
 
 fn authorization(error: &(dyn core::error::Error + 'static)) -> Option<Error> {
@@ -431,7 +471,7 @@ fn authorized_foreach_delete_reuses_only_successful_explicit_and_cascade_retirem
             (
                 // Explicit edges share a DETACH proposal with the vertex.
                 // Admit those original edge images before the cascade.
-                "MATCH (n:Visible {p:1})-[r:R]->(:Visible {p:2}) \\
+                "MATCH (n:Visible {p:1})-[r:R]->(:Visible {p:2}) \
                  FOREACH (i IN [1,2] | DETACH DELETE n,r)",
                 vec![VId(1)],
                 vec![EId(11), EId(12), EId(13), EId(14), EId(16)],

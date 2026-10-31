@@ -805,10 +805,14 @@ impl<'a> Parser<'a> {
                     edge_count: parsed.edges.len() - first_edge,
                 });
             }
-            // Consecutive CREATE clauses with no reading clause between them
-            // run on the same row, so CREATE p1 CREATE p2 is CREATE p1, p2 and
-            // p2 may reuse p1's bindings.
-            if !self.take(b',')? && !self.take_word("CREATE")? && !self.take_word("INSERT")? {
+            // A chain threads the created identities into the next native
+            // clause, whose fields may read them through composite values.
+            // Comma patterns stay one insertion. Standalone consecutive
+            // CREATE clauses retain their existing single-insertion owner.
+            if !self.take(b',')?
+                && (self.chain_write
+                    || (!self.take_word("CREATE")? && !self.take_word("INSERT")?))
+            {
                 break;
             }
         }

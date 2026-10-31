@@ -1966,7 +1966,9 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
     where
         R: GraphSymbolResolver + ?Sized,
     {
-        if multipart {
+        // An identity-only continuation has no cached property preimages.
+        // The existing native owned-input compiler supplies its field reads.
+        if multipart || from.boundary.is_none() {
             return Self::prepare_multipart(
                 statement,
                 relation,

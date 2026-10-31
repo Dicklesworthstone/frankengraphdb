@@ -116,6 +116,30 @@ fn independent_fresh_subgraphs_match_visible_prefix_staging_and_reopen() {
                 .unwrap();
             let pinned = db.read_session().unwrap();
             let basis = db.frontier().unwrap();
+            // Ordinary read UNWIND preserves the written input order. The
+            // write owner's terminal projection below canonicalizes its bag;
+            // neither path may change the input [2,1] used by this control.
+            assert_eq!(
+                db.query(
+                    &query,
+                    "UNWIND [2,1] AS outer RETURN outer",
+                    &GqlParameters::new(),
+                    Catalog,
+                    GqlQueryPolicy::new(HIGH, 2, HIGH, HIGH),
+                )
+                .unwrap(),
+                QueryResult::Rows {
+                    columns: vec!["outer".into()],
+                    rows: [2, 1]
+                        .into_iter()
+                        .map(|value| {
+                            vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+                                value,
+                            )))]
+                        })
+                        .collect(),
+                },
+            );
             let mut txn = db.begin(&txcx).unwrap();
             if prefixed {
                 // A nonempty entry workspace must use ordinary visible staging.
@@ -138,7 +162,9 @@ fn independent_fresh_subgraphs_match_visible_prefix_staging_and_reopen() {
             assert_eq!(receipt.stats().completed_statements, 1);
             assert_eq!(next.load(Ordering::Relaxed), 112);
             assert_eq!(rows.value.len(), 2);
-            for (row, outer) in rows.value.iter().zip([2, 1]) {
+            // An unpaged RETURN canonicalizes its projected tuple; the
+            // collection's written order does not impose an ORDER BY.
+            for (row, outer) in rows.value.iter().zip([1, 2]) {
                 assert_eq!(
                     row.values(),
                     &[GraphValue::Scalar(CanonicalScalar::Int(outer))]
@@ -230,6 +256,7 @@ fn independent_creation_refuses_collisions_before_later_iteration_errors() {
             }
             let basis = db.frontier().unwrap();
             let mut txn = db.begin(&contexts.txn()).unwrap();
+            let digest = txn.staged_effect_digest().unwrap();
             let calls = AtomicU64::new(0);
             let error = txn
                 .execute_graph_write_chain_governed(
@@ -268,12 +295,14 @@ fn independent_creation_refuses_collisions_before_later_iteration_errors() {
                 ));
             }
             assert_eq!(calls.load(Ordering::Relaxed), if spent { 1 } else { 2 });
-            assert!(txn.staged_effect_digest().is_err());
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
             assert!(txn.vertices(&db).unwrap().is_empty());
             assert!(txn.edges(&db).unwrap().is_empty());
             assert_eq!(db.frontier().unwrap(), basis);
             assert_eq!(db.delta_since(basis).unwrap().count(), 0);
+            assert_eq!(contexts.txn().outstanding_obligations(), 1);
             txn.abort();
+            assert_eq!(contexts.txn().outstanding_obligations(), 0);
         }
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
@@ -479,6 +508,8 @@ fn separate_set_clauses_read_prior_effects_but_one_clause_keeps_conflicts_atomic
         assert_eq!(txn.vertex(&db, VId(1)).unwrap().unwrap().props, expected);
         assert_eq!(db.frontier().unwrap(), committed);
         assert_eq!(db.vertices().unwrap().len(), 1);
+        assert_eq!(contexts.txn().outstanding_obligations(), 1);
+        txn.abort();
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -1486,6 +1517,8 @@ fn merge_metadata_without_a_complete_catalog_refuses_before_reserving_identity()
         assert_eq!(txn.vertices(&db).unwrap(), before);
         assert_eq!(db.vertices().unwrap(), before);
         assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(contexts.txn().outstanding_obligations(), 1);
+        txn.abort();
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

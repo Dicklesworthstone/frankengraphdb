@@ -1042,8 +1042,9 @@ impl<'a> Parser<'a> {
     /// carries its post-write properties through the WITH's WHERE/pages,
     /// terminal RETURN or first UNWIND expression. Hidden grouping keys are
     /// functions of kept identities; no summary becomes an element binding.
-    /// A row-fed write uses its admitted incoming field slots, never graph
-    /// projection indices or a fresh read. UNWIND drops the hidden cells.
+    /// Native owned rows use their post-write element reader. Legacy row
+    /// adapters use admitted incoming field slots, never graph projection
+    /// indices or a fresh read. UNWIND drops the hidden cells.
     fn write_tail(
         &mut self,
         returning: &mut ParsedMutationReturn<'a>,
@@ -1055,6 +1056,13 @@ impl<'a> Parser<'a> {
         let visible = schema.len();
         let mut reads = Vec::new();
         let input_boundary = self.boundary_reads.take();
+        // Multipart owned rows retain identities and use the native
+        // post-write element reader for their tail. They need no frozen
+        // preimage column to read a field after this clause's proposal.
+        // The legacy row adapter below still hoists its admitted fields.
+        if self.read_elements {
+            return Ok(self.finish_write_tail(schema, visible, reads)?);
+        }
         // In a chain, a field the next write only names as a SET target is
         // not a read of its post-write value.
         let tail_reads = if self.chain_write {
