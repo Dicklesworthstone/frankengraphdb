@@ -340,9 +340,9 @@ impl GqlParameters {
         mut self,
         statement_time: CanonicalTimestamp,
     ) -> Result<Self, GqlParameterError> {
-        self.set_statement_time(Some(GqlScalarParameter::new(CanonicalScalar::Timestamp(
-            statement_time,
-        ))?))?;
+        let statement_time = GqlScalarParameter::new(CanonicalScalar::Timestamp(statement_time))
+            .map_err(|_| GqlParameterError::ScalarLiteral)?;
+        self.set_statement_time(Some(statement_time))?;
         Ok(self)
     }
 

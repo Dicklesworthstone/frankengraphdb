@@ -10,8 +10,8 @@ use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
     GlaLimitDimension, GqlBudgetDimension, GqlParameters, GqlQueryError, GqlQueryPolicy,
-    GraphSymbol, GraphSymbolKind, GraphVertexMergeRowsQueryError, GraphWriteChainError,
-    PreparedGraphWriteChain, PreparedGraphWriteChainText,
+    GraphSymbol, GraphSymbolKind, GraphVertexMergeError, GraphVertexMergeRowsQueryError,
+    GraphWriteChainError, PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
 use fgdb_types::{
     CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId,
@@ -331,6 +331,184 @@ fn private_occurrences_still_spend_snapshot_work_scratch_and_creation_limits() {
             .await
             .unwrap();
         assert_targets(&db, true, VId(1_000));
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn non_key_merge_actions_reuse_targets_and_keep_every_occurrence_and_receipt() {
+    let ((), report) = run_async_under_lab(0xc4a2_1004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut distinct_key_records = None;
+        for repetitions in [1_usize, 8, 32] {
+            let input = std::iter::repeat_n("1,2", repetitions)
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut reference = None;
+            let mut optimized_records = 0;
+            for sequential in [false, true] {
+                let mut db = Database::open_memory(&contexts.commit(), keys())
+                    .await
+                    .unwrap();
+                db.write(&contexts.commit(), seed()).await.unwrap();
+                // Assigning the match key to itself deliberately keeps the
+                // sequential path. It changes no graph value, so it is an
+                // independent reference for target order and ON-branch effects.
+                let after = if sequential { "SET n.p=n.p" } else { "" };
+                let text = format!(
+                    "UNWIND [{input}] AS k MERGE (n:Target {{p:k}}) {ACTIONS} \
+                     {after} RETURN k,n,n.q AS q ORDER BY k,n"
+                );
+                let next = AtomicU64::new(1_000);
+                let mut transaction = db.begin(&contexts.txn()).unwrap();
+                let (stats, rows, receipt) = transaction
+                    .execute_graph_write_chain_governed(
+                        &mut db,
+                        &contexts.query(),
+                        &prepare(&text),
+                        policy(HIGH),
+                        |request| allocate(&next, request),
+                    )
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                assert_eq!(stats.created_vertices, 1);
+                assert_eq!(next.load(Ordering::Relaxed), 1_001);
+                let expected: Vec<_> = [
+                    (1, VId(1), 4 + repetitions as i64),
+                    (1, WIDE, 7 + repetitions as i64),
+                    (2, VId(1_000), 9 + repetitions as i64),
+                ]
+                .into_iter()
+                .flat_map(|(key, vertex, value)| {
+                    std::iter::repeat_n(
+                        vec![int(key), GraphValue::Vertex(vertex), int(value)],
+                        repetitions,
+                    )
+                })
+                .collect();
+                let actual: Vec<_> = rows.value.iter().map(|row| row.values().to_vec()).collect();
+                assert_eq!(actual, expected, "{text}");
+                assert_eq!(
+                    receipt.stats().mutation_effects,
+                    (3 * repetitions * if sequential { 2 } else { 1 }) as u64,
+                    "each matched target and duplicate occurrence spends its actions",
+                );
+                let outcomes = receipt.steps()[0].merged_vertices().unwrap();
+                assert_eq!(outcomes.len(), 3 * repetitions);
+                assert_eq!(
+                    outcomes.iter().filter(|outcome| outcome.created()).count(),
+                    1,
+                    "the first duplicate of the new key runs ON MATCH",
+                );
+                transaction
+                    .finish(&mut db, &contexts.commit())
+                    .await
+                    .unwrap();
+                let state = (actual, receipt.steps().to_vec(), db.vertices().unwrap());
+                if sequential {
+                    assert_eq!(&state, reference.as_ref().unwrap());
+                    if repetitions > 1 {
+                        assert!(
+                            stats.selection.snapshot_records > optimized_records,
+                            "the reference must really reselect duplicate keys",
+                        );
+                    }
+                } else {
+                    optimized_records = stats.selection.snapshot_records;
+                    assert!(optimized_records > 0);
+                    assert_eq!(
+                        *distinct_key_records.get_or_insert(optimized_records),
+                        optimized_records,
+                        "source visits depend on distinct keys, not repeated updates",
+                    );
+                    reference = Some(state);
+                }
+                assert_eq!(contexts.txn().outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn repeated_merge_actions_reselect_changed_keys_and_roll_back_late_failures() {
+    let ((), report) = run_async_under_lab(0xc4a2_1005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut transaction = db.begin(&contexts.txn()).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(500), vec![LabelId(1)], vec![]);
+        transaction.write(&mut db, prefix).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let before = db.frontier().unwrap();
+        let next = AtomicU64::new(1_000);
+        for (actions, limit) in [
+            ("ON CREATE SET n.q=1 ON MATCH SET n.q=10/(n.q-1)", HIGH),
+            ("ON CREATE SET n.q=1 ON MATCH SET n.q=n.q+1", 1),
+        ] {
+            let text = format!("UNWIND [7,7] AS k MERGE (n:Target {{p:k}}) {actions} RETURN n.q");
+            let error = transaction
+                .execute_graph_write_chain_governed(
+                    &mut db,
+                    &contexts.query(),
+                    &prepare(&text),
+                    policy(HIGH).with_mutation_limit(limit),
+                    |request| allocate(&next, request),
+                )
+                .expect_err("a later cached occurrence must still evaluate and spend its action");
+            if limit == 1 {
+                assert!(matches!(
+                    error,
+                    GqlQueryError::Source(GraphWriteChainError::VertexMerge(
+                        GraphVertexMergeRowsQueryError::Merge(GraphVertexMergeError::EffectLimit {
+                            limit: 1,
+                            observed: 2,
+                        })
+                    ))
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    GqlQueryError::Source(GraphWriteChainError::VertexMerge(
+                        GraphVertexMergeRowsQueryError::Merge(GraphVertexMergeError::RowAction {
+                            row: 1,
+                            ..
+                        })
+                    ))
+                ));
+            }
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.vertices(&db).unwrap().len(), 1);
+            assert_eq!(db.frontier().unwrap(), before);
+        }
+        let text = "UNWIND [7,7] AS k MERGE (n:Target {p:k}) \
+                    ON CREATE SET n.p=8 RETURN n.p ORDER BY n.p";
+        let (stats, result, _) = transaction
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &prepare(text),
+                policy(HIGH),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(stats.created_vertices, 2);
+        assert_eq!(
+            result
+                .value
+                .iter()
+                .map(|row| row.values())
+                .collect::<Vec<_>>(),
+            vec![&[int(8)][..], &[int(8)][..]],
+        );
+        transaction
+            .finish(&mut db, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 3);
+        assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

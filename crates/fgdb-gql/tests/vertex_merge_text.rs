@@ -153,3 +153,54 @@ fn malformed_duplicate_and_relationship_merge_syntax_refuse_before_catalog_acces
         })
     ));
 }
+
+#[test]
+fn row_merge_target_reuse_requires_every_branch_to_preserve_keys_and_visibility() {
+    use fgdb_gql::{
+        GraphSymbolResolver, GraphWriteChainStep, PreparedGraphWriteChainText, ReverseSymbolCatalog,
+    };
+
+    struct Catalog;
+    impl GraphSymbolResolver for Catalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            symbols(kind, name)
+        }
+
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = ReverseSymbolCatalog::new();
+            catalog.insert_property(P, "p");
+            catalog.insert_property(NAME, "name");
+            catalog.insert_property(ACTIVE, "active");
+            Some(catalog)
+        }
+    }
+
+    for (pattern, actions, expected) in [
+        ("p:k", "", true),
+        (
+            "p:k",
+            "ON CREATE SET n.active=0 ON MATCH SET n.active=n.active+1",
+            true,
+        ),
+        ("p:k", "ON CREATE SET n.name=[1,2] SET n.active=k+1", true),
+        ("p:k,active:7", "SET n.name='payload'", true),
+        ("p:k", "ON CREATE SET n.p=2", false),
+        ("p:k", "ON MATCH SET n.p=n.p+1", false),
+        ("p:k", "ON CREATE SET n.active=0 SET n.p=k", false),
+        ("p:k,active:7", "ON MATCH SET n.active=8", false),
+        ("p:k", "ON CREATE SET n:Person", false),
+        ("p:k", "ON MATCH SET n:Person", false),
+        ("p:k", "SET n={active:k}", false),
+        ("p:k", "ON MATCH SET n += {active:k}", false),
+    ] {
+        let text = format!("UNWIND [1,1] AS k MERGE (n:Person {{{pattern}}}) {actions} RETURN n");
+        let chain = PreparedGraphWriteChainText::prepare(&text, R, Catalog)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let [GraphWriteChainStep::VertexMergeQuery(query)] = chain.steps() else {
+            panic!("expected one row MERGE query: {text}");
+        };
+        assert_eq!(query.merge().preserves_match_targets(), expected, "{text}");
+    }
+}

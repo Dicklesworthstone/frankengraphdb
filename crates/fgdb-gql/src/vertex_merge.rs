@@ -868,11 +868,53 @@ impl PreparedGraphVertexMergeRows {
         Ok(tuple)
     }
 
-    /// The ON/SET clauses, if any. With clauses, every row runs its own
-    /// MERGE; without, rows with equal scalar tuples share one.
+    /// The ON/SET clauses, if any. Each input occurrence runs its selected
+    /// branch and trailing assignments against the preceding occurrence's
+    /// state, even when target resolution can be shared.
     #[must_use]
     pub fn actions(&self) -> Option<&GraphVertexMergeRowActions> {
         self.actions.as_deref()
+    }
+
+    /// Whether every ON/SET action preserves the MERGE's match keys and
+    /// labels. Hosts may reuse targets for an already resolved scalar tuple
+    /// within this step; every occurrence must still run its own actions and
+    /// retain its output multiplicity. A reused target is matched, not newly
+    /// created, and action values read the current overlay as usual.
+    ///
+    /// Only assignments to named non-key properties are proved here. Label
+    /// writes can also change capability visibility, and whole-map writes may
+    /// replace a match key. Neither admits reuse. Collection tuples still
+    /// require native matching: an identical list containing NULL need not
+    /// compare TRUE. This proof does not authorize reuse across write steps.
+    #[must_use]
+    pub fn preserves_match_targets(&self) -> bool {
+        self.actions.as_deref().is_none_or(|actions| {
+            actions
+                .on_create
+                .iter()
+                .chain(&actions.on_match)
+                .chain(&actions.after)
+                .all(|action| {
+                    let key = match action {
+                        GraphVertexMergeRowAction::Vertex(
+                            crate::GraphVertexUpsertAction::SetProperty { key, .. }
+                            | crate::GraphVertexUpsertAction::SetStored { key, .. },
+                        )
+                        | GraphVertexMergeRowAction::Expression { key, .. }
+                        | GraphVertexMergeRowAction::Value { key, .. } => key,
+                        GraphVertexMergeRowAction::Vertex(
+                            crate::GraphVertexUpsertAction::ClearProperties { .. }
+                            | crate::GraphVertexUpsertAction::SetExpression { .. }
+                            | crate::GraphVertexUpsertAction::SetLabel { .. },
+                        )
+                        | GraphVertexMergeRowAction::Properties { .. } => return false,
+                    };
+                    self.properties
+                        .binary_search_by_key(key, |(key, _)| *key)
+                        .is_err()
+                })
+        })
     }
 
     /// One output row: the input row's kept columns, then the vertex.

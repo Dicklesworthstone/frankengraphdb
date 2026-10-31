@@ -23,10 +23,12 @@ pub enum GraphWriteStepReceipt {
     VertexMerge {
         outcome: GraphVertexMergeOutcome,
     },
-    /// A vertex MERGE over input rows (a chained write, fgdb-cpny9): one
-    /// outcome per distinct property tuple and vertex, tuples in first-row
-    /// order and each tuple's vertices in identity order. `created` retains
-    /// exactly the Created IDs in that order.
+    /// A vertex MERGE over input rows (a chained write, fgdb-cpny9). With
+    /// ON/SET actions, retain each input occurrence's outcomes in row order;
+    /// a later occurrence of a created vertex is Matched. Action-free scalar
+    /// tuples share one outcome per distinct tuple and vertex. Each tuple's
+    /// vertices retain identity order, and `created` retains exactly the
+    /// Created IDs in that order.
     VertexMergeRows {
         outcomes: Vec<GraphVertexMergeOutcome>,
         created: Vec<VId>,
