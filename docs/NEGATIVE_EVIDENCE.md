@@ -573,6 +573,16 @@ be a commit reachable in this repository.
 - **caught_by**: the complete stable proof on `48cac8c36e04b3fc7ed7d63edd7f8bffbec82cf0` failed the unchanged chained-UNWIND exact-conflict law; independent source review supplied the single-target counterexample. The complete run retained 13,592 passed, nine failed and 33 existing ignored tests, with an authenticated RED verdict.
 - **signature**: treating a contradictory fixture as evidence of a missing production owner, then changing the statement boundary to satisfy it. The in-place repair removes the specialization and completion adapter, keeps the original exact-conflict and distinct-friend selection tests unchanged, retains invalid FGP/document inputs as atomic negatives, and adds lawful disjoint-field/equal-duplicate positives with issued identities, history and reopen. Explicit parameter records remain separate statements. The corrected diagnostic passes 5,946 tests across 36 targets; full integrated committed-tree qualification remains a separate requirement.
 
+### NE-0051 — The operator committed after an exact-ID exporter rejected the landing
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-epic-verif-phi.2
+- **repair**: 5ebfa34d183e3a6b51ddd6b627f6b81b24f1f41f
+- **claimed**: a two-record export intent was sufficient to proceed with the integrated source and tracker commit
+- **actual**: `br_sync.sh` returned 65 and explicitly prohibited staging because it observed four records. Root printed that result without checking its exit code and committed local `8238738703d1d8143ababfe3907f34229605d4da`. No push or task closure occurred. The helper worked; the operator bypassed its verdict. The extra records were native renumbering of three colliding comment IDs after a merge, not permission to sweep unrelated work.
+- **caught_by**: immediate review of the helper's terminal output. Comparison against `256107d7f` proves every non-comment field and ordered comment payload unchanged for both extra records; only numeric comment IDs changed. Incoming IDs 3446/3447/3448 collided with existing comments, and native import assigned 3474/3472/3473.
+- **signature**: invoking an enforcement helper is not the same as obeying its result. The corrective landing explicitly declares `fgdb-48a`, `fgdb-at06q`, `fgdb-epic-verif-phi.2` and `fgdb-qjmgo`, records their actual compile progress and collision provenance, and checks native export exit 0 before committing. The original rejected attempt stays in history; it is not retroactively green. Subsequent orchestration stops before staging on any nonzero export. No helper, attribution rule or gate is weakened.
+
 ## Reverts
 
 The literal `AGENTS.md` clause, enforced. A performed revert has exactly one

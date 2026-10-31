@@ -865,6 +865,14 @@ zero after those concrete corrections. Failed earlier passes are retained.
 The new tests are type-checked; this does not replace their runtime, the full
 scanner or the complete committed-tree mandatory proof.
 
+One tracker landing was mishandled: Root committed local `823873870` before
+checking an exact-ID export rejection. The helper correctly found two extra
+records caused by native renumbering of colliding imported comment IDs. All
+comment payloads and other issue fields are preserved. Corrective commit
+`5ebfa34d183e3a6b51ddd6b627f6b81b24f1f41f` follows a successful, explicitly
+declared four-record export; the rejected attempt is retained as NE-0051.
+Nothing was pushed or closed on that rejection. Full qualification stays open.
+
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,
 not a new gate or capability. Retire it from active use when these work units
