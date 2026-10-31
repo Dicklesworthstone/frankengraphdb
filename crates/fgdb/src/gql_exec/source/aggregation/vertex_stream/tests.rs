@@ -639,6 +639,7 @@ fn cold_authorized_streams_mask_history_before_charging_visible_allowances() {
 
 #[test]
 fn graph_probes_keep_the_indexed_source_instead_of_seeking_every_patch_per_probe() {
+    use fgdb_gql::algebra::GraphValue;
     use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
 
     let ((), report) = run_async_under_lab(0x51cb_0005, |root| async move {
@@ -676,11 +677,17 @@ fn graph_probes_keep_the_indexed_source_instead_of_seeking_every_patch_per_probe
         let plan = VertexScanPlan::compile(prepared.plan()).unwrap();
         assert!(plan.has_graph_probes());
         let actual = view
-            .stream_graph_vertices_governed(&cx, &prepared, wide())
+            .stream_graph_values_governed(&cx, &prepared, wide())
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(actual, vec![VId(0), VId(1), VId(2)]);
+        assert_eq!(
+            actual,
+            [0, 1, 2]
+                .into_iter()
+                .map(|id| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(id))]))
+                .collect::<Vec<_>>(),
+        );
         assert!(view.snapshot.property_index.get().is_some());
     });
     assert!(report.lab_test_passed(), "{report:?}");

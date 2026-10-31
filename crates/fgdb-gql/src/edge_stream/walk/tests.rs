@@ -625,7 +625,7 @@ fn endpoint_and_path_filters_do_not_prune_transit_and_zero_hops_keep_isolates() 
     assert!(rows.iter().any(|row| row[0] == GraphValue::Vertex(IDS[3])));
     assert!(
         rows.iter()
-            .all(|row| matches!(&row[2],GraphValue::Path(path) if path.len()==0))
+            .all(|row| matches!(&row[2],GraphValue::Path(path) if path.is_empty()))
     );
 }
 
@@ -776,7 +776,9 @@ fn scalar_edge_filter_payload_checkpoints_and_limits_are_terminal() {
     let logical = prepared(&format!(
         "MATCH (a)-[:R*1..2 {{p:'{payload}'}}]->(b) RETURN b LIMIT 0"
     ));
-    let plan = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap().0;
+    let plan = AsyncGraphWalkPlan::compile_sort_input(logical.plan())
+        .unwrap()
+        .0;
     check_all_live_limits(plan, || {
         Source::new(1).with_edge_properties(vec![(
             EId(0),
@@ -895,7 +897,6 @@ fn pending_drop_is_terminal_and_outputs_keep_their_independent_guards() {
     }
 }
 
-
 fn scalar_edges(mask: usize) -> Source {
     use fgdb_types::CanonicalF64;
 
@@ -929,19 +930,23 @@ fn scalar_edges(mask: usize) -> Source {
     ])
 }
 
-fn native_with_edge_properties(
-    plan: &GlaPlan<GraphValueRow>,
-    data: &Data,
-) -> Vec<Vec<GraphValue>> {
+fn native_with_edge_properties(plan: &GlaPlan<GraphValueRow>, data: &Data) -> Vec<Vec<GraphValue>> {
     plan.execute_with_element_properties_control(
         data.vertices.keys().copied(),
         data.edges.iter().map(|&(eid, a, b)| (eid, a, R, b)),
         |vid, predicates| {
             Ok::<_, crate::GraphIntegerError>(
-                predicates.iter().all(|p| p.matches(&[], &data.vertices[&vid])),
+                predicates
+                    .iter()
+                    .all(|p| p.matches(&[], &data.vertices[&vid])),
             )
         },
-        |vid, key| Ok(data.vertices[&vid].iter().find(|p| p.0 == key).map(|p| &p.1)),
+        |vid, key| {
+            Ok(data.vertices[&vid]
+                .iter()
+                .find(|p| p.0 == key)
+                .map(|p| &p.1))
+        },
         |eid, key| {
             Ok(data
                 .edge_properties
@@ -979,8 +984,8 @@ fn scalar_edge_maps_match_literal_edge_selection_and_native_complete_routes() {
                 for different in [false, true] {
                     for (minimum, maximum) in [(0, 0), (0, 3), (1, 2)] {
                         let source = scalar_edges(mask);
-                        let text = statement(direction, minimum, maximum)
-                            .replacen(']', " {p:7}]", 1);
+                        let text =
+                            statement(direction, minimum, maximum).replacen(']', " {p:7}]", 1);
                         let logical = definition(&text, search, different);
                         let accepted = Data {
                             edges: source
@@ -995,7 +1000,10 @@ fn scalar_edge_maps_match_literal_edge_selection_and_native_complete_routes() {
                         };
                         let expected =
                             oracle(&accepted, direction, minimum, maximum, search, different);
-                        assert_eq!(native_with_edge_properties(&logical, &source.data), expected);
+                        assert_eq!(
+                            native_with_edge_properties(&logical, &source.data),
+                            expected
+                        );
                         assert_eq!(drain(logical, source), expected, "{text} {search:?}");
                         cases += 1;
                     }
@@ -1026,8 +1034,8 @@ fn scalar_edge_maps_keep_numeric_domains_nulls_and_conjunctions_native() {
             GraphWalkSearch::Simple,
         ] {
             let source = scalar_edges(31);
-            let text = statement(GlaDirection::Undirected, 0, 3)
-                .replacen(']', &format!(" {{{map}}}]"), 1);
+            let text =
+                statement(GlaDirection::Undirected, 0, 3).replacen(']', &format!(" {{{map}}}]"), 1);
             let logical = definition(&text, search, false);
             let selected = Data {
                 edges: source
@@ -1041,16 +1049,17 @@ fn scalar_edge_maps_keep_numeric_domains_nulls_and_conjunctions_native() {
                 vertices: source.data.vertices.clone(),
             };
             let expected = oracle(&selected, GlaDirection::Undirected, 0, 3, search, false);
-            assert_eq!(native_with_edge_properties(&logical, &source.data), expected);
+            assert_eq!(
+                native_with_edge_properties(&logical, &source.data),
+                expected
+            );
             assert_eq!(drain(logical, source), expected, "{map} {search:?}");
         }
     }
     // Vertex 0 has p=1, but its outgoing edge has explicit NULL. The lookup
     // must stay in the relationship property domain and NULL must not match.
-    let source = Source::new(1).with_edge_properties(vec![(
-        EId(0),
-        vec![(P, CanonicalScalar::Null.into())],
-    )]);
+    let source = Source::new(1)
+        .with_edge_properties(vec![(EId(0), vec![(P, CanonicalScalar::Null.into())])]);
     let logical = definition(
         "MATCH p = (a)-[:R*1..2 {p:1}]->(b) RETURN p",
         GraphWalkSearch::All,
@@ -1066,7 +1075,9 @@ fn scalar_edge_filter_charges_payloads_and_propagates_candidate_control() {
         let logical = prepared(&format!(
             "MATCH (a)-[:R*1..1 {{p:'{payload}'}}]->(b) RETURN b"
         ));
-        let plan = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap().0;
+        let plan = AsyncGraphWalkPlan::compile_sort_input(logical.plan())
+            .unwrap()
+            .0;
         let source = Source::new(1).with_edge_properties(vec![(
             EId(0),
             vec![(P, CanonicalScalar::ucs_basic_text(payload).unwrap().into())],
@@ -1089,7 +1100,9 @@ fn scalar_edge_filter_charges_payloads_and_propagates_candidate_control() {
     assert_eq!(long.scratch_entries, short.scratch_entries);
 
     let logical = prepared("MATCH (a)-[:R*1..2 {p:7}]->(b) RETURN b LIMIT 0");
-    let plan = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap().0;
+    let plan = AsyncGraphWalkPlan::compile_sort_input(logical.plan())
+        .unwrap()
+        .0;
     let mut source = scalar_edges(1);
     source.refuse_evaluation = true;
     let counts = source.counts.clone();

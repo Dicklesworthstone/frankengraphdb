@@ -242,6 +242,9 @@ impl PreparedGraphForeachText {
                                 declarations,
                                 resolve,
                                 from,
+                                // This iteration supplies the native owned
+                                // frame and its current staged graph.
+                                true,
                             )?;
                         match (returning, after) {
                             (Some(returning), Some((_, after))) => {
@@ -268,6 +271,9 @@ impl PreparedGraphForeachText {
                                 declarations,
                                 resolve,
                                 Some(from),
+                                // Keep the same native owned input as the
+                                // other writes in this FOREACH body.
+                                true,
                             )?;
                         steps.push(ChainTextStep::VertexMerge(Box::new(merge)));
                         next = after;

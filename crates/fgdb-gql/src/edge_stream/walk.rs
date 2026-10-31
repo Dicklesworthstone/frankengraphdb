@@ -9,6 +9,9 @@ use crate::GraphWalkBounds;
 use crate::algebra::{EdgeRelation, GraphWalkSearch, IntegerComparison, WalkEdgePredicate};
 use crate::stream::{AsyncVertexCandidate, AsyncVertexScanEvent, AsyncVertexScanRecord};
 
+type AsyncRootCandidateResult<Record, Error, Control> =
+    Result<Option<AsyncVertexCandidate<Record>>, EdgeScanSourceError<Error, Control>>;
+
 /// One immutable vertex-root and indexed-incidence source. Root candidates
 /// obey the same exactly-once admission and strict identity ordering as
 /// AsyncVertexScanSource. Incidences obey AsyncEdgeJoinSource, independently of
@@ -21,10 +24,7 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
         &mut self,
         control: &mut (impl FnMut(AsyncVertexScanEvent) -> Result<(), C> + Send),
     ) -> impl core::future::Future<
-        Output = Result<
-            Option<AsyncVertexCandidate<Self::RootRecord>>,
-            EdgeScanSourceError<Self::Error, C>,
-        >,
+        Output = AsyncRootCandidateResult<Self::RootRecord, Self::Error, C>,
     > + Send;
 
     /// Admit root-local evaluator temporaries, including a zero-hop capture,
@@ -659,8 +659,13 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
                         .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
                 };
                 control(GlaExecutionEvent::Work)?;
-                let actual = seek(edge.properties, &predicate.key, |entry| entry.0, &mut control)?
-                    .map(|(_, value)| value);
+                let actual = seek(
+                    edge.properties,
+                    &predicate.key,
+                    |entry| entry.0,
+                    &mut control,
+                )?
+                .map(|(_, value)| value);
                 if let Some(actual) = actual {
                     crate::algebra_exec::charge_stored_payload(actual, &mut control)?;
                 }

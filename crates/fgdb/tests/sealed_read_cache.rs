@@ -1101,6 +1101,13 @@ fn sealed_owners_execute_every_native_class_at_current_and_historical_cuts() {
                 "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at RETURN COUNT(*) AS n",
             ),
             (
+                Class::TemporalAggregate,
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at WITH n \
+                 CALL fnx.weakly_connected_components(label => 'L', relation => 'R', \
+                 parallel => 'collapse', self_loops => 'drop') YIELD vertex \
+                 WHERE vertex = n RETURN COUNT(*) AS n",
+            ),
+            (
                 Class::TemporalSet,
                 "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at \
                  RETURN n AS id UNION ALL MATCH (m:L) RETURN m AS id",
@@ -1221,6 +1228,34 @@ fn sealed_owners_execute_every_native_class_at_current_and_historical_cuts() {
                     );
                 }
                 assert_eq!(actual, literal, "literal {class:?} at {selected:?}");
+                if class == Class::TemporalAggregate && text.contains("CALL") {
+                    let requested = if selected == CommitSeq(1) { 4 } else { 1 };
+                    let wrong = GqlParameters::new().with_uint64("at", requested).unwrap();
+                    assert!(matches!(
+                        view.execute_prepared(
+                            &cx, &prepared, &wrong, sealed_sql_policy(), memory(),
+                        ),
+                        Err(fgdb::SealedQueryError::SnapshotMismatch {
+                            requested: actual,
+                            retained,
+                        }) if actual == CommitSeq(requested) && retained == selected,
+                    ));
+                    assert!(matches!(
+                        view.execute_prepared(
+                            &cx,
+                            &prepared,
+                            arguments,
+                            sealed_sql_policy(),
+                            FnxMemoryLimits {
+                                max_kernel_workspace_bytes: 0,
+                                ..memory()
+                            },
+                        ),
+                        Err(fgdb::SealedQueryError::Query(fgdb::QueryError::Aggregate(
+                            _
+                        ))),
+                    ));
+                }
                 results.push((prepared, arguments.clone(), expected));
             }
             retained.push((view, results));

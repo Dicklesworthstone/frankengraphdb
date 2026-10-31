@@ -74,3 +74,12 @@ needless_range_loop = "allow"
 [profile.test]
 debug = "line-tables-only"
 
+# fgdb-epic-verif-phi.3: the unoptimized lib-test's emitted code exceeds
+# x86-64's signed PC32 range. Reduce test-profile code size while retaining
+# every test, debug assertion, checked overflow and the existing unwind policy.
+# Development and release artifacts keep their existing profiles.
+[profile.test.package.fgdb]
+opt-level = 1
+debug-assertions = true
+overflow-checks = true
+
