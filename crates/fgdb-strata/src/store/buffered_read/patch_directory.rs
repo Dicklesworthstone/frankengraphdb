@@ -133,6 +133,13 @@ impl Candidates {
         }
     }
 
+    // No pending subtree means traversal is complete without inspecting any
+    // additional node or spending another control event. A nonempty stack
+    // makes no claim about whether its remaining ranges contain the identity.
+    pub(super) fn is_exhausted(&self) -> bool {
+        self.depth == 0
+    }
+
     fn next<E>(
         &mut self,
         ranges: &[Range],
