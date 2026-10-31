@@ -591,7 +591,7 @@ fn repeated_optional_and_null_collection_keep_native_body_invocation_laws() {
         )
         .unwrap();
     assert_eq!(calls, 1);
-    assert_eq!(answer.value[0].values(), [null.clone()]);
+    assert_eq!(answer.value[0].values(), core::slice::from_ref(&null));
     let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(&optional).unwrap();
     let AsyncSpillSetSourcePlan::Apply(apply) = plan.source() else {
         unreachable!()
