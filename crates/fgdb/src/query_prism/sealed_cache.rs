@@ -1,8 +1,8 @@
 //! Owner-private reuse of completed decoded and compressed projections. No result, live
 //! permit, unverified source claim or partial build is retained here.
 //!
-//! Standalone and buffered construction allowances remain exact keys. Composed
-//! resident queries may reuse the same image/projection when their complete measured
+//! Standalone construction allowances remain exact keys. Composed resident and
+//! buffered queries may reuse the same image/projection when their complete measured
 //! construction cost fits every fresh source/GQL counter allowance. Otherwise
 //! the ordinary build reaches its original first refusal. Physical build
 //! checkpoints and I/O disappear on a hit; live entry/return checks and all
@@ -44,9 +44,9 @@ pub(crate) enum Source {
 pub(crate) struct Request {
     pub(crate) projection: ProjectionRequest,
     pub(crate) source: Source,
-    /// A query retains its complete measured construction admission. Buffered
-    /// queries require exact policy equality. A resident query may reuse under
-    /// different remaining allowances only when every construction counter
+    /// A query retains its complete measured construction admission. A resident
+    /// or buffered query may reuse under different remaining allowances only
+    /// when every construction counter
     /// fits; otherwise it rebuilds and reaches its own first refusal.
     /// Standalone preparation has no GQL admission profile.
     pub(crate) query_policy: Option<GqlQueryPolicy>,
@@ -177,6 +177,40 @@ pub(crate) struct BufferedCache<Key, Graph> {
 pub(crate) type BufferedSealedCache = BufferedCache<Request, Retained>;
 pub(crate) type BufferedProjectionCache = BufferedCache<ProjectionRequest, SnapshotGraphView>;
 
+impl BufferedSealedCache {
+    /// Reuse only completed construction whose exact counters fit this caller.
+    /// Root, cut, selection, graph laws and physical source bounds remain exact.
+    pub(crate) fn lookup_query(
+        &self,
+        cx: &QueryCx,
+        request: Request,
+    ) -> Result<Option<Retained>, Box<asupersync::error::Error>> {
+        self.lookup_controlled_by(
+            |cached, retained| buffered_query_compatible(*cached, request, retained.query_usage),
+            || cx.checkpoint(),
+        )
+    }
+}
+
+fn buffered_query_compatible(cached: Request, request: Request, usage: Option<QueryUsage>) -> bool {
+    let (Some(policy), Some(usage)) = (request.query_policy, usage) else {
+        return false;
+    };
+    if cached.query_policy.is_none() || !matches!(request.source, Source::Buffered { .. }) {
+        return false;
+    }
+    // Normalize only the same three allowance profiles as the resident query
+    // cache. Equality retains staging, projection, sealing and raw-source caps,
+    // along with every current or future source and projection identity field.
+    let mut compatible = cached;
+    compatible.query_policy = request.query_policy;
+    compatible.projection.source_limits.max_work_units =
+        request.projection.source_limits.max_work_units;
+    compatible.projection.source_limits.max_scratch_entries =
+        request.projection.source_limits.max_scratch_entries;
+    compatible == request && usage.fits(policy, request.projection.source_limits)
+}
+
 impl<Key: PartialEq, Graph: RetainedProjection> BufferedCache<Key, Graph> {
     pub(crate) fn new(pool: MemoryPool) -> Self {
         Self {
@@ -233,14 +267,21 @@ impl<Key: PartialEq, Graph: RetainedProjection> BufferedCache<Key, Graph> {
     fn lookup_controlled<E>(
         &self,
         request: Key,
+        checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<Graph>, E> {
+        self.lookup_controlled_by(|cached, _| cached == &request, checkpoint)
+    }
+
+    fn lookup_controlled_by<E>(
+        &self,
+        mut matches: impl FnMut(&Key, &Graph) -> bool,
         mut checkpoint: impl FnMut() -> Result<(), E>,
     ) -> Result<Option<Graph>, E> {
         checkpoint()?;
-        let graph = self
-            .entries
-            .iter()
-            .flatten()
-            .find_map(|entry| (entry.request == request).then(|| entry.graph.clone()));
+        let graph =
+            self.entries.iter().flatten().find_map(|entry| {
+                matches(&entry.request, &entry.graph).then(|| entry.graph.clone())
+            });
         checkpoint()?;
         Ok(graph)
     }
@@ -293,5 +334,144 @@ impl<Key: PartialEq, Graph: RetainedProjection> BufferedCache<Key, Graph> {
             charge,
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_prism::{
+        Directedness, FnxReadOptions, FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy,
+        SelfLoopPolicy, SnapshotBinding,
+    };
+    use fgdb_types::{CommitSeq, ObjectId};
+
+    fn request() -> Request {
+        let mut options = FnxReadOptions::whole_graph(Some(CommitSeq(2)));
+        options.selection.relation = Some(RelationId(1));
+        options.source_limits.max_work_units = 100;
+        options.source_limits.max_scratch_entries = 100;
+        options.projection.directedness = Directedness::Directed;
+        options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+        options.projection.self_loops = SelfLoopPolicy::Drop;
+        Request {
+            projection: ProjectionRequest {
+                binding: SnapshotBinding {
+                    root: ObjectId([1; 32]),
+                    as_of: CommitSeq(2),
+                },
+                selection: options.selection,
+                projection: options.projection,
+                projection_limits: options.projection_limits,
+                source_limits: options.source_limits,
+            },
+            source: Source::Buffered {
+                sealing: SealedLimits {
+                    max_rows: 100,
+                    max_incidences: 100,
+                    max_image_bytes: 1 << 20,
+                    max_property_bytes: 1 << 16,
+                },
+                max_source_incidences: 100,
+            },
+            query_policy: Some(GqlQueryPolicy::new(100, 100, 100, 100)),
+        }
+    }
+
+    fn usage() -> QueryUsage {
+        let mut admission = AdmissionUsage::default();
+        admission.absorb(3, 16, 5);
+        QueryUsage {
+            admission,
+            source_work: 11,
+            source_scratch: 5,
+        }
+    }
+
+    #[test]
+    fn buffered_query_reuse_requires_every_measured_construction_allowance() {
+        let cached = request();
+        let mut exact = cached;
+        exact.query_policy = Some(GqlQueryPolicy::new(3, 1, 16, 5));
+        exact.projection.source_limits.max_work_units = 11;
+        exact.projection.source_limits.max_scratch_entries = 5;
+        assert!(buffered_query_compatible(cached, exact, Some(usage())));
+        assert!(buffered_query_compatible(exact, cached, Some(usage())));
+        for dimension in 0..5 {
+            let mut short = exact;
+            match dimension {
+                0 => short.query_policy = Some(GqlQueryPolicy::new(2, 1, 16, 5)),
+                1 => short.query_policy = Some(GqlQueryPolicy::new(3, 1, 15, 5)),
+                2 => short.query_policy = Some(GqlQueryPolicy::new(3, 1, 16, 4)),
+                3 => short.projection.source_limits.max_work_units = 10,
+                4 => short.projection.source_limits.max_scratch_entries = 4,
+                _ => unreachable!(),
+            }
+            assert!(
+                !buffered_query_compatible(cached, short, Some(usage())),
+                "underfit construction must rebuild at dimension {dimension}",
+            );
+        }
+        assert!(!buffered_query_compatible(cached, exact, None));
+        let mut standalone = cached;
+        standalone.query_policy = None;
+        assert!(!buffered_query_compatible(standalone, exact, Some(usage())));
+        assert!(!buffered_query_compatible(
+            cached,
+            standalone,
+            Some(usage())
+        ));
+    }
+
+    #[test]
+    fn buffered_query_reuse_keeps_identity_and_physical_admissions_exact() {
+        let cached = request();
+        for dimension in 0..18 {
+            let mut other = cached;
+            other.query_policy = Some(GqlQueryPolicy::new(90, 90, 90, 90));
+            match dimension {
+                0 => other.projection.binding.root = ObjectId([2; 32]),
+                1 => other.projection.binding.as_of = CommitSeq(1),
+                2 => other.projection.selection.vertex_label = Some(LabelId(1)),
+                3 => other.projection.selection.relation = Some(RelationId(2)),
+                4 => {
+                    other.projection.selection.weight = FnxWeightSpec::Property {
+                        key: PropertyKeyId(1),
+                        missing: MissingWeightPolicy::Reject,
+                    };
+                }
+                5 => other.projection.projection.directedness = Directedness::Reversed,
+                6 => other.projection.projection.parallel_edges = ParallelEdgePolicy::Reject,
+                7 => other.projection.projection.self_loops = SelfLoopPolicy::Keep,
+                8 => other.projection.projection_limits.max_vertices -= 1,
+                9 => other.projection.projection_limits.max_input_edges -= 1,
+                10 => other.projection.projection_limits.max_adjacency_entries -= 1,
+                11 => other.projection.projection_limits.max_workspace_bytes -= 1,
+                12 => other.projection.source_limits.max_staging_bytes -= 1,
+                13..=17 => {
+                    let Source::Buffered {
+                        sealing,
+                        max_source_incidences,
+                    } = &mut other.source
+                    else {
+                        unreachable!();
+                    };
+                    match dimension {
+                        13 => *max_source_incidences -= 1,
+                        14 => sealing.max_rows -= 1,
+                        15 => sealing.max_incidences -= 1,
+                        16 => sealing.max_image_bytes -= 1,
+                        17 => sealing.max_property_bytes -= 1,
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                !buffered_query_compatible(cached, other, Some(usage())),
+                "identity or physical admission changed at dimension {dimension}",
+            );
+        }
     }
 }

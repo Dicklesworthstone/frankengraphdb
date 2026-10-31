@@ -749,6 +749,7 @@ fn independent_algorithms_and_property_reads_share_one_exact_historical_cut() {
         let retained = current.sealed_read_cache_pool().clone();
         let historical = prepared.clone().with_as_of(CommitSeq(2)).unwrap();
         assert!(historical.clone().with_as_of(CommitSeq(3)).is_err());
+        let mut historical_answer = None;
         for run_rows in [1, 3] {
             let answer = execute(
                 &historical,
@@ -763,6 +764,10 @@ fn independent_algorithms_and_property_reads_share_one_exact_historical_cut() {
             .unwrap();
             assert_eq!(answer.snapshot, CommitSeq(2));
             assert_eq!(answer.rows, earlier);
+            assert_eq!(current.sealed_read_cache_usage().entries, 1);
+            if run_rows == 1 {
+                historical_answer = Some(answer);
+            }
             assert_eq!(spill_pool.used(), 0);
         }
         let later = vec![
@@ -794,6 +799,8 @@ fn independent_algorithms_and_property_reads_share_one_exact_historical_cut() {
             .unwrap();
         assert_eq!(latest.snapshot, CommitSeq(3));
         assert_eq!(latest.rows, later);
+        let both_cuts = current.sealed_read_cache_usage();
+        assert_eq!(both_cuts.entries, 2, "one shared graph per exact cut");
         assert_eq!(
             resident_rows(
                 writer
@@ -815,6 +822,8 @@ fn independent_algorithms_and_property_reads_share_one_exact_historical_cut() {
         .unwrap();
         assert_eq!(again.snapshot, CommitSeq(2));
         assert_eq!(again.rows, earlier);
+        assert_eq!(again, historical_answer.unwrap());
+        assert_eq!(current.sealed_read_cache_usage(), both_cuts);
         assert_eq!(spill_pool.used(), 0);
         drop(current);
         assert_eq!(source_pool.used(), 0);
@@ -844,12 +853,23 @@ fn independent_source_receipts_and_external_limits_remain_cumulative_on_reuse() 
         let first = execute(&left, &mut cold, &cx, policy(), &spill_pool, 1, WORK)
             .await
             .unwrap();
+        let shared = cold.sealed_read_cache_usage();
+        assert_eq!(shared.entries, 1);
+        let source_stats = cold.buffer_stats();
         let second = execute(&right, &mut cold, &cx, policy(), &spill_pool, 1, WORK)
             .await
             .unwrap();
+        assert_eq!(cold.sealed_read_cache_usage(), shared);
+        assert_eq!(cold.buffer_stats(), source_stats);
         let combined = execute(&union, &mut cold, &cx, policy(), &spill_pool, 1, WORK)
             .await
             .unwrap();
+        assert_eq!(cold.sealed_read_cache_usage(), shared);
+        assert_eq!(
+            cold.buffer_stats(),
+            source_stats,
+            "the second source's smaller remaining allowance reuses construction",
+        );
         assert_eq!(
             combined.rows,
             [1, 1, SECOND, SECOND, THIRD, THIRD, FOURTH, u128::MAX]
@@ -883,6 +903,12 @@ fn independent_source_receipts_and_external_limits_remain_cumulative_on_reuse() 
         .await
         .unwrap();
         assert_eq!(exact, combined);
+        assert_eq!(cold.sealed_read_cache_usage(), shared);
+        assert_eq!(
+            cold.buffer_stats(),
+            source_stats,
+            "lower fitting budgets replay the same construction counters",
+        );
         for dimension in 0..4 {
             let (allowance, sort_work) = match dimension {
                 0 => (
@@ -1011,6 +1037,28 @@ fn warm_construction_replays_admission_and_cannot_hide_limits_or_late_errors() {
             faults,
             "a warm pure CALL needs no source faults"
         );
+        let cache_usage = cold.sealed_read_cache_usage();
+        let zero_work = GqlQueryPolicy::new(10_000, 100, 0, WORK);
+        let warm_refusal = execute(&prepared, &mut cold, &cx, zero_work, &spill_pool, 1, WORK)
+            .await
+            .unwrap_err();
+        assert_eq!(cold.buffer_stats(), faults);
+        assert_eq!(cold.sealed_read_cache_usage(), cache_usage);
+        let mut fresh = view(&commit, &vfs, &source_pool).await;
+        let fresh_stats = fresh.buffer_stats();
+        let cold_refusal = execute(&prepared, &mut fresh, &cx, zero_work, &spill_pool, 1, WORK)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            format!("{warm_refusal:?}"),
+            format!("{cold_refusal:?}"),
+            "an argument-work refusal precedes either cache or source",
+        );
+        assert_eq!(fresh.buffer_stats(), fresh_stats);
+        assert_eq!(fresh.sealed_read_cache_usage().entries, 0);
+        drop(fresh);
+        assert_eq!(spill_pool.used(), 0);
+        assert_eq!(source_pool.used(), baseline);
         for dimension in 0..6 {
             let mut kernel = memory();
             let mut image = sealing();

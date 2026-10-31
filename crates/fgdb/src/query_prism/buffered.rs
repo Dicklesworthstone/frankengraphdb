@@ -489,10 +489,12 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     }
 
     /// Query construction retains a complete admission receipt beside the
-    /// compressed graph. Its exact key includes every query/source/build
-    /// allowance; a standalone build cannot satisfy it. Reuse skips physical
-    /// I/O and builder checkpoints but recharges all successful logical source
-    /// counters. Live checks and kernel/output admissions are never cached.
+    /// compressed graph. A query may reuse it under different remaining
+    /// counter allowances only when the complete measured construction fits.
+    /// Every identity and physical build bound stays exact, and a standalone
+    /// build cannot satisfy this query path. Reuse skips physical I/O and
+    /// builder checkpoints but recharges all logical source counters. Live
+    /// checks and kernel/output admissions are never cached.
     #[allow(clippy::too_many_arguments)]
     async fn prism_sealed_query_projection(
         &mut self,
@@ -536,7 +538,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         };
         if let Some(retained) = self
             .sealed_cache
-            .lookup(cx, request)
+            .lookup_query(cx, request)
             .map_err(GqlQueryError::Interrupted)?
         {
             let Some(usage) = retained.query_usage else {
