@@ -507,3 +507,195 @@ fn composed_terminal_text_prepares_and_binds_before_reaching_any_source() {
         // division errors must not be evaluated before the source is reached.
     }
 }
+
+#[test]
+fn independent_procedure_text_summaries_preserve_exact_group_domains() {
+    use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan};
+    use fgdb_gql::{GqlParameters, PreparedGraphPipelineAggregateText};
+
+    fn supplied_rows(arguments: &[GraphValue]) -> Vec<GraphValueRow> {
+        if arguments == [int(1)] {
+            vec![
+                row(1, int(i64::MAX)),
+                row(1, int(2)),
+                row(1, int(i64::MAX)),
+                row(2, int(4)),
+                row(2, null()),
+            ]
+        } else {
+            assert_eq!(arguments, [int(2)]);
+            vec![row(1, int(10)), row(1, int(20)), row(2, int(30))]
+        }
+    }
+
+    // Only source rows and their finite product are materialized by this test
+    // host. The compiled pair selection, row stages and aggregate arithmetic
+    // are the real public native operators, as in the one-source laws above.
+    fn staged(plan: &AsyncSpillSetPlan, calls: &mut Vec<Vec<GraphValue>>) -> Vec<GraphValueRow> {
+        let mut rows = match plan.source() {
+            AsyncSpillSetSourcePlan::Procedure(source) => {
+                assert_eq!(
+                    (source.call().namespace(), source.call().name()),
+                    ("test", "rows")
+                );
+                assert_eq!(source.call().outputs(), ["vertex", "score"]);
+                let arguments = source.evaluate_arguments(&mut |_| Ok::<_, ()>(())).unwrap();
+                let rows = supplied_rows(&arguments);
+                calls.push(arguments);
+                rows
+            }
+            AsyncSpillSetSourcePlan::Cross(cross) => {
+                let left = staged(cross.left(), calls);
+                let right = staged(cross.right(), calls);
+                let mut rows = Vec::new();
+                for left in &left {
+                    for right in &right {
+                        if let Some(row) = cross
+                            .select_pair_with_control(left, right, &mut |_| Ok::<_, ()>(()))
+                            .unwrap()
+                        {
+                            rows.push(row);
+                        }
+                    }
+                }
+                rows
+            }
+            _ => panic!("the fixture contains only two independent procedure sources"),
+        };
+        for stage in plan.stages() {
+            let mut output = Vec::new();
+            for (index, row) in rows.into_iter().enumerate() {
+                let mut cursor = stage.start(row, index, &mut |_| Ok::<_, ()>(())).unwrap();
+                while let Some((row, next)) =
+                    cursor.next_with_control(&mut |_| Ok::<_, ()>(())).unwrap()
+                {
+                    output.push(row);
+                    cursor = next;
+                }
+            }
+            if let Some(order) = stage.order() {
+                output.sort_by(|a, b| compare(a, b, order));
+            }
+            if stage.distinct() {
+                output.dedup();
+            }
+            rows = output
+                .into_iter()
+                .skip(usize::try_from(stage.offset()).unwrap())
+                .take(
+                    stage
+                        .count()
+                        .map(|count| usize::try_from(count).unwrap())
+                        .unwrap_or(usize::MAX),
+                )
+                .collect();
+        }
+        rows
+    }
+
+    let text = "CALL test.rows(1) YIELD vertex AS g,score AS x \
+                CALL test.rows(2) YIELD vertex AS h,score AS y WHERE g=h \
+                WITH g,x,y ORDER BY x DESC NULLS LAST,y DESC \
+                RETURN g,COUNT(*) AS n,SUM(x) AS total,AVG(x) AS mean,\
+                COLLECT(y) AS bag,COUNT(DISTINCT y) AS support";
+    let parameters = GqlParameters::new();
+    let template = PreparedGraphPipelineAggregateText::prepare(text, |_, _: &str| None).unwrap();
+    // The iterator-based aggregate owner still requires one real graph leaf.
+    // It must not manufacture a first-source view of this two-source input.
+    assert!(template.bind_parameters(&parameters).is_err());
+    let query = template.bind_relation_parameters(&parameters).unwrap();
+    let transcript = query.canonical_bytes();
+    assert!(AsyncSpillAggregatePlan::compile_relation(&query).is_err());
+    assert!(AsyncSpillAggregatePlan::compile_relation_with_single_procedure(&query).is_err());
+    let AsyncSpillAggregatePlan::Relation { input, definition } =
+        AsyncSpillAggregatePlan::compile_relation_with_independent_procedures(&query).unwrap()
+    else {
+        panic!("both complete procedure inputs must remain in the relation");
+    };
+    assert_eq!(input.source_count(), 2);
+    let mut sources = Vec::new();
+    assert!(input.all_procedure_sources(&mut |source| {
+        sources.push(source.columns().to_vec());
+        assert_eq!(source.argument_count(), 1);
+        true
+    }));
+    assert_eq!(sources, [vec!["g", "x"], vec!["h", "y"]]);
+    assert!(definition.has_collections());
+
+    use GraphAggregateValue::{Average, Count, Integer, Value};
+    let total = 4 * i128::from(i64::MAX) + 4;
+    let expected = vec![
+        GraphAggregateRow::from_group_values(
+            vec![int(1)],
+            vec![
+                Count(6),
+                Integer(total),
+                Average(GraphExactAverage::new(total, 6).unwrap()),
+                Value(GraphValue::List(
+                    [20, 20, 10, 10, 20, 10]
+                        .into_iter()
+                        .map(int)
+                        .collect::<Vec<_>>()
+                        .into(),
+                )),
+                Count(2),
+            ],
+        ),
+        GraphAggregateRow::from_group_values(
+            vec![int(2)],
+            vec![
+                Count(2),
+                Integer(4),
+                Average(GraphExactAverage::new(4, 1).unwrap()),
+                Value(GraphValue::List(vec![int(30), int(30)].into())),
+                Count(1),
+            ],
+        ),
+    ];
+    let mut staged_calls = Vec::new();
+    assert_eq!(
+        reduce(&definition, staged(&input, &mut staged_calls)),
+        expected
+    );
+    let mut native_calls = Vec::new();
+    let native = query
+        .execute_governed_with_procedures(
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+            |_, _| -> Result<_, GqlQueryError<Infallible, ()>> {
+                panic!("the fixture has no graph source")
+            },
+            |call, arguments, _| {
+                assert_eq!((call.namespace(), call.name()), ("test", "rows"));
+                assert_eq!(call.outputs(), ["vertex", "score"]);
+                native_calls.push(arguments.to_vec());
+                let value = supplied_rows(arguments);
+                Ok(GqlQueryExecution {
+                    rows: GqlExecutionStats {
+                        snapshot_records: 0,
+                        result_rows: value.len() as u64,
+                    },
+                    evaluator: GlaExecutionStats::default(),
+                    value,
+                })
+            },
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert_eq!(staged_calls, [vec![int(1)], vec![int(2)]]);
+    assert_eq!(native_calls, staged_calls);
+    assert_eq!(native.value, expected);
+    assert_eq!(query.canonical_bytes(), transcript);
+
+    // The other public plural entrypoint keeps its ordinary-owner boundary:
+    // an actual graph aggregate with no procedure is not this capability.
+    let graph = PreparedGraphPipelineAggregateText::prepare(
+        "MATCH (v) RETURN COUNT(*) AS n",
+        |_, _: &str| None,
+    )
+    .unwrap()
+    .bind_parameters(&parameters)
+    .unwrap();
+    assert!(AsyncSpillAggregatePlan::compile(&graph).is_ok());
+    assert!(AsyncSpillAggregatePlan::compile_with_single_procedure(&graph).is_err());
+    assert!(AsyncSpillAggregatePlan::compile_with_independent_procedures(&graph).is_err());
+}

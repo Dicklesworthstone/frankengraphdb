@@ -1301,6 +1301,34 @@ mod tests {
     }
 
     #[test]
+    fn composed_buffered_sealed_preflight_admits_independent_procedure_sources() {
+        let flags = [
+            "--sealed",
+            "--graph-relation",
+            "KNOWS",
+            "--buffered",
+            "--spill-dir",
+            "never-opened-spill",
+        ];
+        let union = "(CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node RETURN node) \
+                     UNION ALL (CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node RETURN node)";
+        let options = composed_options(union, &flags).unwrap();
+        assert!(matches!(
+            super::super::spill::prepare_buffered(&options).unwrap(),
+            super::super::spill::PreparedBuffered::SealedOrdered(_)
+        ));
+
+        let aggregate = "CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node AS a \
+                         CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node AS b \
+                         WHERE a = b RETURN COUNT(*) AS n";
+        let options = composed_options(aggregate, &flags).unwrap();
+        assert!(matches!(
+            super::super::spill::prepare_buffered(&options).unwrap(),
+            super::super::spill::PreparedBuffered::SealedAggregate(_)
+        ));
+    }
+
+    #[test]
     fn composed_buffered_sealed_preflight_refuses_unsupported_shapes_before_open() {
         let flags = [
             "--sealed",
@@ -1314,7 +1342,7 @@ mod tests {
             "MATCH (n) RETURN n",
             "MATCH (n) RETURN COUNT(*) AS count",
             "(CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node RETURN node) \
-             UNION ALL (CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node RETURN node)",
+             UNION ALL (CALL fnx.weakly_connected_components() YIELD node RETURN node)",
         ] {
             let options = composed_options(text, &flags).unwrap();
             assert!(

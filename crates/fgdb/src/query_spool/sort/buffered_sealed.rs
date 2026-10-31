@@ -1,4 +1,4 @@
-//! Explicit owner-level composition of one compressed analytics source with
+//! Explicit owner-level composition of independent compressed analytics sources with
 //! the shared external relational executor. The kernel remains resident and
 //! bounded; ordinary graph reads and intermediate relations remain buffered.
 
@@ -21,10 +21,11 @@ struct SealedOptions {
     max_source_incidences: usize,
 }
 
-/// One non-correlated FnX CALL followed by supported external query stages.
+/// Independent FnX CALLs composed through supported external query stages.
 /// Preparation binds the complete physical shape without graph or scratch IO.
 /// Procedure arguments execute only when their source is reached, preserving
-/// earlier child failures. Repeated or correlated procedure calls refuse.
+/// earlier child failures. Calls inside Apply bodies refuse. Every call must
+/// select this owner's admitted relation at the same pinned historical cut.
 ///
 /// The compressed image, projection and completed kernel vectors retain their
 /// independent resident limits. This is not an external-memory graph kernel.
@@ -45,7 +46,7 @@ impl core::fmt::Debug for PreparedBufferedSealedOrder {
 }
 
 impl PreparedNativeRead {
-    /// Explicit privileged admission for a single sealed procedure source.
+    /// Explicit privileged admission for independent sealed procedure sources.
     /// Ordinary buffered and authorized compilers do not acquire this ability.
     /// The selected relation must also be present in the CALL's own projection;
     /// it is an admission boundary, never an implicit projection override.
@@ -78,8 +79,8 @@ impl PreparedNativeRead {
             }
             _ => return Err(unsupported()),
         };
-        let plan =
-            AsyncSpillSetPlan::compile_with_single_procedure(&query).map_err(|_| unsupported())?;
+        let plan = AsyncSpillSetPlan::compile_with_independent_procedures(&query)
+            .map_err(|_| unsupported())?;
         PreparedBufferedSealedOrder::from_relation(
             plan,
             as_of,
@@ -205,7 +206,12 @@ impl PreparedBufferedSealedOrder {
         sealing: SealedLimits,
         max_source_incidences: usize,
     ) -> Option<Self> {
-        if !admit_procedure_shape(plan.procedure_source()?, relation) {
+        let mut found_procedure = false;
+        let admitted = plan.all_procedure_sources(&mut |source| {
+            found_procedure = true;
+            admit_procedure_shape(source, relation)
+        });
+        if !found_procedure || !admitted {
             return None;
         }
         Some(Self {

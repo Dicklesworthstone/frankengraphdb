@@ -1,4 +1,4 @@
-//! Terminal exact aggregates over one sealed analytics source. The input uses
+//! Terminal exact aggregates over independent sealed analytics sources. The input uses
 //! the existing external relational host; completed groups retain the native
 //! aggregate domain and never pass through a scalar-row conversion.
 
@@ -8,7 +8,7 @@ use fgdb_delta_types::RelationId;
 use fgdb_prism::FnxMemoryLimits;
 use fgdb_strata::tiered::sealed::SealedLimits;
 
-/// A single non-correlated sealed FnX source feeding native external grouping.
+/// Independent sealed FnX sources feeding native external grouping.
 /// Wide sums, exact averages and ordered collections retain their native output
 /// domains. The input may include supported external relational stages, and
 /// both input and final aggregate output must complete before a handle escapes.
@@ -31,8 +31,8 @@ impl core::fmt::Debug for PreparedBufferedSealedAggregate {
 }
 
 impl PreparedNativeRead {
-    /// Explicit privileged admission for terminal aggregates over exactly one
-    /// sealed procedure source. Ordinary buffered preparation remains unchanged.
+    /// Explicit privileged admission for terminal aggregates over independent
+    /// sealed procedure sources. Ordinary buffered preparation remains unchanged.
     /// Binding and registry-shape admission perform no graph or scratch IO;
     /// argument evaluation remains at the reached procedure source.
     pub fn prepare_buffered_sealed_aggregate(
@@ -49,8 +49,10 @@ impl PreparedNativeRead {
                     NativeAggregateSpoolError::Prepare(Box::new(QueryError::PipelineText(error)))
                 })?;
                 (
-                    AsyncSpillAggregatePlan::compile_relation_with_single_procedure(&aggregate)
-                        .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
+                    AsyncSpillAggregatePlan::compile_relation_with_independent_procedures(
+                        &aggregate,
+                    )
+                    .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
                     template.columns().to_vec(),
                     template.output_slots().to_vec(),
                     None,
@@ -64,7 +66,7 @@ impl PreparedNativeRead {
                     as_of,
                 } = bind(self, params)?;
                 (
-                    AsyncSpillAggregatePlan::compile_with_single_procedure(&definition)
+                    AsyncSpillAggregatePlan::compile_with_independent_procedures(&definition)
                         .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
                     columns,
                     slots,

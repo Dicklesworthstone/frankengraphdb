@@ -248,6 +248,7 @@ struct Answer {
     rows: Vec<Vec<GraphValue>>,
     records: u64,
     evaluator_work: u64,
+    evaluator_scratch: u64,
     sort_work: u64,
 }
 async fn execute(
@@ -296,6 +297,7 @@ async fn execute(
         rows,
         records: spool.row_stats().snapshot_records,
         evaluator_work: spool.evaluator_stats().work_units,
+        evaluator_scratch: spool.evaluator_stats().scratch_entries,
         sort_work,
     })
 }
@@ -645,6 +647,253 @@ fn old_publication_and_explicit_history_keep_topology_and_properties_together() 
 }
 
 #[test]
+fn independent_algorithms_and_property_reads_share_one_exact_historical_cut() {
+    let ((), report) = run_async_under_lab(0x6273_5107, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, mut writer) = fixture(&commit).await;
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let text = format!(
+            "{BFS} YIELD node,distance {WCC} YIELD node AS member,component \
+             WITH node,distance,member,component WHERE node=member \
+             MATCH (node:Person) RETURN node,distance,component,node.p AS p ORDER BY node"
+        );
+        let params = parameters();
+        let prepared = prepare(&text, &params);
+        let earlier = vec![
+            vec![vertex(1), integer(0), vertex(1), integer(10)],
+            vec![vertex(SECOND), integer(1), vertex(1), integer(20)],
+            vec![vertex(THIRD), integer(2), vertex(1), integer(30)],
+        ];
+        assert_eq!(
+            resident_rows(
+                writer
+                    .query(&cx, &text, &params, resolve, policy())
+                    .unwrap()
+            ),
+            earlier,
+        );
+        let mut change = WriteBatch::new(R);
+        change.add_edge(EId(BASE + 8), VId(THIRD), VId(FOURTH), vec![]);
+        change.set_vertex_property(VId(THIRD), P, Some(CanonicalScalar::Int(300)));
+        assert_eq!(writer.write(&commit, change).await.unwrap(), CommitSeq(3));
+        writer.compact(&commit).await.unwrap();
+        let mut current = view(&commit, &vfs, &source_pool).await;
+        let retained = current.sealed_read_cache_pool().clone();
+        let historical = prepared.clone().with_as_of(CommitSeq(2)).unwrap();
+        assert!(historical.clone().with_as_of(CommitSeq(3)).is_err());
+        for run_rows in [1, 3] {
+            let answer = execute(
+                &historical,
+                &mut current,
+                &cx,
+                policy(),
+                &spill_pool,
+                run_rows,
+                WORK,
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer.snapshot, CommitSeq(2));
+            assert_eq!(answer.rows, earlier);
+            assert_eq!(spill_pool.used(), 0);
+        }
+        let later = vec![
+            vec![vertex(1), integer(0), vertex(1), integer(10)],
+            vec![vertex(SECOND), integer(1), vertex(1), integer(20)],
+            vec![vertex(THIRD), integer(2), vertex(1), integer(300)],
+            vec![vertex(FOURTH), integer(3), vertex(1), integer(40)],
+        ];
+        let latest = execute(&prepared, &mut current, &cx, policy(), &spill_pool, 1, WORK)
+            .await
+            .unwrap();
+        assert_eq!(latest.snapshot, CommitSeq(3));
+        assert_eq!(latest.rows, later);
+        assert_eq!(
+            resident_rows(
+                writer
+                    .query(&cx, &text, &params, resolve, policy())
+                    .unwrap()
+            ),
+            later,
+        );
+        let again = execute(
+            &historical,
+            &mut current,
+            &cx,
+            policy(),
+            &spill_pool,
+            1,
+            WORK,
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.snapshot, CommitSeq(2));
+        assert_eq!(again.rows, earlier);
+        assert_eq!(spill_pool.used(), 0);
+        drop(current);
+        assert_eq!(source_pool.used(), 0);
+        assert_eq!(retained.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn independent_source_receipts_and_external_limits_remain_cumulative_on_reuse() {
+    let ((), report) = run_async_under_lab(0x6273_5108, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _writer) = fixture(&commit).await;
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let retained = cold.sealed_read_cache_pool().clone();
+        let params = parameters();
+        let left_text = format!("{BFS} YIELD node RETURN node ORDER BY node");
+        let right_text = format!("{WCC} YIELD node RETURN node ORDER BY node");
+        let union_text = format!("({left_text}) UNION ALL ({right_text})");
+        let left = prepare(&left_text, &params);
+        let right = prepare(&right_text, &GqlParameters::new());
+        let union = prepare(&union_text, &params);
+        let first = execute(&left, &mut cold, &cx, policy(), &spill_pool, 1, WORK)
+            .await
+            .unwrap();
+        let second = execute(&right, &mut cold, &cx, policy(), &spill_pool, 1, WORK)
+            .await
+            .unwrap();
+        let combined = execute(&union, &mut cold, &cx, policy(), &spill_pool, 1, WORK)
+            .await
+            .unwrap();
+        assert_eq!(
+            combined.rows,
+            [1, 1, SECOND, SECOND, THIRD, THIRD, FOURTH, u128::MAX]
+                .map(|id| vec![vertex(id)])
+                .to_vec(),
+        );
+        assert_eq!(combined.records, first.records + second.records);
+        assert!(combined.evaluator_work > first.evaluator_work.max(second.evaluator_work));
+        assert!(combined.evaluator_scratch > first.evaluator_scratch.max(second.evaluator_scratch));
+        assert!(combined.sort_work > first.sort_work.max(second.sort_work));
+        let faults = cold.buffer_stats();
+        let warm = execute(&union, &mut cold, &cx, policy(), &spill_pool, 1, WORK)
+            .await
+            .unwrap();
+        assert_eq!(warm, combined);
+        assert_eq!(cold.buffer_stats(), faults);
+        let exact = execute(
+            &union,
+            &mut cold,
+            &cx,
+            GqlQueryPolicy::new(
+                10_000,
+                100,
+                combined.evaluator_work,
+                combined.evaluator_scratch,
+            ),
+            &spill_pool,
+            1,
+            combined.sort_work,
+        )
+        .await
+        .unwrap();
+        assert_eq!(exact, combined);
+        for dimension in 0..4 {
+            let (allowance, sort_work) = match dimension {
+                0 => (
+                    GqlQueryPolicy::new(10_000, 100, combined.evaluator_work - 1, WORK),
+                    WORK,
+                ),
+                1 => (
+                    GqlQueryPolicy::new(10_000, 100, WORK, combined.evaluator_scratch - 1),
+                    WORK,
+                ),
+                2 => (policy(), combined.sort_work - 1),
+                3 => (GqlQueryPolicy::new(10_000, 7, WORK, WORK), WORK),
+                _ => unreachable!(),
+            };
+            // The same cap admits either complete source alone. Combining them
+            // cannot reset the query or physical counters at the second CALL.
+            for single in [&left, &right] {
+                execute(single, &mut cold, &cx, allowance, &spill_pool, 1, sort_work)
+                    .await
+                    .unwrap();
+            }
+            let error = execute(&union, &mut cold, &cx, allowance, &spill_pool, 1, sort_work)
+                .await
+                .unwrap_err();
+            if dimension == 2 {
+                assert!(
+                    matches!(error, NativeSpoolError::SortWorkLimit { .. }),
+                    "{error:?}"
+                );
+            }
+            assert_eq!(spill_pool.used(), 0, "dimension {dimension}");
+            assert_eq!(
+                execute(&union, &mut cold, &cx, policy(), &spill_pool, 1, WORK)
+                    .await
+                    .unwrap(),
+                combined,
+            );
+        }
+        let late = format!(
+            "({BFS} YIELD node RETURN node LIMIT 0) UNION ALL \
+             (CALL fnx.single_source_shortest_path_length(\
+             args => [1/0],relation => 'R') YIELD node RETURN node LIMIT 0)"
+        );
+        let error = execute(
+            &prepare(&late, &params),
+            &mut cold,
+            &cx,
+            policy(),
+            &spill_pool,
+            1,
+            WORK,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, NativeSpoolError::SetExecution(
+                GraphSetExecutionError::Projection { error, .. }
+            ) if error.kind == GraphIntegerErrorKind::DivisionByZero),
+            "{error:?}",
+        );
+        // Named selector values retain reached-source binding. They are not
+        // interchangeable with the static inline projection checked below.
+        let mismatched = format!(
+            "({BFS} YIELD node RETURN node LIMIT 0) UNION ALL \
+             (CALL fnx.weakly_connected_components(relation => 'S') \
+             YIELD node RETURN node LIMIT 0)"
+        );
+        let error = execute(
+            &prepare(&mismatched, &params),
+            &mut cold,
+            &cx,
+            policy(),
+            &spill_pool,
+            1,
+            WORK,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, NativeSpoolError::Procedure(error)
+                if matches!(error.as_ref(), GqlQueryError::Source(
+                    GqlError::Procedure(ProcedureError::SealedRelationMismatch { requested: Some(requested), retained })
+                ) if *requested == S && *retained == R)),
+            "{error:?}",
+        );
+        assert_eq!(spill_pool.used(), 0);
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+        assert_eq!(retained.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn warm_construction_replays_admission_and_cannot_hide_limits_or_late_errors() {
     let ((), report) = run_async_under_lab(0x6273_5103, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -782,14 +1031,34 @@ fn warm_construction_replays_admission_and_cannot_hide_limits_or_late_errors() {
 }
 
 #[test]
-fn dropping_a_suspended_procedure_append_refunds_live_rows_and_scratch() {
+fn dropping_a_suspended_second_procedure_refunds_both_children_and_live_rows() {
     let ((), report) = run_async_under_lab(0x6273_5104, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let cx = contexts.query();
         let (vfs, _writer) = fixture(&commit).await;
         let params = parameters();
-        let text = format!("{BFS} YIELD node,distance RETURN node,distance");
+        let text = format!(
+            "{BFS} YIELD node,distance {WCC} YIELD node AS member,component \
+             RETURN node,distance,member,component ORDER BY node,member"
+        );
+        let mut expected = Vec::new();
+        for row in bfs_rows() {
+            for (member, component) in [
+                (1, 1),
+                (SECOND, 1),
+                (THIRD, 1),
+                (FOURTH, FOURTH),
+                (u128::MAX, u128::MAX),
+            ] {
+                expected.push(vec![
+                    row[0].clone(),
+                    row[1].clone(),
+                    vertex(member),
+                    vertex(component),
+                ]);
+            }
+        }
         let prepared = prepare(&text, &params);
         let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
         let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
@@ -799,12 +1068,12 @@ fn dropping_a_suspended_procedure_append_refunds_live_rows_and_scratch() {
                 .await
                 .unwrap()
                 .rows,
-            bfs_rows(),
+            expected,
         );
         let baseline = source_pool.used();
         let retained = cold.sealed_read_cache_pool().clone();
         let retained_bytes = retained.used();
-        let marker = GraphValueRow::from_owned_values(vec![vertex(1), integer(0)])
+        let marker = GraphValueRow::from_owned_values(vec![vertex(1), vertex(1)])
             .canonical_bytes()
             .unwrap();
         let (mut scratch, a) = file(&cx, &spill_pool).await;
@@ -813,8 +1082,9 @@ fn dropping_a_suspended_procedure_append_refunds_live_rows_and_scratch() {
         for backing in [&a, &b, &c] {
             backing.0.lock().unwrap().suspend_row = Some(marker.clone());
         }
-        // The first raw procedure row exactly fills a page with its length
-        // prefix, so the append suspends while its row/encoder ownership is live.
+        // Two vertex cells cannot match a BFS row's vertex/integer frame. This
+        // marker therefore suspends the second source, after the first child
+        // completed, while the component row and encoder guards remain live.
         let mut future = prepared.spool_in_view(
             &mut cold,
             &cx,
@@ -864,7 +1134,7 @@ fn dropping_a_suspended_procedure_append_refunds_live_rows_and_scratch() {
                 .await
                 .unwrap()
                 .rows,
-            bfs_rows(),
+            expected,
         );
         drop(cold);
         assert_eq!(source_pool.used(), 0);
@@ -990,7 +1260,6 @@ fn explicit_owner_admission_does_not_broaden_default_or_terminal_aggregate_paths
     for text in [
         "MATCH (node) RETURN node".to_owned(),
         format!("{BFS} YIELD node RETURN COUNT(*) AS n"),
-        format!("({BFS} YIELD node RETURN node) UNION ALL ({WCC} YIELD node RETURN node)"),
     ] {
         let params = if text.contains("$start") {
             parameters()
@@ -999,6 +1268,32 @@ fn explicit_owner_admission_does_not_broaden_default_or_terminal_aggregate_paths
         };
         let native = PreparedNativeRead::prepare(&text, &params, resolve)
             .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert!(
+            native
+                .prepare_buffered_sealed_order(&params, R, memory(), sealing(), RAW)
+                .is_err(),
+            "{text}",
+        );
+    }
+    let repeated =
+        format!("({BFS} YIELD node RETURN node) UNION ALL ({WCC} YIELD node RETURN node)");
+    let native = PreparedNativeRead::prepare(&repeated, &params, resolve).unwrap();
+    assert!(native.prepare_buffered_order(&params).is_err());
+    assert!(
+        native
+            .prepare_buffered_sealed_order(&params, R, memory(), sealing(), RAW)
+            .is_ok()
+    );
+    // An empty first source never hides a statically inadmissible second CALL.
+    for second in [
+        "CALL fnx.does_not_exist(relation => 'R') YIELD node RETURN node LIMIT 0",
+        "CALL fnx.pagerank(relation => 'R',bogus => 1) YIELD node RETURN node LIMIT 0",
+        "CALL fnx.weakly_connected_components({relations:['S']}) YIELD node RETURN node LIMIT 0",
+    ] {
+        let text = format!("({BFS} YIELD node RETURN node LIMIT 0) UNION ALL ({second})");
+        let native = PreparedNativeRead::prepare(&text, &params, resolve)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert!(native.prepare_buffered_order(&params).is_err());
         assert!(
             native
                 .prepare_buffered_sealed_order(&params, R, memory(), sealing(), RAW)
@@ -1019,8 +1314,8 @@ fn explicit_owner_admission_does_not_broaden_default_or_terminal_aggregate_paths
         "CALL fnx.pagerank(relation => 'R') YIELD vertex AS a,node AS b RETURN a,b",
         "CALL fnx.single_source_shortest_path_length(args => [1],relation => 'R') \
          YIELD vertex,distance MATCH (distance) RETURN vertex,distance",
-        "CALL fnx.pagerank(relation => 'S') YIELD vertex,score RETURN vertex,score",
-        "CALL fnx.triangles(relation => 'R',direction => 'directed') \
+        "CALL fnx.pagerank({relations:['S']}) YIELD vertex,score RETURN vertex,score",
+        "CALL fnx.triangles({relations:['R'],direction:'directed'}) \
          YIELD vertex,triangles RETURN vertex,triangles",
     ] {
         let params = GqlParameters::new();

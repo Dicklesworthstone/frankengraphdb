@@ -453,7 +453,7 @@ pub struct AsyncSpillSetPlan {
 
 #[derive(Default)]
 struct ProcedureAdmission {
-    enabled: bool,
+    max_count: usize,
     count: usize,
 }
 
@@ -474,12 +474,36 @@ impl AsyncSpillSetPlan {
     pub fn compile_with_single_procedure(
         query: &PreparedGraphSet,
     ) -> Result<Self, SpillSetBuildError> {
+        Self::compile_with_procedure_limit(query, 1)
+    }
+
+    /// Admit one or more independent procedure sources, each executed once
+    /// in its original child order. Procedures inside every Apply body still
+    /// refuse, including uncorrelated bodies and bodies hidden by empty pages.
+    /// Ordinary compilation and the explicit single-source API keep their
+    /// existing refusal boundaries.
+    ///
+    /// Before opening any source or scratch writer, the host must inspect
+    /// EVERY procedure through `all_procedure_sources` and admit its registered
+    /// shape. This capability grants no query or storage authority. Arguments
+    /// remain lazy at each reached source, and all source, evaluator and
+    /// physical work belongs to the enclosing query's cumulative allowance.
+    pub fn compile_with_independent_procedures(
+        query: &PreparedGraphSet,
+    ) -> Result<Self, SpillSetBuildError> {
+        Self::compile_with_procedure_limit(query, usize::MAX)
+    }
+
+    fn compile_with_procedure_limit(
+        query: &PreparedGraphSet,
+        max_count: usize,
+    ) -> Result<Self, SpillSetBuildError> {
         let mut admission = ProcedureAdmission {
-            enabled: true,
+            max_count,
             count: 0,
         };
         let plan = Self::compile_at(query, 0, &mut admission, false)?;
-        if admission.count != 1 {
+        if admission.count == 0 {
             return Err(SpillSetBuildError::Unsupported { depth: 0 });
         }
         Ok(plan)
@@ -594,9 +618,11 @@ impl AsyncSpillSetPlan {
         &self.source
     }
 
-    /// The single explicit procedure capability, wherever its original source
-    /// occurs in the complete relation. Default-compiled plans return None.
-    /// This definition-only inspection never evaluates arguments or reads data.
+    /// The first explicit procedure source in original child order.
+    /// Single-source hosts may inspect their sole capability here; plural
+    /// hosts must use `all_procedure_sources` to admit every source instead.
+    /// Default-compiled plans return None. This definition-only inspection
+    /// never evaluates arguments or reads data.
     pub fn procedure_source(&self) -> Option<&SpillSetProcedurePlan> {
         match &self.source {
             AsyncSpillSetSourcePlan::Procedure(procedure) => Some(procedure),
@@ -615,6 +641,42 @@ impl AsyncSpillSetPlan {
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => aggregate.input().procedure_source(),
             AsyncSpillSetSourcePlan::Apply(apply) => apply.left().procedure_source(),
             _ => None,
+        }
+    }
+
+    /// Visit procedure definitions in original child order without allocation,
+    /// argument evaluation or source reads. Return false immediately when the
+    /// predicate refuses one definition. Empty source sets return true without
+    /// invoking the predicate; a host requiring a procedure must track whether
+    /// it saw one. Every child is inspected even when a page or empty sibling
+    /// would suppress its output. The compiler independently rejects every
+    /// procedure inside an Apply body.
+    pub fn all_procedure_sources(
+        &self,
+        predicate: &mut impl FnMut(&SpillSetProcedurePlan) -> bool,
+    ) -> bool {
+        match &self.source {
+            AsyncSpillSetSourcePlan::Procedure(procedure) => predicate(procedure),
+            AsyncSpillSetSourcePlan::Binary(binary) => {
+                binary.left().all_procedure_sources(predicate)
+                    && binary.right().all_procedure_sources(predicate)
+            }
+            AsyncSpillSetSourcePlan::Cross(cross) => {
+                cross.left().all_procedure_sources(predicate)
+                    && cross.right().all_procedure_sources(predicate)
+            }
+            AsyncSpillSetSourcePlan::RowJoin(join) => {
+                join.left().all_procedure_sources(predicate)
+                    && join.right().all_procedure_sources(predicate)
+            }
+            AsyncSpillSetSourcePlan::Aggregate(aggregate) => {
+                aggregate.input().all_procedure_sources(predicate)
+            }
+            AsyncSpillSetSourcePlan::Apply(apply) => {
+                apply.left().all_procedure_sources(predicate)
+                    && apply.right().all_procedure_sources(predicate)
+            }
+            _ => true,
         }
     }
 
@@ -1363,10 +1425,13 @@ fn compile_stages<'a>(
             )
         }
         SetNode::ProcedureCall(call) => {
-            if !admission.enabled || in_apply_body || admission.count != 0 {
+            if in_apply_body || admission.count >= admission.max_count {
                 return Err(SpillSetBuildError::Unsupported { depth });
             }
-            admission.count = 1;
+            admission.count = admission
+                .count
+                .checked_add(1)
+                .ok_or(SpillSetBuildError::Unsupported { depth })?;
             (
                 CompiledSource::Procedure(SpillSetProcedurePlan {
                     call: call.clone(),

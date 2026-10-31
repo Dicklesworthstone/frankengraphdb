@@ -252,6 +252,49 @@ impl AsyncSpillAggregatePlan {
         })
     }
 
+    /// Admit a terminal summary over one or more independent procedure
+    /// sources. Every procedure remains outside Apply bodies and executes in
+    /// original child order. The host must admit all registered source shapes
+    /// before I/O and share cumulative allowances across every input and the
+    /// terminal reducer. Arguments stay lazy at their reached sources.
+    ///
+    /// Native completed-group clauses and exact aggregate domains are the
+    /// same as `compile_with_single_procedure`; ordinary and single-source
+    /// compilation retain their existing refusal boundaries.
+    pub fn compile_with_independent_procedures(
+        aggregate: &PreparedGraphAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let relation = aggregate
+            .input_relation()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        let input = AsyncSpillSetPlan::compile_with_independent_procedures(relation)
+            .map_err(SpillAggregateBuildError::Relation)?;
+        let physical = aggregate
+            .prepare_complete_group_output()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        let definition = SpillAggregateDefinition::from_physical(physical)?;
+        Ok(Self::Relation {
+            input: Box::new(input),
+            definition,
+        })
+    }
+
+    /// Admit the complete source-aware aggregate input with independent
+    /// procedure sources. All-call host admission and cumulative accounting
+    /// match `compile_with_independent_procedures`. COLLECT keeps native input
+    /// occurrence order and every existing per-value memory and row bound.
+    pub fn compile_relation_with_independent_procedures(
+        aggregate: &PreparedGraphSetAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let input = AsyncSpillSetPlan::compile_with_independent_procedures(aggregate.input())
+            .map_err(SpillAggregateBuildError::Relation)?;
+        let definition = SpillAggregateDefinition::from_relation(aggregate)?;
+        Ok(Self::Relation {
+            input: Box::new(input),
+            definition,
+        })
+    }
+
     pub fn definition(&self) -> &SpillAggregateDefinition {
         match self {
             Self::Vertex(plan) => plan.definition(),

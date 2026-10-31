@@ -3,9 +3,11 @@
 use super::*;
 use crate::PreparedProcedureCall;
 
-/// The original bound call and its YIELD aliases, admitted only by
-/// [`AsyncSpillSetPlan::compile_with_single_procedure`]. This definition does
-/// not confer authority or validate a host's procedure implementation.
+/// The original bound call and its YIELD aliases, admitted only by the explicit
+/// [`AsyncSpillSetPlan::compile_with_single_procedure`] or
+/// [`AsyncSpillSetPlan::compile_with_independent_procedures`] capability.
+/// This definition does not confer authority or validate a host's procedure
+/// implementation.
 ///
 /// Before opening any source or scratch writer, the host must validate the
 /// namespace, signature, graph projection and output profile from `call()`.

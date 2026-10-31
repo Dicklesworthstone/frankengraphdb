@@ -619,6 +619,197 @@ fn explicit_single_procedure_composes_with_native_stages_and_graph_sources() {
 }
 
 #[test]
+fn independent_procedures_preserve_union_bags_selected_products_and_source_order() {
+    let graph = Graph::sample();
+    let left = prepare("CALL test.rows(10) YIELD vertex AS n,score RETURN n,score ORDER BY n");
+    let literal = vec![
+        row(vec![GraphValue::Vertex(VId(1)), scalar(17)]),
+        row(vec![GraphValue::Vertex(VId(2)), scalar(12)]),
+        row(vec![GraphValue::Vertex(VId(3)), scalar(15)]),
+    ];
+    let mut bag = literal.clone();
+    bag.extend(literal.clone());
+    bag.sort();
+    let selected = prepare(
+        "CALL test.rows(10) YIELD vertex AS n,score AS first \
+         CALL test.rows(20) YIELD vertex AS other,score AS second \
+         WITH n,other,first,second WHERE n=other \
+         RETURN n,first,second ORDER BY n",
+    );
+    let product = prepare(
+        "CALL test.rows(10) YIELD vertex AS n,score AS first \
+         CALL test.rows(20) YIELD vertex AS other,score AS second \
+         RETURN n,other,first,second ORDER BY n,other",
+    );
+    let mut pairs = Vec::new();
+    for (n, first) in [(1, 17), (2, 12), (3, 15)] {
+        for (other, second) in [(1, 27), (2, 22), (3, 25)] {
+            pairs.push(row(vec![
+                GraphValue::Vertex(VId(n)),
+                GraphValue::Vertex(VId(other)),
+                scalar(first),
+                scalar(second),
+            ]));
+        }
+    }
+    for (query, expected, biases) in [
+        (
+            left.clone()
+                .combine(
+                    GraphSetOperation::Union,
+                    GraphSetQuantifier::All,
+                    left.clone(),
+                )
+                .unwrap(),
+            bag,
+            vec![10, 10],
+        ),
+        (
+            left.clone()
+                .combine(
+                    GraphSetOperation::Union,
+                    GraphSetQuantifier::Distinct,
+                    left.clone(),
+                )
+                .unwrap(),
+            literal,
+            vec![10, 10],
+        ),
+        (
+            selected,
+            vec![
+                row(vec![GraphValue::Vertex(VId(1)), scalar(17), scalar(27)]),
+                row(vec![GraphValue::Vertex(VId(2)), scalar(12), scalar(22)]),
+                row(vec![GraphValue::Vertex(VId(3)), scalar(15), scalar(25)]),
+            ],
+            vec![10, 20],
+        ),
+        (product, pairs, vec![10, 20]),
+    ] {
+        let transcript = query.canonical_bytes();
+        assert!(AsyncSpillSetPlan::compile(&query).is_err());
+        assert!(AsyncSpillSetPlan::compile_with_single_procedure(&query).is_err());
+        let plan = AsyncSpillSetPlan::compile_with_independent_procedures(&query).unwrap();
+        assert_eq!(plan.source_count(), 2);
+        let mut inspected = Vec::new();
+        assert!(plan.all_procedure_sources(&mut |source| {
+            inspected.push(source.evaluate_arguments(&mut |_| Ok::<_, ()>(())).unwrap());
+            true
+        }));
+        assert_eq!(
+            inspected,
+            biases
+                .iter()
+                .map(|&bias| vec![scalar(bias)])
+                .collect::<Vec<_>>()
+        );
+        let mut visited = 0;
+        assert!(!plan.all_procedure_sources(&mut |_| {
+            visited += 1;
+            false
+        }));
+        assert_eq!(visited, 1);
+        assert_eq!(staged_plan(&graph, &plan).unwrap(), expected);
+        let mut calls = Vec::new();
+        let native = query
+            .execute_governed_with_procedures(
+                policy(),
+                |pattern, policy| graph.execute(pattern, policy),
+                |call, arguments, _| {
+                    calls.push(arguments.to_vec());
+                    let value = procedure_rows(call, arguments);
+                    Ok(GqlQueryExecution {
+                        rows: GqlExecutionStats {
+                            snapshot_records: 0,
+                            result_rows: value.len() as u64,
+                        },
+                        evaluator: GlaExecutionStats::default(),
+                        value,
+                    })
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            calls, inspected,
+            "independent sources execute once in source order"
+        );
+        assert_eq!(native.value, expected);
+        assert_eq!(query.canonical_bytes(), transcript);
+    }
+    assert!(AsyncSpillSetPlan::compile_with_independent_procedures(&left).is_ok());
+    let no_procedures = AsyncSpillSetPlan::compile(&PreparedGraphSet::singleton()).unwrap();
+    let mut visits = 0;
+    assert!(no_procedures.all_procedure_sources(&mut |_| {
+        visits += 1;
+        true
+    }));
+    assert_eq!(visits, 0);
+    assert!(
+        AsyncSpillSetPlan::compile_with_independent_procedures(&PreparedGraphSet::singleton())
+            .is_err()
+    );
+    for query in [
+        PreparedGraphSet::singleton()
+            .apply(left.clone(), Vec::new())
+            .unwrap(),
+        PreparedGraphSet::singleton()
+            .optional_apply(left.clone(), Vec::new())
+            .unwrap(),
+    ] {
+        assert!(
+            AsyncSpillSetPlan::compile_with_independent_procedures(&query.with_page(0, Some(0)))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn independent_procedures_keep_late_arguments_and_complete_child_failure_order() {
+    let graph = Graph::sample();
+    let good = prepare("CALL test.rows(10) YIELD vertex AS n RETURN n");
+    let late = prepare("CALL test.rows(1/0) YIELD vertex AS other RETURN other");
+    for left in [
+        good.clone()
+            .unwind("bad".into(), GraphSetValue::Value(scalar(1)))
+            .unwrap(),
+        good.with_page(0, Some(0)),
+    ] {
+        let query = left.cross_join(late.clone()).unwrap().with_page(0, Some(0));
+        let plan = AsyncSpillSetPlan::compile_with_independent_procedures(&query).unwrap();
+        let mut calls = 0;
+        let native = query.execute_governed_with_procedures(
+            policy(),
+            |pattern, policy| graph.execute(pattern, policy),
+            |call, arguments, _| {
+                calls += 1;
+                let value = procedure_rows(call, arguments);
+                Ok(GqlQueryExecution {
+                    rows: GqlExecutionStats {
+                        snapshot_records: 0,
+                        result_rows: value.len() as u64,
+                    },
+                    evaluator: GlaExecutionStats::default(),
+                    value,
+                })
+            },
+            || Ok(()),
+        );
+        let Err(GqlQueryError::Source(expected)) = native else {
+            panic!("neither an empty child nor LIMIT 0 may hide the reached failure");
+        };
+        assert_eq!(
+            calls, 1,
+            "the second source's argument fails before its callback"
+        );
+        assert_eq!(
+            staged_plan(&graph, &plan),
+            Err(SpillSetRowError::Native(expected))
+        );
+    }
+}
+
+#[test]
 fn earlier_child_failures_precede_lazy_procedure_arguments_under_empty_pages() {
     let graph = Graph::sample();
     let argument = GraphSetValue::Integer(
