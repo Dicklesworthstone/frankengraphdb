@@ -1060,7 +1060,6 @@ impl PreparedGraphSet {
             SetNode::Values
             | SetNode::Arguments
             | SetNode::Unwind { .. }
-            | SetNode::CrossJoin { .. }
             | SetNode::Apply { .. } => true,
             // Procedure rows are canonically sorted on arrival, like a pattern,
             // unless the procedure itself defines a ranked output order (`hybrid.*`).
@@ -1070,7 +1069,11 @@ impl PreparedGraphSet {
             SetNode::Scope(input)
             | SetNode::Project { input, .. }
             | SetNode::Filter { input, .. } => input.preserves_row_order(),
-            SetNode::Binary { left, right, .. } => {
+            // The product retains left-major child delivery, but does not
+            // turn canonical graph/procedure rows into a ranked sequence.
+            // A later projection must sort its actual tuple unless a child
+            // already carries list, argument or procedure ranking order.
+            SetNode::Binary { left, right, .. } | SetNode::CrossJoin { left, right } => {
                 left.preserves_row_order() || right.preserves_row_order()
             }
         }

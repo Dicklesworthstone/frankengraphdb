@@ -1451,6 +1451,68 @@ mod tests {
     }
 
     #[test]
+    fn unranked_graph_products_canonicalize_projected_tuples_without_changing_delivery() {
+        let product = scope_leaf().cross_join(scope_leaf()).unwrap();
+        let swapped = || {
+            vec![
+                GraphSetProjection::new("right", GraphSetValue::Column(1)),
+                GraphSetProjection::new("left", GraphSetValue::Column(0)),
+            ]
+        };
+        for (query, literal) in [
+            (product.clone(), [(1, 10), (1, 20), (2, 10), (2, 20)]),
+            (
+                product
+                    .clone()
+                    .project(swapped(), GraphSetQuantifier::All)
+                    .unwrap(),
+                [(10, 1), (10, 2), (20, 1), (20, 2)],
+            ),
+            (
+                product.project_ordered_output(swapped()).unwrap(),
+                [(10, 1), (20, 1), (10, 2), (20, 2)],
+            ),
+        ] {
+            let mut sources = 0;
+            let result = query
+                .execute_governed(
+                    GqlQueryPolicy::new(4, 4, 10_000, 10_000),
+                    |_: &PreparedGraphPattern<GraphValueRow>, _: GqlQueryPolicy| {
+                        let ids = if sources == 0 { [1, 2] } else { [10, 20] };
+                        sources += 1;
+                        Ok::<_, GqlQueryError<(), ()>>(GqlQueryExecution {
+                            value: ids
+                                .map(|id| {
+                                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(
+                                        id,
+                                    ))])
+                                })
+                                .to_vec(),
+                            rows: GqlExecutionStats {
+                                snapshot_records: 2,
+                                result_rows: 2,
+                            },
+                            evaluator: GlaExecutionStats::default(),
+                        })
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
+            assert_eq!(sources, 2);
+            assert_eq!(result.rows.snapshot_records, 4);
+            assert_eq!(
+                result.value,
+                literal
+                    .map(|(left, right)| GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(VId(left)),
+                        GraphValue::Vertex(VId(right)),
+                    ]))
+                    .to_vec(),
+            );
+        }
+    }
+
+    #[test]
     fn nested_pages_select_before_outer_reordering_without_repeating_the_source() {
         let inner = scope_leaf()
             .with_order_by(&[GraphValueOrder::descending(0)])

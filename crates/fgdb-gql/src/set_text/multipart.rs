@@ -244,7 +244,7 @@ pub(crate) fn row_existence_offsets(tokens: &[TextToken<'_>]) -> Vec<usize> {
 }
 
 /// The offset of the WHERE keyword of a required MATCH over imported rows (a
-/// top-level MATCH after a top-level WITH or a leading UNWIND, not OPTIONAL)
+/// top-level MATCH after a top-level WITH, CALL or leading UNWIND, not OPTIONAL)
 /// whose predicate contains byte `offset`, if any. unresolved_read_input
 /// re-reads such a WHERE after an implicit `WITH *` when the graph predicate
 /// refused it.
@@ -289,7 +289,7 @@ fn imported_where_at(tokens: &[TextToken<'_>], offset: usize, optional: bool) ->
                     eligible = with
                         && token.word("MATCH")
                         && previous.is_some_and(|previous| previous.word("OPTIONAL")) == optional;
-                    with |= token.word("WITH");
+                    with |= token.word("WITH") || token.word("CALL");
                 } else if eligible && token.word("WHERE") {
                     predicate = Some(token.at);
                     eligible = false;

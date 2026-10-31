@@ -3107,6 +3107,39 @@ mod tests {
     }
 
     #[test]
+    fn procedure_scalars_filter_the_correlated_match_without_restoring_dropped_names() {
+        let call = "CALL fnx.single_source_shortest_path_length(args => [1]) YIELD node,distance";
+        for predicate in ["distance>0", "distance IS NULL"] {
+            let statement =
+                format!("{call} MATCH (node) WHERE {predicate} RETURN node,distance ORDER BY node");
+            let prepared = PreparedGraphSetText::prepare(&statement, |_, _| None)
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            assert_eq!(prepared.columns(), ["node", "distance"]);
+            assert!(
+                prepared
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap()
+                    .calls_procedure()
+            );
+        }
+        for statement in [
+            format!("{call} WITH node MATCH (node) WHERE distance>0 RETURN node"),
+            "MATCH (node) WHERE distance>0 RETURN node".to_owned(),
+        ] {
+            let error = PreparedGraphSetText::prepare(&statement, |_, _| None).unwrap_err();
+            assert!(
+                matches!(
+                    error.kind,
+                    crate::GraphSetTextErrorKind::Pattern(
+                        crate::GraphPatternTextErrorKind::UnknownVariable
+                    )
+                ),
+                "{statement}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
     fn call_named_columns_and_nested_locals_do_not_become_procedure_clauses() {
         for statement in [
             "MATCH (n) RETURN n AS CALL",
