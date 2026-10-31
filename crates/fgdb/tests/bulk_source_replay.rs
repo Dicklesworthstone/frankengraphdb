@@ -8,7 +8,10 @@ use fgdb::{
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::GraphInsertRequest;
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts};
+use fgdb_types::{
+    CanonicalList, CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId,
+    EId, PurposeContexts,
+};
 use std::sync::Arc;
 
 struct DriftingSource {
@@ -99,6 +102,29 @@ fn rows() -> Vec<BulkRow> {
         edge("ab", "a", "b"),
         edge("ba", "b", "a"),
     ]
+}
+
+fn nullable_rows() -> Vec<BulkRow> {
+    let mut result = rows();
+    for (ordinal, row) in result.iter_mut().enumerate() {
+        let props = match row {
+            BulkRow::Vertex(vertex) => &mut vertex.props,
+            BulkRow::Edge(edge) => &mut edge.props,
+        };
+        props[0].1 = CanonicalScalar::Int(10 + ordinal as i64).into();
+        props.push((PropertyKeyId(2), CanonicalScalar::Null.into()));
+        props.push((
+            PropertyKeyId(3),
+            CanonicalPropertyValue::List(
+                CanonicalList::try_new(vec![
+                    CanonicalScalar::Null.into(),
+                    CanonicalScalar::Int(42).into(),
+                ])
+                .unwrap(),
+            ),
+        ));
+    }
+    result
 }
 fn policy() -> BulkLoadPolicy {
     BulkLoadPolicy::new(2, RelationId(1))
@@ -392,6 +418,225 @@ fn canonical_scalars_and_length_delimited_keys_do_not_alias() {
             error.kind,
             BulkLoadErrorKind::SourceChanged { row: 0 }
         ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn null_bearing_vertex_and_edge_prefixes_resume_without_an_extra_commit() {
+    let ((), report) = run_async_under_lab(0x000b_5106, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let original = nullable_rows();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let stopped = db
+            .bulk_load_with_checkpoint(&cx, &commit, original.clone(), policy(), None, |_| {
+                Err(std::io::Error::other("stop after the vertex chunk"))
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(stopped.kind, BulkLoadErrorKind::Checkpoint(_)));
+        assert_eq!(stopped.committed.next_row, 2);
+        assert_eq!(stopped.committed.committed_chunks, 1);
+        assert_eq!(stopped.committed.frontier, CommitSeq(basis.0 + 1));
+        let mut resumed = policy();
+        resumed.resume = Some(stopped.committed);
+        let stopped = db
+            .bulk_load_with_checkpoint(&cx, &commit, original.clone(), resumed, None, |_| {
+                Err(std::io::Error::other("stop after the edge chunk"))
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(stopped.kind, BulkLoadErrorKind::Checkpoint(_)));
+        let complete = stopped.committed;
+        assert_eq!((complete.next_row, complete.committed_chunks), (4, 2));
+        assert_eq!(complete.frontier, CommitSeq(basis.0 + 2));
+        let mut resumed = policy();
+        resumed.resume = Some(complete.clone());
+        let repeated = db
+            .bulk_load(&cx, &commit, original.clone(), resumed)
+            .await
+            .unwrap();
+        assert_eq!(repeated.vertices, complete.vertices);
+        assert_eq!(repeated.edges, complete.edges);
+        assert_eq!((repeated.next_row, repeated.committed_chunks), (4, 2));
+        assert_eq!(repeated.frontier, complete.frontier);
+        assert_eq!(db.frontier().unwrap(), complete.frontier);
+        assert_eq!(db.delta_since(basis).unwrap().count(), 2);
+        let stored = |value| {
+            vec![
+                (PropertyKeyId(1), CanonicalScalar::Int(value).into()),
+                (
+                    PropertyKeyId(3),
+                    CanonicalPropertyValue::List(
+                        CanonicalList::try_new(vec![
+                            CanonicalScalar::Null.into(),
+                            CanonicalScalar::Int(42).into(),
+                        ])
+                        .unwrap(),
+                    ),
+                ),
+            ]
+        };
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(db.edges().unwrap().len(), 2);
+        for (key, value) in [("a", 10), ("b", 11)] {
+            let vertex = db.vertex(complete.vertices[key]).unwrap().unwrap();
+            assert_eq!(vertex.labels, [LabelId(1)]);
+            assert_eq!(vertex.props, stored(value));
+        }
+        for (key, source, destination, value) in [("ab", "a", "b", 12), ("ba", "b", "a", 13)] {
+            let edge = db.edge(complete.edges[key]).unwrap().unwrap();
+            assert_eq!(edge.entry.src, complete.vertices[source]);
+            assert_eq!(edge.entry.dst, complete.vertices[destination]);
+            assert_eq!(edge.entry.relation, RelationId(1));
+            assert_eq!(edge.props, stored(value));
+        }
+        // The input itself remains NULL-bearing, including its raw transcript.
+        for row in original {
+            let props = match row {
+                BulkRow::Vertex(vertex) => vertex.props,
+                BulkRow::Edge(edge) => edge.props,
+            };
+            assert_eq!(props.len(), 3);
+            assert_eq!(props[1], (PropertyKeyId(2), CanonicalScalar::Null.into()));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn logical_null_resume_keeps_nonnull_nested_and_forged_identity_refusals() {
+    let ((), report) = run_async_under_lab(0x000b_5107, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let original = nullable_rows();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let complete = db
+            .bulk_load(&cx, &commit, original.clone(), policy())
+            .await
+            .unwrap();
+        for fault in 0_usize..6 {
+            let mut changed = original.clone();
+            let mut forged = complete.clone();
+            if fault < 4 {
+                let row = if fault.is_multiple_of(2) {
+                    &mut changed[0]
+                } else {
+                    &mut changed[2]
+                };
+                let props = match row {
+                    BulkRow::Vertex(vertex) => &mut vertex.props,
+                    BulkRow::Edge(edge) => &mut edge.props,
+                };
+                if fault < 2 {
+                    props[0].1 = CanonicalScalar::Int(999).into();
+                } else {
+                    // Omitting a nested NULL changes the stored list, unlike
+                    // omitting its top-level NULL-valued sibling property.
+                    props[2].1 = CanonicalPropertyValue::List(
+                        CanonicalList::try_new(vec![CanonicalScalar::Int(42).into()]).unwrap(),
+                    );
+                }
+            } else if fault == 4 {
+                let a = forged.vertices["a"];
+                let b = forged.vertices["b"];
+                forged.vertices.insert("a".into(), b);
+                forged.vertices.insert("b".into(), a);
+            } else {
+                let ab = forged.edges["ab"];
+                let ba = forged.edges["ba"];
+                forged.edges.insert("ab".into(), ba);
+                forged.edges.insert("ba".into(), ab);
+            }
+            let mut resumed = policy();
+            resumed.resume = Some(forged);
+            let refusal = db
+                .bulk_load(&cx, &commit, changed, resumed)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(refusal.kind, BulkLoadErrorKind::InvalidResume),
+                "fault={fault}: {refusal:?}"
+            );
+            assert!(refusal.pending.is_none());
+            assert_eq!(db.frontier().unwrap(), complete.frontier);
+            assert_eq!(db.vertices().unwrap().len(), 2);
+            assert_eq!(db.edges().unwrap().len(), 2);
+        }
+        // None of the refused source/mapping changes may consume identities.
+        assert_eq!(
+            db.allocate_identity(&cx, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                .unwrap(),
+            ElementId::Vertex(engine_vertex(3)),
+        );
+        assert_eq!(
+            db.allocate_identity(&cx, GraphInsertRequest::Edge { row: 0, edge: 0 })
+                .unwrap(),
+            ElementId::Edge(engine_edge(3)),
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn raw_null_omission_drift_is_not_hidden_by_logical_resume_comparison() {
+    let ((), report) = run_async_under_lab(0x000b_5108, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        for changed_row in [0, 2] {
+            for null_first in [false, true] {
+                let with_null = nullable_rows();
+                let mut omitted = with_null.clone();
+                let props = match &mut omitted[changed_row] {
+                    BulkRow::Vertex(vertex) => &mut vertex.props,
+                    BulkRow::Edge(edge) => &mut edge.props,
+                };
+                props.remove(1);
+                let (audited, replayed) = if null_first {
+                    (with_null, omitted)
+                } else {
+                    (omitted, with_null)
+                };
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let basis = db.frontier().unwrap();
+                let refusal = db
+                    .bulk_load(
+                        &cx,
+                        &commit,
+                        DriftingSource::new(audited, replayed),
+                        policy(),
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(refusal.kind, BulkLoadErrorKind::SourceChanged { row } if row == changed_row)
+                );
+                assert_eq!(refusal.committed.next_row, changed_row);
+                assert_eq!(refusal.committed.committed_chunks, changed_row / 2);
+                assert!(refusal.pending.is_none());
+                assert_eq!(
+                    db.frontier().unwrap(),
+                    CommitSeq(basis.0 + (changed_row / 2) as u64)
+                );
+                assert_eq!(db.vertices().unwrap().len(), changed_row);
+                assert!(db.edges().unwrap().is_empty());
+                assert_eq!(
+                    db.allocate_identity(&cx, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                        .unwrap(),
+                    ElementId::Vertex(engine_vertex(changed_row as u64 + 1)),
+                );
+                assert_eq!(
+                    db.allocate_identity(&cx, GraphInsertRequest::Edge { row: 0, edge: 0 })
+                        .unwrap(),
+                    ElementId::Edge(engine_edge(1)),
+                );
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

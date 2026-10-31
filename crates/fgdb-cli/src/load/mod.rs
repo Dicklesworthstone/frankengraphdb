@@ -20,7 +20,7 @@ use fgdb_delta_types::{DeltaRow, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GqlParameterValue;
 /// The strict, dependency-free JSON grammar now lives with the wire codecs.
 pub(crate) use fgdb_protocol::json::{Json, parse_json};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, PurposeContexts, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, PurposeContexts, VId};
 use std::{
     collections::{BTreeMap, HashSet},
     io::{self, Write},
@@ -28,6 +28,22 @@ use std::{
 
 fn invalid(message: impl std::fmt::Display) -> Failure {
     Failure::query(format!("InvalidResume: {message}"))
+}
+
+// Chronicle effects and source rows agree modulo a top-level NULL assignment,
+// which means absence. Keep both source rows and their raw hashes untouched;
+// nested NULL values and every nonnull property still compare exactly.
+fn same_logical_props(
+    left: &[(PropertyKeyId, CanonicalPropertyValue)],
+    right: &[(PropertyKeyId, CanonicalPropertyValue)],
+) -> bool {
+    let present = |entry: &&(PropertyKeyId, CanonicalPropertyValue)| {
+        !matches!(
+            &entry.1,
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Null)
+        )
+    };
+    left.iter().filter(present).eq(right.iter().filter(present))
 }
 fn line_error(line: usize, kind: &str, message: impl std::fmt::Display) -> Failure {
     Failure::query(format!("line {line}: {kind}: {message}"))
@@ -773,7 +789,7 @@ fn reconcile(
                 let (id, (labels, props)) = vs
                     .next()
                     .ok_or_else(|| invalid("missing vertex creation"))?;
-                if labels != &v.labels || props != &v.props {
+                if labels != &v.labels || !same_logical_props(props, &v.props) {
                     return Err(invalid("vertex source prefix changed"));
                 }
                 cp.vertices.insert(v.key.clone(), id);
@@ -791,7 +807,7 @@ fn reconcile(
                 if !keyed(&e.source, src)
                     || !keyed(&e.destination, dst)
                     || relation != e.relation
-                    || props != &e.props
+                    || !same_logical_props(props, &e.props)
                 {
                     return Err(invalid("edge source prefix changed"));
                 }

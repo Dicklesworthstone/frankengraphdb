@@ -714,6 +714,18 @@ fn logical(db: &Database, checkpoint: &BulkLoadCheckpoint) -> (Vertices, Edges) 
     )
 }
 fn expected(rows: &[BulkRow]) -> (Vertices, Edges) {
+    // Source NULLs remain in generated()/ndjson() and in the sealed raw source.
+    // The independent graph oracle reflects GQL's top-level NULL-as-absence
+    // semantics; all nonnull typed values remain exact.
+    let stored = |props: &[(PropertyKeyId, CanonicalPropertyValue)]| {
+        props
+            .iter()
+            .filter(|(_, value)| {
+                !matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))
+            })
+            .cloned()
+            .collect()
+    };
     let mut vertices = BTreeMap::new();
     let mut edges = BTreeMap::new();
     for row in rows {
@@ -721,7 +733,7 @@ fn expected(rows: &[BulkRow]) -> (Vertices, Edges) {
             BulkRow::Vertex(row) => {
                 assert!(
                     vertices
-                        .insert(row.key.clone(), (row.labels.clone(), row.props.clone()))
+                        .insert(row.key.clone(), (row.labels.clone(), stored(&row.props)))
                         .is_none()
                 );
             }
@@ -734,7 +746,7 @@ fn expected(rows: &[BulkRow]) -> (Vertices, Edges) {
                                 row.source.key().unwrap().to_owned(),
                                 row.destination.key().unwrap().to_owned(),
                                 row.relation,
-                                row.props.clone()
+                                stored(&row.props)
                             )
                         )
                         .is_none()

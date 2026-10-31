@@ -27,6 +27,20 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod source;
 
+// A top-level NULL assignment stores no property. Compare the logical prefix
+// without changing the caller's rows: their complete raw properties still feed
+// source admission and the replay transcript. Nested NULL values remain data.
+fn same_logical_props(
+    left: &[(PropertyKeyId, CanonicalPropertyValue)],
+    right: &[(PropertyKeyId, CanonicalPropertyValue)],
+) -> bool {
+    left.iter()
+        .filter(|(_, value)| !crate::is_null_property(value))
+        .eq(right
+            .iter()
+            .filter(|(_, value)| !crate::is_null_property(value)))
+}
+
 #[derive(Clone, Debug)]
 pub struct BulkVertex {
     pub key: String,
@@ -783,7 +797,7 @@ impl<V: Vfs + Clone> Database<V> {
                                 .map_err(|e| BulkLoadErrorKind::Write(e.into()))?
                                 .ok_or(BulkLoadErrorKind::InvalidResume)?;
                             if row.labels != v.labels
-                                || row.props != v.props
+                                || !same_logical_props(&row.props, &v.props)
                                 || !prefix_vertices.insert(*id)
                             {
                                 return Err(BulkLoadErrorKind::InvalidResume);
@@ -839,7 +853,7 @@ impl<V: Vfs + Clone> Database<V> {
                             if row.entry.src != prefix(&e.source)?
                                 || row.entry.dst != prefix(&e.destination)?
                                 || row.entry.relation != e.relation
-                                || row.props != e.props
+                                || !same_logical_props(&row.props, &e.props)
                                 || !prefix_edges.insert(*id)
                             {
                                 return Err(BulkLoadErrorKind::InvalidResume);
