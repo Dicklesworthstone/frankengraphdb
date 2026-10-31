@@ -12,7 +12,8 @@ use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::unwind_write::{GraphUnwindRowError, GraphUnwindWriteError};
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteIdentityRequest,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationError, GraphMutationQueryError,
+    GraphSymbol, GraphSymbolKind, GraphWriteChainError, GraphWriteIdentityRequest,
     GraphWriteProgramPolicy, GraphWriteScriptExecutionError,
 };
 use fgdb_types::{
@@ -2278,7 +2279,10 @@ fn row_map_fallbacks_keep_heterogeneous_keys_collections_and_with_scope() {
                 let second = if heterogeneous {
                     object(vec![("id", int(5)), ("name", text("later"))])
                 } else {
-                    object(vec![("id", int(5)), ("p", list(vec![int(3)]))])
+                    // A native trailing SET proposes its completed row bag
+                    // simultaneously. Distinct targets can receive different
+                    // lists; unequal proposals for one target must refuse.
+                    object(vec![("id", int(6)), ("p", list(vec![int(3)]))])
                 };
                 let issued = AtomicU64::new(0);
                 db.query_write(
@@ -2299,38 +2303,115 @@ fn row_map_fallbacks_keep_heterogeneous_keys_collections_and_with_scope() {
                     },
                 )
                 .await
-                .unwrap_or_else(|error| panic!("{statement}; collection={collection}: {error:?}"));
+                .unwrap_or_else(|error| {
+                    panic!("{statement}; collection={collection}; heterogeneous={heterogeneous}: {error:?}")
+                });
                 let vertices = db.vertices().unwrap();
-                assert_eq!(vertices.len(), 1);
-                assert_eq!(issued.load(Ordering::Relaxed), 1);
-                assert_eq!(vertices[0].labels, vec![ENTITY]);
-                assert_eq!(vertices[0].props.len(), if heterogeneous { 3 } else { 2 });
-                for (key, value) in &vertices[0].props {
-                    match *key {
-                        ID => assert_eq!(*value, CanonicalScalar::Int(5).into()),
-                        NAME => assert_eq!(
-                            *value,
-                            CanonicalScalar::ucs_basic_text("later").unwrap().into()
-                        ),
-                        P if collection => {
-                            let fgdb_types::CanonicalPropertyValue::List(values) = value else {
-                                panic!("the first row's list remains a typed list")
-                            };
-                            let expected = if heterogeneous {
-                                vec![
-                                    CanonicalScalar::Int(1).into(),
-                                    CanonicalScalar::Int(2).into(),
-                                ]
-                            } else {
-                                vec![CanonicalScalar::Int(3).into()]
-                            };
-                            assert_eq!(values.values(), expected);
+                let count = if heterogeneous { 1 } else { 2 };
+                assert_eq!(vertices.len(), count);
+                assert_eq!(issued.load(Ordering::Relaxed), count as u64);
+                let mut ids = std::collections::BTreeSet::new();
+                for vertex in &vertices {
+                    let Some((
+                        _,
+                        fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(id)),
+                    )) = vertex.props.iter().find(|(key, _)| *key == ID)
+                    else {
+                        panic!("every target retains its integer MERGE key")
+                    };
+                    assert!(ids.insert(*id));
+                    assert_eq!(vertex.labels, vec![ENTITY]);
+                    assert_eq!(vertex.props.len(), if heterogeneous { 3 } else { 2 });
+                    for (key, value) in &vertex.props {
+                        match *key {
+                            ID => {}
+                            NAME => assert_eq!(
+                                *value,
+                                CanonicalScalar::ucs_basic_text("later").unwrap().into()
+                            ),
+                            P if collection => {
+                                let fgdb_types::CanonicalPropertyValue::List(values) = value else {
+                                    panic!("each assigned list remains a typed list")
+                                };
+                                let expected = if *id == 5 {
+                                    vec![
+                                        CanonicalScalar::Int(1).into(),
+                                        CanonicalScalar::Int(2).into(),
+                                    ]
+                                } else {
+                                    vec![CanonicalScalar::Int(3).into()]
+                                };
+                                assert_eq!(values.values(), expected);
+                            }
+                            P => assert_eq!(*value, CanonicalScalar::Int(7).into()),
+                            _ => panic!("an input row introduced an unexpected property"),
                         }
-                        P => assert_eq!(*value, CanonicalScalar::Int(7).into()),
-                        _ => panic!("an input row introduced an unexpected property"),
                     }
                 }
+                assert_eq!(
+                    ids,
+                    if heterogeneous {
+                        std::collections::BTreeSet::from([5])
+                    } else {
+                        std::collections::BTreeSet::from([5, 6])
+                    }
+                );
             }
+            // Keep the original duplicate-target, different-list input as a
+            // precise native simultaneous-assignment refusal. Its MERGE
+            // creation must roll back with the rejected SET.
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(
+                VId(99),
+                vec![LabelId(2)],
+                vec![(P, CanonicalScalar::Int(9))],
+            );
+            db.write(&commit, prefix).await.unwrap();
+            let before = db.vertices().unwrap();
+            let frontier = db.frontier().unwrap();
+            let issued = AtomicU64::new(0);
+            let result = db
+                .query_write(
+                    &contexts.txn(),
+                    &cx,
+                    &commit,
+                    statement,
+                    &args(vec![
+                        object(vec![("id", int(5)), ("p", list(vec![int(1), int(2)]))]),
+                        object(vec![("id", int(5)), ("p", list(vec![int(3)]))]),
+                    ]),
+                    symbols,
+                    R,
+                    policy(100, 10),
+                    |request| {
+                        let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                        })
+                    },
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(QueryWriteError::Chain(GqlQueryError::Source(
+                        GraphWriteChainError::Mutation(GraphMutationQueryError::Mutation(
+                            GraphMutationError::ConflictingAssignment {
+                                first_row: 0,
+                                first_action: 0,
+                                row: 1,
+                                action: 0
+                            }
+                        ))
+                    )))
+                ),
+                "{statement}: {result:?}"
+            );
+            assert_eq!(issued.load(Ordering::Relaxed), 1);
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert_eq!(db.vertices().unwrap(), before);
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             db.query_write(
                 &contexts.txn(),

@@ -1164,13 +1164,14 @@ fn sealed_owners_execute_every_native_class_at_current_and_historical_cuts() {
                     Class::Pattern | Class::TemporalPattern => {
                         let null =
                             fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
-                        let mut rows = vec![vec![null.clone()]; 3];
+                        // Without ORDER BY, complete projected values use
+                        // canonical order: the four NULLs precede INT(99).
+                        let mut rows = vec![vec![null]; 4];
                         if selected == CommitSeq(4) {
                             rows.push(vec![fgdb::QueryValue::Value(GraphValue::Scalar(
                                 CanonicalScalar::Int(99),
                             ))]);
                         }
-                        rows.push(vec![null]);
                         fgdb::QueryResult::Rows {
                             columns: vec!["n.p".into()],
                             rows,
@@ -1194,6 +1195,31 @@ fn sealed_owners_execute_every_native_class_at_current_and_historical_cuts() {
                         }
                     }
                 };
+                if matches!(class, Class::Pattern | Class::TemporalPattern) {
+                    let typed = |result: &fgdb::QueryResult| {
+                        let fgdb::QueryResult::Rows { rows, .. } = result else {
+                            panic!("a pattern read returns rows");
+                        };
+                        rows.iter()
+                            .enumerate()
+                            .map(|(index, row)| {
+                                assert_eq!(row.len(), 1, "pattern row {index}");
+                                match row[0].as_value() {
+                                    Some(GraphValue::Scalar(CanonicalScalar::Null)) => None,
+                                    Some(GraphValue::Scalar(CanonicalScalar::Int(value))) => {
+                                        Some(*value)
+                                    }
+                                    _ => panic!("pattern row {index} must contain NULL or INT"),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(
+                        typed(&actual),
+                        typed(&literal),
+                        "typed literal {class:?} at {selected:?}",
+                    );
+                }
                 assert_eq!(actual, literal, "literal {class:?} at {selected:?}");
                 results.push((prepared, arguments.clone(), expected));
             }
