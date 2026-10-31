@@ -246,7 +246,8 @@ pub use set_ops::{
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;
 pub use temporal_aggregate_text::{
-    BoundTemporalGraphAggregateQuery, PreparedTemporalGraphAggregateText,
+    BoundTemporalAggregateQuery, BoundTemporalGraphAggregateQuery,
+    PreparedTemporalGraphAggregateText, TemporalAggregatePlan,
 };
 pub use temporal_set_text::{
     BoundTemporalGraphSetQuery, GraphTemporalSetTextError, GraphTemporalSetTextErrorKind,

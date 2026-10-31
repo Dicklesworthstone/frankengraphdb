@@ -279,12 +279,19 @@ impl PreparedGraphPipelineAggregateText {
         self.input.graph_source_count()
     }
 
-    /// Hosts must preserve every continuation, including an Apply whose body
-    /// owns the sole graph leaf. A source count is not an execution shape.
+    /// Hosts must preserve every continuation and procedure stage, including
+    /// an Apply whose body owns the sole graph leaf. A source count is not an
+    /// execution shape.
     #[must_use]
     pub fn requires_relational_input(&self) -> bool {
         self.input.first.selection.is_none()
             || !self.input.first.leading.is_empty()
+            || self
+                .input
+                .first
+                .pipeline
+                .iter()
+                .any(|stage| matches!(stage, ReadStageTemplate::Call { .. }))
             || !self.input.continuations.is_empty()
     }
 

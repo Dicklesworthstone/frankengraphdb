@@ -1,8 +1,8 @@
 //! Parse-once `FOR SYSTEM_TIME AS OF SEQ` wrapper for aggregate GQL text.
 //!
 //! The temporal selector is removed with equal-length ASCII whitespace and the
-//! remaining bytes are compiled by the direct or WITH-pipeline aggregate
-//! compiler. This preserves original UTF-8 offsets, row-stage boundaries,
+//! remaining bytes are compiled by the direct or relational aggregate compiler.
+//! This preserves original UTF-8 offsets, row-stage boundaries,
 //! catalog resolution and parameter binding. Execution remains host-owned.
 
 use crate::temporal_text::{TemplateSequenceSelector, append_template_sequence_selector};
@@ -11,6 +11,7 @@ use crate::{
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, GraphTemporalTextError,
     GraphTemporalTextErrorKind, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
     PreparedGraphAggregate, PreparedGraphAggregateText, PreparedGraphPipelineAggregateText,
+    PreparedGraphSetAggregate, PreparedGraphText,
 };
 use fgdb_types::CommitSeq;
 use std::collections::BTreeSet;
@@ -271,7 +272,13 @@ fn locate(statement: &str) -> Result<(usize, usize, SequenceSelector), GraphTemp
         ));
     }
     if !tokens.get(at + 6).is_some_and(|next| {
-        next.word("WHERE") || next.word("OPTIONAL") || next.word("WITH") || next.word("RETURN")
+        next.word("WHERE")
+            || next.word("OPTIONAL")
+            || next.word("WITH")
+            || next.word("RETURN")
+            || next.word("MATCH")
+            || next.word("CALL")
+            || next.word("UNWIND")
     }) {
         return Err(fail(
             end,
@@ -279,6 +286,44 @@ fn locate(statement: &str) -> Result<(usize, usize, SequenceSelector), GraphTemp
         ));
     }
     Ok((start, end, selector))
+}
+
+/// Admit leading and intermediate row sources through the shared lexical
+/// tokens. Quoted text, delimited names and property names cannot forge stages.
+fn has_row_sources(
+    statement: &str,
+    declarations: &[(&str, GqlParameterType)],
+) -> Result<bool, crate::GraphPatternTextError> {
+    use crate::set_text::TextKind;
+
+    let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
+    let mut depth = 0_usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            TextKind::Word(word) if depth == 0 => {
+                let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
+                if previous.is_some_and(|previous| {
+                    matches!(previous.kind, TextKind::Punct(b'.' | b':'))
+                        || matches!(
+                            previous.kind,
+                            TextKind::Word(name) if name.eq_ignore_ascii_case("AS")
+                        )
+                }) {
+                    continue;
+                }
+                if word.eq_ignore_ascii_case("RETURN") {
+                    break;
+                }
+                if word.eq_ignore_ascii_case("CALL") || word.eq_ignore_ascii_case("UNWIND") {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Clone)]
@@ -316,6 +361,18 @@ impl AggregateTemplate {
         match self {
             Self::Direct(inner) => Ok(inner.bind_parameters(arguments)?),
             Self::Pipeline(inner) => Ok(inner.bind_parameters(arguments)?),
+        }
+    }
+
+    fn bind_source_parameters(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<TemporalAggregatePlan, GraphTemporalTextError> {
+        match self {
+            Self::Pipeline(inner) if inner.requires_relational_input() => Ok(
+                TemporalAggregatePlan::Relation(inner.bind_relation_parameters(arguments)?),
+            ),
+            _ => Ok(TemporalAggregatePlan::Graph(self.bind_parameters(arguments)?)),
         }
     }
 }
@@ -406,10 +463,14 @@ impl PreparedTemporalGraphAggregateText {
             .copied()
             .filter(|(name, _)| inner_names.contains(*name))
             .collect::<Vec<_>>();
+        // Preserve the selected compiler and canonical transcript for every
+        // already-admitted WITH definition. Newly admitted CALL/UNWIND sources
+        // use the shared lexer so a name or literal cannot select a new owner.
         let pipeline = tokens(&blanked)
             .iter()
             .take_while(|token| !token.word("RETURN"))
-            .any(|token| token.word("WITH"));
+            .any(|token| token.word("WITH"))
+            || has_row_sources(&blanked, &inner_declarations)?;
         let inner = if pipeline {
             AggregateTemplate::Pipeline(
                 PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
@@ -510,10 +571,36 @@ impl PreparedTemporalGraphAggregateText {
         operators
     }
 
+    /// Bind a definition representable by the single-graph aggregate owner.
+    /// Source-aware definitions retain its ordinary shape refusal; hosts that
+    /// own every relational source use [Self::bind_source_parameters].
     pub fn bind_parameters(
         &self,
         arguments: &GqlParameters,
     ) -> Result<BoundTemporalGraphAggregateQuery, GraphTemporalTextError> {
+        let (as_of, aggregate) = self.bind_with(arguments, AggregateTemplate::bind_parameters)?;
+        Ok(BoundTemporalGraphAggregateQuery { aggregate, as_of })
+    }
+
+    /// Bind the complete aggregate while retaining its actual source owner.
+    /// The selected sequence applies to every graph and procedure source.
+    /// Ordinary single-graph definitions keep their existing execution lane;
+    /// leading rows, source-free inputs and continuations retain the complete
+    /// native relation. Binding performs no execution or catalog access.
+    pub fn bind_source_parameters(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<BoundTemporalAggregateQuery, GraphTemporalTextError> {
+        let (as_of, aggregate) =
+            self.bind_with(arguments, AggregateTemplate::bind_source_parameters)?;
+        Ok(BoundTemporalAggregateQuery { aggregate, as_of })
+    }
+
+    fn bind_with<T>(
+        &self,
+        arguments: &GqlParameters,
+        bind: impl FnOnce(&AggregateTemplate, &GqlParameters) -> Result<T, GraphTemporalTextError>,
+    ) -> Result<(CommitSeq, T), GraphTemporalTextError> {
         let as_of = match &self.selector {
             SequenceSelector::Literal(value) => *value,
             SequenceSelector::Parameter { name, offset } => match arguments.get(name) {
@@ -537,7 +624,7 @@ impl PreparedTemporalGraphAggregateText {
                     .expect("prepared parameter names are valid and unique");
             }
         }
-        let aggregate = self.inner.bind_parameters(&local)?;
+        let aggregate = bind(&self.inner, &local)?;
         let recognized = self
             .parameters
             .iter()
@@ -549,10 +636,44 @@ impl PreparedTemporalGraphAggregateText {
                 GraphTemporalTextErrorKind::UnexpectedArguments,
             ));
         }
-        Ok(BoundTemporalGraphAggregateQuery {
-            aggregate,
-            as_of: CommitSeq(as_of),
-        })
+        Ok((CommitSeq(as_of), aggregate))
+    }
+}
+
+/// The admitted aggregate and its genuine source ownership. Hosts must pin the
+/// bound sequence before executing either arm and share that cut across every
+/// relational leaf; this enum grants no graph or procedure authorization.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TemporalAggregatePlan {
+    Graph(PreparedGraphAggregate),
+    Relation(PreparedGraphSetAggregate),
+}
+
+/// A complete native aggregate bound to one historical database sequence.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BoundTemporalAggregateQuery {
+    aggregate: TemporalAggregatePlan,
+    as_of: CommitSeq,
+}
+
+impl core::fmt::Debug for BoundTemporalAggregateQuery {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BoundTemporalAggregateQuery")
+            .field("aggregate", &self.aggregate)
+            .field("snapshot", &"[BOUND]")
+            .finish()
+    }
+}
+
+impl BoundTemporalAggregateQuery {
+    #[must_use]
+    pub fn aggregate(&self) -> &TemporalAggregatePlan {
+        &self.aggregate
+    }
+
+    #[must_use]
+    pub const fn as_of(&self) -> CommitSeq {
+        self.as_of
     }
 }
 
@@ -751,5 +872,247 @@ mod tests {
             GraphTemporalTextErrorKind::ConflictingParameterType
         ));
         assert_eq!((zones.get(), catalog.get()), (0, 0));
+    }
+
+    #[test]
+    fn source_binding_preserves_single_graph_plans_and_snapshot_independence() {
+        for source in [
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN SUM(n.p) AS total",
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at WITH n.p AS p RETURN SUM(p) AS total",
+        ] {
+            let template = PreparedTemporalGraphAggregateText::prepare(source, symbols).unwrap();
+            let frozen = template.canonical_template_bytes();
+            let arguments = GqlParameters::new().with_uint64("at", 8).unwrap();
+            let narrow = template.bind_parameters(&arguments).unwrap();
+            let bound = template.bind_source_parameters(&arguments).unwrap();
+            let TemporalAggregatePlan::Graph(aggregate) = bound.aggregate() else {
+                panic!("ordinary single-graph execution must retain its owner");
+            };
+            assert_eq!(aggregate, narrow.aggregate());
+            assert_eq!(bound.as_of(), narrow.as_of());
+            let later = template
+                .bind_source_parameters(&GqlParameters::new().with_uint64("at", 9).unwrap())
+                .unwrap();
+            assert_eq!(bound.aggregate(), later.aggregate());
+            assert_eq!(later.as_of(), CommitSeq(9));
+            assert_eq!(template.canonical_template_bytes(), frozen);
+        }
+    }
+
+    #[test]
+    fn temporal_source_free_aggregate_keeps_exact_values_without_a_graph_callback() {
+        let source = "UNWIND [1,1,3] AS x FOR SYSTEM_TIME AS OF SEQ $at \
+                      RETURN COUNT(*) AS c,SUM(x) AS s,AVG(x) AS a";
+        let template = PreparedTemporalGraphAggregateText::prepare(source, symbols).unwrap();
+        let arguments = GqlParameters::new().with_uint64("at", 7).unwrap();
+        assert!(
+            template.bind_parameters(&arguments).is_err(),
+            "the narrow owner must not fabricate a graph source"
+        );
+        let bound = template.bind_source_parameters(&arguments).unwrap();
+        assert_eq!(bound.as_of(), CommitSeq(7));
+        let TemporalAggregatePlan::Relation(aggregate) = bound.aggregate() else {
+            panic!("UNWIND owns a real relation");
+        };
+        let rows = aggregate
+            .execute_governed::<(), ()>(
+                crate::GqlQueryPolicy::new(100_000, 100_000, 5_000_000, 5_000_000),
+                |_, _| panic!("source-free aggregate cannot scan a graph"),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values()[0].as_count(), Some(3));
+        assert_eq!(rows[0].values()[1].as_integer(), Some(5));
+        assert_eq!(
+            rows[0].values()[2].as_average(),
+            Some(crate::GraphExactAverage::new(5, 3).unwrap())
+        );
+    }
+
+    #[test]
+    fn source_binding_preserves_complete_mixed_prefix_and_resolves_only_once() {
+        let source = "UNWIND [1,2] AS factor CALL test.rows(10) YIELD vertex AS n \
+                      FOR SYSTEM_TIME AS OF SEQ $at \
+                      CALL test.rows(20) YIELD vertex AS m MATCH (n) \
+                      RETURN COUNT(*) AS c,SUM(n.p*factor) AS s";
+        let calls = Cell::new(0);
+        let template = PreparedTemporalGraphAggregateText::prepare(source, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            template
+                .template_operators()
+                .iter()
+                .filter(|operator| **operator == "ProcedureCall")
+                .count(),
+            2
+        );
+        let AggregateTemplate::Pipeline(inner) = &template.inner else {
+            panic!("leading CALL and UNWIND require the relational compiler");
+        };
+        assert!(inner.requires_relational_input());
+        assert_eq!(inner.graph_source_count(), 1);
+        let expected = inner
+            .bind_relation_parameters(&GqlParameters::new())
+            .unwrap();
+        for at in [7, 8] {
+            let arguments = GqlParameters::new().with_uint64("at", at).unwrap();
+            let bound = template.bind_source_parameters(&arguments).unwrap();
+            assert_eq!(bound.as_of(), CommitSeq(at));
+            let TemporalAggregatePlan::Relation(aggregate) = bound.aggregate() else {
+                panic!("leading sources cannot be replaced with a single graph");
+            };
+            assert_eq!(aggregate, &expected);
+            assert!(template.bind_parameters(&arguments).is_err());
+        }
+        assert_eq!(calls.get(), 1, "binding cannot reopen the catalog");
+    }
+
+    #[test]
+    fn source_binding_keeps_selector_argument_precedence_and_original_offsets() {
+        let source = "/* λ */ UNWIND [$value] AS x FOR SYSTEM_TIME AS OF SEQ $at \
+                      RETURN SUM(x) AS s LIMIT $at";
+        let template = PreparedTemporalGraphAggregateText::prepare_with_parameter_types(
+            source,
+            &[
+                ("value", GqlParameterType::Int64),
+                ("at", GqlParameterType::UInt64),
+            ],
+            symbols,
+        )
+        .unwrap();
+        let selector = template
+            .parameter_schema()
+            .iter()
+            .find(|spec| spec.name == "at")
+            .unwrap();
+        assert_eq!(selector.occurrences, 2);
+        let missing = template
+            .bind_source_parameters(&GqlParameters::new())
+            .unwrap_err();
+        assert_eq!(missing.offset, source.find("$at").unwrap());
+        assert_eq!(missing.kind, GraphTemporalTextErrorKind::MissingParameter);
+        let wrong = template
+            .bind_source_parameters(&GqlParameters::new().with_int64("at", 7).unwrap())
+            .unwrap_err();
+        assert_eq!(wrong.offset, source.find("$at").unwrap());
+        assert_eq!(
+            wrong.kind,
+            GraphTemporalTextErrorKind::ParameterTypeMismatch {
+                found: GqlParameterType::Int64,
+            }
+        );
+        let missing_value = template
+            .bind_source_parameters(
+                &GqlParameters::new()
+                    .with_uint64("at", 7)
+                    .unwrap()
+                    .with_int64("extra", 1)
+                    .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(missing_value.offset, source.find("$value").unwrap());
+        assert!(matches!(
+            missing_value.kind,
+            GraphTemporalTextErrorKind::Pipeline(
+                crate::GraphPipelineAggregateTextErrorKind::Input(
+                    crate::GraphSetTextErrorKind::Pattern(
+                        GraphPatternTextErrorKind::MissingParameter
+                    )
+                )
+            )
+        ));
+        let arguments = GqlParameters::new()
+            .with_uint64("at", 7)
+            .unwrap()
+            .with_int64("value", 4)
+            .unwrap();
+        assert!(template.bind_source_parameters(&arguments).is_ok());
+        let unexpected = template
+            .bind_source_parameters(&arguments.with_int64("extra", 1).unwrap())
+            .unwrap_err();
+        assert_eq!(unexpected.offset, source.len());
+        assert_eq!(
+            unexpected.kind,
+            GraphTemporalTextErrorKind::UnexpectedArguments
+        );
+    }
+
+    #[test]
+    fn temporal_pipeline_selection_keeps_literals_and_nested_clauses_opaque() {
+        let direct = PreparedTemporalGraphAggregateText::prepare(
+            "MATCH (n) /* CALL test.rows() UNWIND [1] AS x WITH x */ \
+             FOR SYSTEM_TIME AS OF SEQ 7 RETURN COUNT(*) AS c",
+            symbols,
+        )
+        .unwrap()
+        .bind_source_parameters(&GqlParameters::new())
+        .unwrap();
+        assert!(matches!(direct.aggregate(), TemporalAggregatePlan::Graph(_)));
+
+        let inline = PreparedTemporalGraphAggregateText::prepare(
+            "CALL { RETURN 1 AS x UNION ALL RETURN 2 AS x } \
+             FOR SYSTEM_TIME AS OF SEQ 7 RETURN SUM(x) AS s",
+            symbols,
+        )
+        .unwrap()
+        .bind_source_parameters(&GqlParameters::new())
+        .unwrap();
+        let TemporalAggregatePlan::Relation(aggregate) = inline.aggregate() else {
+            panic!("inline CALL owns the complete native relation");
+        };
+        let rows = aggregate
+            .execute_governed::<(), ()>(
+                crate::GqlQueryPolicy::new(100_000, 100_000, 5_000_000, 5_000_000),
+                |_, _| panic!("inline row subquery cannot scan a graph"),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values()[0].as_integer(), Some(3));
+
+        for source in [
+            "UNWIND [1] AS x WITH x FOR SYSTEM_TIME AS OF SEQ 7 RETURN COUNT(*)",
+            "UNWIND [1] AS x FOR SYSTEM_TIME AS OF SEQ 7 \
+             CALL test.rows() YIELD score FOR SYSTEM_TIME AS OF SEQ 8 RETURN COUNT(*)",
+        ] {
+            let calls = Cell::new(0);
+            assert!(
+                PreparedTemporalGraphAggregateText::prepare(source, |kind, name| {
+                    calls.set(calls.get() + 1);
+                    symbols(kind, name)
+                })
+                .is_err(),
+                "{source}"
+            );
+            assert_eq!(calls.get(), 0, "{source}");
+        }
+    }
+
+    #[test]
+    fn call_after_with_retains_its_host_beside_the_single_graph_leaf() {
+        let source = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 7 WITH n \
+                      CALL test.rows() YIELD score \
+                      RETURN COUNT(*) AS c,SUM(score) AS total";
+        let template = PreparedTemporalGraphAggregateText::prepare(source, symbols).unwrap();
+        let AggregateTemplate::Pipeline(inner) = &template.inner else {
+            panic!("WITH retains the row pipeline");
+        };
+        assert_eq!(inner.graph_source_count(), 1);
+        assert!(inner.requires_relational_input());
+        let arguments = GqlParameters::new();
+        assert!(template.bind_parameters(&arguments).is_err());
+        let bound = template.bind_source_parameters(&arguments).unwrap();
+        let TemporalAggregatePlan::Relation(aggregate) = bound.aggregate() else {
+            panic!("CALL after WITH still requires the procedure host");
+        };
+        assert!(aggregate.input().calls_procedure());
+        assert_eq!(bound.as_of(), CommitSeq(7));
     }
 }
