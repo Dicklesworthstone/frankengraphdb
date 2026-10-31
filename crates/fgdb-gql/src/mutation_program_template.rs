@@ -123,7 +123,7 @@ fn check_program_arguments(
 ) -> Result<(), GraphMutationProgramTemplateError> {
     let recognized = parameters
         .iter()
-        .filter(|spec| arguments.get(&spec.name).is_some())
+        .filter(|spec| !spec.is_statement_time() && arguments.get(&spec.name).is_some())
         .count();
     if recognized != arguments.len() {
         return Err(GraphMutationProgramTemplateError::UnexpectedArguments);
@@ -131,15 +131,7 @@ fn check_program_arguments(
     Ok(())
 }
 fn local_arguments(schema: &[GqlParameterSpec], arguments: &GqlParameters) -> GqlParameters {
-    let mut local = GqlParameters::new();
-    for spec in schema {
-        if let Some(value) = arguments.get(&spec.name) {
-            local
-                .insert(spec.name.clone(), value)
-                .expect("prepared argument names are valid and locally unique");
-        }
-    }
-    local
+    arguments.subset_for(schema)
 }
 
 /// One reusable program schema across separately prepared statements. The host

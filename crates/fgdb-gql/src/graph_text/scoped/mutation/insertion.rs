@@ -2037,34 +2037,12 @@ impl PreparedGraphInsertText {
             } => {
                 // Use the original registered names, positions and exact-kind
                 // acceptance law. There is no MATCH object to bind or execute.
-                // Signed client integers for SKIP/LIMIT (fgdb-3dnpu).
-                let admitted = arguments.admit_unsigned(parameters);
-                let arguments: &GqlParameters = &admitted;
-                let mut values = Vec::new();
-                for (spec, &at) in parameters.iter().zip(parameter_offsets) {
-                    let value = arguments
-                        .get(&spec.name)
-                        .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
-                    if !spec.parameter_type.accepts(value.parameter_type()) {
-                        return Err(error(
-                            at,
-                            GraphPatternTextErrorKind::ParameterTypeMismatch {
-                                expected: spec.parameter_type,
-                                found: value.parameter_type(),
-                            },
-                        )
-                        .into());
-                    }
-                    values.push(value);
-                }
-                if arguments.len() != values.len() {
-                    return Err(error(
-                        statement.len(),
-                        GraphPatternTextErrorKind::UnexpectedArguments,
-                    )
-                    .into());
-                }
-                Ok(values)
+                Ok(crate::graph_text::checked_parameter_values(
+                    parameters,
+                    parameter_offsets,
+                    statement.len(),
+                    arguments,
+                )?)
             }
         }
     }

@@ -164,6 +164,13 @@ impl PreparedNativeRead {
         after: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> Result<GraphResultDiff, Error> {
+        // Both endpoints share this binding's calendar observation, just as
+        // they share its named arguments. Comparing history never samples a
+        // second instant between the before and after evaluations.
+        let captured = view
+            .capture_statement_parameters(cx, self.statement(), params)
+            .map_err(definition)?;
+        let params = captured.as_ref();
         // Keep each native source class and bind error. A complete aggregate's
         // private input is NOT replaced by its primary pattern; compound and
         // computed stages are owned by the existing aggregate/set executor.

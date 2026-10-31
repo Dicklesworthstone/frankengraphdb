@@ -5,11 +5,12 @@
 mod join;
 mod walk;
 
-use super::{Cancel, Checkpoint};
+use super::{BufferedVertexSeeds, Cancel, Checkpoint};
 use crate::{BufferedReadError, BufferedReadView, MemoryPool};
 use asupersync::fs::Vfs;
 use fgdb_gql::algebra::{
-    EdgeRelation, GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue, GraphValueRow, PreparedGraphPattern,
+    EdgeRelation, GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaDirection, GraphValue, GraphValueRow,
+    PreparedGraphPattern,
 };
 use fgdb_gql::edge_stream::{
     AsyncEdgeCandidate, AsyncEdgeScanCursor, AsyncEdgeScanEvent, AsyncEdgeScanPlan,
@@ -21,7 +22,8 @@ use fgdb_gql::stream::{AsyncVertexProbeCursor, AsyncVertexProbePlan, VertexScanE
 use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy};
 use fgdb_strata::store::BufferedScanError;
 use fgdb_strata::tiered::edge_scan::{
-    BufferedEdgeCandidate, BufferedEdgeEndpoints, BufferedEdgeJoinScan, BufferedEdgeScanEvent,
+    BufferedEdgeCandidate, BufferedEdgeDirection, BufferedEdgeEndpoints, BufferedEdgeJoinScan,
+    BufferedEdgeScanEvent,
 };
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -69,6 +71,8 @@ impl AsyncEdgeScanRecord for Record {
 
 struct Source<'view, 'q, V: Vfs> {
     scan: BufferedEdgeJoinScan<'view, V>,
+    vertex_seeds: Option<BufferedVertexSeeds>,
+    edge_seed_direction: Option<BufferedEdgeDirection>,
     cx: &'q QueryCx,
     pool: MemoryPool,
 }
@@ -119,6 +123,35 @@ impl<V: Vfs + Clone> AsyncEdgeScanSource for Source<'_, '_, V> {
         relation: EdgeRelation,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
     ) -> CandidateResult<C> {
+        if let Some(direction) = self.edge_seed_direction.take() {
+            let seeds = self
+                .vertex_seeds
+                .take()
+                .expect("selected edge direction owns its complete vertex domain");
+            self.cx
+                .with_restriction_async(self.scan.select_root_vertices_with(
+                    self.cx,
+                    seeds.as_slice(),
+                    direction,
+                    &mut |event| {
+                        control(match event {
+                            BufferedEdgeScanEvent::Work => AsyncEdgeScanEvent::Work,
+                            BufferedEdgeScanEvent::Identity(eid) => {
+                                AsyncEdgeScanEvent::Candidate(eid)
+                            }
+                        })
+                    },
+                ))
+                .erase_send()
+                .await
+                .map_err(|error| match error {
+                    BufferedScanError::Read(error) => EdgeScanSourceError::Source(error),
+                    BufferedScanError::Control(error) => EdgeScanSourceError::Control(error),
+                })?;
+            // Compact selected positions now own the root restriction. Release
+            // the bounded seed batch before admitting full edge/endpoints.
+            drop(seeds);
+        }
         // An alternation reads every relation's candidates; the async cursor
         // admits only its members through `EdgeRelation::matches`.
         let relation = relation.one();
@@ -200,6 +233,14 @@ impl<V: Vfs + Clone> AsyncEdgeScanSource for Source<'_, '_, V> {
 
 fn source_error(error: BufferedReadError) -> EdgeQueryError {
     GqlQueryError::Source(EdgeScanError::Source(error))
+}
+
+fn seed_direction(direction: GlaDirection) -> BufferedEdgeDirection {
+    match direction {
+        GlaDirection::Forward => BufferedEdgeDirection::Outgoing,
+        GlaDirection::Reverse => BufferedEdgeDirection::Incoming,
+        GlaDirection::Undirected => BufferedEdgeDirection::Undirected,
+    }
 }
 
 impl<V: Vfs + Clone> BufferedReadView<V> {
@@ -375,6 +416,29 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         ))
     }
 
+    /// Select the first edge's slot-zero vertex domain without changing native
+    /// edge orientation, bag multiplicity, projection or external ordering.
+    pub(crate) fn open_seeded_edge_input<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncEdgeScanPlan,
+        seeds: BufferedVertexSeeds,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        AsyncEdgeScanCursor<
+            impl AsyncEdgeScanSource<Error = BufferedReadError, OutputGuard = MemoryCharge>
+            + use<'view, 'q, V>,
+            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
+        >,
+        EdgeQueryError,
+    > {
+        let (mut source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
+        source.edge_seed_direction = Some(seed_direction(plan.root_direction()));
+        source.vertex_seeds = Some(seeds);
+        Ok(AsyncEdgeScanCursor::new(source, plan, policy, checkpoint))
+    }
+
     fn edge_input_source<'view, 'q>(
         &'view mut self,
         cx: &'q QueryCx,
@@ -407,6 +471,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         .map_err(source_error)?;
         let source = Source {
             scan: scan.into_join_scan(),
+            vertex_seeds: None,
+            edge_seed_direction: None,
             cx,
             pool,
         };

@@ -324,6 +324,9 @@ impl PreparedGraphBranchText {
                 let branch = branch_name(text.as_str(), self.selector_offset)?;
                 if !*used_in_query {
                     let mut native = GqlParameters::new();
+                    native.copy_statement_time_from(arguments).map_err(|_| {
+                        error(self.selector_offset, GraphBranchTextErrorKind::ArgumentMap)
+                    })?;
                     for (other, _) in arguments.parameter_types() {
                         if other != name.as_str() {
                             // This is a subset of an already admitted map.

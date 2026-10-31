@@ -52,8 +52,11 @@ async fn write_if_current_inner(
     refuse_element_identity(&statement.statement)?;
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-    match Returning::prepare(db, &statement.statement, &parameters)? {
-        Some(prepared) => {
+    match ReturningTemplate::prepare(db, &statement.statement, &parameters)? {
+        Some(template) => {
+            let contexts = PurposeContexts::narrow_runtime_root(cx);
+            let query = crate::query_cx(&contexts);
+            let prepared = template.bind_current(&query, db, &parameters)?;
             write_returning_in_guard(cx, db, token, prepared, guard, |_, rows, _| Ok(rows)).await
         }
         None => write_stats_in_guard(cx, db, token, &statement.statement, &parameters, guard).await,

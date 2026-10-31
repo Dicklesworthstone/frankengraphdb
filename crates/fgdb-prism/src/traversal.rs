@@ -305,6 +305,7 @@ pub(crate) fn run<C>(
         }
         FnxAlgorithm::PageRank(_)
         | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+        | FnxAlgorithm::DijkstraPathLength { .. }
         | FnxAlgorithm::Triangles
         | FnxAlgorithm::ClusteringCoefficient
         | FnxAlgorithm::Cdlp { .. }
@@ -312,6 +313,7 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::InDegreeCentrality
         | FnxAlgorithm::OutDegreeCentrality
         | FnxAlgorithm::HitsCentrality
+        | FnxAlgorithm::KatzCentrality(_)
         | FnxAlgorithm::ArticulationPoints
         | FnxAlgorithm::Bridges
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),

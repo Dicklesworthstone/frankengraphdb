@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::BufferedReadView;
+use crate::buffered_read::BufferedVertexSeeds;
 use fgdb_gql::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeJoinSource, AsyncEdgeScanPlan,
     AsyncGraphWalkCursor, AsyncGraphWalkPlan, AsyncGraphWalkSource,
@@ -538,6 +539,135 @@ impl<V: Vfs + Clone> ExternalOrderHost for BufferedHost<'_, V> {
 
     fn native_event(&mut self, _event: GlaExecutionEvent) -> Result<()> {
         Ok(())
+    }
+
+    fn supports_vertex_seeds(&self) -> bool {
+        true
+    }
+
+    fn seeded_vertex_leaf<'q, A, B>(
+        &'q mut self,
+        plan: &'q AsyncSpillSetPlan,
+        seeds: BufferedVertexSeeds,
+        snapshot: CommitSeq,
+        cx: &'q QueryCx,
+        policy: GqlQueryPolicy,
+        scratch: &'q mut SpillFile<A>,
+        destination: &'q mut SpillFile<B>,
+        limits: ExternalOrderLimits,
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+    {
+        Box::pin(async move {
+            self.check_snapshot(snapshot)?;
+            let tail = plan.source_tail().cloned().ok_or(SpillError::InvalidRun)?;
+            let columns = plan.source_columns().to_vec();
+            match plan.source() {
+                AsyncSpillSetSourcePlan::Vertex(source) => {
+                    let cursor = self
+                        .view
+                        .open_seeded_vertex_input(cx, source.clone(), seeds, snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Vertex),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
+                AsyncSpillSetSourcePlan::Edge(source) => {
+                    let cursor = self
+                        .view
+                        .open_seeded_edge_input(cx, source.clone(), seeds, snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Edge),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
+                AsyncSpillSetSourcePlan::Join(source) => {
+                    let cursor = self
+                        .view
+                        .open_seeded_edge_join_input(cx, source.clone(), seeds, snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Edge),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
+                AsyncSpillSetSourcePlan::Walk(source) => {
+                    let cursor = self
+                        .view
+                        .open_seeded_graph_walk_input(cx, source.clone(), seeds, snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Edge),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
+                _ => Err(SpillError::InvalidRun.into()),
+            }
+        })
     }
 
     fn leaf<'q, A, B>(

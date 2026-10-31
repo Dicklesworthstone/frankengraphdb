@@ -146,6 +146,123 @@ fn prefix_streams_and_native_aggregates_seek_mixed_type_properties_exactly() {
 }
 
 #[test]
+fn wide_prefixes_admit_only_historical_candidates_across_pinned_cuts_and_compaction() {
+    let ((), report) = run_async_under_lab(0x51ca_0305, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        // More than 64 matching values select the bounded history route. The
+        // unrelated population must not become snapshot-record admissions.
+        for id in 100..180_u128 {
+            batch.create_vertex(VId(id), vec![], vec![(KEY, text(&format!("pré-{id}")))]);
+        }
+        batch.create_vertex(VId(u128::MAX), vec![], vec![(KEY, text("pré-last"))]);
+        for id in 1000..1256_u128 {
+            batch.create_vertex(VId(id), vec![], vec![(KEY, text("outside"))]);
+        }
+        batch.create_vertex(VId(0), vec![], vec![]);
+        batch.create_vertex(VId(1), vec![], vec![(KEY, CanonicalScalar::Int(7))]);
+        batch.create_vertex(VId(2), vec![], vec![(KEY, CanonicalScalar::Null)]);
+        let first = db.write(&commit, batch).await.unwrap();
+        let first_ids: Vec<_> = (100..180).map(VId).chain([VId(u128::MAX)]).collect();
+        let query = prefix("pré-", None);
+        let pinned = db
+            .stream_graph_values_governed(&cx, &query, GqlQueryPolicy::new(81, 81, 100_000, 10_000))
+            .unwrap();
+        let mut changes = WriteBatch::new(R);
+        changes.set_vertex_property(VId(100), KEY, Some(text("outside now")));
+        changes.delete_vertex(VId(101));
+        changes.set_vertex_property(VId(1000), KEY, Some(text("pré-new")));
+        changes.create_vertex(VId(99), vec![], vec![(KEY, text("pré-future"))]);
+        let second = db.write(&commit, changes).await.unwrap();
+        let latest_ids: Vec<_> = [VId(99)]
+            .into_iter()
+            .chain((102..180).map(VId))
+            .chain([VId(1000), VId(u128::MAX)])
+            .collect();
+        // All 83 historical candidates remain admitted at every cut, including
+        // future-only and retired identities; only the MVCC winner emits rows.
+        for compact in [false, true] {
+            if compact {
+                db.compact(&commit).await.unwrap();
+            }
+            for (at, ids) in [
+                (CommitSeq::ORIGIN, Vec::new()),
+                (first, first_ids.clone()),
+                (second, latest_ids.clone()),
+            ] {
+                let expected = identities(&ids);
+                assert_eq!(
+                    db.execute_graph_pattern_governed_at(&cx, &query, at, wide())
+                        .unwrap()
+                        .value,
+                    expected,
+                );
+                let mut cursor = db
+                    .stream_graph_values_governed_at(
+                        &cx,
+                        &query,
+                        at,
+                        GqlQueryPolicy::new(83, 83, 100_000, 10_000),
+                    )
+                    .unwrap();
+                assert_eq!(cursor.evaluator_stats().work_units, 0);
+                assert_eq!(cursor.row_stats().snapshot_records, 0);
+                assert_eq!(
+                    cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                    expected,
+                    "compact={compact}, at={at:?}",
+                );
+                assert_eq!(cursor.row_stats().snapshot_records, 83);
+                assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            }
+        }
+        let mut aggregate = db
+            .query_aggregate_stream(
+                &cx,
+                "MATCH (n) WHERE n.p STARTS WITH 'pré-' RETURN COUNT(*) AS total",
+                &GqlParameters::new(),
+                RelationBind::new().with_property("p", KEY),
+                GqlQueryPolicy::new(83, 1, 100_000, 10_000),
+            )
+            .unwrap();
+        let count = aggregate.next().unwrap().unwrap();
+        assert_eq!(count.values()[0].as_count(), Some(latest_ids.len() as u64));
+        assert_eq!(aggregate.row_stats().snapshot_records, 83);
+        assert!(aggregate.next().is_none());
+
+        let one = prefix("pré-", Some(1));
+        let mut limited = db
+            .stream_graph_values_governed(&cx, &one, GqlQueryPolicy::new(1, 1, 100_000, 1000))
+            .unwrap();
+        assert_eq!(limited.next().unwrap().unwrap(), identities(&[VId(99)])[0]);
+        assert_eq!(limited.row_stats().snapshot_records, 1);
+        assert!(limited.next().is_none());
+
+        let mut refused = db
+            .stream_graph_values_governed(&cx, &query, GqlQueryPolicy::new(82, 83, 100_000, 10_000))
+            .unwrap();
+        let error = refused.by_ref().collect::<Result<Vec<_>, _>>().unwrap_err();
+        assert!(matches!(
+            error,
+            GqlQueryError::Rows(error)
+                if error.dimension == GqlBudgetDimension::SnapshotRecords
+                    && error.limit == 82 && error.observed == 83
+        ));
+        assert_eq!(refused.state(), VertexScanState::Failed);
+        assert!(refused.next().is_none());
+        drop(db);
+        assert_eq!(
+            pinned.collect::<Result<Vec<_>, _>>().unwrap(),
+            identities(&first_ids),
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn prefix_eligibility_never_hides_arithmetic_in_either_conjunct_order() {
     let ((), report) = run_async_under_lab(0x51ca_0303, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

@@ -15,6 +15,7 @@ use fgdb_gql::{
 use fgdb_prism::{FnxMemoryLimits, FnxValue};
 use fgdb_strata::tiered::memory::MemoryPool;
 use fgdb_strata::tiered::sealed::SealedLimits;
+use std::num::NonZeroUsize;
 
 #[derive(Clone, Copy)]
 struct SealedOptions {
@@ -22,6 +23,7 @@ struct SealedOptions {
     memory: FnxMemoryLimits,
     sealing: SealedLimits,
     max_source_incidences: usize,
+    quantum: NonZeroUsize,
 }
 
 /// FnX CALLs composed through supported external stages and Apply bodies.
@@ -37,6 +39,9 @@ struct SealedOptions {
 /// Input rows use the private input cap; only the final selected relation uses
 /// the query's result cap. Cache reuse never refunds native source/evaluator
 /// work, and each invocation executes its kernel and result processing afresh.
+/// Kernel raw-incidence, scalar and result-encoding steps cooperatively yield
+/// after a shared nonzero quantum. Source admission, sealing and initial
+/// projection preparation still contain synchronous stages.
 #[derive(Clone)]
 pub struct PreparedBufferedSealedOrder {
     plan: AsyncSpillSetPlan,
@@ -227,6 +232,7 @@ impl PreparedBufferedSealedOrder {
                 memory,
                 sealing,
                 max_source_incidences,
+                quantum: NonZeroUsize::new(1024).expect("nonzero scheduling quantum"),
             },
         })
     }
@@ -237,6 +243,17 @@ impl PreparedBufferedSealedOrder {
 
     pub fn aggregate_count(&self) -> usize {
         self.plan.aggregate_count()
+    }
+
+    /// Set the shared kernel scheduling quantum for every CALL, including
+    /// repeated Apply bodies. Defaults to 1024 counted steps. This controls
+    /// scheduling only: work, memory, result and scratch allowances are
+    /// unchanged. A step may include an indivisible allocation or lookup, so
+    /// the quantum is not a wall-clock bound.
+    #[must_use]
+    pub fn with_analytics_quantum(mut self, quantum: NonZeroUsize) -> Self {
+        self.options.quantum = quantum;
+        self
     }
 
     /// Select an owner-supplied historical cut without overriding a selector
@@ -448,6 +465,37 @@ impl<V: Vfs + Clone> ExternalOrderHost for SealedHost<'_, V> {
         self.ordinary.native_event(event)
     }
 
+    fn supports_vertex_seeds(&self) -> bool {
+        self.ordinary.supports_vertex_seeds()
+    }
+
+    fn seeded_vertex_leaf<'q, A, B>(
+        &'q mut self,
+        plan: &'q AsyncSpillSetPlan,
+        seeds: BufferedVertexSeeds,
+        snapshot: CommitSeq,
+        cx: &'q QueryCx,
+        policy: GqlQueryPolicy,
+        scratch: &'q mut SpillFile<A>,
+        destination: &'q mut SpillFile<B>,
+        limits: ExternalOrderLimits,
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+    {
+        self.ordinary.seeded_vertex_leaf(
+            plan,
+            seeds,
+            snapshot,
+            cx,
+            policy,
+            scratch,
+            destination,
+            limits,
+        )
+    }
+
     fn leaf<'q, A, B>(
         &'q mut self,
         plan: &'q AsyncSpillSetPlan,
@@ -556,6 +604,7 @@ impl<V: Vfs + Clone> ExternalOrderHost for SealedHost<'_, V> {
                     self.options.memory,
                     self.options.sealing,
                     self.options.max_source_incidences,
+                    self.options.quantum,
                 )
                 .await
                 .map_err(|error| {

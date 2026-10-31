@@ -18,6 +18,161 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 
 #[test]
+fn relationship_merge_final_tails_bind_and_read_computed_identities() {
+    use fgdb_delta_types::ElementId;
+    use fgdb_gql::algebra::{GraphPath, GraphPathFunction, GraphValue, GraphValueRow};
+    use fgdb_gql::{
+        GlaExecutionStats, GqlExecutionStats, GqlQueryPolicy, GraphEdgeMergeBinding,
+        GraphWriteChainStep, PreparedGraphWriteChainText,
+    };
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
+
+    let text = "MATCH (a),(b) MERGE route=(a)<-[r:R]-(b) \
+        ON CREATE SET r.p=$value ON MATCH SET r.p=r.p+1 \
+        WITH route AS saved UNWIND relationships(saved) AS edge \
+        RETURN edge.p AS value,length(saved) AS hops";
+    assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+    let calls = Cell::new(0);
+    let template = PreparedGraphWriteChainText::prepare(text, R, |kind, name: &str| {
+        calls.set(calls.get() + 1);
+        symbols(kind, name)
+    })
+    .unwrap();
+    let resolved = calls.get();
+    assert!(template.returns_rows());
+    let mut identities = Vec::new();
+    for value in [7, 19] {
+        let bound = template
+            .bind_parameters(&GqlParameters::new().with_int64("value", value).unwrap())
+            .unwrap();
+        assert_eq!(
+            calls.get(),
+            resolved,
+            "rebinding cannot resolve the catalog"
+        );
+        assert!(bound.returns_rows());
+        assert!(bound.read_continuation().is_none());
+        assert_eq!(bound.columns(), &["value", "hops"]);
+        let [GraphWriteChainStep::EdgeUpsertQuery { query, .. }] = bound.steps() else {
+            panic!("the existing MERGE query owner must execute its final tail");
+        };
+        assert_eq!(
+            query.bindings(),
+            &[GraphEdgeMergeBinding::Path {
+                reverse: true,
+                function: GraphPathFunction::Value,
+            }]
+        );
+        let path = GraphValue::Path(GraphPath::new(VId(1), vec![(EId(9), VId(2))].into()));
+        let mut reads = Vec::new();
+        let result = query
+            .finish_governed_reading(
+                vec![vec![path]],
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                GqlQueryPolicy::new(0, 1, 10_000, 10_000),
+                |element, key| {
+                    reads.push((element, key));
+                    Ok::<_, ()>(Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                        value,
+                    ))))
+                },
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(reads, vec![(ElementId::Edge(EId(9)), P)]);
+        assert_eq!(
+            result.value,
+            vec![GraphValueRow::from_owned_values(vec![
+                GraphValue::Scalar(CanonicalScalar::Int(value)),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+            ])]
+        );
+        assert_eq!(result.rows.result_rows, 1);
+        // Cancellation after the selected element read must still discard
+        // the tail; a computed-identity reader cannot escape its live control.
+        let read = Cell::new(false);
+        let cancelled = query
+            .finish_governed_reading(
+                vec![vec![GraphValue::Path(GraphPath::new(
+                    VId(1),
+                    vec![(EId(9), VId(2))].into(),
+                ))]],
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                GqlQueryPolicy::new(0, 1, 10_000, 10_000),
+                |_, _| {
+                    read.set(true);
+                    Ok::<_, ()>(Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                        value,
+                    ))))
+                },
+                || if read.get() { Err("cancelled") } else { Ok(()) },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            cancelled,
+            fgdb_gql::GqlQueryError::Interrupted("cancelled")
+        ));
+        identities.push(query.canonical_bytes());
+    }
+    assert_ne!(
+        identities[0], identities[1],
+        "the bound action retains its parameter"
+    );
+}
+
+#[test]
+fn relationship_merge_tails_keep_write_boundaries_and_lexical_scope() {
+    use fgdb_gql::{GraphWriteChainStep, PreparedGraphWriteChainText};
+
+    for text in [
+        "CREATE (a),(b) MERGE (a)-[r:R]->(b) WITH r AS saved RETURN saved",
+        "MERGE (a)-[r:R]->(b) ON CREATE SET r.p=7 \
+         WITH r AS saved UNWIND [saved,null] AS edge RETURN edge.p AS value",
+        "MATCH (a),(b) MERGE path=(a)-[r:R]->(b) ON MATCH SET r.p=r.p+1 \
+         WITH path AS saved UNWIND relationships(saved) AS edge RETURN count(edge)",
+    ] {
+        let template = PreparedGraphWriteChainText::prepare(text, R, symbols).expect(text);
+        let bound = template.bind_parameters(&GqlParameters::new()).expect(text);
+        assert!(template.returns_rows() && bound.returns_rows(), "{text}");
+        assert!(bound.read_continuation().is_none(), "{text}");
+        assert!(
+            matches!(
+                bound.steps().last(),
+                Some(GraphWriteChainStep::EdgeMergeQuery(_))
+                    | Some(GraphWriteChainStep::EdgeUpsertQuery { .. })
+            ),
+            "{text}"
+        );
+    }
+    let continued = "MATCH (a),(b) MERGE path=(a)-[r:R]->(b) ON CREATE SET r.p=7 \
+        WITH path AS saved UNWIND relationships(saved) AS edge \
+        CREATE (marker {p:edge.p}) RETURN marker.p AS value";
+    let bound = PreparedGraphWriteChainText::prepare(continued, R, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    assert_eq!(bound.steps().len(), 2);
+    assert!(matches!(
+        bound.steps().last(),
+        Some(GraphWriteChainStep::Query(_))
+    ));
+    for text in [
+        "MATCH (a),(b) MERGE path=(a)-[r:R]->(b) ON CREATE SET r.p=7 WITH path AS saved",
+        "MATCH (a),(b) MERGE path=(a)-[r:R]->(b) ON CREATE SET r.p=7 \
+         WITH path AS saved WITH 1 AS value RETURN saved",
+        "MATCH (a),(b) MERGE path=(a)-[r:R]->(b) ON CREATE SET r.p=7 \
+         WITH path AS saved RETURN saved; CREATE ()",
+    ] {
+        assert!(
+            PreparedGraphWriteChainText::prepare(text, R, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn whole_pattern_actions_keep_lazy_reads_of_resolved_endpoint_fields() {
     use fgdb_gql::algebra::{GraphValue, GraphValueRow};
     use fgdb_gql::{GraphEdgeMergeRowAction, GraphWriteChainStep, PreparedGraphWriteChainText};

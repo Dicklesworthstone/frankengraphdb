@@ -4,7 +4,8 @@
 //! supply ordered roots. An unkeyed cold scan does not build a property index.
 //! Equality keeps at most two roots. Literal membership and numeric ranges merge
 //! at most 64 value-bucket heads; wider memberships retain the history scan and
-//! wider ranges test historical membership one identity at a time. Neither
+//! wider ranges and binary prefixes test historical membership one identity at
+//! a time. Neither
 //! path collects all candidate IDs or resolves unrequested MVCC winners.
 //! The source holds an EmbeddedReadView, not a borrow
 //! of the mutable Database: writes, compaction, reopen and handle drop cannot
@@ -296,6 +297,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                     RootCandidates::Prefix(prefix) => {
                         return prefix.next(
                             self.view.snapshot.property_index(),
+                            &self.view.snapshot.patches,
                             self.after,
                             control,
                         );

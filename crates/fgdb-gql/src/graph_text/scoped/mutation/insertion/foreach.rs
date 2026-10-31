@@ -498,18 +498,7 @@ impl PreparedGraphForeachText {
             );
         }
         let own = |schema: &[GqlParameterSpec]| -> Result<GqlParameters, GraphPatternTextError> {
-            let mut own = GqlParameters::new();
-            for spec in schema {
-                if let Some(value) = arguments.get(&spec.name) {
-                    own.insert(spec.name.clone(), value).map_err(|_| {
-                        error(
-                            self.input.first.return_at,
-                            GraphPatternTextErrorKind::UnexpectedArguments,
-                        )
-                    })?;
-                }
-            }
-            Ok(own)
+            Ok(arguments.subset_for(schema))
         };
         let input = self
             .input

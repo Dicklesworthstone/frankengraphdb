@@ -117,6 +117,8 @@ fn open<'q>(
     view.snapshot
         .check_frontier(after)
         .map_err(QueryError::Read)?;
+    let captured = view.capture_statement_parameters(cx, prepared.statement(), params)?;
+    let params = captured.as_ref();
     cx.with_restriction(|| {
         cx.checkpoint()
             .map_err(|e| QueryError::Stream(GqlQueryError::Interrupted(e)))?;

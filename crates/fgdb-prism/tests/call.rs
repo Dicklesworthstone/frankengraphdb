@@ -107,8 +107,8 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 23);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 22);
+    assert_eq!(FnxSignatureRegistry::version(), 25);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 24);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);
@@ -164,6 +164,76 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
 }
 
 #[test]
+fn target_dijkstra_binds_full_width_endpoints_and_keeps_legacy_call_identity() {
+    let source = VId((1 << 113) + 5);
+    let target = VId(u128::MAX);
+    let parameters = FnxParameters::from([
+        ("s".to_owned(), FnxArgument::Vertex(source)),
+        ("t".to_owned(), FnxArgument::Vertex(target)),
+    ]);
+    let positional = FnxCallSpec::bind(
+        "CALL fnx.dijkstra_path_length($s,$t,NULL,false) YIELD distance AS cost,vertex AS destination",
+        &parameters,
+    ).unwrap();
+    let named = FnxCallSpec::bind(
+        "CALL fnx.dijkstra_path_length(target => $t,source => $s) YIELD distance AS cost,vertex AS destination",
+        &parameters,
+    ).unwrap();
+    assert_eq!(positional, named);
+    assert_eq!(positional.signature().name, "fnx.dijkstra_path_length");
+    assert!(
+        matches!(positional.algorithm(), FnxAlgorithm::DijkstraPathLength {
+        options, target: found,
+    } if options.source() == source && found == target
+        && options.comparison() == DijkstraComparison::FnxEpsilon)
+    );
+    let changed = FnxCallSpec::dijkstra_path_length(
+        DijkstraOptions::new(source, None).unwrap(),
+        VId(target.0 - 1),
+    );
+    assert_ne!(
+        FnxCallSpec::dijkstra_path_length(DijkstraOptions::new(source, None).unwrap(), target)
+            .digest(),
+        changed.digest(),
+    );
+    for invalid in [
+        "CALL fnx.dijkstra_path_length(1)",
+        "CALL fnx.dijkstra_path_length(1,NULL)",
+        "CALL fnx.dijkstra_path_length(1,-1)",
+        "CALL fnx.dijkstra_path_length(1,2,-0.5)",
+        "CALL fnx.dijkstra_path_length(1,2,NULL,0)",
+        "CALL fnx.dijkstra_path_length(source => 1,target => 2,target => 3)",
+    ] {
+        assert!(
+            FnxCallSpec::bind(invalid, &FnxParameters::new()).is_err(),
+            "{invalid}"
+        );
+    }
+
+    // Freeze the pre-extension v23 transcript, independent of the current
+    // registry version and constructor dispatch. Appending a procedure must
+    // not change the identity of a previously bound all-destinations call.
+    let mut legacy = fgdb_crypto::Hasher::new();
+    legacy.update(b"fgdb:prism:bound-call:v3");
+    legacy.update(&23_u16.to_le_bytes());
+    let name = b"fnx.single_source_dijkstra_path_length";
+    legacy.update(&(name.len() as u128).to_le_bytes());
+    legacy.update(name);
+    legacy.update(&1_u128.to_le_bytes());
+    legacy.update(&[0, 1]); // no cutoff; pinned FNX epsilon comparison
+    legacy.update(&2_u128.to_le_bytes());
+    for (field, name) in [(0_u8, "vertex"), (2_u8, "distance")] {
+        legacy.update(&[field]);
+        legacy.update(&(name.len() as u128).to_le_bytes());
+        legacy.update(name.as_bytes());
+    }
+    assert_eq!(
+        bind("CALL fnx.single_source_dijkstra_path_length(1) YIELD vertex,distance").digest(),
+        legacy.finalize(),
+    );
+}
+
+#[test]
 fn hits_binds_two_independent_scores_and_preserves_yield_identity() {
     let call = FnxCallSpec::hits_centrality();
     let signature = call.signature();
@@ -199,6 +269,64 @@ fn hits_binds_two_independent_scores_and_preserves_yield_identity() {
             FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
             "{text}"
         );
+    }
+}
+
+#[test]
+fn katz_binds_validated_controls_and_freezes_each_requested_answer() {
+    let options = KatzOptions::default();
+    let call = FnxCallSpec::katz_centrality(options);
+    assert_eq!(call, bind("CALL fnx.katz_centrality() YIELD *"));
+    assert_eq!(call, bind("CALL fnx.katz_centrality(0.1,1,1000,1e-6)"));
+    assert_eq!(call.algorithm(), FnxAlgorithm::KatzCentrality(options));
+    assert_eq!(call.signature().graph_kind, FnxGraphKind::Any);
+    assert_eq!(call.signature().parameters.len(), 4);
+    assert_eq!(
+        call.signature().outputs,
+        &[FnxOutput::Vertex, FnxOutput::Score]
+    );
+    assert!(call.supports_sealed_execution());
+    assert!(call.supports_cooperative_sealed_execution());
+    let custom = KatzOptions::new(0.01, -2.0, 500, 1e-10).unwrap();
+    assert_eq!(
+        FnxCallSpec::katz_centrality(custom),
+        bind("CALL fnx.katz_centrality(tol => 1e-10, beta => -2, alpha => 0.01, max_iter => 500)"),
+    );
+    for text in [
+        "CALL fnx.katz_centrality(alpha => 0.01)",
+        "CALL fnx.katz_centrality(beta => 2)",
+        "CALL fnx.katz_centrality(max_iter => 1001)",
+        "CALL fnx.katz_centrality(tol => 1e-8)",
+        "CALL fnx.katz_centrality() YIELD score AS rank,node AS id",
+    ] {
+        assert_ne!(call.digest(), bind(text).digest(), "{text}");
+    }
+    assert_eq!(
+        FnxCallSpec::katz_centrality(KatzOptions::new(-0.0, -0.0, 5, 1e-6).unwrap()).digest(),
+        bind("CALL fnx.katz_centrality(0,0,5,1e-6)").digest(),
+    );
+    for text in [
+        "CALL fnx.katz_centrality(-0.1)",
+        "CALL fnx.katz_centrality(beta => NULL)",
+        "CALL fnx.katz_centrality(alpha => 9007199254740993)",
+        "CALL fnx.katz_centrality(max_iter => 0)",
+        "CALL fnx.katz_centrality(max_iter => 1.5)",
+        "CALL fnx.katz_centrality(tol => 0)",
+        "CALL fnx.katz_centrality(tol => -1)",
+        "CALL fnx.katz_centrality(alpha => 0.1,alpha => 0.2)",
+        "CALL fnx.katz_centrality(iterations => 10)",
+        "CALL fnx.katz_centrality(1,1,1,1,1)",
+        "CALL fnx.katz_centrality() YIELD hub",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(KatzOptions::new(bad, 1.0, 1, 1e-6).is_err());
+        assert!(KatzOptions::new(0.1, bad, 1, 1e-6).is_err());
+        assert!(KatzOptions::new(0.1, 1.0, 1, bad).is_err());
     }
 }
 

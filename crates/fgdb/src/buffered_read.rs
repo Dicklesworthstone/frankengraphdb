@@ -12,6 +12,7 @@ pub use fgdb_strata::tiered::memory::{MemoryError, MemoryPool};
 use fgdb_types::{CanonicalPropertyValue, QueryCx};
 
 mod query;
+pub(crate) use query::BufferedVertexSeeds;
 pub use query::{BufferedQueryCursor, BufferedQueryError, BufferedQueryRow};
 
 #[path = "query_prism/buffered.rs"]

@@ -311,6 +311,157 @@ fn selective_spill_reads_keep_pinned_cuts_duplicates_nulls_and_record_limits() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn historical_winner_properties_survive_reopen_compaction_and_repeated_spill_reads() {
+    let ((), report) = run_async_under_lab(0xc01d_4705, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let history = [
+            Some(collection()),
+            Some(scalar(83)),
+            Some(document()),
+            Some(null()),
+            None,
+        ];
+        let mut birth = WriteBatch::new(RelationId(1));
+        birth.create_vertex_values(
+            WIDE_VERTEX,
+            vec![],
+            vec![
+                (
+                    PropertyKeyId(1),
+                    history[0].as_ref().unwrap().to_property_value().unwrap(),
+                ),
+                (
+                    PropertyKeyId(2),
+                    CanonicalScalar::bytes(vec![0x45; 2048]).unwrap().into(),
+                ),
+            ],
+        );
+        assert_eq!(db.write(&commit, birth).await.unwrap(), CommitSeq(1));
+        let old_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let mut old = view(&commit, &vfs, &old_pool).await;
+        for (at, value) in history.iter().enumerate().skip(1) {
+            let mut change = WriteBatch::new(RelationId(1));
+            change.set_vertex_property_value(
+                WIDE_VERTEX,
+                PropertyKeyId(1),
+                value
+                    .as_ref()
+                    .map(|value| value.to_property_value().unwrap()),
+            );
+            assert_eq!(
+                db.write(&commit, change).await.unwrap(),
+                CommitSeq(at as u64 + 1)
+            );
+        }
+        let mut deletion = WriteBatch::new(RelationId(1));
+        deletion.delete_vertex(WIDE_VERTEX);
+        assert_eq!(db.write(&commit, deletion).await.unwrap(), CommitSeq(6));
+        let resident = db.read_session().unwrap();
+        let before_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let mut before = view(&commit, &vfs, &before_pool).await;
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let after_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let mut after = view(&commit, &vfs, &after_pool).await;
+        let params = GqlParameters::new()
+            .with_list(
+                "items",
+                vec![
+                    GraphValue::Vertex(WIDE_VERTEX),
+                    GraphValue::Vertex(WIDE_VERTEX),
+                    null(),
+                ],
+            )
+            .unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        // Deliberately revisit an old cut after newer cuts and a different
+        // physical generation. The literal timeline includes present NULL,
+        // removal and deletion, which all render NULL but have distinct owners.
+        for cold in [&mut before, &mut after] {
+            for cut in [0_u64, 1, 4, 5, 6, 3, 2, 1] {
+                let literal_value = cut
+                    .checked_sub(1)
+                    .and_then(|at| history.get(at as usize))
+                    .and_then(Option::as_ref);
+                let literal_property =
+                    literal_value.map(|value| value.to_property_value().unwrap());
+                let selected = cold
+                    .vertex_property_at(&cx, WIDE_VERTEX, PropertyKeyId(1), CommitSeq(cut))
+                    .await
+                    .unwrap();
+                assert_eq!(selected.as_deref(), literal_property.as_ref());
+                assert_eq!(
+                    literal_property,
+                    expected_property(&resident, WIDE_VERTEX, PropertyKeyId(1), CommitSeq(cut)),
+                );
+                drop(selected);
+                let value = literal_value.cloned().unwrap_or_else(null);
+                let expected = vec![
+                    vec![scalar(0), value.clone(), value.clone()],
+                    vec![scalar(1), value.clone(), value],
+                    vec![scalar(2), null(), null()],
+                ];
+                let text = format!(
+                    "UNWIND [0,1,2] AS ordinal FOR SYSTEM_TIME AS OF SEQ {cut} \
+                     WITH ordinal,$items[ordinal] AS n \
+                     RETURN ordinal,n.p AS first,n.p AS repeated ORDER BY ordinal"
+                );
+                let prepared = prepare(&text, &params);
+                let (mut scratch, _) = file(&cx, &spill_pool).await;
+                let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+                let (spool, _) = prepared
+                    .spool_in_view(
+                        cold,
+                        &cx,
+                        GqlQueryPolicy::new(4, 3, WORK, WORK),
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        1,
+                        16,
+                        1,
+                        16,
+                        127,
+                        32 * 1024,
+                        16,
+                        WORK,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(spool.snapshot_seq(), CommitSeq(cut));
+                assert_eq!(spool.row_stats().snapshot_records, 4);
+                assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+            }
+        }
+        let retained = old
+            .vertex_property(&cx, WIDE_VERTEX, PropertyKeyId(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.as_ref(),
+            &collection().to_property_value().unwrap()
+        );
+        let bytes = retained.charged_bytes();
+        drop((old, before, after));
+        assert_eq!(old_pool.used(), bytes);
+        assert_eq!(before_pool.used(), 0);
+        assert_eq!(after_pool.used(), 0);
+        assert_eq!(spill_pool.used(), 0);
+        drop(retained);
+        assert_eq!(old_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 const WIDE_EDGE: EId = EId((2_u128 << 100) | 7);
 
 async fn edge_fixture(cx: &CommitCx) -> (MemVfs, Database<MemVfs>) {

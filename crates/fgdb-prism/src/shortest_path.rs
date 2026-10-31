@@ -745,7 +745,55 @@ pub(crate) fn run<C>(
     if uses_unit_fifo(graph) {
         return run_unit_fifo(graph, source, options.cutoff, row_limit, checkpoint);
     }
-    run_indexed_heap(graph, source, options, row_limit, checkpoint)
+    run_indexed_heap(graph, source, options, row_limit, None, checkpoint)
+}
+
+/// The target procedure shares queue/relaxation semantics with SSSP, but its
+/// intermediate discovered vertices are workspace, not delivered result rows.
+/// A target is final only when popped, after the previous row reached EOF.
+/// The complete projection is still validated before any search can stop.
+pub(crate) fn run_target<C>(
+    graph: &SnapshotGraphView,
+    options: DijkstraOptions,
+    target: VId,
+    row_limit: usize,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(usize, DijkstraRun), FnxExecutionError<C>> {
+    let source = graph
+        .vertex_ordinal(options.source)
+        .ok_or(FnxExecutionError::UnknownSource(options.source))?;
+    let target = graph
+        .vertex_ordinal(target)
+        .ok_or(FnxExecutionError::UnknownTarget(target))?;
+    validate_weights(graph, checkpoint)?;
+    let mut run = if uses_unit_fifo(graph) {
+        let mut run = run_unit_fifo_selected(
+            graph,
+            source,
+            options.cutoff,
+            graph.node_count(),
+            Some(target),
+            checkpoint,
+        )?;
+        run.execution_kernel = "fgdb-prism/dijkstra-target-unit-fifo-v1";
+        run.output.witness.algorithm = "dijkstra_target_unit_fifo".to_owned();
+        run
+    } else {
+        let mut run = run_indexed_heap(
+            graph,
+            source,
+            options,
+            graph.node_count(),
+            Some(target),
+            checkpoint,
+        )?;
+        run.execution_kernel = "fgdb-prism/dijkstra-target-indexed-heap-v1";
+        run.output.witness.algorithm = "dijkstra_target_indexed_heap".to_owned();
+        run
+    };
+    run.output.row_count = usize::from(run.output.distances[target].is_some());
+    admit("result rows", run.output.row_count, row_limit)?;
+    Ok((target, run))
 }
 
 fn run_indexed_heap<C>(
@@ -753,6 +801,7 @@ fn run_indexed_heap<C>(
     source: usize,
     options: DijkstraOptions,
     row_limit: usize,
+    destination: Option<usize>,
     checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<DijkstraRun, FnxExecutionError<C>> {
     let n = graph.node_count();
@@ -780,6 +829,9 @@ fn run_indexed_heap<C>(
             .nodes_touched
             .checked_add(1)
             .ok_or(FnxExecutionError::SizeOverflow)?;
+        if destination == Some(node) {
+            break;
+        }
         let (targets, weights) = graph
             .projected_row(node)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
@@ -818,7 +870,11 @@ fn run_indexed_heap<C>(
             witness.queue_peak = witness.queue_peak.max(heap.len());
         }
     }
-    validate_overflow(&distances, &overflowed, checkpoint)?;
+    // A finalized target is independent of unneeded, unrepresentable other
+    // distances. Without one, retain the full-source conservative refusal.
+    if destination.is_none_or(|target| distances[target].is_none()) {
+        validate_overflow(&distances, &overflowed, checkpoint)?;
+    }
     let bytes = [
         vector_bytes::<_, C>(&distances)?,
         vector_bytes::<_, C>(&overflowed)?,
@@ -850,6 +906,17 @@ fn run_unit_fifo<C>(
     source: usize,
     cutoff: Option<f64>,
     row_limit: usize,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<DijkstraRun, FnxExecutionError<C>> {
+    run_unit_fifo_selected(graph, source, cutoff, row_limit, None, checkpoint)
+}
+
+fn run_unit_fifo_selected<C>(
+    graph: &SnapshotGraphView,
+    source: usize,
+    cutoff: Option<f64>,
+    row_limit: usize,
+    destination: Option<usize>,
     checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<DijkstraRun, FnxExecutionError<C>> {
     let n = graph.node_count();
@@ -891,6 +958,9 @@ fn run_unit_fifo<C>(
             .nodes_touched
             .checked_add(1)
             .ok_or(FnxExecutionError::SizeOverflow)?;
+        if destination == Some(node) {
+            break;
+        }
         let row = graph
             .neighbors_indices(node)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
@@ -1141,6 +1211,230 @@ mod tests {
             Ok::<(), Infallible>(())
         })
         .unwrap()
+    }
+
+    #[test]
+    fn target_distances_match_complete_sssp_on_every_small_topology_and_numeric_policy() {
+        let pairs = [(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1)];
+        for mask in 0_u8..64 {
+            for unit in [true, false] {
+                let edges: Vec<_> = pairs
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| mask & (1 << bit) != 0)
+                    .map(|(bit, &(s, t))| {
+                        (
+                            s,
+                            t,
+                            if unit {
+                                1.0
+                            } else {
+                                [0.0, 2.0, 0.5e-12][bit % 3]
+                            },
+                        )
+                    })
+                    .collect();
+                for direction in [
+                    Directedness::Directed,
+                    Directedness::Reversed,
+                    Directedness::Undirected,
+                ] {
+                    let view = graph(3, &edges, direction);
+                    for comparison in [DijkstraComparison::Strict, DijkstraComparison::FnxEpsilon] {
+                        for source in 0..3 {
+                            for cutoff in [None, Some(0.0)] {
+                                let options =
+                                    options(&view, source, cutoff).with_comparison(comparison);
+                                let complete =
+                                    dijkstra(&view, options, limits(), || Ok::<(), Infallible>(()))
+                                        .unwrap();
+                                for target in 0..3 {
+                                    let id = view.vertex_id(target).unwrap();
+                                    let call = FnxCallSpec::dijkstra_path_length(options, id);
+                                    let actual = call
+                                        .execute(
+                                            &view,
+                                            FnxExecutionLimits {
+                                                max_result_rows: 1,
+                                                ..limits()
+                                            },
+                                            || Ok::<(), Infallible>(()),
+                                        )
+                                        .unwrap();
+                                    let expected: Vec<_> = complete.distances[target]
+                                        .into_iter()
+                                        .map(|value| {
+                                            vec![FnxValue::Vertex(id), FnxValue::Float(value)]
+                                        })
+                                        .collect();
+                                    assert_eq!(
+                                        actual.rows, expected,
+                                        "mask={mask}, unit={unit}, direction={direction:?}, source={source}, target={target}, cutoff={cutoff:?}, comparison={comparison:?}"
+                                    );
+                                    assert!(
+                                        actual.certificate.witness.nodes_touched
+                                            <= complete.witness.nodes_touched
+                                    );
+                                    assert!(
+                                        actual.certificate.witness.edges_scanned
+                                            <= complete.witness.edges_scanned
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn target_output_is_scalar_and_does_not_spend_intermediate_result_rows() {
+        for weight in [1.0, 2.5] {
+            let edges: Vec<_> = (0..127)
+                .map(|source| (source, source + 1, weight))
+                .collect();
+            let view = graph(129, &edges, Directedness::Directed);
+            let target = view.vertex_id(127).unwrap();
+            let call = FnxCallSpec::dijkstra_path_length(options(&view, 0, None), target);
+            let one = FnxExecutionLimits {
+                max_result_rows: 1,
+                ..limits()
+            };
+            let mut cursor = call
+                .execute_rows(&view, one, || Ok::<(), Infallible>(()))
+                .unwrap();
+            let mut row = Vec::new();
+            let mut polls = 0;
+            assert!(
+                cursor
+                    .next_row(&mut row, || {
+                        polls += 1;
+                        Ok::<(), Infallible>(())
+                    })
+                    .unwrap()
+            );
+            assert_eq!(
+                row,
+                vec![FnxValue::Vertex(target), FnxValue::Float(127.0 * weight)]
+            );
+            assert!(
+                !cursor
+                    .next_row(&mut row, || {
+                        polls += 1;
+                        Ok::<(), Infallible>(())
+                    })
+                    .unwrap()
+            );
+            assert_eq!(
+                polls, 1,
+                "scalar output must not rescan the vertex directory"
+            );
+            let zero = FnxExecutionLimits {
+                max_result_rows: 0,
+                ..limits()
+            };
+            assert!(matches!(
+                call.execute(&view, zero, || Ok::<(), Infallible>(())),
+                Err(FnxExecutionError::LimitExceeded {
+                    resource: "result rows",
+                    requested: 1,
+                    limit: 0
+                })
+            ));
+            let unreachable = FnxCallSpec::dijkstra_path_length(
+                options(&view, 0, None),
+                view.vertex_id(128).unwrap(),
+            );
+            assert!(
+                unreachable
+                    .execute(&view, zero, || Ok::<(), Infallible>(()))
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
+            let self_call = FnxCallSpec::dijkstra_path_length(options(&view, 127, None), target);
+            let self_result = self_call
+                .execute(&view, one, || Ok::<(), Infallible>(()))
+                .unwrap();
+            assert_eq!(
+                self_result.rows,
+                vec![vec![FnxValue::Vertex(target), FnxValue::Float(0.0)]]
+            );
+            assert_eq!(self_result.certificate.witness.edges_scanned, 0);
+        }
+    }
+
+    #[test]
+    fn target_membership_weight_admission_and_overflow_are_explicit() {
+        let negative = graph(3, &[(1, 2, -1.0)], Directedness::Directed);
+        let id = negative.vertex_id(0).unwrap();
+        let call = FnxCallSpec::dijkstra_path_length(options(&negative, 0, Some(0.0)), id);
+        assert!(matches!(
+            call.execute(&negative, limits(), || Ok::<(), Infallible>(())),
+            Err(FnxExecutionError::NegativeWeight)
+        ));
+        let missing = FnxCallSpec::dijkstra_path_length(options(&negative, 0, None), VId(0));
+        assert!(matches!(
+            missing.execute(&negative, limits(), || Ok::<(), Infallible>(())),
+            Err(FnxExecutionError::UnknownTarget(VId(0)))
+        ));
+        let missing =
+            FnxCallSpec::dijkstra_path_length(DijkstraOptions::new(VId(0), None).unwrap(), VId(1));
+        assert!(matches!(
+            missing.execute(&negative, limits(), || Ok::<(), Infallible>(())),
+            Err(FnxExecutionError::UnknownSource(VId(0)))
+        ));
+
+        let view = graph(
+            5,
+            &[
+                (0, 1, f64::MAX * 0.75),
+                (1, 2, f64::MAX * 0.75),
+                (0, 3, f64::MAX * 0.9),
+            ],
+            Directedness::Directed,
+        );
+        assert!(matches!(
+            dijkstra(&view, options(&view, 0, None), limits(), || Ok::<
+                (),
+                Infallible,
+            >(
+                ()
+            )),
+            Err(FnxExecutionError::InvalidNumericResult)
+        ));
+        let target = view.vertex_id(3).unwrap();
+        let result = FnxCallSpec::dijkstra_path_length(options(&view, 0, None), target)
+            .execute(&view, limits(), || Ok::<(), Infallible>(()))
+            .unwrap();
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                FnxValue::Vertex(target),
+                FnxValue::Float(f64::MAX * 0.9)
+            ]]
+        );
+        for target in [2, 4] {
+            assert!(matches!(
+                FnxCallSpec::dijkstra_path_length(
+                    options(&view, 0, None),
+                    view.vertex_id(target).unwrap()
+                )
+                .execute(&view, limits(), || Ok::<(), Infallible>(())),
+                Err(FnxExecutionError::InvalidNumericResult)
+            ));
+        }
+        assert!(
+            FnxCallSpec::dijkstra_path_length(
+                options(&view, 0, Some(f64::MAX)),
+                view.vertex_id(4).unwrap()
+            )
+            .execute(&view, limits(), || Ok::<(), Infallible>(()))
+            .unwrap()
+            .rows
+            .is_empty()
+        );
     }
 
     #[test]

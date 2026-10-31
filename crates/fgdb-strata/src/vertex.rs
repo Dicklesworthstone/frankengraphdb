@@ -737,7 +737,8 @@ pub(crate) fn decode_admitted_patch_topology(
 enum PatchPropertyAccess {
     Decode,
     DecodeVertex(VId),
-    DecodeProperty(VId, PropertyKeyId),
+    DecodeVertexProperty(VId, PropertyKeyId),
+    DecodeRow(usize, Option<PropertyKeyId>),
     SkipAdmitted,
 }
 
@@ -777,10 +778,16 @@ fn decode_patch_fields(
         let decode_properties = match properties {
             PatchPropertyAccess::Decode => true,
             PatchPropertyAccess::DecodeVertex(selected) => selected == vid,
-            PatchPropertyAccess::DecodeProperty(_, _) | PatchPropertyAccess::SkipAdmitted => false,
+            PatchPropertyAccess::DecodeRow(selected, None) => selected == at,
+            PatchPropertyAccess::DecodeVertexProperty(_, _)
+            | PatchPropertyAccess::DecodeRow(_, Some(_))
+            | PatchPropertyAccess::SkipAdmitted => false,
         };
         let selected_key = match properties {
-            PatchPropertyAccess::DecodeProperty(selected, key) if selected == vid => Some(key),
+            PatchPropertyAccess::DecodeVertexProperty(selected, key) if selected == vid => {
+                Some(key)
+            }
+            PatchPropertyAccess::DecodeRow(selected, key) if selected == at => key,
             _ => None,
         };
         let mut props = if decode_properties {
@@ -988,14 +995,10 @@ pub(crate) fn read_admitted_patch_for_vertex(
     )
 }
 
-/// Read one property from each version of one completely admitted identity.
-///
-/// Authentication, framing, labels, lifetimes and the complete property-key
-/// order remain checked. Only the selected value is decoded; all other value
-/// bytes inherit their semantic validation from complete root admission.
-/// Keep versions without the key, because a newer absent property must clear
-/// an older value. These partial rows are private to the buffered resolver and
-/// must never be exposed as complete vertex rows.
+/// Read one identity's selected property after complete immutable admission.
+/// The point reader uses this only when authenticated routing and the patch's
+/// validated sequence span prove that the identity can have at most one row.
+/// Every other row retains topology with its property values unread.
 pub(crate) fn read_admitted_patch_for_vertex_property(
     k_oid: &[u8; 32],
     namespace: DatabaseSecurityNamespaceId,
@@ -1011,7 +1014,55 @@ pub(crate) fn read_admitted_patch_for_vertex_property(
         bytes,
         expected,
         resolver,
-        PatchPropertyAccess::DecodeProperty(vid, key),
+        PatchPropertyAccess::DecodeVertexProperty(vid, key),
+    )
+}
+
+/// Authenticate a completely admitted patch and read only its topology.
+///
+/// Point reads use this before choosing the exact historical row. Keyed
+/// identity and every row's framing, labels, lifetime and ordering remain
+/// checked; only property values inherit admission from the immutable extent.
+pub(crate) fn read_admitted_patch_topology(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    expected: VertexPatchVersion,
+) -> Result<VertexPatchRows, VertexPatchError> {
+    read_patch_fields(
+        k_oid,
+        namespace,
+        bytes,
+        expected,
+        None,
+        PatchPropertyAccess::SkipAdmitted,
+    )
+}
+
+/// Read the properties of one exact row in a completely admitted patch.
+///
+/// Authentication, framing, labels, lifetimes and the complete property-key
+/// order remain checked. `key` narrows that row to one property; None reads
+/// all of its properties. Other versions of the same identity stay unread.
+/// Skipped value bytes inherit semantic validation from complete admission.
+/// The caller binds the row ordinal to its already-selected historical winner
+/// and must never expose any other partial row as a complete vertex row.
+pub(crate) fn read_admitted_patch_for_row(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    expected: VertexPatchVersion,
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    row: usize,
+    key: Option<PropertyKeyId>,
+) -> Result<VertexPatchRows, VertexPatchError> {
+    read_patch_fields(
+        k_oid,
+        namespace,
+        bytes,
+        expected,
+        resolver,
+        PatchPropertyAccess::DecodeRow(row, key),
     )
 }
 
@@ -1541,19 +1592,21 @@ mod admitted_topology_tests {
             bytes[at..at + replacement.len()].copy_from_slice(&replacement);
             assert_eq!(decode_patch(&bytes), Err(error.clone()));
             assert_eq!(decode_admitted_patch_topology(&bytes), Err(error.clone()));
-            for vid in [VId(101), VId(u128::MAX)] {
+            for (vid, row) in [(VId(101), 0), (VId(u128::MAX), 2)] {
                 assert_eq!(
                     decode_patch_fields(&bytes, None, PatchPropertyAccess::DecodeVertex(vid)),
                     Err(error.clone()),
                 );
-                assert_eq!(
-                    decode_patch_fields(
-                        &bytes,
-                        None,
-                        PatchPropertyAccess::DecodeProperty(vid, PropertyKeyId(41)),
-                    ),
-                    Err(error.clone()),
-                );
+                for property in [None, Some(PropertyKeyId(41))] {
+                    assert_eq!(
+                        decode_patch_fields(
+                            &bytes,
+                            None,
+                            PatchPropertyAccess::DecodeRow(row, property),
+                        ),
+                        Err(error.clone()),
+                    );
+                }
             }
         }
     }
@@ -1613,36 +1666,59 @@ mod admitted_topology_tests {
                 .map(|(bytes, id)| read_patch(&key, namespace, bytes, *id).unwrap())
                 .collect();
             for vid in [VId(0), VId(101), VId(u128::MAX)] {
-                for property in [PropertyKeyId(41), PropertyKeyId(59), PropertyKeyId(99)] {
-                    let selected: Vec<_> = encoded
-                        .iter()
-                        .zip(&complete)
-                        .map(|((bytes, id), complete)| {
-                            let selected = read_admitted_patch_for_vertex_property(
-                                &key, namespace, bytes, *id, None, vid, property,
-                            )
-                            .unwrap();
-                            assert_eq!(span_of_rows(&selected), span_of_rows(complete));
-                            assert_eq!(selected.len(), complete.len());
-                            for (selected, complete) in selected.iter().zip(complete.iter()) {
-                                let mut expected = complete.clone();
-                                let selected_identity = expected.vid == vid;
-                                expected.props.retain(|(candidate, _)| {
-                                    selected_identity && *candidate == property
-                                });
-                                assert_eq!(*selected, expected);
-                                assert!(selected.props.len() <= 1);
-                                if selected.vid != vid {
-                                    assert_eq!(selected.props.capacity(), 0);
-                                }
-                            }
-                            selected
-                        })
-                        .collect();
+                for property in [
+                    None,
+                    Some(PropertyKeyId(41)),
+                    Some(PropertyKeyId(59)),
+                    Some(PropertyKeyId(99)),
+                ] {
                     for cut in [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, u64::MAX] {
+                        let selected: Vec<_> = encoded
+                            .iter()
+                            .zip(&complete)
+                            .map(|((bytes, id), complete)| {
+                                let winner = complete
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, row)| row.vid == vid && row.created_at.0 <= cut)
+                                    .max_by_key(|(at, row)| (row.created_at, *at))
+                                    .map(|(at, _)| at);
+                                let selected = match winner {
+                                    Some(at) => read_admitted_patch_for_row(
+                                        &key, namespace, bytes, *id, None, at, property,
+                                    ),
+                                    None => {
+                                        read_admitted_patch_topology(&key, namespace, bytes, *id)
+                                    }
+                                }
+                                .unwrap();
+                                assert_eq!(span_of_rows(&selected), span_of_rows(complete));
+                                assert_eq!(selected.len(), complete.len());
+                                for (at, (selected, complete)) in
+                                    selected.iter().zip(complete.iter()).enumerate()
+                                {
+                                    let mut expected = complete.clone();
+                                    expected.props.retain(|(candidate, _)| {
+                                        winner == Some(at)
+                                            && property
+                                                .is_none_or(|property| *candidate == property)
+                                    });
+                                    assert_eq!(*selected, expected);
+                                    if property.is_some() {
+                                        assert!(selected.props.len() <= 1);
+                                    }
+                                    if winner != Some(at) {
+                                        assert_eq!(selected.props.capacity(), 0);
+                                    }
+                                }
+                                selected
+                            })
+                            .collect();
                         let mut expected = merge_vertex(&complete, vid, CommitSeq(cut));
                         if let Some(row) = &mut expected {
-                            row.props.retain(|(candidate, _)| *candidate == property);
+                            row.props.retain(|(candidate, _)| {
+                                property.is_none_or(|property| *candidate == property)
+                            });
                         }
                         assert_eq!(
                             merge_vertex(&selected, vid, CommitSeq(cut)),
@@ -1679,52 +1755,115 @@ mod admitted_topology_tests {
         let namespace = DatabaseSecurityNamespaceId([0x71; 32]);
         let id = VertexPatchVersion(vertex_patch_id(&key, namespace, &bytes));
         for property in [PropertyKeyId(59), PropertyKeyId(99)] {
-            let selected = read_admitted_patch_for_vertex_property(
-                &key,
-                namespace,
-                &bytes,
-                id,
-                None,
-                VId(101),
-                property,
-            )
-            .unwrap();
+            let selected =
+                read_admitted_patch_for_row(&key, namespace, &bytes, id, None, 0, Some(property))
+                    .unwrap();
             assert_eq!(resolver.calls.get(), after_admission);
-            for (selected, complete) in selected.iter().zip(complete.iter()) {
+            for (at, (selected, complete)) in selected.iter().zip(complete.iter()).enumerate() {
                 let expected: Vec<_> = complete
                     .props
                     .iter()
-                    .filter(|(candidate, _)| *candidate == property)
+                    .filter(|(candidate, _)| at == 0 && *candidate == property)
                     .cloned()
                     .collect();
                 assert_eq!(selected.props, expected);
             }
         }
         assert!(
-            read_admitted_patch_for_vertex_property(
+            read_admitted_patch_for_row(
                 &key,
                 namespace,
                 &bytes,
                 id,
                 None,
-                VId(101),
-                PropertyKeyId(41),
+                0,
+                Some(PropertyKeyId(41)),
             )
             .is_err(),
             "the selected value still requires its real pinned artifacts",
         );
-        let selected = read_admitted_patch_for_vertex_property(
+        let selected = read_admitted_patch_for_row(
             &key,
             namespace,
             &bytes,
             id,
             Some(&resolver),
-            VId(101),
-            PropertyKeyId(41),
+            0,
+            Some(PropertyKeyId(41)),
         )
         .unwrap();
         assert_eq!(selected[0].props.as_slice(), &complete[0].props[..1]);
         assert!(resolver.calls.get() > after_admission);
+    }
+
+    #[test]
+    fn exact_row_payload_skips_superseded_and_future_versions_of_the_same_vertex() {
+        let resolver = Resolver::default();
+        let bound: CanonicalPropertyValue = CanonicalScalar::Text(
+            CanonicalText::new_non_binary(
+                "unrequested historical payload",
+                NonBinaryTextBinding::new(
+                    ObjectId([1; 32]),
+                    ObjectId([2; 32]),
+                    ObjectId([3; 32]),
+                    ObjectId([4; 32]),
+                ),
+                &resolver,
+            )
+            .unwrap(),
+        )
+        .into();
+        let mut expected = rows(bound.clone());
+        expected[1].props = vec![(PropertyKeyId(41), CanonicalScalar::Int(83).into())];
+        expected[2] = VertexRow {
+            vid: VId(101),
+            birth_ordinal: 17,
+            created_at: CommitSeq(9),
+            retired_at: None,
+            labels: vec![LabelId(29)],
+            props: vec![(PropertyKeyId(41), bound)],
+        };
+        let bytes = encode_patch(&expected).unwrap();
+        let key = [0x53; 32];
+        let namespace = DatabaseSecurityNamespaceId([0x71; 32]);
+        let id = VertexPatchVersion(vertex_patch_id(&key, namespace, &bytes));
+        let admitted = read_patch_with_resolver(&key, namespace, &bytes, id, &resolver).unwrap();
+        let before = resolver.calls.get();
+        assert!(
+            read_admitted_patch_for_vertex(&key, namespace, &bytes, id, None, VId(101)).is_err(),
+            "the prior identity-wide path reaches an unrequested version's artifacts",
+        );
+        for property in [None, Some(PropertyKeyId(41)), Some(PropertyKeyId(99))] {
+            let selected = read_admitted_patch_for_row(
+                &key,
+                namespace,
+                &bytes,
+                id,
+                Some(&resolver),
+                1,
+                property,
+            )
+            .unwrap();
+            assert_eq!(resolver.calls.get(), before);
+            assert_eq!(span_of_rows(&selected), span_of_rows(&admitted));
+            assert!(selected[0].props.is_empty() && selected[2].props.is_empty());
+            assert_eq!(selected[0].props.capacity(), 0);
+            assert_eq!(selected[2].props.capacity(), 0);
+            let mut winner = expected[1].clone();
+            winner
+                .props
+                .retain(|(key, _)| property.is_none_or(|property| *key == property));
+            let props_address = selected[1].props.as_ptr();
+            let selected = selected.into_iter().nth(1).unwrap();
+            assert_eq!(selected, winner);
+            assert_eq!(selected.props.as_ptr(), props_address);
+        }
+        for at in [0, 2] {
+            assert!(
+                read_admitted_patch_for_row(&key, namespace, &bytes, id, None, at, None).is_err(),
+                "an actually selected artifact-bound value keeps its resolver requirement",
+            );
+        }
     }
 
     #[test]
@@ -1735,7 +1874,7 @@ mod admitted_topology_tests {
         let bytes = encode_patch(&expected).unwrap();
         let id = VertexPatchVersion(vertex_patch_id(&key, namespace, &bytes));
         for property in [PropertyKeyId(41), PropertyKeyId(59), PropertyKeyId(99)] {
-            let access = PatchPropertyAccess::DecodeProperty(VId(101), property);
+            let access = PatchPropertyAccess::DecodeRow(0, Some(property));
             for end in 0..bytes.len() {
                 assert!(matches!(
                     decode_patch_fields(&bytes[..end], None, access),
@@ -1767,15 +1906,7 @@ mod admitted_topology_tests {
             // when the requested key is the first property or is absent.
             changed[second_key + 8 + 4 + 1] ^= 1;
             assert!(matches!(
-                read_admitted_patch_for_vertex_property(
-                    &key,
-                    namespace,
-                    &changed,
-                    id,
-                    None,
-                    VId(101),
-                    property,
-                ),
+                read_admitted_patch_for_row(&key, namespace, &changed, id, None, 0, Some(property),),
                 Err(VertexPatchError::IdentityMismatch { .. }),
             ));
             for (wrong_key, wrong_namespace) in [
@@ -1783,17 +1914,134 @@ mod admitted_topology_tests {
                 (key, DatabaseSecurityNamespaceId([0x72; 32])),
             ] {
                 assert!(matches!(
-                    read_admitted_patch_for_vertex_property(
+                    read_admitted_patch_for_row(
                         &wrong_key,
                         wrong_namespace,
                         &bytes,
                         id,
                         None,
-                        VId(101),
-                        property,
+                        0,
+                        Some(property),
                     ),
                     Err(VertexPatchError::IdentityMismatch { .. }),
                 ));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "paired live identity-wide/winner-row codec measurement; run explicitly"]
+    fn benchmark_historical_vertex_winner_decode() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let key = [0x53; 32];
+        let namespace = DatabaseSecurityNamespaceId([0x71; 32]);
+        let rounds = 7;
+        let reads = 256;
+        for versions in [1, 4, 16] {
+            for values in [0, 48] {
+                let rows: Vec<_> = (0..versions)
+                    .map(|at| VertexRow {
+                        vid: VId(101),
+                        birth_ordinal: 1,
+                        created_at: CommitSeq(at as u64 + 1),
+                        retired_at: (at + 1 < versions).then_some(CommitSeq(at as u64 + 2)),
+                        labels: vec![],
+                        props: if values == 0 {
+                            Vec::new()
+                        } else {
+                            vec![(
+                                PropertyKeyId(1),
+                                CanonicalPropertyValue::List(
+                                    CanonicalList::try_new(
+                                        (0..values)
+                                            .map(|item| {
+                                                CanonicalScalar::Int(item + at as i64).into()
+                                            })
+                                            .collect(),
+                                    )
+                                    .unwrap(),
+                                ),
+                            )]
+                        },
+                    })
+                    .collect();
+                let bytes = encode_patch(&rows).unwrap();
+                assert!(bytes.len() as u64 <= crate::store::MAX_STORED_OBJECT_BYTES);
+                let id = VertexPatchVersion(vertex_patch_id(&key, namespace, &bytes));
+                let cut = CommitSeq(versions as u64);
+                let mut times = [Vec::new(), Vec::new()];
+                for round in 0..rounds {
+                    let mut outputs = [Vec::new(), Vec::new()];
+                    for which in [round % 2, 1 - round % 2] {
+                        let start = Instant::now();
+                        for _ in 0..reads {
+                            let value = if which == 0 {
+                                let decoded = read_admitted_patch_for_vertex(
+                                    &key,
+                                    namespace,
+                                    black_box(&bytes),
+                                    id,
+                                    None,
+                                    VId(101),
+                                )
+                                .unwrap();
+                                decoded.iter().find(|row| row.visible_at(cut)).cloned()
+                            } else if versions == 1 {
+                                // This fixture has one routed patch. Its
+                                // admitted one-row bound proves uniqueness,
+                                // so the public point reader keeps one parse.
+                                read_admitted_patch_for_vertex(
+                                    &key,
+                                    namespace,
+                                    black_box(&bytes),
+                                    id,
+                                    None,
+                                    VId(101),
+                                )
+                                .unwrap()
+                                .into_iter()
+                                .next()
+                            } else {
+                                let topology = read_admitted_patch_topology(
+                                    &key,
+                                    namespace,
+                                    black_box(&bytes),
+                                    id,
+                                )
+                                .unwrap();
+                                let winner = topology
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, row)| row.created_at <= cut)
+                                    .max_by_key(|(at, row)| (row.created_at, *at))
+                                    .map(|(at, _)| at)
+                                    .unwrap();
+                                drop(topology);
+                                read_admitted_patch_for_row(
+                                    &key, namespace, &bytes, id, None, winner, None,
+                                )
+                                .unwrap()
+                                .into_iter()
+                                .nth(winner)
+                            };
+                            outputs[which].push(black_box(value));
+                        }
+                        times[which].push(start.elapsed().as_nanos());
+                    }
+                    assert_eq!(outputs[0], outputs[1]);
+                    assert!(outputs[0].iter().all(|row| row.as_ref() == rows.last()));
+                }
+                for samples in &mut times {
+                    samples.sort_unstable();
+                }
+                eprintln!(
+                    "historical_vertex_winner_codec versions={versions} values={values} bytes={} reads={reads} rounds={rounds} identity_wide_ns={} winner_row_ns={}",
+                    bytes.len(),
+                    times[0][rounds / 2],
+                    times[1][rounds / 2],
+                );
             }
         }
     }

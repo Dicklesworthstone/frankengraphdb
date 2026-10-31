@@ -840,9 +840,8 @@ impl<V: Vfs + Clone> Database<V> {
         memory: FnxMemoryLimits,
         sealing: SealedLimits,
     ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
-        // Kept apart from the cooperative path: this future must not contain
-        // the cooperative kernel's (non-Send) future, so a Send-requiring
-        // host such as a lab task can await it.
+        // Preserve this entry point's immediate kernel scheduling. Callers
+        // opt into bounded yields through the cooperative owner API below.
         cx.with_restriction_async(async {
             let graph = self
                 .prepare_fnx_sealed(cx, call, &options, sealing, false, ImmediateSealedBuild)

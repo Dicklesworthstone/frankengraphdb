@@ -1,5 +1,5 @@
-//! Keep immediate preparation futures Send while opting cooperative callers
-//! into the projection constructor's resumable state and runtime yield.
+//! Keep owner preparation futures Send in both scheduling modes while sharing
+//! the projection constructor's resumable state and runtime yield.
 
 use super::*;
 use std::future::{Future, Ready, ready};
@@ -43,7 +43,7 @@ pub(crate) struct CooperativeSealedBuild(pub(crate) NonZeroUsize);
 
 impl SealedBuild for CooperativeSealedBuild {
     type Build<'a> =
-        Pin<Box<dyn Future<Output = Result<SealedGraphView, SealedProjectionError>> + 'a>>;
+        Pin<Box<dyn Future<Output = Result<SealedGraphView, SealedProjectionError>> + Send + 'a>>;
 
     fn build<'a>(
         &'a mut self,

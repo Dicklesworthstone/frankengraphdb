@@ -52,6 +52,133 @@ fn assert_rows_equal(left: &QueryResult, right: &QueryResult) {
     assert_eq!(lc, rc);
     assert_eq!(lr, rr);
 }
+
+#[test]
+fn current_time_certificates_replay_the_captured_instant_without_a_live_clock() {
+    use fgdb::{MemVfs, NativeResultCertificate, ReplayRefusal, StatementClock};
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::CanonicalTimestamp;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let commit = contexts.commit();
+    let cx = contexts.query();
+    runtime.block_on(async {
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let instant = CanonicalTimestamp::offset_only(1_700_000_000_123_456_789, 0).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sampled = Arc::clone(&calls);
+        let captured = instant.clone();
+        db.set_statement_clock(Some(StatementClock::new(move |_| {
+            sampled.fetch_add(1, Ordering::SeqCst);
+            Some(captured.clone())
+        })));
+        let text = "UNWIND [1,2] AS occurrence \
+            RETURN occurrence AS n,datetime() AS instant,datetime() AS repeated ORDER BY n";
+        let params = GqlParameters::new();
+        let (original, certificate) = db
+            .execute_certified(&cx, text, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one capture per statement, never per row or expression"
+        );
+        assert_eq!(certificate.statement_time.as_ref(), Some(&instant));
+        assert_eq!(certificate.plan.snapshot_seq, CommitSeq(1));
+        let cell = fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Timestamp(
+            instant.clone(),
+        )));
+        assert_eq!(
+            original,
+            QueryResult::Rows {
+                columns: vec!["n".into(), "instant".into(), "repeated".into()],
+                rows: [1, 2]
+                    .into_iter()
+                    .map(|value| vec![
+                        fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value))),
+                        cell.clone(),
+                        cell.clone(),
+                    ])
+                    .collect(),
+            }
+        );
+        let certificate = NativeResultCertificate::decode(&certificate.canonical_bytes()).unwrap();
+        db.set_statement_clock(Some(StatementClock::new(|_| {
+            panic!("replay must never sample a live clock")
+        })));
+        assert_rows_equal(
+            &original,
+            &db.replay(&cx, &certificate, &params, symbols, policy())
+                .unwrap(),
+        );
+        let explicit = params.clone().with_statement_time(instant.clone()).unwrap();
+        assert_rows_equal(
+            &original,
+            &db.replay(&cx, &certificate, &explicit, symbols, policy())
+                .unwrap(),
+        );
+        let later = CanonicalTimestamp::offset_only(1_700_000_001_123_456_789, 0).unwrap();
+        let different = params.clone().with_statement_time(later.clone()).unwrap();
+        assert!(matches!(
+            db.replay(&cx, &certificate, &different, symbols, policy()),
+            Err(ReplayRefusal::ParameterValuesMismatch)
+        ));
+        for changed in [None, Some(later.clone())] {
+            let mut tampered = certificate.clone();
+            tampered.statement_time = changed;
+            assert!(matches!(
+                db.replay(&cx, &tampered, &params, symbols, policy()),
+                Err(ReplayRefusal::ParameterValuesMismatch)
+            ));
+        }
+        let (_, rebound) = db
+            .execute_certified(&cx, text, &different, symbols, policy())
+            .unwrap();
+        assert_eq!(
+            rebound.plan.digest, certificate.plan.digest,
+            "the reusable template does not freeze time"
+        );
+        assert_ne!(rebound.values_digest, certificate.values_digest);
+        assert_ne!(rebound.result_digest, certificate.result_digest);
+        let (_, timeless) = db
+            .execute_certified(&cx, "RETURN 1 AS value", &params, symbols, policy())
+            .unwrap();
+        assert!(timeless.statement_time.is_none());
+        let mut write = WriteBatch::new(R);
+        write.create_vertex(VId(9), vec![PERSON], vec![(P, CanonicalScalar::Int(99))]);
+        db.write(&commit, write).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_rows_equal(
+            &original,
+            &reopened
+                .replay(&cx, &certificate, &params, symbols, policy())
+                .unwrap(),
+        );
+        assert!(
+            reopened
+                .execute_certified(&cx, text, &params, symbols, policy())
+                .is_err(),
+            "a fresh execution cannot invent an absent statement clock"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    });
+}
+
 const READS: [(NativeReadClass, &str); 7] = [
     (
         NativeReadClass::Pattern,

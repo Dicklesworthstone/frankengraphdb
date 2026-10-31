@@ -910,7 +910,9 @@ fn open<'q, C: FnMut() -> u64, Plan, Output>(
             .map_err(selector_error)?;
         check_branch(&selected, branch)?;
         let params = prepared.parameters(selected.parameters())?;
-        bind_plan(&prepared.native, &params, view.frontier())
+        let captured =
+            view.capture_authorized_statement_parameters(cx, prepared.native.statement(), &params)?;
+        bind_plan(&prepared.native, &captured, view.frontier())
     })();
     execution.borrow_mut().checkpoint()?;
     build(selected?, view, cx, execution, policy)

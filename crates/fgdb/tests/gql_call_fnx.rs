@@ -63,7 +63,7 @@ fn graph() -> WriteBatch {
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected. An empty value field names a
 /// vertex-only result, such as the sparse set of articulation points.
-const CALLS: [(&str, &str, &str, bool); 22] = [
+const CALLS: [(&str, &str, &str, bool); 24] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -90,6 +90,8 @@ const CALLS: [(&str, &str, &str, bool); 22] = [
     ("hits_centrality", "", "hub", false),
     ("articulation_points", "", "", true),
     ("bridges", "", "neighbor", true),
+    ("dijkstra_path_length", "1,5", "distance", false),
+    ("katz_centrality", "", "score", false),
 ];
 
 /// The whole graph spelled out field by field, independent of
@@ -228,6 +230,12 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
                 false,
             ),
             ("hits_centrality", "", "authority", false),
+            (
+                "katz_centrality",
+                "alpha => 0.025, beta => 2, max_iter => 500, tol => 1e-10",
+                "score",
+                false,
+            ),
         ]) {
             let yields = if field.is_empty() {
                 "vertex".to_owned()
@@ -253,6 +261,8 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
                 // Only vertices 3 and 4 split the triangle/tail fixture;
                 // only edges 3--4 and 4--5 disconnect it when removed.
                 assert_eq!(expected.len(), 2, "{name}");
+            } else if name == "dijkstra_path_length" {
+                assert_eq!(expected.len(), 1, "one settled target row");
             } else {
                 assert!(expected.len() >= 4, "{name}: {} rows", expected.len());
             }

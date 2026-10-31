@@ -6,7 +6,7 @@ use crate::execute::{
     HopDistance, KernelOutput, KernelValues, PageRankRestart, hash_bfs_decision_card,
     hash_component_decision_card, hash_result_value,
 };
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard, GuardFn};
 use crate::{
     AdapterPath, BfsDecisionCard, ComplexityWitness, Directedness, FNX_IMPLEMENTATION_REVISION,
     FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm, FnxBindError, FnxCallSpec, FnxCertificate,
@@ -47,6 +47,8 @@ mod distance;
 mod eigenvector;
 #[path = "sealed_hits.rs"]
 mod hits;
+#[path = "sealed_katz.rs"]
+mod katz;
 #[path = "sealed_load.rs"]
 mod load;
 #[path = "sealed_shortest_path.rs"]
@@ -153,7 +155,7 @@ impl Finished {
     }
 }
 
-fn checkpoint(cx: &Control<'_>) -> Result<()> {
+fn checkpoint(cx: &Control<'_, impl Guard>) -> Result<()> {
     cx.checkpoint().map_err(Into::into)
 }
 fn add(left: usize, right: usize) -> Result<usize> {
@@ -190,7 +192,7 @@ trait Rows {
     }
     /// Complete admission validated every target ordinal and exact degree in
     /// this immutable projection, including the symmetry law when undirected.
-    /// Only then may connectivity omit rows whose edges cannot change labels.
+    /// Only then may kernels omit rows whose edges cannot change their result.
     /// Unknown providers must still expose malformed rows and source failures.
     fn has_validated_adjacency(&self) -> bool {
         false
@@ -213,22 +215,22 @@ trait Rows {
     }
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>>;
 }
-struct SealedRows<'a> {
-    cx: &'a Control<'a>,
+struct SealedRows<'a, G: Guard> {
+    cx: &'a Control<'a, G>,
     graph: &'a SealedGraphView,
 }
-struct SealedRow<'a> {
-    cx: &'a Control<'a>,
+struct SealedRow<'a, G: Guard = GuardFn> {
+    cx: &'a Control<'a, G>,
     row: SealedNeighborCursor<'a>,
 }
-impl Cursor for SealedRow<'_> {
+impl<G: Guard> Cursor for SealedRow<'_, G> {
     fn next(&mut self) -> Result<Option<(usize, f64)>> {
         self.row.next_controlled(self.cx).map_err(Into::into)
     }
 }
-impl Rows for SealedRows<'_> {
+impl<G: Guard> Rows for SealedRows<'_, G> {
     type Cursor<'a>
-        = SealedRow<'a>
+        = SealedRow<'a, G>
     where
         Self: 'a;
     fn node_count(&self) -> usize {
@@ -610,20 +612,26 @@ fn pagerank(
     let mut sums = normalization.reserve_sums(n)?;
     let mut ranks = reserve(n)?;
     let mut next = reserve(n)?;
+    let admitted = graph.has_validated_adjacency();
     let population = n as f64;
     for source in 0..n {
         checkpoint()?;
         if normalization == PageRankNormalization::WeightedSums {
             let mut sum = 0.0;
-            let mut row = graph.open(source)?;
-            while let Some((_, weight)) = row.next()? {
-                checkpoint()?;
-                if weight < 0.0 {
-                    return Err(ExecutionError::NegativeWeight.into());
-                }
-                sum += weight;
-                if !sum.is_finite() {
-                    return Err(ExecutionError::NonFiniteWeightSum.into());
+            // A fully admitted empty row has no weights to validate. Its raw
+            // source may still contain substantial excluded/retired history.
+            // Unknown providers must retain their open and EOF failures.
+            if !admitted || graph.degree(source) != Some(0) {
+                let mut row = graph.open(source)?;
+                while let Some((_, weight)) = row.next()? {
+                    checkpoint()?;
+                    if weight < 0.0 {
+                        return Err(ExecutionError::NegativeWeight.into());
+                    }
+                    sum += weight;
+                    if !sum.is_finite() {
+                        return Err(ExecutionError::NonFiniteWeightSum.into());
+                    }
                 }
             }
             sums.push(sum);
@@ -654,6 +662,12 @@ fn pagerank(
             checkpoint()?;
             let push = options.alpha() * ranks[source];
             let sum = normalization.sum(&sums, source, || graph.degree(source))?;
+            // Keep the vertex checkpoint and all scalar passes. Only exact
+            // degree zero proves there is no contribution: a nonempty row
+            // with zero total weight must still be opened and drained.
+            if admitted && graph.degree(source) == Some(0) {
+                continue;
+            }
             let mut row = graph.open(source)?;
             while let Some((target, weight)) = row.next()? {
                 checkpoint()?;
@@ -725,8 +739,16 @@ fn bfs(
         edges_scanned: 0,
         queue_peak: 1,
     };
+    let admitted = graph.has_validated_adjacency();
     while head < queue.len() {
         checkpoint()?;
+        // BFS discovery fixes each hop distance. Once every admitted vertex
+        // has been discovered, later rows cannot change any distance. Check
+        // only between rows: the last reached row must still drain its EOF.
+        // Unknown providers retain every remaining source/ordinal failure.
+        if admitted && queue.len() == n {
+            break;
+        }
         let vertex = queue[head];
         head += 1;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
@@ -780,6 +802,7 @@ impl FnxCallSpec {
             FnxAlgorithm::PageRank(_)
                 | FnxAlgorithm::SingleSourceShortestPathLength { .. }
                 | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+                | FnxAlgorithm::DijkstraPathLength { .. }
                 | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
@@ -790,6 +813,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::InDegreeCentrality
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::HitsCentrality
+                | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
                 | FnxAlgorithm::Foundation(
@@ -905,7 +929,7 @@ impl FnxCallSpec {
 
     fn execute_controlled(
         &self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         graph: &SealedGraphView,
         limits: FnxExecutionLimits,
         memory: FnxMemoryLimits,
@@ -926,6 +950,9 @@ impl FnxCallSpec {
         }
         if matches!(self.algorithm(), FnxAlgorithm::HitsCentrality) {
             return hits::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(self.algorithm(), FnxAlgorithm::KatzCentrality(_)) {
+            return katz::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(
             self.algorithm(),
@@ -1025,7 +1052,7 @@ impl FnxCallSpec {
                     })
                     .transpose()?;
                 (
-                    "fgdb-prism/sealed-pagerank-v2",
+                    "fgdb-prism/sealed-pagerank-nonempty-rows-v3",
                     mul(pass, add(options.max_iter(), 1)?)?,
                     PageRankNormalization::select(n, options.weighted(), graph.has_unit_weights())
                         .workspace(n)?,
@@ -1038,23 +1065,34 @@ impl FnxCallSpec {
                     .ok_or(ExecutionError::UnknownSource(source))?;
                 admission.rows(1)?;
                 (
-                    "fgdb-prism/sealed-bfs-v1",
+                    "fgdb-prism/sealed-bfs-complete-population-v2",
                     pass,
                     mul(n, size_of::<usize>() + size_of::<Option<HopDistance>>())?,
                     Some(ordinal),
                 )
             }
-            FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
+            FnxAlgorithm::SingleSourceDijkstraPathLength(options)
+            | FnxAlgorithm::DijkstraPathLength { options, .. } => {
                 let ordinal = graph
                     .vertex_ordinal(options.source())
                     .ok_or(ExecutionError::UnknownSource(options.source()))?;
-                admission.rows(1)?;
+                let targeted =
+                    if let FnxAlgorithm::DijkstraPathLength { target, .. } = self.algorithm() {
+                        graph
+                            .vertex_ordinal(target)
+                            .ok_or(ExecutionError::UnknownTarget(target))?;
+                        true
+                    } else {
+                        false
+                    };
+                admission.rows(usize::from(!targeted))?;
                 let unit = shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
                 (
-                    if unit {
-                        "fgdb-prism/sealed-dijkstra-unit-fifo-v2"
-                    } else {
-                        "fgdb-prism/sealed-dijkstra-indexed-heap-v2"
+                    match (unit, targeted) {
+                        (true, false) => "fgdb-prism/sealed-dijkstra-unit-fifo-v2",
+                        (false, false) => "fgdb-prism/sealed-dijkstra-indexed-heap-v2",
+                        (true, true) => "fgdb-prism/sealed-dijkstra-target-unit-fifo-v1",
+                        (false, true) => "fgdb-prism/sealed-dijkstra-target-indexed-heap-v1",
                     },
                     shortest_path::work(n, graph.adjacency_entry_count(), pass, unit)?,
                     shortest_path::workspace(n, unit)?,
@@ -1117,6 +1155,16 @@ impl FnxCallSpec {
                 &rows,
                 source.ok_or(ExecutionError::InvalidUpstreamResult)?,
                 options,
+                &admission,
+                &mut control,
+            )?,
+            FnxAlgorithm::DijkstraPathLength { options, target } => shortest_path::run_target(
+                &rows,
+                source.ok_or(ExecutionError::InvalidUpstreamResult)?,
+                options,
+                graph
+                    .vertex_ordinal(target)
+                    .ok_or(ExecutionError::UnknownTarget(target))?,
                 &admission,
                 &mut control,
             )?,
@@ -1186,7 +1234,7 @@ fn finish_bfs(
 ) -> Result<Finished> {
     checkpoint()?;
     let mut encoded = EncodedRows::new(call, output.row_count, admission)?;
-    for index in 0..graph.node_count() {
+    for index in 0..output.values.scan_len(graph.node_count()) {
         encoded.push(call, graph, &output.values, index, checkpoint)?;
     }
     finish_encoded_bfs(
@@ -1342,6 +1390,18 @@ impl EncodedRows {
                     .get(index)
                     .ok_or(ExecutionError::InvalidUpstreamResult)?
                 else {
+                    return Ok(());
+                };
+                if !distance.is_finite() || distance < 0.0 {
+                    return Err(ExecutionError::InvalidNumericResult.into());
+                }
+                FnxValue::Float(distance)
+            }
+            KernelValues::TargetDistance { distance, .. } => {
+                if index != 0 {
+                    return Err(ExecutionError::InvalidUpstreamResult.into());
+                }
+                let Some(distance) = *distance else {
                     return Ok(());
                 };
                 if !distance.is_finite() || distance < 0.0 {
@@ -1916,11 +1976,12 @@ mod tests {
             })
         }
     }
-    // The trusted adapter independently checks every final projected weight.
-    // DecodedRows deliberately retains the default unknown-evidence behavior.
+    // Unit-weight evidence and complete adjacency admission are independent.
+    // The ordinary constructor retains every row as the full-scan oracle.
     struct CountedRankRows<'a> {
         graph: &'a SnapshotGraphView,
         unit_weights: bool,
+        admitted: bool,
         opens: std::cell::Cell<usize>,
     }
     impl<'a> CountedRankRows<'a> {
@@ -1934,7 +1995,17 @@ mod tests {
             Self {
                 graph,
                 unit_weights,
+                admitted: false,
                 opens: std::cell::Cell::new(0),
+            }
+        }
+        fn new_admitted(graph: &'a SnapshotGraphView, unit_weights: bool) -> Self {
+            // Independently validate all row ordinals/degrees before enabling
+            // omission, just as the fault-injecting admitted adapter does.
+            AdmittedFaultRows::new(graph, usize::MAX).unwrap();
+            Self {
+                admitted: true,
+                ..Self::new(graph, unit_weights)
             }
         }
     }
@@ -1951,6 +2022,9 @@ mod tests {
         }
         fn has_unit_weights(&self) -> bool {
             self.unit_weights
+        }
+        fn has_validated_adjacency(&self) -> bool {
+            self.admitted
         }
         fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
             self.opens.set(self.opens.get() + 1);
@@ -2100,6 +2174,13 @@ mod tests {
         projection_with_weights(mask, |bit| [0.0, 0.1, 0.3, 1.0, 7.0][bit % 5])
     }
     fn projection_with_weights(mask: u16, weight: impl Fn(usize) -> f64) -> SnapshotGraphView {
+        projection_in_direction(mask, weight, Directedness::Directed)
+    }
+    fn projection_in_direction(
+        mask: u16,
+        weight: impl Fn(usize) -> f64,
+        direction: Directedness,
+    ) -> SnapshotGraphView {
         let vertices = [VId(0), VId(17), VId(u128::MAX)];
         let edges: Vec<_> = (0..9)
             .filter(|bit| mask & (1 << bit) != 0)
@@ -2118,7 +2199,7 @@ mod tests {
             &vertices,
             &edges,
             ProjectionSpec {
-                directedness: Directedness::Directed,
+                directedness: direction,
                 parallel_edges: ParallelEdgePolicy::Sum,
                 self_loops: SelfLoopPolicy::Keep,
             },
@@ -2511,6 +2592,181 @@ mod tests {
     }
 
     #[test]
+    fn pagerank_admitted_empty_rows_match_full_scans_and_exact_open_counts() {
+        const ITERATIONS: usize = 3;
+        let mut omitted = 0;
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            for mask in 0..512 {
+                let graph = projection_in_direction(mask, |_| 1.0, direction);
+                let n = graph.node_count();
+                let nonempty = (0..n)
+                    .filter(|&source| !graph.projected_row(source).unwrap().0.is_empty())
+                    .count();
+                // Undirected Sum can reduce two unit incidences to weight 2.
+                let unit = (0..n).all(|source| {
+                    graph
+                        .projected_row(source)
+                        .unwrap()
+                        .1
+                        .iter()
+                        .all(|&weight| weight == 1.0)
+                });
+                for weighted in [false, true] {
+                    for source in [None, Some(2)] {
+                        let options =
+                            PageRankOptions::fixed_iterations(0.85, ITERATIONS, weighted).unwrap();
+                        let options = source.map_or(options, |source| {
+                            options.with_source(graph.vertex_id(source).unwrap())
+                        });
+                        let admitted = CountedRankRows::new_admitted(&graph, unit);
+                        let unknown = CountedRankRows::new(&graph, unit);
+                        let mut admitted_checks = 0;
+                        let fast = pagerank(&admitted, options, source, &mut || {
+                            admitted_checks += 1;
+                            Ok(())
+                        })
+                        .unwrap();
+                        let mut unknown_checks = 0;
+                        let slow = pagerank(&unknown, options, source, &mut || {
+                            unknown_checks += 1;
+                            Ok(())
+                        })
+                        .unwrap();
+                        assert_eq!(
+                            rank_score_bits(&fast),
+                            rank_score_bits(&slow),
+                            "direction={direction:?} mask={mask} weighted={weighted} source={source:?}"
+                        );
+                        assert_eq!(fast.witness, slow.witness);
+                        assert_eq!(fast.row_count, n);
+                        // Omitting empty cursors removes no scalar checkpoint
+                        // or logical edge visit, including weighted sums.
+                        assert_eq!(admitted_checks, unknown_checks);
+                        let passes = ITERATIONS + usize::from(weighted && !unit);
+                        assert_eq!(admitted.opens.get(), nonempty * passes);
+                        assert_eq!(unknown.opens.get(), n * passes);
+                        omitted += unknown.opens.get() - admitted.opens.get();
+                        assert_rank_matches_decoded(&graph, options, &fast);
+                    }
+                }
+            }
+        }
+        assert!(omitted > 0, "the corpus must actually omit empty rows");
+    }
+
+    #[test]
+    fn pagerank_admitted_empty_rows_keep_nonempty_eof_faults_and_live_checkpoints() {
+        // Rows 0 and 2 are empty. Row 1 contains three selected zero-weight
+        // edges, so its weighted sum is also zero but it must still drain.
+        let graph = projection_with_weights(0b000_111_000, |_| 0.0);
+        for weighted in [false, true] {
+            let options = PageRankOptions::fixed_iterations(0.85, 2, weighted)
+                .unwrap()
+                .with_source(VId(u128::MAX));
+            let rows = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+            let mut checkpoints = 0;
+            let expected = pagerank(&rows, options, Some(2), &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+            let passes = 2 + usize::from(weighted);
+            let one_row = [
+                ("open", 1),
+                ("pull", 1),
+                ("pull", 1),
+                ("pull", 1),
+                ("eof", 1),
+            ];
+            let events: Vec<_> = one_row
+                .into_iter()
+                .cycle()
+                .take(passes * one_row.len())
+                .collect();
+            assert_eq!(rows.events.borrow().as_slice(), events.as_slice());
+            assert_eq!(rows.calls.get(), passes * 5);
+            assert_eq!(expected.witness.edges_scanned, 6);
+            assert_eq!(expected.witness.nodes_touched, 6);
+            assert_rank_matches_decoded(&graph, options, &expected);
+            for fail_at in 1..=events.len() {
+                let rows = AdmittedFaultRows::new(&graph, fail_at).unwrap();
+                assert!(matches!(
+                    pagerank(&rows, options, Some(2), &mut || Ok(())),
+                    Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                        usize::MAX
+                    )))
+                ));
+                assert_eq!(rows.calls.get(), fail_at);
+                assert_eq!(rows.events.borrow().as_slice(), &events[..fail_at]);
+            }
+            for stop in 1..=checkpoints {
+                let rows = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+                let mut seen = 0;
+                assert!(matches!(
+                    pagerank(&rows, options, Some(2), &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(Error::Cancelled(
+                                std::io::Error::other("empty row stop").into(),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(Error::Cancelled(_))
+                ));
+                assert_eq!(seen, stop);
+                assert_eq!(rows.events.borrow().as_slice(), &events[..rows.calls.get()]);
+            }
+        }
+    }
+
+    #[test]
+    fn pagerank_without_complete_admission_keeps_empty_row_source_failures() {
+        let graph = projection_with_weights(0, |_| 1.0);
+        for weighted in [false, true] {
+            let options = PageRankOptions::fixed_iterations(0.85, 2, weighted).unwrap();
+            let operations = 2 * graph.node_count() * (2 + usize::from(weighted));
+            let full_scan = FaultRows {
+                graph: &graph,
+                calls: std::cell::Cell::new(0),
+                fail_at: usize::MAX,
+            };
+            let expected = pagerank(&full_scan, options, None, &mut || Ok(())).unwrap();
+            assert_eq!(full_scan.calls.get(), operations);
+            for fail_at in 1..=operations {
+                let rows = FaultRows {
+                    graph: &graph,
+                    calls: std::cell::Cell::new(0),
+                    fail_at,
+                };
+                assert!(matches!(
+                    pagerank(&rows, options, None, &mut || Ok(())),
+                    Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                        usize::MAX
+                    )))
+                ));
+                assert_eq!(rows.calls.get(), fail_at);
+            }
+            let admitted = AdmittedFaultRows::new(&graph, 1).unwrap();
+            let mut checkpoints = 0;
+            let actual = pagerank(&admitted, options, None, &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(admitted.calls.get(), 0);
+            assert_eq!(rank_score_bits(&actual), rank_score_bits(&expected));
+            assert_eq!(actual.witness, expected.witness);
+            assert_eq!(checkpoints, graph.node_count() * (1 + 4 * 2));
+        }
+    }
+
+    #[test]
     fn cursor_pagerank_is_bit_identical_to_pinned_fnx_on_every_three_node_topology() {
         for mask in 0..512 {
             let graph = projection(mask);
@@ -2598,14 +2854,14 @@ mod tests {
                 for cutoff in [None, Some(0), Some(1), Some(2), Some(1000)] {
                     let call = bfs_call(graph.vertex_id(source).unwrap(), cutoff);
                     let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
-                    let output = bfs(
-                        &DecodedRows(&graph),
-                        source,
-                        cutoff,
-                        &admission,
-                        &mut || Ok(()),
-                    )
-                    .unwrap();
+                    // Retain the original full-scan witness oracle for a
+                    // provider without complete adjacency admission evidence.
+                    let rows = FaultRows {
+                        graph: &graph,
+                        calls: std::cell::Cell::new(0),
+                        fail_at: usize::MAX,
+                    };
+                    let output = bfs(&rows, source, cutoff, &admission, &mut || Ok(())).unwrap();
                     let expected = call
                         .execute(&graph, limits(), || Ok::<(), Infallible>(()))
                         .unwrap();
@@ -2643,6 +2899,318 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn admitted_bfs_matches_floyd_warshall_for_every_small_direction_and_cutoff() {
+        let mut omitted = 0;
+        for mask in 0_u16..512 {
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                // Independent all-pairs oracle over the raw adjacency mask.
+                // It has no frontier, queue, discovery order or admission facts.
+                let mut hops = [[4_usize; 3]; 3];
+                for (vertex, row) in hops.iter_mut().enumerate() {
+                    row[vertex] = 0;
+                }
+                for bit in 0..9 {
+                    if mask & (1 << bit) == 0 {
+                        continue;
+                    }
+                    let (source, target) = (bit / 3, bit % 3);
+                    if direction != Directedness::Reversed {
+                        hops[source][target] = hops[source][target].min(1);
+                    }
+                    if direction != Directedness::Directed {
+                        hops[target][source] = hops[target][source].min(1);
+                    }
+                }
+                for via in 0..3 {
+                    for source in 0..3 {
+                        for target in 0..3 {
+                            hops[source][target] =
+                                hops[source][target].min(hops[source][via] + hops[via][target]);
+                        }
+                    }
+                }
+                // Hop distance ignores finite weight values, including negatives.
+                let graph = projection_in_direction(mask, |bit| bit as f64 - 4.0, direction);
+                for source in 0..3 {
+                    for cutoff in [None, Some(0), Some(1), Some(2), Some(1000)] {
+                        let call = bfs_call(graph.vertex_id(source).unwrap(), cutoff);
+                        let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+                        let rows = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+                        assert_eq!(rows.calls.get(), 0, "admission precedes source tracing");
+                        let output =
+                            bfs(&rows, source, cutoff, &admission, &mut || Ok(())).unwrap();
+                        let KernelValues::Distances(distances) = &output.values else {
+                            panic!("distances");
+                        };
+                        let actual: Vec<_> = distances
+                            .iter()
+                            .map(|distance| distance.map(HopDistance::hops))
+                            .collect();
+                        let expected: Vec<_> = hops[source]
+                            .iter()
+                            .map(|&distance| {
+                                (distance < 4 && cutoff.is_none_or(|limit| distance <= limit))
+                                    .then_some(distance)
+                            })
+                            .collect();
+                        assert_eq!(
+                            actual, expected,
+                            "mask={mask} {direction:?} source={source} cutoff={cutoff:?}"
+                        );
+                        assert_eq!(output.row_count, expected.iter().flatten().count());
+                        let full_scan: usize = hops[source]
+                            .iter()
+                            .enumerate()
+                            .filter(|&(_, &distance)| {
+                                distance < 4 && cutoff.is_none_or(|limit| distance < limit)
+                            })
+                            .map(|(vertex, _)| graph.neighbors_indices(vertex).unwrap().len())
+                            .sum();
+                        assert!(output.witness.edges_scanned <= full_scan);
+                        if output.row_count < graph.node_count() {
+                            assert_eq!(
+                                output.witness.edges_scanned, full_scan,
+                                "a disconnected or cutoff-limited search cannot omit reachable rows"
+                            );
+                        }
+                        assert_eq!(
+                            output.witness.edges_scanned,
+                            rows.events
+                                .borrow()
+                                .iter()
+                                .filter(|(kind, _)| *kind == "pull")
+                                .count()
+                        );
+                        omitted += usize::from(output.witness.edges_scanned < full_scan);
+                    }
+                }
+            }
+        }
+        assert!(
+            omitted > 0,
+            "the exhaustive corpus must exercise omitted expansions"
+        );
+    }
+
+    #[test]
+    fn admitted_bfs_drains_the_final_row_and_keeps_every_reached_fault_and_checkpoint() {
+        for (mask, opened, edges) in [
+            (511, vec![2], 3),
+            // Vertex 1 is isolated: discovering the reachable component does
+            // not prove that every selected vertex has been discovered.
+            (1 | (1 << 2) | (1 << 6) | (1 << 8), vec![2, 0], 4),
+        ] {
+            let graph = projection(mask);
+            let call = bfs_call(VId(u128::MAX), None);
+            let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+            let rows = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+            let mut checkpoints = 0;
+            let output = bfs(&rows, 2, None, &admission, &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+            let events = rows.events.borrow().clone();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter_map(|(kind, source)| (*kind == "open").then_some(*source))
+                    .collect::<Vec<_>>(),
+                opened
+            );
+            assert_eq!(output.witness.nodes_touched, opened.len());
+            assert_eq!(output.witness.edges_scanned, edges);
+            assert_eq!(rows.calls.get(), 2 * opened.len() + edges);
+            assert_eq!(events.last(), Some(&("eof", *opened.last().unwrap())));
+            if mask == 511 {
+                // Source 2 discovers the last new vertex on its second pull.
+                // Its third pull (a loop) and EOF are still mandatory.
+                assert_eq!(
+                    events,
+                    vec![
+                        ("open", 2),
+                        ("pull", 2),
+                        ("pull", 2),
+                        ("pull", 2),
+                        ("eof", 2),
+                    ]
+                );
+                let incumbent = FaultRows {
+                    graph: &graph,
+                    calls: std::cell::Cell::new(0),
+                    fail_at: usize::MAX,
+                };
+                let full = bfs(&incumbent, 2, None, &admission, &mut || Ok(())).unwrap();
+                assert_eq!(full.witness.edges_scanned, 9);
+                assert_eq!(full.witness.nodes_touched, 3);
+                assert_eq!(incumbent.calls.get(), 3 + 9 + 3);
+                let (KernelValues::Distances(actual), KernelValues::Distances(expected)) =
+                    (&output.values, &full.values)
+                else {
+                    panic!("distances");
+                };
+                assert_eq!(actual, expected);
+            }
+            for fail_at in 1..=events.len() {
+                let rows = AdmittedFaultRows::new(&graph, fail_at).unwrap();
+                assert!(matches!(
+                    bfs(&rows, 2, None, &admission, &mut || Ok(())),
+                    Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                        usize::MAX
+                    )))
+                ));
+                assert_eq!(rows.calls.get(), fail_at);
+                assert_eq!(rows.events.borrow().as_slice(), &events[..fail_at]);
+            }
+            for stop in 1..=checkpoints {
+                let rows = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+                let mut reached = 0;
+                let result = bfs(&rows, 2, None, &admission, &mut || {
+                    reached += 1;
+                    if reached == stop {
+                        Err(Error::Cancelled(std::io::Error::other("BFS stop").into()))
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert!(matches!(result, Err(Error::Cancelled(_))));
+                assert_eq!(reached, stop);
+                let attempted = rows.events.borrow();
+                assert_eq!(attempted.as_slice(), &events[..attempted.len()]);
+                if mask == 511 && stop == checkpoints {
+                    assert_eq!(
+                        attempted.as_slice(),
+                        events.as_slice(),
+                        "completion must poll the live guard after the last required EOF"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bfs_without_complete_admission_keeps_later_source_and_ordinal_failures() {
+        let graph = projection(511);
+        let call = bfs_call(VId(u128::MAX), None);
+        let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+        for fail_at in 1..=15 {
+            // three opens, nine edges, three EOFs
+            let rows = FaultRows {
+                graph: &graph,
+                calls: std::cell::Cell::new(0),
+                fail_at,
+            };
+            assert!(matches!(
+                bfs(&rows, 2, None, &admission, &mut || Ok(())),
+                Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                    usize::MAX
+                )))
+            ));
+            assert_eq!(rows.calls.get(), fail_at);
+        }
+        struct MalformedRows;
+        impl Rows for MalformedRows {
+            type Cursor<'a>
+                = PathRow
+            where
+                Self: 'a;
+            fn node_count(&self) -> usize {
+                2
+            }
+            fn degree(&self, source: usize) -> Option<usize> {
+                (source < 2).then_some(1)
+            }
+            fn open(&self, source: usize) -> Result<PathRow> {
+                // Row zero discovers the complete stated population. Row one
+                // then exposes an invalid ordinal; no admission certified it.
+                Ok(PathRow(Some((source + 1, 1.0))))
+            }
+        }
+        assert!(matches!(
+            bfs(&MalformedRows, 0, None, &admission, &mut || Ok(())),
+            Err(Error::Execution(ExecutionError::InvalidUpstreamResult))
+        ));
+    }
+
+    #[test]
+    fn admitted_bfs_keeps_discovery_limits_and_singleton_completion_control() {
+        let graph = projection(511);
+        let call = bfs_call(VId(u128::MAX), None);
+        for resource in ["result rows", "result bytes"] {
+            let mut admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+            let (limit, requested) = if resource == "result rows" {
+                admission.max_rows = 2;
+                (2, 3)
+            } else {
+                let bytes = admission.column_bytes + 3 * admission.row_bytes;
+                admission.max_bytes = bytes - 1;
+                (bytes - 1, bytes)
+            };
+            for admitted in [false, true] {
+                let result = if admitted {
+                    bfs(
+                        &AdmittedFaultRows::new(&graph, usize::MAX).unwrap(),
+                        2,
+                        None,
+                        &admission,
+                        &mut || Ok(()),
+                    )
+                } else {
+                    bfs(
+                        &FaultRows {
+                            graph: &graph,
+                            calls: std::cell::Cell::new(0),
+                            fail_at: usize::MAX,
+                        },
+                        2,
+                        None,
+                        &admission,
+                        &mut || Ok(()),
+                    )
+                };
+                assert!(
+                    matches!(result, Err(Error::Execution(ExecutionError::LimitExceeded {
+                    resource: actual, limit: actual_limit, requested: actual_requested,
+                })) if actual == resource && actual_limit == limit && actual_requested == requested)
+                );
+            }
+        }
+        let call = bfs_call(VId(0), None);
+        let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+        for cycle in [false, true] {
+            let singleton = PathRows { n: 1, cycle };
+            let mut checkpoints = 0;
+            let output = bfs(&singleton, 0, None, &admission, &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(output.row_count, 1);
+            assert_eq!(output.witness.nodes_touched, 0);
+            assert_eq!(output.witness.edges_scanned, 0);
+            assert_eq!(checkpoints, 2); // initialization, controlled completion
+            let mut reached = 0;
+            assert!(matches!(
+                bfs(&singleton, 0, None, &admission, &mut || {
+                    reached += 1;
+                    if reached == checkpoints {
+                        Err(Error::Cancelled(
+                            std::io::Error::other("singleton stop").into(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(Error::Cancelled(_))
+            ));
         }
     }
 

@@ -221,10 +221,18 @@ fn prepare(
                     .insert(name, parameter(raw, resolver)?)
                     .map_err(Failure::query)?;
             }
+            params = super::statement_clock()
+                .capture_parameters(cx, &step.text, &params)
+                .map_err(Failure::query)?
+                .into_owned();
             if step.kind == StepKind::Write {
-                if let Some(query) =
-                    query_write::prepare_statement(&step.text, &params, &step.query_write, options)?
-                {
+                if let Some(query) = query_write::prepare_statement(
+                    &step.text,
+                    &params,
+                    &step.query_write,
+                    options,
+                    cx,
+                )? {
                     // Reserve this source and all later fixed statements now.
                     // The actual expansion is admitted at execution, before
                     // source rows bind or any dependent script can stage.

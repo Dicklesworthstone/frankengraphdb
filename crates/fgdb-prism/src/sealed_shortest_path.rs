@@ -62,12 +62,34 @@ pub(super) fn run(
     admission: &ResultAdmission,
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<KernelOutput> {
+    run_selected(graph, source, options, None, admission, checkpoint)
+}
+
+pub(super) fn run_target(
+    graph: &impl Rows,
+    source: usize,
+    options: DijkstraOptions,
+    target: usize,
+    admission: &ResultAdmission,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<KernelOutput> {
+    run_selected(graph, source, options, Some(target), admission, checkpoint)
+}
+
+fn run_selected(
+    graph: &impl Rows,
+    source: usize,
+    options: DijkstraOptions,
+    destination: Option<usize>,
+    admission: &ResultAdmission,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<KernelOutput> {
     checkpoint()?;
     let n = graph.node_count();
-    if source >= n {
+    if source >= n || destination.is_some_and(|target| target >= n) {
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
-    admission.rows(1)?;
+    admission.rows(usize::from(destination.is_none()))?;
     let unit = uses_unit_fifo(n, graph.has_unit_weights());
     // The admitted sealed graph has already inspected every final weight.
     // Reopening ALL compressed rows for each source repeats that work, even
@@ -91,7 +113,14 @@ pub(super) fn run(
         }
     }
     if unit {
-        return run_unit_fifo(graph, source, options.cutoff(), admission, checkpoint);
+        return run_unit_fifo(
+            graph,
+            source,
+            options.cutoff(),
+            destination,
+            admission,
+            checkpoint,
+        );
     }
     let mut distances = reserve(n)?;
     let mut overflowed = reserve(n)?;
@@ -115,6 +144,10 @@ pub(super) fn run(
         };
         distances[entry.node] = Some(entry.cost);
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
+        if destination == Some(entry.node) {
+            admission.rows(1)?;
+            break;
+        }
         let mut row = graph.open(entry.node)?;
         while let Some((target, weight)) = row.next()? {
             checkpoint()?;
@@ -145,7 +178,9 @@ pub(super) fn run(
                 .ok_or(ExecutionError::InvalidUpstreamResult)?
             {
                 let next = add(discovered, 1)?;
-                admission.rows(next)?; // BEFORE the queue can retain this row
+                if destination.is_none() {
+                    admission.rows(next)?; // BEFORE the queue can retain this row
+                }
                 discovered = next;
             }
             heap.offer(target, candidate, checkpoint)?;
@@ -154,14 +189,26 @@ pub(super) fn run(
         // In contrast to hop-cutoff BFS, a vertex at the cost cutoff MUST
         // still expand: zero-weight edges can extend the admitted closure.
     }
-    for node in 0..n {
-        checkpoint()?;
-        if overflowed[node] && distances[node].is_none() {
-            return Err(ExecutionError::InvalidNumericResult.into());
+    let settled_target = destination.is_some_and(|target| distances[target].is_some());
+    if !settled_target {
+        for node in 0..n {
+            checkpoint()?;
+            if overflowed[node] && distances[node].is_none() {
+                return Err(ExecutionError::InvalidNumericResult.into());
+            }
         }
     }
-    if witness.nodes_touched != discovered {
+    if !settled_target && witness.nodes_touched != discovered {
         return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
+    if let Some(target) = destination {
+        witness.algorithm = "dijkstra_target_compressed_indexed_heap".to_owned();
+        let distance = distances[target];
+        return Ok(KernelOutput {
+            values: KernelValues::TargetDistance { target, distance },
+            row_count: usize::from(distance.is_some()),
+            witness,
+        });
     }
     Ok(KernelOutput {
         values: KernelValues::WeightedDistances(distances),
@@ -180,22 +227,35 @@ pub(super) struct UnitTraversal {
     queue: Vec<usize>,
     head: usize,
     witness: ComplexityWitness,
+    destination: Option<usize>,
 }
 
 impl UnitTraversal {
     pub(super) fn new(n: usize) -> Result<Self> {
+        Self::new_selected(n, None)
+    }
+
+    pub(super) fn new_selected(n: usize, destination: Option<usize>) -> Result<Self> {
+        if destination.is_some_and(|target| target >= n) {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
         Ok(Self {
             population: n,
             distances: reserve(n)?,
             queue: reserve(n)?,
             head: 0,
             witness: ComplexityWitness {
-                algorithm: "single_source_dijkstra_compressed_unit_fifo".to_owned(),
+                algorithm: if destination.is_some() {
+                    "dijkstra_target_compressed_unit_fifo"
+                } else {
+                    "single_source_dijkstra_compressed_unit_fifo"
+                }.to_owned(),
                 complexity_claim: "O(|V| log(1+H) + H log(1+|V|) + |V| + |E|) compressed row visits and unit queue work".to_owned(),
                 nodes_touched: 0,
                 edges_scanned: 0,
                 queue_peak: 1,
             },
+            destination,
         })
     }
 
@@ -228,6 +288,10 @@ impl UnitTraversal {
         Ok(Some((source, cost)))
     }
 
+    pub(super) fn is_target(&self, vertex: usize) -> bool {
+        self.destination == Some(vertex)
+    }
+
     pub(super) fn visit(
         &mut self,
         target: usize,
@@ -252,7 +316,9 @@ impl UnitTraversal {
         if cutoff.is_some_and(|limit| candidate > limit) {
             return Ok(());
         }
-        admission.rows(add(self.queue.len(), 1)?)?;
+        if self.destination.is_none() {
+            admission.rows(add(self.queue.len(), 1)?)?;
+        }
         *distance = Some(candidate);
         self.queue.push(target);
         self.witness.queue_peak = self.witness.queue_peak.max(self.queue.len() - self.head);
@@ -260,6 +326,21 @@ impl UnitTraversal {
     }
 
     pub(super) fn finish(self) -> Result<KernelOutput> {
+        if let Some(target) = self.destination {
+            let distance = self.distances[target];
+            if self.witness.nodes_touched != self.head
+                || (distance.is_some()
+                    && self.head.checked_sub(1).and_then(|at| self.queue.get(at)) != Some(&target))
+                || (distance.is_none() && self.head != self.queue.len())
+            {
+                return Err(ExecutionError::InvalidUpstreamResult.into());
+            }
+            return Ok(KernelOutput {
+                values: KernelValues::TargetDistance { target, distance },
+                row_count: usize::from(distance.is_some()),
+                witness: self.witness,
+            });
+        }
         if self.head != self.queue.len() || self.witness.nodes_touched != self.queue.len() {
             return Err(ExecutionError::InvalidUpstreamResult.into());
         }
@@ -275,11 +356,12 @@ fn run_unit_fifo(
     graph: &impl Rows,
     source: usize,
     cutoff: Option<f64>,
+    destination: Option<usize>,
     admission: &ResultAdmission,
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<KernelOutput> {
     checkpoint()?;
-    let mut traversal = UnitTraversal::new(graph.node_count())?;
+    let mut traversal = UnitTraversal::new_selected(graph.node_count(), destination)?;
     loop {
         checkpoint()?;
         if traversal.initialize_step() {
@@ -293,6 +375,10 @@ fn run_unit_fifo(
         let Some((node, cost)) = traversal.pop()? else {
             break;
         };
+        if traversal.is_target(node) {
+            admission.rows(1)?;
+            break;
+        }
         let mut row = graph.open(node)?;
         while let Some((target, weight)) = row.next()? {
             checkpoint()?;
@@ -832,6 +918,168 @@ mod tests {
                 assert_eq!(fixture.calls.get(), stop);
             }
         }
+    }
+
+    #[test]
+    fn target_stops_between_complete_rows_and_every_prior_failure_still_wins() {
+        for weight in [0.0, 1.0, 2.5] {
+            let mut fixture = Fixture::new(
+                4,
+                &[
+                    (0, 1, weight),
+                    (0, 2, weight),
+                    (1, 3, weight),
+                    (2, 3, weight),
+                ],
+            );
+            let options = DijkstraOptions::new(fixture.view.vertex_id(0).unwrap(), None).unwrap();
+            let call =
+                FnxCallSpec::dijkstra_path_length(options, fixture.view.vertex_id(1).unwrap());
+            let admission = ResultAdmission::new(&call, limits(1), memory()).unwrap();
+            let mut checkpoints = 0;
+            let output = run_target(
+                &Nonnegative::new(&fixture),
+                0,
+                options,
+                1,
+                &admission,
+                &mut || {
+                    checkpoints += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(
+                matches!(output.values, KernelValues::TargetDistance { target: 1, distance: Some(distance) } if distance == weight)
+            );
+            assert_eq!(output.row_count, 1);
+            assert_eq!(output.witness.nodes_touched, 2);
+            assert_eq!(output.witness.edges_scanned, 2);
+            assert_eq!(
+                fixture.calls.get(),
+                4,
+                "source open, both incidences, and its EOF; no target row"
+            );
+            for stop in 1..=checkpoints {
+                let mut seen = 0;
+                let result = run_target(
+                    &Nonnegative::new(&fixture),
+                    0,
+                    options,
+                    1,
+                    &admission,
+                    &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(Error::Cancelled(
+                                std::io::Error::other("target checkpoint").into(),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                );
+                assert!(
+                    matches!(result, Err(Error::Cancelled(_))),
+                    "stop={stop}, weight={weight}"
+                );
+                assert_eq!(seen, stop);
+            }
+            for stop in 1..=5 {
+                fixture.calls.set(0);
+                fixture.fail_at = stop;
+                let result = run_target(
+                    &Nonnegative::new(&fixture),
+                    0,
+                    options,
+                    1,
+                    &admission,
+                    &mut || Ok(()),
+                );
+                if stop <= 4 {
+                    assert!(
+                        matches!(
+                            result,
+                            Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                                usize::MAX
+                            )))
+                        ),
+                        "the EOF failure must not disappear after target discovery"
+                    );
+                    assert_eq!(fixture.calls.get(), stop);
+                } else {
+                    assert!(result.is_ok(), "a target's unneeded row must not be opened");
+                    assert_eq!(fixture.calls.get(), 4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn targeted_admission_counts_only_delivered_rows_and_keeps_complete_weight_validation() {
+        let fixture = Fixture::new(4, &[(0, 1, 2.0), (1, 2, 0.0)]);
+        let options = DijkstraOptions::new(fixture.view.vertex_id(0).unwrap(), Some(2.0)).unwrap();
+        let call = FnxCallSpec::dijkstra_path_length(options, fixture.view.vertex_id(2).unwrap());
+        let one = ResultAdmission::new(&call, limits(1), memory()).unwrap();
+        let output = run_target(&fixture, 0, options, 2, &one, &mut || Ok(())).unwrap();
+        assert!(matches!(
+            output.values,
+            KernelValues::TargetDistance {
+                target: 2,
+                distance: Some(2.0)
+            }
+        ));
+        let zero = ResultAdmission::new(&call, limits(0), memory()).unwrap();
+        assert!(matches!(
+            run_target(&fixture, 0, options, 2, &zero, &mut || Ok(())),
+            Err(Error::Execution(ExecutionError::LimitExceeded {
+                resource: "result rows",
+                requested: 1,
+                limit: 0
+            }))
+        ));
+        let empty = run_target(&fixture, 0, options, 3, &zero, &mut || Ok(())).unwrap();
+        assert_eq!(empty.row_count, 0);
+        assert!(matches!(
+            empty.values,
+            KernelValues::TargetDistance {
+                target: 3,
+                distance: None
+            }
+        ));
+        let exact_bytes = ResultAdmission::new(
+            &call,
+            limits(1),
+            FnxMemoryLimits {
+                max_result_bytes: one.column_bytes + one.row_bytes,
+                ..memory()
+            },
+        )
+        .unwrap();
+        assert!(run_target(&fixture, 0, options, 2, &exact_bytes, &mut || Ok(())).is_ok());
+        let no_row_bytes = ResultAdmission::new(
+            &call,
+            limits(1),
+            FnxMemoryLimits {
+                max_result_bytes: one.column_bytes,
+                ..memory()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            run_target(&fixture, 0, options, 2, &no_row_bytes, &mut || Ok(())),
+            Err(Error::Execution(ExecutionError::LimitExceeded {
+                resource: "result bytes",
+                ..
+            }))
+        ));
+        assert!(run_target(&fixture, 0, options, 3, &no_row_bytes, &mut || Ok(())).is_ok());
+        let negative = Fixture::new(3, &[(1, 2, -1.0)]);
+        let options = DijkstraOptions::new(negative.view.vertex_id(0).unwrap(), Some(0.0)).unwrap();
+        assert!(matches!(
+            run_target(&negative, 0, options, 0, &one, &mut || Ok(())),
+            Err(Error::Execution(ExecutionError::NegativeWeight))
+        ));
     }
 
     #[test]

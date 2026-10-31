@@ -264,6 +264,8 @@ impl PreparedNativeRead {
         params: &GqlParameters,
         policy: GqlQueryPolicy,
     ) -> Result<NativeAggregateCursor<'q>, QueryError> {
+        let captured = view.capture_statement_parameters(cx, self.statement(), params)?;
+        let params = captured.as_ref();
         let facade = self.facade_class();
         let (compiled, as_of) = match self {
             Self::Aggregate(prepared) => {

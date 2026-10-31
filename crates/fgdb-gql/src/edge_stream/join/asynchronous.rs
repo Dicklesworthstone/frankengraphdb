@@ -82,6 +82,12 @@ impl AsyncEdgeJoinPlan {
         self.inner.relation
     }
 
+    /// Direction of the first edge binding slot zero, independent of every
+    /// nested expansion's own direction and relation selector.
+    pub fn root_direction(&self) -> GlaDirection {
+        self.inner.direction
+    }
+
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         Self::check_access(plan)?;
         Ok(Self::from_inner(compile_output(plan, Output::OrderedRows)?))

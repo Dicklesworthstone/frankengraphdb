@@ -1976,6 +1976,7 @@ impl<'a> Parser<'a> {
             || self.list_function()?.is_some()
             || self.value_function()?.is_some()
             || self.random_call()?
+            || self.timestamp_call()?
         {
             return Ok(true);
         }
@@ -3179,6 +3180,17 @@ impl<'a> Parser<'a> {
             )?
         } else if self.random_call()? {
             self.random_value()?
+        } else if self.timestamp_call()? {
+            let at = self.current.at;
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            self.punct(b')', "() without arguments")?;
+            ReadValueTemplate::MapGet {
+                map: Box::new(self.statement_time_value(at)?),
+                key: "epochMillis".into(),
+                // Execution context is a scalar, never a graph element.
+                property: crate::set_text::ElementKeySlot::default(),
+            }
         } else if self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
@@ -3191,8 +3203,8 @@ impl<'a> Parser<'a> {
         } else if let Some((function, dotted)) = self.temporal_call()? {
             // A temporal constructor of a map, text, temporal value or NULL,
             // or a dotted call such as date.truncate(unit, value, map) whose
-            // argument is the list of its arguments (fgdb-txbg9). An empty
-            // constructor reads the statement clock, which no read has yet.
+            // argument is the list of its arguments (fgdb-txbg9). Empty
+            // constructors share one explicit statement-time parameter.
             let at = self.current.at;
             self.advance()?;
             if dotted {
@@ -3200,7 +3212,12 @@ impl<'a> Parser<'a> {
                 self.advance()?;
             }
             self.punct(b'(', "(")?;
-            let argument = if let Some((least, most)) = function.arity() {
+            let argument = if !dotted
+                && function != crate::GraphTemporalFunction::Duration
+                && self.take(b')')?
+            {
+                self.statement_time_value(at)?
+            } else if let Some((least, most)) = function.arity() {
                 let mut items = Vec::new();
                 loop {
                     items.push(self.read_recursive_value(
@@ -3468,6 +3485,23 @@ impl<'a> Parser<'a> {
     fn random_call(&self) -> Result<bool, GraphPatternTextError> {
         Ok(self.is_word("RAND")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+    }
+
+    fn timestamp_call(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(self.is_word("TIMESTAMP")
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+    }
+
+    fn statement_time_value(
+        &mut self,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphPatternTextError> {
+        let index = self.statement_time_parameter(at)?;
+        Ok(ReadValueTemplate::parameter(
+            index,
+            at,
+            self.syntax.parameters[index].parameter_type,
+        ))
     }
 
     /// `rand()`: the next call site, keyed on the element locals in force.
@@ -4367,33 +4401,12 @@ impl BoundSetTextInput {
         if let Some(selection) = &self.selection {
             return selection.checked_arguments(arguments);
         }
-        // Signed client integers for SKIP/LIMIT parameters (fgdb-3dnpu).
-        let admitted = arguments.admit_unsigned(&self.parameters);
-        let arguments: &GqlParameters = &admitted;
-        let mut values = Vec::new();
-        for (index, spec) in self.parameters.iter().enumerate() {
-            let at = self.parameter_offsets[index];
-            let value = arguments
-                .get(&spec.name)
-                .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
-            if !spec.parameter_type.accepts(value.parameter_type()) {
-                return Err(error(
-                    at,
-                    GraphPatternTextErrorKind::ParameterTypeMismatch {
-                        expected: spec.parameter_type,
-                        found: value.parameter_type(),
-                    },
-                ));
-            }
-            values.push(value);
-        }
-        if arguments.len() != values.len() {
-            return Err(error(
-                self.return_at,
-                GraphPatternTextErrorKind::UnexpectedArguments,
-            ));
-        }
-        Ok(values)
+        crate::graph_text::checked_parameter_values(
+            &self.parameters,
+            &self.parameter_offsets,
+            self.return_at,
+            arguments,
+        )
     }
 
     /// Only callers that checked the COMPLETE native argument table may use

@@ -12,6 +12,8 @@ use fgdb_types::CanonicalScalarResolver;
 
 #[path = "cross_keys.rs"]
 mod keyed;
+#[path = "cross_seeds.rs"]
+pub(super) mod seeds;
 
 pub(super) fn position(spool: &NativeResultSpool) -> RunInput {
     RunInput::new(
@@ -87,6 +89,7 @@ where
     } = binary::complete_children(
         plan.left(),
         plan.right(),
+        Some(plan),
         arguments,
         snapshot,
         host,

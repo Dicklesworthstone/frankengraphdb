@@ -3,7 +3,7 @@
 //! selected by this projection changes. At most two raw lookaheads are retained.
 
 use super::{Directedness, SealedProjectionError, SealedProjectionSpec};
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard};
 use fgdb_strata::tiered::sealed::{
     SealedCursor, SealedEdge, SealedIncomingCursor, SealedIncomingIndex, SealedPartition,
     SealedScanBudget, SealedScanStep,
@@ -36,7 +36,7 @@ impl<'a> Incidences<'a> {
     }
 
     pub(super) fn open(
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         partition: &'a SealedPartition,
         incoming: Option<&'a SealedIncomingIndex>,
         source: VId,
@@ -107,7 +107,7 @@ impl<'a> Incidences<'a> {
 
     pub(super) fn next_budgeted(
         &mut self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         budget: &mut SealedScanBudget,
     ) -> Result<SealedScanStep<(VId, SealedEdge<'a>)>, SealedProjectionError> {
         if self.finished {
@@ -126,7 +126,7 @@ impl<'a> Incidences<'a> {
 
     fn next_inner(
         &mut self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         budget: &mut SealedScanBudget,
     ) -> Result<SealedScanStep<(VId, SealedEdge<'a>)>, SealedProjectionError> {
         super::checkpoint(cx)?;

@@ -689,23 +689,25 @@ impl<'s> Connection<'s> {
         };
         let generation = session.generation();
         self.output_generation = Some(generation.clone());
-        let (columns, rows) = match session.query(&query_cx, query, &parameters) {
-            Ok(QueryResult::Rows { columns, rows }) => (
-                columns,
-                rows.iter()
-                    .map(|row| row.iter().map(convert::cell).collect::<Vec<_>>())
-                    .collect::<Vec<_>>(),
-            ),
-            Ok(QueryResult::Write { .. }) => return Err(read_only()),
-            Err(error) => {
-                return Err(if looks_like_write(query) {
-                    read_only()
-                } else {
-                    Failure::from_refusal(query_refusal(error))
-                });
-            }
-        };
-        let entities = hydrate(&query_cx, session, db, &rows, query, &parameters, seq)?;
+        let (columns, rows, selected) =
+            match session.query_with_snapshot(&query_cx, query, &parameters) {
+                Ok((QueryResult::Rows { columns, rows }, selected)) => (
+                    columns,
+                    rows.iter()
+                        .map(|row| row.iter().map(convert::cell).collect::<Vec<_>>())
+                        .collect::<Vec<_>>(),
+                    selected,
+                ),
+                Ok((QueryResult::Write { .. }, _)) => return Err(read_only()),
+                Err(error) => {
+                    return Err(if looks_like_write(query) {
+                        read_only()
+                    } else {
+                        Failure::from_refusal(query_refusal(error))
+                    });
+                }
+            };
+        let entities = hydrate(&query_cx, session, db, &rows, selected)?;
         let rows = rows
             .into_iter()
             .map(|row| {
@@ -1190,38 +1192,6 @@ fn collect_entities(value: &WireValue, vertices: &mut BTreeSet<u128>, edges: &mu
     }
 }
 
-/// Resolve the already-successful statement's effective cut with the same
-/// native templates as execution. Branch-only arguments are removed by the
-/// existing selector, never by string substitution. A temporal result must
-/// not be hydrated with newer labels, endpoints or properties.
-fn hydration_snapshot(
-    db: &Served,
-    text: &str,
-    parameters: &GqlParameters,
-    default: CommitSeq,
-) -> Result<CommitSeq, Failure> {
-    // The read lowers its pattern fields (fgdb-8srlm); so does this probe of
-    // the same statement.
-    let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, parameters);
-    let (text, parameters) = lowered
-        .as_ref()
-        .map_or((text, parameters), |(lowered, derived)| {
-            (lowered.text(), derived)
-        });
-    let selector = PreparedGraphBranchText::prepare(text)
-        .map_err(|error| Failure::invalid(error.to_string()))?;
-    let selected = selector
-        .bind_parameters(parameters)
-        .map_err(|error| Failure::invalid(error.to_string()))?;
-    let parameters = selected.parameters();
-    let prepared =
-        PreparedNativeRead::prepare(selected.statement(), parameters, db.symbols.clone())
-            .map_err(|error| Failure::from_refusal(query_refusal(error)))?;
-    prepared
-        .bound_snapshot_seq(parameters, default)
-        .map_err(|error| Failure::from_refusal(query_refusal(error)))
-}
-
 /// Execute a metadata lookup through the original authorized session. Only a
 /// hidden catalog binding reads as absent; expiry, cancellation and exhausted
 /// signed budgets abort the whole RUN instead of emitting incomplete values.
@@ -1260,9 +1230,7 @@ fn hydrate(
     session: &mut ReadSession<'_>,
     db: &Served,
     rows: &[Vec<WireValue>],
-    text: &str,
-    parameters: &GqlParameters,
-    default: CommitSeq,
+    at: CommitSeq,
 ) -> Result<Entities, Failure> {
     let mut vertices = BTreeSet::new();
     let mut edges = BTreeSet::new();
@@ -1274,7 +1242,6 @@ fn hydrate(
     if vertices.is_empty() && edges.is_empty() {
         return Ok(Entities::default());
     }
-    let at = hydration_snapshot(db, text, parameters, default)?;
     let temporal = format!("FOR SYSTEM_TIME AS OF SEQ {}", at.0);
     let mut entities = Entities {
         nodes: vertices

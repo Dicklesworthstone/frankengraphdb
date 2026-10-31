@@ -1,8 +1,10 @@
 //! Controlled UCS_BASIC prefix seeks over immutable value buckets.
 //!
 //! The numeric range source supplies the same bounded, governed heap. Prefix
-//! type checks and the 64-head capacity are decided before output. Histories
-//! remain the complete fallback; scoped admission retains the selected prefix.
+//! type checks and the 64-head capacity are decided before output. Wide binary
+//! prefixes test historical membership one identity at a time without admitting
+//! unrelated histories. Alternate collations retain the complete fallback;
+//! scoped admission rechecks the selected prefix after visibility masking.
 
 use super::{EqualityKey, index_successor, range};
 use crate::gql_exec::source::{
@@ -12,12 +14,19 @@ use crate::gql_exec::source::{
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::scan_stream::SourceStep;
 use fgdb_gql::stream::VertexScanEvent;
+use fgdb_strata::vertex::VertexPatchRows;
 use fgdb_types::{CanonicalScalar, VId};
 use std::sync::Arc;
 
 enum Frontier {
     Pending,
     Buckets(Vec<range::Head>),
+    HistoricalMatches {
+        scan: VertexHistoryScanCursor,
+        // A controlled membership check can refuse after advancing the spine.
+        // Keep that identity until the complete source step is admitted.
+        pending: Option<VId>,
+    },
     Histories(VertexHistoryScanCursor),
 }
 
@@ -53,7 +62,9 @@ impl PrefixCandidates {
 
     pub(super) fn history(&self, vid: VId) -> Option<&History> {
         match &self.frontier {
-            Frontier::Histories(scan) => scan.history(vid),
+            Frontier::Histories(scan) | Frontier::HistoricalMatches { scan, .. } => {
+                scan.history(vid)
+            }
             Frontier::Pending | Frontier::Buckets(_) => None,
         }
     }
@@ -61,13 +72,15 @@ impl PrefixCandidates {
     pub(super) fn next<C>(
         &mut self,
         index: &PropertyEqualityIndex,
+        patches: &[VertexPatchRows],
         after: Option<VId>,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<SourceStep<VId>, C> {
         control(VertexScanEvent::Work)?;
         if matches!(self.frontier, Frontier::Pending) {
             let mut count = 0;
-            let narrow = types_are_safe(index, &self.range, control)?
+            let binary = types_are_safe(index, &self.range, control)?;
+            let narrow = binary
                 && range::visit_range(&index.candidates, &self.range, control, &mut |root, _| {
                     count += usize::from(root.0.is_some());
                     Ok(count <= range::MAX_RANGE_HEADS)
@@ -95,6 +108,11 @@ impl PrefixCandidates {
                 // Publish only a completely admitted frontier, including an
                 // empty range. Refused setup can be retried without lost roots.
                 self.frontier = Frontier::Buckets(heads);
+            } else if binary {
+                self.frontier = Frontier::HistoricalMatches {
+                    scan: VertexHistoryScanCursor::default(),
+                    pending: None,
+                };
             } else {
                 self.frontier = Frontier::Histories(VertexHistoryScanCursor::default());
             }
@@ -116,10 +134,97 @@ impl PrefixCandidates {
                     SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
                 })
             })?,
+            Frontier::HistoricalMatches { scan, pending } => {
+                return history_step(
+                    scan,
+                    pending,
+                    index,
+                    patches,
+                    self.range.key,
+                    &self.prefix,
+                    control,
+                );
+            }
             Frontier::Pending => unreachable!("frontier selected above"),
         };
         Ok(next.map_or(SourceStep::Exhausted, SourceStep::Item))
     }
+}
+
+/// Keep the same candidate set as the property postings, including retired and
+/// future versions. The native cursor alone resolves the winner at its pinned
+/// cut. A noncandidate still yields a cooperative source step, but consumes no
+/// SnapshotRecord allowance and never materializes a current vertex row.
+fn history_step<C>(
+    scan: &mut VertexHistoryScanCursor,
+    pending: &mut Option<VId>,
+    index: &PropertyEqualityIndex,
+    patches: &[VertexPatchRows],
+    key: PropertyKeyId,
+    prefix: &str,
+    control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+) -> Result<SourceStep<VId>, C> {
+    if pending.is_none() {
+        *pending = scan.next(&index.histories, &mut |event| {
+            control(match event {
+                SourceEvent::Work | SourceEvent::SnapshotRecord => VertexScanEvent::Work,
+                SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+            })
+        })?;
+    }
+    let Some(vid) = *pending else {
+        return Ok(SourceStep::Exhausted);
+    };
+    let history = scan
+        .history(vid)
+        .expect("pending identity retains its history");
+    let matches = history_matches(history, patches, key, prefix, control)?;
+    // Publish only after the complete check. A refusal leaves pending set so
+    // retry cannot skip the identity that the spine already enumerated.
+    *pending = None;
+    Ok(if matches {
+        SourceStep::Item(vid)
+    } else {
+        SourceStep::Skipped(vid)
+    })
+}
+
+fn history_matches<C>(
+    history: &History,
+    patches: &[VertexPatchRows],
+    key: PropertyKeyId,
+    prefix: &str,
+    control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+) -> Result<bool, C> {
+    let Some(node) = history.0.as_deref() else {
+        return Ok(false);
+    };
+    control(VertexScanEvent::Work)?;
+    if history_matches(&node.right, patches, key, prefix, control)? {
+        return Ok(true);
+    }
+    let (_, patch, row) = node.key;
+    let properties = &patches[patch][row].props;
+    let mut low = 0;
+    let mut high = properties.len();
+    while low < high {
+        control(VertexScanEvent::Work)?;
+        let mid = low + (high - low) / 2;
+        match properties[mid].0.cmp(&key) {
+            core::cmp::Ordering::Less => low = mid + 1,
+            core::cmp::Ordering::Greater => high = mid,
+            core::cmp::Ordering::Equal => {
+                control(VertexScanEvent::Work)?;
+                if matches!(properties[mid].1.as_scalar(), Some(CanonicalScalar::Text(value))
+                    if value.as_str().starts_with(prefix))
+                {
+                    return Ok(true);
+                }
+                break;
+            }
+        }
+    }
+    history_matches(&node.left, patches, key, prefix, control)
 }
 
 /// Prefix byte order is valid only in UCS_BASIC. Nontext values are UNKNOWN

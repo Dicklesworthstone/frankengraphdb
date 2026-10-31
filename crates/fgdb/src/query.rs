@@ -10,6 +10,138 @@ use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 
 type Cancel = Box<asupersync::error::Error>;
 
+/// A trusted host's calendar clock. It is sampled at statement binding, never
+/// by an expression evaluator. The returned timestamp includes the host's
+/// chosen offset or pinned timezone; the engine does not infer a calendar from
+/// the runtime's process-relative timer or read the ambient wall clock.
+#[derive(Clone)]
+pub struct StatementClock {
+    source:
+        std::sync::Arc<dyn Fn(&QueryCx) -> Option<fgdb_types::CanonicalTimestamp> + Send + Sync>,
+}
+
+impl StatementClock {
+    /// Install an explicit calendar-time authority. Returning `None` refuses
+    /// the statement; it never falls back to an ambient clock.
+    pub fn new(
+        source: impl Fn(&QueryCx) -> Option<fgdb_types::CanonicalTimestamp> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            source: std::sync::Arc::new(source),
+        }
+    }
+
+    /// Capture one instant for all current-time constructors in a statement.
+    /// Explicitly supplied context is retained, which also lets replay avoid
+    /// sampling. Statements with no current-time constructor borrow their
+    /// arguments unchanged and spend no clock observation.
+    pub fn capture_parameters<'p>(
+        &self,
+        cx: &QueryCx,
+        text: &str,
+        params: &'p GqlParameters,
+    ) -> Result<std::borrow::Cow<'p, GqlParameters>, StatementTimeError> {
+        self.capture_if_required(cx, fgdb_gql::statement_time_required(text), params)
+    }
+
+    /// Bind a fresh observation to an already prepared template without
+    /// reparsing its statement or retaining a preparation-time value.
+    pub fn capture_for_template<'p>(
+        &self,
+        cx: &QueryCx,
+        schema: &[GqlParameterSpec],
+        params: &'p GqlParameters,
+    ) -> Result<std::borrow::Cow<'p, GqlParameters>, StatementTimeError> {
+        self.capture_if_required(
+            cx,
+            schema.iter().any(GqlParameterSpec::is_statement_time),
+            params,
+        )
+    }
+
+    fn capture_if_required<'p>(
+        &self,
+        cx: &QueryCx,
+        required: bool,
+        params: &'p GqlParameters,
+    ) -> Result<std::borrow::Cow<'p, GqlParameters>, StatementTimeError> {
+        if params.statement_time().is_some() || !required {
+            return Ok(std::borrow::Cow::Borrowed(params));
+        }
+        cx.checkpoint().map_err(StatementTimeError::Cancelled)?;
+        let instant = (self.source)(cx);
+        // The host callback can itself encounter cancellation. No bound value
+        // or graph observation escapes after that boundary.
+        cx.checkpoint().map_err(StatementTimeError::Cancelled)?;
+        let instant = instant.ok_or(StatementTimeError::Unavailable)?;
+        params
+            .clone()
+            .with_statement_time(instant)
+            .map(std::borrow::Cow::Owned)
+            .map_err(StatementTimeError::Parameter)
+    }
+}
+
+impl core::fmt::Debug for StatementClock {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("StatementClock([HOST AUTHORITY])")
+    }
+}
+
+/// A host calendar observation was unavailable, cancelled, or could not fit
+/// the same bounded argument transcript that carries ordinary parameters.
+#[derive(Debug)]
+pub enum StatementTimeError {
+    Unavailable,
+    Cancelled(Cancel),
+    Parameter(GqlParameterError),
+}
+
+impl core::fmt::Display for StatementTimeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("statement calendar-time authority is unavailable"),
+            Self::Cancelled(error) => error.fmt(f),
+            Self::Parameter(error) => error.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for StatementTimeError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Unavailable => None,
+            Self::Cancelled(error) => Some(error.as_ref()),
+            Self::Parameter(error) => Some(error),
+        }
+    }
+}
+
+/// Narrowed sessions accept parameter data, not a replacement calendar
+/// authority. Discard request-provided context before consulting the trusted
+/// host clock. Replay uses the privileged owner path and its recorded context.
+pub(crate) fn capture_authorized_statement_parameters<'p>(
+    clock: Option<&StatementClock>,
+    cx: &QueryCx,
+    required: bool,
+    params: &'p GqlParameters,
+) -> Result<std::borrow::Cow<'p, GqlParameters>, StatementTimeError> {
+    if params.statement_time().is_none() {
+        return clock.map_or_else(
+            || Ok(std::borrow::Cow::Borrowed(params)),
+            |clock| clock.capture_if_required(cx, required, params),
+        );
+    }
+    let mut ordinary = params.clone();
+    ordinary.clear_statement_time();
+    if let Some(clock) = clock {
+        ordinary = clock
+            .capture_if_required(cx, required, &ordinary)?
+            .into_owned();
+    }
+    Ok(std::borrow::Cow::Owned(ordinary))
+}
+
 #[path = "query_aggregate_stream.rs"]
 mod aggregate_stream;
 #[path = "query_authorized.rs"]
@@ -90,6 +222,7 @@ pub enum QueryResult {
 /// refusal. Unsupported includes structural parser diagnostics, never values.
 #[derive(Debug)]
 pub enum QueryError {
+    StatementTime(StatementTimeError),
     /// Signature, scope, expiry, retirement, or signed-budget refusal.
     Authorization(fgdb_warden::Error),
     /// A native read could not admit its database generation or revision.
@@ -146,6 +279,7 @@ pub enum QueryError {
 impl core::fmt::Display for QueryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::StatementTime(error) => error.fmt(f),
             Self::Authorization(error) => error.fmt(f),
             Self::Read(error) => error.fmt(f),
             Self::Unsupported { diagnostics } => {
@@ -185,6 +319,7 @@ impl core::fmt::Display for QueryError {
 impl core::error::Error for QueryError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            Self::StatementTime(error) => Some(error),
             Self::Authorization(error) => Some(error),
             Self::Read(error) => Some(error),
             Self::Refused { source, .. } => Some(source.as_ref()),
@@ -205,6 +340,7 @@ impl core::error::Error for QueryError {
 
 #[derive(Debug)]
 pub enum QueryWriteError<A> {
+    StatementTime(StatementTimeError),
     Prepare(GraphWriteScriptError),
     /// A recognized UNWIND mutation failed whole-input admission/binding.
     UnwindBinding(fgdb_gql::unwind_write::GraphUnwindWriteError),
@@ -235,6 +371,7 @@ pub enum QueryWriteError<A> {
 impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::StatementTime(error) => error.fmt(f),
             Self::Prepare(e) => e.fmt(f),
             Self::UnwindBinding(e) => e.fmt(f),
             Self::Execute(e) => e.fmt(f),
@@ -256,6 +393,7 @@ impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
 impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            Self::StatementTime(error) => Some(error),
             Self::Prepare(error) => Some(error),
             Self::UnwindBinding(error) => Some(error),
             Self::Execute(error) => Some(error),
@@ -512,6 +650,30 @@ pub(crate) fn aggregates(
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Supply or withdraw the host's calendar-time capability. A fresh handle
+    /// has none: embedded users can instead pass a captured instant with
+    /// `GqlParameters::with_statement_time`. Pinned views keep the authority
+    /// present when they were issued; templates retain no captured value.
+    pub fn set_statement_clock(&mut self, clock: Option<StatementClock>) {
+        self.statement_clock = clock;
+    }
+
+    pub(crate) fn capture_statement_parameters<'p>(
+        &self,
+        cx: &QueryCx,
+        text: &str,
+        params: &'p GqlParameters,
+    ) -> Result<std::borrow::Cow<'p, GqlParameters>, QueryError> {
+        self.statement_clock.as_ref().map_or_else(
+            || Ok(std::borrow::Cow::Borrowed(params)),
+            |clock| {
+                clock
+                    .capture_parameters(cx, text, params)
+                    .map_err(QueryError::StatementTime)
+            },
+        )
+    }
+
     /// Execute a read using the native parsers as the classification authority.
     /// More specific grammars precede their general forms. A successful prepare
     /// commits the classification: binding/execution failures never try another
@@ -593,6 +755,15 @@ impl<V: Vfs + Clone> Database<V> {
         budget: GraphWriteProgramPolicy,
         allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
+        let captured = self
+            .statement_clock
+            .as_ref()
+            .map_or_else(
+                || Ok(std::borrow::Cow::Borrowed(params)),
+                |clock| clock.capture_parameters(cx, text, params),
+            )
+            .map_err(QueryWriteError::StatementTime)?;
+        let params = captured.as_ref();
         let lowered = map_arguments(text, params);
         let (text, params) = lowered
             .as_ref()
@@ -817,6 +988,15 @@ impl WriteTxn {
         budget: GraphWriteProgramPolicy,
         allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
+        let captured = database
+            .statement_clock
+            .as_ref()
+            .map_or_else(
+                || Ok(std::borrow::Cow::Borrowed(params)),
+                |clock| clock.capture_parameters(cx, text, params),
+            )
+            .map_err(QueryWriteError::StatementTime)?;
+        let params = captured.as_ref();
         let lowered = map_arguments(text, params);
         let (text, params) = lowered
             .as_ref()

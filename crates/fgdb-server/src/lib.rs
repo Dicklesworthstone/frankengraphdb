@@ -402,6 +402,9 @@ pub(crate) fn capability_from_hex(hex: &str) -> Option<CapabilityToken> {
 /// One served database and its fixed authority inputs.
 pub(crate) struct Served {
     pub(crate) db: recovery::DatabaseSlot,
+    /// The same trusted binding-time authority installed on the native owner.
+    /// Direct transport binders use it before handing off immutable operands.
+    pub(crate) statement_clock: fgdb::StatementClock,
     pub(crate) authority: Authority,
     pub(crate) symbols: Symbols,
     pub(crate) write_relation: RelationId,
@@ -505,6 +508,14 @@ impl Server {
         let mut db = Database::open(&contexts.commit(), path, config.keys)
             .await
             .map_err(ServerError::Open)?;
+        let statement_clock = fgdb::StatementClock::new(|_| {
+            let elapsed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?;
+            let nanos = i128::try_from(elapsed.as_nanos()).ok()?;
+            fgdb_types::CanonicalTimestamp::offset_only(nanos, 0).ok()
+        });
+        db.set_statement_clock(Some(statement_clock.clone()));
         db.set_read_cache_limits(&contexts.query(), config.read_cache_limits)
             .map_err(ServerError::ReadCache)?;
         let beacon = beacon::ConfiguredIndexes {
@@ -531,6 +542,7 @@ impl Server {
             config.name,
             Arc::new(Served {
                 db,
+                statement_clock,
                 authority,
                 symbols: config.symbols,
                 write_relation: config.write_relation,

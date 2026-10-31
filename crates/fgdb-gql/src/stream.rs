@@ -20,7 +20,7 @@
 //! or dropping provides backpressure without scanning the unused suffix. This
 //! does not promise a server lease, restart token, spill, or byte-memory limit.
 
-use crate::algebra::{GlaOperator, GlaPlan, VertexPredicate};
+use crate::algebra::{GlaOperator, GlaPlan, ValueProjection, VertexPredicate};
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
     GqlQueryPolicy,
@@ -93,6 +93,29 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
     #[must_use]
     pub fn has_graph_probes(&self) -> bool {
         self.tests.iter().any(|test| matches!(test, Test::Probe(_)))
+    }
+
+    /// Whether the compiled local evaluator may inspect a property payload.
+    /// A false result permits an authenticated source to supply identity and
+    /// labels alone; visibility, candidate admission and all controls still
+    /// run normally. This proof covers the complete evaluation projection,
+    /// including hidden ordering cells, and never drops a fallible predicate.
+    /// Boolean bindings and graph probes conservatively require full fields.
+    #[must_use]
+    pub fn requires_properties(&self) -> bool {
+        if self.tests.iter().any(|test| match test {
+            Test::Predicate(VertexPredicate::HasLabel(_)) | Test::Identity(_) => false,
+            Test::Predicate(_) | Test::Binding(_) | Test::Probe(_) => true,
+        }) {
+            return true;
+        }
+        match self.projection.as_ref() {
+            GlaOperator::Project { .. } => false,
+            GlaOperator::ProjectValues { columns } => columns
+                .iter()
+                .any(|column| !matches!(column, ValueProjection::Vertex { .. })),
+            _ => true,
+        }
     }
 
     /// Infallible root predicates that precede every Boolean expression and

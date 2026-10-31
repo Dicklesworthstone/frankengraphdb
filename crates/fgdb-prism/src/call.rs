@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 23;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 25;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -191,12 +191,49 @@ const DIJKSTRA_PARAMETERS: &[FnxParameterSpec] = &[
         default: Some(FnxArgument::Boolean(false)),
     },
 ];
+const DIJKSTRA_TARGET_PARAMETERS: &[FnxParameterSpec] = &[
+    DIJKSTRA_PARAMETERS[0],
+    FnxParameterSpec {
+        name: "target",
+        value_type: FnxParameterType::Vertex,
+        positional: true,
+        default: None,
+    },
+    DIJKSTRA_PARAMETERS[1],
+    DIJKSTRA_PARAMETERS[2],
+];
 const CDLP_PARAMETERS: &[FnxParameterSpec] = &[FnxParameterSpec {
     name: "max_iter",
     value_type: FnxParameterType::NonNegativeInteger,
     positional: true,
     default: None,
 }];
+const KATZ_PARAMETERS: &[FnxParameterSpec] = &[
+    FnxParameterSpec {
+        name: "alpha",
+        value_type: FnxParameterType::FiniteFloat,
+        positional: true,
+        default: Some(FnxArgument::Float(0.1)),
+    },
+    FnxParameterSpec {
+        name: "beta",
+        value_type: FnxParameterType::FiniteFloat,
+        positional: true,
+        default: Some(FnxArgument::Float(1.0)),
+    },
+    FnxParameterSpec {
+        name: "max_iter",
+        value_type: FnxParameterType::PositiveInteger,
+        positional: true,
+        default: Some(FnxArgument::Integer(1000)),
+    },
+    FnxParameterSpec {
+        name: "tol",
+        value_type: FnxParameterType::FiniteFloat,
+        positional: true,
+        default: Some(FnxArgument::Float(1e-6)),
+    },
+];
 const SIGNATURES: &[FnxSignature] = &[
     FnxSignature {
         name: "fnx.pagerank",
@@ -432,6 +469,32 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_laws: "explicit undirected simple projection; caller-selected parallel-edge reduction; weights ignored; self-loops ignored; projected edges whose removal increases connected-component count; vertex < neighbor, lexicographic full-width VId pair order; endpoints identify a projected edge, not a raw EId",
         complexity: "O(|V| + |E|) logical traversal and canonical ordering plus separately bounded compressed history/lookup work; O(|V|) integer workspace and depth-bounded compressed cursors",
         execution_kernel: "fgdb-prism/bridges-lowlink-v1",
+    },
+    FnxSignature {
+        name: "fnx.dijkstra_path_length",
+        graph_input_arity: 1,
+        parameters: DIJKSTRA_TARGET_PARAMETERS,
+        outputs: &[FnxOutput::Vertex, FnxOutput::Distance],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Any,
+        numeric_profile: "dijkstra-target-f64-policy-selected-by-strict-v1",
+        rng_policy: "none",
+        graph_laws: "explicit projection; known source and target; complete finite nonnegative weight admission; inclusive cost cutoff; FIFO ties; fnx 1e-12 relaxation unless strict; only the target row, or no row when unreachable/beyond cutoff; stop at target finalization between drained rows; a settled target ignores unneeded distance overflows, otherwise retain whole-source overflow refusal",
+        complexity: "O((|V| + |E|) * log(1 + |V|)) worst case, stopping at the target; O(|V| + |E|) for proven unit weights; O(1) retained result",
+        execution_kernel: "fgdb-prism/dijkstra-target-unit-or-indexed-heap-v1",
+    },
+    FnxSignature {
+        name: "fnx.katz_centrality",
+        graph_input_arity: 1,
+        parameters: KATZ_PARAMETERS,
+        outputs: &[FnxOutput::Vertex, FnxOutput::Score],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Any,
+        numeric_profile: "fnx-katz-f64-canonical-node-order-v1",
+        rng_policy: "none",
+        graph_laws: "explicit simple projection; weights ignored; retained self-loops contribute once per row; incoming Katz x=alpha*A^T*x+beta from zero; alpha finite nonnegative, scalar beta finite; successive-iterate L1 < |V|*tol, then L2 normalization; zero vector stays zero, nonfinite or underflowed norm refuses; non-convergence refuses at max_iter; defaults .1/1/1000/1e-6 match checked FNX, including singleton score 1 without iteration; custom settings iterate singletons; isolates retained",
+        complexity: "O(k * (|V| + |E|)); O(|V|) kernel workspace",
+        execution_kernel: "fgdb-prism/katz-csr-source-order-v1",
     },
 ];
 
@@ -738,6 +801,75 @@ impl Default for PageRankOptions {
     }
 }
 
+/// Scalar incoming Katz centrality with checked power-iteration convergence.
+///
+/// `alpha` attenuates longer walks. A value below the inverse spectral radius
+/// is the usual convergence condition; this API neither estimates that radius
+/// nor silently changes the requested value. Select a smaller alpha for dense
+/// graphs. `beta` supplies each vertex's baseline, including isolates. The
+/// result is L2-normalized only after the successive-iterate L1 change is below
+/// `|V| * tolerance`; the cap refuses rather than returning an unconverged rank.
+/// Defaults reproduce the pinned FNX checked entry, including its singleton
+/// shortcut. Custom settings run the recurrence even for a singleton.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KatzOptions {
+    alpha: f64,
+    beta: f64,
+    max_iter: usize,
+    tol: f64,
+}
+
+impl KatzOptions {
+    pub fn new(alpha: f64, beta: f64, max_iter: usize, tol: f64) -> Result<Self, FnxBindError> {
+        let invalid = |message| FnxBindError {
+            at: 0,
+            kind: FnxBindErrorKind::InvalidArgument(message),
+        };
+        if !alpha.is_finite() || alpha < 0.0 {
+            return Err(invalid("alpha must be finite and nonnegative"));
+        }
+        if !beta.is_finite() {
+            return Err(invalid("beta must be finite"));
+        }
+        if max_iter == 0 {
+            return Err(invalid("max_iter must be positive"));
+        }
+        if !tol.is_finite() || tol <= 0.0 {
+            return Err(invalid("tol must be finite and positive"));
+        }
+        Ok(Self {
+            alpha: if alpha == 0.0 { 0.0 } else { alpha },
+            beta: if beta == 0.0 { 0.0 } else { beta },
+            max_iter,
+            tol,
+        })
+    }
+
+    pub const fn alpha(self) -> f64 {
+        self.alpha
+    }
+    pub const fn beta(self) -> f64 {
+        self.beta
+    }
+    pub const fn max_iter(self) -> usize {
+        self.max_iter
+    }
+    pub const fn tolerance(self) -> f64 {
+        self.tol
+    }
+}
+
+impl Default for KatzOptions {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            beta: 1.0,
+            max_iter: 1000,
+            tol: 1e-6,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FnxAlgorithm {
     PageRank(PageRankOptions),
@@ -749,6 +881,11 @@ pub enum FnxAlgorithm {
     WeaklyConnectedComponents,
     StronglyConnectedComponents,
     SingleSourceDijkstraPathLength(DijkstraOptions),
+    /// One destination, with the same projected weight and comparison laws.
+    DijkstraPathLength {
+        options: DijkstraOptions,
+        target: VId,
+    },
     Triangles,
     ClusteringCoefficient,
     /// A pinned catalog procedure whose signature identifies its executor.
@@ -764,6 +901,7 @@ pub enum FnxAlgorithm {
     HitsCentrality,
     ArticulationPoints,
     Bridges,
+    KatzCentrality(KatzOptions),
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -774,6 +912,7 @@ impl FnxAlgorithm {
             Self::WeaklyConnectedComponents => 3,
             Self::StronglyConnectedComponents => 4,
             Self::SingleSourceDijkstraPathLength(_) => 5,
+            Self::DijkstraPathLength { .. } => 22,
             Self::Triangles => 6,
             Self::ClusteringCoefficient => 7,
             Self::Foundation(FoundationAlgorithm::LoadCentrality) => 18,
@@ -785,6 +924,7 @@ impl FnxAlgorithm {
             Self::HitsCentrality => 19,
             Self::ArticulationPoints => 20,
             Self::Bridges => 21,
+            Self::KatzCentrality(_) => 23,
         }]
     }
 }
@@ -850,6 +990,14 @@ impl FnxCallSpec {
     pub fn single_source_dijkstra_path_length(options: DijkstraOptions) -> Self {
         Self::new(FnxAlgorithm::SingleSourceDijkstraPathLength(options))
     }
+    /// Return only the requested destination's distance. Intermediate vertices
+    /// consume bounded kernel workspace, never the 0/1 result-row allowance.
+    /// Complete weight admission precedes early termination. A settled target
+    /// does not depend on overflowing distances to other destinations; if no
+    /// target settles, the all-source overflow refusal still applies.
+    pub fn dijkstra_path_length(options: DijkstraOptions, target: VId) -> Self {
+        Self::new(FnxAlgorithm::DijkstraPathLength { options, target })
+    }
     pub fn triangles() -> Self {
         Self::new(FnxAlgorithm::Triangles)
     }
@@ -877,6 +1025,12 @@ impl FnxCallSpec {
     pub fn hits_centrality() -> Self {
         Self::new(FnxAlgorithm::HitsCentrality)
     }
+    /// Checked incoming Katz centrality with scalar attenuation and baseline.
+    /// Text calls accept `alpha`, `beta`, `max_iter` and `tol`, in that order
+    /// or by name. Defaults match the pinned FNX checked procedure.
+    pub fn katz_centrality(options: KatzOptions) -> Self {
+        Self::new(FnxAlgorithm::KatzCentrality(options))
+    }
     /// Cut vertices of the explicit undirected simple projection, in VId order.
     pub fn articulation_points() -> Self {
         Self::new(FnxAlgorithm::ArticulationPoints)
@@ -900,6 +1054,10 @@ impl FnxCallSpec {
             FnxAlgorithm::SingleSourceDijkstraPathLength(options) => match options.comparison() {
                 DijkstraComparison::Strict => "fgdb-f64-dijkstra-strict-fifo-v1",
                 DijkstraComparison::FnxEpsilon => "fnx-f64-dijkstra-epsilon-1e-12-fifo-v1",
+            },
+            FnxAlgorithm::DijkstraPathLength { options, .. } => match options.comparison() {
+                DijkstraComparison::Strict => "fgdb-f64-dijkstra-target-strict-fifo-v1",
+                DijkstraComparison::FnxEpsilon => "fnx-f64-dijkstra-target-epsilon-1e-12-fifo-v1",
             },
             _ => self.signature().numeric_profile,
         }
@@ -1162,6 +1320,22 @@ impl FnxCallSpec {
                     PageRankOptions::new(alpha, max_iter, tol, weighted).map_err(whole)?,
                 )
             }
+            "fnx.katz_centrality" => {
+                let alpha = float_argument(arguments[0])
+                    .ok_or_else(|| invalid(0, "finite exact alpha required"))?;
+                let beta = float_argument(arguments[1])
+                    .ok_or_else(|| invalid(1, "finite exact beta required"))?;
+                let max_iter = match arguments[2] {
+                    FnxArgument::Integer(value) if value > 0 => usize::try_from(value).ok(),
+                    _ => None,
+                }
+                .ok_or_else(|| invalid(2, "positive integer max_iter required"))?;
+                let tol = float_argument(arguments[3])
+                    .ok_or_else(|| invalid(3, "finite exact tol required"))?;
+                FnxAlgorithm::KatzCentrality(
+                    KatzOptions::new(alpha, beta, max_iter, tol).map_err(whole)?,
+                )
+            }
             "fnx.single_source_shortest_path_length" => {
                 let source = match arguments[0] {
                     FnxArgument::Vertex(vertex) => vertex,
@@ -1178,36 +1352,52 @@ impl FnxCallSpec {
                 };
                 FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff }
             }
-            "fnx.single_source_dijkstra_path_length" => {
+            "fnx.single_source_dijkstra_path_length" | "fnx.dijkstra_path_length" => {
                 let source = match arguments[0] {
                     FnxArgument::Vertex(vertex) => vertex,
                     FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
                     _ => return Err(invalid(0, "VId or nonnegative integer source required")),
                 };
-                let cutoff = if arguments[1] == FnxArgument::Null {
+                let target = if signature.name == "fnx.dijkstra_path_length" {
+                    Some(match arguments[1] {
+                        FnxArgument::Vertex(vertex) => vertex,
+                        FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
+                        _ => return Err(invalid(1, "VId or nonnegative integer target required")),
+                    })
+                } else {
+                    None
+                };
+                let cutoff_index = 1 + usize::from(target.is_some());
+                let strict_index = cutoff_index + 1;
+                let cutoff = if arguments[cutoff_index] == FnxArgument::Null {
                     None
                 } else {
                     Some(
-                        float_argument(arguments[1])
+                        float_argument(arguments[cutoff_index])
                             .filter(|&value| value >= 0.0)
                             .ok_or_else(|| {
-                                invalid(1, "finite nonnegative exact cost or NULL required")
+                                invalid(
+                                    cutoff_index,
+                                    "finite nonnegative exact cost or NULL required",
+                                )
                             })?,
                     )
                 };
-                let FnxArgument::Boolean(strict) = arguments[2] else {
-                    return Err(invalid(2, "boolean strict required"));
+                let FnxArgument::Boolean(strict) = arguments[strict_index] else {
+                    return Err(invalid(strict_index, "boolean strict required"));
                 };
                 let comparison = if strict {
                     DijkstraComparison::Strict
                 } else {
                     DijkstraComparison::FnxEpsilon
                 };
-                FnxAlgorithm::SingleSourceDijkstraPathLength(
-                    DijkstraOptions::new(source, cutoff)
-                        .map_err(whole)?
-                        .with_comparison(comparison),
-                )
+                let options = DijkstraOptions::new(source, cutoff)
+                    .map_err(whole)?
+                    .with_comparison(comparison);
+                match target {
+                    Some(target) => FnxAlgorithm::DijkstraPathLength { options, target },
+                    None => FnxAlgorithm::SingleSourceDijkstraPathLength(options),
+                }
             }
             "fnx.connected_components" => FnxAlgorithm::ConnectedComponents,
             "fnx.weakly_connected_components" => FnxAlgorithm::WeaklyConnectedComponents,
@@ -1425,6 +1615,19 @@ impl FnxCallSpec {
                 }
             }
         }
+        if registration.name == "fnx.katz_centrality" {
+            for (index, &(parameter, value)) in supplied.iter().enumerate() {
+                match (parameter, float_argument(value)) {
+                    ("alpha", Some(alpha)) if alpha < 0.0 => {
+                        return Err(invalid(index, "alpha must be finite and nonnegative"));
+                    }
+                    ("tol", Some(tol)) if tol <= 0.0 => {
+                        return Err(invalid(index, "tol must be finite and positive"));
+                    }
+                    _ => {}
+                }
+            }
+        }
         let call =
             Self::from_arguments(namespace, name, &positional, yields).map_err(|mut failure| {
                 if let FnxCallSite::Argument(index) = failure.site {
@@ -1492,11 +1695,24 @@ impl FnxCallSpec {
     fn compiled(algorithm: FnxAlgorithm, outputs: Vec<FnxOutputColumn>) -> Self {
         let mut hash = Hasher::new();
         hash.update(b"fgdb:prism:bound-call:v3");
-        hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
+        // Each signature retains its parameter/output binding version when
+        // unrelated signatures are appended to the public registry.
+        let binding_version: u16 = match algorithm {
+            FnxAlgorithm::DijkstraPathLength { .. } => 24,
+            FnxAlgorithm::KatzCentrality(_) => 25,
+            _ => 23,
+        };
+        hash.update(&binding_version.to_le_bytes());
         let name = algorithm.signature().name;
         hash.update(&(name.len() as u128).to_le_bytes());
         hash.update(name.as_bytes());
         match algorithm {
+            FnxAlgorithm::KatzCentrality(options) => {
+                hash.update(&options.alpha.to_bits().to_le_bytes());
+                hash.update(&options.beta.to_bits().to_le_bytes());
+                hash.update(&(options.max_iter as u128).to_le_bytes());
+                hash.update(&options.tol.to_bits().to_le_bytes());
+            }
             FnxAlgorithm::PageRank(options) => {
                 hash.update(&[options.stopping_rule as u8]);
                 hash.update(&options.alpha.to_bits().to_le_bytes());
@@ -1527,7 +1743,8 @@ impl FnxCallSpec {
                     }
                 }
             }
-            FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
+            FnxAlgorithm::SingleSourceDijkstraPathLength(options)
+            | FnxAlgorithm::DijkstraPathLength { options, .. } => {
                 hash.update(&options.source().0.to_le_bytes());
                 match options.cutoff() {
                     None => {
@@ -1539,6 +1756,9 @@ impl FnxCallSpec {
                     }
                 }
                 hash.update(&[options.comparison() as u8]);
+                if let FnxAlgorithm::DijkstraPathLength { target, .. } = algorithm {
+                    hash.update(&target.0.to_le_bytes());
+                }
             }
             FnxAlgorithm::Cdlp { max_iter } => {
                 hash.update(&(max_iter as u128).to_le_bytes());

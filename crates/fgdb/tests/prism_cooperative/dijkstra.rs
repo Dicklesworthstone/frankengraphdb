@@ -4,6 +4,7 @@
 use super::*;
 use fgdb_prism::FnxValue;
 use fgdb_types::CanonicalF64;
+use std::convert::Infallible;
 
 fn call(source: VId, cutoff: Option<f64>, strict: bool) -> FnxCallSpec {
     let parameters: FnxParameters = [
@@ -20,6 +21,315 @@ fn call(source: VId, cutoff: Option<f64>, strict: bool) -> FnxCallSpec {
         "CALL fnx.single_source_dijkstra_path_length($source,$cutoff,$strict) YIELD vertex,distance",
         &parameters,
     ).unwrap()
+}
+
+fn target_call(source: VId, target: VId, cutoff: Option<f64>, strict: bool) -> FnxCallSpec {
+    let parameters = FnxParameters::from([
+        ("source".to_owned(), FnxArgument::Vertex(source)),
+        ("target".to_owned(), FnxArgument::Vertex(target)),
+        (
+            "cutoff".to_owned(),
+            cutoff.map_or(FnxArgument::Null, FnxArgument::Float),
+        ),
+        ("strict".to_owned(), FnxArgument::Boolean(strict)),
+    ]);
+    FnxCallSpec::bind(
+        "CALL fnx.dijkstra_path_length(source => $source,target => $target,cutoff => $cutoff,strict => $strict) YIELD vertex,distance",
+        &parameters,
+    ).unwrap()
+}
+
+#[test]
+fn target_distances_match_filtered_sssp_decoded_sealed_and_cooperative() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        for edges in [
+            vec![
+                (0, 1, 1.0),
+                (0, 2, 1.0),
+                (1, 3, 1.0),
+                (2, 3, 1.0),
+                (3, 4, 1.0),
+            ],
+            vec![
+                (0, 1, 1.0),
+                (0, 2, 1.0 - 0.5e-12),
+                (2, 1, 0.0),
+                (1, 3, 0.0),
+                (2, 3, 2.0),
+                (3, 4, 2.0),
+                (4, 5, 0.0),
+            ],
+        ] {
+            let db = weighted(&contexts.commit(), 8, &edges).await;
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                let opt = options(direction);
+                let graph = projection(&db, &cx, opt).await;
+                let view = db.read_session().unwrap();
+                let decoded = view
+                    .prism_projection_at(
+                        &cx,
+                        view.frontier(),
+                        opt.selection,
+                        opt.projection,
+                        opt.projection_limits,
+                        opt.source_limits,
+                    )
+                    .unwrap();
+                for source in [VId(0), VId(3)] {
+                    for cutoff in [None, Some(0.0), Some(2.0)] {
+                        for strict in [false, true] {
+                            let full = call(source, cutoff, strict)
+                                .execute(&decoded, opt.execution_limits, || cx.checkpoint())
+                                .unwrap();
+                            for target in [VId(0), VId(1), VId(4), VId(7)] {
+                                let call = target_call(source, target, cutoff, strict);
+                                let limits = FnxExecutionLimits {
+                                    max_result_rows: 1,
+                                    ..opt.execution_limits
+                                };
+                                let expected =
+                                    call.execute_sealed(&cx, &graph, limits, memory()).unwrap();
+                                let filtered: Vec<_> = full
+                                    .rows
+                                    .iter()
+                                    .filter(|row| row[0] == FnxValue::Vertex(target))
+                                    .cloned()
+                                    .collect();
+                                assert_eq!(expected.rows, filtered);
+                                let direct =
+                                    call.execute(&decoded, limits, || cx.checkpoint()).unwrap();
+                                assert_eq!(direct.rows, expected.rows);
+                                assert_eq!(
+                                    direct.certificate.result_digest,
+                                    expected.certificate.result_digest
+                                );
+                                assert!(
+                                    expected.certificate.witness.nodes_touched
+                                        <= full.certificate.witness.nodes_touched
+                                );
+                                assert!(
+                                    expected.certificate.witness.edges_scanned
+                                        <= full.certificate.witness.edges_scanned
+                                );
+                                let bytes = call.outputs().len() * size_of::<String>()
+                                    + call
+                                        .outputs()
+                                        .iter()
+                                        .map(|column| column.name.len())
+                                        .sum::<usize>()
+                                    + expected.rows.len()
+                                        * (size_of::<Vec<FnxValue>>()
+                                            + call.outputs().len() * size_of::<FnxValue>());
+                                let exact = FnxExecutionLimits {
+                                    max_result_rows: expected.rows.len(),
+                                    max_estimated_work: expected.certificate.estimated_work,
+                                    ..limits
+                                };
+                                let mem = FnxMemoryLimits {
+                                    max_kernel_workspace_bytes: expected
+                                        .certificate
+                                        .kernel_workspace_bytes,
+                                    max_result_bytes: bytes,
+                                };
+                                for q in [1, 7] {
+                                    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                                    let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                                    let (actual, pending) = drive(
+                                        call.execute_sealed_cooperative(
+                                            &controlled,
+                                            &graph,
+                                            exact,
+                                            mem,
+                                            quantum(q),
+                                            yield_now,
+                                        ),
+                                        &probe,
+                                        q,
+                                    );
+                                    compare_execution(&actual.unwrap(), &expected);
+                                    assert!(pending > 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn target_membership_and_invalid_weights_refuse_before_early_success() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let db = weighted(&contexts.commit(), 4, &[(2, 3, -1.0)]).await;
+        let opt = options(Directedness::Directed);
+        let graph = projection(&db, &cx, opt).await;
+        for call in [
+            target_call(VId(0), VId(0), Some(0.0), false),
+            target_call(VId(0), VId(1), None, true),
+        ] {
+            for result in [
+                call.execute_sealed(&cx, &graph, opt.execution_limits, memory()),
+                call.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(1),
+                    yield_now,
+                )
+                .await,
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(FnxSealedExecutionError::Execution(
+                        FnxExecutionError::NegativeWeight
+                    ))
+                ));
+            }
+        }
+        let absent = target_call(VId(0), VId(u128::MAX), None, true);
+        assert!(matches!(
+            absent
+                .execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(1),
+                    || -> std::future::Ready<()> { panic!("membership preflight yielded") }
+                )
+                .await,
+            Err(FnxSealedExecutionError::Execution(
+                FnxExecutionError::UnknownTarget(VId(u128::MAX))
+            ))
+        ));
+    });
+}
+
+#[test]
+fn target_cancellation_covers_every_suspension_and_completed_cursor_is_scalar() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        for weight in [1.0, 2.5] {
+            let mut db = weighted(
+                &contexts.commit(),
+                6,
+                &[(0, 1, weight), (0, 2, weight), (1, 3, weight)],
+            )
+            .await;
+            let mut batch = WriteBatch::new(RelationId(1));
+            batch.create_vertex(VId(u128::MAX), vec![LabelId(1)], vec![]);
+            batch.add_edge(
+                EId(99),
+                VId(3),
+                VId(u128::MAX),
+                vec![(
+                    PropertyKeyId(1),
+                    CanonicalScalar::Float(CanonicalF64::new(weight)),
+                )],
+            );
+            db.write(&contexts.commit(), batch).await.unwrap();
+            let opt = options(Directedness::Directed);
+            let graph = projection(&db, &cx, opt).await;
+            let call = target_call(VId(0), VId(u128::MAX), None, true);
+            let limits = FnxExecutionLimits {
+                max_result_rows: 1,
+                ..opt.execution_limits
+            };
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let (expected, _) = drive(
+                call.execute_sealed_cooperative(
+                    &controlled,
+                    &graph,
+                    limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                ),
+                &probe,
+                3,
+            );
+            let expected = expected.unwrap();
+            assert_eq!(
+                expected.rows,
+                vec![vec![
+                    FnxValue::Vertex(VId(u128::MAX)),
+                    FnxValue::Float(weight * 3.0)
+                ]]
+            );
+            for stop in 1..=probe.calls() {
+                let stopped = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&stopped));
+                let (result, _) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        limits,
+                        memory(),
+                        quantum(3),
+                        yield_now,
+                    ),
+                    &stopped,
+                    3,
+                );
+                assert!(
+                    matches!(result, Err(FnxSealedExecutionError::Cancelled(_))),
+                    "stop={stop}, weight={weight}"
+                );
+                assert_eq!(stopped.calls(), stop);
+            }
+            let mut cursor = call
+                .execute_sealed_cooperative_rows(
+                    &cx,
+                    &graph,
+                    limits,
+                    memory(),
+                    quantum(1),
+                    yield_now,
+                )
+                .await
+                .unwrap();
+            let mut row = Vec::new();
+            let mut polls = 0;
+            assert!(
+                cursor
+                    .next_row(&mut row, || {
+                        polls += 1;
+                        Ok::<(), Infallible>(())
+                    })
+                    .unwrap()
+            );
+            assert_eq!(row, expected.rows[0]);
+            assert!(
+                !cursor
+                    .next_row(&mut row, || {
+                        polls += 1;
+                        Ok::<(), Infallible>(())
+                    })
+                    .unwrap()
+            );
+            assert_eq!(polls, 1);
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
 }
 
 async fn weighted(cx: &CommitCx, n: usize, edges: &[(usize, usize, f64)]) -> Database<MemVfs> {

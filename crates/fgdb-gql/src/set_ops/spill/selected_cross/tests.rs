@@ -294,6 +294,269 @@ fn allow(_: GlaExecutionEvent) -> Result<(), usize> {
 }
 
 #[test]
+fn vertex_seed_proof_keeps_root_columns_and_expression_window_boundaries() {
+    let pattern = |text| -> PreparedGraphSet {
+        PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .with_duplicates()
+        .into()
+    };
+    let left = pattern("MATCH (a) RETURN a,a.p AS value");
+    let right = pattern("MATCH (b) RETURN b.p AS value,b");
+    let selected = |right: PreparedGraphSet, code: &[GraphSetPredicateOp]| {
+        cross(
+            &left
+                .clone()
+                .cross_join(right)
+                .unwrap()
+                .filter(code)
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        selected(right.clone(), &[equal(0, 3)]).vertex_seed_column(),
+        Some(0)
+    );
+    assert_eq!(
+        selected(right.clone(), &[equal(1, 2)]).vertex_seed_column(),
+        None
+    );
+    assert_eq!(
+        selected(
+            right.clone(),
+            &[
+                equal(0, 3),
+                GraphSetPredicateOp::Truth(Some(true)),
+                GraphSetPredicateOp::Or
+            ]
+        )
+        .vertex_seed_column(),
+        None,
+    );
+    for right in [
+        right.clone().with_page(0, Some(0)),
+        right.clone().with_page(1, None),
+        right
+            .clone()
+            .with_order_by(&[GraphValueOrder::ascending(0)])
+            .unwrap(),
+        pattern("MATCH (b) WHERE 1/(b.p-2)>0 RETURN b.p AS value,b"),
+    ] {
+        assert_eq!(selected(right, &[equal(0, 3)]).vertex_seed_column(), None);
+    }
+    let projected = left
+        .cross_join(right)
+        .unwrap()
+        .project(
+            vec![
+                GraphSetProjection::new("root", GraphSetValue::Column(3)),
+                GraphSetProjection::new("wanted", GraphSetValue::Column(0)),
+                GraphSetProjection::new("again", GraphSetValue::Column(3)),
+            ],
+            GraphSetQuantifier::All,
+        )
+        .unwrap()
+        .filter(&[equal(0, 1)])
+        .unwrap();
+    assert_eq!(cross(&projected).vertex_seed_column(), Some(0));
+}
+
+#[test]
+fn walk_seed_proof_keeps_native_path_modes_and_requires_the_root_identity() {
+    let pattern = |text: &str| -> PreparedGraphSet {
+        PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => {
+                Some(GraphSymbol::Relation(fgdb_delta_types::RelationId(7)))
+            }
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .with_duplicates()
+        .into()
+    };
+    let left = pattern("MATCH (wanted) RETURN wanted");
+    let selected = |right: PreparedGraphSet, predicate: &[GraphSetPredicateOp]| {
+        let query = left
+            .clone()
+            .cross_join(right)
+            .unwrap()
+            .filter(predicate)
+            .unwrap();
+        let plan = AsyncSpillSetPlan::compile_with_bounded_walks(&query).unwrap();
+        let AsyncSpillSetSourcePlan::Cross(cross) = plan.source() else {
+            panic!("selected external product");
+        };
+        cross.clone()
+    };
+    for mode in ["WALK", "TRAIL", "ACYCLIC", "SIMPLE", "ANY SHORTEST WALK"] {
+        let right = pattern(&format!(
+            "MATCH REPEATABLE ELEMENTS {mode} p=(a)-[:R*0..2]->(b) \
+             WHERE a.p>=1 RETURN b,a,p"
+        ));
+        let plan = selected(right.clone(), &[equal(0, 2)]);
+        assert!(matches!(
+            plan.right().source(),
+            AsyncSpillSetSourcePlan::Walk(_)
+        ));
+        assert_eq!(plan.vertex_seed_column(), Some(0), "{mode}");
+        assert_eq!(
+            selected(right.clone(), &[equal(0, 1)]).vertex_seed_column(),
+            None,
+            "an endpoint identity cannot seed the root"
+        );
+        assert_eq!(
+            selected(
+                right.clone(),
+                &[
+                    equal(0, 2),
+                    GraphSetPredicateOp::Truth(Some(true)),
+                    GraphSetPredicateOp::Or,
+                ],
+            )
+            .vertex_seed_column(),
+            None
+        );
+        for right in [
+            right.clone().with_page(0, Some(0)),
+            right.clone().with_page(1, None),
+            right
+                .with_order_by(&[GraphValueOrder::ascending(0)])
+                .unwrap(),
+        ] {
+            assert_eq!(selected(right, &[equal(0, 2)]).vertex_seed_column(), None);
+        }
+    }
+    assert_eq!(
+        selected(
+            pattern("MATCH WALK (a)-[:R*1..2]->(b) WHERE 1/(b.p-2)>0 RETURN b,a"),
+            &[equal(0, 2)],
+        )
+        .vertex_seed_column(),
+        None,
+        "fallible predicates retain their full input"
+    );
+}
+
+#[test]
+fn fixed_edge_seed_proof_keeps_root_direction_and_rejects_other_endpoints_and_errors() {
+    use crate::algebra::GlaDirection;
+
+    let pattern = |text: &str| -> PreparedGraphSet {
+        PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => {
+                Some(GraphSymbol::Relation(fgdb_delta_types::RelationId(7)))
+            }
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .with_duplicates()
+        .into()
+    };
+    let left = pattern("MATCH (wanted) RETURN wanted");
+    let selected = |right: PreparedGraphSet, predicate: &[GraphSetPredicateOp]| {
+        cross(
+            &left
+                .clone()
+                .cross_join(right)
+                .unwrap()
+                .filter(predicate)
+                .unwrap(),
+        )
+    };
+    for (text, direction, joined) in [
+        (
+            "MATCH (a)-[:R]->(b) RETURN b,a",
+            GlaDirection::Forward,
+            false,
+        ),
+        (
+            "MATCH (a)<-[:R]-(b) RETURN b,a",
+            GlaDirection::Reverse,
+            false,
+        ),
+        (
+            "MATCH (a)-[:R]-(b) RETURN b,a",
+            GlaDirection::Undirected,
+            false,
+        ),
+        (
+            "MATCH (a)-[:R]->(c)-[:R]->(b) RETURN b,a",
+            GlaDirection::Forward,
+            true,
+        ),
+        (
+            "MATCH (a)<-[:R]-(c)-[:R]->(b) RETURN b,a",
+            GlaDirection::Reverse,
+            true,
+        ),
+        (
+            "MATCH (a)-[:R]-(b),(a)-[:R]->(c) RETURN b,a",
+            GlaDirection::Undirected,
+            true,
+        ),
+    ] {
+        let right = pattern(text);
+        let plan = selected(right.clone(), &[equal(0, 2)]);
+        assert_eq!(plan.vertex_seed_column(), Some(0), "{text}");
+        match plan.right().source() {
+            AsyncSpillSetSourcePlan::Edge(plan) if !joined => {
+                assert_eq!(plan.root_direction(), direction);
+            }
+            AsyncSpillSetSourcePlan::Join(plan) if joined => {
+                assert_eq!(plan.root_direction(), direction);
+            }
+            _ => panic!("expected the native fixed-edge source: {text}"),
+        }
+        assert_eq!(
+            selected(right.clone(), &[equal(0, 1)]).vertex_seed_column(),
+            None
+        );
+        assert_eq!(
+            selected(
+                right.clone(),
+                &[
+                    equal(0, 2),
+                    GraphSetPredicateOp::Truth(Some(true)),
+                    GraphSetPredicateOp::Or,
+                ],
+            )
+            .vertex_seed_column(),
+            None,
+        );
+        for right in [
+            right.clone().with_page(0, Some(0)),
+            right.clone().with_page(1, None),
+            right
+                .with_order_by(&[GraphValueOrder::ascending(0)])
+                .unwrap(),
+        ] {
+            assert_eq!(selected(right, &[equal(0, 2)]).vertex_seed_column(), None);
+        }
+    }
+    for text in [
+        "MATCH (a)-[:R]->(b) WHERE 1/(b.p-2)>0 RETURN b,a",
+        "MATCH (a)-[:R]->(c)-[:R]->(b) WHERE 1/(b.p-2)>0 RETURN b,a",
+        "MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN b,a",
+    ] {
+        assert_eq!(
+            selected(pattern(text), &[equal(0, 2)]).vertex_seed_column(),
+            None
+        );
+    }
+}
+
+#[test]
 fn keyed_selection_uses_native_boolean_proof_and_counts_every_physical_barrier() {
     use GraphSetPredicateOp::{And, Not, Or, Truth};
     assert!(!cross(&product()).supports_keyed_selection());

@@ -367,6 +367,9 @@ impl GqlMapArgumentText {
         arguments: &GqlParameters,
     ) -> Result<GqlParameters, GqlMapArgumentError> {
         let mut derived = GqlParameters::new();
+        derived
+            .copy_statement_time_from(arguments)
+            .map_err(GqlMapArgumentError::Parameter)?;
         for (name, _) in arguments.parameter_types() {
             if !self.spliced.iter().any(|spliced| **spliced == *name)
                 && let Some(value) = arguments.get(name)

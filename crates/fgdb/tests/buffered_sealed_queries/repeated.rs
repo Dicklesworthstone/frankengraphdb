@@ -4,6 +4,130 @@ use fgdb_gql::GlaLimitDimension;
 use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetApplyKind};
 
 #[test]
+fn targeted_weighted_routes_compose_with_repeated_apply_scalar_yields_and_history() {
+    let ((), report) = run_async_under_lab(0x6273_5329, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let (vfs, mut writer) = fixture(&commit).await;
+        let mut change = WriteBatch::new(R);
+        for edge in [1, 2] {
+            change.set_edge_property(
+                EId(BASE + edge),
+                P,
+                Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(2.5))),
+            );
+        }
+        change.set_edge_property(EId(BASE + 3), P, Some(CanonicalScalar::Int(0)));
+        assert_eq!(writer.write(&commit, change).await.unwrap(), CommitSeq(3));
+        writer.compact(&commit).await.unwrap();
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let retained = cold.sealed_read_cache_pool().clone();
+        let params = GqlParameters::new()
+            .with_list(
+                "starts",
+                [SECOND, 1, SECOND, THIRD, FOURTH, u128::MAX]
+                    .into_iter()
+                    .map(vertex)
+                    .collect(),
+            )
+            .unwrap()
+            .with_list(
+                "targets",
+                [THIRD, u128::MAX].into_iter().map(vertex).collect(),
+            )
+            .unwrap();
+        let call = "CALL fnx.dijkstra_path_length(source => start,target => destination,strict => true, \
+            label => 'Person',relation => 'R',weight => 'p',missing => 'unit', \
+            direction => 'directed',parallel => 'min',self_loops => 'drop')";
+        let prefix = "UNWIND $starts AS start UNWIND $targets AS destination";
+        let queries = [
+            format!(
+                "{prefix} {call} YIELD distance AS cost,vertex AS endpoint \
+                RETURN start,endpoint,cost ORDER BY start,endpoint,cost"
+            ),
+            format!(
+                "{prefix} CALL (start,destination) {{ {call} \
+                YIELD distance AS cost,vertex AS endpoint RETURN endpoint,cost }} \
+                RETURN start,endpoint,cost ORDER BY start,endpoint,cost"
+            ),
+            format!(
+                "{prefix} {call} YIELD distance AS cost \
+                RETURN start,destination AS endpoint,cost ORDER BY start,endpoint,cost"
+            ),
+        ];
+        let expected = |first, second| {
+            [
+                (1, THIRD, first),
+                (SECOND, THIRD, second),
+                (SECOND, THIRD, second),
+                (THIRD, THIRD, 0.0),
+                (u128::MAX, u128::MAX, 0.0),
+            ]
+            .into_iter()
+            .map(|(source, target, distance)| {
+                vec![
+                    vertex(source),
+                    vertex(target),
+                    GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
+                        distance,
+                    ))),
+                ]
+            })
+            .collect::<Vec<_>>()
+        };
+        for text in queries {
+            let prepared = prepare(&text, &params);
+            let current = expected(2.5, 0.0);
+            assert_eq!(
+                resident_rows(
+                    writer
+                        .query(&cx, &text, &params, resolve, policy())
+                        .unwrap()
+                ),
+                current,
+                "{text}"
+            );
+            for run_rows in [1, 4] {
+                let actual = execute(
+                    &prepared,
+                    &mut cold,
+                    &cx,
+                    policy(),
+                    &spill_pool,
+                    run_rows,
+                    WORK,
+                )
+                .await
+                .unwrap();
+                assert_eq!(actual.rows, current, "{text}");
+                assert_eq!(actual.snapshot, CommitSeq(3));
+                let historical = prepared.clone().with_as_of(CommitSeq(2)).unwrap();
+                let old = execute(
+                    &historical,
+                    &mut cold,
+                    &cx,
+                    policy(),
+                    &spill_pool,
+                    run_rows,
+                    WORK,
+                )
+                .await
+                .unwrap();
+                assert_eq!(old.rows, expected(2.0, 1.0), "{text}");
+                assert_eq!(old.snapshot, CommitSeq(2));
+                assert_eq!(spill_pool.used(), 0);
+            }
+        }
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+        assert_eq!(retained.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn row_arguments_preserve_full_width_ids_duplicate_seeds_and_nested_scope() {
     let ((), report) = run_async_under_lab(0x6273_5311, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

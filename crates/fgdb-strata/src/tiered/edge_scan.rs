@@ -16,8 +16,8 @@ use crate::tiered::buffer::BufferError;
 use crate::tiered::memory::{MemoryCharge, MemoryError};
 use crate::vertex::VertexRow;
 use asupersync::fs::Vfs;
-use fgdb_delta_types::RelationId;
-use fgdb_types::{CommitSeq, EId, QueryCx};
+use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_types::{CanonicalPropertyValue, CommitSeq, EId, QueryCx};
 use std::cmp::Reverse;
 
 mod incidence;
@@ -54,9 +54,36 @@ impl core::fmt::Debug for BufferedEdgeTopology {
     }
 }
 
+/// One authenticated visible edge and the requested property's value, if any.
+/// The owned reservation covers only this selected image; omitted properties
+/// are never exposed as a complete stored edge. Endpoint visibility remains
+/// the caller's responsibility, exactly as for topology candidates.
+pub struct BufferedEdgeProperty(BufferedValue<BufferedEdge>);
+
+impl BufferedEdgeProperty {
+    pub fn entry(&self) -> &AdjacencyEntry {
+        &self.0.entry
+    }
+
+    pub fn value(&self) -> Option<&CanonicalPropertyValue> {
+        self.0.props.first().map(|(_, value)| value)
+    }
+
+    pub fn charged_bytes(&self) -> usize {
+        self.0.charged_bytes()
+    }
+}
+
+impl core::fmt::Debug for BufferedEdgeProperty {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("BufferedEdgeProperty([REDACTED])")
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EdgePropertyAccess {
     Read,
+    Property(PropertyKeyId),
     Skip,
 }
 
@@ -353,7 +380,8 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         if state.active.as_ref().is_some_and(|active| {
             active.block == block
                 && (properties == EdgePropertyAccess::Skip
-                    || active.properties == EdgePropertyAccess::Read)
+                    || active.properties == EdgePropertyAccess::Read
+                    || active.properties == properties)
         }) {
             return Ok(());
         }
@@ -540,14 +568,25 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 self.work.step(cx, observe)?;
                 let value = &mut winner.as_mut().expect("reserved winner").0;
                 value.entry = *entry;
-                value.props = if properties == EdgePropertyAccess::Read {
-                    active
+                value.props = match properties {
+                    EdgePropertyAccess::Read => active
                         .image
                         .1
                         .as_ref()
-                        .map_or_else(Vec::new, |props| props.props_of(original))
-                } else {
-                    Vec::new()
+                        .map_or_else(Vec::new, |props| props.props_of(original)),
+                    EdgePropertyAccess::Property(key) => active
+                        .image
+                        .1
+                        .as_ref()
+                        .and_then(|props| {
+                            let row = props.props_ref(original);
+                            row.binary_search_by_key(&key, |(key, _)| *key)
+                                .ok()
+                                .map(|at| row[at].clone())
+                        })
+                        .into_iter()
+                        .collect(),
+                    EdgePropertyAccess::Skip => Vec::new(),
                 };
             }
             let next = active
@@ -612,6 +651,32 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 candidate.map(|candidate| BufferedEdgeCandidate {
                     eid: candidate.eid,
                     row: candidate.row.map(BufferedEdgeTopology),
+                })
+            })
+    }
+
+    /// Resolve the same complete EId history while materializing only one
+    /// property per stored sidecar row. Every selected extent and sidecar is
+    /// authenticated; all framing, key order and locator checks remain active.
+    /// Missing newer properties overwrite older values, and an invisible winner
+    /// remains a candidate with no row. The opaque result distinguishes a
+    /// missing key from a present NULL without exposing partial edge records.
+    ///
+    /// Property keys, full rows and topology pulls may be interleaved. A partial
+    /// active image satisfies only the same key or topology; full-row and
+    /// different-key requests refault through their ordinary admitted path.
+    pub async fn next_property_candidate_with<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        key: PropertyKeyId,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeProperty>>, BufferedScanError<C>> {
+        self.next_candidate_with_access(cx, EdgePropertyAccess::Property(key), observe)
+            .await
+            .map(|candidate| {
+                candidate.map(|candidate| BufferedEdgeCandidate {
+                    eid: candidate.eid,
+                    row: candidate.row.map(BufferedEdgeProperty),
                 })
             })
     }

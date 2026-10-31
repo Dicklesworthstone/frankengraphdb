@@ -2,109 +2,85 @@
 //! Scheduling owns only private build progress and never changes graph policy.
 
 use super::*;
-use std::future::Future;
+use std::future::{Future, Ready, ready};
 use std::num::NonZeroUsize;
 use std::task::{Context, Poll, Waker};
 
-pub(super) trait Schedule {
-    fn fuel(&mut self) -> &mut SealedScanBudget;
-    async fn check(&mut self, cx: &Control<'_>) -> Result<(), SealedProjectionError>;
-    async fn refill(&mut self, cx: &Control<'_>) -> Result<(), SealedProjectionError>;
-    async fn incoming(
-        &mut self,
-        cx: &Control<'_>,
-        partition: &SealedPartition,
-        limits: IncomingIndexLimits,
-    ) -> Result<SealedIncomingIndex, SealedProjectionError>;
-}
-
-pub(super) struct Immediate {
+// A concrete scheduler retains the yield future's conditional Send property.
+// An async trait would erase that property at the shared constructor boundary.
+pub(super) struct Schedule<Y> {
     fuel: SealedScanBudget,
+    quantum: Option<NonZeroUsize>,
+    yield_now: Y,
 }
 
-impl Immediate {
-    pub(super) fn new() -> Self {
+impl Schedule<fn() -> Ready<()>> {
+    pub(super) fn immediate() -> Self {
         Self {
             fuel: SealedScanBudget::new(usize::MAX),
+            quantum: None,
+            yield_now: || ready(()),
         }
     }
 }
 
-impl Schedule for Immediate {
-    fn fuel(&mut self) -> &mut SealedScanBudget {
-        &mut self.fuel
-    }
-
-    async fn check(&mut self, cx: &Control<'_>) -> Result<(), SealedProjectionError> {
-        checkpoint(cx)
-    }
-
-    async fn refill(&mut self, cx: &Control<'_>) -> Result<(), SealedProjectionError> {
-        checkpoint(cx)?;
-        self.fuel = SealedScanBudget::new(usize::MAX);
-        Ok(())
-    }
-
-    async fn incoming(
-        &mut self,
-        cx: &Control<'_>,
-        partition: &SealedPartition,
-        limits: IncomingIndexLimits,
-    ) -> Result<SealedIncomingIndex, SealedProjectionError> {
-        partition.incoming_index_with_checkpoint(cx.query, limits, || cx.guard())
-    }
-}
-
-pub(super) struct Cooperative<Y> {
-    fuel: SealedScanBudget,
-    quantum: NonZeroUsize,
-    yield_now: Y,
-}
-
-impl<Y> Cooperative<Y> {
-    pub(super) fn new(quantum: NonZeroUsize, yield_now: Y) -> Self {
+impl<Y> Schedule<Y> {
+    pub(super) fn cooperative(quantum: NonZeroUsize, yield_now: Y) -> Self {
         Self {
             fuel: SealedScanBudget::new(quantum.get()),
-            quantum,
+            quantum: Some(quantum),
             yield_now,
         }
     }
 }
 
-impl<Y, F> Schedule for Cooperative<Y>
+impl<Y, F> Schedule<Y>
 where
     Y: FnMut() -> F,
     F: Future<Output = ()>,
 {
-    fn fuel(&mut self) -> &mut SealedScanBudget {
+    pub(super) fn fuel(&mut self) -> &mut SealedScanBudget {
         &mut self.fuel
     }
 
-    async fn check(&mut self, cx: &Control<'_>) -> Result<(), SealedProjectionError> {
+    pub(super) async fn check(
+        &mut self,
+        cx: &Control<'_, impl Guard>,
+    ) -> Result<(), SealedProjectionError> {
         checkpoint(cx)?;
-        if !self.fuel.spend() {
+        if self.quantum.is_some() && !self.fuel.spend() {
             self.refill(cx).await?;
             self.fuel.spend();
         }
         Ok(())
     }
 
-    async fn refill(&mut self, cx: &Control<'_>) -> Result<(), SealedProjectionError> {
+    pub(super) async fn refill(
+        &mut self,
+        cx: &Control<'_, impl Guard>,
+    ) -> Result<(), SealedProjectionError> {
         checkpoint(cx)?;
+        let Some(quantum) = self.quantum else {
+            self.fuel = SealedScanBudget::new(usize::MAX);
+            return Ok(());
+        };
         (self.yield_now)().await;
         // Both the original query context and the live caller guard are checked
         // before touching the source or unpublished output after suspension.
         checkpoint(cx)?;
-        self.fuel = SealedScanBudget::new(self.quantum.get());
+        self.fuel = SealedScanBudget::new(quantum.get());
         Ok(())
     }
 
-    async fn incoming(
+    pub(super) async fn incoming(
         &mut self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         partition: &SealedPartition,
         limits: IncomingIndexLimits,
     ) -> Result<SealedIncomingIndex, SealedProjectionError> {
+        let Some(quantum) = self.quantum else {
+            return partition.incoming_index_with_checkpoint(cx.query, limits, || cx.guard());
+        };
         // The incoming builder has its own quantum. Suspend at both boundaries
         // so directory work cannot accumulate on top of a complete index quantum.
         self.refill(cx).await?;
@@ -112,7 +88,7 @@ where
             .incoming_index_cooperative_with_checkpoint(
                 cx.query,
                 limits,
-                self.quantum,
+                quantum,
                 &mut self.yield_now,
                 || cx.guard(),
             )
@@ -122,7 +98,7 @@ where
     }
 }
 
-// This driver accepts only the constructor instantiated with Immediate. There
+// This driver is used only with the immediate schedule. There
 // is no executor, blocking wait or poll loop. A mistakenly introduced suspend
 // fails closed and drops every unpublished allocation.
 pub(super) fn immediately(

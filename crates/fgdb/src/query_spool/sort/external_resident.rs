@@ -23,6 +23,8 @@ pub(super) fn open<'q>(
     policy: GqlQueryPolicy,
     max_input_rows: u64,
 ) -> core::result::Result<ResidentOrder<impl SpoolInput + 'q + use<'q>>, QueryError> {
+    let captured = view.capture_statement_parameters(cx, prepared.statement(), params)?;
+    let params = captured.as_ref();
     let (set, snapshot) = match prepared {
         PreparedNativeRead::Set(template) => (
             template

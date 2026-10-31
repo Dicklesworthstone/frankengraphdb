@@ -12,7 +12,7 @@
 
 use crate::csv_parameters::{
     CsvParameterError, CsvParameterErrorKind, CsvParameterLimit, CsvParameterLimits,
-    decode_csv_parameters,
+    decode_csv_parameters_with_context,
 };
 use crate::csv_records::{CsvRecordError, CsvRecordFramer, CsvRecordLimits};
 use crate::{
@@ -158,6 +158,19 @@ impl PreparedGraphWriteScript {
     pub fn bind_csv_with_statement_limit(
         &self,
         input: &str,
+        limits: CsvParameterLimits,
+        max_statements: usize,
+    ) -> Result<BoundGraphWriteScriptBatch, GraphWriteScriptCsvError> {
+        self.bind_csv_with_context(input, &GqlParameters::new(), limits, max_statements)
+    }
+
+    /// Bind one atomic CSV batch with the host's captured execution instant.
+    /// All record bindings share that instant; CSV columns supply only named
+    /// parameters. No clock is read, and templates retain no execution time.
+    pub fn bind_csv_with_context(
+        &self,
+        input: &str,
+        context: &GqlParameters,
         mut limits: CsvParameterLimits,
         max_statements: usize,
     ) -> Result<BoundGraphWriteScriptBatch, GraphWriteScriptCsvError> {
@@ -168,8 +181,9 @@ impl PreparedGraphWriteScript {
             .checked_div(self.statements().len())
             .unwrap_or(0);
         limits.max_records = limits.max_records.min(max_records);
-        let arguments = decode_csv_parameters(input, self.parameter_schema(), limits)
-            .map_err(GraphWriteScriptCsvError::Csv)?;
+        let arguments =
+            decode_csv_parameters_with_context(input, self.parameter_schema(), limits, context)
+                .map_err(GraphWriteScriptCsvError::Csv)?;
         self.bind_parameter_sets_with_limit(&arguments, max_statements)
             .map_err(GraphWriteScriptCsvError::Binding)
     }
@@ -199,6 +213,26 @@ impl PreparedGraphWriteScript {
     /// ordinary governed program API, with its unchanged execution quotas.
     pub fn bind_csv_stream_controlled<C>(
         &self,
+        limits: CsvParameterLimits,
+        max_statements: usize,
+        read: impl FnMut(&mut [u8]) -> Result<usize, C>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<(PreparedGraphWriteProgram, usize), GraphWriteScriptCsvStreamError<C>> {
+        self.bind_csv_stream_with_context_controlled(
+            &GqlParameters::new(),
+            limits,
+            max_statements,
+            read,
+            checkpoint,
+        )
+    }
+
+    /// Stream an atomic CSV batch with one explicit host-captured instant for
+    /// all rows. The template remains reusable with a fresh context on each
+    /// call; the decoder charges that context in every row's transcript.
+    pub fn bind_csv_stream_with_context_controlled<C>(
+        &self,
+        context: &GqlParameters,
         mut limits: CsvParameterLimits,
         max_statements: usize,
         read: impl FnMut(&mut [u8]) -> Result<usize, C>,
@@ -212,8 +246,9 @@ impl PreparedGraphWriteScript {
                 .unwrap_or(0),
         );
         let mut statements = Vec::new();
-        let records = stream_csv_parameters_controlled(
+        let records = stream_csv_parameters_with_context_controlled(
             self.parameter_schema(),
+            context,
             limits,
             read,
             &mut checkpoint,
@@ -241,15 +276,16 @@ impl PreparedGraphWriteScript {
 
 /// One CSV framing and typed-value owner shared by atomic scripts and row
 /// relations. The sink is private preparation work; a late error drops it.
-pub(crate) fn stream_csv_parameters_controlled<C, B>(
+pub(crate) fn stream_csv_parameters_with_context_controlled<C, B>(
     schema: &[GqlParameterSpec],
+    context: &GqlParameters,
     limits: CsvParameterLimits,
     mut read: impl FnMut(&mut [u8]) -> Result<usize, C>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
     bind: impl FnMut(GqlParameters, usize) -> Result<(), GraphWriteScriptCsvStreamError<C, B>>,
 ) -> Result<usize, GraphWriteScriptCsvStreamError<C, B>> {
     use GraphWriteScriptCsvStreamError as Error;
-    let mut compiler = CsvStreamCompiler::new(schema, limits, bind)?;
+    let mut compiler = CsvStreamCompiler::new(schema, context, limits, bind)?;
     let mut chunk = [0u8; 8192];
     let mut prefix = [0u8; 3];
     let mut prefix_len = 0;
@@ -336,6 +372,7 @@ pub(crate) fn stream_csv_parameters_controlled<C, B>(
 
 struct CsvStreamCompiler<'a, Bind> {
     schema: &'a [GqlParameterSpec],
+    context: GqlParameters,
     bind: Bind,
     limits: CsvParameterLimits,
     framer: CsvRecordFramer,
@@ -349,6 +386,7 @@ struct CsvStreamCompiler<'a, Bind> {
 impl<'a, Bind> CsvStreamCompiler<'a, Bind> {
     fn new<C, B>(
         schema: &'a [GqlParameterSpec],
+        context: &GqlParameters,
         limits: CsvParameterLimits,
         bind: Bind,
     ) -> Result<Self, GraphWriteScriptCsvStreamError<C, B>> {
@@ -363,13 +401,14 @@ impl<'a, Bind> CsvStreamCompiler<'a, Bind> {
         // Reuse the native decoder's declaration admission before touching the
         // source. MissingHeader is the only expected result for a valid schema
         // and empty input; no synthetic record or value is used for validation.
-        match decode_csv_parameters("", schema, limits) {
+        match decode_csv_parameters_with_context("", schema, limits, context) {
             Err(error) if error.kind == CsvParameterErrorKind::MissingHeader => {}
             Err(error) => return Err(GraphWriteScriptCsvStreamError::Csv(error)),
             Ok(_) => unreachable!("empty CSV cannot contain a header"),
         }
         Ok(Self {
             schema,
+            context: context.subset_for(&[]),
             bind,
             limits,
             framer: CsvRecordFramer::new(CsvRecordLimits {
@@ -500,7 +539,8 @@ impl<'a, Bind> CsvStreamCompiler<'a, Bind> {
             offset: self.source_offset(error.valid_up_to()),
         })?;
         let Some(header_len) = self.header_len else {
-            match decode_csv_parameters(text, self.schema, self.limits) {
+            match decode_csv_parameters_with_context(text, self.schema, self.limits, &self.context)
+            {
                 Err(error) if error.kind == CsvParameterErrorKind::EmptyData => {}
                 Err(error) => return Err(self.csv_error(error)),
                 Ok(_) => unreachable!("one framed header cannot contain data records"),
@@ -514,8 +554,9 @@ impl<'a, Bind> CsvStreamCompiler<'a, Bind> {
             max_parameter_bytes: self.limits.max_parameter_bytes - self.parameter_bytes,
             ..self.limits
         };
-        let mut arguments = decode_csv_parameters(text, self.schema, row_limits)
-            .map_err(|error| self.csv_error(error))?;
+        let mut arguments =
+            decode_csv_parameters_with_context(text, self.schema, row_limits, &self.context)
+                .map_err(|error| self.csv_error(error))?;
         let arguments = arguments
             .pop()
             .expect("one framed data record after the header");
@@ -929,6 +970,7 @@ mod streaming_tests {
         let statements = std::cell::Cell::new(0);
         let mut compiler = CsvStreamCompiler::new::<(), GraphWriteScriptBatchError>(
             script.parameter_schema(),
+            &GqlParameters::new(),
             CsvParameterLimits::default(),
             |arguments, record| {
                 let program = script.bind_parameters(&arguments).map_err(|source| {

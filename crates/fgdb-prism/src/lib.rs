@@ -33,6 +33,7 @@ mod execute;
 mod foundation;
 mod hits;
 mod input;
+mod katz;
 mod projection;
 mod sealed;
 mod sealed_control;
@@ -45,7 +46,7 @@ pub use call::{
     FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallError, FnxCallSite, FnxCallSpec,
     FnxGraphKind, FnxImplementationClass, FnxOutput, FnxOutputColumn, FnxParameterSpec,
     FnxParameterType, FnxParameters, FnxSignature, FnxSignatureRegistry, FoundationAlgorithm,
-    MAX_FNX_CALL_BYTES, PageRankOptions, PageRankStoppingRule,
+    KatzOptions, MAX_FNX_CALL_BYTES, PageRankOptions, PageRankStoppingRule,
 };
 pub use clustering::{TriangleStatistics, triangle_statistics};
 pub use execute::{

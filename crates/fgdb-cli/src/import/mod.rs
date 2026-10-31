@@ -149,6 +149,13 @@ pub(super) fn prepare(options: &Options, cx: &QueryCx) -> Result<PreparedImport,
         .map(|path| read_bounded(cx, path, MAX_TEXT_BYTES, "--types-file"))
         .transpose()?;
     let declarations = parse_types(types.as_deref().unwrap_or(""))?;
+    // Bind the import's calendar context once, after the actual statement
+    // file is known and before consuming any CSV input. Both native adapters
+    // carry it explicitly through every row of this atomic program.
+    let context = super::statement_clock()
+        .capture_parameters(cx, &statement, &GqlParameters::new())
+        .map_err(Failure::query)?
+        .into_owned();
     let limit = csv_options.max_input_bytes.unwrap_or(DEFAULT_INPUT_BYTES);
     cx.checkpoint().map_err(Failure::io)?;
     // Reject the statement before opening/consuming its CSV source. This is
@@ -168,10 +175,15 @@ pub(super) fn prepare(options: &Options, cx: &QueryCx) -> Result<PreparedImport,
                 return Err(Failure::query(error));
             };
             let mut source = open_bounded(input, limit, "--input")?;
-            let (chain, records) =
-                bind_chain(&template, &names, &declarations, &mut source, limit, || {
-                    cx.checkpoint().map_err(Failure::io)
-                })?;
+            let (chain, records) = bind_chain(
+                &template,
+                &names,
+                &declarations,
+                &context,
+                &mut source,
+                limit,
+                || cx.checkpoint().map_err(Failure::io),
+            )?;
             return Ok(PreparedImport {
                 body: Body::Chain(Box::new(chain)),
                 records,
@@ -181,9 +193,10 @@ pub(super) fn prepare(options: &Options, cx: &QueryCx) -> Result<PreparedImport,
         }
     };
     let mut source = open_bounded(input, limit, "--input")?;
-    let (program, records) = bind_source(&script, &mut source, limit, || {
-        cx.checkpoint().map_err(Failure::io)
-    })?;
+    let (program, records) =
+        bind_source_with_context(&script, &context, &mut source, limit, || {
+            cx.checkpoint().map_err(Failure::io)
+        })?;
     Ok(PreparedImport {
         body: Body::Script(program),
         records,
@@ -310,6 +323,7 @@ fn bind_chain(
     template: &PreparedGraphWriteChainText,
     names: &[String],
     declarations: &[(&str, GqlParameterType)],
+    context: &GqlParameters,
     source: &mut impl Read,
     limit: u64,
     checkpoint: impl FnMut() -> Result<(), Failure>,
@@ -333,9 +347,10 @@ fn bind_chain(
         ..CsvParameterLimits::default()
     };
     template
-        .bind_csv_rows_stream_controlled(
+        .bind_csv_rows_stream_with_context_controlled(
             ROWS,
             &schema,
+            context,
             limits,
             |buffer| {
                 source
@@ -350,14 +365,16 @@ fn bind_chain(
 /// The native adapter owns CSV framing, cumulative source/parameter admission,
 /// per-record binding and final acceptance. This wrapper owns only input I/O
 /// and CLI error classification; it never executes a bound prefix.
-fn bind_source(
+fn bind_source_with_context(
     script: &PreparedGraphWriteScript,
+    context: &GqlParameters,
     source: &mut impl Read,
     limit: u64,
     checkpoint: impl FnMut() -> Result<(), Failure>,
 ) -> Result<(PreparedGraphWriteProgram, usize), Failure> {
     script
-        .bind_csv_stream_controlled(
+        .bind_csv_stream_with_context_controlled(
+            context,
             CsvParameterLimits {
                 max_input_bytes: usize::try_from(limit)
                     .map_err(|_| Failure::usage("--max-input-bytes exceeds this platform"))?,
@@ -373,6 +390,16 @@ fn bind_source(
             checkpoint,
         )
         .map_err(stream_failure)
+}
+
+#[cfg(test)]
+fn bind_source(
+    script: &PreparedGraphWriteScript,
+    source: &mut impl Read,
+    limit: u64,
+    checkpoint: impl FnMut() -> Result<(), Failure>,
+) -> Result<(PreparedGraphWriteProgram, usize), Failure> {
+    bind_source_with_context(script, &GqlParameters::new(), source, limit, checkpoint)
 }
 
 fn stream_failure<B: std::fmt::Display>(

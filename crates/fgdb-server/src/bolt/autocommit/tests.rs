@@ -42,6 +42,85 @@ async fn frontier(cx: &Cx, db: &Served) -> CommitSeq {
 }
 
 #[test]
+fn statement_time_bolt_defers_effects_keeps_bound_return_and_hydrates_the_selected_cut() {
+    let ((), report) = run_async_under_lab(0xc10c_b017, |root| async move {
+        let (mut server, token, _) = served(&root, "statement-clock-bolt").await;
+        let (clock, calls) = crate::execute::statement_time_tests::counted_clock();
+        crate::execute::statement_time_tests::install_clock(&root, &mut server, clock).await;
+        std::sync::Arc::get_mut(server.databases.get_mut("test").unwrap())
+            .unwrap()
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Property, "stamp", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let mut client = connection(&server, token.clone());
+        let timestamp = |observation| structure::date_time(1_609_459_200 + observation, 0, 0);
+        client
+            .run(
+                &root,
+                "CREATE (n {stamp:datetime()}) RETURN n.stamp AS stored, datetime() AS repeated",
+                &vec![],
+                &extra(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(frontier(&root, db).await, CommitSeq(0));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        crate::execute::read(
+            &root,
+            db,
+            &token,
+            &Execute {
+                mode: ExecuteMode::Read,
+                statement: "RETURN datetime() AS unrelated".into(),
+                parameters: vec![],
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        client.finish_autocommit_write(&root).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            client.pending.as_ref().unwrap().rows,
+            VecDeque::from([vec![timestamp(0); 2]])
+        );
+        let mut wire = io();
+        client.pull(&root, &mut wire, -1, false).await.unwrap();
+        client
+            .run(&root, "MATCH (n) SET n.stamp=datetime()", &vec![], &extra())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        client.pull(&root, &mut wire, -1, true).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(frontier(&root, db).await, CommitSeq(2));
+        client
+            .run(
+                &root,
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n, datetime() AS observed",
+                &vec![],
+                &extra(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        let row = &client.pending.as_ref().unwrap().rows[0];
+        assert_eq!(row[1], timestamp(3));
+        let Value::Struct { fields, .. } = &row[0] else {
+            panic!("expected a hydrated node");
+        };
+        let Value::Map(properties) = &fields[2] else {
+            panic!("expected the node's property map");
+        };
+        assert_eq!(get(properties, "stamp"), Some(&timestamp(0)));
+        client.pull(&root, &mut wire, -1, false).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn write_options_preserve_local_causal_bookmarks_and_reject_weaker_semantics() {
     assert_eq!(write_options(&vec![], "social").unwrap(), CommitSeq(0));
     let options = vec![

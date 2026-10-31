@@ -10,11 +10,11 @@ pub use scalar::GqlScalarParameter;
 
 use crate::{BindError, BoundPlan, ParseErrorKind, PreparedGqlQuery, RelationBind};
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::CanonicalScalarKind;
+use fgdb_types::{CanonicalScalar, CanonicalScalarKind, CanonicalTimestamp};
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-/// Maximum number of distinct arguments admitted by one parameter map.
+/// Maximum retained entries, including an optional statement-time context.
 pub const MAX_GQL_PARAMETER_COUNT: usize = 1_000;
 /// Maximum UTF-8 byte length of an argument name, excluding the `$` sigil.
 pub const MAX_GQL_PARAMETER_NAME_BYTES: usize = 64;
@@ -24,6 +24,10 @@ pub const MAX_GQL_PARAMETER_NAME_BYTES: usize = 64;
 pub const MAX_GQL_PARAMETER_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
 const PARAMETER_TRANSCRIPT_HEADER: &[u8] = b"fgdb:gql-parameters:v1\0";
 const PARAMETER_TRANSCRIPT_HEADER_BYTES: usize = PARAMETER_TRANSCRIPT_HEADER.len() + 8;
+// Neither a text parameter nor a supplied named argument can spell this name.
+// Its reserved transcript entry binds the explicit execution context while
+// keeping every pre-existing transcript without a clock byte-for-byte stable.
+pub(crate) const STATEMENT_TIME_PARAMETER: &str = "\0fgdb_statement_time";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GqlParameterType {
@@ -235,6 +239,7 @@ impl core::fmt::Debug for GqlMapParameter {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct GqlParameters {
     values: BTreeMap<String, GqlParameterValue>,
+    statement_time: Option<GqlScalarParameter>,
     transcript_entry_bytes: usize,
 }
 
@@ -262,7 +267,8 @@ impl GqlParameters {
         if self.values.contains_key(&name) {
             return Err(GqlParameterError::Duplicate { name });
         }
-        if self.values.len() >= MAX_GQL_PARAMETER_COUNT {
+        if self.values.len() + usize::from(self.statement_time.is_some()) >= MAX_GQL_PARAMETER_COUNT
+        {
             return Err(GqlParameterError::ParameterCountExceeded {
                 limit: MAX_GQL_PARAMETER_COUNT,
             });
@@ -326,9 +332,102 @@ impl GqlParameters {
         Ok(self)
     }
 
+    /// Bind the one instant captured by the host for this execution. Prepared
+    /// templates never read a clock; all current-time constructors consume
+    /// this context, including calls in subqueries and write rows. Rebinding
+    /// replaces a prior instant and leaves named arguments untouched.
+    pub fn with_statement_time(
+        mut self,
+        statement_time: CanonicalTimestamp,
+    ) -> Result<Self, GqlParameterError> {
+        let statement_time = GqlScalarParameter::new(CanonicalScalar::Timestamp(statement_time))
+            .map_err(|_| GqlParameterError::ScalarLiteral)?;
+        self.set_statement_time(Some(statement_time))?;
+        Ok(self)
+    }
+
+    /// The explicit execution instant, separate from caller-named arguments.
+    #[must_use]
+    pub fn statement_time(&self) -> Option<&CanonicalTimestamp> {
+        match self.statement_time.as_ref()?.value() {
+            CanonicalScalar::Timestamp(value) => Some(value),
+            _ => unreachable!("statement time is admitted only as a timestamp"),
+        }
+    }
+
+    /// Carry execution context when deriving or subsetting named arguments.
+    /// A source without context clears a previously bound instant. Like named
+    /// insertion, a failed admission leaves the destination unchanged.
+    pub fn copy_statement_time_from(&mut self, source: &Self) -> Result<(), GqlParameterError> {
+        self.set_statement_time(source.statement_time.clone())
+    }
+
+    /// Discard an untrusted caller's execution context before a capability
+    /// boundary installs its own clock observation. Named values stay intact.
+    pub fn clear_statement_time(&mut self) {
+        self.set_statement_time(None)
+            .expect("removing context only reduces admitted bounds");
+    }
+
+    /// A compiler-owned parameter subset is no larger than its admitted
+    /// source. Execution context follows it even when this particular child
+    /// does not read the instant; a later child may share the same statement.
+    pub(crate) fn subset_for(&self, schema: &[GqlParameterSpec]) -> Self {
+        let mut local = Self::new();
+        local
+            .copy_statement_time_from(self)
+            .expect("context subset of an admitted argument map");
+        for spec in schema.iter().filter(|spec| !spec.is_statement_time()) {
+            if let Some(value) = self.get(&spec.name) {
+                local
+                    .insert(spec.name.clone(), value)
+                    .expect("unique prepared names form an admitted argument subset");
+            }
+        }
+        local
+    }
+
+    fn set_statement_time(
+        &mut self,
+        value: Option<GqlScalarParameter>,
+    ) -> Result<(), GqlParameterError> {
+        if value.is_some() && self.values.len() >= MAX_GQL_PARAMETER_COUNT {
+            return Err(GqlParameterError::ParameterCountExceeded {
+                limit: MAX_GQL_PARAMETER_COUNT,
+            });
+        }
+        let entry_bytes = |value: &GqlScalarParameter| {
+            GqlParameterValue::Scalar(value.clone())
+                .transcript_entry_bytes(STATEMENT_TIME_PARAMETER.len())
+                .expect("admitted timestamp has bounded canonical bytes")
+        };
+        let previous = self.statement_time.as_ref().map_or(0, entry_bytes);
+        let next_entry_bytes = self
+            .transcript_entry_bytes
+            .checked_sub(previous)
+            .and_then(|bytes| bytes.checked_add(value.as_ref().map_or(0, entry_bytes)));
+        let next_transcript_bytes =
+            next_entry_bytes.and_then(|bytes| PARAMETER_TRANSCRIPT_HEADER_BYTES.checked_add(bytes));
+        let Some(next_entry_bytes) = next_entry_bytes.filter(|_| {
+            next_transcript_bytes.is_some_and(|bytes| bytes <= MAX_GQL_PARAMETER_TRANSCRIPT_BYTES)
+        }) else {
+            return Err(GqlParameterError::TranscriptBytesExceeded {
+                observed: next_transcript_bytes.unwrap_or(usize::MAX),
+                limit: MAX_GQL_PARAMETER_TRANSCRIPT_BYTES,
+            });
+        };
+        self.statement_time = value;
+        self.transcript_entry_bytes = next_entry_bytes;
+        Ok(())
+    }
+
     #[must_use]
     pub fn get(&self, name: &str) -> Option<GqlParameterValue> {
-        self.values.get(name).cloned()
+        if name == STATEMENT_TIME_PARAMETER {
+            self.statement_time.clone().map(GqlParameterValue::Scalar)
+        } else {
+            self.values.get(name).cloned()
+        }
     }
 
     /// openCypher and Bolt clients send every integer as a signed Int64,
@@ -363,11 +462,14 @@ impl GqlParameters {
     }
 
     #[must_use]
+    /// Number of caller-named arguments; execution context is counted only by
+    /// admission and the canonical transcript, not by the public named schema.
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
     #[must_use]
+    /// Whether there are no caller-named arguments, regardless of context.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
@@ -404,7 +506,13 @@ impl GqlParameters {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.canonical_byte_len());
         bytes.extend_from_slice(PARAMETER_TRANSCRIPT_HEADER);
-        bytes.extend_from_slice(&(self.values.len() as u64).to_be_bytes());
+        let count = self.values.len() + usize::from(self.statement_time.is_some());
+        bytes.extend_from_slice(&(count as u64).to_be_bytes());
+        if let Some(value) = &self.statement_time {
+            append_bytes(&mut bytes, STATEMENT_TIME_PARAMETER.as_bytes());
+            bytes.push(2);
+            append_bytes(&mut bytes, value.canonical_bytes());
+        }
         for (name, value) in &self.values {
             append_bytes(&mut bytes, name.as_bytes());
             match value {
@@ -452,6 +560,15 @@ pub struct GqlParameterSpec {
     /// True if any use of this unsigned parameter is a LIMIT.
     pub requires_positive: bool,
     pub occurrences: usize,
+}
+
+impl GqlParameterSpec {
+    /// Whether this compiler-generated requirement reads the host's explicit
+    /// statement instant instead of a caller-named argument.
+    #[must_use]
+    pub fn is_statement_time(&self) -> bool {
+        self.name == STATEMENT_TIME_PARAMETER
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -906,6 +1023,130 @@ mod tests {
             .with_label("L", LabelId(3))
             .with_property("n", PropertyKeyId(4))
             .with_property("m", PropertyKeyId(5))
+    }
+
+    #[test]
+    fn statement_time_is_reserved_shared_context_with_bound_transcript_accounting() {
+        let instant = CanonicalTimestamp::offset_only(1_234_567_890, 3600).unwrap();
+        let original = GqlParameters::new().with_int64("n", 7).unwrap();
+        let original_bytes = original.canonical_bytes();
+        let mut supplied = original
+            .clone()
+            .with_statement_time(instant.clone())
+            .unwrap();
+        assert_eq!(supplied.len(), 1);
+        assert_eq!(
+            supplied.parameter_types().collect::<Vec<_>>(),
+            [("n", GqlParameterType::Int64)]
+        );
+        assert_eq!(supplied.statement_time(), Some(&instant));
+        assert_eq!(
+            supplied.canonical_byte_len(),
+            supplied.canonical_bytes().len()
+        );
+        assert_ne!(supplied.canonical_bytes(), original_bytes);
+        assert!(matches!(
+            supplied.insert(STATEMENT_TIME_PARAMETER, GqlParameterValue::Int64(0)),
+            Err(GqlParameterError::InvalidArgumentName { .. })
+        ));
+        let internal = GqlParameterSpec {
+            name: STATEMENT_TIME_PARAMETER.to_owned(),
+            parameter_type: GqlParameterType::Scalar(CanonicalScalarKind::Timestamp),
+            requires_positive: false,
+            occurrences: 2,
+        };
+        assert!(internal.is_statement_time());
+        let subset = supplied.subset_for(&[internal]);
+        assert!(subset.is_empty());
+        assert_eq!(subset.statement_time(), Some(&instant));
+        assert_eq!(subset.canonical_byte_len(), subset.canonical_bytes().len());
+        let mut copied = original.clone();
+        copied.copy_statement_time_from(&subset).unwrap();
+        assert_eq!(copied, supplied);
+        copied.copy_statement_time_from(&original).unwrap();
+        assert_eq!(copied, original);
+        supplied.clear_statement_time();
+        assert_eq!(supplied.canonical_bytes(), original_bytes);
+        assert_eq!(supplied.canonical_byte_len(), original_bytes.len());
+    }
+
+    #[test]
+    fn statement_time_counts_toward_admission_and_failed_copy_is_atomic() {
+        let context = GqlParameters::new()
+            .with_statement_time(CanonicalTimestamp::offset_only(0, 0).unwrap())
+            .unwrap();
+        let mut full = GqlParameters::new();
+        for index in 0..MAX_GQL_PARAMETER_COUNT {
+            full.insert(format!("p{index}"), GqlParameterValue::Int64(0))
+                .unwrap();
+        }
+        let frozen = full.clone();
+        assert_eq!(
+            full.copy_statement_time_from(&context),
+            Err(GqlParameterError::ParameterCountExceeded {
+                limit: MAX_GQL_PARAMETER_COUNT
+            })
+        );
+        assert_eq!(full, frozen);
+        let mut full = context;
+        for index in 0..MAX_GQL_PARAMETER_COUNT - 1 {
+            full.insert(format!("p{index}"), GqlParameterValue::Int64(0))
+                .unwrap();
+        }
+        let frozen = full.clone();
+        assert_eq!(
+            full.insert("last", GqlParameterValue::Int64(0)),
+            Err(GqlParameterError::ParameterCountExceeded {
+                limit: MAX_GQL_PARAMETER_COUNT
+            })
+        );
+        assert_eq!(full, frozen);
+        assert_eq!(full.canonical_byte_len(), full.canonical_bytes().len());
+        full.clear_statement_time();
+        full.insert("last", GqlParameterValue::Int64(0)).unwrap();
+        assert_eq!(full.len(), MAX_GQL_PARAMETER_COUNT);
+    }
+
+    #[test]
+    fn statement_time_cannot_bypass_the_complete_transcript_byte_limit() {
+        let context = GqlParameters::new()
+            .with_statement_time(CanonicalTimestamp::offset_only(0, 0).unwrap())
+            .unwrap();
+        let scalar = |size| {
+            GqlParameterValue::Scalar(
+                GqlScalarParameter::new(CanonicalScalar::bytes(vec![0xab; size]).unwrap()).unwrap(),
+            )
+        };
+        let block = scalar(32_768);
+        let mut full = GqlParameters::new();
+        for index in 0..MAX_GQL_PARAMETER_COUNT {
+            let name = format!("p{index}");
+            if full.canonical_byte_len()
+                + block.transcript_entry_bytes(name.len()).unwrap()
+                + 32_000
+                > MAX_GQL_PARAMETER_TRANSCRIPT_BYTES
+            {
+                break;
+            }
+            full.insert(name, block.clone()).unwrap();
+        }
+        let remaining = MAX_GQL_PARAMETER_TRANSCRIPT_BYTES - full.canonical_byte_len();
+        let payload = remaining - scalar(0).transcript_entry_bytes("tail".len()).unwrap();
+        full.insert("tail", scalar(payload)).unwrap();
+        assert_eq!(
+            full.canonical_byte_len(),
+            MAX_GQL_PARAMETER_TRANSCRIPT_BYTES
+        );
+        let frozen = full.clone();
+        assert!(matches!(
+            full.copy_statement_time_from(&context),
+            Err(GqlParameterError::TranscriptBytesExceeded { .. })
+        ));
+        assert_eq!(full, frozen);
+        assert_eq!(
+            full.canonical_bytes().len(),
+            MAX_GQL_PARAMETER_TRANSCRIPT_BYTES
+        );
     }
 
     #[test]

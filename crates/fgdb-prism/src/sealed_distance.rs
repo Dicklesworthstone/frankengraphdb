@@ -23,7 +23,7 @@ use super::{
     checkpoint, directional_pass_work, finish, finish_encoded, mul, require_loop_free_degree,
     reserve,
 };
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard};
 use std::future::Future;
 use std::mem::size_of;
 
@@ -831,7 +831,7 @@ fn prepare(
 
 pub(super) fn execute(
     call: &FnxCallSpec,
-    cx: &Control<'_>,
+    cx: &Control<'_, impl Guard>,
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
@@ -890,7 +890,7 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     delivery: Delivery,
-    control: &mut super::cooperative::Cooperate<'_, Yield>,
+    control: &mut super::cooperative::Cooperate<'_, Yield, impl Guard>,
 ) -> Result<Finished>
 where
     Yield: FnMut() -> YieldFuture,

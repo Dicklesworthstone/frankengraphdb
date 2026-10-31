@@ -88,6 +88,12 @@ pub struct SealedReadView {
 }
 
 impl SealedReadView {
+    /// Supply the trusted calendar authority used by future statement binds.
+    /// The authenticated compressed generation and selected cut stay fixed.
+    pub fn set_statement_clock(&mut self, clock: Option<crate::StatementClock>) {
+        self.view.set_statement_clock(clock);
+    }
+
     // Only the trusted authorized-session constructor receives these parts.
     // No capability response can acquire a raw read view or image anchor.
     pub(crate) fn authorized_parts(
@@ -222,6 +228,7 @@ impl<V: Vfs + Clone> Database<V> {
                     snapshot: std::sync::Arc::new(snapshot),
                     namespace: keys.namespace,
                     beacon_indexes: crate::query::BeaconQueryIndexes::default(),
+                    statement_clock: None,
                 };
                 view.check_sealed_source(&partition, as_of)?;
                 partition
@@ -328,6 +335,10 @@ impl SealedReadView {
         policy: GqlQueryPolicy,
         memory: FnxMemoryLimits,
     ) -> Result<QueryResult, SealedQueryError> {
+        let captured = self
+            .view
+            .capture_statement_parameters(cx, prepared.statement(), params)?;
+        let params = captured.as_ref();
         let requested = prepared.bound_snapshot_seq(params, self.as_of)?;
         if requested != self.as_of {
             return Err(SealedQueryError::SnapshotMismatch {

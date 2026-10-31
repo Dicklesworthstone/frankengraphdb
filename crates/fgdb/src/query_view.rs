@@ -32,6 +32,43 @@ pub use spool::{
 pub(crate) use spool::{SpoolInput, SpoolRow, ordered_input, ordered_stages};
 
 impl EmbeddedReadView {
+    /// Set an explicit host calendar authority for future statement bindings
+    /// on this retained view. Its graph generation remains pinned.
+    pub fn set_statement_clock(&mut self, clock: Option<super::StatementClock>) {
+        self.statement_clock = clock;
+    }
+
+    pub(crate) fn capture_statement_parameters<'p>(
+        &self,
+        cx: &QueryCx,
+        text: &str,
+        params: &'p GqlParameters,
+    ) -> Result<std::borrow::Cow<'p, GqlParameters>, QueryError> {
+        self.statement_clock.as_ref().map_or_else(
+            || Ok(std::borrow::Cow::Borrowed(params)),
+            |clock| {
+                clock
+                    .capture_parameters(cx, text, params)
+                    .map_err(QueryError::StatementTime)
+            },
+        )
+    }
+
+    pub(crate) fn capture_authorized_statement_parameters<'p>(
+        &self,
+        cx: &QueryCx,
+        text: &str,
+        params: &'p GqlParameters,
+    ) -> Result<std::borrow::Cow<'p, GqlParameters>, QueryError> {
+        super::capture_authorized_statement_parameters(
+            self.statement_clock.as_ref(),
+            cx,
+            fgdb_gql::statement_time_required(text),
+            params,
+        )
+        .map_err(QueryError::StatementTime)
+    }
+
     /// Execute a native read at this view's immutable frontier. The same native
     /// classification, parameter binding, GLA engines, lossless result columns
     /// and governed policy used by the database remain authoritative.
@@ -140,6 +177,8 @@ impl PreparedNativeRead {
         policy: GqlQueryPolicy,
         as_of: CommitSeq,
     ) -> Result<(QueryResult, CommitSeq), QueryError> {
+        let captured = view.capture_statement_parameters(cx, self.statement(), params)?;
+        let params = captured.as_ref();
         let mut snapshot_seq = as_of;
         let result = match self {
             Self::Pattern(prepared) => {
@@ -316,6 +355,8 @@ impl PreparedNativeRead {
         ),
         QueryError,
     > {
+        let captured = view.capture_statement_parameters(cx, self.statement(), params)?;
+        let params = captured.as_ref();
         let (pull, columns, as_of) = match self {
             Self::Pattern(prepared) => {
                 let query = prepared

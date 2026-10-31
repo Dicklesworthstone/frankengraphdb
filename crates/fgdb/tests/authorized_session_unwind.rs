@@ -1391,13 +1391,13 @@ fn native_session_chain_refusals_are_atomic_and_close_the_session() {
 }
 
 #[test]
-fn prepared_native_chain_handles_reject_foreign_sessions_and_atomic_batch_substitution() {
+fn prepared_native_chain_handles_reject_foreign_sessions_and_unwind_substitution() {
     lab(0xac34, |contexts| async move {
         let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
         let issuer = authority();
         let token = issuer.issue_at(&grant(), NOW).unwrap();
         let text = "FOREACH (row IN $rows | CREATE (:Visible {p:row.p}))";
-        for mode in 0..5 {
+        for mode in [0, 4] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let basis = db.frontier().unwrap();
             let arguments = rows(&[(1, 2)]);
@@ -1443,28 +1443,468 @@ fn prepared_native_chain_handles_reject_foreign_sessions_and_atomic_batch_substi
                 assert!(foreign.is_closed());
                 drop(foreign);
             } else {
-                if mode == 1 {
-                    assert!(
-                        session
-                            .execute_batch_stats(&query, &prepared, &[arguments])
-                            .await
-                            .is_err()
-                    );
-                } else if mode == 2 {
-                    assert!(session.bind_batch(&query, &prepared, &[arguments]).is_err());
-                } else if mode == 3 {
-                    assert!(
-                        session
-                            .query_batch_stats(&query, text, &[arguments])
-                            .await
-                            .is_err()
-                    );
-                } else {
-                    assert!(session.bind_unwind_batch(&query, text, &arguments).is_err());
-                }
+                assert!(session.bind_unwind_batch(&query, text, &arguments).is_err());
                 assert!(session.is_closed());
                 drop(session);
             }
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(
+                db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                    .unwrap(),
+                ElementId::Vertex(engine_vertex(1))
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn native_chain_batches_share_one_overlay_and_commit_without_rebinding_prepared_names() {
+    lab(0xac36, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let mut scope = grant();
+        scope.limits.max_rows = 0;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let text = "FOREACH (row IN $rows | MERGE (n:Visible {p:row.p}) \
+                    ON CREATE SET n.q=0 \
+                    FOREACH (step IN [row.q] | SET n.q=n.q+step))";
+        let arguments = [rows(&[(1, 2)]), rows(&[(1, 3), (2, 7)]), rows(&[(2, 5)])];
+        let original: Vec<_> = arguments
+            .iter()
+            .map(GqlParameters::canonical_bytes)
+            .collect();
+        for mode in 0..3 {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let basis = db.frontier().unwrap();
+            let pinned = db.read_session().unwrap();
+            let calls = AtomicUsize::new(0);
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    |kind, name: &str| {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        symbols(kind, name)
+                    },
+                    R,
+                    policy(),
+                    3,
+                    || NOW,
+                )
+                .unwrap();
+            let (stats, completion) = if mode == 0 {
+                session
+                    .query_batch_stats(&query, text, &arguments)
+                    .await
+                    .unwrap()
+            } else {
+                let prepared = session.prepare(&query, text, &rows(&[(999, 111)])).unwrap();
+                let resolved = calls.load(Ordering::Relaxed);
+                let result = if mode == 1 {
+                    session
+                        .execute_batch_stats(&query, &prepared, &arguments)
+                        .await
+                        .unwrap()
+                } else {
+                    let bound = session.bind_batch(&query, &prepared, &arguments).unwrap();
+                    assert_eq!(bound.argument_sets(), 3);
+                    for record in 0..3 {
+                        let location = bound.location(record).unwrap();
+                        assert_eq!(location.argument_set, record);
+                        assert_eq!(location.statement, 0);
+                        assert_eq!(location.span, 0..text.len());
+                    }
+                    assert!(bound.location(3).is_none());
+                    let (receipt, completion) =
+                        session.execute_bound_batch(&query, &bound).await.unwrap();
+                    assert!(
+                        receipt.steps().is_empty(),
+                        "chain identities remain private"
+                    );
+                    assert!(bound.record_receipts(&receipt, 0).is_none());
+                    (receipt.stats(), completion)
+                };
+                assert_eq!(calls.load(Ordering::Relaxed), resolved);
+                result
+            };
+            assert_eq!(stats.completed_statements, 3);
+            assert_eq!(stats.created_vertices, 2);
+            assert_eq!(stats.mutation_effects, 6);
+            assert_eq!(stats.selection.result_rows, 0);
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: CommitSeq(basis.0 + 1),
+                }
+            );
+            assert!(!session.is_closed());
+            drop(session);
+            assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+            assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+            assert!(pinned.vertices().unwrap().is_empty());
+            let mut properties: Vec<_> = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .map(|vertex| vertex.props)
+                .collect();
+            properties.sort();
+            assert_eq!(
+                properties,
+                [(1, 5), (2, 12)]
+                    .into_iter()
+                    .map(|(p, q)| vec![
+                        (P, CanonicalScalar::Int(p).into()),
+                        (Q, CanonicalScalar::Int(q).into()),
+                    ])
+                    .collect::<Vec<_>>()
+            );
+            let expected = db.vertices().unwrap();
+            drop(db);
+            let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(reopened.vertices().unwrap(), expected);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        assert_eq!(
+            arguments
+                .iter()
+                .map(GqlParameters::canonical_bytes)
+                .collect::<Vec<_>>(),
+            original
+        );
+    });
+}
+
+#[test]
+fn native_chain_batches_refuse_late_values_and_cumulative_limits_without_a_prefix() {
+    lab(0xac37, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let text = "FOREACH (row IN $rows | CREATE (:Visible {p:row.p, q:10/row.q}))";
+        for mode in 0..5 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut budget = policy();
+            if mode == 2 {
+                budget.max_created_vertices = 1;
+            }
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    symbols,
+                    R,
+                    budget,
+                    if mode == 3 { 1 } else { 2 },
+                    || NOW,
+                )
+                .unwrap();
+            let prepared = session.prepare(&query, text, &rows(&[(99, 99)])).unwrap();
+            let arguments = match mode {
+                0 => vec![rows(&[(1, 2)]), rows(&[(2, 0)])],
+                1 => vec![rows(&[(1, 2)]), GqlParameters::new()],
+                4 => Vec::new(),
+                _ => vec![rows(&[(1, 2)]), rows(&[(2, 5)])],
+            };
+            let error = session
+                .execute_batch_stats(&query, &prepared, &arguments)
+                .await
+                .unwrap_err();
+            if matches!(mode, 0 | 2) {
+                let Fault::BatchChain {
+                    location: Some(location),
+                    ..
+                } = &error
+                else {
+                    panic!("record failure lost its native batch coordinates: {error:?}");
+                };
+                assert_eq!(location.argument_set, 1);
+                assert_eq!(location.statement, 0);
+                assert_eq!(location.span, 0..text.len());
+                assert!(error.to_string().contains("argument set 1, statement 0"));
+                if mode == 0 {
+                    let mut cause: Option<&(dyn core::error::Error + 'static)> = Some(&error);
+                    let mut arithmetic = None;
+                    while let Some(error) = cause {
+                        if let Some(error) = error.downcast_ref::<fgdb_gql::GraphIntegerError>() {
+                            arithmetic = Some(error.kind);
+                            break;
+                        }
+                        cause = error.source();
+                    }
+                    assert_eq!(
+                        arithmetic,
+                        Some(fgdb_gql::GraphIntegerErrorKind::DivisionByZero),
+                        "the coordinate wrapper must retain the native typed cause",
+                    );
+                }
+            } else if mode == 1 {
+                assert!(
+                    matches!(
+                        &error,
+                        Fault::BatchChainBinding { location, .. }
+                            if location.argument_set == 1
+                                && location.statement == 0
+                                && location.span == (0..text.len())
+                    ),
+                    "{error:?}"
+                );
+            } else if mode == 3 {
+                assert!(matches!(
+                    error,
+                    Fault::BatchBinding(GraphWriteScriptBatchError::TooManyStatements {
+                        limit: 1,
+                        observed: 2,
+                    })
+                ));
+            } else if mode == 4 {
+                assert!(matches!(
+                    error,
+                    Fault::BatchBinding(GraphWriteScriptBatchError::Empty)
+                ));
+            }
+            assert!(session.is_closed());
+            drop(session);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert!(db.edges().unwrap().is_empty());
+            if matches!(mode, 1 | 3 | 4) {
+                assert_eq!(
+                    db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                        .unwrap(),
+                    ElementId::Vertex(engine_vertex(1)),
+                    "all bindings precede allocation"
+                );
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn native_chain_batch_missing_arguments_keep_scalar_and_list_record_coordinates() {
+    lab(0xac39, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        for scalar in [false, true] {
+            let text = if scalar {
+                "FOREACH (x IN [1] | CREATE (:Visible {p:$p}))"
+            } else {
+                "FOREACH (row IN $rows | CREATE (:Visible {p:row.p}))"
+            };
+            let good = if scalar {
+                GqlParameters::new().with_int64("p", 7).unwrap()
+            } else {
+                rows(&[(7, 9)])
+            };
+            let arguments = [good.clone(), GqlParameters::new()];
+            for mode in 0..4 {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let basis = db.frontier().unwrap();
+                let mut session = db
+                    .authorized_write_session(
+                        &txn,
+                        &commit,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        symbols,
+                        R,
+                        policy(),
+                        2,
+                        || NOW,
+                    )
+                    .unwrap();
+                let prepared = session.prepare(&query, text, &good).unwrap();
+                let error = match mode {
+                    0 => session
+                        .execute_batch_stats(&query, &prepared, &arguments)
+                        .await
+                        .unwrap_err(),
+                    1 => session
+                        .bind_batch(&query, &prepared, &arguments)
+                        .unwrap_err(),
+                    2 => session
+                        .query_batch_stats(&query, text, &arguments)
+                        .await
+                        .unwrap_err(),
+                    _ => session
+                        .execute_stats(&query, &prepared, &arguments[1])
+                        .await
+                        .unwrap_err(),
+                };
+                if mode == 3 {
+                    assert!(matches!(&error, Fault::ChainBinding(_)), "{error:?}");
+                } else {
+                    let Fault::BatchChainBinding { location, .. } = &error else {
+                        panic!("scalar={scalar}, mode={mode}: {error:?}");
+                    };
+                    assert_eq!(location.argument_set, 1);
+                    assert_eq!(location.statement, 0);
+                    assert_eq!(location.span, 0..text.len());
+                    assert!(error.to_string().contains("argument set 1, statement 0"));
+                }
+                assert!(
+                    core::error::Error::source(&error)
+                        .unwrap()
+                        .downcast_ref::<fgdb_gql::GraphWriteChainTextError>()
+                        .is_some(),
+                    "the original native parameter error must remain a typed cause",
+                );
+                assert!(session.is_closed());
+                drop(session);
+                assert_eq!(db.frontier().unwrap(), basis);
+                assert!(db.vertices().unwrap().is_empty());
+                assert_eq!(
+                    db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                        .unwrap(),
+                    ElementId::Vertex(engine_vertex(1)),
+                    "all records must bind before any identity is reserved",
+                );
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn native_chain_batch_final_admission_and_expiry_never_blame_a_record() {
+    lab(0xac3a, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let scope = grant();
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let text = "FOREACH (p IN [1,2] | CREATE (:Visible {p:p}))";
+        let chain = fgdb_gql::PreparedGraphWriteChainText::prepare(text, R, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let chains = [chain.clone(), chain];
+        for expire in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let now = AtomicU64::new(NOW);
+            let admitted = AtomicBool::new(false);
+            let error = db
+                .execute_graph_write_chain_batch_authorized_checked(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    &chains,
+                    text.len(),
+                    2,
+                    policy(),
+                    || now.load(Ordering::Relaxed),
+                    |stats, _| {
+                        assert_eq!(stats.completed_statements, 2);
+                        assert_eq!(stats.created_vertices, 4);
+                        admitted.store(true, Ordering::Relaxed);
+                        if expire {
+                            now.store(scope.expires_at_ms, Ordering::Relaxed);
+                            Ok(())
+                        } else {
+                            Err(WriteTxnError::AuthorizedMutationRefused)
+                        }
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(admitted.load(Ordering::Relaxed));
+            assert!(
+                matches!(&error, Fault::BatchChain { location: None, .. }),
+                "{error:?}"
+            );
+            assert!(!error.to_string().contains("argument set"));
+            if expire {
+                assert_eq!(authorization(&error), Some(Error::Expired));
+            }
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn native_chain_batch_map_refusals_keep_the_original_argument_set() {
+    lab(0xac38, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let text = "CREATE (source:Visible {p:$props.p}) \
+                    FOREACH (x IN [1] | CREATE (:Visible {p:source.p}))";
+        let good = GqlParameters::new()
+            .with_map(
+                "props",
+                vec![("p".into(), GraphValue::Scalar(CanonicalScalar::Int(7)))],
+            )
+            .unwrap();
+        let arguments = [
+            good.clone(),
+            GqlParameters::new().with_int64("props", 9).unwrap(),
+        ];
+        for mode in 0..3 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    symbols,
+                    R,
+                    policy(),
+                    2,
+                    || NOW,
+                )
+                .unwrap();
+            let prepared = session.prepare(&query, text, &good).unwrap();
+            let error = match mode {
+                0 => session
+                    .execute_batch_stats(&query, &prepared, &arguments)
+                    .await
+                    .unwrap_err(),
+                1 => session
+                    .bind_batch(&query, &prepared, &arguments)
+                    .unwrap_err(),
+                _ => session
+                    .query_batch_stats(&query, text, &arguments)
+                    .await
+                    .unwrap_err(),
+            };
+            assert!(
+                matches!(
+                    error,
+                    Fault::BatchBinding(GraphWriteScriptBatchError::Arguments {
+                        argument_set: 1,
+                        ..
+                    })
+                ),
+                "{error:?}"
+            );
+            assert!(session.is_closed());
+            drop(session);
             assert_eq!(db.frontier().unwrap(), basis);
             assert!(db.vertices().unwrap().is_empty());
             assert_eq!(

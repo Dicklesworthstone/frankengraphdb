@@ -11,7 +11,7 @@ mod integer;
 mod merge;
 mod mutation_query;
 pub(in crate::graph_text) mod return_projection;
-mod script;
+pub(in crate::graph_text) mod script;
 
 use super::*;
 use crate::GraphSymbolResolver;
@@ -2343,7 +2343,7 @@ impl<'a> Parser<'a> {
         parameters: &[GqlParameterSpec],
         at: usize,
     ) -> Result<Self, GraphPatternTextError> {
-        for spec in parameters {
+        for spec in parameters.iter().filter(|spec| !spec.is_statement_time()) {
             self.parameter_types
                 .entry(spec.name.clone())
                 .or_insert(spec.parameter_type);
@@ -2684,6 +2684,38 @@ mod graph_function_tests {
             panic!("SET must retain a Date, not its text rendering");
         };
         assert_eq!(date.to_string(), "2024-02-29");
+    }
+
+    #[test]
+    fn set_current_time_uses_each_explicit_binding_without_reading_a_clock() {
+        let template = PreparedGraphMutationText::prepare(
+            "MATCH (a)-[:R]->(b) SET a.cost = datetime()",
+            RelationId(1),
+            symbols,
+        )
+        .unwrap();
+        for nanos in [1_437_511_232_142_000_000, 1_437_511_233_142_000_000] {
+            let instant = fgdb_types::CanonicalTimestamp::offset_only(nanos, 3600).unwrap();
+            let arguments = GqlParameters::new()
+                .with_statement_time(instant.clone())
+                .unwrap();
+            let bound = template.bind_parameters(&arguments).unwrap();
+            let batch = execute_assignment(
+                &bound,
+                &[CanonicalScalar::Int(7)],
+                assignment_policy(),
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(
+                batch.intents(),
+                &[crate::GraphMutationIntent::Property {
+                    vertex: fgdb_types::VId(1),
+                    key: PropertyKeyId(1),
+                    value: Some(CanonicalScalar::Timestamp(instant).into()),
+                }]
+            );
+        }
     }
 
     #[test]

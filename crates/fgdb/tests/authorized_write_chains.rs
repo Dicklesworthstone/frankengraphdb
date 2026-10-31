@@ -72,6 +72,204 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 
 #[test]
+fn repeated_vertex_merge_targets_keep_scoped_actions_and_bounded_source_visits() {
+    lab(0xc4a1_2114, |contexts| async move {
+        const COUNTER: PropertyKeyId = PropertyKeyId(3);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let mut scope = grant(Rights::ReadWrite, 100);
+        scope.properties = Scope::only([P, COUNTER]);
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let mut observations = Vec::new();
+        let mut distinct_key_records = None;
+        for hidden in [false, true] {
+            for (at, repetitions) in [1_usize, 8].into_iter().enumerate() {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                for (id, count) in [(1, 4), (2, 7)] {
+                    let mut fields = vec![
+                        (P, CanonicalScalar::Int(1)),
+                        (COUNTER, CanonicalScalar::Int(count)),
+                    ];
+                    if hidden {
+                        fields.insert(1, (SECRET, CanonicalScalar::Int(99)));
+                    }
+                    seed.create_vertex(VId(id), vec![L], fields);
+                }
+                if hidden {
+                    for id in 100..116 {
+                        seed.create_vertex(
+                            VId(id),
+                            vec![HIDDEN],
+                            vec![
+                                (P, CanonicalScalar::Int(1 + (id % 2) as i64)),
+                                (COUNTER, CanonicalScalar::Int(900)),
+                            ],
+                        );
+                    }
+                }
+                db.write(&commit, seed).await.unwrap();
+                let before = (db.frontier().unwrap(), db.vertices().unwrap());
+                let input = std::iter::repeat_n("1,2", repetitions)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let text = format!(
+                    "UNWIND [{input}] AS k MERGE (n:Visible {{p:k}}) \
+                     ON CREATE SET n.counter=10 ON MATCH SET n.counter=n.counter+1 \
+                     RETURN k,n.counter AS value ORDER BY k,value"
+                );
+                let program = PreparedGraphWriteChainText::prepare(&text, R, |kind, name: &str| {
+                    match (kind, name) {
+                        (GraphSymbolKind::Property, "counter") => {
+                            Some(GraphSymbol::Property(COUNTER))
+                        }
+                        _ => symbols(kind, name),
+                    }
+                })
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+                let (stats, rows, completion) = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        policy(100).with_mutation_limit((3 * repetitions) as u64),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap();
+                let expected: Vec<_> = [
+                    (1, 4 + repetitions as i64),
+                    (1, 7 + repetitions as i64),
+                    (2, 9 + repetitions as i64),
+                ]
+                .into_iter()
+                .flat_map(|(key, count)| {
+                    std::iter::repeat_n(
+                        vec![
+                            GraphValue::Scalar(CanonicalScalar::Int(key)),
+                            GraphValue::Scalar(CanonicalScalar::Int(count)),
+                        ],
+                        repetitions,
+                    )
+                })
+                .collect();
+                assert_eq!(
+                    rows.value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    expected,
+                );
+                assert_eq!(stats.created_vertices, 1);
+                assert_eq!(
+                    *distinct_key_records.get_or_insert(stats.selection.snapshot_records),
+                    stats.selection.snapshot_records,
+                    "duplicate updates and hidden data cannot add source visits",
+                );
+                if hidden {
+                    assert_eq!(&(stats, rows), &observations[at]);
+                    for original in &before.1 {
+                        let current = db.vertex(original.vid).unwrap().unwrap();
+                        if original.labels.contains(&HIDDEN) {
+                            assert_eq!(&current, original);
+                        } else {
+                            assert!(
+                                current
+                                    .props
+                                    .contains(&(SECRET, CanonicalScalar::Int(99).into()))
+                            );
+                        }
+                    }
+                } else {
+                    observations.push((stats, rows));
+                }
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: fgdb_types::CommitSeq(before.0.0 + 1),
+                    },
+                );
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn cached_merge_occurrences_still_refuse_late_authority_effect_and_expression_failures() {
+    use fgdb_gql::{
+        GqlQueryError, GraphMutationError, GraphMutationQueryError, GraphVertexMergeError,
+        GraphVertexMergeRowsQueryError, GraphWriteChainError,
+    };
+
+    lab(0xc4a1_2115, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = (db.frontier().unwrap(), db.vertices().unwrap());
+        for (action, effects) in [
+            ("n.secret=1", 100),
+            ("n.p=n.p+1", 1),
+            ("n.p=10/(n.p-10)", 100),
+        ] {
+            // Label-only matching has no property key to invalidate. The
+            // first row creates a visible vertex; the second reuses it and
+            // must still execute its distinct ON MATCH branch.
+            let text = format!(
+                "UNWIND [1,1] AS occurrence MERGE (n:Visible) \
+                 ON CREATE SET n.p=10 ON MATCH SET {action} RETURN n.p"
+            );
+            let error = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &chain(&text),
+                    policy(10).with_mutation_limit(effects),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            if action.contains("secret") {
+                assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+            } else if effects == 1 {
+                assert!(matches!(
+                    error,
+                    GqlQueryError::Source(GraphWriteChainError::Mutation(
+                        GraphMutationQueryError::Mutation(GraphMutationError::EffectLimit {
+                            limit: 1,
+                            observed: 2,
+                        })
+                    ))
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    GqlQueryError::Source(GraphWriteChainError::VertexMerge(
+                        GraphVertexMergeRowsQueryError::Merge(GraphVertexMergeError::RowAction {
+                            row: 1,
+                            ..
+                        })
+                    ))
+                ));
+            }
+            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
 fn multipart_read_before_create_masks_hidden_matches_and_freezes_optional_rows() {
     lab(0xc4a1_2031, |contexts| async move {
         let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());

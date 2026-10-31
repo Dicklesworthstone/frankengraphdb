@@ -36,11 +36,28 @@ type Receipt = (
     GqlQueryExecution<GraphValueRow>,
     EmbeddedTxnCompletion,
 );
+type BatchFault =
+    fgdb_gql::GraphWriteScriptExecutionError<WriteTxnError, WriteTxnError, WriteTxnError>;
 
 fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphWriteChainError::Insert(
         GraphInsertQueryError::Insertion(GraphInsertError::Source(error)),
     ))
+}
+
+pub(super) fn batch_error(
+    source: Fault,
+    argument_set: Option<usize>,
+    source_len: usize,
+) -> BatchFault {
+    BatchFault::BatchChain {
+        location: argument_set.map(|argument_set| fgdb_gql::GraphWriteScriptBatchLocation {
+            argument_set,
+            statement: 0,
+            span: 0..source_len,
+        }),
+        source,
+    }
 }
 
 /// Authorize an original intent against native before/after images. A frozen
@@ -735,6 +752,108 @@ impl<V: Vfs + Clone> Database<V> {
         .await
     }
 
+    /// Execute a finite batch of independently bound, non-returning chains in
+    /// argument-set order. Each statement sees the preceding statements' graph
+    /// effects but none of their local variables. One live capability, one
+    /// cumulative native allowance and one Chronicle completion cover the batch.
+    /// The complete definitions are admitted before graph access or identity
+    /// allocation. A failure never commits an earlier input record.
+    ///
+    /// `source_len` is the caller's original template length in UTF-8 bytes,
+    /// before parameter-map lowering. It supplies diagnostics only: every
+    /// independently bound record is statement zero of that template.
+    ///
+    /// The host admits its final statistics representation before publication.
+    /// The callback must keep its output private and must not publish or retry.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_write_chain_batch_authorized_checked(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        chains: &[PreparedGraphWriteChain],
+        source_len: usize,
+        max_statements: usize,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+        mut clock: impl FnMut() -> u64,
+        admit: impl FnOnce(
+            &fgdb_gql::GraphWriteProgramStats,
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<(fgdb_gql::GraphWriteProgramStats, EmbeddedTxnCompletion), BatchFault> {
+        let refusal = |error| batch_error(source(error), None, source_len);
+        if authority.namespace() != self.keys.namespace {
+            return Err(refusal(WriteTxnError::Authorization(Error::WrongAuthority)));
+        }
+        let now = clock();
+        let verified = authority
+            .verify_at(token, branch, now)
+            .map_err(|error| refusal(WriteTxnError::Authorization(error)))?;
+        let permit = verified
+            .begin_write_at(branch, now)
+            .map_err(|error| refusal(WriteTxnError::Authorization(error)))?;
+        let mut execution = Execution {
+            cx: commit_cx,
+            permit,
+            clock,
+        };
+        query_cx
+            .checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(refusal)?;
+        execution.checkpoint().map_err(refusal)?;
+        if chains.is_empty() {
+            return Err(BatchFault::BatchBinding(
+                fgdb_gql::GraphWriteScriptBatchError::Empty,
+            ));
+        }
+        let max_statements =
+            max_statements.min(fgdb_gql::PreparedGraphWriteScript::MAX_BATCH_STATEMENTS);
+        if chains.len() > max_statements {
+            return Err(BatchFault::BatchBinding(
+                fgdb_gql::GraphWriteScriptBatchError::TooManyStatements {
+                    limit: max_statements,
+                    observed: chains.len() as u128,
+                },
+            ));
+        }
+        for (argument_set, chain) in chains.iter().enumerate() {
+            let refusal = |error| batch_error(source(error), Some(argument_set), source_len);
+            execution.checkpoint().map_err(refusal)?;
+            if chain.returns_rows() {
+                return Err(refusal(WriteTxnError::AuthorizedMutationRefused));
+            }
+        }
+        let mut stats = None;
+        let mut active_record = None;
+        let (_, _, completion) = self
+            .complete_authorized_chains(
+                txn_cx,
+                query_cx,
+                commit_cx,
+                chains,
+                None,
+                policy.insertion_policy(),
+                verified.predicates(),
+                execution,
+                &mut active_record,
+                |value, _, work| {
+                    admit(&value, work)?;
+                    stats = Some(value);
+                    Ok(())
+                },
+            )
+            .await
+            .map_err(|error| batch_error(error, active_record, source_len))?;
+        Ok((
+            stats.expect("batch statistics admitted before publication"),
+            completion,
+        ))
+    }
+
     /// Continue native text admission with its existing live permit. The same
     /// preflight, workspace, output admission and completion own every chain.
     #[allow(clippy::too_many_arguments)]
@@ -747,15 +866,66 @@ impl<V: Vfs + Clone> Database<V> {
         continuation: Option<&fgdb_gql::PreparedGraphSet>,
         policy: GraphInsertPolicy,
         scope: &PlannerPredicates,
-        mut execution: Execution<'_, '_, Clock>,
+        execution: Execution<'_, '_, Clock>,
         admit: impl FnOnce(
             fgdb_gql::GraphWriteProgramStats,
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<Receipt, Fault> {
-        let continuation = continuation.or_else(|| chain.read_continuation());
-        admit_definition(chain, continuation, query_cx, scope, &mut execution)?;
+        let mut active_record = None;
+        self.complete_authorized_chains(
+            txn_cx,
+            query_cx,
+            commit_cx,
+            core::slice::from_ref(chain),
+            continuation,
+            policy,
+            scope,
+            execution,
+            &mut active_record,
+            admit,
+        )
+        .await
+    }
+
+    /// Execute independently bound statements in input order over one private
+    /// transaction. Statement-local rows never cross a boundary; the canonical
+    /// graph overlay and all native and signed allowances do. The full batch is
+    /// admitted before opening its workspace, and only the final completion
+    /// may publish. A multi-statement batch has no implicit RETURN channel.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn complete_authorized_chains<Clock: FnMut() -> u64>(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        chains: &[PreparedGraphWriteChain],
+        continuation: Option<&fgdb_gql::PreparedGraphSet>,
+        policy: GraphInsertPolicy,
+        scope: &PlannerPredicates,
+        mut execution: Execution<'_, '_, Clock>,
+        active_record: &mut Option<usize>,
+        admit: impl FnOnce(
+            fgdb_gql::GraphWriteProgramStats,
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<Receipt, Fault> {
+        *active_record = None;
+        if chains.is_empty()
+            || (chains.len() != 1
+                && (continuation.is_some() || chains.iter().any(|chain| chain.returns_rows())))
+        {
+            return Err(source(WriteTxnError::AuthorizedMutationRefused));
+        }
+        for (argument_set, chain) in chains.iter().enumerate() {
+            *active_record = Some(argument_set);
+            admit_definition(chain, continuation, query_cx, scope, &mut execution)?;
+        }
+        // Opening the workspace is a whole-batch boundary, not part of the
+        // last definition's admission. The same reset precedes completion.
+        *active_record = None;
         commit_cx
             .with_restriction_async(async {
                 let mut workspace = Workspace(Some(
@@ -773,20 +943,32 @@ impl<V: Vfs + Clone> Database<V> {
                     created_vertices: 0,
                     created_edges: 0,
                 };
+                let mut mutation_effects = 0;
+                let mut last_result = None;
+                for (argument_set, chain) in chains.iter().enumerate() {
+                *active_record = Some(argument_set);
+                let continuation = continuation.or_else(|| chain.read_continuation());
                 // The complete definition was authorized above. Input
                 // materialization now spends both the query's cumulative
                 // allowance and the live signed work meter before copying.
-                let mut rows = match chain.initial_rows_governed(policy.query, || {
+                let input_policy = remaining(policy, &used, mutation_effects, false).query;
+                let mut rows = match chain.initial_rows_governed(input_policy, || {
                     query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                     execution.checkpoint()
                 })? {
                     Some(input) => {
-                        used.evaluator = input.evaluator;
+                        used.evaluator.work_units = used
+                            .evaluator
+                            .work_units
+                            .saturating_add(input.evaluator.work_units);
+                        used.evaluator.scratch_entries = used
+                            .evaluator
+                            .scratch_entries
+                            .saturating_add(input.evaluator.scratch_entries);
                         Some(input.value)
                     }
                     None => None,
                 };
-                let mut mutation_effects = 0;
                 // Independent creation loops have no reads of their held
                 // prefix. stage_batch still checks every original intent's
                 // native before/after images on this same live permit before
@@ -1370,6 +1552,10 @@ impl<V: Vfs + Clone> Database<V> {
                     used.evaluator = result.evaluator;
                 }
                 used.selection.result_rows = result.rows.result_rows;
+                last_result = Some(result);
+                }
+                *active_record = None;
+                let result = last_result.expect("a nonempty chain batch was admitted");
                 let delivered = u64::try_from(result.value.len())
                     .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?;
                 execution
@@ -1380,7 +1566,7 @@ impl<V: Vfs + Clone> Database<V> {
                     .with_restriction(|| {
                         admit(
                             fgdb_gql::GraphWriteProgramStats {
-                                completed_statements: 1,
+                                completed_statements: chains.len(),
                                 selection: used.selection,
                                 evaluator: used.evaluator,
                                 target_vertex_visits: 0,

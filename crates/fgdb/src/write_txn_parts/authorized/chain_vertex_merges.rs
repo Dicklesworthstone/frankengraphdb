@@ -423,9 +423,10 @@ fn action_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
     GraphValue::admit_property_value(&value, &mut |kind| control(kind))
 }
 
-/// Resolve every row against the preceding row's state. Only action-free
-/// exact tuples share a resolution; all matching vertices retain identity
-/// order and every input occurrence continues independently.
+/// Resolve every row against the preceding row's state. Exact scalar tuples
+/// share a resolution only when every action preserves match keys and labels.
+/// Every occurrence still executes its selected actions and original-intent
+/// authorization; all matching vertices retain identity order.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &mut WriteTxn,
@@ -498,9 +499,14 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
         let mut resolved: BTreeMap<Vec<CanonicalPropertyValue>, Vec<VId>> = BTreeMap::new();
         let mut pairs = Vec::new();
         let mut effects = 0_u64;
-        let memoized = merge.actions().is_none();
+        let memoized = merge.preserves_match_targets();
         let retains_rows = continues || matches!(step, GraphWriteChainStep::VertexMergeQuery(_));
         for (at, row) in rows.iter().enumerate() {
+            // Even a cached label-only tuple with an empty ON MATCH branch
+            // must remain cancellable when no continuation rows are retained.
+            cx.checkpoint()
+                .map_err(WriteTxnError::Interrupted)
+                .map_err(GqlQueryError::Interrupted)?;
             let tuple = {
                 let controls = RefCell::new(&mut *execution);
                 merge

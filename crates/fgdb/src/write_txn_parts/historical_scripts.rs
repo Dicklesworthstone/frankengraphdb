@@ -115,6 +115,15 @@ impl WriteTxn {
                 ),
             ))
         })?;
+        let captured = database
+            .statement_clock
+            .as_ref()
+            .map_or_else(
+                || Ok(std::borrow::Cow::Borrowed(params)),
+                |clock| clock.capture_parameters(cx, text, params),
+            )
+            .map_err(crate::QueryWriteError::StatementTime)?;
+        let params = captured.as_ref();
         let declarations: Vec<(&str, fgdb_gql::GqlParameterType)> = params
             .parameter_types()
             .filter(|(_, kind)| {

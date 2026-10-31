@@ -39,6 +39,9 @@ fn options(parts: &[&str]) -> Options {
 
 #[test]
 fn source_parameters_and_feed_declarations_have_separate_native_schemas() {
+    let runtime = fgdb::runtime_builder().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
     let options = options(&[
         "--from-query",
         "RETURN $city AS city",
@@ -48,7 +51,7 @@ fn source_parameters_and_feed_declarations_have_separate_native_schemas() {
         "city=text",
         "MERGE (c:City {name:$city})",
     ]);
-    let prepared = prepare(&options).unwrap().unwrap();
+    let prepared = prepare(&options, &contexts.query()).unwrap().unwrap();
     assert_eq!(prepared.query.source().columns(), ["city"]);
     assert_eq!(prepared.query.script().parameter_schema().len(), 1);
     assert_eq!(
@@ -57,7 +60,7 @@ fn source_parameters_and_feed_declarations_have_separate_native_schemas() {
     );
     // A global read parameter is not implicitly copied into every write row.
     let options = options_with_missing_projection();
-    let error = prepare(&options).expect_err("missing script input must refuse");
+    let error = prepare(&options, &contexts.query()).expect_err("missing script input must refuse");
     assert_eq!(error.code, 3);
     assert_eq!(error.refusal, crate::refusal::Code::Statement);
     assert_eq!(
@@ -78,6 +81,9 @@ fn options_with_missing_projection() -> Options {
 
 #[test]
 fn definitions_refuse_missing_or_element_columns_and_returning_scripts_before_open() {
+    let runtime = fgdb::runtime_builder().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
     for (source, script) in [
         ("RETURN 1 AS other", "MERGE (c:City {name:$key})"),
         (
@@ -88,10 +94,13 @@ fn definitions_refuse_missing_or_element_columns_and_returning_scripts_before_op
         ("CREATE (:Person)", "CREATE (:City)"),
     ] {
         let options = options(&["--from-query", source, script]);
-        assert!(prepare(&options).is_err(), "{source} / {script}");
+        assert!(
+            prepare(&options, &contexts.query()).is_err(),
+            "{source} / {script}"
+        );
     }
     let ordinary = options(&["CREATE (:City)"]);
-    assert!(prepare(&ordinary).unwrap().is_none());
+    assert!(prepare(&ordinary, &contexts.query()).unwrap().is_none());
 }
 
 #[test]
@@ -206,7 +215,7 @@ fn output_failure_after_completion_does_not_retry_or_undo_the_write() {
             "MATCH (p:Person) RETURN p.bornIn AS key",
             "CREATE (c:City {name:$key})",
         ]);
-        let prepared = prepare(&options).unwrap().unwrap();
+        let prepared = prepare(&options, &contexts.query()).unwrap().unwrap();
         let error = run(&mut db, &contexts, prepared, true, &mut BrokenOutput)
             .await
             .expect_err("transport must fail");
@@ -247,7 +256,7 @@ fn list_and_map_feeds_preserve_nested_values_and_nullable_collection_domains() {
             "items=list",
             "CREATE (:City {bornIn:$idx,name:$doc.key,seen:size($items)})",
         ]);
-        let prepared = prepare(&input).unwrap().unwrap();
+        let prepared = prepare(&input, &contexts.query()).unwrap().unwrap();
         let schema = prepared.query.script().parameter_schema();
         for (name, expected) in [
             ("doc", GqlParameterType::Map),
@@ -333,7 +342,7 @@ fn late_wrong_collection_shapes_refuse_atomically_without_a_scalar_fallback() {
             db.write(&contexts.commit(), seed).await.unwrap();
             let before = db.frontier().unwrap();
             let input = options(&["--from-query", source, "--feed-type", declaration, script]);
-            let prepared = prepare(&input).unwrap().unwrap();
+            let prepared = prepare(&input, &contexts.query()).unwrap().unwrap();
             let mut out = Vec::new();
             let error = run(&mut db, &contexts, prepared, true, &mut out)
                 .await.expect_err("the later incompatible collection must refuse");
@@ -352,7 +361,7 @@ fn late_wrong_collection_shapes_refuse_atomically_without_a_scalar_fallback() {
             // A successful, identically typed operation distinguishes a late
             // binding refusal from an unsupported parser or broken driver.
             let good = options(&["--from-query", good_source, "--feed-type", declaration, script]);
-            run(&mut db, &contexts, prepare(&good).unwrap().unwrap(), true, &mut out)
+            run(&mut db, &contexts, prepare(&good, &contexts.query()).unwrap().unwrap(), true, &mut out)
                 .await.unwrap();
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             assert_eq!(db.vertices().unwrap().len(), 2);

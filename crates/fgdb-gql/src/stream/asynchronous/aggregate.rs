@@ -29,6 +29,14 @@ impl AsyncVertexSpillAggregatePlan {
     pub fn definition(&self) -> &SpillAggregateDefinition {
         &self.definition
     }
+
+    /// Payload demand of the complete compiled input, before any aggregate
+    /// projection or reduction. Later host element reads retain their own
+    /// source authority and do not require unused input property payloads.
+    #[must_use]
+    pub fn requires_properties(&self) -> bool {
+        self.input.requires_properties()
+    }
 }
 
 impl core::fmt::Debug for AsyncVertexSpillAggregatePlan {

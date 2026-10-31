@@ -802,6 +802,7 @@ fn cold_view(db: &Database<crate::MemVfs>) -> crate::EmbeddedReadView {
         snapshot: std::sync::Arc::clone(&db.snapshot),
         namespace: db.keys.namespace,
         beacon_indexes: super::QueryIndexes::default(),
+        statement_clock: db.statement_clock.clone(),
     }
 }
 

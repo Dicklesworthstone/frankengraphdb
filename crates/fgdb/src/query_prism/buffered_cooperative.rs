@@ -56,8 +56,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// bounds cooperative construction/kernel steps, not the
     /// complete call's poll duration, and does not make its workspace spillable.
     /// This is an owner-level API, not a capability-authorized procedure host.
-    /// The cooperative kernel future is not `Send`; use a registered
-    /// current-thread runtime, as with the resident cooperative entry point.
+    /// This owner future is `Send` and may be scheduled by the caller's
+    /// registered runtime. No task or thread is spawned by the reader.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_fnx_sealed_cooperative(
         &mut self,

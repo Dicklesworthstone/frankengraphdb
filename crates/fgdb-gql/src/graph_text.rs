@@ -274,6 +274,8 @@ pub enum GraphPatternTextErrorKind {
     UnusedParameterDeclaration,
     ConflictingParameterTypes,
     MissingParameter,
+    /// A current-time constructor needs an explicit host-captured instant.
+    StatementTimeRequired,
     ParameterTypeMismatch {
         expected: GqlParameterType,
         found: GqlParameterType,
@@ -354,6 +356,9 @@ impl core::fmt::Display for GraphPatternTextErrorKind {
                 f.write_str("a parameter is used where two different types are required")
             }
             Self::MissingParameter => f.write_str("missing parameter value"),
+            Self::StatementTimeRequired => {
+                f.write_str("statement time must be supplied by the host")
+            }
             Self::ParameterTypeMismatch { expected, found } => {
                 write!(f, "parameter has type {found}, expected {expected}")
             }
@@ -385,6 +390,7 @@ impl GraphPatternTextErrorKind {
             | Self::UnusedParameterDeclaration
             | Self::ConflictingParameterTypes
             | Self::MissingParameter
+            | Self::StatementTimeRequired
             | Self::ParameterTypeMismatch { .. }
             | Self::UnexpectedArguments => C::InvalidValue,
             Self::DefinitionTooLarge
@@ -506,6 +512,69 @@ pub fn reads_element_identity(statement: &str) -> bool {
             }
             _ => identity_word = false,
         }
+    }
+}
+
+/// Whether native text contains a current-time constructor. The shared lexer
+/// skips comments and quoted values; only a bare zero-argument DATE, TIME,
+/// LOCALTIME, DATETIME, LOCALDATETIME or TIMESTAMP call requests context.
+/// Hosts may capture once before binding writes, whose templates are prepared
+/// internally. Script separators use the native script lexer, so a call in a
+/// later statement shares the same context. This is a routing hint; normal
+/// preparation owns syntax errors.
+#[must_use]
+pub fn statement_time_required(statement: &str) -> bool {
+    if statement.len() > crate::MAX_GRAPH_WRITE_SCRIPT_BYTES {
+        return false;
+    }
+    let mut lexer = Lexer {
+        text: statement,
+        at: 0,
+        tokens: 0,
+    };
+    let mut previous_dot = false;
+    let mut first = true;
+    loop {
+        let Ok(token) = scoped::mutation::script::next_script_token(&mut lexer) else {
+            return false;
+        };
+        if first
+            && matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXPLAIN"))
+        {
+            return false;
+        }
+        first = false;
+        match token.kind {
+            TokenKind::End => return false,
+            TokenKind::Punct(b';') => lexer.tokens = 0,
+            TokenKind::Word(word)
+                if !previous_dot
+                    && statement.as_bytes().get(token.at) != Some(&b'`')
+                    && [
+                        "DATE",
+                        "TIME",
+                        "LOCALTIME",
+                        "DATETIME",
+                        "LOCALDATETIME",
+                        "TIMESTAMP",
+                    ]
+                    .iter()
+                    .any(|name| word.eq_ignore_ascii_case(name)) =>
+            {
+                let mut lookahead = lexer.clone();
+                if matches!(
+                    lookahead.next().map(|token| token.kind),
+                    Ok(TokenKind::Punct(b'('))
+                ) && matches!(
+                    lookahead.next().map(|token| token.kind),
+                    Ok(TokenKind::Punct(b')'))
+                ) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        previous_dot = matches!(token.kind, TokenKind::Punct(b'.'));
     }
 }
 
@@ -1852,32 +1921,7 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         if let TokenKind::Parameter(name) = self.current.kind {
             self.check_declared_parameter(name, expected, at)?;
-            let index = if let Some(index) = self
-                .syntax
-                .parameters
-                .iter()
-                .position(|spec| spec.name == name)
-            {
-                let spec = &mut self.syntax.parameters[index];
-                if spec.parameter_type != expected {
-                    return Err(error(
-                        at,
-                        GraphPatternTextErrorKind::ConflictingParameterTypes,
-                    ));
-                }
-                spec.occurrences += 1;
-                index
-            } else {
-                let index = self.syntax.parameters.len();
-                self.syntax.parameters.push(GqlParameterSpec {
-                    name: name.to_owned(),
-                    parameter_type: expected,
-                    requires_positive: false,
-                    occurrences: 1,
-                });
-                self.syntax.parameter_offsets.push(at);
-                index
-            };
+            let index = self.register_parameter(name, expected, at)?;
             self.advance()?;
             return Ok(Number::Parameter(index));
         }
@@ -1920,6 +1964,54 @@ impl<'a> Parser<'a> {
         };
         self.advance()?;
         Ok(Number::Literal(value))
+    }
+
+    /// Named arguments and implicit execution context spend the same admitted
+    /// slot budget, regardless of which one is encountered first.
+    fn register_parameter(
+        &mut self,
+        name: &str,
+        expected: GqlParameterType,
+        at: usize,
+    ) -> Result<usize, GraphPatternTextError> {
+        if let Some(index) = self
+            .syntax
+            .parameters
+            .iter()
+            .position(|spec| spec.name == name)
+        {
+            let spec = &mut self.syntax.parameters[index];
+            if spec.parameter_type != expected {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::ConflictingParameterTypes,
+                ));
+            }
+            spec.occurrences += 1;
+            return Ok(index);
+        }
+        if self.syntax.parameters.len() >= crate::parameters::MAX_GQL_PARAMETER_COUNT {
+            return Err(error(at, GraphPatternTextErrorKind::ParameterDeclaration));
+        }
+        let index = self.syntax.parameters.len();
+        self.syntax.parameters.push(GqlParameterSpec {
+            name: name.to_owned(),
+            parameter_type: expected,
+            requires_positive: false,
+            occurrences: 1,
+        });
+        self.syntax.parameter_offsets.push(at);
+        Ok(index)
+    }
+
+    /// Register one shared, instant-free requirement for every current-time
+    /// call in this template. The reserved name is impossible in user text.
+    fn statement_time_parameter(&mut self, at: usize) -> Result<usize, GraphPatternTextError> {
+        self.register_parameter(
+            crate::parameters::STATEMENT_TIME_PARAMETER,
+            GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Timestamp),
+            at,
+        )
     }
     /// Whether a comparison operator starts at the current token.
     fn at_comparison(&self) -> bool {
@@ -2441,7 +2533,7 @@ impl core::fmt::Debug for PreparedGraphText {
 /// Each declared parameter's admitted argument, in declaration order. A
 /// missing or mistyped argument refuses at its first use, and an argument no
 /// parameter names refuses at `end`.
-fn checked_parameter_values(
+pub(crate) fn checked_parameter_values(
     parameters: &[GqlParameterSpec],
     offsets: &[usize],
     end: usize,
@@ -2453,9 +2545,16 @@ fn checked_parameter_values(
     let mut values = Vec::new();
     for (index, spec) in parameters.iter().enumerate() {
         let at = offsets[index];
-        let value = arguments
-            .get(&spec.name)
-            .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
+        let value = arguments.get(&spec.name).ok_or_else(|| {
+            error(
+                at,
+                if spec.is_statement_time() {
+                    GraphPatternTextErrorKind::StatementTimeRequired
+                } else {
+                    GraphPatternTextErrorKind::MissingParameter
+                },
+            )
+        })?;
         if !spec.parameter_type.accepts(value.parameter_type()) {
             return Err(error(
                 at,
@@ -2467,10 +2566,50 @@ fn checked_parameter_values(
         }
         values.push(value);
     }
-    if arguments.len() != values.len() {
+    if arguments.len()
+        != parameters
+            .iter()
+            .filter(|spec| !spec.is_statement_time())
+            .count()
+    {
         return Err(error(end, GraphPatternTextErrorKind::UnexpectedArguments));
     }
     Ok(values)
+}
+
+#[cfg(test)]
+mod statement_time_parameter_tests {
+    use super::*;
+
+    #[test]
+    fn statement_time_and_named_parameters_share_the_slot_limit_in_either_order() {
+        let limit = crate::parameters::MAX_GQL_PARAMETER_COUNT;
+        for time_first in [false, true] {
+            let mut parser = Parser::new("").unwrap();
+            if time_first {
+                assert_eq!(parser.statement_time_parameter(0).unwrap(), 0);
+            }
+            for index in 0..limit - usize::from(time_first) {
+                parser
+                    .register_parameter(&format!("p{index}"), GqlParameterType::Int64, index)
+                    .unwrap();
+            }
+            assert_eq!(parser.syntax.parameters.len(), limit);
+            let error = if time_first {
+                // Repeated calls retain one slot even when every slot is used.
+                assert_eq!(parser.statement_time_parameter(limit).unwrap(), 0);
+                parser
+                    .register_parameter("overflow", GqlParameterType::Int64, limit)
+                    .unwrap_err()
+            } else {
+                parser.statement_time_parameter(limit).unwrap_err()
+            };
+            assert_eq!(error.kind, GraphPatternTextErrorKind::ParameterDeclaration);
+            assert_eq!(error.offset, limit);
+            assert_eq!(parser.syntax.parameters.len(), limit);
+            assert_eq!(parser.syntax.parameter_offsets.len(), limit);
+        }
+    }
 }
 
 impl PreparedGraphText {

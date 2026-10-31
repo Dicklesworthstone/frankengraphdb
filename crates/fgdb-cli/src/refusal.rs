@@ -94,6 +94,9 @@ macro_rules! text_errors {
 }
 
 fn classify_one(error: &(dyn Error + 'static)) -> Option<(Code, Option<usize>)> {
+    if let Some(error) = error.downcast_ref::<fgdb_gql::query_write::GraphQueryWriteBuildError>() {
+        return Some((error.class().into(), None));
+    }
     text_errors!(
         error,
         fgdb_gql::GqlUnsupportedConstruct,

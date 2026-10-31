@@ -102,7 +102,14 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     BorrowedResolver(resolver),
                 )
                 .map_err(definition)?;
-                BoundDiff::bind(&prepared, selected.parameters())?
+                let captured = view
+                    .capture_authorized_statement_parameters(
+                        execution.borrow().cx,
+                        prepared.statement(),
+                        selected.parameters(),
+                    )
+                    .map_err(control)?;
+                BoundDiff::bind(&prepared, &captured)?
                     .execute(view, before, after, scope, policy, execution)
             },
             control,
@@ -142,7 +149,14 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     .map_err(definition)?;
                 refuse_element_identity(prepared.native.statement()).map_err(control)?;
                 admit(view, before, after)?;
-                BoundDiff::bind(&prepared.native, &params)?
+                let captured = view
+                    .capture_authorized_statement_parameters(
+                        execution.borrow().cx,
+                        prepared.native.statement(),
+                        &params,
+                    )
+                    .map_err(control)?;
+                BoundDiff::bind(&prepared.native, &captured)?
                     .execute(view, before, after, scope, policy, execution)
             },
             control,

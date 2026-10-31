@@ -36,7 +36,23 @@ impl InputPipeline {
     pub(crate) fn prepare(
         aggregate: &PreparedGraphAggregate,
     ) -> Option<(PreparedGraphAggregate, Option<Self>)> {
-        if aggregate.computed_order_requires_element_reads() {
+        Self::prepare_output(aggregate, false)
+    }
+
+    /// The resident external owner retains a pinned element reader after input
+    /// exhaustion. Only completed-group output gains that capability; every
+    /// input-stage admission below remains unchanged.
+    pub(crate) fn prepare_with_element_reads(
+        aggregate: &PreparedGraphAggregate,
+    ) -> Option<(PreparedGraphAggregate, Option<Self>)> {
+        Self::prepare_output(aggregate, true)
+    }
+
+    fn prepare_output(
+        aggregate: &PreparedGraphAggregate,
+        element_reads: bool,
+    ) -> Option<(PreparedGraphAggregate, Option<Self>)> {
+        if !element_reads && aggregate.computed_order_requires_element_reads() {
             return None;
         }
         let Some(relation) = aggregate.input_relation() else {

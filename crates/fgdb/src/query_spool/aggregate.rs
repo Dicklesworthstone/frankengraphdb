@@ -378,6 +378,14 @@ trait GroupInput: Send {
     fn next_input(&mut self) -> crate::SendFuture<'_, Result<Option<SpoolRow>>>;
     fn charge(&mut self, event: VertexScanEvent) -> core::result::Result<(), ExecutionError>;
     fn finish_result(&mut self) -> core::result::Result<(), ExecutionError>;
+    fn output_view(&self) -> Option<EmbeddedReadView> {
+        None
+    }
+    fn admit_output_record(&mut self) -> core::result::Result<(), ExecutionError> {
+        Err(GqlQueryError::Source(
+            fgdb_gql::GraphAggregateError::InvalidReductionInput,
+        ))
+    }
     fn native_control(&mut self, _event: VertexScanEvent) -> Result<()> {
         Ok(())
     }
@@ -429,6 +437,11 @@ macro_rules! input_adapter {
             }
             fn finish_result(&mut self) -> core::result::Result<(), ExecutionError> {
                 $cursor::finish_result(self).map_err(|error| {
+                    error.map_source(|error| error.map_source(ScanError::$variant))
+                })
+            }
+            fn admit_output_record(&mut self) -> core::result::Result<(), ExecutionError> {
+                $cursor::admit_output_record(self).map_err(|error| {
                     error.map_source(|error| error.map_source(ScanError::$variant))
                 })
             }
@@ -588,6 +601,10 @@ fn open<'q>(
     params: &GqlParameters,
     policy: GqlQueryPolicy,
 ) -> Result<Opened<'q>> {
+    let captured = view
+        .capture_statement_parameters(cx, prepared.statement(), params)
+        .map_err(|error| NativeAggregateSpoolError::Prepare(Box::new(error)))?;
+    let params = captured.as_ref();
     let BoundAggregate {
         definition,
         columns,
@@ -595,7 +612,7 @@ fn open<'q>(
         as_of,
     } = bind(prepared, params)?;
     let as_of = as_of.unwrap_or_else(|| view.frontier());
-    let plan = SpillAggregatePlan::compile(&definition)
+    let plan = SpillAggregatePlan::compile_with_element_reads(&definition)
         .map_err(|_| NativeAggregateSpoolError::Unsupported)?;
     let definition = plan.definition().clone();
     if !crate::query::aggregate_stream::valid_layout(
@@ -626,6 +643,11 @@ fn open<'q>(
             move || cx.with_restriction(|| cx.checkpoint()),
         )),
     };
+    let input = if definition.output_may_read_elements() {
+        output::retain_element_reader(input, view.clone())
+    } else {
+        input
+    };
     Ok(Opened {
         input,
         definition,
@@ -643,8 +665,10 @@ impl PreparedNativeRead {
     /// partitioning; every declared input column runs, including hidden ones.
     /// COUNT/SUM/AVG DISTINCT arguments use external canonical support passes;
     /// the compiler refuses COLLECT and relational input before source opening.
-    /// Native completed-group expressions and
-    /// RETURN DISTINCT run once before final ranking and pagination. Every partition
+    /// Native completed-group expressions and RETURN DISTINCT run once before
+    /// final ranking and pagination. Final vertex/edge properties and metadata
+    /// use the same pinned resident view and cumulative source allowance,
+    /// including an explicitly selected historical cut. Every partition
     /// preserves ordinary occurrence order within each group. DISTINCT numeric
     /// cells consume one typed argument value per group; integer and float
     /// arguments retain their distinct membership domains. All groups finish

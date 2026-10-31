@@ -20,7 +20,7 @@ use super::{
     SealedGraphView, SealedNeighborCursor, add, admit, checkpoint, execution_pass_work,
     finish_encoded, mul, require_loop_free_degree, reserve,
 };
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard};
 use crate::shortest_path::{Entry, IndexedHeap};
 use crate::{DijkstraOptions, FoundationAlgorithm, SealedProjectionError};
 use fgdb_strata::tiered::sealed::{SealedScanBudget, SealedScanStep};
@@ -29,14 +29,14 @@ use std::future::Future;
 use std::mem::size_of;
 use std::num::NonZeroUsize;
 
-pub(super) struct Cooperate<'cx, Yield> {
-    pub(super) cx: &'cx Control<'cx>,
+pub(super) struct Cooperate<'cx, Yield, G: Guard> {
+    pub(super) cx: &'cx Control<'cx, G>,
     fuel: SealedScanBudget,
     quantum: NonZeroUsize,
     yield_now: Yield,
 }
 
-impl<Yield, YieldFuture> Cooperate<'_, Yield>
+impl<Yield, YieldFuture, G: Guard> Cooperate<'_, Yield, G>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
@@ -127,6 +127,7 @@ impl FnxCallSpec {
             FnxAlgorithm::PageRank(_)
                 | FnxAlgorithm::SingleSourceShortestPathLength { .. }
                 | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+                | FnxAlgorithm::DijkstraPathLength { .. }
                 | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
@@ -137,6 +138,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::InDegreeCentrality
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::HitsCentrality
+                | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
                 | FnxAlgorithm::Foundation(
@@ -175,16 +177,18 @@ impl FnxCallSpec {
         Yield: FnMut() -> YieldFuture,
         YieldFuture: Future<Output = ()>,
     {
-        self.execute_sealed_cooperative_with_checkpoint(
+        self.execute_sealed_cooperative_delivery(
             cx,
             graph,
             limits,
             memory,
             quantum,
             yield_now,
-            || Ok(()),
+            &|| Ok(()),
+            Delivery::Collected,
         )
-        .await
+        .await?
+        .collected()
     }
 
     /// Cooperatively execute under an additional live guard. The guard spans
@@ -211,6 +215,8 @@ impl FnxCallSpec {
         Yield: FnMut() -> YieldFuture,
         YieldFuture: Future<Output = ()>,
     {
+        let guard = RefCell::new(guard);
+        let invoke = || (guard.borrow_mut())();
         self.execute_sealed_cooperative_delivery(
             cx,
             graph,
@@ -218,7 +224,7 @@ impl FnxCallSpec {
             memory,
             quantum,
             yield_now,
-            guard,
+            &invoke,
             Delivery::Collected,
         )
         .await?
@@ -242,16 +248,18 @@ impl FnxCallSpec {
         Yield: FnMut() -> YieldFuture,
         YieldFuture: Future<Output = ()>,
     {
-        self.execute_sealed_cooperative_rows_with_checkpoint(
+        self.execute_sealed_cooperative_delivery(
             cx,
             graph,
             limits,
             memory,
             quantum,
             yield_now,
-            || Ok(()),
+            &|| Ok(()),
+            Delivery::Retained,
         )
-        .await
+        .await?
+        .retained()
     }
 
     /// Retain completed values under an execution-local live guard. Every
@@ -273,6 +281,8 @@ impl FnxCallSpec {
         Yield: FnMut() -> YieldFuture,
         YieldFuture: Future<Output = ()>,
     {
+        let guard = RefCell::new(guard);
+        let invoke = || (guard.borrow_mut())();
         self.execute_sealed_cooperative_delivery(
             cx,
             graph,
@@ -280,7 +290,7 @@ impl FnxCallSpec {
             memory,
             quantum,
             yield_now,
-            guard,
+            &invoke,
             Delivery::Retained,
         )
         .await?
@@ -296,7 +306,7 @@ impl FnxCallSpec {
         memory: FnxMemoryLimits,
         quantum: NonZeroUsize,
         mut yield_now: Yield,
-        guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
+        guard: &impl Guard,
         delivery: Delivery,
     ) -> Result<Finished>
     where
@@ -306,9 +316,7 @@ impl FnxCallSpec {
         // Install the existing role restriction for EACH poll, never across an
         // await via a synchronous guard or by recovering a wider ambient Cx.
         cx.with_restriction_async(async {
-            let guard = RefCell::new(guard);
-            let invoke = || (guard.borrow_mut())();
-            let execution = Control::new(cx, &invoke);
+            let execution = Control::new(cx, guard);
             let cx = &execution;
             checkpoint(cx)?;
             if !self.supports_cooperative_sealed_execution() {
@@ -326,6 +334,23 @@ impl FnxCallSpec {
                     yield_now,
                 };
                 return super::cuts::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
+            }
+            if matches!(self.algorithm(), FnxAlgorithm::KatzCentrality(_)) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::katz::execute_cooperative(
                     self,
                     graph,
                     limits,
@@ -585,7 +610,7 @@ impl FnxCallSpec {
                         })
                         .transpose()?;
                     (
-                        "fgdb-prism/sealed-pagerank-cooperative-v2",
+                        "fgdb-prism/sealed-pagerank-nonempty-rows-cooperative-v3",
                         mul(pass, add(options.max_iter(), 1)?)?,
                         super::PageRankNormalization::select(
                             n,
@@ -602,23 +627,40 @@ impl FnxCallSpec {
                         .ok_or(ExecutionError::UnknownSource(source))?;
                     admission.rows(1)?;
                     (
-                        "fgdb-prism/sealed-bfs-cooperative-v1",
+                        "fgdb-prism/sealed-bfs-complete-population-cooperative-v2",
                         pass,
                         mul(n, size_of::<usize>() + size_of::<Option<HopDistance>>())?,
                         Some(ordinal),
                     )
                 }
-                FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
+                FnxAlgorithm::SingleSourceDijkstraPathLength(options)
+                | FnxAlgorithm::DijkstraPathLength { options, .. } => {
                     let ordinal = graph
                         .vertex_ordinal(options.source())
                         .ok_or(ExecutionError::UnknownSource(options.source()))?;
-                    admission.rows(1)?;
+                    let targeted =
+                        if let FnxAlgorithm::DijkstraPathLength { target, .. } = self.algorithm() {
+                            graph
+                                .vertex_ordinal(target)
+                                .ok_or(ExecutionError::UnknownTarget(target))?;
+                            true
+                        } else {
+                            false
+                        };
+                    admission.rows(usize::from(!targeted))?;
                     let unit = super::shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
                     (
-                        if unit {
-                            "fgdb-prism/sealed-dijkstra-unit-fifo-cooperative-v2"
-                        } else {
-                            "fgdb-prism/sealed-dijkstra-indexed-heap-cooperative-v2"
+                        match (unit, targeted) {
+                            (true, false) => "fgdb-prism/sealed-dijkstra-unit-fifo-cooperative-v2",
+                            (false, false) => {
+                                "fgdb-prism/sealed-dijkstra-indexed-heap-cooperative-v2"
+                            }
+                            (true, true) => {
+                                "fgdb-prism/sealed-dijkstra-target-unit-fifo-cooperative-v1"
+                            }
+                            (false, true) => {
+                                "fgdb-prism/sealed-dijkstra-target-indexed-heap-cooperative-v1"
+                            }
                         },
                         super::shortest_path::work(n, graph.adjacency_entry_count(), pass, unit)?,
                         super::shortest_path::workspace(n, unit)?,
@@ -691,6 +733,22 @@ impl FnxCallSpec {
                         graph,
                         source.ok_or(ExecutionError::InvalidUpstreamResult)?,
                         options,
+                        None,
+                        &admission,
+                        &mut control,
+                    )
+                    .await?
+                }
+                FnxAlgorithm::DijkstraPathLength { options, target } => {
+                    dijkstra(
+                        graph,
+                        source.ok_or(ExecutionError::InvalidUpstreamResult)?,
+                        options,
+                        Some(
+                            graph
+                                .vertex_ordinal(target)
+                                .ok_or(ExecutionError::UnknownTarget(target))?,
+                        ),
                         &admission,
                         &mut control,
                     )
@@ -709,7 +767,7 @@ impl FnxCallSpec {
             };
             control.tick().await?;
             let mut encoded = EncodedRows::new(self, output.row_count, &admission)?;
-            for index in 0..n {
+            for index in 0..output.values.scan_len(n) {
                 control.tick().await?;
                 encoded.push(self, graph, &output.values, index, &mut || checkpoint(cx))?;
             }
@@ -732,7 +790,7 @@ impl FnxCallSpec {
 
 async fn degree_centrality<Yield, YieldFuture>(
     graph: &SealedGraphView,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -751,7 +809,7 @@ where
 async fn directed_degree_centrality<Yield, YieldFuture>(
     graph: &SealedGraphView,
     incoming: bool,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -801,18 +859,19 @@ async fn dijkstra<Yield, YieldFuture>(
     graph: &SealedGraphView,
     source: usize,
     options: DijkstraOptions,
+    destination: Option<usize>,
     admission: &ResultAdmission,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
 {
     let n = graph.node_count();
-    if source >= n {
+    if source >= n || destination.is_some_and(|target| target >= n) {
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
-    admission.rows(1)?;
+    admission.rows(usize::from(destination.is_none()))?;
     let unit = super::shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
     // Complete immutable admission can prove every reduced weight compatible.
     // Otherwise a cutoff or unreachable component must not hide a negative
@@ -839,7 +898,15 @@ where
         }
     }
     if unit {
-        return dijkstra_unit_fifo(graph, source, options.cutoff(), admission, control).await;
+        return dijkstra_unit_fifo(
+            graph,
+            source,
+            options.cutoff(),
+            destination,
+            admission,
+            control,
+        )
+        .await;
     }
     control.tick().await?;
     let mut distances = reserve(n)?;
@@ -878,6 +945,10 @@ where
         }
         distances[node] = Some(cost);
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
+        if destination == Some(node) {
+            admission.rows(1)?;
+            break;
+        }
         let mut row = graph.neighbor_cursor_controlled(control.cx, node, None)?;
         while let Some((target, weight)) = control.next(&mut row).await? {
             control.tick().await?;
@@ -911,21 +982,35 @@ where
                 .ok_or(ExecutionError::InvalidUpstreamResult)?
             {
                 let requested = add(discovered, 1)?;
-                admission.rows(requested)?;
+                if destination.is_none() {
+                    admission.rows(requested)?;
+                }
                 discovered = requested;
             }
             control.offer(&mut heap, target, candidate).await?;
             witness.queue_peak = witness.queue_peak.max(heap.len());
         }
     }
-    for vertex in 0..n {
-        control.tick().await?;
-        if overflowed[vertex] && distances[vertex].is_none() {
-            return Err(ExecutionError::InvalidNumericResult.into());
+    let settled_target = destination.is_some_and(|target| distances[target].is_some());
+    if !settled_target {
+        for vertex in 0..n {
+            control.tick().await?;
+            if overflowed[vertex] && distances[vertex].is_none() {
+                return Err(ExecutionError::InvalidNumericResult.into());
+            }
         }
     }
-    if witness.nodes_touched != discovered {
+    if !settled_target && witness.nodes_touched != discovered {
         return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
+    if let Some(target) = destination {
+        witness.algorithm = "dijkstra_target_compressed_indexed_heap".to_owned();
+        let distance = distances[target];
+        return Ok(KernelOutput {
+            values: KernelValues::TargetDistance { target, distance },
+            row_count: usize::from(distance.is_some()),
+            witness,
+        });
     }
     Ok(KernelOutput {
         values: KernelValues::WeightedDistances(distances),
@@ -940,15 +1025,21 @@ async fn dijkstra_unit_fifo<Yield, YieldFuture>(
     graph: &SealedGraphView,
     source: usize,
     cutoff: Option<f64>,
+    destination: Option<usize>,
     admission: &ResultAdmission,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
 {
     control.tick().await?;
-    let mut traversal = super::shortest_path::UnitTraversal::new(graph.node_count())?;
+    let mut traversal = match destination {
+        None => super::shortest_path::UnitTraversal::new(graph.node_count())?,
+        Some(_) => {
+            super::shortest_path::UnitTraversal::new_selected(graph.node_count(), destination)?
+        }
+    };
     loop {
         control.tick().await?;
         if traversal.initialize_step() {
@@ -962,6 +1053,10 @@ where
         let Some((node, cost)) = traversal.pop()? else {
             break;
         };
+        if traversal.is_target(node) {
+            admission.rows(1)?;
+            break;
+        }
         let mut row = graph.neighbor_cursor_controlled(control.cx, node, None)?;
         while let Some((target, weight)) = control.next(&mut row).await? {
             control.tick().await?;
@@ -977,7 +1072,7 @@ where
 async fn root<Yield, YieldFuture>(
     parents: &mut [usize],
     mut vertex: usize,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<usize>
 where
     Yield: FnMut() -> YieldFuture,
@@ -993,7 +1088,7 @@ where
 
 async fn weak<Yield, YieldFuture>(
     graph: &SealedGraphView,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -1103,7 +1198,7 @@ where
 async fn strong<Yield, YieldFuture>(
     graph: &SealedGraphView,
     max_workspace: usize,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<(KernelOutput, usize)>
 where
     Yield: FnMut() -> YieldFuture,
@@ -1119,7 +1214,7 @@ where
     let mut on_stack = reserved(n, &mut workspace, max_workspace)?;
     let mut labels = reserved(n, &mut workspace, max_workspace)?;
     let mut members = reserved(n, &mut workspace, max_workspace)?;
-    let mut frames: FrameStack<SealedRow<'_>> = FrameStack::new(n, workspace, max_workspace)?;
+    let mut frames: FrameStack<SealedRow<'_, _>> = FrameStack::new(n, workspace, max_workspace)?;
     for _ in 0..n {
         control.tick().await?;
         indices.push(usize::MAX);
@@ -1236,7 +1331,7 @@ async fn bfs<Yield, YieldFuture>(
     source: usize,
     cutoff: Option<usize>,
     admission: &ResultAdmission,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -1263,6 +1358,13 @@ where
     };
     while head < queue.len() {
         control.tick().await?;
+        // The immutable projection admitted all adjacency before this call.
+        // Every discovered vertex already has its final BFS distance. Keep
+        // this boundary after the current row's EOF, with a live fuel/guard
+        // check before omitting the remaining row opens.
+        if queue.len() == n {
+            break;
+        }
         let vertex = queue[head];
         head += 1;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
@@ -1297,7 +1399,7 @@ async fn pagerank<Yield, YieldFuture>(
     graph: &SealedGraphView,
     options: PageRankOptions,
     source: Option<usize>,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -1331,15 +1433,19 @@ where
         control.tick().await?;
         if normalization == super::PageRankNormalization::WeightedSums {
             let mut sum = 0.0;
-            let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
-            while let Some((_, weight)) = control.next(&mut row).await? {
-                control.tick().await?;
-                if weight < 0.0 {
-                    return Err(ExecutionError::NegativeWeight.into());
-                }
-                sum += weight;
-                if !sum.is_finite() {
-                    return Err(ExecutionError::NonFiniteWeightSum.into());
+            // Projection admission already proved that degree-zero rows
+            // contain no selected weights, even if raw history is nonempty.
+            if graph.degree(source) != Some(0) {
+                let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
+                while let Some((_, weight)) = control.next(&mut row).await? {
+                    control.tick().await?;
+                    if weight < 0.0 {
+                        return Err(ExecutionError::NegativeWeight.into());
+                    }
+                    sum += weight;
+                    if !sum.is_finite() {
+                        return Err(ExecutionError::NonFiniteWeightSum.into());
+                    }
                 }
             }
             sums.push(sum);
@@ -1374,6 +1480,11 @@ where
             control.tick().await?;
             let push = options.alpha() * ranks[source];
             let sum = normalization.sum(&sums, source, || graph.degree(source))?;
+            // The live vertex tick survives omission. Zero-weight nonempty
+            // rows retain their ordered contributions and final EOF.
+            if graph.degree(source) == Some(0) {
+                continue;
+            }
             let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
             while let Some((target, weight)) = control.next(&mut row).await? {
                 control.tick().await?;

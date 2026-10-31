@@ -799,9 +799,10 @@ impl WriteTxn {
             let mut outcomes = Vec::new();
             let mut created = Vec::new();
             let mut pairs = Vec::new();
-            // ON/SET clauses may change what a later row's MERGE selects, so
-            // with clauses every row runs its own MERGE.
-            let memoized = merge.actions().is_none();
+            // Named non-key assignments preserve every resolved target set.
+            // Repeated keys still run their selected ON/SET clauses against
+            // current state; only the invariant match selection is reused.
+            let memoized = merge.preserves_match_targets();
             for (at, row) in rows.iter().enumerate() {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                 let tuple = merge.stored_tuple(at, row, &mut |event| evaluate(&mut used, event))?;
@@ -994,6 +995,15 @@ impl WriteTxn {
                         })?;
                     }
                     resolved.insert(tuple.clone(), vertices);
+                } else if merge.actions().is_some() {
+                    // Action-bearing MERGEs have always retained each input
+                    // occurrence's outcomes. Preserve that receipt contract
+                    // even when its match no longer rereads the snapshot.
+                    for vertex in &resolved[&tuple] {
+                        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                        scratch(&mut used)?;
+                        outcomes.push(GraphVertexMergeOutcome::Matched(*vertex));
+                    }
                 }
                 if let Some(actions) = merge.actions() {
                     let selected = if created_here {

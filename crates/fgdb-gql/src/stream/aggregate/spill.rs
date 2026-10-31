@@ -146,6 +146,25 @@ impl<S: VertexScanSource, F> VertexSpillAggregateCursor<S, F> {
         result
     }
 
+    /// Admit one reached final-output element read on the original source
+    /// allowance. The host retains the exact snapshot after source exhaustion.
+    pub fn admit_output_record<C>(&mut self) -> Result<(), VertexAggregateError<S::Error, C>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.input.state != VertexScanState::Exhausted {
+            self.fail();
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        let result = self.input.meter.record().map_err(lift);
+        if result.is_err() {
+            self.fail();
+        }
+        result
+    }
+
     /// Charge one complete final group, only after all source input is checked.
     pub fn finish_result<C>(&mut self) -> Result<(), VertexAggregateError<S::Error, C>>
     where
