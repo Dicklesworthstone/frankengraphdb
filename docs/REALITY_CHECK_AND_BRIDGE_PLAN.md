@@ -563,6 +563,61 @@ the official gzip. This satisfies the named functional acceptance, subject to
 the current mandatory full gate, and makes no Memgraph or external-memory win
 claim. `fgdb-ewc7i` remains in progress until qualification is complete.
 
+The sixth full proof is **VOID125**, not a passing run. It began on
+`fe6affa39f470e25e8fb8df616d7d366cbaa4c87`; the owner's committer rebased and
+integrated additional work during compilation, and root's later edits also
+disqualify it. Its terminal verifier exits0 to authenticate that VOID verdict.
+The final ledger classifies all nine core and forty registered checks UNRUN;
+successful prefix output cannot qualify the later source.
+
+That compilation exposed a second actual link limit: the
+`authorized_count_summary` binary exceeded DWARF32's four-GiB debug-string
+offset range. The original signed PC32 executable-address overflow and this
+nonallocated debug-offset overflow are distinct. Native-only DWARF64 controls
+preserved code and line information but could not repair the Rust objects'
+own DWARF32 references. The current package-specific test profile instead
+keeps unpacked debug sidecars, basic optimization, debug assertions, checked
+overflow, unwind and line tables, restoring the original native compiler
+flags. A pinned Rust probe preserves exact code, line information and
+file/line/function backtraces while actually loading its sidecars. This probe
+does not establish that the oversized project binaries link or execute.
+Linux/Darwin test support is the declared scope; no MSVC qualification follows.
+
+Current integration repairs on `ae393f938` pass all-target, all-feature Clippy
+and formatting. They preserve shortest-path admission before allocation,
+cursor lifetimes, argument-accounting scope and write-program contracts.
+New public tests exercise correlated Optional/Collect bodies, duplicate and
+NULL behavior, repeated source charges, and directed/reversed distance
+centralities with real guard/cancel/drop boundaries. The workspace oracle now
+distinguishes a lawful optional degree-cache fallback from the actual
+mandatory minimum's typed refusal. The original undirected controls remain.
+The three focused native targets are running; their runtime results and the
+complete mandatory proof remain pending.
+
+The scanner investigation now reproduces the original October5 calibration
+with its original UBS5.4.17 tag: all thirty partitions complete with exactly
+1 command, 16 comparison and 901 panic criticals. The corrected modern tool
+on that same source produces 1/11/117: 784 identical panic sites are now
+warnings, and five public fixture/schema comparisons no longer match.
+Thus the historical calibration was valid for its tool. Complete modern-tool
+controls on initial `c30a48d0` and later `fe6affa39` produce260 and277 criticals,
+respectively. Every exact critical site is reviewed and retained; the later
+232 panic sites comprise231 test-only signals and one compile-time fixed
+nonzero guard. Public comparisons, binary-protocol test headers, scratch-path
+timestamps and the operator-selected fuzz executable remain visible findings.
+These bounded reviews are not a general security clearance. Intervening
+integration changed77 files, making even277 historical. A fresh complete scan
+is required; the review-only calibration candidate remains outside the
+project, and the canonical ratchet is unchanged.
+
+The fourth tracker publication is exactly six attributable record IDs through
+the native helper. It preserves1,363 prior issues and adds the genuine
+`fgdb-rwtcx` record and original comment from the authenticated writer backup;
+all prior raw issue/label/dependency/comment/event rows survive. Its historical
+closed state is preserved as provenance, earning no new closure credit.
+`fgdb-016qw` remains unrecovered and the historical audit remains open. Current
+qualification and capability records carry explicit pending-runtime comments.
+
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,
 not a new gate or capability. Retire it from active use when these work units
