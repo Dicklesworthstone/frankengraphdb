@@ -448,6 +448,90 @@ fn sealed_bfs_and_components_compose_with_properties_matches_and_grouping() {
 }
 
 #[test]
+fn compressed_bridge_pairs_preserve_shared_sources_and_typed_neighbor_composition() {
+    let ((), report) = run_async_under_lab(0x6273_5110, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, mut writer) = fixture(&commit).await;
+        let mut branches = WriteBatch::new(R);
+        branches.add_edge(EId(BASE + 20), VId(1), VId(FOURTH), vec![]);
+        branches.add_edge(EId(BASE + 21), VId(1), VId(u128::MAX), vec![]);
+        assert_eq!(writer.write(&commit, branches).await.unwrap(), CommitSeq(3));
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let params = GqlParameters::new();
+        let call = "CALL fnx.bridges(label => 'Person', relation => 'R', direction => 'undirected', parallel => 'collapse', self_loops => 'keep')";
+        for (text, expected) in [
+            (
+                format!("{call} YIELD node,neighbor RETURN node,neighbor ORDER BY node,neighbor"),
+                vec![
+                    vec![vertex(1), vertex(SECOND)],
+                    vec![vertex(1), vertex(FOURTH)],
+                    vec![vertex(1), vertex(u128::MAX)],
+                    vec![vertex(SECOND), vertex(THIRD)],
+                ],
+            ),
+            (
+                format!("{call} YIELD node,neighbor RETURN node,-neighbor.p AS value"),
+                // A unique-leading-vertex shortcut would keep the wrong
+                // secondary order within the three rows rooted at vertex 1.
+                vec![
+                    vec![vertex(1), integer(-50)],
+                    vec![vertex(1), integer(-40)],
+                    vec![vertex(1), integer(-20)],
+                    vec![vertex(SECOND), integer(-30)],
+                ],
+            ),
+            (
+                format!("{call} YIELD node,neighbor MATCH (neighbor:Person) RETURN node,neighbor.p AS p ORDER BY node,p"),
+                vec![
+                    vec![vertex(1), integer(20)],
+                    vec![vertex(1), integer(40)],
+                    vec![vertex(1), integer(50)],
+                    vec![vertex(SECOND), integer(30)],
+                ],
+            ),
+            (
+                format!("{call} YIELD node,neighbor WITH node,COUNT(*) AS n RETURN node,n ORDER BY node"),
+                vec![vec![vertex(1), integer(3)], vec![vertex(SECOND), integer(1)]],
+            ),
+            (
+                "CALL fnx.articulation_points(label => 'Person', relation => 'R', direction => 'undirected', parallel => 'collapse', self_loops => 'keep') YIELD node RETURN node,node.p AS p ORDER BY node".to_owned(),
+                vec![vec![vertex(1), integer(10)], vec![vertex(SECOND), integer(20)]],
+            ),
+        ] {
+            assert_eq!(
+                resident_rows(writer.query(&cx, &text, &params, resolve, policy()).unwrap()),
+                expected,
+                "resident {text}",
+            );
+            let prepared = prepare(&text, &params);
+            for run_rows in [1, 3] {
+                let answer = execute(
+                    &prepared,
+                    &mut cold,
+                    &cx,
+                    policy(),
+                    &spill_pool,
+                    run_rows,
+                    WORK,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                assert_eq!(answer.snapshot, CommitSeq(3));
+                assert_eq!(answer.rows, expected, "run_rows={run_rows}: {text}");
+                assert_eq!(spill_pool.used(), 0);
+            }
+        }
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn old_publication_and_explicit_history_keep_topology_and_properties_together() {
     let ((), report) = run_async_under_lab(0x6273_5102, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

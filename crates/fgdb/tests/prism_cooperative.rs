@@ -54,7 +54,7 @@ mod hits;
 #[path = "prism_cooperative/pagerank.rs"]
 mod pagerank;
 
-fn retained_calls() -> [FnxCallSpec; 20] {
+fn retained_calls() -> [FnxCallSpec; 22] {
     let bind = |text| FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();
     [
         FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap()),
@@ -79,12 +79,15 @@ fn retained_calls() -> [FnxCallSpec; 20] {
         bind("CALL fnx.eigenvector_centrality()"),
         bind("CALL fnx.load_centrality()"),
         bind("CALL fnx.hits_centrality() YIELD authority AS rank,node AS id,hub"),
+        FnxCallSpec::articulation_points(),
+        bind("CALL fnx.bridges() YIELD neighbor AS target,node AS source"),
     ]
 }
 
 fn compare_retained(mut cursor: FnxRowCursor, expected: &FnxResult, vertices: usize) {
     assert_eq!(cursor.certificate(), &expected.certificate);
     assert_eq!(cursor.remaining(), expected.rows.len());
+    assert!(expected.rows.len() <= vertices);
     let maximum = expected
         .rows
         .iter()
@@ -125,7 +128,7 @@ fn compare_retained(mut cursor: FnxRowCursor, expected: &FnxResult, vertices: us
     );
     assert_eq!(
         examined, vertices,
-        "unreachable ordinals still poll live control"
+        "unreachable, unselected and post-pair ordinals still poll live control"
     );
     assert!(row.is_empty());
     assert!(
@@ -135,6 +138,98 @@ fn compare_retained(mut cursor: FnxRowCursor, expected: &FnxResult, vertices: us
             })
             .unwrap()
     );
+}
+
+#[test]
+fn retained_cutsets_preserve_sparse_empty_and_repeated_endpoint_rows() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = small_database(&commit, 3, false).await;
+        let mut star = WriteBatch::new(RelationId(1));
+        star.delete_edge(EId(2));
+        star.add_edge(
+            EId(3),
+            VId(0),
+            VId(2),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(2))],
+        );
+        star.create_vertex(VId(3), vec![LabelId(1)], vec![]);
+        db.write(&commit, star).await.unwrap();
+        let options = options(Directedness::Undirected);
+        for cycle in [false, true] {
+            if cycle {
+                let mut close = WriteBatch::new(RelationId(1));
+                close.add_edge(
+                    EId(4),
+                    VId(1),
+                    VId(2),
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(3))],
+                );
+                db.write(&commit, close).await.unwrap();
+            }
+            let graph = projection(&db, &cx, options).await;
+            for (call, expected) in [
+                (
+                    FnxCallSpec::articulation_points(),
+                    vec![vec![FnxValue::Vertex(VId(0))]],
+                ),
+                (
+                    FnxCallSpec::bridges(),
+                    vec![
+                        vec![FnxValue::Vertex(VId(0)), FnxValue::Vertex(VId(1))],
+                        vec![FnxValue::Vertex(VId(0)), FnxValue::Vertex(VId(2))],
+                    ],
+                ),
+            ] {
+                let expected = if cycle { vec![] } else { expected };
+                let limits = FnxExecutionLimits {
+                    max_result_rows: expected.len(),
+                    ..options.execution_limits
+                };
+                let collected = call.execute_sealed(&cx, &graph, limits, memory()).unwrap();
+                assert_eq!(collected.rows, expected);
+                compare_retained(
+                    call.execute_sealed_rows(&cx, &graph, limits, memory())
+                        .unwrap(),
+                    &collected,
+                    graph.node_count(),
+                );
+                for q in [1, 3] {
+                    let cooperative = call
+                        .execute_sealed_cooperative(
+                            &cx,
+                            &graph,
+                            limits,
+                            memory(),
+                            quantum(q),
+                            yield_now,
+                        )
+                        .await
+                        .unwrap();
+                    compare_execution(&cooperative, &collected);
+                    compare_retained(
+                        call.execute_sealed_cooperative_rows(
+                            &cx,
+                            &graph,
+                            limits,
+                            memory(),
+                            quantum(q),
+                            yield_now,
+                        )
+                        .await
+                        .unwrap(),
+                        &cooperative,
+                        graph.node_count(),
+                    );
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
 }
 
 #[test]

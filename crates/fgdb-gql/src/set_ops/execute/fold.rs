@@ -127,6 +127,10 @@ impl PreparedGraphSet {
 
 fn canonical_vertex_call(call: &PreparedProcedureCall) -> bool {
     call.namespace() == "fnx"
+        // Bridge endpoint pairs are canonical as complete tuples, but their
+        // leading vertex can repeat. That cannot prove secondary expression
+        // order after a projection, nor satisfy the unique-vertex cursor law.
+        && call.name() != "bridges"
         && call
             .outputs()
             .first()
@@ -327,7 +331,7 @@ where
                     .map_err(|error| projected(error, 0))?,
                 );
             }
-            if source.supports_procedure_rows() {
+            if source.supports_procedure_rows() && canonical_vertex_call(call) {
                 let execution = source
                     .procedure_rows(call, &arguments, meter.remaining())
                     .ok_or(GqlQueryError::Source(
@@ -366,8 +370,9 @@ where
                     ));
                 }
             } else {
-                // Unsupported hosts retain their source implementation and
-                // canonical sorting. Arguments and the source execute once.
+                // Hosts without the cursor capability, and procedures whose
+                // rows lack a unique leading vertex, retain complete tuple
+                // canonicalization. Arguments and the source execute once.
                 let execution = source
                     .procedure(call, &arguments, meter.remaining())
                     .ok_or(GqlQueryError::Source(

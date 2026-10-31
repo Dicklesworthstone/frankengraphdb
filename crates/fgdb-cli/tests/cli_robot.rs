@@ -3324,12 +3324,24 @@ fn sealed_prism_cli_matches_decoded_algorithms_and_historical_weights() {
             "directed",
             "CALL fnx.hits_centrality() YIELD authority AS authority_score,node AS id,hub AS hub_score",
         ),
+        (
+            "undirected",
+            "CALL fnx.articulation_points() YIELD node AS cut",
+        ),
+        (
+            "undirected",
+            "CALL fnx.bridges() YIELD vertex AS from_node,neighbor AS to_node",
+        ),
     ] {
         let mut args = projection.to_vec();
         args.extend_from_slice(&["--direction", direction, call]);
         let output = sealed_analytics_matches_decoded(&db, &args);
         assert_eq!(output.sequence("rows"), basis);
-        if call.contains("load_centrality") || call.contains("hits_centrality") {
+        if call.contains("load_centrality")
+            || call.contains("hits_centrality")
+            || call.contains("articulation_points")
+            || call.contains("bridges")
+        {
             let mut cooperative = vec!["--sealed", "--sealed-quantum", "1"];
             cooperative.extend_from_slice(&args);
             let actual = db.command("query", &cooperative);

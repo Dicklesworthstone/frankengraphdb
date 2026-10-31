@@ -35,7 +35,7 @@ fn strong_arrays(n: usize) -> Result<usize> {
     mul(n, 4 * size_of::<usize>() + size_of::<bool>())
 }
 
-fn frame_minimum<C>(n: usize) -> Result<usize> {
+pub(super) fn frame_minimum<C>(n: usize) -> Result<usize> {
     let directory = mul(n.div_ceil(FRAME_SLAB), size_of::<Vec<Frame<C>>>())?;
     let first = mul(n.min(FRAME_SLAB), size_of::<Frame<C>>())?;
     let slabs = add(directory, first)?;

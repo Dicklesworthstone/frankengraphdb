@@ -35,7 +35,7 @@ const DIJKSTRA: &str =
     "CALL fnx.single_source_dijkstra_path_length(1,NULL,true) YIELD vertex,distance";
 const CC: &str = "CALL fnx.connected_components() YIELD vertex,component";
 const TRIANGLES: &str = "CALL fnx.triangles() YIELD vertex,triangles";
-const CALLS: [&str; 8] = [
+const CALLS: [&str; 10] = [
     "CALL fnx.pagerank(0.85,1000,1e-12,true) YIELD score AS rank,vertex AS id",
     BFS,
     DIJKSTRA,
@@ -44,6 +44,8 @@ const CALLS: [&str; 8] = [
     "CALL fnx.strongly_connected_components() YIELD vertex,component",
     TRIANGLES,
     "CALL fnx.clustering_coefficient() YIELD score,vertex",
+    "CALL fnx.articulation_points() YIELD node AS cut",
+    "CALL fnx.bridges() YIELD neighbor AS target,node AS source",
 ];
 fn authority(seed: u64, namespace: DatabaseSecurityNamespaceId) -> Authority {
     Authority::new(
@@ -182,7 +184,7 @@ fn authorization(error: Failure, expected: Error) {
 }
 
 #[test]
-fn all_eight_calls_match_a_physically_masked_database_in_every_compatible_direction() {
+fn all_listed_calls_match_a_physically_masked_database_in_every_compatible_direction() {
     let ((), report) = run_async_under_lab(0x5ec0_3001, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
@@ -1508,6 +1510,12 @@ fn an_authorized_read_hosts_call_over_the_masked_projection() {
              RETURN vertex, component ORDER BY vertex",
             "CALL fnx.single_source_shortest_path_length(1) YIELD vertex, distance \
              RETURN count(*) AS reached",
+            "CALL fnx.articulation_points(direction => 'undirected') YIELD node AS cut \
+             RETURN cut ORDER BY cut",
+            "CALL fnx.bridges(direction => 'undirected') YIELD node,neighbor \
+             RETURN node,neighbor ORDER BY node,neighbor",
+            "CALL fnx.bridges(direction => 'undirected') YIELD neighbor AS endpoint,node AS origin \
+             RETURN origin,endpoint ORDER BY origin,endpoint",
         ] {
             let masked = db
                 .query_authorized(
@@ -1569,6 +1577,116 @@ fn an_authorized_read_hosts_call_over_the_masked_projection() {
             ),
             Err(QueryError::Authorization(_))
         ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_bridge_endpoints_keep_property_masks_and_seeded_match_identity() {
+    use fgdb::{QueryResult, QueryValue};
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0x5ec0_3074, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut masked = simple_database(&c.commit(), true).await;
+        let mut visible = simple_database(&c.commit(), false).await;
+        for (db, hidden) in [(&mut masked, true), (&mut visible, false)] {
+            let mut values = WriteBatch::new(RelationId(1));
+            for id in 1..=3 {
+                values.set_vertex_property(
+                    VId(id),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(id as i64 * 10)),
+                );
+                if hidden {
+                    values.set_vertex_property(
+                        VId(id),
+                        PropertyKeyId(2),
+                        Some(CanonicalScalar::Int(id as i64 * 1000)),
+                    );
+                }
+            }
+            db.write(&c.commit(), values).await.unwrap();
+        }
+        let issuer = authority(314, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |kind, name: &str| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                Some(fgdb_gql::GraphSymbol::Relation(RelationId(1)))
+            }
+            (fgdb_gql::GraphSymbolKind::Property, "p") => {
+                Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(1)))
+            }
+            (fgdb_gql::GraphSymbolKind::Property, "private") => {
+                Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(2)))
+            }
+            _ => None,
+        };
+        let scalar = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let vertex = |value| QueryValue::Value(GraphValue::Vertex(VId(value)));
+        let null = QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        for (text, columns, rows) in [
+            (
+                "CALL fnx.bridges(direction => 'undirected') YIELD node,neighbor \
+                 RETURN node.p AS source_value,neighbor.p AS target_value,\
+                 node.private AS source_private,neighbor.private AS target_private \
+                 ORDER BY source_value,target_value",
+                vec![
+                    "source_value",
+                    "target_value",
+                    "source_private",
+                    "target_private",
+                ],
+                vec![
+                    vec![scalar(10), scalar(20), null.clone(), null.clone()],
+                    vec![scalar(20), scalar(30), null.clone(), null.clone()],
+                ],
+            ),
+            (
+                "CALL fnx.bridges(direction => 'undirected') YIELD node,neighbor \
+                 MATCH (neighbor)-[:R]->(next) \
+                 RETURN node,neighbor,next,next.private AS hidden ORDER BY node,neighbor,next",
+                vec!["node", "neighbor", "next", "hidden"],
+                vec![vec![vertex(1), vertex(2), vertex(3), null.clone()]],
+            ),
+        ] {
+            let expected = QueryResult::Rows {
+                columns: columns.into_iter().map(str::to_owned).collect(),
+                rows,
+            };
+            for db in [&masked, &visible] {
+                assert_eq!(
+                    db.query_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &params,
+                        symbols,
+                        policy,
+                        || 100,
+                    )
+                    .unwrap(),
+                    expected,
+                    "{text}",
+                );
+            }
+            assert_eq!(
+                visible.query(&cx, text, &params, symbols, policy).unwrap(),
+                expected,
+                "the oracle physically omits protected edges, vertices and properties",
+            );
+            assert_ne!(
+                masked.query(&cx, text, &params, symbols, policy).unwrap(),
+                expected,
+                "hidden alternate routes remove every bridge before masking",
+            );
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

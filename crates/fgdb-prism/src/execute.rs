@@ -31,6 +31,8 @@ pub struct FnxExecutionLimits {
     /// directory; projection admission is separate.
     /// HITS includes both row passes and all scalar normalization passes for
     /// its fixed 100-update cap, plus initialization and output.
+    /// Cut vertices and bridges include iterative lowlink traversal and linear
+    /// canonical pair ordering; sparse cutsets spend only actual result rows.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -363,7 +365,8 @@ impl FnxRowCursor {
         &self.certificate
     }
 
-    /// Exact number of rows still available, including sparse reachability.
+    /// Exact number of rows still available, including sparse reachability
+    /// and cutsets. Bridge rows can repeat a leading vertex identity.
     pub fn remaining(&self) -> usize {
         self.remaining
     }
@@ -470,6 +473,10 @@ pub(crate) enum KernelValues {
     Components(Vec<usize>),
     WeightedDistances(Vec<Option<f64>>),
     Counts(Vec<u64>),
+    SelectedVertices(Vec<bool>),
+    /// At most V-1 canonical bridge pairs; output indexes select pairs rather
+    /// than the projection's vertex directory. Both cells remain stable VIds.
+    EndpointPairs(Vec<(usize, usize)>),
 }
 pub(crate) struct KernelOutput {
     pub values: KernelValues,
@@ -489,6 +496,8 @@ impl KernelValues {
             Self::Components(values) => index < values.len(),
             Self::WeightedDistances(values) => values.get(index).is_some_and(Option::is_some),
             Self::Counts(values) => index < values.len(),
+            Self::SelectedVertices(values) => values.get(index).copied().unwrap_or(false),
+            Self::EndpointPairs(values) => index < values.len(),
         }
     }
     pub(crate) fn value<C>(
@@ -498,6 +507,26 @@ impl KernelValues {
         vertices: &[VId],
     ) -> Result<FnxValue, FnxExecutionError<C>> {
         match (field, self) {
+            (FnxOutput::Vertex | FnxOutput::Neighbor, Self::EndpointPairs(values)) => {
+                let &(vertex, neighbor) = values
+                    .get(index)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                if vertex >= neighbor
+                    || neighbor >= vertices.len()
+                    || index
+                        .checked_sub(1)
+                        .is_some_and(|prior| values[prior] >= (vertex, neighbor))
+                {
+                    return Err(FnxExecutionError::InvalidUpstreamResult);
+                }
+                Ok(FnxValue::Vertex(
+                    vertices[if field == FnxOutput::Vertex {
+                        vertex
+                    } else {
+                        neighbor
+                    }],
+                ))
+            }
             (FnxOutput::Vertex, _) => vertices
                 .get(index)
                 .copied()
@@ -1407,6 +1436,8 @@ impl FnxCallSpec {
             algorithm,
             FnxAlgorithm::SingleSourceShortestPathLength { .. }
                 | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+                | FnxAlgorithm::ArticulationPoints
+                | FnxAlgorithm::Bridges
         ) {
             admit("result rows", n, limits.max_result_rows)?;
         }
@@ -1449,6 +1480,9 @@ impl FnxCallSpec {
                 n,
                 self.outputs().len(),
             )?),
+            FnxAlgorithm::ArticulationPoints | FnxAlgorithm::Bridges => {
+                crate::cuts::Cuts::estimated_work(n, arcs, self.outputs().len())
+            }
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs, graph.is_directed())
             }
@@ -1473,7 +1507,9 @@ impl FnxCallSpec {
             | FnxAlgorithm::DirectedClusteringCoefficient
             | FnxAlgorithm::InDegreeCentrality
             | FnxAlgorithm::OutDegreeCentrality
-            | FnxAlgorithm::HitsCentrality => 0,
+            | FnxAlgorithm::HitsCentrality
+            | FnxAlgorithm::ArticulationPoints
+            | FnxAlgorithm::Bridges => 0,
             _ => {
                 let bytes_per_vertex = match algorithm {
                     FnxAlgorithm::SingleSourceShortestPathLength { .. } => {
@@ -1562,6 +1598,16 @@ impl FnxCallSpec {
             }
             FnxAlgorithm::HitsCentrality => {
                 let (output, workspace_bytes) = crate::hits::run(graph, &mut checkpoint)?;
+                kernel_workspace_bytes = workspace_bytes;
+                output
+            }
+            FnxAlgorithm::ArticulationPoints | FnxAlgorithm::Bridges => {
+                let (output, workspace_bytes) = crate::cuts::run(
+                    graph,
+                    matches!(algorithm, FnxAlgorithm::Bridges),
+                    limits.max_result_rows,
+                    &mut checkpoint,
+                )?;
                 kernel_workspace_bytes = workspace_bytes;
                 output
             }
@@ -1814,6 +1860,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("call.rs"));
         hash_text(&mut hash, include_str!("shortest_path.rs"));
         hash_text(&mut hash, include_str!("clustering.rs"));
+        hash_text(&mut hash, include_str!("cuts.rs"));
         hash_text(&mut hash, include_str!("directed_clustering.rs"));
         hash_text(&mut hash, include_str!("foundation.rs"));
         hash_text(&mut hash, include_str!("foundation/native.rs"));

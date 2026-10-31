@@ -573,6 +573,250 @@ mod completed_procedures {
     }
 }
 
+mod bridge_procedures {
+    use super::*;
+    use crate::GraphProcedureExecution;
+    use fgdb_types::VId;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    const A: VId = VId(1_u128 << 100);
+    const B: VId = VId((1_u128 << 100) + 17);
+    const C: VId = VId((1_u128 << 100) + 33);
+    const D: VId = VId(u128::MAX);
+
+    fn rows() -> Vec<GraphValueRow> {
+        [(A, B), (A, C), (B, D)]
+            .into_iter()
+            .map(|(vertex, neighbor)| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(vertex),
+                    GraphValue::Vertex(neighbor),
+                ])
+            })
+            .collect()
+    }
+
+    struct Host {
+        cursor_available: bool,
+        opened: Rc<Cell<usize>>,
+        reported: Option<u64>,
+    }
+    impl Host {
+        fn new(cursor_available: bool) -> Self {
+            Self {
+                cursor_available,
+                opened: Rc::new(Cell::new(0)),
+                reported: None,
+            }
+        }
+    }
+    impl GraphSetSource<&'static str, usize> for Host {
+        fn pattern(
+            &mut self,
+            _: &PreparedGraphPattern<GraphValueRow>,
+            _: GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, usize>> {
+            panic!("a bridge procedure has no graph leaf")
+        }
+        fn supports_procedure_rows(&self) -> bool {
+            self.cursor_available
+        }
+        fn procedure(
+            &mut self,
+            call: &PreparedProcedureCall,
+            _: &[GraphValue],
+            _: GqlQueryPolicy,
+        ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, usize>>>
+        {
+            assert_eq!(call.name(), "bridges");
+            self.opened.set(self.opened.get() + 1);
+            Some(Ok(GqlQueryExecution {
+                value: rows(),
+                rows: GqlExecutionStats {
+                    snapshot_records: 7,
+                    result_rows: self.reported.unwrap_or(3),
+                },
+                evaluator: GlaExecutionStats {
+                    work_units: 11,
+                    scratch_entries: 3,
+                },
+            }))
+        }
+        fn procedure_rows(
+            &mut self,
+            _: &PreparedProcedureCall,
+            _: &[GraphValue],
+            _: GqlQueryPolicy,
+        ) -> Option<
+            Result<
+                GraphProcedureExecution<&'static str, usize>,
+                GqlQueryError<&'static str, usize>,
+            >,
+        > {
+            panic!(
+                "repeated leading bridge vertices cannot enter the unique-vertex cursor contract"
+            )
+        }
+    }
+    fn call() -> PreparedGraphSet {
+        PreparedGraphSet::singleton()
+            .procedure_call(
+                "fnx".into(),
+                "bridges".into(),
+                vec![],
+                vec![],
+                vec![
+                    ("vertex".into(), "v".into()),
+                    ("neighbor".into(), "n".into()),
+                ],
+                vec![0, 1],
+            )
+            .unwrap()
+    }
+    fn execute(query: &PreparedGraphSet, expected_opens: usize) -> Vec<GraphValueRow> {
+        let expected = query
+            .execute_governed_from_source(wide(), Host::new(false), || Ok(()))
+            .unwrap();
+        let host = Host::new(true);
+        let opened = Rc::clone(&host.opened);
+        let actual = query
+            .execute_governed_from_source(wide(), host, || Ok(()))
+            .unwrap();
+        assert_eq!(actual.value, expected.value);
+        assert_eq!(actual.rows, expected.rows);
+        assert_eq!(opened.get(), expected_opens);
+        actual.value
+    }
+
+    #[test]
+    fn bridge_rows_keep_materialized_admission_even_when_cursor_capability_is_present() {
+        let query = call();
+        assert!(!query.has_foldable_expansion_for_source(true));
+        assert!(!query.has_canonical_vertex_prefix());
+        assert_eq!(execute(&query, 1), rows());
+        // A reached ProcedureCall must independently select its legal source
+        // class, even when entered by an already selected expansion driver.
+        let mut host = Host::new(true);
+        let mut meter = Meter {
+            policy: wide(),
+            checkpoint: || Ok(()),
+            arguments: Vec::new(),
+            rows: GqlExecutionStats {
+                snapshot_records: 0,
+                result_rows: 0,
+            },
+            evaluator: GlaExecutionStats::default(),
+        };
+        let mut actual = Vec::new();
+        visit_expansion(
+            &query,
+            &mut host,
+            &mut meter,
+            &mut 0,
+            Window::new(0, None),
+            &mut |row, _, _| {
+                actual.push(row);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(actual, rows());
+        assert_eq!(host.opened.get(), 1);
+    }
+
+    #[test]
+    fn bridge_projection_sorts_computed_secondary_cells_before_its_page() {
+        let query = call()
+            .project(
+                vec![
+                    GraphSetProjection::new("v", GraphSetValue::Column(0)),
+                    GraphSetProjection::new(
+                        "first_neighbor",
+                        GraphSetValue::Equal {
+                            left: Box::new(GraphSetValue::Column(1)),
+                            right: Box::new(GraphSetValue::Value(GraphValue::Vertex(B))),
+                        },
+                    ),
+                ],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
+        assert!(!query.has_foldable_expansion_for_source(true));
+        let expected = vec![
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(A),
+                GraphValue::Scalar(CanonicalScalar::Bool(false)),
+            ]),
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(A),
+                GraphValue::Scalar(CanonicalScalar::Bool(true)),
+            ]),
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(B),
+                GraphValue::Scalar(CanonicalScalar::Bool(false)),
+            ]),
+        ];
+        assert_eq!(execute(&query, 1), expected);
+        assert_eq!(execute(&query.with_page(0, Some(1)), 1), expected[..1]);
+    }
+
+    #[test]
+    fn foldable_unwind_and_binary_parents_preserve_bridge_occurrences_and_bags() {
+        let expanded = call()
+            .unwind("copy".into(), list(&[Some(2), Some(1), Some(2)]))
+            .unwrap();
+        assert!(expanded.has_foldable_expansion_for_source(true));
+        assert_eq!(execute(&expanded, 1).len(), 9);
+        for (quantifier, expected_len) in [
+            (GraphSetQuantifier::All, 6),
+            (GraphSetQuantifier::Distinct, 3),
+        ] {
+            let combined = call()
+                .combine(GraphSetOperation::Union, quantifier, call())
+                .unwrap();
+            assert!(combined.has_foldable_expansion_for_source(true));
+            assert_eq!(execute(&combined, 2).len(), expected_len);
+        }
+        for (quantifier, expected) in [
+            (GraphSetQuantifier::All, vec![A, A, B]),
+            (GraphSetQuantifier::Distinct, vec![A, B]),
+        ] {
+            let projected = call()
+                .project(
+                    vec![GraphSetProjection::new("v", GraphSetValue::Column(0))],
+                    quantifier,
+                )
+                .unwrap();
+            let expected: Vec<_> = expected
+                .into_iter()
+                .map(|v| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(v)]))
+                .collect();
+            assert_eq!(execute(&projected, 1), expected);
+        }
+    }
+
+    #[test]
+    fn bridge_fallback_validates_complete_source_cardinality_under_zero_pages() {
+        for reported in [2, 4] {
+            for limit in [None, Some(0)] {
+                let mut host = Host::new(true);
+                host.reported = Some(reported);
+                let query = call()
+                    .unwind("copy".into(), list(&[Some(1), Some(1)]))
+                    .unwrap()
+                    .with_page(0, limit);
+                assert!(matches!(
+                    query.execute_governed_from_source(wide(), host, || Ok(())),
+                    Err(GqlQueryError::Source(
+                        GraphSetExecutionError::InvalidSourceStatistics { operand: 0 }
+                    ))
+                ));
+            }
+        }
+    }
+}
+
 fn wide() -> GqlQueryPolicy {
     GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
 }

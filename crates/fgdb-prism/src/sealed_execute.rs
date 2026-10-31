@@ -35,6 +35,8 @@ mod components;
 mod cooperative;
 #[path = "sealed_core.rs"]
 mod core_number;
+#[path = "sealed_cuts.rs"]
+mod cuts;
 #[path = "sealed_directed_clustering.rs"]
 mod directed_clustering;
 #[path = "sealed_bfs.rs"]
@@ -776,6 +778,8 @@ impl FnxCallSpec {
                 | FnxAlgorithm::InDegreeCentrality
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::HitsCentrality
+                | FnxAlgorithm::ArticulationPoints
+                | FnxAlgorithm::Bridges
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -818,6 +822,8 @@ impl FnxCallSpec {
     /// Their retained-history work bound applies to every compressed pass.
     /// Exact betweenness shares source-ordered Brandes arithmetic with the native
     /// kernel and reopens compressed rows for dependencies using O(|V|) workspace.
+    /// Cut vertices and bridges share iterative lowlink state, open each row
+    /// once and retain authenticated cursors only along the active DFS depth.
     /// Every graph pass and row pull is fallible; identities remain stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
     /// This synchronous API does not claim async scheduling or disk spill.
@@ -908,6 +914,12 @@ impl FnxCallSpec {
         }
         if matches!(self.algorithm(), FnxAlgorithm::HitsCentrality) {
             return hits::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::ArticulationPoints | FnxAlgorithm::Bridges
+        ) {
+            return cuts::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(
             self.algorithm(),
@@ -1222,6 +1234,34 @@ impl EncodedRows {
     ) -> Result<()> {
         checkpoint()?;
         let value = match values {
+            KernelValues::SelectedVertices(values) => {
+                if !values
+                    .get(index)
+                    .copied()
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?
+                {
+                    return Ok(());
+                }
+                FnxValue::Vertex(
+                    *vertices
+                        .get(index)
+                        .ok_or(ExecutionError::InvalidUpstreamResult)?,
+                )
+            }
+            KernelValues::EndpointPairs(pairs) => {
+                let Some(&(vertex, neighbor)) = pairs.get(index) else {
+                    return Ok(());
+                };
+                if vertex >= neighbor
+                    || neighbor >= vertices.len()
+                    || index
+                        .checked_sub(1)
+                        .is_some_and(|prior| pairs[prior] >= (vertex, neighbor))
+                {
+                    return Err(ExecutionError::InvalidUpstreamResult.into());
+                }
+                FnxValue::Vertex(vertices[neighbor])
+            }
             KernelValues::HubsAndAuthorities { hubs, authorities } => {
                 let hub = *hubs
                     .get(index)
@@ -1295,10 +1335,11 @@ impl EncodedRows {
                     .ok_or(ExecutionError::InvalidUpstreamResult)?,
             ),
         };
-        let vertex = vertices
-            .get(index)
-            .copied()
-            .ok_or(ExecutionError::InvalidUpstreamResult)?;
+        let FnxValue::Vertex(vertex) =
+            values.value::<Infallible>(index, FnxOutput::Vertex, vertices)?
+        else {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        };
         // Refuse an extra row before allocating even its bounded field vector.
         if self.emitted == self.row_count {
             return Err(ExecutionError::InvalidUpstreamResult.into());
@@ -1320,6 +1361,7 @@ impl EncodedRows {
                 (FnxOutput::Distance, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 (FnxOutput::Distance, FnxValue::Float(value)) => FnxValue::Float(value),
                 (FnxOutput::Component, FnxValue::Vertex(value)) => FnxValue::Vertex(value),
+                (FnxOutput::Neighbor, FnxValue::Vertex(value)) => FnxValue::Vertex(value),
                 (FnxOutput::Triangles, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 (FnxOutput::Core, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
@@ -1509,6 +1551,8 @@ fn source_digest() -> Digest {
             include_str!("sealed_betweenness.rs"),
             include_str!("sealed_betweenness_cooperative.rs"),
             include_str!("sealed_core.rs"),
+            include_str!("cuts.rs"),
+            include_str!("sealed_cuts.rs"),
             include_str!("sealed_distance.rs"),
             include_str!("sealed_load.rs"),
             include_str!("sealed_eigenvector.rs"),
@@ -1551,6 +1595,19 @@ mod tests {
             FnxParameters::from([("source".to_owned(), crate::FnxArgument::Vertex(vertices[0]))]);
         let bind = |text| FnxCallSpec::bind(text, &parameters).unwrap();
         let cases = [
+            (
+                bind("CALL fnx.articulation_points() YIELD node AS cut"),
+                KernelValues::SelectedVertices(vec![false, true, false]),
+                vec![vec![FnxValue::Vertex(vertices[1])]],
+            ),
+            (
+                bind("CALL fnx.bridges() YIELD neighbor AS target,node AS source"),
+                KernelValues::EndpointPairs(vec![(0, 1), (0, 2)]),
+                vec![
+                    vec![FnxValue::Vertex(vertices[1]), FnxValue::Vertex(vertices[0])],
+                    vec![FnxValue::Vertex(vertices[2]), FnxValue::Vertex(vertices[0])],
+                ],
+            ),
             (
                 bind("CALL fnx.pagerank() YIELD score AS rank, vertex AS id"),
                 KernelValues::Scores(vec![0.0, 0.25, 0.75]),
@@ -1765,6 +1822,39 @@ mod tests {
             }
             assert_eq!(encoded.max_integer, None);
             assert_eq!(encoded.emitted, 3);
+        }
+    }
+
+    #[test]
+    fn bridge_encoding_validates_both_endpoints_and_canonical_pairs_for_every_yield() {
+        let vertices = [VId(0), VId(17), VId(u128::MAX)];
+        for selected in ["vertex", "neighbor", "vertex,neighbor"] {
+            let call = FnxCallSpec::bind(
+                &format!("CALL fnx.bridges() YIELD {selected}"),
+                &FnxParameters::new(),
+            )
+            .unwrap();
+            for pairs in [
+                vec![(0, 0)],
+                vec![(1, 0)],
+                vec![(0, 3)],
+                vec![(0, 2), (0, 1)],
+                vec![(0, 1), (0, 1)],
+            ] {
+                for delivery in [Delivery::Collected, Delivery::Retained] {
+                    let admission =
+                        ResultAdmission::for_delivery(&call, limits(), memory(), delivery).unwrap();
+                    let mut encoded = EncodedRows::new(&call, pairs.len(), &admission).unwrap();
+                    let values = KernelValues::EndpointPairs(pairs.clone());
+                    let failure = (0..vertices.len()).try_for_each(|index| {
+                        encoded.push_vertices(&call, &vertices, &values, index, &mut || Ok(()))
+                    });
+                    assert!(matches!(
+                        failure,
+                        Err(Error::Execution(ExecutionError::InvalidUpstreamResult))
+                    ));
+                }
+            }
         }
     }
 

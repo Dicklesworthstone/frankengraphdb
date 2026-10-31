@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 21;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 22;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -55,6 +55,8 @@ pub enum FnxOutput {
     Core = 5,
     Hub = 6,
     Authority = 7,
+    /// The other full-width vertex identity in a canonical undirected pair.
+    Neighbor = 8,
 }
 impl FnxOutput {
     pub const fn name(self) -> &'static str {
@@ -67,6 +69,7 @@ impl FnxOutput {
             Self::Core => "core",
             Self::Hub => "hub",
             Self::Authority => "authority",
+            Self::Neighbor => "neighbor",
         }
     }
     /// Whether `YIELD <name>` selects this field: its registered name, or
@@ -78,6 +81,11 @@ impl FnxOutput {
     pub fn is_named(self, name: &str) -> bool {
         // ubs:ignore -- public YIELD field names, not secret material.
         self.name() == name || (matches!(self, Self::Vertex) && name == "node")
+    }
+    /// Fields that can bind a vertex in a later native query stage.
+    #[must_use]
+    pub const fn is_vertex_reference(self) -> bool {
+        matches!(self, Self::Vertex | Self::Component | Self::Neighbor)
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -392,6 +400,32 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_laws: "explicit simple projection; weights ignored; retained self-loops count once per row; uniform initial hubs; at most 100 updates, stopping at absolute hub L1 < 1e-8; last iterate returned at the cap; hubs and authorities each sum-normalized with uniform zero-sum fallback; isolates retained",
         complexity: "O(k * (|V| + |E|)); O(|V|) kernel workspace",
         execution_kernel: "fgdb-prism/hits-csr-source-order-v1",
+    },
+    FnxSignature {
+        name: "fnx.articulation_points",
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Vertex],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Undirected,
+        numeric_profile: FNX_DISCRETE_PROFILE,
+        rng_policy: "none",
+        graph_laws: "explicit undirected simple projection; caller-selected parallel-edge reduction; weights ignored; self-loops ignored; vertices whose removal increases connected-component count; VId order",
+        complexity: "O(|V| + |E|) logical traversal plus separately bounded compressed history/lookup work; O(|V|) integer workspace and depth-bounded compressed cursors",
+        execution_kernel: "fgdb-prism/articulation-points-lowlink-v1",
+    },
+    FnxSignature {
+        name: "fnx.bridges",
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Neighbor],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Undirected,
+        numeric_profile: FNX_DISCRETE_PROFILE,
+        rng_policy: "none",
+        graph_laws: "explicit undirected simple projection; caller-selected parallel-edge reduction; weights ignored; self-loops ignored; projected edges whose removal increases connected-component count; vertex < neighbor, lexicographic full-width VId pair order; endpoints identify a projected edge, not a raw EId",
+        complexity: "O(|V| + |E|) logical traversal and canonical ordering plus separately bounded compressed history/lookup work; O(|V|) integer workspace and depth-bounded compressed cursors",
+        execution_kernel: "fgdb-prism/bridges-lowlink-v1",
     },
 ];
 
@@ -722,6 +756,8 @@ pub enum FnxAlgorithm {
     InDegreeCentrality,
     OutDegreeCentrality,
     HitsCentrality,
+    ArticulationPoints,
+    Bridges,
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -741,6 +777,8 @@ impl FnxAlgorithm {
             Self::InDegreeCentrality => 16,
             Self::OutDegreeCentrality => 17,
             Self::HitsCentrality => 19,
+            Self::ArticulationPoints => 20,
+            Self::Bridges => 21,
         }]
     }
 }
@@ -832,6 +870,14 @@ impl FnxCallSpec {
     /// 100-update cap the last iterate is returned, as in the fnx oracle.
     pub fn hits_centrality() -> Self {
         Self::new(FnxAlgorithm::HitsCentrality)
+    }
+    /// Cut vertices of the explicit undirected simple projection, in VId order.
+    pub fn articulation_points() -> Self {
+        Self::new(FnxAlgorithm::ArticulationPoints)
+    }
+    /// Cut edges as canonical `(vertex, neighbor)` full-width VId pairs.
+    pub fn bridges() -> Self {
+        Self::new(FnxAlgorithm::Bridges)
     }
     fn new(algorithm: FnxAlgorithm) -> Self {
         Self::compiled(algorithm, default_outputs(algorithm.signature()))
@@ -1183,6 +1229,8 @@ impl FnxCallSpec {
             "fnx.in_degree_centrality" => FnxAlgorithm::InDegreeCentrality,
             "fnx.out_degree_centrality" => FnxAlgorithm::OutDegreeCentrality,
             "fnx.hits_centrality" => FnxAlgorithm::HitsCentrality,
+            "fnx.articulation_points" => FnxAlgorithm::ArticulationPoints,
+            "fnx.bridges" => FnxAlgorithm::Bridges,
             "fnx.cdlp" => {
                 let max_iter = match arguments[0] {
                     FnxArgument::Integer(value) if value >= 0 => usize::try_from(value).ok(),

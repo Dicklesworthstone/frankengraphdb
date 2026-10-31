@@ -107,8 +107,8 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 21);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 20);
+    assert_eq!(FnxSignatureRegistry::version(), 22);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 22);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);
@@ -314,6 +314,260 @@ fn node_selects_the_vertex_output_under_its_own_column_name() {
     // `node` spells the vertex only.
     assert!(!FnxOutput::Score.is_named("node"));
     assert!(!FnxOutput::Component.is_named("node"));
+}
+
+#[test]
+fn resilience_signatures_bind_only_registered_full_width_endpoint_fields() {
+    assert_eq!(
+        FnxCallSpec::articulation_points(),
+        bind("CALL fnx.articulation_points()")
+    );
+    assert_eq!(FnxCallSpec::bridges(), bind("CALL fnx.bridges() YIELD *"));
+    let call = bind("CALL fnx.bridges() YIELD neighbor AS target,node AS source");
+    assert_eq!(call.outputs()[0].field, FnxOutput::Neighbor);
+    assert_eq!(call.outputs()[1].field, FnxOutput::Vertex);
+    assert!(FnxOutput::Neighbor.is_vertex_reference());
+    assert!(!FnxOutput::Score.is_vertex_reference());
+    for name in ["fnx.articulation_points", "fnx.bridges"] {
+        let signature = FnxSignatureRegistry::lookup(name).unwrap();
+        assert_eq!(signature.graph_kind, FnxGraphKind::Undirected);
+        assert_eq!(signature.numeric_profile, FNX_DISCRETE_PROFILE);
+        assert!(signature.parameters.is_empty());
+    }
+    for text in [
+        "CALL fnx.articulation_points(1)",
+        "CALL fnx.articulation_points() YIELD neighbor",
+        "CALL fnx.bridges() YIELD edge",
+        "CALL fnx.bridges() YIELD vertex,node",
+        "CALL fnx.bridges() YIELD neighbor,neighbor",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn resilience_calls_match_pinned_foundation_on_every_four_vertex_graph_and_loop_assignment() {
+    let vertices = [VId(0), VId(17), VId(1 << 100), VId(u128::MAX)];
+    let names: Vec<_> = vertices.iter().map(|v| format!("{:032x}", v.0)).collect();
+    let candidates: Vec<_> = (0..4).flat_map(|v| (v..4).map(move |u| (v, u))).collect();
+    let vertex_call = FnxCallSpec::articulation_points();
+    let edge_call = FnxCallSpec::bridges();
+    for mask in 0usize..1 << candidates.len() {
+        let mut source = Graph::strict();
+        for name in &names {
+            let _ = source.add_node(name);
+        }
+        let mut edges = Vec::new();
+        for (bit, &(v, u)) in candidates.iter().enumerate() {
+            if mask & (1 << bit) == 0 {
+                continue;
+            }
+            source.add_edge(&names[v], &names[u]).unwrap();
+            edges.push(ProjectionEdge {
+                eid: EId(bit as u128),
+                source: vertices[v],
+                target: vertices[u],
+                weight: -3.0,
+            });
+        }
+        let view = graph(&vertices, &edges, Directedness::Undirected);
+        let mut expected_vertices: Vec<_> = fnx_algorithms::articulation_points(&source)
+            .nodes
+            .into_iter()
+            .map(|v| VId(u128::from_str_radix(&v, 16).unwrap()))
+            .collect();
+        expected_vertices.sort_unstable();
+        let mut expected_pairs: Vec<_> = fnx_algorithms::bridges(&source)
+            .edges
+            .into_iter()
+            .map(|(v, u)| {
+                let v = VId(u128::from_str_radix(&v, 16).unwrap());
+                let u = VId(u128::from_str_radix(&u, 16).unwrap());
+                (v.min(u), v.max(u))
+            })
+            .collect();
+        expected_pairs.sort_unstable();
+        assert_eq!(
+            execute(&vertex_call, &view).rows,
+            expected_vertices
+                .into_iter()
+                .map(|v| vec![FnxValue::Vertex(v)])
+                .collect::<Vec<_>>(),
+            "mask={mask}"
+        );
+        assert_eq!(
+            execute(&edge_call, &view).rows,
+            expected_pairs
+                .into_iter()
+                .map(|(v, u)| vec![FnxValue::Vertex(v), FnxValue::Vertex(u)])
+                .collect::<Vec<_>>(),
+            "mask={mask}"
+        );
+    }
+}
+
+#[test]
+fn resilience_collected_mapped_and_retained_results_preserve_pairs_and_certificate() {
+    let vertices = [VId(0), VId(7), VId(1 << 90), VId(u128::MAX)];
+    let edges = [
+        edge(0, 0, 7, 1.0),
+        edge(1, 0, 1 << 90, -1.0),
+        edge(2, 0, u128::MAX, 0.0),
+    ];
+    let view = graph(&vertices, &edges, Directedness::Undirected);
+    for text in [
+        "CALL fnx.articulation_points() YIELD node AS cut",
+        "CALL fnx.bridges() YIELD vertex,neighbor",
+        "CALL fnx.bridges() YIELD neighbor AS target,node AS source",
+        "CALL fnx.bridges() YIELD neighbor",
+    ] {
+        let call = bind(text);
+        let collected = execute(&call, &view);
+        let mut mapped = Vec::new();
+        let certificate = call
+            .execute_into(&view, limits(), || Ok::<(), Infallible>(()), &mut mapped)
+            .unwrap();
+        assert_eq!(mapped, collected.rows);
+        assert_eq!(certificate, collected.certificate);
+        let mut cursor = call
+            .execute_rows(&view, limits(), || Ok::<(), Infallible>(()))
+            .unwrap();
+        assert_eq!(cursor.certificate(), &collected.certificate);
+        assert_eq!(cursor.max_integer(), None);
+        let mut row = Vec::new();
+        let mut retained = Vec::new();
+        while cursor
+            .next_row(&mut row, || Ok::<(), Infallible>(()))
+            .unwrap()
+        {
+            retained.push(row.clone());
+        }
+        assert_eq!(retained, collected.rows);
+        assert_eq!(cursor.remaining(), 0);
+    }
+    let result = execute(&FnxCallSpec::bridges(), &view);
+    assert_eq!(
+        result.rows,
+        vertices[1..]
+            .iter()
+            .map(|&v| vec![FnxValue::Vertex(vertices[0]), FnxValue::Vertex(v)])
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn resilience_refuses_direction_and_counts_reduced_projected_edges() {
+    let vertices = [VId(0), VId(u128::MAX)];
+    let edges = [
+        edge(0, 0, u128::MAX, 1.0),
+        edge(1, 0, u128::MAX, 2.0),
+        edge(2, u128::MAX, 0, 3.0),
+        edge(3, 0, 0, 1.0),
+    ];
+    let undirected = graph(&vertices, &edges, Directedness::Undirected);
+    assert_eq!(
+        execute(&FnxCallSpec::bridges(), &undirected).rows,
+        vec![vec![
+            FnxValue::Vertex(vertices[0]),
+            FnxValue::Vertex(vertices[1])
+        ]]
+    );
+    assert!(
+        execute(&FnxCallSpec::articulation_points(), &undirected)
+            .rows
+            .is_empty()
+    );
+    for direction in [Directedness::Directed, Directedness::Reversed] {
+        let directed = graph(&vertices, &edges, direction);
+        for call in [FnxCallSpec::articulation_points(), FnxCallSpec::bridges()] {
+            assert!(matches!(
+                call.execute(&directed, limits(), || Ok::<(), Infallible>(())),
+                Err(FnxExecutionError::GraphKind {
+                    required: FnxGraphKind::Undirected
+                })
+            ));
+        }
+    }
+}
+
+#[test]
+fn resilience_every_public_checkpoint_prefix_is_cancellable() {
+    let vertices: Vec<_> = (0..7).map(VId).collect();
+    let edges = [
+        edge(0, 0, 4, 1.0),
+        edge(1, 4, 1, 1.0),
+        edge(2, 1, 5, 1.0),
+        edge(3, 0, 2, 1.0),
+        edge(4, 2, 3, 1.0),
+    ];
+    let view = graph(&vertices, &edges, Directedness::Undirected);
+    for call in [FnxCallSpec::articulation_points(), FnxCallSpec::bridges()] {
+        let mut total = 0;
+        call.execute(&view, limits(), || {
+            total += 1;
+            Ok::<(), usize>(())
+        })
+        .unwrap();
+        for stop in 1..=total {
+            let mut seen = 0;
+            let result = call.execute(&view, limits(), || {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(FnxExecutionError::Cancelled(at)) if at == stop));
+            assert_eq!(seen, stop);
+        }
+    }
+}
+
+#[test]
+fn resilience_public_admission_uses_actual_cutsets_and_declared_work() {
+    let vertices = [VId(0), VId(1), VId(2)];
+    let cycle = graph(
+        &vertices,
+        &[edge(0, 0, 1, 1.0), edge(1, 1, 2, 1.0), edge(2, 0, 2, 1.0)],
+        Directedness::Undirected,
+    );
+    let path = graph(
+        &vertices,
+        &[edge(0, 0, 1, 1.0), edge(1, 1, 2, 1.0)],
+        Directedness::Undirected,
+    );
+    for call in [FnxCallSpec::articulation_points(), FnxCallSpec::bridges()] {
+        let result = call
+            .execute(
+                &cycle,
+                FnxExecutionLimits {
+                    max_result_rows: 0,
+                    ..limits()
+                },
+                || Ok::<(), Infallible>(()),
+            )
+            .unwrap();
+        assert!(result.rows.is_empty());
+        let estimated = result.certificate.estimated_work;
+        assert!(
+            matches!(call.execute(&cycle, FnxExecutionLimits { max_estimated_work:estimated-1, ..limits() }, || Ok::<(),Infallible>(())), Err(FnxExecutionError::LimitExceeded { resource:"estimated work",requested,limit }) if requested == estimated && limit == estimated-1)
+        );
+        assert!(matches!(
+            call.execute(
+                &path,
+                FnxExecutionLimits {
+                    max_result_rows: 0,
+                    ..limits()
+                },
+                || Ok::<(), Infallible>(())
+            ),
+            Err(FnxExecutionError::LimitExceeded {
+                resource: "result rows",
+                requested: 1,
+                limit: 0
+            })
+        ));
+    }
 }
 
 #[test]

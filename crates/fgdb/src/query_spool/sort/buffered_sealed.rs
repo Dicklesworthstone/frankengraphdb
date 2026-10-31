@@ -123,8 +123,7 @@ fn admit_procedure_shape(
         if call.outputs()[..index]
             .iter()
             .any(|earlier| field.is_named(earlier))
-            || (call.vertex_outputs().contains(&index)
-                && !matches!(*field, FnxOutput::Vertex | FnxOutput::Component))
+            || (call.vertex_outputs().contains(&index) && !field.is_vertex_reference())
         {
             return false;
         }

@@ -312,6 +312,8 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::InDegreeCentrality
         | FnxAlgorithm::OutDegreeCentrality
         | FnxAlgorithm::HitsCentrality
+        | FnxAlgorithm::ArticulationPoints
+        | FnxAlgorithm::Bridges
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
 }

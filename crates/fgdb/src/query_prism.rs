@@ -466,10 +466,13 @@ pub(crate) fn fnx_procedure_rows(
     execute: impl FnOnce(&FnxCallSpec, FnxReadOptions) -> Result<FnxRowCursor, Error>,
 ) -> Result<GraphProcedureExecution<GqlError, Cancel>, GqlQueryError<GqlError, Cancel>> {
     let spec = bind_procedure(call, arguments)?;
-    if spec
-        .outputs()
-        .first()
-        .is_none_or(|column| column.field != FnxOutput::Vertex)
+    // This native folding interface promises a unique leading vertex key.
+    // Bridge pairs can share that key and use the ordinary canonical bag path.
+    if matches!(spec.algorithm(), fgdb_prism::FnxAlgorithm::Bridges)
+        || spec
+            .outputs()
+            .first()
+            .is_none_or(|column| column.field != FnxOutput::Vertex)
     {
         return Err(refuse(ProcedureError::ResultDomain));
     }
@@ -625,13 +628,14 @@ fn check_kernel_outputs<C>(
     spec: FnxCallSpec,
 ) -> Result<FnxCallSpec, GqlQueryError<GqlError, C>> {
     // The statement matches these outputs as vertices (fgdb-luq0b). Vertex
-    // and component cells are vertex identities; anything else refuses here
-    // rather than matching nothing and dropping every row.
+    // and component cells, including both endpoints of a bridge, are vertex
+    // identities; anything else refuses here rather than matching nothing and
+    // dropping every row.
     for &index in call.vertex_outputs() {
         let vertex = spec
             .outputs()
             .get(index)
-            .is_some_and(|column| matches!(column.field, FnxOutput::Vertex | FnxOutput::Component));
+            .is_some_and(|column| column.field.is_vertex_reference());
         if !vertex {
             return Err(refuse(ProcedureError::Bind(FnxCallError {
                 site: FnxCallSite::Yield(index),

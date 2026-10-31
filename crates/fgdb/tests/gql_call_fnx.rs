@@ -61,8 +61,9 @@ fn graph() -> WriteBatch {
 }
 
 /// Every registered procedure: name, arguments, value output, and whether
-/// its signature law reads the graph undirected.
-const CALLS: [(&str, &str, &str, bool); 20] = [
+/// its signature law reads the graph undirected. An empty value field names a
+/// vertex-only result, such as the sparse set of articulation points.
+const CALLS: [(&str, &str, &str, bool); 22] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -87,6 +88,8 @@ const CALLS: [(&str, &str, &str, bool); 20] = [
     ("out_degree_centrality", "", "score", false),
     ("load_centrality", "", "score", true),
     ("hits_centrality", "", "hub", false),
+    ("articulation_points", "", "", true),
+    ("bridges", "", "neighbor", true),
 ];
 
 /// The whole graph spelled out field by field, independent of
@@ -226,10 +229,15 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
             ),
             ("hits_centrality", "", "authority", false),
         ]) {
+            let yields = if field.is_empty() {
+                "vertex".to_owned()
+            } else {
+                format!("vertex, {field}")
+            };
             let standalone = db
                 .call_fnx(
                     cx,
-                    &format!("CALL fnx.{name}({arguments}) YIELD vertex, {field}"),
+                    &format!("CALL fnx.{name}({arguments}) YIELD {yields}"),
                     &FnxParameters::new(),
                     explicit(undirected),
                 )
@@ -241,30 +249,52 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
                 .into_iter()
                 .map(|row| row.into_iter().map(value).collect())
                 .collect();
-            assert!(expected.len() >= 4, "{name}: {} rows", expected.len());
+            if matches!(name, "articulation_points" | "bridges") {
+                // Only vertices 3 and 4 split the triangle/tail fixture;
+                // only edges 3--4 and 4--5 disconnect it when removed.
+                assert_eq!(expected.len(), 2, "{name}");
+            } else {
+                assert!(expected.len() >= 4, "{name}: {} rows", expected.len());
+            }
             expected.sort_by(|a, b| {
-                let by_value = compare(&b[1], &a[1]).expect("one value domain");
+                let by_value = if field.is_empty() {
+                    Ordering::Equal
+                } else {
+                    compare(&b[1], &a[1]).expect("one value domain")
+                };
                 by_value.then_with(|| compare(&a[0], &b[0]).expect("vertices"))
             });
             expected.truncate(4);
 
-            let text = format!(
-                "CALL fnx.{name}({arguments}) YIELD vertex, {field} AS value \
-                 RETURN vertex, value ORDER BY value DESC, vertex LIMIT 4"
-            );
+            let (text, expected_columns) = if field.is_empty() {
+                (
+                    format!(
+                        "CALL fnx.{name}({arguments}) YIELD vertex RETURN vertex ORDER BY vertex LIMIT 4"
+                    ),
+                    vec!["vertex"],
+                )
+            } else {
+                (
+                    format!(
+                        "CALL fnx.{name}({arguments}) YIELD vertex, {field} AS value \
+                         RETURN vertex, value ORDER BY value DESC, vertex LIMIT 4"
+                    ),
+                    vec!["vertex", "value"],
+                )
+            };
             let (columns, actual) = rows(
                 db.query(cx, &text, &GqlParameters::new(), symbols, policy())
                     .map_err(|error| format!("{name}: {error}"))
                     .unwrap(),
             );
-            assert_eq!(columns, ["vertex", "value"], "{name}");
+            assert_eq!(columns, expected_columns, "{name}");
             assert_eq!(actual, expected, "{name}");
             let (columns, actual) = rows(
                 txn.query(&db, cx, &text, &GqlParameters::new(), symbols, policy())
                     .map_err(|error| format!("transaction {name}: {error}"))
                     .unwrap(),
             );
-            assert_eq!(columns, ["vertex", "value"], "transaction {name}");
+            assert_eq!(columns, expected_columns, "transaction {name}");
             assert_eq!(actual, expected, "transaction {name}");
         }
         txn.abort();
@@ -403,6 +433,96 @@ fn a_readme_shaped_call_reads_vertex_properties_with_no_match() {
                 "{text}: {error:?}"
             );
         }
+    });
+}
+
+#[test]
+fn bridge_endpoints_keep_full_width_identity_properties_and_repeated_leading_rows() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = Database::<MemVfs>::open_memory(commit, keys())
+            .await
+            .unwrap();
+        let hub = VId((1_u128 << 110) + 3);
+        let leaves = [VId(u128::MAX - 2), VId(u128::MAX - 1), VId(u128::MAX)];
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(hub, vec![PERSON], vec![(P, CanonicalScalar::Int(30))]);
+        for (at, leaf) in leaves.into_iter().enumerate() {
+            batch.create_vertex(
+                leaf,
+                vec![PERSON],
+                vec![(P, CanonicalScalar::Int(40 + 10 * at as i64))],
+            );
+            batch.add_edge(EId((1_u128 << 100) + at as u128), hub, leaf, vec![]);
+        }
+        db.write(commit, batch).await.unwrap();
+        let old = db.read_session().unwrap();
+        let txn = db.begin(txcx).unwrap();
+        let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let cases = [
+            (
+                "CALL fnx.bridges() YIELD vertex,neighbor RETURN vertex,neighbor ORDER BY vertex,neighbor",
+                leaves
+                    .map(|leaf| vec![GraphValue::Vertex(hub), GraphValue::Vertex(leaf)])
+                    .to_vec(),
+            ),
+            (
+                "CALL fnx.bridges() YIELD node,neighbor RETURN node,-neighbor.p AS value",
+                [-60, -50, -40]
+                    .map(|value| vec![GraphValue::Vertex(hub), int(value)])
+                    .to_vec(),
+            ),
+            (
+                "CALL fnx.bridges() YIELD node,neighbor MATCH (neighbor)<-[:R]-(origin) RETURN node.p,neighbor.p,origin ORDER BY neighbor.p",
+                [40, 50, 60]
+                    .map(|value| vec![int(30), int(value), GraphValue::Vertex(hub)])
+                    .to_vec(),
+            ),
+            (
+                "CALL fnx.articulation_points() YIELD node RETURN node,node.p",
+                vec![vec![GraphValue::Vertex(hub), int(30)]],
+            ),
+        ];
+        for (text, expected) in &cases {
+            for result in [
+                db.query(cx, text, &GqlParameters::new(), symbols, policy()),
+                old.query(cx, text, &GqlParameters::new(), symbols, policy()),
+                txn.query(&db, cx, text, &GqlParameters::new(), symbols, policy()),
+            ] {
+                assert_eq!(rows(result.unwrap()).1, *expected, "{text}");
+            }
+        }
+        // Adding a cycle through two leaves removes exactly those two bridges.
+        // The opened session and transaction keep the original three pairs.
+        let mut close_cycle = WriteBatch::new(R);
+        close_cycle.add_edge(EId(u128::MAX), leaves[0], leaves[1], vec![]);
+        db.write(commit, close_cycle).await.unwrap();
+        let text = cases[0].0;
+        assert_eq!(
+            rows(
+                db.query(cx, text, &GqlParameters::new(), symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            vec![vec![GraphValue::Vertex(hub), GraphValue::Vertex(leaves[2])]],
+        );
+        assert_eq!(
+            rows(
+                old.query(cx, text, &GqlParameters::new(), symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            cases[0].1,
+        );
+        assert_eq!(
+            rows(
+                txn.query(&db, cx, text, &GqlParameters::new(), symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            cases[0].1,
+        );
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
 
