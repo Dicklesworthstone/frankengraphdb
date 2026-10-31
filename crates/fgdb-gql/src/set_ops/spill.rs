@@ -498,7 +498,7 @@ impl AsyncSpillSetPlan {
     pub fn compile_with_single_procedure(
         query: &PreparedGraphSet,
     ) -> Result<Self, SpillSetBuildError> {
-        Self::compile_with_procedure_limit(query, 1)
+        Self::compile_with_procedure_limit(query, 1, false)
     }
 
     /// Admit one or more independent procedure sources, each executed once
@@ -515,17 +515,29 @@ impl AsyncSpillSetPlan {
     pub fn compile_with_independent_procedures(
         query: &PreparedGraphSet,
     ) -> Result<Self, SpillSetBuildError> {
-        Self::compile_with_procedure_limit(query, usize::MAX)
+        Self::compile_with_procedure_limit(query, usize::MAX, false)
+    }
+
+    /// Combine independent procedures with the buffered host's bounded path
+    /// leaves. Every procedure still requires complete host admission before
+    /// I/O, and calls inside Apply bodies still refuse. The host must support
+    /// both source capabilities at the same cut with cumulative allowances.
+    /// This does not widen ordinary, single-procedure or authorized profiles.
+    pub fn compile_with_independent_procedures_and_bounded_walks(
+        query: &PreparedGraphSet,
+    ) -> Result<Self, SpillSetBuildError> {
+        Self::compile_with_procedure_limit(query, usize::MAX, true)
     }
 
     fn compile_with_procedure_limit(
         query: &PreparedGraphSet,
         max_count: usize,
+        bounded_walks: bool,
     ) -> Result<Self, SpillSetBuildError> {
         let mut admission = SourceAdmission {
             max_count,
             count: 0,
-            bounded_walks: false,
+            bounded_walks,
         };
         let plan = Self::compile_at(query, 0, &mut admission, false)?;
         if admission.count == 0 {

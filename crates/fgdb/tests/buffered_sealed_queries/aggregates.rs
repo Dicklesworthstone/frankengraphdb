@@ -175,6 +175,51 @@ fn exact_numeric_distinct_collection_and_empty_results_survive_terminal_spilling
             ),
             (
                 format!(
+                    "{BFS} YIELD node MATCH route = WALK (node)-[:R*0..2]->(next:Person) \
+                     RETURN COUNT(*) AS paths,COUNT(DISTINCT next) AS endpoints, \
+                     SUM(length(route)) AS hops"
+                ),
+                // The native path source retains both parallel first edges
+                // and may transit the excluded-label bridge to FOURTH.
+                vec![vec![
+                    QueryValue::Count(15),
+                    QueryValue::Count(4),
+                    QueryValue::Integer(19),
+                ]],
+            ),
+            (
+                format!(
+                    "{BFS} YIELD node MATCH route = WALK (node)-[:R*0..2]->(next:Person) \
+                     WITH length(route) AS hops ORDER BY hops DESC \
+                     RETURN COUNT(*) AS paths,COLLECT(hops) AS lengths, \
+                     COLLECT(DISTINCT hops) AS unique_lengths"
+                ),
+                vec![vec![
+                    QueryValue::Count(15),
+                    values(
+                        [2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0]
+                            .into_iter()
+                            .map(integer)
+                            .collect(),
+                    ),
+                    values([2, 1, 0].into_iter().map(integer).collect()),
+                ]],
+            ),
+            (
+                format!(
+                    "{BFS} YIELD node MATCH route = WALK (node)-[:R*0..2]->(next:Person) \
+                     FOR SYSTEM_TIME AS OF SEQ 2 \
+                     RETURN COUNT(*) AS paths,COUNT(DISTINCT next) AS endpoints, \
+                     SUM(length(route)) AS hops"
+                ),
+                vec![vec![
+                    QueryValue::Count(15),
+                    QueryValue::Count(4),
+                    QueryValue::Integer(19),
+                ]],
+            ),
+            (
+                format!(
                     "{WCC} YIELD node,component RETURN DISTINCT COUNT(*) AS size \
                      GROUP BY component ORDER BY size DESC"
                 ),

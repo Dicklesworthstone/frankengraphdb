@@ -251,6 +251,11 @@ fn complete_cold_relations_match_historical_queries_not_their_first_leaf() {
             "MATCH (n) RETURN DISTINCT n.p AS p",
             "MATCH (n) RETURN n.p AS p ORDER BY n.q DESC SKIP 1 LIMIT 2",
             "MATCH (a)-[r:R]->(b) RETURN a.p AS a, b.p AS b",
+            "MATCH route = WALK (a)-[:R*0..2]->(b) RETURN route",
+            "MATCH route = TRAIL (a)-[:R*0..2]->(b) RETURN b.p AS p",
+            "MATCH route = ACYCLIC (a)-[:R*0..2]->(b) RETURN DISTINCT b.p AS p",
+            "MATCH route = SIMPLE (a)-[:R*0..2]->(b) WITH b.p AS p ORDER BY p DESC SKIP 1 LIMIT 3 RETURN p",
+            "MATCH route = WALK (a)-[:R*0..2]->(b) WITH a.p AS p,COUNT(*) AS c RETURN p,c",
             "MATCH (n) RETURN n.p AS p UNION ALL MATCH (m) RETURN m.p AS p",
             "MATCH (n) RETURN n.p AS p UNION MATCH (m) RETURN m.p AS p",
             "MATCH (n) RETURN n.p AS p EXCEPT ALL MATCH (m) WHERE m.p > 4 RETURN m.p AS p",
@@ -296,6 +301,56 @@ fn complete_cold_relations_match_historical_queries_not_their_first_leaf() {
                 }
             }
         }
+        let endpoints = plan("MATCH route = WALK (a)-[:R*0..2]->(b) RETURN b.p AS p");
+        assert_eq!(
+            attempt(
+                &cx,
+                &endpoints,
+                &mut view,
+                &cx,
+                cuts[0],
+                cuts[1],
+                policy(3),
+                u64::MAX,
+            )
+            .await
+            .unwrap()
+            .0,
+            Bag::from([(value(3), -2), (value(5), 2), (value(9), 1)]),
+        );
+        let path_row = |start, steps: &[(u128, u128)]| {
+            vec![QueryValue::Value(GraphValue::Path(
+                fgdb_gql::algebra::GraphPath::new(
+                    VId(start),
+                    steps
+                        .iter()
+                        .map(|&(edge, target)| (EId(edge), VId(target)))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+            ))]
+        };
+        let captures = plan("MATCH route = WALK (a)-[:R*0..2]->(b) RETURN route");
+        assert_eq!(
+            attempt(
+                &cx,
+                &captures,
+                &mut view,
+                &cx,
+                cuts[0],
+                cuts[1],
+                policy(3),
+                u64::MAX,
+            )
+            .await
+            .unwrap()
+            .0,
+            Bag::from([
+                (path_row(2, &[]), -1),
+                (path_row(4, &[]), 1),
+                (path_row(1, &[(3, 4)]), 1),
+            ]),
+        );
         let union = plan("MATCH (n) RETURN n.p AS p UNION ALL MATCH (m) RETURN m.p AS p");
         assert_eq!(
             attempt(
@@ -560,6 +615,9 @@ fn admission_precedes_binding_and_io_including_empty_and_source_free_results() {
         for text in [
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p",
             "MATCH (n) RETURN COUNT(*) AS n",
+            "MATCH route = WALK (a)-[:R*]->(b) RETURN route LIMIT 0",
+            "MATCH route = ANY SHORTEST (a)-[:R*0..2]->(b) RETURN route LIMIT 0",
+            "MATCH route = WALK (a)-[:R*0..2]->(b)-[:R]->(c) RETURN route LIMIT 0",
         ] {
             let error = plan(text)
                 .spool_buffered_difference_in_view(
@@ -650,8 +708,19 @@ fn late_second_endpoint_failure_under_limit_zero_cannot_publish_a_difference() {
         let commit = contexts.commit();
         let (db, vfs, cuts) = history(&commit).await;
         drop(db);
-        for suffix in ["", " LIMIT 0"] {
-            let prepared = plan(&format!("MATCH (n) RETURN 100 / (n.p - 9) AS x{suffix}"));
+        for (query, suffix) in [
+            ("MATCH (n) RETURN 100 / (n.p - 9) AS x", ""),
+            ("MATCH (n) RETURN 100 / (n.p - 9) AS x", " LIMIT 0"),
+            (
+                "MATCH route = WALK (a)-[:R*0..2]->(b) RETURN 100 / (b.p - 9) AS x",
+                "",
+            ),
+            (
+                "MATCH route = WALK (a)-[:R*0..2]->(b) RETURN 100 / (b.p - 9) AS x",
+                " LIMIT 0",
+            ),
+        ] {
+            let prepared = plan(&format!("{query}{suffix}"));
             let mut view = cold(&commit, &vfs).await;
             let pool = MemoryPool::new(262_144, 0).unwrap();
             let (mut source, _) = file(&cx, &pool).await;

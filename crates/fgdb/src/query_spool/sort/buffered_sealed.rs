@@ -26,6 +26,8 @@ struct SealedOptions {
 /// Procedure arguments execute only when their source is reached, preserving
 /// earlier child failures. Calls inside Apply bodies refuse. Every call must
 /// select this owner's admitted relation at the same pinned historical cut.
+/// Bounded path leaves use the ordinary buffered traversal and external tail;
+/// every native route occurrence remains distinct until its query clauses act.
 ///
 /// The compressed image, projection and completed kernel vectors retain their
 /// independent resident limits. This is not an external-memory graph kernel.
@@ -79,8 +81,9 @@ impl PreparedNativeRead {
             }
             _ => return Err(unsupported()),
         };
-        let plan = AsyncSpillSetPlan::compile_with_independent_procedures(&query)
-            .map_err(|_| unsupported())?;
+        let plan =
+            AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&query)
+                .map_err(|_| unsupported())?;
         PreparedBufferedSealedOrder::from_relation(
             plan,
             as_of,

@@ -352,6 +352,45 @@ impl AsyncSpillAggregatePlan {
         })
     }
 
+    /// Admit the buffered owner's combined independent-procedure and bounded
+    /// path sources. Complete relational ordering still precedes reduction;
+    /// procedure shape admission and collection order retain their contracts.
+    pub fn compile_with_independent_procedures_and_bounded_walks(
+        aggregate: &PreparedGraphAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let relation = aggregate
+            .input_relation()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        let input =
+            AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(relation)
+                .map_err(SpillAggregateBuildError::Relation)?;
+        let physical = aggregate
+            .prepare_complete_group_output()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        let definition = SpillAggregateDefinition::from_physical(physical)?;
+        Ok(Self::Relation {
+            input: Box::new(input),
+            definition,
+        })
+    }
+
+    /// Source-aware counterpart for the buffered combined capability. Every
+    /// inner order, DISTINCT and window stays inside the complete input.
+    pub fn compile_relation_with_independent_procedures_and_bounded_walks(
+        aggregate: &PreparedGraphSetAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let input =
+            AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(
+                aggregate.input(),
+            )
+            .map_err(SpillAggregateBuildError::Relation)?;
+        let definition = SpillAggregateDefinition::from_relation(aggregate)?;
+        Ok(Self::Relation {
+            input: Box::new(input),
+            definition,
+        })
+    }
+
     pub fn definition(&self) -> &SpillAggregateDefinition {
         match self {
             Self::Vertex(plan) => plan.definition(),

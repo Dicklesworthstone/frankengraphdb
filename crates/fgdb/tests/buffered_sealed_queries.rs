@@ -93,6 +93,16 @@ fn vertex(id: u128) -> GraphValue {
 fn integer(value: i64) -> GraphValue {
     GraphValue::Scalar(CanonicalScalar::Int(value))
 }
+fn path(start: u128, steps: &[(u128, u128)]) -> GraphValue {
+    GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+        VId(start),
+        steps
+            .iter()
+            .map(|&(edge, vertex)| (EId(edge), VId(vertex)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    ))
+}
 fn prepare(text: &str, params: &GqlParameters) -> PreparedBufferedSealedOrder {
     PreparedNativeRead::prepare(text, params, resolve)
         .unwrap_or_else(|error| panic!("{text}: {error:?}"))
@@ -349,6 +359,33 @@ fn sealed_bfs_and_components_compose_with_properties_matches_and_grouping() {
                     vec![vertex(THIRD), integer(30), integer(2)],
                     vec![vertex(SECOND), integer(20), integer(1)],
                 ],
+                0,
+            ),
+            (
+                format!(
+                    "{BFS} YIELD node MATCH p = WALK (node)-[:R*0..1]->(next:Person) \
+                     RETURN node,next,p ORDER BY node,length(p),p"
+                ),
+                vec![
+                    vec![vertex(1), vertex(1), path(1, &[])],
+                    vec![vertex(1), vertex(SECOND), path(1, &[(BASE + 1, SECOND)])],
+                    vec![vertex(1), vertex(SECOND), path(1, &[(BASE + 2, SECOND)])],
+                    vec![vertex(SECOND), vertex(SECOND), path(SECOND, &[])],
+                    vec![vertex(SECOND), vertex(THIRD), path(SECOND, &[(BASE + 3, THIRD)])],
+                    vec![vertex(THIRD), vertex(THIRD), path(THIRD, &[])],
+                    vec![vertex(THIRD), vertex(SECOND), path(THIRD, &[(BASE + 4, SECOND)])],
+                    vec![vertex(THIRD), vertex(THIRD), path(THIRD, &[(BASE + 5, THIRD)])],
+                ],
+                0,
+            ),
+            (
+                format!(
+                    "{WCC} YIELD node MATCH p = SIMPLE (node)-[:R*0..0]->(next) \
+                     RETURN node,next,p ORDER BY node"
+                ),
+                [1, SECOND, THIRD, FOURTH, u128::MAX]
+                    .map(|id| vec![vertex(id), vertex(id), path(id, &[])])
+                    .to_vec(),
                 0,
             ),
             (
@@ -658,14 +695,16 @@ fn independent_algorithms_and_property_reads_share_one_exact_historical_cut() {
         let text = format!(
             "{BFS} YIELD node,distance {WCC} YIELD node AS member,component \
              WITH node,distance,member,component WHERE node=member \
-             MATCH (node:Person) RETURN node,distance,component,node.p AS p ORDER BY node"
+             MATCH route = WALK (node)-[:R*0..1]->(next:Person) \
+             WITH node,distance,component,node.p AS p,COUNT(*) AS paths \
+             RETURN node,distance,component,p,paths ORDER BY node"
         );
         let params = parameters();
         let prepared = prepare(&text, &params);
         let earlier = vec![
-            vec![vertex(1), integer(0), vertex(1), integer(10)],
-            vec![vertex(SECOND), integer(1), vertex(1), integer(20)],
-            vec![vertex(THIRD), integer(2), vertex(1), integer(30)],
+            vec![vertex(1), integer(0), vertex(1), integer(10), integer(3)],
+            vec![vertex(SECOND), integer(1), vertex(1), integer(20), integer(2)],
+            vec![vertex(THIRD), integer(2), vertex(1), integer(30), integer(3)],
         ];
         assert_eq!(
             resident_rows(
@@ -701,10 +740,10 @@ fn independent_algorithms_and_property_reads_share_one_exact_historical_cut() {
             assert_eq!(spill_pool.used(), 0);
         }
         let later = vec![
-            vec![vertex(1), integer(0), vertex(1), integer(10)],
-            vec![vertex(SECOND), integer(1), vertex(1), integer(20)],
-            vec![vertex(THIRD), integer(2), vertex(1), integer(300)],
-            vec![vertex(FOURTH), integer(3), vertex(1), integer(40)],
+            vec![vertex(1), integer(0), vertex(1), integer(10), integer(3)],
+            vec![vertex(SECOND), integer(1), vertex(1), integer(20), integer(2)],
+            vec![vertex(THIRD), integer(2), vertex(1), integer(300), integer(4)],
+            vec![vertex(FOURTH), integer(3), vertex(1), integer(40), integer(1)],
         ];
         let latest = execute(&prepared, &mut current, &cx, policy(), &spill_pool, 1, WORK)
             .await
@@ -1247,6 +1286,105 @@ fn superseded_history_is_charged_before_compaction_even_under_limit_zero_and_reu
 }
 
 #[test]
+fn sealed_paths_share_limits_and_preserve_reached_errors_under_limit_zero() {
+    let ((), report) = run_async_under_lab(0x6273_5111, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = fixture(&commit).await;
+        let params = parameters();
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let text = format!(
+            "{BFS} YIELD node MATCH route = WALK (node)-[:R*0..1]->(next:Person) \
+             RETURN node,next,length(route) AS hops ORDER BY node,hops,next"
+        );
+        let prepared = prepare(&text, &params);
+        let complete = execute(&prepared, &mut cold, &cx, policy(), &spill_pool, 1, WORK)
+            .await
+            .unwrap();
+        assert_eq!(complete.rows.len(), 8);
+        let exact = GqlQueryPolicy::new(
+            complete.records,
+            8,
+            complete.evaluator_work,
+            complete.evaluator_scratch,
+        );
+        assert_eq!(
+            execute(
+                &prepared,
+                &mut cold,
+                &cx,
+                exact,
+                &spill_pool,
+                1,
+                complete.sort_work,
+            )
+            .await
+            .unwrap(),
+            complete,
+        );
+        for dimension in 0..4 {
+            let (allowance, work) = match dimension {
+                0 => (
+                    GqlQueryPolicy::new(complete.records - 1, 100, WORK, WORK),
+                    WORK,
+                ),
+                1 => (
+                    GqlQueryPolicy::new(10_000, 100, complete.evaluator_work - 1, WORK),
+                    WORK,
+                ),
+                2 => (
+                    GqlQueryPolicy::new(10_000, 100, WORK, complete.evaluator_scratch - 1),
+                    WORK,
+                ),
+                3 => (policy(), complete.sort_work - 1),
+                _ => unreachable!(),
+            };
+            assert!(
+                execute(&prepared, &mut cold, &cx, allowance, &spill_pool, 1, work)
+                    .await
+                    .is_err(),
+                "dimension {dimension}",
+            );
+            assert_eq!(spill_pool.used(), 0);
+        }
+        let late = format!(
+            "{BFS} YIELD node MATCH route = WALK (node)-[:R*0..1]->(next:Person) \
+             RETURN 1/(next.p-30) AS broken LIMIT 0"
+        );
+        let error = execute(
+            &prepare(&late, &params),
+            &mut cold,
+            &cx,
+            policy(),
+            &spill_pool,
+            1,
+            WORK,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, NativeSpoolError::SetExecution(
+                GraphSetExecutionError::Projection { error, .. }
+            ) if error.kind == GraphIntegerErrorKind::DivisionByZero),
+            "{error:?}",
+        );
+        assert_eq!(spill_pool.used(), 0);
+        assert_eq!(
+            execute(&prepared, &mut cold, &cx, policy(), &spill_pool, 1, WORK)
+                .await
+                .unwrap(),
+            complete,
+        );
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn explicit_owner_admission_does_not_broaden_default_or_terminal_aggregate_paths() {
     let params = parameters();
     let text = format!("{BFS} YIELD node,distance RETURN node,distance");
@@ -1284,6 +1422,71 @@ fn explicit_owner_admission_does_not_broaden_default_or_terminal_aggregate_paths
             .prepare_buffered_sealed_order(&params, R, memory(), sealing(), RAW)
             .is_ok()
     );
+    let composed = format!(
+        "{BFS} YIELD node MATCH route = WALK (node)-[:R*0..2]->(next) \
+         RETURN node,next,route"
+    );
+    let native = PreparedNativeRead::prepare(&composed, &params, resolve).unwrap();
+    assert!(native.prepare_buffered_order(&params).is_err());
+    assert!(
+        native
+            .prepare_buffered_sealed_order(&params, R, memory(), sealing(), RAW)
+            .is_ok()
+    );
+    let PreparedNativeRead::Set(template) = native else {
+        panic!("procedure composition must retain its complete relation");
+    };
+    let bound = template.bind_parameters(&params).unwrap();
+    use fgdb_gql::spill_set::AsyncSpillSetPlan;
+    assert!(AsyncSpillSetPlan::compile(&bound).is_err());
+    assert!(AsyncSpillSetPlan::compile_with_bounded_walks(&bound).is_err());
+    assert!(AsyncSpillSetPlan::compile_with_single_procedure(&bound).is_err());
+    assert!(AsyncSpillSetPlan::compile_with_independent_procedures(&bound).is_err());
+    assert!(
+        AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&bound)
+            .is_ok()
+    );
+    let empty = fgdb_gql::PreparedGraphSet::singleton();
+    assert!(
+        AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&empty)
+            .is_err()
+    );
+    for apply in [
+        empty.clone().apply(bound.clone(), Vec::new()).unwrap(),
+        empty.optional_apply(bound, Vec::new()).unwrap(),
+    ] {
+        assert!(
+            AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(
+                &apply.with_page(0, Some(0)),
+            )
+            .is_err()
+        );
+    }
+    // An empty bounded-path branch must not hide an invalid analytics shape.
+    for second in [
+        "CALL fnx.does_not_exist(relation => 'R') YIELD node RETURN node LIMIT 0",
+        "CALL fnx.pagerank(relation => 'R',bogus => 1) YIELD node RETURN node LIMIT 0",
+        "CALL fnx.weakly_connected_components({relations:['S']}) YIELD node RETURN node LIMIT 0",
+    ] {
+        let text = format!(
+            "(MATCH route = WALK (a)-[:R*0..1]->(node) RETURN node LIMIT 0) \
+             UNION ALL ({second})"
+        );
+        let native = PreparedNativeRead::prepare(&text, &GqlParameters::new(), resolve)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert!(
+            native
+                .prepare_buffered_sealed_order(
+                    &GqlParameters::new(),
+                    R,
+                    memory(),
+                    sealing(),
+                    RAW,
+                )
+                .is_err(),
+            "{text}",
+        );
+    }
     // An empty first source never hides a statically inadmissible second CALL.
     for second in [
         "CALL fnx.does_not_exist(relation => 'R') YIELD node RETURN node LIMIT 0",

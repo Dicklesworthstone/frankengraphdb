@@ -611,3 +611,282 @@ fn pending_returned_path_spill_releases_zero_hop_roots_routes_and_output_guards(
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+async fn graph_with_edge_filters(cx: &CommitCx) -> (Database<MemVfs>, MemVfs) {
+    let (mut db, vfs) = graph(cx).await;
+    let mut properties = WriteBatch::new(RelationId(1));
+    for (eid, value) in [(AB, 7), (PARALLEL, 7), (BC, 7), (CA, 8), (OTHER, 7)] {
+        properties.set_edge_property(eid, PropertyKeyId(1), Some(CanonicalScalar::Int(value)));
+    }
+    assert_eq!(db.write(cx, properties).await.unwrap(), CommitSeq(3));
+    (db, vfs)
+}
+
+#[test]
+fn cold_edge_filtered_paths_preserve_history_routes_scalar_equality_and_zero_hops() {
+    let ((), report) = run_async_under_lab(0xc01d_3901, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (mut db, vfs) = graph_with_edge_filters(&contexts.commit()).await;
+        let pinned_pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut pinned = view(&contexts.commit(), &vfs, &pinned_pool).await;
+        assert_eq!(pinned.frontier(), CommitSeq(3));
+
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_edge_property(AB, PropertyKeyId(1), Some(CanonicalScalar::Int(8)));
+        assert_eq!(
+            db.write(&contexts.commit(), update).await.unwrap(),
+            CommitSeq(4)
+        );
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut latest = view(&contexts.commit(), &vfs, &pool).await;
+        assert_eq!(latest.frontier(), CommitSeq(4));
+
+        let before = paths(&[
+            (A, &[]),
+            (A, &[(AB, B)]),
+            (A, &[(PARALLEL, B)]),
+            (A, &[(AB, B), (BC, C)]),
+            (A, &[(PARALLEL, B), (BC, C)]),
+        ]);
+        let after = paths(&[
+            (A, &[]),
+            (A, &[(PARALLEL, B)]),
+            (A, &[(PARALLEL, B), (BC, C)]),
+        ]);
+        for mode in ["WALK", "TRAIL", "ACYCLIC", "SIMPLE"] {
+            // Integer and floating literals use native numeric equality.
+            // CA has a different property; LOOP has no property. Neither
+            // enters a retained route merely because its endpoints match.
+            for wanted in ["7", "7.0"] {
+                for (cut, expected) in [(3, &before), (4, &after)] {
+                    let text = format!(
+                        "MATCH p = {mode} (a {{p:1}})-[:R*0..3 {{p:{wanted}}}]->(b) \
+                         FOR SYSTEM_TIME AS OF SEQ {cut} {CAPTURE}"
+                    );
+                    case(&db, &mut latest, &cx, &text, expected.clone(), cut).await;
+                }
+            }
+            let text =
+                format!("MATCH p = {mode} (a {{p:1}})-[:R*0..3 {{p:7}}]->(b) {CAPTURE}");
+            for run_rows in [1, 3] {
+                spooled(&mut pinned, &cx, &text, &before, 3, run_rows).await;
+            }
+        }
+
+        for (atom, expected) in [
+            (
+                "(a)-[:R*1..1 {p:7}]->(b)",
+                paths(&[(A, &[(PARALLEL, B)]), (B, &[(BC, C)])]),
+            ),
+            (
+                "(a)<-[:R*1..1 {p:7}]-(b)",
+                paths(&[(B, &[(PARALLEL, A)]), (C, &[(BC, B)])]),
+            ),
+            (
+                "(a)-[:R*1..1 {p:7}]-(b)",
+                paths(&[
+                    (A, &[(PARALLEL, B)]),
+                    (B, &[(PARALLEL, A)]),
+                    (B, &[(BC, C)]),
+                    (C, &[(BC, B)]),
+                ]),
+            ),
+            (
+                "(a)-[*1..1 {p:7}]->(b)",
+                paths(&[
+                    (A, &[(PARALLEL, B)]),
+                    (B, &[(BC, C)]),
+                    (A, &[(OTHER, C)]),
+                ]),
+            ),
+        ] {
+            case(
+                &db,
+                &mut latest,
+                &cx,
+                &format!("MATCH p = WALK {atom} {CAPTURE}"),
+                expected,
+                4,
+            )
+            .await;
+        }
+        let zero = paths(&[(A, &[]), (B, &[]), (C, &[]), (ISOLATE, &[])]);
+        for (atom, expected) in [
+            ("(a)-[:R*0..0 {p:NULL}]->(b)", zero.clone()),
+            ("(a)-[:R*0..2 {p:NULL}]->(b)", zero.clone()),
+            ("(a)-[:R*1..2 {p:NULL}]->(b)", vec![]),
+            ("(a)-[:R*0..2 {missing:7}]->(b)", zero.clone()),
+            ("(a)-[:R*1..2 {missing:7}]->(b)", vec![]),
+            ("(a)-[:R*0..2 {p:7,missing:1}]->(b)", zero),
+        ] {
+            case(
+                &db,
+                &mut latest,
+                &cx,
+                &format!("MATCH p = WALK {atom} {CAPTURE}"),
+                expected,
+                4,
+            )
+            .await;
+        }
+
+        // Collection operands retain their explicit preparation refusal.
+        // Native eager collection filtering can raise a value-bound error on
+        // an unreachable edge; a local scalar predicate makes no such claim.
+        for bounds in ["0..0", "0..2"] {
+            let text = format!(
+                "MATCH p = WALK (a)-[:R*{bounds} {{p:[7]}}]->(b) RETURN p LIMIT 0"
+            );
+            let parameters = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(&text, &parameters, resolve).unwrap();
+            assert!(prepared.prepare_buffered_order(&parameters).is_err());
+        }
+        drop(pinned);
+        drop(latest);
+        assert_eq!(pinned_pool.used(), 0);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_edge_filtered_paths_charge_accepted_occurrences_and_keep_reached_errors() {
+    let ((), report) = run_async_under_lab(0xc01d_3902, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (mut db, vfs) = graph_with_edge_filters(&contexts.commit()).await;
+        let source_pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let spill_pool = MemoryPool::new(2_000_000, 0).unwrap();
+        let mut initial = view(&contexts.commit(), &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+
+        for run_rows in [1, 3] {
+            for (limit, inputs, success) in
+                [(1, 5, true), (1, 4, false), (0, 5, true), (0, 4, false)]
+            {
+                let text = format!(
+                    "MATCH p = WALK (a {{p:1}})-[:R*0..3 {{p:7}}]->(b) \
+                     RETURN b.p AS value ORDER BY value DESC LIMIT {limit}"
+                );
+                let expected = if limit == 0 {
+                    vec![]
+                } else {
+                    frames(vec![scalar(3)])
+                };
+                assert_eq!(native(&db, &cx, &text), expected);
+                let prepared = prepare(&text);
+                let (mut scratch, _) = file(&cx, &spill_pool).await;
+                let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+                let result = prepared
+                    .spool_in_view(
+                        &mut initial,
+                        &cx,
+                        policy(limit),
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        2,
+                        32,
+                        run_rows,
+                        256,
+                        31,
+                        8192,
+                        inputs,
+                        WORK,
+                    )
+                    .await;
+                if success {
+                    let (spool, _) = result.unwrap();
+                    assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+                } else {
+                    assert!(
+                        matches!(result, Err(NativeSpoolError::BufferedExecute(error)) if matches!(*error, GqlQueryError::Rows(_))),
+                        "{text}"
+                    );
+                    assert_eq!(destination.stats().published_runs, 0);
+                }
+                assert_eq!(source_pool.used(), baseline);
+                assert_eq!(spill_pool.used(), 0);
+            }
+        }
+
+        for limit in [0, 1] {
+            let text = format!(
+                "MATCH p = WALK (a {{p:1}})-[:R*0..3 {{p:7}}]->(b) \
+                 WHERE 12/(3-b.p)>0 {CAPTURE} LIMIT {limit}"
+            );
+            assert!(
+                db.query(&cx, &text, &GqlParameters::new(), resolve, policy(1_000))
+                    .is_err()
+            );
+            let prepared = prepare(&text);
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, backing) = file(&cx, &spill_pool).await;
+            let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+            backing.0.lock().unwrap().writes = 0;
+            let result = prepared
+                .spool_in_view(
+                    &mut initial,
+                    &cx,
+                    policy(limit),
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    2,
+                    32,
+                    1,
+                    256,
+                    1,
+                    8192,
+                    100,
+                    WORK,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(NativeSpoolError::BufferedExecute(error)) if matches!(*error, GqlQueryError::Data(error) if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)),
+                "{text}"
+            );
+            assert!(backing.0.lock().unwrap().writes > 0);
+            assert_eq!(destination.stats().published_runs, 0);
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+        }
+        drop(initial);
+        assert_eq!(source_pool.used(), 0);
+
+        // Rejecting BC removes the transit edge itself. C's endpoint expression
+        // is now unreachable, while A and both parallel routes to B survive.
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_edge_property(BC, PropertyKeyId(1), Some(CanonicalScalar::Int(8)));
+        assert_eq!(
+            db.write(&contexts.commit(), update).await.unwrap(),
+            CommitSeq(4)
+        );
+        let mut latest = view(&contexts.commit(), &vfs, &source_pool).await;
+        let head = "MATCH p = WALK (a {p:1})-[:R*0..3 {p:7}]->(b) WHERE 12/(3-b.p)>0";
+        case(
+            &db,
+            &mut latest,
+            &cx,
+            &format!("{head} {CAPTURE}"),
+            paths(&[(A, &[]), (A, &[(AB, B)]), (A, &[(PARALLEL, B)])]),
+            4,
+        )
+        .await;
+        case(
+            &db,
+            &mut latest,
+            &cx,
+            &format!("{head} {CAPTURE} LIMIT 0"),
+            vec![],
+            4,
+        )
+        .await;
+        drop(latest);
+        assert_eq!(source_pool.used(), 0);
+        assert_eq!(spill_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

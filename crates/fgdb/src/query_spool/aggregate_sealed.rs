@@ -49,7 +49,7 @@ impl PreparedNativeRead {
                     NativeAggregateSpoolError::Prepare(Box::new(QueryError::PipelineText(error)))
                 })?;
                 (
-                    AsyncSpillAggregatePlan::compile_relation_with_independent_procedures(
+                    AsyncSpillAggregatePlan::compile_relation_with_independent_procedures_and_bounded_walks(
                         &aggregate,
                     )
                     .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
@@ -64,10 +64,12 @@ impl PreparedNativeRead {
                 })?;
                 let plan = match aggregate.aggregate() {
                     fgdb_gql::TemporalAggregatePlan::Graph(definition) => {
-                        AsyncSpillAggregatePlan::compile_with_independent_procedures(definition)
+                        AsyncSpillAggregatePlan::compile_with_independent_procedures_and_bounded_walks(
+                            definition,
+                        )
                     }
                     fgdb_gql::TemporalAggregatePlan::Relation(definition) => {
-                        AsyncSpillAggregatePlan::compile_relation_with_independent_procedures(
+                        AsyncSpillAggregatePlan::compile_relation_with_independent_procedures_and_bounded_walks(
                             definition,
                         )
                     }
@@ -88,8 +90,10 @@ impl PreparedNativeRead {
                     as_of,
                 } = bind(self, params)?;
                 (
-                    AsyncSpillAggregatePlan::compile_with_independent_procedures(&definition)
-                        .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
+                    AsyncSpillAggregatePlan::compile_with_independent_procedures_and_bounded_walks(
+                        &definition,
+                    )
+                    .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
                     columns,
                     slots,
                     as_of,

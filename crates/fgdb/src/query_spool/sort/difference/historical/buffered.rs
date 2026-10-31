@@ -59,7 +59,8 @@ fn prepare<V: Vfs + Clone>(
             // Terminal exact aggregates use a different result-cell carrier.
             _ => return Err(unsupported()),
         };
-        let plan = AsyncSpillSetPlan::compile(&query).map_err(|_| unsupported())?;
+        let plan =
+            AsyncSpillSetPlan::compile_with_bounded_walks(&query).map_err(|_| unsupported())?;
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
         Ok(Endpoints {
             before: PreparedBufferedOrder::from_relation(plan.clone(), Some(before)),
@@ -77,8 +78,8 @@ impl PreparedNativeRead {
     /// this template and the parameter map may change/drop immediately.
     ///
     /// Each endpoint uses PreparedBufferedOrder's COMPLETE relational executor.
-    /// Its admitted vertex, identified-edge/fixed-hop, source-free, set,
-    /// Cartesian/keyed/outer join and unary stage profiles keep their own
+    /// Its admitted vertex, identified-edge/fixed-hop, bounded-path, source-free,
+    /// set, Cartesian/keyed/outer join and unary stage profiles keep their own
     /// predicates, projections, UNWIND, DISTINCT, hidden ordering keys and
     /// local windows. Supported intermediate grouping converts to the native
     /// row domain BEFORE subsequent stages. Terminal exact aggregate carriers,
