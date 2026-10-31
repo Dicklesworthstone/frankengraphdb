@@ -5,6 +5,8 @@
 
 #[path = "buffered_sealed_queries/aggregates.rs"]
 mod aggregates;
+#[path = "buffered_sealed_queries/cooperative.rs"]
+mod cooperative;
 #[path = "buffered_sealed_queries/repeated.rs"]
 mod repeated;
 

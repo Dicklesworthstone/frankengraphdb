@@ -226,6 +226,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         memory: FnxMemoryLimits,
         sealing: SealedLimits,
         max_source_incidences: usize,
+        quantum: NonZeroUsize,
     ) -> Result<(FnxRowCursor, GqlExecutionStats, GlaExecutionStats), QueryFailure> {
         cx.with_restriction_async(async {
             let bound = bind_procedure(call, arguments)?;
@@ -268,7 +269,15 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                         .unwrap_or(usize::MAX),
                 );
             let cursor = bound
-                .execute_sealed_rows(cx, &graph, options.execution_limits, memory)
+                .execute_sealed_cooperative_rows(
+                    cx,
+                    &graph,
+                    options.execution_limits,
+                    memory,
+                    quantum,
+                    asupersync::runtime::yield_now::yield_now,
+                )
+                .await
                 .map_err(|error| query_sealed_failure(FnxSealedReadError::Execution(error)))?;
             let count = sealed_usage_count(cursor.remaining())?;
             // This is the registered conservative kernel estimate, not its

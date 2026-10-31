@@ -8,7 +8,7 @@ use super::{
     directional_pass_work, finish, finish_encoded,
 };
 use crate::hits::{Iteration, MAX_ITERATIONS, estimated_work, workspace};
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard};
 use std::convert::Infallible;
 use std::future::Future;
 
@@ -67,7 +67,7 @@ fn compressed_witness(output: &mut KernelOutput) {
 
 pub(super) fn execute(
     call: &FnxCallSpec,
-    cx: &Control<'_>,
+    cx: &Control<'_, impl Guard>,
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
@@ -96,7 +96,7 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     delivery: Delivery,
-    control: &mut super::cooperative::Cooperate<'_, Yield>,
+    control: &mut super::cooperative::Cooperate<'_, Yield, impl Guard>,
 ) -> Result<Finished>
 where
     Yield: FnMut() -> YieldFuture,

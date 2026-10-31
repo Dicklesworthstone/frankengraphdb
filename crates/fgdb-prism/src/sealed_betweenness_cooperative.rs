@@ -14,6 +14,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{Cursor, Rows, betweenness::work};
+use crate::sealed_control::Guard;
 use std::future::Future;
 use std::mem::size_of;
 
@@ -304,7 +305,7 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     delivery: Delivery,
-    control: &mut super::cooperative::Cooperate<'_, Yield>,
+    control: &mut super::cooperative::Cooperate<'_, Yield, impl Guard>,
 ) -> Result<Finished>
 where
     Yield: FnMut() -> YieldFuture,

@@ -23,7 +23,7 @@ use super::{
     Result, ResultAdmission, Rows, SealedGraphView, SealedRows, add, checkpoint, finish_bfs,
     finish_encoded_bfs, mul, reserve,
 };
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard};
 use crate::{BfsDecisionCard, BfsPullDecision, Directedness};
 use std::future::Future;
 use std::mem::size_of;
@@ -566,7 +566,7 @@ fn run(
 
 pub(super) fn execute(
     call: &FnxCallSpec,
-    cx: &Control<'_>,
+    cx: &Control<'_, impl Guard>,
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
@@ -608,7 +608,7 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     delivery: Delivery,
-    control: &mut super::cooperative::Cooperate<'_, Yield>,
+    control: &mut super::cooperative::Cooperate<'_, Yield, impl Guard>,
 ) -> Result<Option<Finished>>
 where
     Yield: FnMut() -> YieldFuture,

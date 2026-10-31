@@ -107,8 +107,8 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 24);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 23);
+    assert_eq!(FnxSignatureRegistry::version(), 25);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 24);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);
@@ -269,6 +269,64 @@ fn hits_binds_two_independent_scores_and_preserves_yield_identity() {
             FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
             "{text}"
         );
+    }
+}
+
+#[test]
+fn katz_binds_validated_controls_and_freezes_each_requested_answer() {
+    let options = KatzOptions::default();
+    let call = FnxCallSpec::katz_centrality(options);
+    assert_eq!(call, bind("CALL fnx.katz_centrality() YIELD *"));
+    assert_eq!(call, bind("CALL fnx.katz_centrality(0.1,1,1000,1e-6)"));
+    assert_eq!(call.algorithm(), FnxAlgorithm::KatzCentrality(options));
+    assert_eq!(call.signature().graph_kind, FnxGraphKind::Any);
+    assert_eq!(call.signature().parameters.len(), 4);
+    assert_eq!(
+        call.signature().outputs,
+        &[FnxOutput::Vertex, FnxOutput::Score]
+    );
+    assert!(call.supports_sealed_execution());
+    assert!(call.supports_cooperative_sealed_execution());
+    let custom = KatzOptions::new(0.01, -2.0, 500, 1e-10).unwrap();
+    assert_eq!(
+        FnxCallSpec::katz_centrality(custom),
+        bind("CALL fnx.katz_centrality(tol => 1e-10, beta => -2, alpha => 0.01, max_iter => 500)"),
+    );
+    for text in [
+        "CALL fnx.katz_centrality(alpha => 0.01)",
+        "CALL fnx.katz_centrality(beta => 2)",
+        "CALL fnx.katz_centrality(max_iter => 1001)",
+        "CALL fnx.katz_centrality(tol => 1e-8)",
+        "CALL fnx.katz_centrality() YIELD score AS rank,node AS id",
+    ] {
+        assert_ne!(call.digest(), bind(text).digest(), "{text}");
+    }
+    assert_eq!(
+        FnxCallSpec::katz_centrality(KatzOptions::new(-0.0, -0.0, 5, 1e-6).unwrap()).digest(),
+        bind("CALL fnx.katz_centrality(0,0,5,1e-6)").digest(),
+    );
+    for text in [
+        "CALL fnx.katz_centrality(-0.1)",
+        "CALL fnx.katz_centrality(beta => NULL)",
+        "CALL fnx.katz_centrality(alpha => 9007199254740993)",
+        "CALL fnx.katz_centrality(max_iter => 0)",
+        "CALL fnx.katz_centrality(max_iter => 1.5)",
+        "CALL fnx.katz_centrality(tol => 0)",
+        "CALL fnx.katz_centrality(tol => -1)",
+        "CALL fnx.katz_centrality(alpha => 0.1,alpha => 0.2)",
+        "CALL fnx.katz_centrality(iterations => 10)",
+        "CALL fnx.katz_centrality(1,1,1,1,1)",
+        "CALL fnx.katz_centrality() YIELD hub",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(KatzOptions::new(bad, 1.0, 1, 1e-6).is_err());
+        assert!(KatzOptions::new(0.1, bad, 1, 1e-6).is_err());
+        assert!(KatzOptions::new(0.1, 1.0, 1, bad).is_err());
     }
 }
 

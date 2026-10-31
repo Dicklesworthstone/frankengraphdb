@@ -6,16 +6,24 @@ use crate::SealedProjectionError;
 use fgdb_strata::tiered::sealed::SealedError;
 use fgdb_types::QueryCx;
 
-pub(crate) struct Control<'a> {
+pub(crate) type GuardResult = Result<(), SealedProjectionError>;
+pub(crate) type GuardFn = fn() -> GuardResult;
+
+/// Keep the guard's concrete type through suspended work. An owner call's
+/// stateless guard is Sync, so its future can move between runtime workers.
+/// Local FnMut guards still use their existing RefCell adapter and need not
+/// be Send or Sync. Neither path adds a lock or erases a caller's live guard.
+pub(crate) trait Guard: Fn() -> GuardResult {}
+
+impl<F: Fn() -> GuardResult> Guard for F {}
+
+pub(crate) struct Control<'a, G: Guard = GuardFn> {
     pub(crate) query: &'a QueryCx,
-    guard: &'a dyn Fn() -> Result<(), SealedProjectionError>,
+    guard: &'a G,
 }
 
-impl<'a> Control<'a> {
-    pub(crate) fn new(
-        query: &'a QueryCx,
-        guard: &'a dyn Fn() -> Result<(), SealedProjectionError>,
-    ) -> Self {
+impl<'a, G: Guard> Control<'a, G> {
+    pub(crate) fn new(query: &'a QueryCx, guard: &'a G) -> Self {
         Self { query, guard }
     }
 

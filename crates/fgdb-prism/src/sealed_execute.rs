@@ -6,7 +6,7 @@ use crate::execute::{
     HopDistance, KernelOutput, KernelValues, PageRankRestart, hash_bfs_decision_card,
     hash_component_decision_card, hash_result_value,
 };
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard, GuardFn};
 use crate::{
     AdapterPath, BfsDecisionCard, ComplexityWitness, Directedness, FNX_IMPLEMENTATION_REVISION,
     FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm, FnxBindError, FnxCallSpec, FnxCertificate,
@@ -47,6 +47,8 @@ mod distance;
 mod eigenvector;
 #[path = "sealed_hits.rs"]
 mod hits;
+#[path = "sealed_katz.rs"]
+mod katz;
 #[path = "sealed_load.rs"]
 mod load;
 #[path = "sealed_shortest_path.rs"]
@@ -153,7 +155,7 @@ impl Finished {
     }
 }
 
-fn checkpoint(cx: &Control<'_>) -> Result<()> {
+fn checkpoint(cx: &Control<'_, impl Guard>) -> Result<()> {
     cx.checkpoint().map_err(Into::into)
 }
 fn add(left: usize, right: usize) -> Result<usize> {
@@ -213,22 +215,22 @@ trait Rows {
     }
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>>;
 }
-struct SealedRows<'a> {
-    cx: &'a Control<'a>,
+struct SealedRows<'a, G: Guard> {
+    cx: &'a Control<'a, G>,
     graph: &'a SealedGraphView,
 }
-struct SealedRow<'a> {
-    cx: &'a Control<'a>,
+struct SealedRow<'a, G: Guard = GuardFn> {
+    cx: &'a Control<'a, G>,
     row: SealedNeighborCursor<'a>,
 }
-impl Cursor for SealedRow<'_> {
+impl<G: Guard> Cursor for SealedRow<'_, G> {
     fn next(&mut self) -> Result<Option<(usize, f64)>> {
         self.row.next_controlled(self.cx).map_err(Into::into)
     }
 }
-impl Rows for SealedRows<'_> {
+impl<G: Guard> Rows for SealedRows<'_, G> {
     type Cursor<'a>
-        = SealedRow<'a>
+        = SealedRow<'a, G>
     where
         Self: 'a;
     fn node_count(&self) -> usize {
@@ -811,6 +813,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::InDegreeCentrality
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::HitsCentrality
+                | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
                 | FnxAlgorithm::Foundation(
@@ -926,7 +929,7 @@ impl FnxCallSpec {
 
     fn execute_controlled(
         &self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         graph: &SealedGraphView,
         limits: FnxExecutionLimits,
         memory: FnxMemoryLimits,
@@ -947,6 +950,9 @@ impl FnxCallSpec {
         }
         if matches!(self.algorithm(), FnxAlgorithm::HitsCentrality) {
             return hits::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(self.algorithm(), FnxAlgorithm::KatzCentrality(_)) {
+            return katz::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(
             self.algorithm(),

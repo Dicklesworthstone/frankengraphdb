@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 24;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 25;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -208,6 +208,32 @@ const CDLP_PARAMETERS: &[FnxParameterSpec] = &[FnxParameterSpec {
     positional: true,
     default: None,
 }];
+const KATZ_PARAMETERS: &[FnxParameterSpec] = &[
+    FnxParameterSpec {
+        name: "alpha",
+        value_type: FnxParameterType::FiniteFloat,
+        positional: true,
+        default: Some(FnxArgument::Float(0.1)),
+    },
+    FnxParameterSpec {
+        name: "beta",
+        value_type: FnxParameterType::FiniteFloat,
+        positional: true,
+        default: Some(FnxArgument::Float(1.0)),
+    },
+    FnxParameterSpec {
+        name: "max_iter",
+        value_type: FnxParameterType::PositiveInteger,
+        positional: true,
+        default: Some(FnxArgument::Integer(1000)),
+    },
+    FnxParameterSpec {
+        name: "tol",
+        value_type: FnxParameterType::FiniteFloat,
+        positional: true,
+        default: Some(FnxArgument::Float(1e-6)),
+    },
+];
 const SIGNATURES: &[FnxSignature] = &[
     FnxSignature {
         name: "fnx.pagerank",
@@ -456,6 +482,19 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_laws: "explicit projection; known source and target; complete finite nonnegative weight admission; inclusive cost cutoff; FIFO ties; fnx 1e-12 relaxation unless strict; only the target row, or no row when unreachable/beyond cutoff; stop at target finalization between drained rows; a settled target ignores unneeded distance overflows, otherwise retain whole-source overflow refusal",
         complexity: "O((|V| + |E|) * log(1 + |V|)) worst case, stopping at the target; O(|V| + |E|) for proven unit weights; O(1) retained result",
         execution_kernel: "fgdb-prism/dijkstra-target-unit-or-indexed-heap-v1",
+    },
+    FnxSignature {
+        name: "fnx.katz_centrality",
+        graph_input_arity: 1,
+        parameters: KATZ_PARAMETERS,
+        outputs: &[FnxOutput::Vertex, FnxOutput::Score],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Any,
+        numeric_profile: "fnx-katz-f64-canonical-node-order-v1",
+        rng_policy: "none",
+        graph_laws: "explicit simple projection; weights ignored; retained self-loops contribute once per row; incoming Katz x=alpha*A^T*x+beta from zero; alpha finite nonnegative, scalar beta finite; successive-iterate L1 < |V|*tol, then L2 normalization; zero vector stays zero, nonfinite or underflowed norm refuses; non-convergence refuses at max_iter; defaults .1/1/1000/1e-6 match checked FNX, including singleton score 1 without iteration; custom settings iterate singletons; isolates retained",
+        complexity: "O(k * (|V| + |E|)); O(|V|) kernel workspace",
+        execution_kernel: "fgdb-prism/katz-csr-source-order-v1",
     },
 ];
 
@@ -762,6 +801,75 @@ impl Default for PageRankOptions {
     }
 }
 
+/// Scalar incoming Katz centrality with checked power-iteration convergence.
+///
+/// `alpha` attenuates longer walks. A value below the inverse spectral radius
+/// is the usual convergence condition; this API neither estimates that radius
+/// nor silently changes the requested value. Select a smaller alpha for dense
+/// graphs. `beta` supplies each vertex's baseline, including isolates. The
+/// result is L2-normalized only after the successive-iterate L1 change is below
+/// `|V| * tolerance`; the cap refuses rather than returning an unconverged rank.
+/// Defaults reproduce the pinned FNX checked entry, including its singleton
+/// shortcut. Custom settings run the recurrence even for a singleton.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KatzOptions {
+    alpha: f64,
+    beta: f64,
+    max_iter: usize,
+    tol: f64,
+}
+
+impl KatzOptions {
+    pub fn new(alpha: f64, beta: f64, max_iter: usize, tol: f64) -> Result<Self, FnxBindError> {
+        let invalid = |message| FnxBindError {
+            at: 0,
+            kind: FnxBindErrorKind::InvalidArgument(message),
+        };
+        if !alpha.is_finite() || alpha < 0.0 {
+            return Err(invalid("alpha must be finite and nonnegative"));
+        }
+        if !beta.is_finite() {
+            return Err(invalid("beta must be finite"));
+        }
+        if max_iter == 0 {
+            return Err(invalid("max_iter must be positive"));
+        }
+        if !tol.is_finite() || tol <= 0.0 {
+            return Err(invalid("tol must be finite and positive"));
+        }
+        Ok(Self {
+            alpha: if alpha == 0.0 { 0.0 } else { alpha },
+            beta: if beta == 0.0 { 0.0 } else { beta },
+            max_iter,
+            tol,
+        })
+    }
+
+    pub const fn alpha(self) -> f64 {
+        self.alpha
+    }
+    pub const fn beta(self) -> f64 {
+        self.beta
+    }
+    pub const fn max_iter(self) -> usize {
+        self.max_iter
+    }
+    pub const fn tolerance(self) -> f64 {
+        self.tol
+    }
+}
+
+impl Default for KatzOptions {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            beta: 1.0,
+            max_iter: 1000,
+            tol: 1e-6,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FnxAlgorithm {
     PageRank(PageRankOptions),
@@ -793,6 +901,7 @@ pub enum FnxAlgorithm {
     HitsCentrality,
     ArticulationPoints,
     Bridges,
+    KatzCentrality(KatzOptions),
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -815,6 +924,7 @@ impl FnxAlgorithm {
             Self::HitsCentrality => 19,
             Self::ArticulationPoints => 20,
             Self::Bridges => 21,
+            Self::KatzCentrality(_) => 23,
         }]
     }
 }
@@ -914,6 +1024,12 @@ impl FnxCallSpec {
     /// 100-update cap the last iterate is returned, as in the fnx oracle.
     pub fn hits_centrality() -> Self {
         Self::new(FnxAlgorithm::HitsCentrality)
+    }
+    /// Checked incoming Katz centrality with scalar attenuation and baseline.
+    /// Text calls accept `alpha`, `beta`, `max_iter` and `tol`, in that order
+    /// or by name. Defaults match the pinned FNX checked procedure.
+    pub fn katz_centrality(options: KatzOptions) -> Self {
+        Self::new(FnxAlgorithm::KatzCentrality(options))
     }
     /// Cut vertices of the explicit undirected simple projection, in VId order.
     pub fn articulation_points() -> Self {
@@ -1204,6 +1320,22 @@ impl FnxCallSpec {
                     PageRankOptions::new(alpha, max_iter, tol, weighted).map_err(whole)?,
                 )
             }
+            "fnx.katz_centrality" => {
+                let alpha = float_argument(arguments[0])
+                    .ok_or_else(|| invalid(0, "finite exact alpha required"))?;
+                let beta = float_argument(arguments[1])
+                    .ok_or_else(|| invalid(1, "finite exact beta required"))?;
+                let max_iter = match arguments[2] {
+                    FnxArgument::Integer(value) if value > 0 => usize::try_from(value).ok(),
+                    _ => None,
+                }
+                .ok_or_else(|| invalid(2, "positive integer max_iter required"))?;
+                let tol = float_argument(arguments[3])
+                    .ok_or_else(|| invalid(3, "finite exact tol required"))?;
+                FnxAlgorithm::KatzCentrality(
+                    KatzOptions::new(alpha, beta, max_iter, tol).map_err(whole)?,
+                )
+            }
             "fnx.single_source_shortest_path_length" => {
                 let source = match arguments[0] {
                     FnxArgument::Vertex(vertex) => vertex,
@@ -1483,6 +1615,19 @@ impl FnxCallSpec {
                 }
             }
         }
+        if registration.name == "fnx.katz_centrality" {
+            for (index, &(parameter, value)) in supplied.iter().enumerate() {
+                match (parameter, float_argument(value)) {
+                    ("alpha", Some(alpha)) if alpha < 0.0 => {
+                        return Err(invalid(index, "alpha must be finite and nonnegative"));
+                    }
+                    ("tol", Some(tol)) if tol <= 0.0 => {
+                        return Err(invalid(index, "tol must be finite and positive"));
+                    }
+                    _ => {}
+                }
+            }
+        }
         let call =
             Self::from_arguments(namespace, name, &positional, yields).map_err(|mut failure| {
                 if let FnxCallSite::Argument(index) = failure.site {
@@ -1554,6 +1699,7 @@ impl FnxCallSpec {
         // unrelated signatures are appended to the public registry.
         let binding_version: u16 = match algorithm {
             FnxAlgorithm::DijkstraPathLength { .. } => 24,
+            FnxAlgorithm::KatzCentrality(_) => 25,
             _ => 23,
         };
         hash.update(&binding_version.to_le_bytes());
@@ -1561,6 +1707,12 @@ impl FnxCallSpec {
         hash.update(&(name.len() as u128).to_le_bytes());
         hash.update(name.as_bytes());
         match algorithm {
+            FnxAlgorithm::KatzCentrality(options) => {
+                hash.update(&options.alpha.to_bits().to_le_bytes());
+                hash.update(&options.beta.to_bits().to_le_bytes());
+                hash.update(&(options.max_iter as u128).to_le_bytes());
+                hash.update(&options.tol.to_bits().to_le_bytes());
+            }
             FnxAlgorithm::PageRank(options) => {
                 hash.update(&[options.stopping_rule as u8]);
                 hash.update(&options.alpha.to_bits().to_le_bytes());

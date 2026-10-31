@@ -31,6 +31,8 @@ pub struct FnxExecutionLimits {
     /// directory; projection admission is separate.
     /// HITS includes both row passes and all scalar normalization passes for
     /// its fixed 100-update cap, plus initialization and output.
+    /// Katz includes the requested iteration cap, source-order contributions,
+    /// scalar recurrence/convergence passes and final L2 normalization.
     /// Cut vertices and bridges include iterative lowlink traversal and linear
     /// canonical pair ordering; sparse cutsets spend only actual result rows.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
@@ -1455,6 +1457,9 @@ impl FnxCallSpec {
             FnxAlgorithm::Cdlp { max_iter } => {
                 admit("iterations", max_iter, limits.max_iterations)?;
             }
+            FnxAlgorithm::KatzCentrality(options) => {
+                admit("iterations", options.max_iter(), limits.max_iterations)?;
+            }
             FnxAlgorithm::HitsCentrality => {
                 admit(
                     "iterations",
@@ -1514,6 +1519,13 @@ impl FnxCallSpec {
                 n,
                 self.outputs().len(),
             )?),
+            FnxAlgorithm::KatzCentrality(options) => Some(crate::katz::estimated_work::<C>(
+                n,
+                arcs,
+                n,
+                self.outputs().len(),
+                options,
+            )?),
             FnxAlgorithm::ArticulationPoints | FnxAlgorithm::Bridges => {
                 crate::cuts::Cuts::estimated_work(n, arcs, self.outputs().len())
             }
@@ -1543,6 +1555,7 @@ impl FnxCallSpec {
             | FnxAlgorithm::InDegreeCentrality
             | FnxAlgorithm::OutDegreeCentrality
             | FnxAlgorithm::HitsCentrality
+            | FnxAlgorithm::KatzCentrality(_)
             | FnxAlgorithm::ArticulationPoints
             | FnxAlgorithm::Bridges => 0,
             _ => {
@@ -1652,6 +1665,11 @@ impl FnxCallSpec {
             }
             FnxAlgorithm::HitsCentrality => {
                 let (output, workspace_bytes) = crate::hits::run(graph, &mut checkpoint)?;
+                kernel_workspace_bytes = workspace_bytes;
+                output
+            }
+            FnxAlgorithm::KatzCentrality(options) => {
+                let (output, workspace_bytes) = crate::katz::run(graph, options, &mut checkpoint)?;
                 kernel_workspace_bytes = workspace_bytes;
                 output
             }

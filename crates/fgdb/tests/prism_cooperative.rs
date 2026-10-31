@@ -16,8 +16,8 @@ use fgdb_prism::{
     Directedness, FnxAlgorithm, FnxArgument, FnxCallSpec, FnxExecutionError, FnxExecutionLimits,
     FnxGraphKind, FnxMemoryLimits, FnxParameters, FnxReadOptions, FnxResult, FnxRowCursor,
     FnxSealedExecutionError, FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue,
-    FnxWeightSpec, MissingWeightPolicy, PageRankOptions, ParallelEdgePolicy, ProjectionLimits,
-    ProjectionSpec, SealedGraphView, SealedProjectionError, SelfLoopPolicy,
+    FnxWeightSpec, KatzOptions, MissingWeightPolicy, PageRankOptions, ParallelEdgePolicy,
+    ProjectionLimits, ProjectionSpec, SealedGraphView, SealedProjectionError, SelfLoopPolicy,
 };
 use fgdb_strata::tiered::sealed::{SealedLimits, SealedScanBudget, SealedScanStep};
 use fgdb_types::context::SimulationCheckpointProbe;
@@ -51,10 +51,14 @@ mod distance;
 mod eigenvector;
 #[path = "prism_cooperative/hits.rs"]
 mod hits;
+#[path = "prism_cooperative/katz.rs"]
+mod katz;
 #[path = "prism_cooperative/pagerank.rs"]
 mod pagerank;
+#[path = "prism_cooperative/send.rs"]
+mod send;
 
-fn retained_calls() -> [FnxCallSpec; 22] {
+fn retained_calls() -> [FnxCallSpec; 23] {
     let bind = |text| FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();
     [
         FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap()),
@@ -81,6 +85,7 @@ fn retained_calls() -> [FnxCallSpec; 22] {
         bind("CALL fnx.hits_centrality() YIELD authority AS rank,node AS id,hub"),
         FnxCallSpec::articulation_points(),
         bind("CALL fnx.bridges() YIELD neighbor AS target,node AS source"),
+        FnxCallSpec::katz_centrality(KatzOptions::default()),
     ]
 }
 

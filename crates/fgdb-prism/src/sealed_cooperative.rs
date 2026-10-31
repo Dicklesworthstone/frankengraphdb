@@ -20,7 +20,7 @@ use super::{
     SealedGraphView, SealedNeighborCursor, add, admit, checkpoint, execution_pass_work,
     finish_encoded, mul, require_loop_free_degree, reserve,
 };
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard};
 use crate::shortest_path::{Entry, IndexedHeap};
 use crate::{DijkstraOptions, FoundationAlgorithm, SealedProjectionError};
 use fgdb_strata::tiered::sealed::{SealedScanBudget, SealedScanStep};
@@ -29,14 +29,14 @@ use std::future::Future;
 use std::mem::size_of;
 use std::num::NonZeroUsize;
 
-pub(super) struct Cooperate<'cx, Yield> {
-    pub(super) cx: &'cx Control<'cx>,
+pub(super) struct Cooperate<'cx, Yield, G: Guard> {
+    pub(super) cx: &'cx Control<'cx, G>,
     fuel: SealedScanBudget,
     quantum: NonZeroUsize,
     yield_now: Yield,
 }
 
-impl<Yield, YieldFuture> Cooperate<'_, Yield>
+impl<Yield, YieldFuture, G: Guard> Cooperate<'_, Yield, G>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
@@ -138,6 +138,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::InDegreeCentrality
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::HitsCentrality
+                | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
                 | FnxAlgorithm::Foundation(
@@ -176,16 +177,18 @@ impl FnxCallSpec {
         Yield: FnMut() -> YieldFuture,
         YieldFuture: Future<Output = ()>,
     {
-        self.execute_sealed_cooperative_with_checkpoint(
+        self.execute_sealed_cooperative_delivery(
             cx,
             graph,
             limits,
             memory,
             quantum,
             yield_now,
-            || Ok(()),
+            &|| Ok(()),
+            Delivery::Collected,
         )
-        .await
+        .await?
+        .collected()
     }
 
     /// Cooperatively execute under an additional live guard. The guard spans
@@ -212,6 +215,8 @@ impl FnxCallSpec {
         Yield: FnMut() -> YieldFuture,
         YieldFuture: Future<Output = ()>,
     {
+        let guard = RefCell::new(guard);
+        let invoke = || (guard.borrow_mut())();
         self.execute_sealed_cooperative_delivery(
             cx,
             graph,
@@ -219,7 +224,7 @@ impl FnxCallSpec {
             memory,
             quantum,
             yield_now,
-            guard,
+            &invoke,
             Delivery::Collected,
         )
         .await?
@@ -243,16 +248,18 @@ impl FnxCallSpec {
         Yield: FnMut() -> YieldFuture,
         YieldFuture: Future<Output = ()>,
     {
-        self.execute_sealed_cooperative_rows_with_checkpoint(
+        self.execute_sealed_cooperative_delivery(
             cx,
             graph,
             limits,
             memory,
             quantum,
             yield_now,
-            || Ok(()),
+            &|| Ok(()),
+            Delivery::Retained,
         )
-        .await
+        .await?
+        .retained()
     }
 
     /// Retain completed values under an execution-local live guard. Every
@@ -274,6 +281,8 @@ impl FnxCallSpec {
         Yield: FnMut() -> YieldFuture,
         YieldFuture: Future<Output = ()>,
     {
+        let guard = RefCell::new(guard);
+        let invoke = || (guard.borrow_mut())();
         self.execute_sealed_cooperative_delivery(
             cx,
             graph,
@@ -281,7 +290,7 @@ impl FnxCallSpec {
             memory,
             quantum,
             yield_now,
-            guard,
+            &invoke,
             Delivery::Retained,
         )
         .await?
@@ -297,7 +306,7 @@ impl FnxCallSpec {
         memory: FnxMemoryLimits,
         quantum: NonZeroUsize,
         mut yield_now: Yield,
-        guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
+        guard: &impl Guard,
         delivery: Delivery,
     ) -> Result<Finished>
     where
@@ -307,9 +316,7 @@ impl FnxCallSpec {
         // Install the existing role restriction for EACH poll, never across an
         // await via a synchronous guard or by recovering a wider ambient Cx.
         cx.with_restriction_async(async {
-            let guard = RefCell::new(guard);
-            let invoke = || (guard.borrow_mut())();
-            let execution = Control::new(cx, &invoke);
+            let execution = Control::new(cx, guard);
             let cx = &execution;
             checkpoint(cx)?;
             if !self.supports_cooperative_sealed_execution() {
@@ -327,6 +334,23 @@ impl FnxCallSpec {
                     yield_now,
                 };
                 return super::cuts::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
+            }
+            if matches!(self.algorithm(), FnxAlgorithm::KatzCentrality(_)) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::katz::execute_cooperative(
                     self,
                     graph,
                     limits,
@@ -766,7 +790,7 @@ impl FnxCallSpec {
 
 async fn degree_centrality<Yield, YieldFuture>(
     graph: &SealedGraphView,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -785,7 +809,7 @@ where
 async fn directed_degree_centrality<Yield, YieldFuture>(
     graph: &SealedGraphView,
     incoming: bool,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -837,7 +861,7 @@ async fn dijkstra<Yield, YieldFuture>(
     options: DijkstraOptions,
     destination: Option<usize>,
     admission: &ResultAdmission,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -1003,7 +1027,7 @@ async fn dijkstra_unit_fifo<Yield, YieldFuture>(
     cutoff: Option<f64>,
     destination: Option<usize>,
     admission: &ResultAdmission,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -1048,7 +1072,7 @@ where
 async fn root<Yield, YieldFuture>(
     parents: &mut [usize],
     mut vertex: usize,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<usize>
 where
     Yield: FnMut() -> YieldFuture,
@@ -1064,7 +1088,7 @@ where
 
 async fn weak<Yield, YieldFuture>(
     graph: &SealedGraphView,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -1174,7 +1198,7 @@ where
 async fn strong<Yield, YieldFuture>(
     graph: &SealedGraphView,
     max_workspace: usize,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<(KernelOutput, usize)>
 where
     Yield: FnMut() -> YieldFuture,
@@ -1190,7 +1214,7 @@ where
     let mut on_stack = reserved(n, &mut workspace, max_workspace)?;
     let mut labels = reserved(n, &mut workspace, max_workspace)?;
     let mut members = reserved(n, &mut workspace, max_workspace)?;
-    let mut frames: FrameStack<SealedRow<'_>> = FrameStack::new(n, workspace, max_workspace)?;
+    let mut frames: FrameStack<SealedRow<'_, _>> = FrameStack::new(n, workspace, max_workspace)?;
     for _ in 0..n {
         control.tick().await?;
         indices.push(usize::MAX);
@@ -1307,7 +1331,7 @@ async fn bfs<Yield, YieldFuture>(
     source: usize,
     cutoff: Option<usize>,
     admission: &ResultAdmission,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,
@@ -1375,7 +1399,7 @@ async fn pagerank<Yield, YieldFuture>(
     graph: &SealedGraphView,
     options: PageRankOptions,
     source: Option<usize>,
-    control: &mut Cooperate<'_, Yield>,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
     Yield: FnMut() -> YieldFuture,

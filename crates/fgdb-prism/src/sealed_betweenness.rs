@@ -15,7 +15,7 @@ use super::{
     SealedGraphView, SealedRows, add, admit, checkpoint, directional_pass_work, finish, mul,
     require_loop_free_degree, reserve,
 };
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard};
 use std::mem::size_of;
 
 pub(super) fn workspace(n: usize) -> Result<usize> {
@@ -304,7 +304,7 @@ pub(super) fn prepare(
 
 pub(super) fn execute(
     call: &FnxCallSpec,
-    cx: &Control<'_>,
+    cx: &Control<'_, impl Guard>,
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,

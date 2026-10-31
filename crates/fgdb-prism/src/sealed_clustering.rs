@@ -27,12 +27,12 @@ use super::{
     FnxExecutionLimits, FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, Rows,
     SealedGraphView, SealedRows, add, admit, checkpoint, finish, mul, reserve,
 };
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard};
 use std::mem::size_of;
 
 pub(super) fn execute(
     call: &FnxCallSpec,
-    cx: &Control<'_>,
+    cx: &Control<'_, impl Guard>,
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
@@ -486,7 +486,7 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     delivery: Delivery,
-    control: &mut super::cooperative::Cooperate<'_, Yield>,
+    control: &mut super::cooperative::Cooperate<'_, Yield, impl Guard>,
 ) -> Result<Finished>
 where
     Yield: FnMut() -> YieldFuture,
@@ -675,7 +675,7 @@ async fn count_rows_cooperative<const PRUNE: bool, Yield, YieldFuture>(
     counts: &mut [u64],
     marked: &mut MarkedNeighbors,
     witness: &mut ComplexityWitness,
-    control: &mut super::cooperative::Cooperate<'_, Yield>,
+    control: &mut super::cooperative::Cooperate<'_, Yield, impl Guard>,
 ) -> Result<()>
 where
     Yield: FnMut() -> YieldFuture,
@@ -754,7 +754,7 @@ async fn next_cooperative_neighbor<Yield, YieldFuture>(
     row: &mut super::SealedNeighborCursor<'_>,
     n: usize,
     previous: &mut Option<usize>,
-    control: &mut super::cooperative::Cooperate<'_, Yield>,
+    control: &mut super::cooperative::Cooperate<'_, Yield, impl Guard>,
 ) -> Result<Option<usize>>
 where
     Yield: FnMut() -> YieldFuture,

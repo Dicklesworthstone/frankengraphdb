@@ -8,7 +8,7 @@
 //! trusted host after snapshot/label/security admission, not authorized here.
 
 use crate::projection::OrdinalPrefix;
-use crate::sealed_control::Control;
+use crate::sealed_control::{Control, Guard};
 use crate::{
     Directedness, FnxSelection, FnxWeightError, ParallelEdgePolicy, ProjectionError,
     ProjectionLimits, ProjectionSpec, SelfLoopPolicy, SnapshotBinding,
@@ -120,7 +120,7 @@ impl From<SealedError> for SealedProjectionError {
     }
 }
 
-fn checkpoint(cx: &Control<'_>) -> Result<(), SealedProjectionError> {
+fn checkpoint(cx: &Control<'_, impl Guard>) -> Result<(), SealedProjectionError> {
     cx.checkpoint()
 }
 
@@ -240,7 +240,7 @@ impl SealedGraphView {
     }
 
     fn build_controlled(
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         partition: &SealedPartition,
         vertices: &[VId],
         config: SealedProjectionSpec,
@@ -254,7 +254,7 @@ impl SealedGraphView {
             config,
             mask,
             limits,
-            &mut construction::Immediate::new(),
+            &mut construction::Schedule::immediate(),
         ))
     }
 
@@ -277,17 +277,19 @@ impl SealedGraphView {
         Y: FnMut() -> F,
         F: Future<Output = ()>,
     {
-        Self::build_cooperative_with_checkpoint(
-            cx,
-            partition,
-            vertices,
-            config,
-            SealedProjectionMask::UNMASKED,
-            limits,
-            quantum,
-            yield_now,
-            || Ok(()),
-        )
+        cx.with_restriction_async(async {
+            let control = Control::new(cx, &|| Ok(()));
+            Self::construct(
+                &control,
+                partition,
+                vertices,
+                config,
+                SealedProjectionMask::UNMASKED,
+                limits,
+                &mut construction::Schedule::cooperative(quantum, yield_now),
+            )
+            .await
+        })
         .await
     }
 
@@ -322,7 +324,7 @@ impl SealedGraphView {
                 config,
                 mask,
                 limits,
-                &mut construction::Cooperative::new(quantum, yield_now),
+                &mut construction::Schedule::cooperative(quantum, yield_now),
             )
             .await
         })
@@ -330,15 +332,19 @@ impl SealedGraphView {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn construct<S: construction::Schedule>(
-        cx: &Control<'_>,
+    async fn construct<Y, F>(
+        cx: &Control<'_, impl Guard>,
         partition: &SealedPartition,
         vertices: &[VId],
         config: SealedProjectionSpec,
         mask: SealedProjectionMask,
         limits: ProjectionLimits,
-        schedule: &mut S,
-    ) -> Result<Self, SealedProjectionError> {
+        schedule: &mut construction::Schedule<Y>,
+    ) -> Result<Self, SealedProjectionError>
+    where
+        Y: FnMut() -> F,
+        F: Future<Output = ()>,
+    {
         schedule.check(cx).await?;
         let relation = config
             .selection
@@ -700,7 +706,7 @@ impl SealedGraphView {
     /// already have both faces and do not need this auxiliary projection.
     pub(crate) fn reverse_projection_controlled(
         &self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         max_workspace_bytes: usize,
     ) -> Result<Self, SealedProjectionError> {
         let (config, limits) = self.reverse_projection_request(max_workspace_bytes)?;
@@ -720,7 +726,7 @@ impl SealedGraphView {
     /// replaced at this construction boundary.
     pub(crate) async fn reverse_projection_cooperative_controlled<Y, F>(
         &self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         max_workspace_bytes: usize,
         quantum: NonZeroUsize,
         yield_now: Y,
@@ -737,7 +743,7 @@ impl SealedGraphView {
             config,
             self.0.mask,
             limits,
-            &mut construction::Cooperative::new(quantum, yield_now),
+            &mut construction::Schedule::cooperative(quantum, yield_now),
         )
         .await
     }
@@ -832,7 +838,7 @@ impl SealedGraphView {
 
     pub(crate) fn neighbor_cursor_controlled(
         &self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         source: usize,
         lower_bound: Option<VId>,
     ) -> Result<SealedNeighborCursor<'_>, SealedProjectionError> {
@@ -882,7 +888,7 @@ pub struct SealedNeighborCursor<'a> {
 
 impl<'a> SealedNeighborCursor<'a> {
     fn empty(
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         vertices: &'a [VId],
         vertex_prefix: Option<&'a OrdinalPrefix>,
         config: &'a SealedProjectionSpec,
@@ -914,7 +920,7 @@ impl<'a> SealedNeighborCursor<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn open(
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         partition: &'a SealedPartition,
         incoming: Option<&'a SealedIncomingIndex>,
         vertices: &'a [VId],
@@ -957,14 +963,14 @@ impl<'a> SealedNeighborCursor<'a> {
 
     pub(crate) fn next_controlled(
         &mut self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
     ) -> Result<Option<(usize, f64)>, SealedProjectionError> {
         self.next_observed(cx, &mut |_, _, _| Ok(()))
     }
 
     fn next_observed(
         &mut self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         observe: &mut impl FnMut(EId, VId, Option<f64>) -> Result<(), SealedProjectionError>,
     ) -> Result<Option<(usize, f64)>, SealedProjectionError> {
         loop {
@@ -996,7 +1002,7 @@ impl<'a> SealedNeighborCursor<'a> {
 
     pub(crate) fn next_budgeted_controlled(
         &mut self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         budget: &mut SealedScanBudget,
     ) -> Result<SealedScanStep<(usize, f64)>, SealedProjectionError> {
         self.next_budgeted_observed(cx, budget, &mut |_, _, _| Ok(()))
@@ -1004,7 +1010,7 @@ impl<'a> SealedNeighborCursor<'a> {
 
     fn next_budgeted_observed(
         &mut self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         budget: &mut SealedScanBudget,
         observe: &mut impl FnMut(EId, VId, Option<f64>) -> Result<(), SealedProjectionError>,
     ) -> Result<SealedScanStep<(usize, f64)>, SealedProjectionError> {
@@ -1022,7 +1028,7 @@ impl<'a> SealedNeighborCursor<'a> {
 
     fn next_inner(
         &mut self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         budget: &mut SealedScanBudget,
         observe: &mut impl FnMut(EId, VId, Option<f64>) -> Result<(), SealedProjectionError>,
     ) -> Result<SealedScanStep<(usize, f64)>, SealedProjectionError> {
@@ -1071,7 +1077,7 @@ impl<'a> SealedNeighborCursor<'a> {
 
     fn read_selected(
         &mut self,
-        cx: &Control<'_>,
+        cx: &Control<'_, impl Guard>,
         budget: &mut SealedScanBudget,
         observe: &mut impl FnMut(EId, VId, Option<f64>) -> Result<(), SealedProjectionError>,
     ) -> Result<SealedScanStep<(usize, f64)>, SealedProjectionError> {
