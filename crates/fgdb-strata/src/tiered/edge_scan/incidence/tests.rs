@@ -41,6 +41,7 @@ fn only_retained_incidence_positions_allocate_displaced_order_memos() {
             .unwrap();
         let mut driver = Driver {
             root: view.edge_scan(&cx, CommitSeq(3)).unwrap(),
+            vertices: None,
         };
         for (endpoint, direction, selected_rows) in [
             (VId(1), BufferedEdgeDirection::Outgoing, 4),
@@ -691,6 +692,275 @@ fn routing_and_history_refusals_drop_the_whole_driver_and_keep_exact_work_limits
             .is_some()
         );
         drop(scan);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_roots_and_incident_positions_share_one_cut_and_cumulative_work() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        for cut in [0, 1, 3] {
+            let mut scan = view
+                .edge_scan(&cx, CommitSeq(cut))
+                .unwrap()
+                .into_join_scan();
+            assert!(scan.driver.as_ref().unwrap().vertices.is_none());
+            assert_eq!(pool.used(), baseline, "vertex heads remain lazy");
+            let mut observed_work = 0usize;
+            let mut admitted = Vec::new();
+            for (vid, initial) in [(1, 10), (2, 20), (3, 30), (9, 90), (10, 100)] {
+                let candidate = scan
+                    .next_vertex_candidate(&cx, &mut |event| {
+                        match event {
+                            BufferedScanEvent::Work => observed_work += 1,
+                            BufferedScanEvent::Identity(vid) => admitted.push(vid),
+                        }
+                        Ok::<_, ()>(())
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(candidate.vid, VId(vid));
+                assert_eq!(scan.work_used(), observed_work);
+                if cut == 0 {
+                    assert!(candidate.row.is_none());
+                    continue;
+                }
+                let row = candidate.row.unwrap();
+                let value = if vid == 1 && cut == 3 { 11 } else { initial };
+                assert_eq!(
+                    row.props,
+                    vec![(
+                        P,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))
+                    )],
+                );
+                let incident = scan
+                    .next_incident_retained_with_endpoints(
+                        &cx,
+                        VId(vid),
+                        Some(R),
+                        BufferedEdgeDirection::Outgoing,
+                        None,
+                        &mut |event| {
+                            if event == BufferedEdgeScanEvent::Work {
+                                observed_work += 1;
+                            }
+                            Ok::<_, ()>(())
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(scan.work_used(), observed_work);
+                if vid == 3 || vid == 10 {
+                    assert!(incident.is_none(), "isolates remain vertex roots");
+                }
+                // Neither vertex intake nor nested edges demand the root edge
+                // heap, and returned vertex payloads survive incidence reads.
+                let root = scan.driver.as_ref().unwrap().root.state.as_ref().unwrap();
+                assert!(!root.initialized);
+                assert!(root._head_charge.is_none());
+                assert_eq!(row.vid, VId(vid));
+            }
+            assert_eq!(admitted, vec![VId(1), VId(2), VId(3), VId(9), VId(10)]);
+            assert!(
+                scan.next_vertex_candidate(&cx, &mut |_| Err::<(), _>("vertex EOF"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(!scan.is_closed(), "the final root may still have children");
+            let mut edges = Vec::new();
+            while let Some(candidate) = scan
+                .next_with_endpoints(&cx, None, &mut |event| {
+                    if event == BufferedEdgeScanEvent::Work {
+                        observed_work += 1;
+                    }
+                    Ok::<_, ()>(())
+                })
+                .await
+                .unwrap()
+            {
+                edges.push(candidate.eid);
+            }
+            assert_eq!(
+                edges,
+                TOPOLOGY.iter().map(|row| EId(row.0)).collect::<Vec<_>>()
+            );
+            assert_eq!(scan.work_used(), observed_work);
+            scan.close();
+            assert!(
+                scan.next_vertex_candidate(&cx, &mut |_| Err::<(), _>("closed"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_and_edge_work_cannot_restart_each_others_allowance() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let mut exact = None;
+        for margin in [None, Some(0), Some(1)] {
+            let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+            if let Some(margin) = margin {
+                scan.driver.as_mut().unwrap().root.work.limit = exact.unwrap() - margin;
+            }
+            let first = scan
+                .next_vertex_candidate(&cx, &mut |_| Ok::<_, ()>(()))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(first.vid, VId(1));
+            drop(first);
+            let edge = scan
+                .next_incident_retained_with_endpoints(
+                    &cx,
+                    VId(1),
+                    Some(R),
+                    BufferedEdgeDirection::Outgoing,
+                    None,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(edge.eid, EId(4));
+            drop(edge);
+            let before = scan.work_used();
+            let result = scan
+                .next_vertex_candidate(&cx, &mut |_| Ok::<_, ()>(()))
+                .await;
+            if margin == Some(1) {
+                assert!(matches!(
+                    result,
+                    Err(BufferedScanError::Read(BufferedReadError::Limit {
+                        resource: "buffered source work",
+                        ..
+                    }))
+                ));
+                assert!(scan.is_closed());
+            } else {
+                assert_eq!(result.unwrap().unwrap().vid, VId(2));
+                assert!(scan.work_used() > before);
+                if margin.is_none() {
+                    exact = Some(scan.work_used());
+                } else {
+                    assert_eq!(Some(scan.work_used()), exact);
+                }
+            }
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_intake_refusal_releases_both_merges_and_never_restarts() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        // Refuse both a work boundary and the identity boundary after a live
+        // retained edge continuation has already allocated its own heads.
+        for identity in [false, true] {
+            let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+            drop(
+                scan.next_vertex_candidate(&cx, &mut |_| Ok::<_, ()>(()))
+                    .await
+                    .unwrap(),
+            );
+            drop(
+                scan.next_incident_retained_with_endpoints(
+                    &cx,
+                    VId(1),
+                    Some(R),
+                    BufferedEdgeDirection::Outgoing,
+                    None,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .await
+                .unwrap(),
+            );
+            assert!(scan.continuation.is_some());
+            let result = scan
+                .next_vertex_candidate(&cx, &mut |event| {
+                    if matches!(event, BufferedScanEvent::Identity(_)) == identity {
+                        Err("vertex control refusal")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await;
+            assert!(matches!(
+                result,
+                Err(BufferedScanError::Control("vertex control refusal"))
+            ));
+            assert!(scan.is_closed());
+            assert!(scan.continuation.is_none());
+            assert_eq!(pool.used(), baseline);
+            assert!(
+                scan.next_with_endpoints(&cx, None, &mut |_| Err::<(), _>("closed"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                scan.next_vertex_candidate(&cx, &mut |_| Err::<(), _>("closed"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // Heap admission can fail before the first await or observer event.
+        drop(view.reserve_scan_bytes(&cx, pool.limit()));
+        let evicted = pool.used();
+        let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+        let hold = pool.reserve(&cx, pool.limit() - pool.used() - 512).unwrap();
+        let result = scan
+            .next_vertex_candidate(&cx, &mut |_| Err::<(), _>("admission precedes events"))
+            .await;
+        assert!(matches!(
+            result,
+            Err(BufferedScanError::Read(BufferedReadError::Buffer(
+                BufferError::Memory(MemoryError::ResourceExhausted { .. })
+            )))
+        ));
+        assert!(scan.is_closed());
+        assert_eq!(scan.work_used(), 0);
+        drop(scan);
+        drop(hold);
+        assert_eq!(pool.used(), evicted);
         drop(view);
         assert_eq!(pool.used(), 0);
     });

@@ -677,7 +677,7 @@ fn test_native_stage<S: EdgeScanSource, C>(
 // Shared by outer stages and probe-local stages. In particular, NOT EXISTS
 // negates existence of a TRUE witness, not the Boolean value of a nullable
 // property comparison. The canonical three-valued evaluator remains in charge.
-fn accepts<S: EdgeScanSource, C>(
+pub(super) fn accepts<S: EdgeScanSource, C>(
     op: &GlaOperator,
     ids: &[Option<VId>],
     paths: &[Option<GraphPath>],
@@ -768,7 +768,7 @@ fn collect_element_properties<'a, Row: GlaOutput, E: From<crate::GraphIntegerErr
     )
 }
 
-fn project<S: EdgeScanSource, C>(
+pub(super) fn project<S: EdgeScanSource, C>(
     projection: &GlaOperator,
     ids: &[Option<VId>],
     paths: &[Option<GraphPath>],

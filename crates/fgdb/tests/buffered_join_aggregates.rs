@@ -1,19 +1,19 @@
-//! Cold fixed-hop queries and completed relational stages into the existing
-//! external numeric reducer. Literal summaries below come from the fixture's
+//! Cold fixed-hop and bounded-path queries with completed relational stages
+//! into the external reducer. Literal summaries below come from the fixture's
 //! finite relation, not the join cursor or the external stage evaluator.
 
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    BufferLimits, BufferedReadLimits, BufferedReadView, Database, DatabaseKeys, MemVfs, MemoryPool,
-    NativeAggregateSpool, NativeAggregateSpoolError, NativeSpoolError, PreparedBufferedAggregate,
-    PreparedNativeRead, WriteBatch,
+    BufferLimits, BufferedReadLimits, BufferedReadView, Database, DatabaseKeys, EmbeddedReadView,
+    MemVfs, MemoryPool, NativeAggregateSpool, NativeAggregateSpoolError, NativeSpoolError,
+    PreparedBufferedAggregate, PreparedNativeRead, QueryResult, WriteBatch,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlBudgetDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateValue,
-    GraphSymbol, GraphSymbolKind,
+    GqlBudgetDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateTextSlot,
+    GraphAggregateValue, GraphSymbol, GraphSymbolKind,
 };
 use fgdb_strata::tiered::memory::{SpillFile, SpillLimits};
 use fgdb_types::{
@@ -224,6 +224,267 @@ fn collected_ints(values: &[i64]) -> GraphAggregateValue {
             .iter()
             .map(|value| GraphValue::Scalar(CanonicalScalar::Int(*value))),
     )
+}
+
+async fn assert_bounded_summary(
+    commit: &CommitCx,
+    cx: &QueryCx,
+    vfs: &MemVfs,
+    resident: &EmbeddedReadView,
+    text: &str,
+    cut: u64,
+    expected: LogicalRows,
+) {
+    let params = GqlParameters::new();
+    let native = PreparedNativeRead::prepare(text, &params, resolve)
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+    let prepared = native
+        .prepare_buffered_aggregate(&params)
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+    let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+    let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+    let mut cold = view(commit, vfs, &source_pool).await;
+    let baseline = source_pool.used();
+    let (mut source, _) = file(cx, &spill_pool).await;
+    let (mut partition, _) = file(cx, &spill_pool).await;
+    let (mut destination, _) = file(cx, &spill_pool).await;
+    let allowance = policy(expected.len() as u64);
+    let (spool, _) = prepared
+        .spool_in_view(
+            &mut cold,
+            cx,
+            allowance,
+            &mut source,
+            &mut partition,
+            &mut destination,
+            1,
+            512,
+            1,
+            512,
+            1024,
+            16 * 1024,
+            1000,
+            WORK,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+    assert_eq!(spool.snapshot_seq(), CommitSeq(cut), "{text}");
+    assert_eq!(spool.row_count(), expected.len() as u64, "{text}");
+    assert_eq!(spool.row_stats().result_rows, spool.row_count(), "{text}");
+    let actual = contents(&spool, &mut destination, cx).await;
+    assert_eq!(actual, expected, "{text}");
+    let (native_result, native_cut) = native
+        .execute_in_view_with_snapshot(resident, cx, &params, allowance)
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+    let QueryResult::Rows { columns, rows } = native_result else {
+        panic!("an aggregate read must return rows: {text}")
+    };
+    let external_rows: Vec<Vec<_>> = actual
+        .iter()
+        .map(|(keys, values)| {
+            spool
+                .output_slots()
+                .iter()
+                .map(|slot| match slot {
+                    GraphAggregateTextSlot::GroupKey(index) => {
+                        GraphAggregateValue::Value(keys[*index].clone())
+                    }
+                    GraphAggregateTextSlot::Aggregate(index) => values[*index].clone(),
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(native_cut, CommitSeq(cut), "{text}");
+    assert_eq!(spool.columns(), columns, "{text}");
+    assert_eq!(external_rows, rows, "{text}");
+    assert!(cold.buffer_stats().bypasses > 0, "{text}");
+    assert_eq!(source_pool.used(), baseline, "{text}");
+    assert_eq!(spill_pool.used(), 0, "{text}");
+    drop(cold);
+    assert_eq!(source_pool.used(), 0, "{text}");
+}
+
+#[test]
+fn cold_bounded_path_modes_reduce_exact_bags_at_every_retained_cut() {
+    let ((), report) = run_async_under_lab(0xc01d_a006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let writer = Database::open_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let resident = writer.read_session().unwrap();
+        drop(writer);
+
+        // Endpoint multiplicities at cut 1, including one zero-hop row per
+        // vertex, are WALK [1,10,8,6], TRAIL [1,6,7,6], ACYCLIC [1,3,4,5]
+        // and SIMPLE [1,4,4,5]. At cut 2 only vertex 3's value changes; at
+        // cut 3 every row ending at retired vertex 4 disappears. Repeated
+        // loop use distinguishes WALK from TRAIL, while the one closing
+        // self-loop distinguishes SIMPLE from ACYCLIC. Parallel edges keep
+        // distinct occurrences in every mode.
+        for (mode, counts, sums) in [
+            ("WALK", [25, 25, 19], [69, 149, 125]),
+            ("TRAIL", [20, 20, 14], [58, 128, 104]),
+            ("ACYCLIC", [13, 13, 8], [39, 79, 59]),
+            ("SIMPLE", [14, 14, 9], [41, 81, 61]),
+        ] {
+            for (at, (count, sum)) in counts.into_iter().zip(sums).enumerate() {
+                let cut = at as u64 + 1;
+                let text = format!(
+                    "MATCH REPEATABLE ELEMENTS {mode} (a)-[:R*0..3]->(b) \
+                     FOR SYSTEM_TIME AS OF SEQ {cut} \
+                     RETURN COUNT(*) AS paths,COUNT(DISTINCT b) AS endpoints, \
+                     SUM(b.p) AS total,MIN(b.p) AS least,MAX(b.p) AS greatest"
+                );
+                assert_bounded_summary(
+                    &commit,
+                    &cx,
+                    &vfs,
+                    &resident,
+                    &text,
+                    cut,
+                    vec![(
+                        vec![],
+                        vec![
+                            GraphAggregateValue::Count(count),
+                            GraphAggregateValue::Count(if cut == 3 { 3 } else { 4 }),
+                            GraphAggregateValue::Integer(sum),
+                            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1))),
+                            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+                                if cut == 1 { 4 } else { 13 },
+                            ))),
+                        ],
+                    )],
+                )
+                .await;
+            }
+        }
+
+        // Both surviving nontrivial groups exceed the resident capacity of
+        // one; HAVING excludes the root-only endpoint before final ordering.
+        for (mode, groups) in [
+            ("WALK", [(2, 10, 20), (13, 8, 104)]),
+            ("TRAIL", [(13, 7, 91), (2, 6, 12)]),
+            ("ACYCLIC", [(13, 4, 52), (2, 3, 6)]),
+            ("SIMPLE", [(2, 4, 8), (13, 4, 52)]),
+        ] {
+            let text = format!(
+                "MATCH REPEATABLE ELEMENTS {mode} (a)-[:R*0..3]->(b) \
+                 RETURN b.p AS endpoint,COUNT(*) AS paths,SUM(b.p) AS total \
+                 GROUP BY b.p HAVING paths>1 ORDER BY paths DESC,endpoint"
+            );
+            let expected = groups
+                .into_iter()
+                .map(|(endpoint, count, sum)| {
+                    (
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(endpoint))],
+                        vec![
+                            GraphAggregateValue::Count(count),
+                            GraphAggregateValue::Integer(sum),
+                        ],
+                    )
+                })
+                .collect();
+            assert_bounded_summary(&commit, &cx, &vfs, &resident, &text, 3, expected).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_bounded_path_summaries_keep_complete_with_ordering_distinct_and_collections() {
+    let ((), report) = run_async_under_lab(0xc01d_a007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let writer = Database::open_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let resident = writer.read_session().unwrap();
+        drop(writer);
+        let head = "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..3]->(b)";
+        // At the current cut the descending endpoint values are eight 13s,
+        // ten 2s and one 1. Page seven through ten crosses the value boundary;
+        // these clauses therefore cannot be pushed after final reduction.
+        for (text, cut, expected) in [
+            (
+                format!("{head} WITH b.p AS value ORDER BY value DESC SKIP 7 LIMIT 4 RETURN COUNT(*) AS paths,SUM(value) AS total"),
+                3,
+                summary(4, 19),
+            ),
+            (
+                format!("{head} WITH DISTINCT b.p AS value ORDER BY value DESC SKIP 1 LIMIT 2 RETURN COUNT(*) AS paths,SUM(value) AS total"),
+                3,
+                summary(2, 3),
+            ),
+            (
+                format!("{head} WITH b.p AS value ORDER BY value DESC SKIP 7 LIMIT 4 RETURN COLLECT(value) AS items,COLLECT(DISTINCT value) AS support,COUNT(*) AS paths,SUM(value) AS total"),
+                3,
+                vec![(
+                    vec![],
+                    vec![
+                        collected_ints(&[13, 2, 2, 2]),
+                        collected_ints(&[13, 2]),
+                        GraphAggregateValue::Count(4),
+                        GraphAggregateValue::Integer(19),
+                    ],
+                )],
+            ),
+            (
+                // Computed direct collections retain complete-source value
+                // order [1,2,13] before negation, not argument order.
+                format!("{head} RETURN COLLECT(DISTINCT -b.p) AS support"),
+                3,
+                vec![(vec![], vec![collected_ints(&[-1, -2, -13])])],
+            ),
+            (
+                format!("{head} WITH b.p AS value ORDER BY value DESC SKIP 7 LIMIT 4 WITH value%2 AS bucket,value AS amount RETURN bucket,COUNT(*) AS paths,SUM(amount) AS total GROUP BY bucket ORDER BY bucket"),
+                3,
+                vec![
+                    (
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(0))],
+                        vec![GraphAggregateValue::Count(3),GraphAggregateValue::Integer(6)],
+                    ),
+                    (
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(1))],
+                        vec![GraphAggregateValue::Count(1),GraphAggregateValue::Integer(13)],
+                    ),
+                ],
+            ),
+            (
+                "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*2..2]->(b) FOR SYSTEM_TIME AS OF SEQ 1 RETURN COUNT(*) AS paths,SUM(b.p) AS total".to_owned(),
+                1,
+                summary(7, 19),
+            ),
+            (
+                format!("{head} FOR SYSTEM_TIME AS OF SEQ 1 WITH b.p AS value ORDER BY value DESC SKIP 5 LIMIT 3 RETURN COUNT(*) AS paths,SUM(value) AS total"),
+                1,
+                summary(3, 10),
+            ),
+            (
+                format!("{head} WHERE a.p=1 RETURN COUNT(*) AS paths,SUM(b.p) AS total"),
+                3,
+                summary(11, 65),
+            ),
+            (
+                format!("{head} WHERE a.p>100 RETURN COUNT(*) AS paths"),
+                3,
+                vec![(vec![], vec![GraphAggregateValue::Count(0)])],
+            ),
+            (
+                format!("{head} RETURN COUNT(*) AS paths LIMIT 0"),
+                3,
+                vec![],
+            ),
+        ] {
+            assert_bounded_summary(&commit, &cx, &vfs, &resident, &text, cut, expected).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -1331,11 +1592,16 @@ fn late_joined_expression_failures_precede_limit_zero_and_empty_global_count_sur
             assert_eq!(source_pool.used(), 0);
         }
         // A correlated fixed-hop probe is a buffered join input now (3faae262,
-        // 0e7c7e7c; fgdb-4wrnd); a variable-length step and a collection over
-        // the join are still refused at preparation.
+        // 0e7c7e7c; fgdb-4wrnd). Mixed fixed/variable atoms still refuse,
+        // as do unprojected path/join collections without an occurrence-order
+        // proof. LIMIT zero cannot bypass complete preparation.
         for (text, buffered) in [
             (
                 "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN COUNT(*) AS rows LIMIT 0",
+                false,
+            ),
+            (
+                "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..3]->(b) RETURN COLLECT(b.p) AS values LIMIT 0",
                 false,
             ),
             (

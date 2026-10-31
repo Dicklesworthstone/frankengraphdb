@@ -69,7 +69,10 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 after,
             },
             state: None,
-            driver: active.then_some(Driver { root: self }),
+            driver: active.then_some(Driver {
+                root: self,
+                vertices: None,
+            }),
         }
     }
 }

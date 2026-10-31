@@ -5716,8 +5716,14 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
         ("MATCH (n:Person) RETURN n.team AS team,count(*) AS count,sum(n.team*2) AS total GROUP BY n.team ORDER BY total DESC".to_owned(), latest),
         ("MATCH (n:Person) RETURN DISTINCT count(*) AS count GROUP BY n.team ORDER BY sum(n.team) DESC".to_owned(), latest),
         ("MATCH (a)-[r:KNOWS]-(b) RETURN a.team AS team ORDER BY b.team DESC,team".to_owned(), latest),
+        ("MATCH p = WALK (a:Person)-[:KNOWS*0..2]->(b) RETURN a,b,p,length(p) AS hops ORDER BY hops,a,b,p".to_owned(), latest),
+        ("MATCH REPEATABLE ELEMENTS p = WALK (a)-[:KNOWS*0..2]-(b) RETURN p ORDER BY length(p),p".to_owned(), latest),
+        ("MATCH p = TRAIL (a)-[:KNOWS*0..2]-(b) RETURN DISTINCT a,b ORDER BY a,b".to_owned(), latest),
+        ("MATCH p = ACYCLIC (a)-[:KNOWS*0..2]-(b) RETURN count(*) AS paths,count(DISTINCT b) AS endpoints,sum(b.team) AS total".to_owned(), latest),
+        ("MATCH p = SIMPLE (a)-[:KNOWS*0..2]-(b) WITH length(p) AS hops ORDER BY hops DESC SKIP 1 LIMIT 3 RETURN hops,count(*) AS paths GROUP BY hops ORDER BY hops".to_owned(), latest),
         (format!("MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {basis} RETURN n.team AS team ORDER BY team DESC"), basis),
         (format!("MATCH (a)-[r:KNOWS]->(b) FOR SYSTEM_TIME AS OF SEQ {basis} RETURN sum(a.team+b.team) AS total,count(*) AS count"), basis),
+        (format!("MATCH p = WALK (a)-[:KNOWS*0..2]->(b) FOR SYSTEM_TIME AS OF SEQ {basis} RETURN a.team,b.team,p ORDER BY p"), basis),
     ] {
         let expected = db.command("query", &[&text]);
         expected.success();
@@ -5755,6 +5761,7 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
     for text in [
         "MATCH (n) WHERE 10/(n.team-2)>0 RETURN n.team AS value LIMIT 0",
         "MATCH (n) RETURN 10/(sum(n.team)-4) AS value GROUP BY n.team LIMIT 0",
+        "MATCH p = WALK (a)-[:KNOWS*0..2]->(b) WHERE 10/(b.team-2)>0 RETURN p LIMIT 0",
     ] {
         let failed = db.command("query", &["--buffered", "--spill-dir", spill, text]);
         failed.failure(3, "query");
@@ -5766,10 +5773,9 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
         );
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
     }
-    // COLLECT refuses before the missing database is opened. Under --spill-dir
-    // a fixed-hop join is a buffered source and a computed map a native stage
-    // (owner ruling 2026-10-09, fgdb-5ppbz), so both pass preparation and fail
-    // only at the open; without --spill-dir the join still refuses first.
+    // Supported buffered sources and stages pass preparation and fail only at
+    // the missing database open. Unsupported path profiles still refuse before
+    // opening storage, even when the final limit is zero.
     let missing = TestDb::new("buffered-external-unsupported-before-open");
     let join = "MATCH (a)-[r:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.team LIMIT 0";
     for (arguments, code, class) in [
@@ -5780,11 +5786,59 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
                 spill,
                 "MATCH (n) RETURN collect(n.team) LIMIT 0",
             ],
-            3,
-            "query",
+            4,
+            "open",
         ),
         (vec!["--buffered", join], 3, "query"),
         (vec!["--buffered", "--spill-dir", spill, join], 4, "open"),
+        (
+            vec![
+                "--buffered",
+                "--spill-dir",
+                spill,
+                "MATCH p = WALK (a)-[:KNOWS*0..3]->(b) RETURN p LIMIT 0",
+            ],
+            4,
+            "open",
+        ),
+        (
+            vec![
+                "--buffered",
+                "MATCH p = WALK (a)-[:KNOWS*0..3]->(b) RETURN p LIMIT 0",
+            ],
+            3,
+            "query",
+        ),
+        (
+            vec![
+                "--buffered",
+                "--spill-dir",
+                spill,
+                "MATCH p = WALK (a)-[:KNOWS*]->(b) RETURN p LIMIT 0",
+            ],
+            3,
+            "query",
+        ),
+        (
+            vec![
+                "--buffered",
+                "--spill-dir",
+                spill,
+                "MATCH p = ANY SHORTEST (a)-[:KNOWS*0..3]->(b) RETURN p LIMIT 0",
+            ],
+            3,
+            "query",
+        ),
+        (
+            vec![
+                "--buffered",
+                "--spill-dir",
+                spill,
+                "MATCH p = WALK (a)-[:KNOWS*0..3]->(b)-[:KNOWS]->(c) RETURN p LIMIT 0",
+            ],
+            3,
+            "query",
+        ),
         (
             vec![
                 "--buffered",

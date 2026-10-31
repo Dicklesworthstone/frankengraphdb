@@ -16,7 +16,7 @@ pub(super) fn compile(
     query: &PreparedGraphSet,
     depth: usize,
     stages: &mut Vec<SpillSetStage>,
-    admission: &mut ProcedureAdmission,
+    admission: &mut SourceAdmission,
     in_apply_body: bool,
 ) -> Result<Option<SpillSetCrossPlan>, SpillSetBuildError> {
     let Some((left, right, code, projection)) = query.filtered_cross_inputs() else {

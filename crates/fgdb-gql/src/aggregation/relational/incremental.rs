@@ -44,6 +44,26 @@ impl PreparedGraphAggregate {
         }) {
             return None;
         }
+        self.complete_group_relation()
+    }
+
+    /// Preserve the complete canonical graph input for an external numeric
+    /// reducer. This broadens no maintained-circuit source profile: callers
+    /// must independently admit every operator in the returned relation.
+    /// Counts and extrema, like exact sums and averages, do not depend on
+    /// occurrence order. Collections keep their separate order proof.
+    pub(crate) fn complete_group_relation(&self) -> Option<PreparedGraphSetAggregate> {
+        if self.relational_input.is_some() {
+            return None;
+        }
+        if self.aggregates.iter().any(|aggregate| {
+            matches!(
+                aggregate.function,
+                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+            )
+        }) {
+            return self.incremental_collection_relation();
+        }
         let source = self.input.0.as_ref()?;
         let [
             ..,

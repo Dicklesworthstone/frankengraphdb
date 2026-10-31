@@ -3,6 +3,8 @@
 
 #[path = "buffered_relational_join_tests.rs"]
 mod relational_join;
+#[path = "buffered_walk_tests.rs"]
+mod walks;
 
 use super::*;
 use crate::{BufferLimits, BufferedReadLimits, Database, DatabaseKeys, MemVfs, WriteBatch};

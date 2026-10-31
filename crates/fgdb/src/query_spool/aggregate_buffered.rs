@@ -1,6 +1,7 @@
-//! Buffered native input for the existing external numeric reducer. The same
+//! Buffered native input for the existing external aggregate reducer. The same
 //! partition, reduction, HAVING, output DISTINCT and ordering engine consumes
-//! either a resident cursor or an asynchronous cursor with an owned row charge.
+//! an asynchronous cursor with an owned row charge or a completed relation,
+//! including occurrence-preserving bounded paths.
 
 use super::*;
 use crate::BufferedReadView;
@@ -441,7 +442,7 @@ impl PreparedNativeRead {
                     NativeAggregateSpoolError::Prepare(Box::new(QueryError::PipelineText(error)))
                 })?;
                 (
-                    AsyncSpillAggregatePlan::compile_relation(&relation)
+                    AsyncSpillAggregatePlan::compile_relation_with_bounded_walks(&relation)
                         .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
                     template.columns().to_vec(),
                     template.output_slots().to_vec(),
@@ -456,7 +457,7 @@ impl PreparedNativeRead {
                     as_of,
                 } = bind(self, params)?;
                 (
-                    AsyncSpillAggregatePlan::compile(&definition)
+                    AsyncSpillAggregatePlan::compile_with_bounded_walks(&definition)
                         .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
                     columns,
                     slots,

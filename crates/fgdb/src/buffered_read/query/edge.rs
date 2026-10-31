@@ -3,6 +3,7 @@
 //! filtering, direction, capture, projection, ordering and pagination.
 
 mod join;
+mod walk;
 
 use super::{Cancel, Checkpoint};
 use crate::{BufferedReadError, BufferedReadView, MemoryPool};

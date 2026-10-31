@@ -375,6 +375,22 @@ pub struct BufferedVertexScan<'source, V: Vfs> {
     initialized: bool,
     done: bool,
     work: usize,
+    work_limit: usize,
+}
+
+/// The owned half of one vertex merge, temporarily detached from its exact
+/// admitted partition so another cursor can borrow that partition. This state
+/// is never a public resume token: it retains the heap, decoded patch and their
+/// affine charges, and can only be restored at the same root and temporal cut.
+pub(crate) struct BufferedVertexScanState {
+    root: PartitionRootVersion,
+    as_of: CommitSeq,
+    heads: BinaryHeap<Reverse<VertexScanHead>>,
+    head_charge: Option<MemoryCharge>,
+    active: Option<BufferedValue<DecodedVertexPatch>>,
+    initialized: bool,
+    done: bool,
+    work: usize,
 }
 
 /// An owned authenticated source generation. Only cached/active extent handles
@@ -807,6 +823,7 @@ impl<V: Vfs> BufferedPartition<V> {
             .checked_mul(size_of::<Reverse<VertexScanHead>>())
             .ok_or(BufferedReadError::SizeOverflow)?;
         limit("buffered scan heap bytes", allocated, bytes)?;
+        let work_limit = self.limits.max_work;
         Ok(BufferedVertexScan {
             partition: self,
             as_of,
@@ -816,6 +833,46 @@ impl<V: Vfs> BufferedPartition<V> {
             initialized: false,
             done: false,
             work: 0,
+            work_limit,
+        })
+    }
+
+    /// Loan this same partition back to an existing vertex merge. The caller
+    /// owns the cumulative source allowance shared with its other cursors; it
+    /// may advance that allowance, but cannot reset previously charged work.
+    /// A first loan uses the ordinary lazy constructor and its heap admission.
+    pub(crate) fn vertex_scan_from_state(
+        &mut self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+        state: Option<BufferedVertexScanState>,
+        work: usize,
+        work_limit: usize,
+    ) -> Result<BufferedVertexScan<'_, V>, BufferedReadError> {
+        limit("buffered source work", work, work_limit)?;
+        if work_limit > self.limits.max_work {
+            return Err(BufferedReadError::Buffer(BufferError::InvalidLoad));
+        }
+        let Some(state) = state else {
+            let mut scan = self.vertex_scan(cx, as_of)?;
+            scan.work = work;
+            scan.work_limit = work_limit;
+            return Ok(scan);
+        };
+        self.begin(cx, as_of)?;
+        if state.root != self.root_id || state.as_of != as_of || work < state.work {
+            return Err(BufferedReadError::Buffer(BufferError::InvalidLoad));
+        }
+        Ok(BufferedVertexScan {
+            partition: self,
+            as_of,
+            heads: state.heads,
+            head_charge: state.head_charge,
+            active: state.active,
+            initialized: state.initialized,
+            done: state.done,
+            work,
+            work_limit,
         })
     }
 
@@ -1119,6 +1176,21 @@ impl<V: Vfs> BufferedPartition<V> {
 }
 
 impl<V: Vfs> BufferedVertexScan<'_, V> {
+    /// End this partition loan without restarting or copying the merge. The
+    /// detached state owns all allocations and remains fused after exhaustion.
+    pub(crate) fn into_state(self) -> BufferedVertexScanState {
+        BufferedVertexScanState {
+            root: self.partition.root_id,
+            as_of: self.as_of,
+            heads: self.heads,
+            head_charge: self.head_charge,
+            active: self.active,
+            initialized: self.initialized,
+            done: self.done,
+            work: self.work,
+        }
+    }
+
     pub const fn snapshot_seq(&self) -> CommitSeq {
         self.as_of
     }
@@ -1146,7 +1218,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
             .work
             .checked_add(1)
             .ok_or(BufferedReadError::SizeOverflow)?;
-        limit("buffered source work", next, self.partition.limits.max_work)?;
+        limit("buffered source work", next, self.work_limit)?;
         observe(BufferedScanEvent::Work).map_err(BufferedScanError::Control)?;
         self.work = next;
         Ok(())

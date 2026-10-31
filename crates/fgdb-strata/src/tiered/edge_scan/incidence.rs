@@ -3,6 +3,7 @@
 //! The existing EId merge selects history winners and property locators.
 
 use super::*;
+use crate::store::{BufferedScanEvent, BufferedVertexCandidate, BufferedVertexScanState};
 use fgdb_types::VId;
 
 mod stream;
@@ -42,6 +43,7 @@ impl Incidence {
 
 struct Driver<'source, V: Vfs> {
     root: BufferedEdgeScan<'source, V>,
+    vertices: Option<BufferedVertexScanState>,
 }
 
 // At most one retained successor stream. `next` is the EXACT request that may
@@ -88,7 +90,10 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             as_of: self.as_of,
             work: self.work.used,
             continuation: None,
-            driver: Some(Driver { root: self }),
+            driver: Some(Driver {
+                root: self,
+                vertices: None,
+            }),
         }
     }
 }
@@ -118,6 +123,55 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         self.work = self.work_used();
         self.continuation = None;
         self.driver = None;
+    }
+
+    /// The next canonical vertex identity at this source's exact cut, including
+    /// isolates and invisible historical candidates. The ordinary vertex merge
+    /// owns its strict successor position, independently of edge root and
+    /// incident positions. Its heap and bounded active patch are admitted only
+    /// on the first vertex pull, so edge-only joins allocate no vertex state.
+    ///
+    /// Vertex and edge reads share one cumulative source-work allowance and one
+    /// admitted partition. The partition is loaned to the existing vertex
+    /// cursor for this pull; its owned merge state is retained without copying
+    /// records or restarting the patch scan. A new vertex root releases the
+    /// preceding incidence continuation. Vertex exhaustion still permits
+    /// incident reads for the final root. Any error or dropped polled future
+    /// releases all source state and makes every later method inert.
+    pub async fn next_vertex_candidate<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexCandidate>, BufferedScanError<C>> {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        self.continuation = None;
+        let mut scan = driver.root.partition.vertex_scan_from_state(
+            cx,
+            self.as_of,
+            driver.vertices.take(),
+            driver.root.work.used,
+            driver.root.work.limit,
+        )?;
+        let used = &mut self.work;
+        let result = scan
+            .next_candidate_with(cx, &mut |event| {
+                observe(event)?;
+                if event == BufferedScanEvent::Work {
+                    *used = used.saturating_add(1);
+                }
+                Ok(())
+            })
+            .await;
+        self.work = scan.work_used();
+        let state = scan.into_state();
+        driver.root.work.used = self.work;
+        if result.is_ok() {
+            driver.vertices = Some(state);
+            self.driver = Some(driver);
+        }
+        result
     }
 
     pub async fn next_with_endpoints<C: Send>(

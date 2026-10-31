@@ -305,6 +305,7 @@ where
         AsyncSpillSetSourcePlan::Vertex(_)
         | AsyncSpillSetSourcePlan::Edge(_)
         | AsyncSpillSetSourcePlan::Join(_)
+        | AsyncSpillSetSourcePlan::Walk(_)
         | AsyncSpillSetSourcePlan::Procedure(_) => host.leaf(
             plan,
             snapshot,

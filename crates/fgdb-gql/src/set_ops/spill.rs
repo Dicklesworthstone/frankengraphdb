@@ -14,7 +14,9 @@ use crate::algebra::{
     GlaOperator, GraphValue, GraphValueOrder, GraphValueRow, MAX_PATTERN_VERTICES,
     PreparedGraphPattern,
 };
-use crate::edge_stream::{AsyncEdgeJoinPlan, AsyncEdgeScanPlan, EdgeScanBuildError};
+use crate::edge_stream::{
+    AsyncEdgeJoinPlan, AsyncEdgeScanPlan, AsyncGraphWalkPlan, EdgeScanBuildError,
+};
 use crate::scan_stream::{ScanKind, ScanSortTail};
 use crate::spill_aggregate::SpillAggregateDefinition;
 use crate::stream::{AsyncVertexScanPlan, VertexScanBuildError};
@@ -137,6 +139,7 @@ pub enum AsyncSpillSetSourcePlan {
     Vertex(AsyncVertexScanPlan<GraphValueRow>),
     Edge(AsyncEdgeScanPlan),
     Join(AsyncEdgeJoinPlan),
+    Walk(AsyncGraphWalkPlan),
     Binary(SpillSetBinaryPlan),
     Cross(SpillSetCrossPlan),
     RowJoin(SpillSetJoinPlan),
@@ -150,7 +153,7 @@ impl AsyncSpillSetSourcePlan {
         match self {
             Self::Values(_) | Self::Arguments(_) => ScanKind::Values,
             Self::Vertex(_) => ScanKind::Vertex,
-            Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
+            Self::Edge(_) | Self::Join(_) | Self::Walk(_) => ScanKind::Edge,
             Self::Binary(_)
             | Self::Cross(_)
             | Self::RowJoin(_)
@@ -452,14 +455,35 @@ pub struct AsyncSpillSetPlan {
 }
 
 #[derive(Default)]
-struct ProcedureAdmission {
+struct SourceAdmission {
     max_count: usize,
     count: usize,
+    bounded_walks: bool,
 }
 
 impl AsyncSpillSetPlan {
     pub fn compile(query: &PreparedGraphSet) -> Result<Self, SpillSetBuildError> {
-        Self::compile_at(query, 0, &mut ProcedureAdmission::default(), false)
+        Self::compile_at(query, 0, &mut SourceAdmission::default(), false)
+    }
+
+    /// Admit bounded variable-length graph leaves for a host with a vertex
+    /// root and independently positioned incidence reads at the same cut.
+    /// Every route occurrence is retained until the ordinary external tail
+    /// applies canonical ordering, DISTINCT and paging. This does not enable
+    /// shortest selectors, unbounded paths, or unsupported local instructions.
+    /// Ordinary resident and authorized hosts keep their own source profile.
+    pub fn compile_with_bounded_walks(
+        query: &PreparedGraphSet,
+    ) -> Result<Self, SpillSetBuildError> {
+        Self::compile_at(
+            query,
+            0,
+            &mut SourceAdmission {
+                bounded_walks: true,
+                ..SourceAdmission::default()
+            },
+            false,
+        )
     }
 
     /// Admit exactly one procedure source that executes once, outside every
@@ -498,9 +522,10 @@ impl AsyncSpillSetPlan {
         query: &PreparedGraphSet,
         max_count: usize,
     ) -> Result<Self, SpillSetBuildError> {
-        let mut admission = ProcedureAdmission {
+        let mut admission = SourceAdmission {
             max_count,
             count: 0,
+            bounded_walks: false,
         };
         let plan = Self::compile_at(query, 0, &mut admission, false)?;
         if admission.count == 0 {
@@ -512,7 +537,7 @@ impl AsyncSpillSetPlan {
     fn compile_at(
         query: &PreparedGraphSet,
         depth: usize,
-        admission: &mut ProcedureAdmission,
+        admission: &mut SourceAdmission,
         in_apply_body: bool,
     ) -> Result<Self, SpillSetBuildError> {
         let mut stages = Vec::new();
@@ -575,7 +600,21 @@ impl AsyncSpillSetPlan {
             }
             CompiledSource::Pattern(pattern) => pattern,
         };
-        let (source, source_tail) = if matches!(
+        let (source, source_tail) = if admission.bounded_walks
+            && matches!(
+                pattern.plan().operators().first(),
+                Some(GlaOperator::ScanVertices)
+            )
+            && pattern
+                .plan()
+                .operators()
+                .iter()
+                .any(|op| matches!(op, GlaOperator::VarLengthExpand { .. }))
+        {
+            let (plan, tail) = AsyncGraphWalkPlan::compile_sort_input(pattern.plan())
+                .map_err(SpillSetBuildError::Edge)?;
+            (AsyncSpillSetSourcePlan::Walk(plan), tail)
+        } else if matches!(
             pattern.plan().operators().first(),
             Some(GlaOperator::ScanEdges { .. })
         ) {
@@ -710,6 +749,7 @@ impl AsyncSpillSetPlan {
             AsyncSpillSetSourcePlan::Vertex(_)
             | AsyncSpillSetSourcePlan::Edge(_)
             | AsyncSpillSetSourcePlan::Join(_)
+            | AsyncSpillSetSourcePlan::Walk(_)
             | AsyncSpillSetSourcePlan::Procedure(_) => 1,
             AsyncSpillSetSourcePlan::Values(_) | AsyncSpillSetSourcePlan::Arguments(_) => 0,
             AsyncSpillSetSourcePlan::Binary(binary) => {
@@ -1206,7 +1246,7 @@ fn compile_stages<'a>(
     query: &'a PreparedGraphSet,
     depth: usize,
     stages: &mut Vec<SpillSetStage>,
-    admission: &mut ProcedureAdmission,
+    admission: &mut SourceAdmission,
     in_apply_body: bool,
 ) -> Result<CompiledSource<'a>, SpillSetBuildError> {
     if let Some(cross) = selected_cross::compile(query, depth, stages, admission, in_apply_body)? {

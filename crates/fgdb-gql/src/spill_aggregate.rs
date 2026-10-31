@@ -118,6 +118,23 @@ pub enum AsyncSpillAggregatePlan {
 
 impl AsyncSpillAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
+        Self::compile_sources(aggregate, false)
+    }
+
+    /// Compile for the buffered host's additional bounded path source. Walk
+    /// occurrences complete through the ordinary external relation before
+    /// exact reduction; the physical traversal order never becomes COLLECT's
+    /// order. Unsupported walk definitions still refuse before source access.
+    pub fn compile_with_bounded_walks(
+        aggregate: &PreparedGraphAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        Self::compile_sources(aggregate, true)
+    }
+
+    fn compile_sources(
+        aggregate: &PreparedGraphAggregate,
+        bounded_walks: bool,
+    ) -> Result<Self, SpillAggregateBuildError> {
         if aggregate.input_relation().is_none()
             && aggregate.aggregates().iter().any(|spec| {
                 matches!(
@@ -136,13 +153,17 @@ impl AsyncSpillAggregatePlan {
             let relation = aggregate
                 .incremental_collection_relation()
                 .ok_or(SpillAggregateBuildError::Unsupported)?;
-            return Self::compile_relation(&relation);
+            return Self::compile_relation_sources(&relation, bounded_walks);
         }
         if let Some(relation) = aggregate.input_relation() {
             // The complete relation, never just its graph leaf, owns the rows
             // summarized by this definition. Admit both halves before I/O.
-            let input =
-                AsyncSpillSetPlan::compile(relation).map_err(SpillAggregateBuildError::Relation)?;
+            let input = if bounded_walks {
+                AsyncSpillSetPlan::compile_with_bounded_walks(relation)
+            } else {
+                AsyncSpillSetPlan::compile(relation)
+            }
+            .map_err(SpillAggregateBuildError::Relation)?;
             let physical = aggregate
                 .prepare_complete_group_output()
                 .ok_or(SpillAggregateBuildError::Unsupported)?;
@@ -151,6 +172,23 @@ impl AsyncSpillAggregatePlan {
                 input: Box::new(input),
                 definition,
             });
+        }
+        if bounded_walks
+            && matches!(
+                aggregate.input_pattern().plan().operators().first(),
+                Some(GlaOperator::ScanVertices)
+            )
+            && aggregate
+                .input_pattern()
+                .plan()
+                .operators()
+                .iter()
+                .any(|operator| matches!(operator, GlaOperator::VarLengthExpand { .. }))
+        {
+            let relation = aggregate
+                .complete_group_relation()
+                .ok_or(SpillAggregateBuildError::Unsupported)?;
+            return Self::compile_relation_sources(&relation, true);
         }
         let definition = SpillAggregateDefinition::compile(aggregate)?;
         if matches!(
@@ -198,8 +236,27 @@ impl AsyncSpillAggregatePlan {
     pub fn compile_relation(
         aggregate: &PreparedGraphSetAggregate,
     ) -> Result<Self, SpillAggregateBuildError> {
-        let input = AsyncSpillSetPlan::compile(aggregate.input())
-            .map_err(SpillAggregateBuildError::Relation)?;
+        Self::compile_relation_sources(aggregate, false)
+    }
+
+    /// Source-aware counterpart of `compile_with_bounded_walks`; every child
+    /// barrier and collection occurrence law remains owned by the relation.
+    pub fn compile_relation_with_bounded_walks(
+        aggregate: &PreparedGraphSetAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        Self::compile_relation_sources(aggregate, true)
+    }
+
+    fn compile_relation_sources(
+        aggregate: &PreparedGraphSetAggregate,
+        bounded_walks: bool,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let input = if bounded_walks {
+            AsyncSpillSetPlan::compile_with_bounded_walks(aggregate.input())
+        } else {
+            AsyncSpillSetPlan::compile(aggregate.input())
+        }
+        .map_err(SpillAggregateBuildError::Relation)?;
         let definition = SpillAggregateDefinition::from_relation(aggregate)?;
         Ok(Self::Relation {
             input: Box::new(input),

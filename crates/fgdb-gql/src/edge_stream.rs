@@ -21,6 +21,10 @@ pub use join::{
 };
 mod record;
 pub use record::EdgeScanRecord;
+mod walk;
+pub use walk::{
+    AsyncGraphWalkCursor, AsyncGraphWalkOutput, AsyncGraphWalkPlan, AsyncGraphWalkSource,
+};
 
 use crate::algebra::{
     GlaDirection, GlaOperator, GlaOutput, GlaPlan, GraphPath, GraphPathFunction, GraphValueRow,
