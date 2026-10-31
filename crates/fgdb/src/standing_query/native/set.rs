@@ -4,8 +4,11 @@
 //! Rebuild prepares a complete replacement suffix before swapping any old node.
 
 use super::*;
-use fgdb_delta_types::zset::set::SetOperation;
+use fgdb_delta_types::{LabelId, zset::set::SetOperation};
 use fgdb_gql::PreparedGraphSetAggregate;
+use fgdb_gql::algebra::{
+    EdgeRelation, GlaDirection, GraphColumn, GraphPatternBuilder, VertexPredicate,
+};
 use fgdb_gql::row_aggregate::definition::GroupDefinition;
 use fgdb_gql::row_join::RowJoinKind;
 use fgdb_gql::row_projection::RowProjectionSpec;
@@ -20,8 +23,75 @@ use fgdb_prism::{
 
 pub(super) enum AnalyticSource {
     Components(components::ComponentRelation),
+    SelectedComponents {
+        input: Box<PreparedGraphSet>,
+        strong: bool,
+    },
     CoreNumbers(Option<RelationId>),
     TriangleCounts(Option<RelationId>, triangle_counts::Output),
+}
+
+fn component_source(
+    relation: Option<RelationId>,
+    label: Option<LabelId>,
+    strong: bool,
+) -> Result<AnalyticSource, StandingQueryError> {
+    let Some(label) = label else {
+        return Ok(AnalyticSource::Components(match (strong, relation) {
+            (false, Some(relation)) => components::ComponentRelation::Weak(relation),
+            (true, Some(relation)) => components::ComponentRelation::Strong(relation),
+            (false, None) => components::ComponentRelation::WeakAll,
+            (true, None) => components::ComponentRelation::StrongAll,
+        }));
+    };
+    // Compile the induced topology through ordinary maintained GLA sources.
+    // A selected vertex contributes a self-pair even when it has no edge;
+    // this supplies its lifetime without changing weak or strong membership.
+    // Edge rows retain counted parallel support and require BOTH labels.
+    let mut pattern = GraphPatternBuilder::new();
+    pattern
+        .vertex("a")
+        .and_then(|pattern| pattern.filter("a", VertexPredicate::HasLabel(label)))
+        .map_err(|_| StandingQueryError::Unsupported)?;
+    let vertices = pattern
+        .prepare_values(
+            &[GraphColumn::vertex("a", "a"), GraphColumn::vertex("b", "a")],
+            0,
+            None,
+        )
+        .map_err(|_| StandingQueryError::Unsupported)?
+        .with_duplicates();
+    pattern
+        .vertex("b")
+        .and_then(|pattern| pattern.filter("b", VertexPredicate::HasLabel(label)))
+        .and_then(|pattern| {
+            pattern.edge(
+                "a",
+                relation.map_or(EdgeRelation::Any, EdgeRelation::One),
+                GlaDirection::Forward,
+                "b",
+            )
+        })
+        .map_err(|_| StandingQueryError::Unsupported)?;
+    let edges = pattern
+        .prepare_values(
+            &[GraphColumn::vertex("a", "a"), GraphColumn::vertex("b", "b")],
+            0,
+            None,
+        )
+        .map_err(|_| StandingQueryError::Unsupported)?
+        .with_duplicates();
+    let input = PreparedGraphSet::from(vertices)
+        .combine(
+            GraphSetOperation::Union,
+            GraphSetQuantifier::All,
+            PreparedGraphSet::from(edges),
+        )
+        .map_err(StandingQueryError::SetSchema)?;
+    Ok(AnalyticSource::SelectedComponents {
+        input: Box::new(input),
+        strong,
+    })
 }
 
 /// The compiler and subscription footprint share one source-free admission.
@@ -42,10 +112,19 @@ pub(super) fn analytic_procedure(
     // at this placeholder cut. The analytic owner admits the live snapshot.
     let options = bound.options_at(CommitSeq(0));
     let relation = options.selection.relation;
-    if options.selection.vertex_label.is_some()
-        || options.selection.weight != FnxWeightSpec::Unit
+    if options.selection.weight != FnxWeightSpec::Unit
         || options.projection.parallel_edges != ParallelEdgePolicy::CollapseUnit
         || options.projection.self_loops == SelfLoopPolicy::Reject
+    {
+        return Err(StandingQueryError::Unsupported);
+    }
+    if options.selection.vertex_label.is_some()
+        && !matches!(
+            bound.algorithm(),
+            FnxAlgorithm::ConnectedComponents
+                | FnxAlgorithm::WeaklyConnectedComponents
+                | FnxAlgorithm::StronglyConnectedComponents
+        )
     {
         return Err(StandingQueryError::Unsupported);
     }
@@ -54,18 +133,12 @@ pub(super) fn analytic_procedure(
     // neither changes reachability between distinct vertices.
     let (source, value_type, value_field) = match bound.algorithm() {
         FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => (
-            AnalyticSource::Components(match relation {
-                Some(relation) => components::ComponentRelation::Weak(relation),
-                None => components::ComponentRelation::WeakAll,
-            }),
+            component_source(relation, options.selection.vertex_label, false)?,
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
         FnxAlgorithm::StronglyConnectedComponents => (
-            AnalyticSource::Components(match relation {
-                Some(relation) => components::ComponentRelation::Strong(relation),
-                None => components::ComponentRelation::StrongAll,
-            }),
+            component_source(relation, options.selection.vertex_label, true)?,
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
@@ -261,6 +334,22 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                     self.database
                         .prepare_standing_components(cx, relation, policy)?,
                 )),
+                AnalyticSource::SelectedComponents { input, strong } => {
+                    // Selected topology is private input, not delivered rows.
+                    // A dense component may contain far more edges than the
+                    // final vertex membership allowance permits as results.
+                    let input = self.compile_group_input(
+                        cx,
+                        &input,
+                        group::input_policy(policy),
+                        checkpoint,
+                    )?;
+                    StandingQuery::Components(Box::new(self.database.prepare_standing_components(
+                        cx,
+                        components::ComponentRelation::selected_rows(input, strong),
+                        policy,
+                    )?))
+                }
                 AnalyticSource::CoreNumbers(relation) => StandingQuery::CoreNumbers(Box::new(
                     self.database
                         .prepare_standing_core_numbers(cx, relation, policy, true)?,
@@ -628,14 +717,11 @@ fn rebuild_checked<V: Vfs + Clone>(
             StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {}
             StandingQuery::CoreNumbers(query) if query.has_value_rows() => {}
             StandingQuery::TriangleCounts(_) => {}
-            StandingQuery::Components(query)
-                if matches!(
-                    query.relation,
-                    components::ComponentRelation::Weak(_)
-                        | components::ComponentRelation::Strong(_)
-                        | components::ComponentRelation::WeakAll
-                        | components::ComponentRelation::StrongAll
-                ) => {}
+            StandingQuery::Components(query) => {
+                if let Some(input) = query.relation.selected_input() {
+                    mark(input, true)?;
+                }
+            }
             _ => return Err(StandingQueryError::Unsupported),
         }
     }
@@ -654,20 +740,23 @@ fn rebuild_checked<V: Vfs + Clone>(
                     .database
                     .prepare_standing_constant(cx, query.definition.clone(), policy)?,
             )),
-            StandingQuery::Components(query)
-                if matches!(
-                    query.relation,
-                    components::ComponentRelation::Weak(_)
-                        | components::ComponentRelation::Strong(_)
-                        | components::ComponentRelation::WeakAll
-                        | components::ComponentRelation::StrongAll
-                ) =>
-            {
-                StandingQuery::Components(Box::new(staged.database.prepare_standing_components(
-                    cx,
-                    query.relation,
-                    policy,
-                )?))
+            StandingQuery::Components(query) => {
+                let mut relation = query.relation;
+                if let Some(input) = relation.selected_input() {
+                    if input < first || input >= old {
+                        return Err(StandingQueryError::Unsupported);
+                    }
+                    let replacement = staged
+                        .first
+                        .checked_add(input - first)
+                        .ok_or(StandingQueryError::Unsupported)?;
+                    relation = relation.with_selected_input(replacement);
+                }
+                StandingQuery::Components(Box::new(
+                    staged
+                        .database
+                        .prepare_standing_components(cx, relation, policy)?,
+                ))
             }
             StandingQuery::CoreNumbers(query) if query.has_value_rows() => {
                 StandingQuery::CoreNumbers(Box::new(
@@ -803,7 +892,15 @@ fn rebuild_checked<V: Vfs + Clone>(
     // The original circuit is never altered on arithmetic/admission refusal.
     for query in &mut staged.database.standing_queries[staged.first..] {
         checkpoint()?;
-        if let StandingQuery::Set(query) = query {
+        if let StandingQuery::Components(query) = query {
+            if let Some(input) = query.relation.selected_input() {
+                let input = input
+                    .checked_sub(staged.first)
+                    .and_then(|offset| first.checked_add(offset))
+                    .ok_or(StandingQueryError::Unsupported)?;
+                query.relation = query.relation.with_selected_input(input);
+            }
+        } else if let StandingQuery::Set(query) = query {
             for input in &mut query.inputs {
                 *input = input
                     .checked_sub(staged.first)

@@ -91,7 +91,12 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             source_width: pattern_width(pattern),
         });
     }
-    if set::analytic_procedure(query)?.is_some() {
+    if let Some((source, _)) = set::analytic_procedure(query)? {
+        if let set::AnalyticSource::SelectedComponents { input, .. } = source {
+            // The induced graph owns both labelled source leaves and their
+            // union, then the shared component engine and YIELD projection.
+            return circuit(cx, &input)?.append(2);
+        }
         // One topology/analytics owner plus its exact YIELD projection.
         // The source binding has the two endpoint identity columns; outer
         // projection, grouping and rank owners are counted by their branches.

@@ -83,7 +83,21 @@ fn oracle(
     strong: bool,
     relation: Option<RelationId>,
 ) -> ZSet<Vec<QueryValue>> {
-    let vertices: BTreeSet<_> = db.vertices().unwrap().iter().map(|row| row.vid).collect();
+    selected_oracle(db, strong, relation, None)
+}
+fn selected_oracle(
+    db: &Database<MemVfs>,
+    strong: bool,
+    relation: Option<RelationId>,
+    label: Option<LabelId>,
+) -> ZSet<Vec<QueryValue>> {
+    let vertices: BTreeSet<_> = db
+        .vertices()
+        .unwrap()
+        .iter()
+        .filter(|row| label.is_none_or(|label| row.labels.contains(&label)))
+        .map(|row| row.vid)
+        .collect();
     let edges = db.edges().unwrap();
     let mut closure = BTreeMap::new();
     for &vertex in &vertices {
@@ -317,6 +331,332 @@ fn all_component_calls_and_downstream_operators_match_fresh_queries_after_mutati
                 }
             }
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn labelled_call(name: &str, selection: &str, extra: &str) -> String {
+    format!(
+        "CALL fnx.{name}({{labels:['L'],{selection}parallel:'collapse',{extra}}}) \
+         YIELD component AS group_id,vertex AS node RETURN group_id,node"
+    )
+}
+
+#[test]
+fn labelled_components_maintain_induced_edges_isolates_and_complete_pipelines() {
+    let ((), report) = run_async_under_lab(0x6e63_6106, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut labels = WriteBatch::new(R);
+        for vertex in [0, 2, 3, u128::MAX] {
+            labels.set_vertex_label(VId(vertex), LabelId(1), true);
+        }
+        db.write(&commit, labels).await.unwrap();
+        let mut other = WriteBatch::new(S);
+        other.add_edge(EId(30), VId(3), VId(u128::MAX), vec![]);
+        db.write(&commit, other).await.unwrap();
+        let params = GqlParameters::new();
+        let mut cases = Vec::new();
+        for (name, strong) in [
+            ("connected_components", false),
+            ("weakly_connected_components", false),
+            ("strongly_connected_components", true),
+        ] {
+            for (selection, relation, loops) in [
+                ("relations:['R'],", Some(R), "self_loops:'drop'"),
+                ("relations:['R'],", Some(R), "self_loops:'keep'"),
+                ("", None, "self_loops:'drop'"),
+            ] {
+                cases.push((
+                    labelled_call(name, selection, loops),
+                    Some(strong),
+                    relation,
+                ));
+            }
+        }
+        cases.push((
+            labelled_call(
+                "strongly_connected_components",
+                "relations:['R'],",
+                "self_loops:'keep',direction:'reversed'",
+            ),
+            Some(true),
+            Some(R),
+        ));
+        let input = "{labels:['L'],relations:['R'],parallel:'collapse',self_loops:'drop'}";
+        cases.extend([
+            (
+                format!(
+                    "CALL fnx.connected_components({input}) YIELD component AS group_id \
+                     RETURN group_id,COUNT(*) AS members GROUP BY group_id \
+                     ORDER BY group_id LIMIT 8"
+                ),
+                None,
+                Some(R),
+            ),
+            (
+                format!(
+                    "CALL fnx.connected_components({input}) YIELD vertex AS node,component AS group_id \
+                     WHERE node <> group_id RETURN group_id,node ORDER BY node DESC LIMIT 3"
+                ),
+                None,
+                Some(R),
+            ),
+            (
+                format!(
+                    "CALL fnx.connected_components({input}) YIELD vertex AS node,component AS group_id \
+                     CALL fnx.strongly_connected_components({input}) YIELD vertex AS member,component AS strong_id \
+                     WITH node,group_id,member,strong_id WHERE node=member \
+                     RETURN node,group_id,strong_id ORDER BY node LIMIT 8"
+                ),
+                None,
+                Some(R),
+            ),
+        ]);
+        let mut handles = Vec::new();
+        for (text, _, _) in &cases {
+            let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+            let (bound, width) = prepared.subscription_footprint(&cx, &params).unwrap();
+            assert_eq!(width, 2);
+            let before = db.standing_queries.len();
+            handles.push(
+                prepared
+                    .register_standing(&mut db, &cx, &params, policy())
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}")),
+            );
+            let nodes = u64::try_from(db.standing_queries.len() - before).unwrap();
+            assert!(nodes >= 5 && nodes <= bound, "{text}: {nodes} > {bound}");
+        }
+        // Four selected vertices but seven private topology occurrences.
+        // Neither those occurrences nor a grouped CALL's memberships spend
+        // the final result allowance. Rebuild preserves the same distinction.
+        for (text, rows) in [
+            (cases[0].0.clone(), 4),
+            (
+                format!("CALL fnx.connected_components({input}) YIELD vertex RETURN COUNT(*) AS n"),
+                1,
+            ),
+        ] {
+            let allowance = GqlQueryPolicy::new(100_000, rows, 10_000_000, 10_000_000);
+            let handle = db
+                .register_standing_native(&cx, &text, &params, symbols, allowance)
+                .unwrap();
+            assert_eq!(
+                db.standing_native_bag(&cx, &handle, policy()).unwrap().1,
+                eager(&db, &cx, &text)
+            );
+            db.rebuild_standing_query(&cx, &handle, allowance).unwrap();
+            assert_eq!(
+                db.standing_native_bag(&cx, &handle, policy()).unwrap().1,
+                eager(&db, &cx, &text)
+            );
+        }
+        for tick in 0..=15 {
+            for ((text, strong, relation), handle) in cases.iter().zip(&handles) {
+                let (frontier, actual) = db.standing_native_bag(&cx, handle, policy()).unwrap();
+                assert_eq!(frontier, db.frontier().unwrap());
+                assert_eq!(actual, eager(&db, &cx, text), "tick {tick}: {text}");
+                if let Some(strong) = strong {
+                    assert_eq!(
+                        actual,
+                        selected_oracle(&db, *strong, *relation, Some(LabelId(1))),
+                        "independent induced reachability, tick {tick}: {text}"
+                    );
+                } else {
+                    assert_eq!(
+                        db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                        db.query(&cx, text, &params, symbols, policy()).unwrap(),
+                        "selected output sequence, tick {tick}: {text}"
+                    );
+                }
+            }
+            if tick == 15 {
+                break;
+            }
+            let mut change = WriteBatch::new(R);
+            match tick {
+                0 => {
+                    change.set_vertex_label(VId(1), LabelId(1), true);
+                }
+                1 => {
+                    change.delete_edge(EId(10));
+                }
+                2 => {
+                    change.delete_edge(EId(11));
+                }
+                3 => {
+                    change.set_vertex_label(VId(2), LabelId(1), false);
+                }
+                4 => {
+                    change.set_vertex_label(VId(2), LabelId(1), true);
+                }
+                5 => {
+                    change.set_vertex_label(VId(0), LabelId(1), false);
+                }
+                6 => {
+                    change.set_vertex_label(VId(0), LabelId(1), true);
+                }
+                7 => {
+                    change.create_vertex(VId(9), vec![LabelId(1)], vec![]);
+                }
+                8 => {
+                    change.add_edge(EId(16), VId(0), VId(1), vec![]);
+                }
+                9 => {
+                    change.set_vertex_property(
+                        VId(0),
+                        PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(99)),
+                    );
+                }
+                10 => {
+                    change.add_edge(EId(17), VId(9), VId(9), vec![]);
+                }
+                11 => {
+                    change.delete_vertex(VId(9));
+                }
+                12 => {
+                    change.delete_vertex(VId(1));
+                }
+                13 => {
+                    for vertex in [0, 2, 3, u128::MAX] {
+                        change.set_vertex_label(VId(vertex), LabelId(1), false);
+                    }
+                }
+                _ => {
+                    change.create_vertex(VId(8), vec![LabelId(1)], vec![]);
+                    change.set_vertex_label(VId(2), LabelId(1), true);
+                    change.add_edge(EId(18), VId(8), VId(2), vec![]);
+                }
+            }
+            db.write(&commit, change).await.unwrap();
+            if matches!(tick, 4 | 13) {
+                for handle in &handles {
+                    db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn labelled_component_subscriptions_replay_label_transitions_and_rebuild() {
+    let ((), report) = run_async_under_lab(0x6e63_6107, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut labels = WriteBatch::new(R);
+        for vertex in [0, 1, 2, 3, u128::MAX] {
+            labels.set_vertex_label(VId(vertex), LabelId(1), true);
+        }
+        let start = db.write(&commit, labels).await.unwrap();
+        let text = labelled_call(
+            "strongly_connected_components",
+            "relations:['R'],",
+            "self_loops:'keep'",
+        );
+        let params = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare_subscription(
+            &cx,
+            &format!("SUBSCRIBE TO {text}"),
+            &params,
+            symbols,
+        )
+        .unwrap();
+        let (bound, width) = prepared.subscription_footprint(&cx, &params).unwrap();
+        assert_eq!(width, 2);
+        let before = db.standing_queries.len();
+        let setup = NativeSubscriptionSetup {
+            maintenance: policy(),
+            delivery: policy(),
+            retention: [16, 1000, 100_000],
+        };
+        let refused: Result<(NativeSubscription, ()), SubscriptionError> = prepared
+            .subscribe_replaying(&mut db, &cx, &params, setup, |_, _| {
+                Err(SubscriptionError::from(StandingQueryError::Delivery(
+                    StandingQueryFailure::ResultBudget,
+                )))
+            });
+        assert!(refused.is_err());
+        assert_eq!(db.standing_queries.len(), before);
+        let (mut subscriber, baseline) = prepared
+            .subscribe_replaying(&mut db, &cx, &params, setup, |_, batch| {
+                Ok::<_, SubscriptionError>(Arc::clone(batch))
+            })
+            .unwrap();
+        assert!(u64::try_from(db.standing_queries.len() - before).unwrap() <= bound + 1);
+        assert_eq!(baseline.frontier(), start);
+        let mut delivered = copied(baseline.rows());
+        assert_eq!(
+            delivered,
+            selected_oracle(&db, true, Some(R), Some(LabelId(1)))
+        );
+        subscriber.acknowledge(baseline.receipt()).unwrap();
+        let mut expected = Vec::new();
+        for tick in 0..5 {
+            let mut change = WriteBatch::new(R);
+            match tick {
+                0 => change.set_vertex_label(VId(1), LabelId(1), false),
+                1 => change.set_vertex_label(VId(1), LabelId(1), true),
+                2 => change.delete_edge(EId(10)),
+                3 => change.set_vertex_property(
+                    VId(0),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(9)),
+                ),
+                _ => change.delete_vertex(VId(u128::MAX)),
+            };
+            let at = db.write(&commit, change).await.unwrap();
+            let answer = eager(&db, &cx, &text);
+            assert_eq!(
+                answer,
+                selected_oracle(&db, true, Some(R), Some(LabelId(1)))
+            );
+            expected.push((at, answer));
+        }
+        let mut after = start;
+        for (tick, (at, answer)) in expected.iter().enumerate() {
+            let frame = subscriber.poll(&db, &cx, policy()).unwrap().unwrap();
+            assert_eq!((frame.from(), frame.frontier()), (Some(after), *at));
+            assert!(Arc::ptr_eq(
+                &frame,
+                &subscriber.poll(&db, &cx, policy()).unwrap().unwrap(),
+            ));
+            if matches!(tick, 2 | 3) {
+                assert!(frame.rows().is_empty());
+            } else {
+                assert!(!frame.rows().is_empty());
+            }
+            if tick == 0 {
+                assert!(
+                    frame
+                        .rows()
+                        .iter()
+                        .any(|(_, weight)| weight < &ZWeight::ZERO)
+                );
+            }
+            delivered
+                .integrate(frame.rows(), LIMBS, &mut |_| Ok::<_, ()>(()))
+                .unwrap();
+            assert_eq!(&delivered, answer);
+            subscriber.acknowledge(frame.receipt()).unwrap();
+            after = *at;
+        }
+        assert!(subscriber.poll(&db, &cx, policy()).unwrap().is_none());
+        db.rebuild_standing_query(&cx, subscriber.handle(), policy())
+            .unwrap();
+        subscriber.restart_from_current().unwrap();
+        let fresh = subscriber.poll(&db, &cx, policy()).unwrap().unwrap();
+        assert!(fresh.is_snapshot());
+        assert_eq!(fresh.frontier(), after);
+        assert_eq!(fresh.rows(), &eager(&db, &cx, &text));
+        subscriber.acknowledge(fresh.receipt()).unwrap();
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -592,7 +932,9 @@ fn unsupported_component_contracts_and_unbounded_pages_refuse_before_publication
             "CALL fnx.connected_components()".to_string(),
             "CALL fnx.connected_components({relations:['R'],self_loops:'drop'})".into(),
             "CALL fnx.connected_components({relations:['R'],parallel:'collapse',self_loops:'reject'})".into(),
-            "CALL fnx.connected_components({relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'})".into(),
+            "CALL fnx.core_number({relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'})".into(),
+            "CALL fnx.triangles({relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'})".into(),
+            "CALL fnx.clustering_coefficient({relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.connected_components({relations:['R'],weight:'p',parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.connected_components({relations:['R'],direction:'directed',parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.strongly_connected_components({relations:['R'],direction:'undirected',parallel:'collapse',self_loops:'drop'})".into(),
@@ -674,7 +1016,9 @@ fn addresses(db: &Database<MemVfs>, first: usize, root: usize) -> Vec<usize> {
         .map(|query| match query {
             StandingQuery::Components(query) => query.as_ref() as *const _ as usize,
             StandingQuery::Projection(query) => query.as_ref() as *const _ as usize,
-            _ => panic!("component source and ordinary projections only"),
+            StandingQuery::Rows { output, .. } => output.as_ref() as *const _ as usize,
+            StandingQuery::Set(query) => query.as_ref() as *const _ as usize,
+            _ => panic!("component source, induced topology and ordinary projections only"),
         })
         .collect()
 }
@@ -687,85 +1031,99 @@ fn every_component_registration_and_rebuild_stage_rolls_back_its_private_suffix(
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, seed()).await.unwrap();
-        let query = PreparedGraphSetText::prepare(&call("strongly_connected_components"), symbols)
-            .unwrap()
-            .bind_parameters(&GqlParameters::new())
-            .unwrap();
-        let handle = register(&mut db, &cx, &query, policy()).unwrap();
-        let Layout::Circuit { first, .. } = handle.native.as_deref().unwrap() else {
-            panic!("native component circuit");
-        };
-        let (first, root) = (*first, handle.index);
-        let before = db.standing_queries.len();
-        let answer = db.standing_native_bag(&cx, &handle, policy()).unwrap();
-        let mut calls = 0;
-        {
-            let mut staged = Staging::new(&mut db);
-            staged
-                .compile_root(&cx, &query, policy(), &mut || {
-                    calls += 1;
-                    Ok(())
-                })
-                .unwrap();
+        let mut labels = WriteBatch::new(R);
+        for vertex in [0, 1, 2, u128::MAX] {
+            labels.set_vertex_label(VId(vertex), LabelId(1), true);
         }
-        assert!(calls > 0);
-        assert_eq!(db.standing_queries.len(), before);
-        for stop in 1..=calls {
-            let mut seen = 0;
+        db.write(&commit, labels).await.unwrap();
+        for text in [
+            call("strongly_connected_components"),
+            labelled_call(
+                "strongly_connected_components",
+                "relations:['R'],",
+                "self_loops:'drop'",
+            ),
+        ] {
+            let query = PreparedGraphSetText::prepare(&text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let handle = register(&mut db, &cx, &query, policy()).unwrap();
+            let Layout::Circuit { first, .. } = handle.native.as_deref().unwrap() else {
+                panic!("native component circuit");
+            };
+            let (first, root) = (*first, handle.index);
+            let before = db.standing_queries.len();
+            let answer = db.standing_native_bag(&cx, &handle, policy()).unwrap();
+            let mut calls = 0;
             {
                 let mut staged = Staging::new(&mut db);
-                assert!(
-                    staged
-                        .compile_root(&cx, &query, policy(), &mut || {
-                            seen += 1;
-                            if seen == stop {
-                                Err(StandingQueryError::Maintenance(
-                                    StandingQueryFailure::Interrupted,
-                                ))
-                            } else {
-                                Ok(())
-                            }
-                        })
-                        .is_err()
+                staged
+                    .compile_root(&cx, &query, policy(), &mut || {
+                        calls += 1;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            assert!(calls > 0);
+            assert_eq!(db.standing_queries.len(), before);
+            for stop in 1..=calls {
+                let mut seen = 0;
+                {
+                    let mut staged = Staging::new(&mut db);
+                    assert!(
+                        staged
+                            .compile_root(&cx, &query, policy(), &mut || {
+                                seen += 1;
+                                if seen == stop {
+                                    Err(StandingQueryError::Maintenance(
+                                        StandingQueryFailure::Interrupted,
+                                    ))
+                                } else {
+                                    Ok(())
+                                }
+                            })
+                            .is_err()
+                    );
+                }
+                assert_eq!(seen, stop);
+                assert_eq!(db.standing_queries.len(), before);
+                assert_eq!(
+                    db.standing_native_bag(&cx, &handle, policy()).unwrap(),
+                    answer
                 );
             }
-            assert_eq!(seen, stop);
-            assert_eq!(db.standing_queries.len(), before);
-            assert_eq!(
-                db.standing_native_bag(&cx, &handle, policy()).unwrap(),
-                answer
-            );
-        }
 
-        let mut calls = 0;
-        rebuild_checked(&mut db, &cx, first, root, policy(), &mut || {
-            calls += 1;
-            Ok(())
-        })
-        .unwrap();
-        for stop in 1..=calls {
-            let identity = addresses(&db, first, root);
-            let mut seen = 0;
-            assert!(
-                rebuild_checked(&mut db, &cx, first, root, policy(), &mut || {
-                    seen += 1;
-                    if seen == stop {
-                        Err(StandingQueryError::Maintenance(
-                            StandingQueryFailure::Interrupted,
-                        ))
-                    } else {
-                        Ok(())
-                    }
-                })
-                .is_err()
-            );
-            assert_eq!(seen, stop);
-            assert_eq!(addresses(&db, first, root), identity);
-            assert_eq!(db.standing_queries.len(), before);
-            assert_eq!(
-                db.standing_native_bag(&cx, &handle, policy()).unwrap(),
-                answer
-            );
+            let mut calls = 0;
+            rebuild_checked(&mut db, &cx, first, root, policy(), &mut || {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
+            for stop in 1..=calls {
+                let identity = addresses(&db, first, root);
+                let mut seen = 0;
+                assert!(
+                    rebuild_checked(&mut db, &cx, first, root, policy(), &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(StandingQueryError::Maintenance(
+                                StandingQueryFailure::Interrupted,
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .is_err()
+                );
+                assert_eq!(seen, stop);
+                assert_eq!(addresses(&db, first, root), identity);
+                assert_eq!(db.standing_queries.len(), before);
+                assert_eq!(
+                    db.standing_native_bag(&cx, &handle, policy()).unwrap(),
+                    answer
+                );
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

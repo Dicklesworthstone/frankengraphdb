@@ -21,6 +21,43 @@ pub(in crate::standing_query) struct Definition {
     width: usize,
 }
 
+impl ComponentRelation {
+    /// The native induced-topology compiler emits exactly two Vertex columns.
+    /// Ordinary selected-source admission still validates the actual parent.
+    pub(in crate::standing_query) fn selected_rows(input: usize, strong: bool) -> Self {
+        let definition = Definition {
+            input,
+            endpoints: [0, 1],
+            width: 2,
+        };
+        if strong {
+            Self::StrongRows(definition)
+        } else {
+            Self::WeakRows(definition)
+        }
+    }
+
+    pub(in crate::standing_query) fn selected_input(self) -> Option<usize> {
+        self.selected().map(|definition| definition.input)
+    }
+
+    /// Rebuilding a private native circuit preserves its exact parent schema
+    /// and connectivity mode while moving only the dependency registry slot.
+    pub(in crate::standing_query) fn with_selected_input(self, input: usize) -> Self {
+        match self {
+            Self::WeakRows(mut definition) => {
+                definition.input = input;
+                Self::WeakRows(definition)
+            }
+            Self::StrongRows(mut definition) => {
+                definition.input = input;
+                Self::StrongRows(definition)
+            }
+            other => other,
+        }
+    }
+}
+
 impl Definition {
     fn matches_schema(self, source: &StandingQuery) -> bool {
         sets::columns(source).is_some_and(|names| names.len() == self.width)
