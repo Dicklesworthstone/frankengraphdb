@@ -149,6 +149,80 @@ fn oracle(input: &ZSet<GraphValueRow>) -> Observed {
 }
 
 #[test]
+fn counts_and_sums_leave_distinct_and_typed_extrema_with_their_requested_owners() {
+    for copies in [1_i128, 1_000] {
+        let definition = PreparedGraphSetAggregate::prepare(
+            dynamic(),
+            &[0],
+            &[
+                GraphAggregate::count_rows("rows"),
+                GraphAggregate::sum_int("sum", 1),
+                GraphAggregate::count_distinct("distinct", 1),
+                GraphAggregate::min("low", 1),
+                GraphAggregate::max("high", 1),
+            ],
+            0,
+            None,
+        )
+        .unwrap();
+        let mut state =
+            IncrementalGroupAggregate::new(definition, &[GraphSetColumnType::Any; 2]).unwrap();
+        state
+            .prepare(&bag([(row(int(0), int(2)), copies)]), LIMBS, None, &mut ok)
+            .unwrap()
+            .commit();
+        state
+            .prepare(
+                &bag([(row(int(0), int(2)), -1), (row(int(0), int(9)), 1)]),
+                LIMBS,
+                None,
+                &mut ok,
+            )
+            .unwrap()
+            .commit();
+        assert_eq!(
+            observed(&state),
+            BTreeMap::from([(
+                vec![int(0)],
+                vec![
+                    Value::Count(u64::try_from(copies).unwrap()),
+                    Value::Integer(2 * copies + 7),
+                    Value::Count(if copies == 1 { 1 } else { 2 }),
+                    Value::Value(int(if copies == 1 { 9 } else { 2 })),
+                    Value::Value(int(9)),
+                ],
+            )]),
+        );
+        let group: Group = vec![int(0)].into();
+        for index in 0..5 {
+            let summary = state
+                .aggregate
+                .counts_and_sums(&primary(&group, index))
+                .unwrap();
+            assert!(summary.distinct_count().is_none());
+            assert!(summary.distinct_sum().is_none());
+        }
+    }
+    // Numeric DISTINCT explicitly requests its arithmetic statistics; typed
+    // COUNT DISTINCT above uses its separate native-value support instead.
+    let mut numeric = state(true);
+    numeric
+        .prepare(&bag([(row(int(0), int(2)), 3)]), LIMBS, None, &mut ok)
+        .unwrap()
+        .commit();
+    let group: Group = vec![int(0)].into();
+    let summary = numeric
+        .aggregate
+        .counts_and_sums(&primary(&group, 6))
+        .unwrap();
+    assert_eq!(summary.distinct_count().unwrap().to_i128(), Some(1));
+    assert_eq!(
+        summary.distinct_sum().unwrap().as_ref().unwrap().to_i128(),
+        Some(2)
+    );
+}
+
+#[test]
 fn all_native_domains_keep_group_keys_distinct_support_and_extrema_on_retraction() {
     let values = domains();
     let source = bag(values.iter().flat_map(|key| {

@@ -120,7 +120,7 @@ impl State {
     pub(super) fn prepare<D: GroupDefinition, E>(
         &mut self,
         definition: &D,
-        aggregate: &IncrementalAggregate<Key>,
+        aggregate: &IncrementalAggregate<Key, false>,
         delta: &Contributions,
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
@@ -136,7 +136,9 @@ impl State {
                 continue;
             }
             let difference = if distinct(function) {
-                let old = aggregate.get(key).map(AggregateValues::count_rows);
+                let old = aggregate
+                    .counts_and_sums(key)
+                    .map(CountSumValues::count_rows);
                 let next = match old {
                     Some(old) => old.checked_add(change, limbs),
                     None => change.checked_clone(limbs),
@@ -196,7 +198,7 @@ impl Update<'_> {
         &self,
         key: &Key,
         function: Function,
-        integers: Option<&AggregateValues>,
+        integers: Option<CountSumValues<'_>>,
         pending: bool,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<Option<Value>, GroupError<E>> {
@@ -211,18 +213,19 @@ impl Update<'_> {
             Function::AverageInt | Function::AverageIntDistinct
         );
         let distinct = distinct(function);
-        let sum = integers.and_then(|integers| {
-            if distinct {
-                integers.sum_distinct()
-            } else {
-                integers.sum()
-            }
-        });
+        let sum = match integers {
+            Some(integers) if distinct => integers
+                .distinct_sum()
+                .ok_or(GroupError::InvalidResult)?
+                .as_ref(),
+            Some(integers) => integers.sum(),
+            None => None,
+        };
         let sum = sum.map_or(Ok(0), |sum| sum.to_i128().ok_or(GroupError::Arithmetic))?;
         let denominator = if average {
             let integer_count = integers.map_or(Ok(0), |integers| {
                 count(if distinct {
-                    integers.count_distinct()
+                    integers.distinct_count().ok_or(GroupError::InvalidResult)?
                 } else {
                     integers.count_values()
                 })

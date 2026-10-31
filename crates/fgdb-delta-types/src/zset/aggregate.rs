@@ -68,6 +68,64 @@ impl AggregateValues {
     }
 }
 
+/// Fixed requirements for the count/sum profile. DISTINCT count does not
+/// require computing a distinct sum; SUM/AVG DISTINCT require both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistinctRequirements {
+    NotRequested,
+    Count,
+    CountAndSum,
+}
+
+impl DistinctRequirements {
+    fn count(self) -> bool {
+        self != Self::NotRequested
+    }
+
+    fn sum(self) -> bool {
+        self == Self::CountAndSum
+    }
+}
+
+/// Borrow only the requested arithmetic statistics. Unlike AggregateValues,
+/// this view exposes no MIN/MAX or complete-summary export. Its owner fixes
+/// the DISTINCT requirements before admitting the first input.
+#[derive(Clone, Copy, Debug)]
+pub struct CountSumValues<'a> {
+    summary: &'a AggregateValues,
+    distinct: DistinctRequirements,
+}
+
+impl<'a> CountSumValues<'a> {
+    pub fn count_rows(self) -> &'a ZWeight {
+        &self.summary.rows
+    }
+
+    pub fn count_values(self) -> &'a ZWeight {
+        &self.summary.values
+    }
+
+    pub fn sum(self) -> Option<&'a ZWeight> {
+        self.summary.sum.as_ref()
+    }
+
+    pub fn average_parts(self) -> Option<(&'a ZWeight, &'a ZWeight)> {
+        self.sum().map(|sum| (sum, &self.summary.values))
+    }
+
+    /// None means DISTINCT count was not requested, not an empty input.
+    /// A requested empty/non-null-free input has a computed zero count.
+    pub fn distinct_count(self) -> Option<&'a ZWeight> {
+        self.distinct.count().then_some(&self.summary.distinct)
+    }
+
+    /// Outer None means DISTINCT sum was not requested. Some(None) is its
+    /// computed SQL NULL; Some(Some(sum)) is the computed exact distinct sum.
+    pub fn distinct_sum(self) -> Option<&'a Option<ZWeight>> {
+        self.distinct.sum().then_some(&self.summary.distinct_sum)
+    }
+}
+
 impl core::fmt::Debug for AggregateValues {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("AggregateValues([REDACTED])")
@@ -107,8 +165,9 @@ struct Group {
 }
 
 #[derive(PartialEq, Eq)]
-pub struct IncrementalAggregate<K: Ord> {
+pub struct IncrementalAggregate<K: Ord, const FULL: bool = true> {
     groups: BTreeMap<K, Group>,
+    distinct: DistinctRequirements,
 }
 
 impl<K: Ord> Default for IncrementalAggregate<K> {
@@ -120,6 +179,7 @@ impl<K: Ord> IncrementalAggregate<K> {
     pub fn new() -> Self {
         Self {
             groups: BTreeMap::new(),
+            distinct: DistinctRequirements::CountAndSum,
         }
     }
     pub fn group_count(&self) -> usize {
@@ -151,7 +211,40 @@ impl<K: Ord> IncrementalAggregate<K> {
             .map(|(key, group)| (key, group.summary.as_ref()))
     }
 }
-impl<K: Ord> core::fmt::Debug for IncrementalAggregate<K> {
+
+impl<K: Ord> IncrementalAggregate<K, false> {
+    /// Use the same retained counts and atomic update owner without maintaining
+    /// unused extrema. The type does not expose AggregateValues or its deltas.
+    ///
+    /// ```compile_fail
+    /// use fgdb_delta_types::zset::aggregate::{DistinctRequirements, IncrementalAggregate};
+    /// let state = IncrementalAggregate::<u8, false>::new_counts_and_sums(
+    ///     DistinctRequirements::NotRequested,
+    /// );
+    /// let _ = state.get(&0); // Full-summary access belongs to the full profile.
+    /// ```
+    pub fn new_counts_and_sums(distinct: DistinctRequirements) -> Self {
+        Self {
+            groups: BTreeMap::new(),
+            distinct,
+        }
+    }
+
+    pub fn counts_and_sums(&self, key: &K) -> Option<CountSumValues<'_>> {
+        self.groups.get(key).map(|group| CountSumValues {
+            summary: &group.summary,
+            distinct: self.distinct,
+        })
+    }
+
+    /// Govern each visited key as for the full profile's range(). No summary
+    /// fields are exposed through this support-presence inspection.
+    pub fn keys(&self, range: impl RangeBounds<K>) -> impl DoubleEndedIterator<Item = &K> {
+        self.groups.range(range).map(|(key, _)| key)
+    }
+}
+
+impl<K: Ord, const FULL: bool> core::fmt::Debug for IncrementalAggregate<K, FULL> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("IncrementalAggregate")
             .field("groups", &self.groups.len())
@@ -166,7 +259,7 @@ struct GroupPatch {
     summary: Option<Arc<AggregateValues>>,
 }
 
-impl<K: Ord + Clone> IncrementalAggregate<K> {
+impl<K: Ord + Clone, const FULL: bool> IncrementalAggregate<K, FULL> {
     /// Prepare one whole input tick without changing retained state. All
     /// arithmetic and recoverable control failures occur before publication.
     /// The exclusive-borrow guard prevents publishing against a stale basis.
@@ -177,7 +270,7 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
         delta: &ZSet<(K, Option<i128>)>,
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
-    ) -> Result<AggregateUpdate<'_, K>, AggregateError<E>> {
+    ) -> Result<AggregateUpdate<'_, K, FULL>, AggregateError<E>> {
         event(control, ZSetEvent::Work)?;
         let mut patches = BTreeMap::new();
         let mut output = ZSet::new();
@@ -255,22 +348,24 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
                         .map_err(ZSetError::Arithmetic)?;
                     let was_present = previous.is_some_and(|weight| !weight.is_zero());
                     let is_present = !next.is_zero();
-                    if was_present != is_present {
+                    if self.distinct.count() && was_present != is_present {
                         let sign = if is_present { 1 } else { -1 };
                         let crossing = ZWeight::from_i128(sign);
                         event(control, ZSetEvent::Work)?;
                         distinct = distinct
                             .checked_add(&crossing, limbs)
                             .map_err(ZSetError::Arithmetic)?;
-                        // Do not negate i128::MIN in the scalar domain.
-                        event(control, ZSetEvent::Work)?;
-                        let term = crossing
-                            .checked_mul_i128(*value, limbs)
-                            .map_err(ZSetError::Arithmetic)?;
-                        event(control, ZSetEvent::Work)?;
-                        distinct_sum = distinct_sum
-                            .checked_add(&term, limbs)
-                            .map_err(ZSetError::Arithmetic)?;
+                        if self.distinct.sum() {
+                            // Do not negate i128::MIN in the scalar domain.
+                            event(control, ZSetEvent::Work)?;
+                            let term = crossing
+                                .checked_mul_i128(*value, limbs)
+                                .map_err(ZSetError::Arithmetic)?;
+                            event(control, ZSetEvent::Work)?;
+                            distinct_sum = distinct_sum
+                                .checked_add(&term, limbs)
+                                .map_err(ZSetError::Arithmetic)?;
+                        }
                     }
                 }
                 // Reserve staging and any future retained input entry before
@@ -286,7 +381,7 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
                 debug_assert!(distinct.is_zero() && distinct_sum.is_zero());
                 None
             } else {
-                let (minimum, maximum) = if values.is_zero() {
+                let (minimum, maximum) = if !FULL || values.is_zero() {
                     (None, None)
                 } else {
                     let previous = old.map(|group| &group.counts);
@@ -299,7 +394,8 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
                     rows,
                     sum: (!values.is_zero()).then_some(sum),
                     values,
-                    distinct_sum: (!distinct.is_zero()).then_some(distinct_sum),
+                    distinct_sum: (self.distinct.sum() && !distinct.is_zero())
+                        .then_some(distinct_sum),
                     distinct,
                     minimum,
                     maximum,
@@ -311,7 +407,9 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
                     Some(Arc::new(row))
                 }
             };
-            if old.map(|group| &group.summary) != summary.as_ref() {
+            // Only the full profile exports complete-summary deltas. Arithmetic
+            // consumers construct their own typed output before committing.
+            if FULL && old.map(|group| &group.summary) != summary.as_ref() {
                 if let Some(group) = old {
                     output.accumulate(
                         (key.clone(), Arc::clone(&group.summary)),
@@ -342,7 +440,9 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
             delta: output,
         })
     }
+}
 
+impl<K: Ord + Clone> IncrementalAggregate<K> {
     pub fn apply<E>(
         &mut self,
         delta: &ZSet<(K, Option<i128>)>,
@@ -420,8 +520,8 @@ fn extremum<E>(
 }
 
 #[must_use = "dropping an aggregate update aborts it"]
-pub struct AggregateUpdate<'a, K: Ord> {
-    owner: &'a mut IncrementalAggregate<K>,
+pub struct AggregateUpdate<'a, K: Ord, const FULL: bool = true> {
+    owner: &'a mut IncrementalAggregate<K, FULL>,
     patches: BTreeMap<K, GroupPatch>,
     delta: AggregateDelta<K>,
 }
@@ -465,6 +565,58 @@ impl<K: Ord> AggregateUpdate<'_, K> {
     }
     /// Infallible under the same collection/key-code boundary as ZSet::integrate.
     pub fn commit(self) -> AggregateDelta<K> {
+        self.publish()
+    }
+}
+
+impl<K: Ord> AggregateUpdate<'_, K, false> {
+    /// Read only requested arithmetic statistics from the prospective state.
+    /// An explicit removal shadows the old group just as in the full profile.
+    pub fn counts_and_sums(&self, key: &K) -> Option<CountSumValues<'_>> {
+        let summary = match self.patches.get(key) {
+            Some(patch) => patch.summary.as_deref(),
+            None => self
+                .owner
+                .groups
+                .get(key)
+                .map(|group| group.summary.as_ref()),
+        }?;
+        Some(CountSumValues {
+            summary,
+            distinct: self.owner.distinct,
+        })
+    }
+
+    pub fn retained_keys(&self, range: impl RangeBounds<K>) -> impl DoubleEndedIterator<Item = &K> {
+        self.owner.keys(range)
+    }
+
+    /// Includes explicit removals; test prospective presence before consuming
+    /// a retained key as a still-live typed extremum support.
+    pub fn changed_keys(&self, range: impl RangeBounds<K>) -> impl DoubleEndedIterator<Item = &K> {
+        self.patches.range(range).map(|(key, _)| key)
+    }
+
+    /// Publish retained input counts and arithmetic summaries together. This
+    /// profile has no complete AggregateValues output to export.
+    ///
+    /// ```compile_fail
+    /// use fgdb_delta_types::{LimbLimit, ZSet};
+    /// use fgdb_delta_types::zset::aggregate::{DistinctRequirements, IncrementalAggregate};
+    /// let mut state = IncrementalAggregate::<u8, false>::new_counts_and_sums(
+    ///     DistinctRequirements::NotRequested,
+    /// );
+    /// let changes = ZSet::new();
+    /// let update = state.prepare(&changes, LimbLimit::new(4), &mut |_| Ok::<_, ()>(())).unwrap();
+    /// let _ = update.delta(); // Incomplete full summaries cannot escape here.
+    /// ```
+    pub fn commit(self) {
+        let _ = self.publish();
+    }
+}
+
+impl<K: Ord, const FULL: bool> AggregateUpdate<'_, K, FULL> {
+    fn publish(self) -> AggregateDelta<K> {
         let Self {
             owner,
             patches,
@@ -490,7 +642,7 @@ impl<K: Ord> AggregateUpdate<'_, K> {
         delta
     }
 }
-impl<K: Ord> core::fmt::Debug for AggregateUpdate<'_, K> {
+impl<K: Ord, const FULL: bool> core::fmt::Debug for AggregateUpdate<'_, K, FULL> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AggregateUpdate")
             .field("changed_groups", &self.patches.len())
@@ -556,6 +708,174 @@ mod tests {
             &mut allow,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn requested_count_sum_profiles_match_full_independent_recomputation() {
+        for requirements in [
+            DistinctRequirements::NotRequested,
+            DistinctRequirements::Count,
+            DistinctRequirements::CountAndSum,
+        ] {
+            let mut projected = IncrementalAggregate::new_counts_and_sums(requirements);
+            let mut full = IncrementalAggregate::new();
+            let mut integrated = Input::new();
+            for changes in [
+                vec![
+                    (0, None, 2),
+                    (0, Some(-4), 1),
+                    (0, Some(2), 2),
+                    (1, None, 1),
+                ],
+                vec![(0, Some(2), -1), (0, Some(9), 1)],
+                vec![(0, Some(-4), -1), (0, Some(2), -1), (0, Some(9), 1)],
+                vec![(0, None, -2), (0, Some(9), -2), (1, Some(0), 1)],
+                vec![(1, None, -1), (1, Some(0), -1)],
+            ] {
+                let changes = input(changes);
+                integrated.integrate(&changes, LIMBS, &mut allow).unwrap();
+                projected
+                    .prepare(&changes, LIMBS, &mut allow)
+                    .unwrap()
+                    .commit();
+                full.apply(&changes, LIMBS, &mut allow).unwrap();
+                let expected = reference(&integrated);
+                assert_eq!(full.snapshot(LIMBS, &mut allow).unwrap(), expected);
+                assert_eq!(projected.keys(..).count(), expected.len());
+                for ((key, summary), weight) in expected.iter() {
+                    assert_eq!(weight, &ZWeight::ONE);
+                    let actual = projected.counts_and_sums(key).unwrap();
+                    assert_eq!(actual.count_rows(), summary.count_rows());
+                    assert_eq!(actual.count_values(), summary.count_values());
+                    assert_eq!(actual.sum(), summary.sum());
+                    assert_eq!(actual.average_parts(), summary.average_parts());
+                    assert_eq!(
+                        actual.distinct_count(),
+                        requirements.count().then_some(summary.count_distinct()),
+                    );
+                    assert_eq!(
+                        actual.distinct_sum().map(Option::as_ref),
+                        requirements.sum().then(|| summary.sum_distinct()),
+                    );
+                }
+            }
+            assert!(projected.counts_and_sums(&0).is_none());
+            assert!(projected.counts_and_sums(&1).is_none());
+        }
+    }
+
+    #[test]
+    fn count_sum_ticks_do_not_maintain_unrequested_distinct_or_extrema() {
+        let change = input([(0, Some(2), -1), (0, Some(9), 1)]);
+        let mut measured = Vec::new();
+        for copies in [1, 1_000] {
+            let initial = input([(0, Some(2), copies)]);
+            let mut state =
+                IncrementalAggregate::new_counts_and_sums(DistinctRequirements::NotRequested);
+            state.prepare(&initial, LIMBS, &mut allow).unwrap().commit();
+            let mut counts = [0_u64; 2];
+            state
+                .prepare(&change, LIMBS, &mut |event| {
+                    counts[match event {
+                        ZSetEvent::Work => 0,
+                        ZSetEvent::ScratchEntry => 1,
+                    }] += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap()
+                .commit();
+            let summary = state.counts_and_sums(&0).unwrap();
+            assert_eq!(summary.count_rows().to_i128(), Some(copies));
+            assert_eq!(summary.sum().unwrap().to_i128(), Some(2 * copies + 7));
+            assert!(summary.distinct_count().is_none());
+            assert!(summary.distinct_sum().is_none());
+            measured.push(counts);
+
+            // The default owner still computes every requested full statistic.
+            let mut full = seeded(&initial);
+            full.apply(&change, LIMBS, &mut allow).unwrap();
+            let summary = full.get(&0).unwrap();
+            assert_eq!(summary.minimum(), Some(if copies == 1 { 9 } else { 2 }));
+            assert_eq!(summary.maximum(), Some(9));
+            assert_eq!(
+                summary.count_distinct().to_i128(),
+                Some(if copies == 1 { 1 } else { 2 })
+            );
+            assert_eq!(
+                summary.sum_distinct().unwrap().to_i128(),
+                Some(if copies == 1 { 9 } else { 11 })
+            );
+        }
+        assert_eq!(measured[0], measured[1]);
+    }
+
+    #[test]
+    fn projected_profiles_keep_every_refusal_drop_and_arithmetic_failure_atomic() {
+        for requirements in [
+            DistinctRequirements::NotRequested,
+            DistinctRequirements::Count,
+            DistinctRequirements::CountAndSum,
+        ] {
+            let seed = || {
+                let mut state = IncrementalAggregate::new_counts_and_sums(requirements);
+                state
+                    .prepare(&input([(0, Some(2), 3), (1, None, 1)]), LIMBS, &mut allow)
+                    .unwrap()
+                    .commit();
+                state
+            };
+            let changes = input([(0, Some(2), -3), (0, Some(9), 2), (1, None, -1)]);
+            let before = seed();
+            let mut success = seed();
+            let mut calls = 0;
+            success
+                .prepare(&changes, LIMBS, &mut |_| {
+                    calls += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap()
+                .commit();
+            for stop in 1..=calls {
+                let mut candidate = seed();
+                let mut seen = 0;
+                assert!(matches!(
+                    candidate.prepare(&changes, LIMBS, &mut |_| {
+                        seen += 1;
+                        if seen == stop { Err(stop) } else { Ok(()) }
+                    }),
+                    Err(AggregateError::ZSet(ZSetError::Control(at))) if at == stop
+                ));
+                assert_eq!(seen, stop);
+                assert_eq!(candidate, before);
+                drop(candidate.prepare(&changes, LIMBS, &mut allow).unwrap());
+                assert_eq!(candidate, before);
+                candidate
+                    .prepare(&changes, LIMBS, &mut allow)
+                    .unwrap()
+                    .commit();
+                assert_eq!(candidate, success);
+            }
+            let mut candidate = seed();
+            assert!(matches!(
+                candidate.prepare(&input([(0, Some(8), -1)]), LIMBS, &mut allow),
+                Err(AggregateError::NegativeMultiplicity)
+            ));
+            assert_eq!(candidate, before);
+            assert!(matches!(
+                candidate.prepare(
+                    &input([(0, Some(i128::MAX), 1)]),
+                    LimbLimit::new(1),
+                    &mut allow
+                ),
+                Err(AggregateError::ZSet(ZSetError::Arithmetic(_)))
+            ));
+            assert_eq!(candidate, before);
+            candidate
+                .prepare(&changes, LIMBS, &mut allow)
+                .unwrap()
+                .commit();
+            assert_eq!(candidate, success);
+        }
     }
 
     #[test]

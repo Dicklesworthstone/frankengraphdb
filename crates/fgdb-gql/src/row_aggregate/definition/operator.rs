@@ -12,7 +12,7 @@ use crate::{
 };
 use fgdb_delta_types::zset::ZSetUpdate;
 use fgdb_delta_types::zset::aggregate::{
-    AggregateError, AggregateUpdate, AggregateValues, IncrementalAggregate,
+    AggregateError, AggregateUpdate, CountSumValues, DistinctRequirements, IncrementalAggregate,
 };
 use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
 use fgdb_types::CanonicalScalar;
@@ -150,13 +150,13 @@ fn first<'a, E>(
     Ok(None)
 }
 fn current_extremum<E>(
-    state: &IncrementalAggregate<Key>,
+    state: &IncrementalAggregate<Key, false>,
     group: &Group,
     index: usize,
     maximum: bool,
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<Option<Arc<GraphValue>>, GroupError<E>> {
-    let keys = state.range(bounds(group, index)).map(|(k, _)| k);
+    let keys = state.keys(bounds(group, index));
     if maximum {
         first(keys.rev(), |_| true, control)
     } else {
@@ -164,23 +164,31 @@ fn current_extremum<E>(
     }
 }
 fn pending_extremum<E>(
-    state: &AggregateUpdate<'_, Key>,
+    state: &AggregateUpdate<'_, Key, false>,
     group: &Group,
     index: usize,
     maximum: bool,
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<Option<Arc<GraphValue>>, GroupError<E>> {
-    let retained = state.retained_range(bounds(group, index)).map(|(k, _)| k);
+    let retained = state.retained_keys(bounds(group, index));
     let a = if maximum {
-        first(retained.rev(), |k| state.get(k).is_some(), control)?
+        first(
+            retained.rev(),
+            |k| state.counts_and_sums(k).is_some(),
+            control,
+        )?
     } else {
-        first(retained, |k| state.get(k).is_some(), control)?
+        first(retained, |k| state.counts_and_sums(k).is_some(), control)?
     };
-    let changed = state.changed_range(bounds(group, index)).map(|(k, _)| k);
+    let changed = state.changed_keys(bounds(group, index));
     let b = if maximum {
-        first(changed.rev(), |k| state.get(k).is_some(), control)?
+        first(
+            changed.rev(),
+            |k| state.counts_and_sums(k).is_some(),
+            control,
+        )?
     } else {
-        first(changed, |k| state.get(k).is_some(), control)?
+        first(changed, |k| state.counts_and_sums(k).is_some(), control)?
     };
     Ok(match (a, b) {
         (Some(a), Some(b)) => {
@@ -201,7 +209,7 @@ fn count<E>(n: &ZWeight) -> Result<u64, GroupError<E>> {
 fn render<'a, D: GroupDefinition, E>(
     definition: &D,
     group: &Group,
-    mut get: impl FnMut(usize) -> Option<&'a AggregateValues>,
+    mut get: impl FnMut(usize) -> Option<CountSumValues<'a>>,
     mut extreme: impl FnMut(
         usize,
         bool,
@@ -241,33 +249,44 @@ fn render<'a, D: GroupDefinition, E>(
             Function::Count | Function::CountDistinct => {
                 Value::Count(state.map_or(Ok(0), |s| count(s.count_values()))?)
             }
-            Function::SumInt | Function::SumIntDistinct => match state.and_then(|s| {
-                if function == Function::SumInt {
-                    s.sum()
-                } else {
-                    s.sum_distinct()
+            Function::SumInt | Function::SumIntDistinct => {
+                let sum = match state {
+                    Some(state) if function == Function::SumIntDistinct => state
+                        .distinct_sum()
+                        .ok_or(GroupError::InvalidResult)?
+                        .as_ref(),
+                    Some(state) => state.sum(),
+                    None => None,
+                };
+                match sum {
+                    None => null,
+                    Some(sum) => Value::Integer(sum.to_i128().ok_or(GroupError::Arithmetic)?),
                 }
-            }) {
-                None => null,
-                Some(sum) => Value::Integer(sum.to_i128().ok_or(GroupError::Arithmetic)?),
-            },
-            Function::AverageInt | Function::AverageIntDistinct => match state.and_then(|s| {
-                if function == Function::AverageInt {
-                    s.average_parts()
-                } else {
-                    s.average_distinct_parts()
-                }
-            }) {
-                None => null,
-                Some((sum, n)) => {
-                    let sum = sum.to_i128().ok_or(GroupError::Arithmetic)?;
-                    let n = count(n)?;
-                    for _ in 0..128 {
-                        charge(control, ZSetEvent::Work)?;
+            }
+            Function::AverageInt | Function::AverageIntDistinct => {
+                let parts = match state {
+                    Some(state) if function == Function::AverageIntDistinct => {
+                        let sum = state.distinct_sum().ok_or(GroupError::InvalidResult)?;
+                        let count = state.distinct_count().ok_or(GroupError::InvalidResult)?;
+                        sum.as_ref().map(|sum| (sum, count))
                     }
-                    Value::Average(GraphExactAverage::new(sum, n).ok_or(GroupError::InvalidResult)?)
+                    Some(state) => state.average_parts(),
+                    None => None,
+                };
+                match parts {
+                    None => null,
+                    Some((sum, n)) => {
+                        let sum = sum.to_i128().ok_or(GroupError::Arithmetic)?;
+                        let n = count(n)?;
+                        for _ in 0..128 {
+                            charge(control, ZSetEvent::Work)?;
+                        }
+                        Value::Average(
+                            GraphExactAverage::new(sum, n).ok_or(GroupError::InvalidResult)?,
+                        )
+                    }
                 }
-            },
+            }
             Function::Min | Function::Max => {
                 match extreme(index, function == Function::Max, control)? {
                     None => null,
@@ -329,7 +348,7 @@ pub struct IncrementalGroupAggregate<D: GroupDefinition> {
     definition: D,
     schema: Box<[GraphSetColumnType]>,
     input: ZSet<GraphValueRow>,
-    aggregate: IncrementalAggregate<Key>,
+    aggregate: IncrementalAggregate<Key, false>,
     collections: Option<collection::State>,
     floats: float_support::State,
     rows: ZSet<GraphAggregateRow>,
@@ -389,11 +408,23 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
         } else {
             None
         };
+        // Typed MIN/MAX and COUNT DISTINCT already use the support keys above.
+        // Only numeric SUM/AVG DISTINCT need the integer distinct-sum state.
+        let distinct = if definition.aggregate_specs().any(|(function, _)| {
+            matches!(
+                function,
+                Function::SumIntDistinct | Function::AverageIntDistinct
+            )
+        }) {
+            DistinctRequirements::CountAndSum
+        } else {
+            DistinctRequirements::NotRequested
+        };
         Ok(Self {
             definition,
             schema: schema.into(),
             input: ZSet::new(),
-            aggregate: IncrementalAggregate::new(),
+            aggregate: IncrementalAggregate::new_counts_and_sums(distinct),
             collections,
             floats: float_support::State::default(),
             rows: ZSet::new(),
@@ -507,7 +538,10 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
             if key.2.is_none() {
                 continue;
             }
-            let old = self.aggregate.get(key).map(AggregateValues::count_rows);
+            let old = self
+                .aggregate
+                .counts_and_sums(key)
+                .map(CountSumValues::count_rows);
             let next = match old {
                 Some(old) => old.checked_add(change, limbs),
                 None => change.checked_clone(limbs),
@@ -573,12 +607,16 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
         for group in groups {
             charge(control, ZSetEvent::Work)?;
             let old = if self.initialized
-                && (global || self.aggregate.get(&primary(&group, 0)).is_some())
+                && (global
+                    || self
+                        .aggregate
+                        .counts_and_sums(&primary(&group, 0))
+                        .is_some())
             {
                 render(
                     &self.definition,
                     &group,
-                    |index| self.aggregate.get(&primary(&group, index)),
+                    |index| self.aggregate.counts_and_sums(&primary(&group, index)),
                     |index, maximum, c| {
                         current_extremum(&self.aggregate, &group, index, maximum, &mut |e| c(e))
                     },
@@ -609,11 +647,11 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
         let mut size = self.rows.len() as u128;
         for (group, old) in before {
             charge(control, ZSetEvent::Work)?;
-            let new = if global || aggregate.get(&primary(&group, 0)).is_some() {
+            let new = if global || aggregate.counts_and_sums(&primary(&group, 0)).is_some() {
                 render(
                     &self.definition,
                     &group,
-                    |index| aggregate.get(&primary(&group, index)),
+                    |index| aggregate.counts_and_sums(&primary(&group, index)),
                     |index, maximum, c| {
                         pending_extremum(&aggregate, &group, index, maximum, &mut |e| c(e))
                     },
@@ -691,7 +729,7 @@ impl<D: GroupDefinition> core::fmt::Debug for IncrementalGroupAggregate<D> {
 #[must_use = "dropping a native group update preserves all accepted state"]
 pub struct GroupUpdate<'a> {
     input: ZSetUpdate<'a, GraphValueRow>,
-    aggregate: AggregateUpdate<'a, Key>,
+    aggregate: AggregateUpdate<'a, Key, false>,
     collections: Option<collection::Update<'a>>,
     floats: float_support::Update<'a>,
     output: ZSetUpdate<'a, GraphAggregateRow>,
@@ -713,7 +751,7 @@ impl GroupUpdate<'_> {
             delta,
         } = self;
         input.commit();
-        let _ = aggregate.commit();
+        aggregate.commit();
         if let Some(collections) = collections {
             collections.commit();
         }
