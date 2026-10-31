@@ -246,13 +246,127 @@ fn seed_capacity_is_available_before_the_last_point_read_in_a_full_pool() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[cfg(test)]
+#[test]
+fn seeded_vertex_input_admits_its_box_before_open_and_retains_the_charge() {
+    use crate::{BufferLimits, BufferedReadLimits, Database, DatabaseKeys, MemVfs, WriteBatch};
+    use fgdb_delta_types::RelationId;
+    use fgdb_gql::{GqlParameters, PreparedGraphText};
+    use fgdb_strata::tiered::memory::MemoryError;
+    use fgdb_types::DatabaseSecurityNamespaceId;
+
+    let ((), report) = asupersync::lab::run_async_under_lab(0xe6_79, |root| async move {
+        let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let keys = DatabaseKeys::new(
+            [0xb1; 32],
+            DatabaseSecurityNamespaceId([0xb2; 32]),
+            [0xb3; 32],
+        );
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys)
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(VId(1), vec![], vec![]);
+        assert_eq!(db.write(&commit, batch).await.unwrap(), CommitSeq(1));
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = db
+            .buffered_read_view(
+                &cx,
+                pool.clone(),
+                BufferedReadLimits {
+                    max_root_bytes: 64 * 1024,
+                    max_source_bytes: 4 * 1024 * 1024,
+                    max_blocks: 512,
+                    max_vertex_patches: 512,
+                    max_work: 100_000,
+                    buffer: BufferLimits {
+                        max_frames: 1,
+                        max_ghost_entries: 2,
+                        max_extent_bytes: 16 * 1024,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let pattern: PreparedGraphPattern<GraphValueRow> =
+            PreparedGraphText::prepare("MATCH (n) RETURN n", |_, _| None)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+        let metadata_bytes = 1024 + size_of::<BufferedEdgeJoinScan<'_, MemVfs>>();
+        let baseline = pool.used();
+        let before = view.buffer_stats();
+        let policy = GqlQueryPolicy::new(1, 1, 100_000, 100_000);
+
+        // Hold the pool one byte short of the actual owner's full metadata
+        // and boxed scan. Opening must refuse without a candidate or fault.
+        let blocker = pool
+            .reserve(&cx, pool.available() - (metadata_bytes - 1))
+            .unwrap();
+        let blocked = pool.used();
+        let Err(refusal) = view.open_seeded_vertex_input(
+            &cx,
+            AsyncVertexScanPlan::compile(pattern.plan()).unwrap(),
+            BufferedVertexSeeds::One(VId(1)),
+            CommitSeq(1),
+            policy,
+        ) else {
+            panic!("one byte short must refuse before opening the source");
+        };
+        assert!(matches!(
+            refusal,
+            GqlQueryError::Source(VertexScanError::Source(BufferedReadError::Memory(
+                MemoryError::ResourceExhausted { requested, available, limit }
+            ))) if requested == metadata_bytes
+                && available == metadata_bytes - 1
+                && limit == pool.limit()
+        ));
+        assert_eq!(pool.used(), blocked);
+        assert_eq!(view.buffer_stats(), before);
+        drop(blocker);
+        assert_eq!(pool.used(), baseline);
+
+        // Exactly the admitted bytes open the same real source. No candidate
+        // is pulled, and its metadata ownership lasts until cursor drop.
+        let blocker = pool
+            .reserve(&cx, pool.available() - metadata_bytes)
+            .unwrap();
+        let blocked = pool.used();
+        let cursor = view
+            .open_seeded_vertex_input(
+                &cx,
+                AsyncVertexScanPlan::compile(pattern.plan()).unwrap(),
+                BufferedVertexSeeds::One(VId(1)),
+                CommitSeq(1),
+                policy,
+            )
+            .unwrap();
+        assert_eq!(cursor.snapshot_seq(), CommitSeq(1));
+        assert_eq!(cursor.state(), VertexScanState::Open);
+        assert_eq!(cursor.row_stats().snapshot_records, 0);
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert_eq!(cursor.evaluator_stats(), GlaExecutionStats::default());
+        assert_eq!(pool.used(), blocked + metadata_bytes);
+        assert_eq!(pool.available(), 0);
+        drop(cursor);
+        assert_eq!(pool.used(), blocked);
+        assert_eq!(view.buffer_stats(), before);
+        drop(blocker);
+        assert_eq!(pool.used(), baseline);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 enum BufferedVertexInput<'view, V: Vfs> {
     Scan {
         scan: BufferedVertexScan<'view, V>,
         requires_properties: bool,
     },
     Seeds {
-        scan: BufferedEdgeJoinScan<'view, V>,
+        scan: Box<BufferedEdgeJoinScan<'view, V>>,
         seeds: BufferedVertexSeeds,
     },
 }
@@ -469,8 +583,13 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         }
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
         let pool = self.memory_pool().clone();
+        // Preserve the fixed cursor bill and admit the boxed driver before
+        // allocating it. The cursor drops its source before this reservation.
+        let metadata_bytes = 1024_usize
+            .checked_add(size_of::<BufferedEdgeJoinScan<'view, V>>())
+            .ok_or_else(|| source_error(BufferedReadError::SizeOverflow))?;
         let metadata = pool
-            .reserve(cx, 1024)
+            .reserve(cx, metadata_bytes)
             .map_err(BufferedReadError::Memory)
             .map_err(source_error)?;
         let scan = self
@@ -479,7 +598,10 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             .map_err(source_error)?
             .into_join_scan();
         let source = BufferedVertexQuerySource {
-            input: BufferedVertexInput::Seeds { scan, seeds },
+            input: BufferedVertexInput::Seeds {
+                scan: Box::new(scan),
+                seeds,
+            },
             cx,
             pool,
         };

@@ -583,7 +583,7 @@ async fn write_chain_prepared_batch(
     let (stats, completion) = result.map_err(|error| {
         output_refusal.unwrap_or_else(|| {
             let message = error.to_string();
-            match error {
+            match *error {
                 fgdb_gql::GraphWriteScriptExecutionError::Chain(error) => returning_refusal(error),
                 fgdb_gql::GraphWriteScriptExecutionError::BatchChain { source, .. } => {
                     let refusal = returning_refusal(source);

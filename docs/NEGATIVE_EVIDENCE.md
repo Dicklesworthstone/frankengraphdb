@@ -563,6 +563,16 @@ be a commit reachable in this repository.
 
 ---
 
+### NE-0050 — Splitting one mutation bag bypassed the conflict law it claimed to preserve
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-epic-verif-phi.2
+- **repair**: 42e51559419dcee0d6f379f6f222678436bcd5b8
+- **claimed**: the per-root native field specialization in `fd4ea3599` preserved ordinary simultaneous conflicts while providing frozen selection and one native source statement
+- **actual**: it converted one completed post-MATCH UNWIND relation into separate root statements. Unequal proposals for the same field became last-wins across those statements, bypassing the global collector. Restricting the specialization to one target column would not repair this: duplicate roots assigning different values to that one target also conflict. A private completion adapter hid the expanded statement count. New focused tests expected the wrong behavior, so their passing verdict did not establish the claimed semantics.
+- **caught_by**: the complete stable proof on `48cac8c36e04b3fc7ed7d63edd7f8bffbec82cf0` failed the unchanged chained-UNWIND exact-conflict law; independent source review supplied the single-target counterexample. The complete run retained 13,592 passed, nine failed and 33 existing ignored tests, with an authenticated RED verdict.
+- **signature**: treating a contradictory fixture as evidence of a missing production owner, then changing the statement boundary to satisfy it. The in-place repair removes the specialization and completion adapter, keeps the original exact-conflict and distinct-friend selection tests unchanged, retains invalid FGP/document inputs as atomic negatives, and adds lawful disjoint-field/equal-duplicate positives with issued identities, history and reopen. Explicit parameter records remain separate statements. The corrected diagnostic passes 5,946 tests across 36 targets; full integrated committed-tree qualification remains a separate requirement.
+
 ## Reverts
 
 The literal `AGENTS.md` clause, enforced. A performed revert has exactly one

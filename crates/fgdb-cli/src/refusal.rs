@@ -119,6 +119,17 @@ fn classify_one(error: &(dyn Error + 'static)) -> Option<(Code, Option<usize>)> 
     if let Some(error) = error.downcast_ref::<fgdb::QueryError>() {
         return query(error);
     }
+    if let Some(error) = error.downcast_ref::<fgdb::StatementTimeError>() {
+        return Some((
+            match error {
+                fgdb::StatementTimeError::Parameter(_) => Code::InvalidValue,
+                fgdb::StatementTimeError::Unavailable | fgdb::StatementTimeError::Cancelled(_) => {
+                    Code::Execution
+                }
+            },
+            None,
+        ));
+    }
     if error.is::<fgdb_gql::GqlBudgetExceeded>() || error.is::<fgdb_gql::GlaLimitExceeded>() {
         return Some((Code::Budget, None));
     }
@@ -211,7 +222,7 @@ fn query(error: &fgdb::QueryError) -> Option<(Code, Option<usize>)> {
         Q::TransactionPattern(error) => execution(error),
         Q::TransactionAggregate(error) => execution(error),
         Q::TransactionSet(error) => execution(error),
-        Q::Read(_) | Q::Transaction(_) => None,
+        Q::StatementTime(_) | Q::Read(_) | Q::Transaction(_) => None,
     }
 }
 

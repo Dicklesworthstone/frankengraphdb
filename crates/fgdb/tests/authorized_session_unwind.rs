@@ -1828,6 +1828,7 @@ fn native_chain_batch_final_admission_and_expiry_never_blame_a_record() {
                 )
                 .await
                 .unwrap_err();
+            let error = *error;
             assert!(admitted.load(Ordering::Relaxed));
             assert!(
                 matches!(&error, Fault::BatchChain { location: None, .. }),

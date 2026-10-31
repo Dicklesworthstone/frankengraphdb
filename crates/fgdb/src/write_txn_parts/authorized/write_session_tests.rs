@@ -922,6 +922,82 @@ fn bound_batches_do_not_outlive_their_owner_or_live_credentials() {
 }
 
 #[test]
+fn chain_batch_slot_admission_precedes_binding_and_keeps_late_native_causes() {
+    lab(0xac18, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let issuer = authority();
+        let text = "FOREACH (x IN [1] | CREATE (:Visible {p:$key}))";
+        // Compile the actual native definition before creating each fresh
+        // permit: preparation work must not obscure the allocation bill.
+        let prepared = PreparedChain {
+            template: PreparedGraphWriteChainText::prepare(text, R, symbols).unwrap(),
+            lowered: None,
+            source_len: text.len(),
+        };
+        let valid = GqlParameters::new().with_int64("key", 7).unwrap();
+        let missing = GqlParameters::new();
+        for (max_work, arguments, missing_record) in [
+            (2, vec![missing.clone(), valid.clone(), valid.clone()], None),
+            (
+                grant().limits.max_work,
+                vec![missing.clone(), valid.clone(), valid.clone()],
+                Some(0),
+            ),
+            (
+                grant().limits.max_work,
+                vec![valid.clone(), missing.clone()],
+                Some(1),
+            ),
+        ] {
+            let mut scope = grant();
+            scope.limits.max_work = max_work;
+            let token = issuer.issue_at(&scope, NOW).unwrap();
+            let verified = issuer.verify_at(&token, "host-branch", NOW).unwrap();
+            let permit = verified.begin_write_at("host-branch", NOW).unwrap();
+            let mut execution = Execution {
+                cx: &commit,
+                permit,
+                clock: || NOW,
+            };
+            let error = prepared
+                .bind_batch(&query, &mut execution, verified.predicates(), &arguments, 3)
+                .unwrap_err();
+            if let Some(record) = missing_record {
+                let Fault::BatchChainBinding { location, source } = &error else {
+                    panic!("native binding cause lost: {error:?}");
+                };
+                assert_eq!(location.argument_set, record);
+                assert_eq!(location.statement, 0);
+                assert_eq!(location.span, 0..text.len());
+                assert!(
+                    matches!(
+                        source,
+                        fgdb_gql::GraphWriteChainTextError::Insert(
+                            fgdb_gql::GraphInsertTextError {
+                                kind: fgdb_gql::GraphInsertTextErrorKind::Query(
+                                    fgdb_gql::GraphPatternTextErrorKind::MissingParameter
+                                ),
+                                ..
+                            }
+                        )
+                    ),
+                    "{source:?}"
+                );
+            } else {
+                // Without the three-slot bill, the first binding's work unit
+                // and post-bind checkpoint both fit in two units, exposing
+                // the missing-key cause instead of this signed-work refusal.
+                assert_eq!(
+                    authorization(&error),
+                    Some(Error::LimitExceeded(LimitDimension::Work))
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn batch_binding_and_execution_share_the_exact_signed_work_allowance() {
     lab(0xac14, |contexts| async move {
         let commit = contexts.commit();

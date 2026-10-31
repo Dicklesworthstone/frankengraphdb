@@ -206,13 +206,15 @@ fn later_grouping_keys<'a>(
     }))
 }
 
+type IdentityAliases<'a> = Vec<(&'a str, &'a str)>;
+
 /// The source/alias pairs a later WITH projects as bare identities, and
 /// whether an item calls an aggregate function. Expressions do not carry an
 /// identity merely because their output happens to reuse its name.
 fn later_with_items<'a>(
     mut lexer: Lexer<'a>,
     carried: &[&'a str],
-) -> Result<(Vec<(&'a str, &'a str)>, bool), GraphPatternTextError> {
+) -> Result<(IdentityAliases<'a>, bool), GraphPatternTextError> {
     const ENDS: [&str; 19] = [
         "WHERE",
         "ORDER",
@@ -234,7 +236,7 @@ fn later_with_items<'a>(
         "DETACH",
         "REMOVE",
     ];
-    let mut kept: Vec<(&'a str, &'a str)> = Vec::new();
+    let mut kept: IdentityAliases<'a> = Vec::new();
     let mut item: Vec<TokenKind<'a>> = Vec::new();
     let mut depth = 0_usize;
     let mut first = true;

@@ -9,6 +9,7 @@ use fgdb_gql::*;
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 
 type Cancel = Box<asupersync::error::Error>;
+type StatementTimeSource = dyn Fn(&QueryCx) -> Option<fgdb_types::CanonicalTimestamp> + Send + Sync;
 
 /// A trusted host's calendar clock. It is sampled at statement binding, never
 /// by an expression evaluator. The returned timestamp includes the host's
@@ -16,8 +17,7 @@ type Cancel = Box<asupersync::error::Error>;
 /// the runtime's process-relative timer or read the ambient wall clock.
 #[derive(Clone)]
 pub struct StatementClock {
-    source:
-        std::sync::Arc<dyn Fn(&QueryCx) -> Option<fgdb_types::CanonicalTimestamp> + Send + Sync>,
+    source: std::sync::Arc<StatementTimeSource>,
 }
 
 impl StatementClock {

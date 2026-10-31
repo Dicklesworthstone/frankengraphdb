@@ -833,6 +833,38 @@ executions of those same binaries are duplicate evidence. A later literal-value
 assertion and incoming peer integration still require fresh qualification; this
 diagnostic is not the complete workspace or a clean committed-tree verdict.
 
+The peer integration at `256107d7f1ce9ae23a4c258d0a8880e542e8f8e8`
+preserves both histories and the local mutation/admission controls. Source
+review identifies two concrete incoming gaps. Prepared chain batches reserve
+their whole vector before signed batch-size work; the repair charges those
+slots first and retains every existing per-chain charge, so some low-budget
+batches now refuse. A real binding-error-versus-budget control distinguishes
+that boundary without claiming allocator instrumentation. Katz accepts finite
+negative beta, but the shared sealed encoder rejects negative scores; the
+repair allows signed Katz scores while preserving finite checks and every
+prior nonnegative rank law. New literal two-isolate results cross decoded,
+sealed, retained and cooperative owners, with explicit nonfinite negatives.
+These repairs are applied and await integrated runtime qualification. The first
+integrated Clippy run also catches two incoming style/type-complexity errors;
+they are corrected without lint allowances or semantic changes.
+
+Further integrated type checking corrects a clock-fixture integer width, uses
+the existing public budget constructor for the unchanged one-short allowance,
+and wires statement-time refusals through the CLI's typed source-chain
+classifier. Parameter failures retain `invalid_value`; unavailable/cancelled
+calendar observations retain `execution`. No robot schema or wire tag changes.
+The large selected-source enum is reduced by boxing its driver, with the full
+additional `size_of` admitted before allocation and retained until cursor drop;
+this raises that source's fixed memory minimum. A real-owner one-short/exact
+admission and refund test covers the price. The new public chain-batch API
+boxes its rich diagnostic without changing its causes or coordinate contents.
+All current runtime and mandatory qualification remain pending.
+
+The final integrated all-workspace/all-feature/all-target Clippy pass exits
+zero after those concrete corrections. Failed earlier passes are retained.
+The new tests are type-checked; this does not replace their runtime, the full
+scanner or the complete committed-tree mandatory proof.
+
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,
 not a new gate or capability. Retire it from active use when these work units

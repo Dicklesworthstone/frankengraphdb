@@ -1899,7 +1899,12 @@ fn relationship_merge_final_tail_refusals_rollback_every_write_and_keep_exact_li
             for dimension in 0..3 {
                 let mut short = exact;
                 match dimension {
-                    0 => short.query.rows.max_result_rows -= 1,
+                    0 => {
+                        short.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                            short.query.rows.max_snapshot_records().unwrap(),
+                            short.query.rows.max_result_rows().unwrap() - 1,
+                        );
+                    }
                     1 => short.query.evaluator.max_work_units -= 1,
                     2 => short.query.evaluator.max_scratch_entries -= 1,
                     _ => unreachable!(),

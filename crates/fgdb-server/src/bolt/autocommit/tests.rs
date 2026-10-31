@@ -54,7 +54,7 @@ fn statement_time_bolt_defers_effects_keeps_bound_return_and_hydrates_the_select
             .unwrap();
         let db = &server.databases["test"];
         let mut client = connection(&server, token.clone());
-        let timestamp = |observation| structure::date_time(1_609_459_200 + observation, 0, 0);
+        let timestamp = |observation: i64| structure::date_time(1_609_459_200 + observation, 0, 0);
         client
             .run(
                 &root,

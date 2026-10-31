@@ -2,6 +2,84 @@
 
 use super::*;
 
+#[test]
+fn negative_katz_baseline_has_literal_scores_through_every_delivery_owner() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let db = small_database(&contexts.commit(), 2, false).await;
+        let opt = options(Directedness::Directed);
+        let graph = projection(&db, &cx, opt).await;
+        assert_eq!(graph.vertex_ids(), &[VId(0), VId(1)]);
+        assert_eq!(graph.adjacency_entry_count(), 0);
+        let call = FnxCallSpec::katz_centrality(KatzOptions::new(0.0, -2.0, 2, 1e-12).unwrap());
+        // Two isolated vertices reach [-2,-2] on the first recurrence and
+        // stay there on the second. The independent norm is sqrt(4+4).
+        let score = -2.0 / 8.0_f64.sqrt();
+        let expected_rows = vec![
+            vec![FnxValue::Vertex(VId(0)), FnxValue::Score(score)],
+            vec![FnxValue::Vertex(VId(1)), FnxValue::Score(score)],
+        ];
+        let decoded = db
+            .read_session()
+            .unwrap()
+            .execute_fnx(&cx, &call, opt)
+            .unwrap()
+            .analytics;
+        assert_eq!(decoded.rows, expected_rows);
+        let sealed = call
+            .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+            .unwrap();
+        assert_eq!(sealed.rows, expected_rows);
+        assert_eq!(
+            sealed.certificate.result_digest,
+            decoded.certificate.result_digest
+        );
+        assert_eq!(sealed.certificate.witness.nodes_touched, 4);
+        assert_eq!(sealed.certificate.witness.edges_scanned, 0);
+        assert_eq!(
+            sealed.certificate.kernel_workspace_bytes,
+            4 * size_of::<f64>()
+        );
+        compare_retained(
+            call.execute_sealed_rows(&cx, &graph, opt.execution_limits, memory())
+                .unwrap(),
+            &sealed,
+            2,
+        );
+        let cooperative = call
+            .execute_sealed_cooperative(
+                &cx,
+                &graph,
+                opt.execution_limits,
+                memory(),
+                quantum(1),
+                yield_now,
+            )
+            .await
+            .unwrap();
+        assert_eq!(cooperative.rows, expected_rows);
+        compare_execution(&cooperative, &sealed);
+        compare_retained(
+            call.execute_sealed_cooperative_rows(
+                &cx,
+                &graph,
+                opt.execution_limits,
+                memory(),
+                quantum(1),
+                yield_now,
+            )
+            .await
+            .unwrap(),
+            &cooperative,
+            2,
+        );
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
 fn call(custom: bool) -> FnxCallSpec {
     FnxCallSpec::bind(
         if custom {

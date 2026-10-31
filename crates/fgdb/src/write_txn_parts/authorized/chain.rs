@@ -783,10 +783,12 @@ impl<V: Vfs + Clone> Database<V> {
             &fgdb_gql::GraphWriteProgramStats,
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
         ) -> Result<(), WriteTxnError>,
-    ) -> Result<(fgdb_gql::GraphWriteProgramStats, EmbeddedTxnCompletion), BatchFault> {
+    ) -> Result<(fgdb_gql::GraphWriteProgramStats, EmbeddedTxnCompletion), Box<BatchFault>> {
         let refusal = |error| batch_error(source(error), None, source_len);
         if authority.namespace() != self.keys.namespace {
-            return Err(refusal(WriteTxnError::Authorization(Error::WrongAuthority)));
+            return Err(Box::new(refusal(WriteTxnError::Authorization(
+                Error::WrongAuthority,
+            ))));
         }
         let now = clock();
         let verified = authority
@@ -806,25 +808,25 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(refusal)?;
         execution.checkpoint().map_err(refusal)?;
         if chains.is_empty() {
-            return Err(BatchFault::BatchBinding(
+            return Err(Box::new(BatchFault::BatchBinding(
                 fgdb_gql::GraphWriteScriptBatchError::Empty,
-            ));
+            )));
         }
         let max_statements =
             max_statements.min(fgdb_gql::PreparedGraphWriteScript::MAX_BATCH_STATEMENTS);
         if chains.len() > max_statements {
-            return Err(BatchFault::BatchBinding(
+            return Err(Box::new(BatchFault::BatchBinding(
                 fgdb_gql::GraphWriteScriptBatchError::TooManyStatements {
                     limit: max_statements,
                     observed: chains.len() as u128,
                 },
-            ));
+            )));
         }
         for (argument_set, chain) in chains.iter().enumerate() {
             let refusal = |error| batch_error(source(error), Some(argument_set), source_len);
             execution.checkpoint().map_err(refusal)?;
             if chain.returns_rows() {
-                return Err(refusal(WriteTxnError::AuthorizedMutationRefused));
+                return Err(Box::new(refusal(WriteTxnError::AuthorizedMutationRefused)));
             }
         }
         let mut stats = None;

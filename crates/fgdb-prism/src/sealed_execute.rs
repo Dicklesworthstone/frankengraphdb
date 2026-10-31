@@ -1346,7 +1346,10 @@ impl EncodedRows {
                 let value = *values
                     .get(index)
                     .ok_or(ExecutionError::InvalidUpstreamResult)?;
-                if !value.is_finite() || value < 0.0 {
+                // Katz permits a finite negative baseline and signed scores.
+                // Earlier rank profiles retain their nonnegative output law.
+                let signed = matches!(call.algorithm(), FnxAlgorithm::KatzCentrality(_));
+                if !value.is_finite() || (!signed && value < 0.0) {
                     return Err(ExecutionError::InvalidNumericResult.into());
                 }
                 FnxValue::Score(value)
@@ -1851,6 +1854,28 @@ mod tests {
                         Err(Error::Execution(ExecutionError::LimitExceeded {resource: actual, ..})) if actual == resource)
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn signed_katz_outputs_still_refuse_nonfinite_unselected_scores() {
+        let call = FnxCallSpec::bind(
+            "CALL fnx.katz_centrality(beta => -2) YIELD vertex AS id",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        for delivery in [Delivery::Collected, Delivery::Retained] {
+            let admission =
+                ResultAdmission::for_delivery(&call, limits(), memory(), delivery).unwrap();
+            for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut encoded = EncodedRows::new(&call, 1, &admission).unwrap();
+                let values = KernelValues::Scores(vec![value]);
+                assert!(matches!(
+                    encoded.push_vertices(&call, &[VId(0)], &values, 0, &mut || Ok(())),
+                    Err(Error::Execution(ExecutionError::InvalidNumericResult))
+                ));
+                assert_eq!(encoded.emitted, 0);
             }
         }
     }

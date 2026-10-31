@@ -1232,10 +1232,10 @@ impl<V: Vfs> BufferedPartition<V> {
                     // Governed sources reserve only at the first winner, just
                     // as before: missing identities need no output workspace,
                     // and later history cannot outrun a memory refusal here.
-                    if let Some(charge) = output_charge.as_deref_mut() {
-                        if charge.is_none() {
-                            *charge = Some(self.reserve_scan_workspace(cx)?);
-                        }
+                    if let Some(charge) = output_charge.as_deref_mut()
+                        && charge.is_none()
+                    {
+                        *charge = Some(self.reserve_scan_workspace(cx)?);
                     }
                     result = Some(VertexPointLocator {
                         patch: at,

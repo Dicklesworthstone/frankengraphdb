@@ -161,6 +161,12 @@ impl PreparedChain {
         limit: usize,
     ) -> Result<Box<[PreparedGraphWriteChain]>, Fault> {
         chain_batch_limit(arguments.len(), limit)?;
+        // Reserve the complete batch-slot bill before allocating its capacity.
+        // Each later native binding retains its distinct existing work charge.
+        cx.checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(admission)?;
+        execution.work(arguments.len() as u64).map_err(admission)?;
         let mut chains = Vec::new();
         chains
             .try_reserve(arguments.len())
