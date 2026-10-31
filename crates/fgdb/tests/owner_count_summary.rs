@@ -455,6 +455,97 @@ fn exact_current_counts_do_not_grow_with_graph_and_reopen_rebuilds_before_reuse(
 }
 
 #[test]
+fn universal_endpoint_labels_follow_exact_counts_labels_deletes_and_pinned_cuts() {
+    let ((), report) = run_async_under_lab(0xc017_0027, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 0..16 {
+            seed.create_vertex(VId(id), vec![LabelId(1), LabelId(2)], vec![]);
+            seed.add_edge(EId(id), VId(id), VId(id), vec![]);
+        }
+        for eid in [u128::MAX - 1, u128::MAX] {
+            seed.add_edge(EId(eid), VId(0), VId(1), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let query = aggregate("MATCH (a:L)-[:R]->(b:M) RETURN COUNT(*) AS total");
+        let reverse = aggregate("MATCH (a:M)<-[:R]-(b:L) RETURN COUNT(*) AS total");
+        assert!(query.count_metadata_source().is_none());
+        let four_records = GqlQueryPolicy::new(4, 1, 1_000_000, 100_000);
+        for query in [&query, &reverse] {
+            let result = db
+                .execute_graph_aggregate_governed(&cx, query, four_records)
+                .unwrap();
+            assert_eq!(result.value[0].values()[0].as_count(), Some(18));
+            assert_eq!(result.rows.snapshot_records, 4);
+            assert!(matches!(
+                db.execute_graph_aggregate_governed(
+                    &cx, query, GqlQueryPolicy::new(3, 1, 1_000_000, 100_000),
+                ),
+                Err(GqlQueryError::Rows(error))
+                    if error.dimension == GqlBudgetDimension::SnapshotRecords && error.observed == 4
+            ));
+        }
+        let mut changed = WriteBatch::new(R);
+        changed.set_vertex_label(VId(1), LabelId(2), false);
+        changed.delete_vertex(VId(2));
+        db.write(&commit, changed).await.unwrap();
+        // The removed label excludes its loop and two parallel incoming edges;
+        // the vertex deletion independently retires the other loop.
+        let subset = db
+            .execute_graph_aggregate_governed(&cx, &query, policy())
+            .unwrap();
+        assert_eq!(subset.value[0].values()[0].as_count(), Some(14));
+        assert!(subset.rows.snapshot_records > 4);
+        assert!(matches!(
+            db.execute_graph_aggregate_governed(&cx, &query, four_records),
+            Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
+        assert_eq!(
+            pinned
+                .execute_graph_aggregate_governed(&cx, &query, four_records)
+                .unwrap()
+                .value[0]
+                .values()[0]
+                .as_count(),
+            Some(18)
+        );
+        assert!(matches!(
+            db.execute_graph_aggregate_governed_at(&cx, &query, CommitSeq(1), four_records),
+            Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
+        assert_eq!(
+            db.execute_graph_aggregate_governed_at(&cx, &query, CommitSeq(1), policy())
+                .unwrap()
+                .value[0]
+                .values()[0]
+                .as_count(),
+            Some(18)
+        );
+        let mut restored = WriteBatch::new(R);
+        restored.set_vertex_label(VId(1), LabelId(2), true);
+        db.write(&commit, restored).await.unwrap();
+        let result = db
+            .execute_graph_aggregate_governed(&cx, &query, four_records)
+            .unwrap();
+        assert_eq!(result.rows.snapshot_records, 4);
+        assert_eq!(result.value[0].values()[0].as_count(), Some(17));
+        let broken =
+            aggregate("MATCH (a:L)-[:R]->(b:M) RETURN 1 / (COUNT(*) - COUNT(*)) AS total LIMIT 0");
+        assert!(matches!(
+            db.execute_graph_aggregate_governed(&cx, &broken, four_records),
+            Err(GqlQueryError::Source(
+                GraphAggregateError::OutputExpression { .. }
+            ))
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn identity_counts_use_exact_metadata_and_preserve_historical_multiplicity() {
     let ((), report) = run_async_under_lab(0xc017_0024, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

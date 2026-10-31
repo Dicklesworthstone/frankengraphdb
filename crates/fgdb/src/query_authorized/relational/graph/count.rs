@@ -5,11 +5,12 @@
 use super::*;
 use fgdb_gql::GraphCountSource;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) struct Input {
     pub(super) records: u64,
     pub(super) examined: u64,
     pub(super) matching: u64,
+    pub(super) publication: Option<source::exact_counts::ExactCounts>,
 }
 
 /// Match Tables' source-selection boundary before either a cold fold or a
@@ -47,6 +48,9 @@ pub(super) fn admit(
     SCANS.with(|scans| scans.set(scans.get() + 1));
     let edges = matches!(source, GraphCountSource::Relation(_));
     let reusable = predicates.sees_all_incidence() && predicates.sees_all_fields();
+    let mut collector = (reusable && at == snapshot.frontier)
+        .then(|| snapshot.exact_counts.collector(edges))
+        .flatten();
     // Preserve the existing unrestricted warm source for later statements,
     // including queries that need its actual records. Scoped sources never
     // populate or consume this shared core.
@@ -75,6 +79,11 @@ pub(super) fn admit(
         } else {
             None
         };
+        if labels.is_some()
+            && let Some(collector) = &mut collector
+        {
+            collector.vertex(&row.labels, control)?;
+        }
         if let (Some(labels), Some(recording)) = (labels, &recording) {
             recording
                 .borrow_mut()
@@ -94,6 +103,9 @@ pub(super) fn admit(
                 {
                     examined += 1;
                     matching += u64::from(edge.relation == requested);
+                    if let Some(collector) = &mut collector {
+                        collector.edges(edge.relation, 1, control)?;
+                    }
                     if let Some(recording) = &recording {
                         recording
                             .borrow_mut()
@@ -120,5 +132,41 @@ pub(super) fn admit(
         records: tables.records,
         examined,
         matching,
+        publication: collector
+            .map(|collector| collector.finish(control))
+            .transpose()?,
     })
+}
+
+/// A full core is already an exact unrestricted population. Reuse its bounded
+/// per-relation totals and vertex coordinates, without walking edge history or
+/// replaying graph admission again. The caller has just replayed that core's
+/// live admission and still controls all additional metadata construction.
+pub(super) fn collect_core(
+    snapshot: &Snapshot,
+    core: &AdmittedCore,
+    edges: bool,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+) -> Result<Option<source::exact_counts::ExactCounts>, Fault> {
+    let Some(mut collector) = snapshot.exact_counts.collector(edges) else {
+        return Ok(None);
+    };
+    for &(_, patch, row) in &core.vertices {
+        collector.vertex(
+            &snapshot.patches[patch as usize][row as usize].labels,
+            control,
+        )?;
+    }
+    if edges && !core.edges.is_empty() {
+        let Some(positioned) = &core.positioned else {
+            return Ok(None);
+        };
+        for &relation in &positioned.relations {
+            let Some((_, count)) = core.count_source(GraphCountSource::Relation(relation)) else {
+                return Ok(None);
+            };
+            collector.edges(relation, count, control)?;
+        }
+    }
+    collector.finish(control).map(Some)
 }

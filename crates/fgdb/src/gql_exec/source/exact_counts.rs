@@ -35,6 +35,45 @@ impl ExactCounts {
         }
     }
 
+    /// Collect a complete unrestricted source without retaining its records.
+    /// A fully known generation needs no second builder. Oversized maps remain
+    /// unavailable until a topology change permits the usual bounded rebuild.
+    pub(crate) fn collector(&self, edges: bool) -> Option<CountCollector> {
+        let labels = self.label_builder();
+        let relations = edges.then(|| self.relation_builder()).flatten();
+        if self.vertices.get().is_some()
+            && (!edges || self.edges.get().is_some())
+            && labels.is_none()
+            && relations.is_none()
+        {
+            return None;
+        }
+        Some(CountCollector {
+            vertices: 0,
+            edges: edges.then_some(0),
+            labels,
+            relations,
+        })
+    }
+
+    /// Publish only a completed, privately built summary. The authorized host
+    /// retains it until final signed delivery succeeds; failures drop it.
+    /// Every value remains attached to its original immutable generation.
+    pub(crate) fn publish(&self, counts: Self) {
+        if let Some(vertices) = counts.vertices.into_inner() {
+            let _ = self.vertices.set(vertices);
+        }
+        if let Some(edges) = counts.edges.into_inner() {
+            let _ = self.edges.set(edges);
+        }
+        if let Some(relations) = counts.relations.into_inner() {
+            let _ = self.relations.set(relations);
+        }
+        if let Some(labels) = counts.labels.into_inner() {
+            let _ = self.labels.set(labels);
+        }
+    }
+
     pub(super) fn lookup<E>(
         &self,
         source: GraphCountSource,
@@ -239,6 +278,68 @@ impl ExactCounts {
     }
 }
 
+/// The caller must feed each live unrestricted vertex once and, for an edge
+/// source, every live edge occurrence. This builder never chooses a scope.
+pub(crate) struct CountCollector {
+    vertices: u64,
+    edges: Option<u64>,
+    labels: Option<LabelBuilder>,
+    relations: Option<RelationBuilder>,
+}
+
+impl CountCollector {
+    pub(crate) fn vertex<E>(
+        &mut self,
+        labels: &[LabelId],
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        control(SourceEvent::Work)?;
+        self.vertices += 1;
+        if let Some(builder) = &mut self.labels {
+            for label in labels {
+                control(SourceEvent::Work)?;
+                builder.observe(*label, control)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn edges<E>(
+        &mut self,
+        relation: RelationId,
+        count: u64,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        control(SourceEvent::Work)?;
+        let total = self.edges.as_mut().expect("the source admitted edges");
+        *total = total
+            .checked_add(count)
+            .expect("the complete in-memory edge population fits u64");
+        if let Some(builder) = &mut self.relations {
+            builder.observe_many(relation, count, control)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish<E>(
+        self,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<ExactCounts, E> {
+        let counts = ExactCounts::default();
+        counts.publish_vertices(self.vertices);
+        if let Some(edges) = self.edges {
+            counts.publish_edges(edges);
+        }
+        if let Some(builder) = self.relations {
+            counts.publish_relations(builder.finish(control)?);
+        }
+        if let Some(builder) = self.labels {
+            counts.publish_labels(builder.finish(control)?);
+        }
+        Ok(counts)
+    }
+}
+
 fn lookup_key<K: Ord, E>(
     index: &IndexMap<K, u64>,
     key: K,
@@ -305,7 +406,19 @@ impl<K: Ord + Clone> CountBuilder<K> {
         key: K,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<(), E> {
+        self.observe_many(key, 1, control)
+    }
+
+    fn observe_many<E>(
+        &mut self,
+        key: K,
+        count: u64,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
         if self.unavailable {
+            return Ok(());
+        }
+        if count == 0 {
             return Ok(());
         }
         let (mut low, mut high) = (0, self.rows.len());
@@ -316,7 +429,7 @@ impl<K: Ord + Clone> CountBuilder<K> {
                 std::cmp::Ordering::Less => low = mid + 1,
                 std::cmp::Ordering::Greater => high = mid,
                 std::cmp::Ordering::Equal => {
-                    if let Some(next) = self.rows[mid].1.checked_add(1) {
+                    if let Some(next) = self.rows[mid].1.checked_add(count) {
                         self.rows[mid].1 = next;
                     } else {
                         self.unavailable = true;
@@ -345,7 +458,7 @@ impl<K: Ord + Clone> CountBuilder<K> {
             control(SourceEvent::Work)?;
         }
         control(SourceEvent::Work)?;
-        self.rows.insert(low, (key, 1));
+        self.rows.insert(low, (key, count));
         Ok(())
     }
 

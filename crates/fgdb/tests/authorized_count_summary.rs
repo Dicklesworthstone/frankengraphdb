@@ -553,6 +553,214 @@ fn maintained_authorized_counts_admit_one_metadata_record_independent_of_graph_s
 }
 
 #[test]
+fn reopened_authorized_counts_publish_only_after_delivery_and_keep_full_scope_proofs() {
+    let ((), report) = run_async_under_lab(0xc161_0012, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let keys = || DatabaseKeys::new([0xc2; 32], NS, [0xc3; 32]);
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &dir, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=64 {
+            seed.create_vertex(VId(id), vec![A], vec![]);
+            seed.add_edge(EId(id), VId(id), VId(id), vec![]);
+        }
+        seed.add_edge(EId(u128::MAX), VId(1), VId(2), vec![]);
+        db.write(&commit, seed).await.unwrap();
+        let mut other = WriteBatch::new(S);
+        other.add_edge(EId(u128::MAX - 1), VId(2), VId(3), vec![]);
+        db.write(&commit, other).await.unwrap();
+        drop(db);
+        let mut db = Database::open_with_vfs(&commit, vfs.clone(), &dir, keys())
+            .await
+            .unwrap();
+        let authority = issuer();
+        let full = authority.issue_at(&grant(), 100).unwrap();
+        let query = prepare(R_EDGES);
+        let one = GqlQueryPolicy::new(1, 100, 1_000_000, 100_000);
+        let four = GqlQueryPolicy::new(4, 100, 1_000_000, 100_000);
+        let run = |db: &Database<MemVfs>,
+                   token: &CapabilityToken,
+                   query: &PreparedGraphAggregate,
+                   policy| {
+            db.execute_graph_aggregate_authorized(
+                &cx,
+                &authority,
+                token,
+                "main",
+                query,
+                policy,
+                || 100,
+            )
+        };
+        let unknown = |db: &Database<MemVfs>| {
+            assert!(matches!(
+                db.execute_graph_aggregate_governed(&cx, &query, one),
+                Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords
+            ));
+        };
+        unknown(&db);
+        let scoped = full
+            .attenuate(Restriction::Properties(Scope::only([])))
+            .unwrap();
+        assert_eq!(count(&run(&db, &scoped, &query, policy()).unwrap()), 65);
+        unknown(&db);
+        // A historical empty source is complete at its cut, never at the
+        // current generation. Its zero must not become current metadata.
+        assert_eq!(
+            count(
+                &db.execute_graph_aggregate_authorized_at(
+                    &cx,
+                    &authority,
+                    &full,
+                    "main",
+                    &query,
+                    CommitSeq(0),
+                    policy(),
+                    || 100,
+                )
+                .unwrap()
+            ),
+            0
+        );
+        unknown(&db);
+        let no_rows = full.attenuate(Restriction::MaxRows(0)).unwrap();
+        assert!(matches!(
+            run(&db, &no_rows, &query, policy()),
+            Err(QueryError::Authorization(
+                fgdb_warden::Error::LimitExceeded(fgdb_warden::LimitDimension::Rows)
+            ))
+        ));
+        unknown(&db);
+        // The failed query may retain an ordinary admitted core. Measure that
+        // same core path's final delivery checkpoint, then cancel and expire
+        // there; neither refusal may publish the privately completed counts.
+        let refused = footprint(&db, &cx, &no_rows, &query, policy(), None);
+        assert!(refused.0.is_err());
+        let cancelled = footprint(&db, &cx, &full, &query, policy(), Some(refused.1));
+        assert!(cancelled.0.is_err());
+        assert_eq!(cancelled.1, refused.1);
+        unknown(&db);
+        let mut samples = 0;
+        assert!(matches!(
+            db.execute_graph_aggregate_authorized(
+                &cx,
+                &authority,
+                &full,
+                "main",
+                &query,
+                policy(),
+                || {
+                    samples += 1;
+                    if samples == refused.2 { 10_000 } else { 100 }
+                },
+            ),
+            Err(QueryError::Authorization(fgdb_warden::Error::Expired))
+        ));
+        unknown(&db);
+        let broken = prepare("MATCH (a)-[:R]->(b) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0");
+        assert!(matches!(
+            run(&db, &full, &broken, policy()),
+            Err(QueryError::Aggregate(GqlQueryError::Source(
+                fgdb_gql::GraphAggregateError::OutputExpression { .. }
+            )))
+        ));
+        unknown(&db);
+        assert_eq!(count(&run(&db, &full, &query, policy()).unwrap()), 65);
+        // No owner count warmed these populations: successful authorized
+        // delivery published the complete source, including another relation.
+        for (text, expected) in [
+            (VERTICES, 64),
+            (R_EDGES, 65),
+            (S_EDGES, 1),
+            (ALL_EDGES, 66),
+            (A_VERTICES, 64),
+        ] {
+            let prepared = prepare(text);
+            let result = db
+                .execute_graph_aggregate_governed(&cx, &prepared, one)
+                .unwrap();
+            assert_eq!(count(&result.value), expected, "{text}");
+            assert_eq!(result.rows.snapshot_records, 1, "{text}");
+            assert_eq!(
+                count(&run(&db, &full, &prepared, one).unwrap()),
+                expected,
+                "{text}"
+            );
+        }
+        let labeled = prepare("MATCH (a:A)-[:R]->(b:A) RETURN COUNT(*) AS n");
+        let exact_nodes = full.attenuate(Restriction::MaxNodes(64)).unwrap();
+        assert_eq!(count(&run(&db, &exact_nodes, &labeled, four).unwrap()), 65);
+        let short_nodes = full.attenuate(Restriction::MaxNodes(63)).unwrap();
+        assert!(matches!(
+            run(&db, &short_nodes, &labeled, four),
+            Err(QueryError::Authorization(
+                fgdb_warden::Error::LimitExceeded(fgdb_warden::LimitDimension::Nodes)
+            ))
+        ));
+        for restriction in [
+            Restriction::Labels(Scope::only([A])),
+            Restriction::Relations(Scope::only([R])),
+            Restriction::Properties(Scope::only([])),
+        ] {
+            let scoped = full.attenuate(restriction).unwrap();
+            assert!(matches!(
+                run(&db, &scoped, &labeled, four),
+                Err(QueryError::Aggregate(GqlQueryError::Rows(error))) if error.dimension == GqlBudgetDimension::SnapshotRecords
+            ));
+            assert_eq!(count(&run(&db, &scoped, &labeled, policy()).unwrap()), 65);
+        }
+        let pinned = db.read_session().unwrap();
+        let mut change = WriteBatch::new(R);
+        change.delete_vertex(VId(1)); // one loop and its parallel outgoing edge
+        change.set_vertex_label(VId(2), A, false);
+        db.write(&commit, change).await.unwrap();
+        assert_eq!(count(&run(&db, &full, &query, one).unwrap()), 63);
+        assert!(matches!(
+            run(&db, &full, &labeled, four),
+            Err(QueryError::Aggregate(GqlQueryError::Rows(error))) if error.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
+        assert_eq!(count(&run(&db, &full, &labeled, policy()).unwrap()), 62);
+        assert_eq!(
+            count(
+                &pinned
+                    .execute_graph_aggregate_governed(&cx, &labeled, four)
+                    .unwrap()
+                    .value
+            ),
+            65
+        );
+        assert!(matches!(
+            db.execute_graph_aggregate_authorized_at(
+                &cx, &authority, &full, "main", &labeled, CommitSeq(2), four, || 100,
+            ),
+            Err(QueryError::Aggregate(GqlQueryError::Rows(error))) if error.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
+        let mut restored = WriteBatch::new(R);
+        restored.set_vertex_label(VId(2), A, true);
+        db.write(&commit, restored).await.unwrap();
+        assert_eq!(count(&run(&db, &full, &labeled, four).unwrap()), 63);
+        // Exercise the cold collector too: the earlier successful publication
+        // reused the core retained by a failed delivery. Reopening has neither
+        // that core nor process-local exact counts.
+        drop(db);
+        let cold = Database::open_with_vfs(&commit, vfs, &dir, keys())
+            .await
+            .unwrap();
+        unknown(&cold);
+        assert_eq!(count(&run(&cold, &full, &query, policy()).unwrap()), 63);
+        assert_eq!(count(&run(&cold, &full, &query, one).unwrap()), 63);
+        assert_eq!(count(&run(&cold, &full, &labeled, four).unwrap()), 63);
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn captured_identity_counts_keep_scoped_sources_and_historical_cuts() {
     let ((), report) = run_async_under_lab(0xc161_0008, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

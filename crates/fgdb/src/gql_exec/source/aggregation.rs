@@ -196,33 +196,33 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
     // events when no exact cardinality is available.
     let mut label_builder = None;
     let mut rebuild_edges = false;
-    if let (Some(snapshot), Some(source)) = (admitted.snapshot, aggregate.count_metadata_source())
+    if let Some(snapshot) = admitted.snapshot
         && as_of == snapshot.frontier
     {
-        let matching = snapshot
-            .exact_counts
-            .lookup(source, &mut |event| {
-                checkpoint().map_err(GqlQueryError::Interrupted)?;
-                usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
+        let count = aggregate
+            .prepare_count_metadata_with_universal_labels(|source| {
+                snapshot.exact_counts.lookup(source, &mut |event| {
+                    checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
+                })
             })
             .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
-        if let Some(matching) = matching {
-            let count = aggregate
-                .prepare_count_metadata(source, matching)
-                .expect("the source shape was checked before the exact metadata lookup");
+        if let Some(count) = count {
             let result = count.execute_governed_with_element_reads(
-                1,
+                usage.snapshot_records(),
                 elements,
                 usage.remaining(policy),
                 checkpoint,
             );
             return usage.finish(policy, result);
         }
-        if matches!(source, GraphCountSource::Label(_)) {
+        let source = aggregate.count_metadata_source();
+        if matches!(source, Some(GraphCountSource::Label(_))) {
             label_builder = snapshot.exact_counts.label_builder();
         }
-        rebuild_edges = source == GraphCountSource::Edges;
+        rebuild_edges = source == Some(GraphCountSource::Edges);
     }
+    let metadata_records = usage.snapshot_records();
     // The same MVCC visitors can admit a plain count without retaining their
     // winning rows a second time. Shape admission excludes every input reader,
     // filter and metadata projection; the original aggregate finalizer still
@@ -260,7 +260,7 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
             .prepare_count_summary(source, examined, matching)
             .expect("the checked source counts only its admitted live occurrences");
         let result = count.execute_governed_with_element_reads(
-            examined,
+            examined + metadata_records,
             elements,
             usage.remaining(policy),
             checkpoint,
@@ -286,6 +286,9 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
             usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
         })
         .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
+    // A refused universal-label proof can still have read exact metadata.
+    // Keep those records in the same allowance and reported source total.
+    admitted.snapshot_records += metadata_records;
     // A single-label count admits every live vertex, then evaluates its one
     // label predicate in GLA. Build from that complete admitted population,
     // never from matching output rows or an independently pruned candidate set.

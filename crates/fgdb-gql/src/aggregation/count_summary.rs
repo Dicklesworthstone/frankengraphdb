@@ -33,6 +33,7 @@ pub enum GraphCountSource {
 struct Shape {
     source: GraphCountSource,
     columns: usize,
+    universal_endpoint_labels: bool,
 }
 
 /// A source summary bound to one checked aggregate definition. It borrows
@@ -48,6 +49,10 @@ pub struct PreparedGraphCount<'query> {
 
 impl PreparedGraphAggregate {
     fn count_shape(&self, metadata: bool) -> Option<Shape> {
+        self.count_shape_with_labels(metadata, false)
+    }
+
+    fn count_shape_with_labels(&self, metadata: bool, endpoint_labels: bool) -> Option<Shape> {
         if self.computed_input.is_some()
             || self.relational_input.is_some()
             || !self.keys.is_empty()
@@ -84,6 +89,7 @@ impl PreparedGraphAggregate {
         let mut columns = None;
         let mut unique_columns = Vec::new();
         let mut edge_captures = Vec::new();
+        let mut universal_endpoint_labels = false;
         for operator in &operators[1..] {
             match operator {
                 GlaOperator::Select { slot, predicates }
@@ -96,6 +102,21 @@ impl PreparedGraphAggregate {
                         return None;
                     };
                     source = GraphCountSource::Label(*label);
+                }
+                GlaOperator::Select { slot, predicates }
+                    if endpoint_labels
+                        && metadata
+                        && columns.is_none()
+                        && matches!(
+                            source,
+                            GraphCountSource::Edges | GraphCountSource::Relation(_)
+                        )
+                        && slot.ordinal() < slots
+                        && predicates.iter().all(|predicate| {
+                            matches!(predicate, crate::algebra::VertexPredicate::HasLabel(_))
+                        }) =>
+                {
+                    universal_endpoint_labels = true;
                 }
                 GlaOperator::CapturePath {
                     capture,
@@ -172,7 +193,17 @@ impl PreparedGraphAggregate {
         }) {
             return None;
         }
-        Some(Shape { source, columns })
+        // Keep captured-edge inputs on their existing identified-source path.
+        // This additional proof admits only ordinary endpoint selections, so
+        // an unavailable proof falls back to the original binding visitor.
+        if universal_endpoint_labels && !edge_captures.is_empty() {
+            return None;
+        }
+        Some(Shape {
+            source,
+            columns,
+            universal_endpoint_labels,
+        })
     }
 
     /// Whether exact live-source counts can replace this definition's input
@@ -254,6 +285,51 @@ impl PreparedGraphAggregate {
             matching,
             metadata: true,
         })
+    }
+
+    /// Bind exact current-generation counts, optionally proving endpoint
+    /// label predicates universal over that same live vertex population.
+    ///
+    /// The host supplies trusted, unrestricted counts at one exact cut and
+    /// admits every lookup through its ordinary controls. Unknown counts or
+    /// a proper label subset return `None`; independent population sizes never
+    /// estimate an intersection. The complete shape is checked before the
+    /// first lookup, and property predicates, captures and extra hops retain
+    /// their ordinary sources. Output expressions and errors remain native.
+    pub fn prepare_count_metadata_with_universal_labels<E>(
+        &self,
+        mut lookup: impl FnMut(GraphCountSource) -> Result<Option<u64>, E>,
+    ) -> Result<Option<PreparedGraphCount<'_>>, E> {
+        let Some(shape) = self.count_shape_with_labels(true, true) else {
+            return Ok(None);
+        };
+        let Some(matching) = lookup(shape.source)? else {
+            return Ok(None);
+        };
+        if shape.universal_endpoint_labels {
+            let Some(vertices) = lookup(GraphCountSource::Vertices)? else {
+                return Ok(None);
+            };
+            for operator in self.input.plan().operators() {
+                if let GlaOperator::Select { predicates, .. } = operator {
+                    for predicate in predicates {
+                        let crate::algebra::VertexPredicate::HasLabel(label) = predicate else {
+                            unreachable!("the complete metadata shape checked every predicate")
+                        };
+                        if lookup(GraphCountSource::Label(*label))? != Some(vertices) {
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Some(PreparedGraphCount {
+            query: self,
+            shape,
+            examined: 0,
+            matching,
+            metadata: true,
+        }))
     }
 }
 

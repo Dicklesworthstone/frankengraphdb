@@ -109,6 +109,10 @@ struct Execution<'cx, 'permit, Clock> {
     // It is not authority: analytics proves complete visibility and request
     // compatibility under this fresh permit before inspecting the image.
     sealed: Option<Arc<analytics::sealed::Source>>,
+    // At most one completed count summary awaits final signed delivery. The
+    // immutable owner travels with it; a refusal or dropped execution cannot
+    // warm another generation or publish a partly admitted population.
+    pending_counts: Option<(Arc<Snapshot>, source::exact_counts::ExactCounts)>,
 }
 
 /// Signed work units charged in one Warden call while the allowance covers
@@ -137,6 +141,7 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             in_runs: false,
             beacon_indexes: None,
             sealed: None,
+            pending_counts: None,
         }
     }
     fn tracking(
@@ -337,7 +342,11 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
         let charged = self.permit.charge_rows_at(now, rows);
         charged.map_err(|error| self.refusal(error))?;
         self.checkpoint()?;
-        self.settle()
+        self.settle()?;
+        if let Some((snapshot, counts)) = self.pending_counts.take() {
+            snapshot.exact_counts.publish(counts);
+        }
+        Ok(())
     }
 }
 /// Run `phase` with its signed work charged in runs (`Execution::work_units`),

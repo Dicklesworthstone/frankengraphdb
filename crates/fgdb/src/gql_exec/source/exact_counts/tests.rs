@@ -33,6 +33,85 @@ fn cold_unknown_is_never_zero_and_relation_builder_preserves_multiplicity() {
 }
 
 #[test]
+fn complete_collection_publishes_all_populations_only_when_the_host_accepts_it() {
+    let counts = ExactCounts::default();
+    let mut collector = counts.collector(true).unwrap();
+    let mut control = |_| Ok::<_, ()>(());
+    for labels in [
+        vec![LabelId(1)],
+        vec![LabelId(1), LabelId(2)],
+        vec![LabelId(1)],
+    ] {
+        collector.vertex(&labels, &mut control).unwrap();
+    }
+    collector.edges(RelationId(8), 3, &mut control).unwrap();
+    collector.edges(RelationId(2), 1, &mut control).unwrap();
+    let completed = collector.finish(&mut control).unwrap();
+    for source in [
+        GraphCountSource::Vertices,
+        GraphCountSource::Edges,
+        GraphCountSource::Relation(RelationId(8)),
+        GraphCountSource::Label(LabelId(1)),
+    ] {
+        assert_eq!(
+            read(&counts, source),
+            None,
+            "a private completion is not publication"
+        );
+    }
+    counts.publish(completed);
+    for (source, expected) in [
+        (GraphCountSource::Vertices, 3),
+        (GraphCountSource::Edges, 4),
+        (GraphCountSource::Relation(RelationId(8)), 3),
+        (GraphCountSource::Relation(RelationId(2)), 1),
+        (GraphCountSource::Relation(RelationId(9)), 0),
+        (GraphCountSource::Label(LabelId(1)), 3),
+        (GraphCountSource::Label(LabelId(2)), 1),
+        (GraphCountSource::Label(LabelId(3)), 0),
+    ] {
+        assert_eq!(read(&counts, source), Some(expected));
+    }
+    assert!(counts.collector(true).is_none());
+    assert!(counts.collector(false).is_none());
+}
+
+#[test]
+fn every_collection_control_failure_leaves_the_public_generation_unknown() {
+    let run = |stop| {
+        let counts = ExactCounts::default();
+        let mut collector = counts.collector(true).unwrap();
+        let mut calls = 0;
+        let mut control = |_| {
+            calls += 1;
+            if stop == Some(calls) {
+                Err(calls)
+            } else {
+                Ok(())
+            }
+        };
+        let result = (|| {
+            collector.vertex(&[LabelId(2), LabelId(3)], &mut control)?;
+            collector.vertex(&[LabelId(3)], &mut control)?;
+            collector.edges(RelationId(7), 3, &mut control)?;
+            collector.edges(RelationId(1), 2, &mut control)?;
+            collector.finish(&mut control)
+        })();
+        assert_eq!(read(&counts, GraphCountSource::Vertices), None);
+        assert_eq!(read(&counts, GraphCountSource::Edges), None);
+        assert_eq!(read(&counts, GraphCountSource::Label(LabelId(3))), None);
+        (result, calls)
+    };
+    let (completed, calls) = run(None);
+    assert!(completed.is_ok());
+    for stop in 1..=calls {
+        let (result, observed) = run(Some(stop));
+        assert!(matches!(result, Err(at) if at == stop));
+        assert_eq!(observed, stop);
+    }
+}
+
+#[test]
 fn cold_builder_has_a_fixed_relation_bound_and_refuses_before_allocation() {
     let mut builder = RelationBuilder::default();
     assert_eq!(builder.observe(RelationId(1), &mut |_| Err(7)), Err(7));

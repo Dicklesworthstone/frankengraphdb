@@ -187,31 +187,34 @@ fn visit_at<Clock: FnMut() -> u64>(
             && scope.sees_all_incidence()
             && scope.sees_all_fields()
         {
-            if let Some(source) = query.count_metadata_source() {
-                let counts = snapshot
-                    .exact_counts
-                    .lookup_with_vertices(source, &mut |event| {
-                        execution
-                            .borrow_mut()
-                            .checkpoint()
-                            .map_err(GqlQueryError::Interrupted)?;
-                        usage.observe::<ReadError, QueryError>(policy, event)
-                    })
-                    .map_err(|error| {
-                        error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
-                    })?;
-                if let Some((vertices, matching)) = counts {
-                    execution
-                        .borrow_mut()
-                        .nodes(vertices)
-                        .map_err(GqlQueryError::Interrupted)?;
-                    let count = query
-                        .prepare_count_metadata(source, matching)
-                        .expect("the exact metadata source shape was checked before admission");
-                    Some((1, count))
-                } else {
-                    None
-                }
+            let mut vertices = None;
+            let count = query
+                .prepare_count_metadata_with_universal_labels(|source| {
+                    snapshot
+                        .exact_counts
+                        .lookup_with_vertices(source, &mut |event| {
+                            execution
+                                .borrow_mut()
+                                .checkpoint()
+                                .map_err(GqlQueryError::Interrupted)?;
+                            usage.observe::<ReadError, QueryError>(policy, event)
+                        })
+                        .map(|counts| {
+                            counts.map(|(population, matching)| {
+                                vertices = Some(population);
+                                matching
+                            })
+                        })
+                })
+                .map_err(|error| {
+                    error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
+                })?;
+            if let Some(count) = count {
+                execution
+                    .borrow_mut()
+                    .nodes(vertices.expect("a successful metadata input read its live population"))
+                    .map_err(GqlQueryError::Interrupted)?;
+                Some((usage.snapshot_records(), count))
             } else {
                 None
             }
@@ -223,6 +226,8 @@ fn visit_at<Clock: FnMut() -> u64>(
         // transcript; a cold or scoped source admits the same winners without
         // an edge table. A core without a bounded count summary keeps the
         // ordinary cached visitor rather than rescanning its history.
+        let metadata_records = usage.snapshot_records();
+        let mut publication = None;
         let count_summary = if metadata.is_some() {
             metadata
         } else if let Some(source) = query.count_summary_source() {
@@ -290,6 +295,24 @@ fn visit_at<Clock: FnMut() -> u64>(
                         records: core.records,
                         examined,
                         matching,
+                        publication: if at == snapshot.frontier
+                            && scope.sees_all_incidence()
+                            && scope.sees_all_fields()
+                        {
+                            count::collect_core(
+                                snapshot,
+                                &core,
+                                matches!(source, fgdb_gql::GraphCountSource::Relation(_)),
+                                &mut control,
+                            )
+                            .map_err(|error| {
+                                error.map_source(|error| {
+                                    GraphAggregateError::Source(GqlError::Read(error))
+                                })
+                            })?
+                        } else {
+                            None
+                        },
                     })
                 } else {
                     None
@@ -311,10 +334,11 @@ fn visit_at<Clock: FnMut() -> u64>(
                 )
             };
             counts.map(|counts| {
+                publication = counts.publication;
                 let count = query
                     .prepare_count_summary(source, counts.examined, counts.matching)
                     .expect("the checked source counts only its admitted live occurrences");
-                (counts.records, count)
+                (counts.records + metadata_records, count)
             })
         } else {
             None
@@ -357,7 +381,13 @@ fn visit_at<Clock: FnMut() -> u64>(
             if let Some(error) = element_failure.borrow_mut().take() {
                 return Err(GqlQueryError::Interrupted(error));
             }
-            return usage.finish(policy, result);
+            let result = usage.finish(policy, result);
+            if result.is_ok()
+                && let Some(counts) = publication
+            {
+                execution.borrow_mut().pending_counts = Some((Arc::clone(snapshot), counts));
+            }
+            return result;
         }
         if !visits_bindings(query) {
             // A COUNT of a captured edge can use exact metadata, but its
@@ -405,6 +435,9 @@ fn visit_at<Clock: FnMut() -> u64>(
         .map_err(|error| {
             error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
         })?;
+        // Failed universal-label proofs are real metadata reads. Their record
+        // charges remain in this query when the original source is selected.
+        tables.records += metadata_records;
         let remaining = usage.remaining(policy);
         let checkpoint = ElementCheckpoint {
             checkpoint: WorkCheckpoint(execution),

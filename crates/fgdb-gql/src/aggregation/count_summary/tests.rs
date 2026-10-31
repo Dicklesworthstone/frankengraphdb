@@ -456,6 +456,137 @@ fn only_one_vertex_label_can_supply_exact_metadata() {
 }
 
 #[test]
+fn universal_endpoint_labels_use_exact_population_proofs_and_the_native_finalizer() {
+    let vertices = [VId(0), VId(17), VId(u128::MAX)];
+    let edges = [
+        (vertices[0], RelationId(1), vertices[1]),
+        (vertices[0], RelationId(1), vertices[1]),
+        (vertices[1], RelationId(1), vertices[1]),
+        (vertices[2], RelationId(2), vertices[0]),
+    ];
+    let policy = GqlQueryPolicy::new(100, 100, 100_000, 100_000);
+    for text in [
+        "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS n",
+        "MATCH (a:L)<-[:R]-(b:M) RETURN COUNT(*) AS n,COUNT(b) AS again",
+        "MATCH (a:L:M)-[]->(b:L) RETURN COUNT(a) AS n HAVING COUNT(a) > 0",
+        "MATCH (a:L)-[:R]->(b) RETURN COUNT(*) AS n ORDER BY n LIMIT 0",
+    ] {
+        let query = query(text);
+        assert!(query.count_metadata_source().is_none(), "{text}");
+        let mut reads = Vec::new();
+        let count = query
+            .prepare_count_metadata_with_universal_labels(|source| {
+                reads.push(source);
+                Ok::<_, ()>(Some(match source {
+                    GraphCountSource::Vertices | GraphCountSource::Label(_) => 3,
+                    GraphCountSource::Edges => 4,
+                    GraphCountSource::Relation(RelationId(1)) => 3,
+                    GraphCountSource::Relation(_) => 1,
+                }))
+            })
+            .unwrap()
+            .unwrap();
+        assert!(reads.contains(&GraphCountSource::Vertices));
+        assert!(reads.contains(&GraphCountSource::Label(LabelId(1))));
+        let expected = query
+            .execute_governed(
+                7,
+                vertices,
+                edges,
+                |_, predicates| -> Result<bool, ()> {
+                    assert!(predicates.iter().all(|predicate| matches!(
+                        predicate,
+                        crate::algebra::VertexPredicate::HasLabel(LabelId(1) | LabelId(2))
+                    )));
+                    Ok(true)
+                },
+                |_, _| -> Result<Option<&fgdb_types::CanonicalPropertyValue>, ()> {
+                    panic!("identity counts do not read input properties")
+                },
+                policy,
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        let actual = count
+            .execute_governed::<(), ()>(reads.len() as u64, policy, || Ok(()))
+            .unwrap();
+        assert_eq!(actual.value, expected.value, "{text}");
+        assert_eq!(actual.rows.snapshot_records, reads.len() as u64);
+    }
+}
+
+#[test]
+fn endpoint_label_metadata_refuses_unknown_subsets_and_unsupported_intersections() {
+    let labeled = query("MATCH (a:L)-[:R]->(b:M) RETURN COUNT(*) AS n");
+    for missing in [
+        GraphCountSource::Relation(RelationId(1)),
+        GraphCountSource::Vertices,
+        GraphCountSource::Label(LabelId(1)),
+        GraphCountSource::Label(LabelId(2)),
+    ] {
+        assert!(
+            labeled
+                .prepare_count_metadata_with_universal_labels(|source| {
+                    Ok::<_, ()>((source != missing).then_some(3))
+                })
+                .unwrap()
+                .is_none()
+        );
+    }
+    for label_count in [0, 1, 2, 4] {
+        assert!(
+            labeled
+                .prepare_count_metadata_with_universal_labels(|source| {
+                    Ok::<_, ()>(Some(if source == GraphCountSource::Label(LabelId(2)) {
+                        label_count
+                    } else {
+                        3
+                    }))
+                })
+                .unwrap()
+                .is_none()
+        );
+    }
+    for text in [
+        "MATCH (a:L)-[:R]->(b) WHERE a.p = 1 RETURN COUNT(*) AS n",
+        "MATCH (a:L)-[:R]-(b:L) RETURN COUNT(*) AS n",
+        "MATCH (a:L)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS n",
+        "MATCH (a:L)-[:R]->(a) RETURN COUNT(*) AS n",
+        "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(DISTINCT b) AS n",
+        "MATCH (a:L)-[r:R]->(b:L) RETURN COUNT(r) AS n",
+    ] {
+        let prepared = query(text);
+        assert!(
+            prepared
+                .prepare_count_metadata_with_universal_labels(|_| -> Result<Option<u64>, ()> {
+                    panic!("unsupported complete shape must refuse before metadata: {text}")
+                })
+                .unwrap()
+                .is_none(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn endpoint_label_proofs_stop_at_each_lookup_error() {
+    let query = query("MATCH (a:L)-[:R]->(b:M) RETURN COUNT(*) AS n");
+    for stop in 1..=4 {
+        let mut reads = 0;
+        let result = query.prepare_count_metadata_with_universal_labels(|_| {
+            reads += 1;
+            if reads == stop {
+                Err(stop)
+            } else {
+                Ok(Some(3))
+            }
+        });
+        assert!(matches!(result, Err(at) if at == stop));
+        assert_eq!(reads, stop);
+    }
+}
+
+#[test]
 fn wildcard_directed_counts_admit_only_exact_metadata() {
     for text in [
         "MATCH ()-[r]->() RETURN COUNT(*) AS n",
