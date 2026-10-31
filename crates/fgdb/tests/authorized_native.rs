@@ -2284,3 +2284,107 @@ fn unrestricted_capabilities_admit_only_an_index_bound_closure() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn temporal_aggregate_relations_share_historical_scope_and_one_live_permit() {
+    let ((), report) = run_async_under_lab(0x5ec0_4017, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = database(&commit).await;
+        let issuer = authority(417);
+        let mut scoped = grant();
+        scoped.limits.max_rows = 1;
+        let token = issuer.issue_at(&scoped, 100).unwrap();
+        let basis = db.frontier().unwrap();
+        let old = GqlParameters::new().with_uint64("at", basis.0).unwrap();
+        let statements = [
+            (
+                "UNWIND [1,2] AS copies MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at \
+                 RETURN COUNT(*) AS rows,SUM(n.p) AS total,COUNT(n.hidden) AS hidden",
+                (4, 80),
+                (2, 60),
+            ),
+            (
+                "CALL fnx.weakly_connected_components({relations:['R'],parallel:'collapse'}) \
+                 YIELD vertex AS a \
+                 CALL fnx.weakly_connected_components({relations:['R'],parallel:'collapse'}) \
+                 YIELD vertex AS b MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at \
+                 WHERE a = b \
+                 RETURN COUNT(*) AS rows,SUM(a.p) AS total,COUNT(a.hidden) AS hidden",
+                (2, 40),
+                (1, 30),
+            ),
+        ];
+        let queries: Vec<_> = statements
+            .iter()
+            .map(|(text, _, _)| PreparedNativeRead::prepare(text, &old, symbols).unwrap())
+            .collect();
+        for query in &queries {
+            assert_eq!(query.facade_class(), NativeReadClass::TemporalAggregate);
+        }
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_label(VId(1), LabelId(1), false);
+        let after = db.write(&commit, change).await.unwrap();
+        let current = GqlParameters::new().with_uint64("at", after.0).unwrap();
+        for compact in [false, true] {
+            if compact {
+                db.compact(&commit).await.unwrap();
+            }
+            for ((text, before, now), query) in statements.iter().zip(&queries) {
+                for (params, (count, sum)) in [(&old, *before), (&current, *now), (&old, *before)] {
+                    let expected = native_rows(
+                        &["rows", "total", "hidden"],
+                        vec![vec![
+                            QueryValue::Count(count),
+                            QueryValue::Integer(sum),
+                            QueryValue::Count(0),
+                        ]],
+                    );
+                    assert_eq!(
+                        query
+                            .execute_authorized(
+                                &db, &cx, &issuer, &token, BRANCH, params, policy(), || 100
+                            )
+                            .unwrap(),
+                        expected,
+                        "{text}"
+                    );
+                    assert_eq!(
+                        db.query_authorized(
+                            &cx, &issuer, &token, BRANCH, text, params, symbols, policy(), || 100
+                        )
+                        .unwrap(),
+                        expected,
+                        "{text}"
+                    );
+                }
+            }
+        }
+
+        let no_nodes = token.attenuate(Restriction::MaxNodes(0)).unwrap();
+        let future = GqlParameters::new().with_uint64("at", after.0 + 1).unwrap();
+        for query in &queries {
+            assert!(matches!(
+                query.execute_authorized(
+                    &db, &cx, &issuer, &no_nodes, BRANCH, &old, policy(), || 100
+                ),
+                Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Nodes)))
+            ));
+            assert!(matches!(
+                query.execute_authorized(
+                    &db, &cx, &issuer, &token, BRANCH, &future, policy(), || 100
+                ),
+                Err(QueryError::Read(ReadError::BeyondFrontier { asked, frontier }))
+                    if asked.0 == after.0 + 1 && frontier == after
+            ));
+            assert!(matches!(
+                query.execute_authorized(
+                    &db, &cx, &issuer, &token, BRANCH, &old, policy(), || 1000
+                ),
+                Err(QueryError::Authorization(Error::Expired))
+            ));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

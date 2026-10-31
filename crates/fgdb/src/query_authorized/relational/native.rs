@@ -154,19 +154,31 @@ fn native_at<Clock: FnMut() -> u64>(
         }
         PreparedNativeRead::TemporalAggregate(prepared) => {
             let query = prepared
-                .bind_parameters(params)
+                .bind_source_parameters(params)
                 .map_err(QueryError::TemporalText)?;
             snapshot
                 .check_frontier(query.as_of())
                 .map_err(QueryError::Read)?;
-            let rows = graph::graph_at(
-                snapshot,
-                query.as_of(),
-                query.aggregate(),
-                scope,
-                execution,
-                policy,
-            )?;
+            // Every historical source retains the same masked projection,
+            // live permit and cumulative allowance as an ordinary pipeline.
+            let rows = match query.aggregate() {
+                fgdb_gql::TemporalAggregatePlan::Graph(aggregate) => graph::graph_at(
+                    snapshot,
+                    query.as_of(),
+                    aggregate,
+                    scope,
+                    execution,
+                    policy,
+                )?,
+                fgdb_gql::TemporalAggregatePlan::Relation(aggregate) => aggregate_at(
+                    snapshot,
+                    query.as_of(),
+                    aggregate,
+                    scope,
+                    execution,
+                    policy,
+                )?,
+            };
             Ok(aggregates(
                 prepared.columns().to_vec(),
                 prepared.output_slots(),
