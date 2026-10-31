@@ -673,6 +673,22 @@ tracked separately as `fgdb-epic-verif-phi.4`. The review-only candidate remains
 outside the project, the canonical gate is unchanged, and the subsequent GQL
 repairs require fresh static coverage before any calibration can land.
 
+The subsequent `b77948305` refresh covers all2,429 Rust files and33 Cargo
+inputs, retaining the exact277 critical identities. Independent review checks
+every source/tool hash, all32 partition receipts and the actual findings,
+then reproduces23 native-parser controls. The separately reviewed
+`fgdb-epic-verif-phi.4` maintenance now updates only the two exact calibration
+tables and their provenance comments. It admits the measured modern ledger;
+it rejects the original-tool918 ledger, increases and decreases, unknown or
+malformed classes, incomplete scans and appended actual runtime-panic or
+credential-comparison findings. Historical classifier changes earn no product
+fix credit, and the generic-token miss remains a failure of scanner coverage.
+Bash syntax, ShellCheck and the complete `check.sh --self-test` all exit0.
+All32 partitions must still run afresh in the mandatory chain. The original
+`phi.3` no-threshold-change criterion is unchanged and not discharged by this
+separate maintenance. The whole-workspace Rust run began clean on `e5389e9e8`;
+the later Bash edit means that warm run cannot be the final exact-tree proof.
+
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,
 not a new gate or capability. Retire it from active use when these work units

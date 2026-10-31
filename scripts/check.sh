@@ -1611,10 +1611,27 @@ run_ubs() {
 # - guarded unreachable!: write_txn_parts/native_query.rs ("symbol domain
 #   checked", twice), gql_exec/source/numeric.rs ("only numeric operands
 #   enter numeric bounds"), and merge.rs's two.
+# fgdb-epic-verif-phi.4: independently reviewed calibration maintenance.
+# Hash-bound ac501add controls on identical Oct5 31d4b198 source reproduce
+# original v5.4.17 command/comparison/panic 1/16/901 versus corrected 1/11/117:
+# 784 panic sites move to warning; five comparison reports disappear, unfixed.
+# Corrected initial c30a48d0 is 1/37/217 plus 3 header and 2 randomness.
+# b77948305 is 1/38/232 plus 3 header and 3 randomness, unchanged versus d0f:
+# one fresh GQL, one unchanged d0f fgdb and 30 unchanged ae393 partition receipts.
+# Initial-to-current adds 15 test-helper panics, one test error comparison
+# and one temporary-path nonce. Per-site audits do not establish bug absence.
+# Receipts: fgdb-ubs-current-b77948305-lilacpelican-v1 and three-source controls.
+# Generic token-byte equality remains a missed control in the recorded evidence.
+# This admits the measured current ledger and rejects the original-tool 918,
+# both directions of count drift, unknown classes and incomplete scans.
+# Actual added runtime-panic and auth-token findings still fail the ratchet.
+# A full gate must freshly execute all partitions; reuse is review evidence only.
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=1"
-  "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=901"
+  "Secret/token comparisons without timing-safe equality=38"
+  "panic!/unreachable!/todo!/unimplemented!=232"
+  "Request-derived response headers=3"
+  "Security-sensitive non-crypto randomness=3"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1633,8 +1650,10 @@ UBS_CRITICAL_BASELINE=(
 # Still true of v5.4.17 (none of the 30 partition transcripts print it).
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Command::new executable from untrusted-looking value=1"
-  "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=901"
+  "Secret/token comparisons without timing-safe equality=38"
+  "panic!/unreachable!/todo!/unimplemented!=232"
+  "Request-derived response headers=3"
+  "Security-sensitive non-crypto randomness=3"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new
