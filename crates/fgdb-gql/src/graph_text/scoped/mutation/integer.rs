@@ -2055,11 +2055,18 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         let Some(column) = self.routing_row(columns).and_then(|schema| {
-            schema[..self.visible_width(schema)]
-                .iter()
-                .position(|(binding, kind)| {
-                    binding.text == name && *kind == crate::GraphSetColumnType::Path
-                })
+            // A resolved scope lends a separate domain table. Its aliases
+            // must not inherit a graph boundary's visibility merely because
+            // the two unrelated tables happen to have the same width. The
+            // resolver still admits each actual name and column below.
+            let visible = if matches!(columns, ExpressionColumns::Row(_)) {
+                self.visible_width(schema)
+            } else {
+                schema.len()
+            };
+            schema[..visible].iter().position(|(binding, kind)| {
+                binding.text == name && *kind == crate::GraphSetColumnType::Path
+            })
         }) else {
             return Ok(false);
         };

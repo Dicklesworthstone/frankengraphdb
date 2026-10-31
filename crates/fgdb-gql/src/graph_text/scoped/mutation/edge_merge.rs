@@ -176,14 +176,19 @@ impl<'a> Parser<'a> {
         Ok((row, unbound, at, endpoints))
     }
 
-    /// A plain SET may also write carried endpoints. Keep that existing
-    /// mutation family intact unless every assignment targets this edge.
-    fn edge_only_set(&self, relationship: Option<Name<'a>>) -> Result<bool, GraphPatternTextError> {
+    /// Keep a common SET with its per-occurrence MERGE actions when every
+    /// target is the merged element. Other targets and whole-element RHS
+    /// reads retain the native mutation owner and its post-write reader.
+    pub(super) fn merge_only_set(
+        &self,
+        relationship: Option<Name<'a>>,
+    ) -> Result<bool, GraphPatternTextError> {
         let Some(relationship) = relationship.filter(|_| self.is_word("SET")) else {
             return Ok(false);
         };
         let mut lexer = self.lexer.clone();
         let (mut depth, mut target, mut property) = (0usize, true, false);
+        let mut previous = None;
         loop {
             let token = lexer.next()?;
             if target {
@@ -191,13 +196,24 @@ impl<'a> Parser<'a> {
                     return Ok(false);
                 }
                 let accessor = lexer.next()?;
-                if !matches!(accessor.kind, TokenKind::Punct(b'.' | b'+')) {
+                if !matches!(accessor.kind, TokenKind::Punct(b'.' | b'+' | b'=')) {
                     return Ok(false);
                 }
                 target = false;
                 property = matches!(accessor.kind, TokenKind::Punct(b'.'));
+                previous = Some(accessor.kind);
                 continue;
             } else {
+                // Upsert expressions have an explicit current-property frame,
+                // but the merged identity is not one of their carried cells.
+                // `r.p` fits that frame; `properties(r)` and `r += r` need the
+                // broader native reader. A map key named `r` is not a read.
+                if matches!(token.kind, TokenKind::Word(word) if word == relationship.text)
+                    && !property
+                    && !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.' | b':'))
+                {
+                    return Ok(false);
+                }
                 match token.kind {
                     TokenKind::End | TokenKind::Punct(b';') => return Ok(true),
                     TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
@@ -206,6 +222,9 @@ impl<'a> Parser<'a> {
                     TokenKind::Word(word)
                         if depth == 0
                             && !property
+                            && !matches!(previous, Some(TokenKind::Word(prior))
+                                if prior.eq_ignore_ascii_case("STARTS")
+                                    || prior.eq_ignore_ascii_case("ENDS"))
                             && [
                                 "ON", "RETURN", "WITH", "CREATE", "MERGE", "SET", "REMOVE",
                                 "DELETE", "DETACH", "MATCH", "UNWIND", "OPTIONAL",
@@ -219,6 +238,7 @@ impl<'a> Parser<'a> {
                 }
             }
             property = matches!(token.kind, TokenKind::Punct(b'.'));
+            previous = Some(token.kind);
         }
     }
 
@@ -1168,7 +1188,7 @@ impl PreparedGraphEdgeMergeText {
         // existing terminal mutation step. An anonymous relationship's ON
         // clauses can assign only the vertices the row carries: its
         // placeholder name is empty, which no identifier matches.
-        let edge_set = parser.edge_only_set(parsed.relationship)?;
+        let edge_set = parser.merge_only_set(parsed.relationship)?;
         if parser.chain_write && (parser.is_word("ON") || edge_set) {
             let relationship = parsed.relationship.unwrap_or(Name {
                 text: "",

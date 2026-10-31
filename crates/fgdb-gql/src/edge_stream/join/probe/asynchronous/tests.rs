@@ -591,11 +591,7 @@ fn all_async_consumers_admit_correlated_path_support_but_keep_other_source_refus
     assert!(AsyncEdgeJoinPlan::compile(accepted.plan()).is_ok());
     assert!(AsyncEdgeJoinPlan::compile_aggregate(accepted.plan()).is_ok());
     assert!(AsyncEdgeJoinPlan::compile_sort_input(accepted.plan()).is_ok());
-    for body in [
-        "MATCH (c)",
-        "MATCH (c)-[:S*1..2]->(d)",
-        "MATCH p = (b)-[:S*1..2]->(c) WHERE length(p)=2",
-    ] {
+    for body in ["MATCH (c)", "MATCH (c)-[:S*1..2]->(d)"] {
         let query = definition(&format!(
             "MATCH (a)-[r:R]->(b) WHERE EXISTS {{ {body} }} RETURN r,a,b"
         ));
@@ -603,6 +599,23 @@ fn all_async_consumers_admit_correlated_path_support_but_keep_other_source_refus
         assert!(AsyncEdgeJoinPlan::compile_aggregate(query.plan()).is_err());
         assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
     }
+    // Named path output is rejected by this native EXISTS grammar before an
+    // asynchronous source can be prepared. Preserve the original definition
+    // and assert that earlier typed boundary rather than unwrapping it.
+    let error = PreparedGraphText::prepare(
+        "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH p = (b)-[:S*1..2]->(c) \
+         WHERE length(p)=2 } RETURN r,a,b",
+        |kind, name| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
+            _ => None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::GraphPatternTextErrorKind::Expected("path binding in a required or OPTIONAL MATCH"),
+    );
     for text in [
         "MATCH (a)-[r:R]->(b)-[:S*1..2]->(c) RETURN r,a,b,c",
         "MATCH p = (a)-[:R*1..2]->(b) RETURN p",

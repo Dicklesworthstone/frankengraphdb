@@ -748,9 +748,32 @@ fn complete_input_precedes_limit_distinct_and_hidden_sort_keys() {
 
 #[test]
 fn unsupported_definitions_refuse_before_a_zero_limit_or_source() {
+    // shortestPath now has a real AnyShortest owner. Keep its original
+    // LIMIT 0 input, and execute the complete input before that outer page.
+    let logical = prepared("MATCH p = shortestPath((a)-[:R*1..3]->(b)) RETURN p LIMIT 0");
+    let (plan, tail) = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap();
+    assert_eq!(plan.search, GraphWalkSearch::AnyShortest);
+    assert_eq!(plan.maximum_hops(), 3);
+    assert_eq!(tail.count(), Some(0));
+    let source = Source::new(1);
+    let counts = source.counts.clone();
+    let mut cursor = AsyncGraphWalkCursor::new(source, plan, wide(), ok);
+    let mut rows = Vec::new();
+    while let Some(row) = run(cursor.next()) {
+        rows.push(row.unwrap().values().to_vec());
+    }
+    assert_eq!(
+        rows,
+        vec![vec![GraphValue::Path(GraphPath::new(
+            IDS[0],
+            vec![(EId(0), IDS[1])].into(),
+        ))]],
+    );
+    assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+    assert_eq!(counts.roots.load(Ordering::SeqCst), IDS.len() + 1);
+    assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
     for text in [
         "MATCH p = (a)-[:R*]->(b) RETURN p LIMIT 0",
-        "MATCH p = shortestPath((a)-[:R*1..3]->(b)) RETURN p LIMIT 0",
         "MATCH p = ALL SHORTEST (a)-[:R*0..3]->(b) RETURN p LIMIT 0",
         "MATCH p = (a)-[:R*1..2]->(b)-[:R]->(c) RETURN p LIMIT 0",
         "MATCH (a)-[:R*0..2 {p:[]}]->(b) RETURN b LIMIT 0",

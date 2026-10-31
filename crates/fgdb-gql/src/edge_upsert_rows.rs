@@ -784,8 +784,13 @@ mod tests {
         assert!(!headed.returns_rows());
         for (tail, upsert) in [
             ("SET r.p=3", true),
+            ("SET r={p:r.q}", true),
             ("SET a.p=3", false),
             ("SET r.p=3,a.q=4", false),
+            // A complete copy of the merged element needs the native
+            // post-write reader, not an upsert's current-property slots.
+            ("SET r+=r", false),
+            ("SET r=properties(r)", false),
         ] {
             let program = bound(
                 &format!("MERGE (a:A {{p:1}}) MERGE (b:A {{p:2}}) MERGE (a)-[r:R]->(b) {tail}"),

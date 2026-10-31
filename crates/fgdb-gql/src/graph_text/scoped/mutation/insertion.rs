@@ -303,8 +303,9 @@ impl<'a> Parser<'a> {
         inputs: &mut Vec<Projection<'a>>,
         imports: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ReadValueTemplate, crate::GraphSetTextError> {
-        // A read scope: an imported map's `row.key` reads its entry.
-        self.read_resolved_value(
+        // A complete write value, including comparisons and Boolean
+        // operators. An imported map's `row.key` still reads its entry.
+        self.read_resolved_item(
             &mut |parser| {
                 // After WITH, `a.key` of an element the row carries is that
                 // row's hidden read (fgdb-sl4ym).
@@ -2133,6 +2134,23 @@ mod graph_row_source_tests {
 
     fn prepare(text: &str) -> PreparedGraphInsertText {
         PreparedGraphInsertText::prepare(text, RelationId(7), symbols).unwrap()
+    }
+
+    #[test]
+    fn whole_write_values_keep_boolean_operators_inside_property_and_clause_boundaries() {
+        for text in [
+            "WITH 'abc' AS x CREATE (:Copy {p:x STARTS WITH 'a'}) \
+             WITH x CREATE (:Copy {p:x ENDS WITH 'c'}) RETURN x",
+            "WITH NULL AS x CREATE (:Copy {p:x STARTS WITH 'a'}) \
+             WITH x CREATE (:Copy {p:x ENDS WITH 'c'}) RETURN x",
+            "MATCH (n:Source) FOREACH (x IN ['a'] | \
+             SET n.p=x STARTS WITH 'a' SET n.p=x ENDS WITH 'a') RETURN n",
+        ] {
+            crate::PreparedGraphWriteChainText::prepare(text, RelationId(7), symbols)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+                .bind_parameters(&GqlParameters::new())
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        }
     }
 
     #[test]

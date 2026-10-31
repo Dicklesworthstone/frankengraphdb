@@ -209,6 +209,39 @@ impl<'a> Parser<'a> {
         distinct: bool,
     ) -> Result<Option<ReadStageTemplate>, GraphSetTextError> {
         let visible = projection.len();
+        // The resolver below owns actual column positions and DISTINCT
+        // admission. Scalar routing also needs these domains: length(route)
+        // of a returned Path uses the existing row-path value program rather
+        // than looking for a graph binding named route. Returned aliases own
+        // their names, including aliases that shadow an earlier path.
+        let types: Vec<_> = schema.iter().map(|(_, kind)| *kind).collect();
+        let mut routing = schema[..self.visible_width(schema)].to_vec();
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        loop {
+            if let TokenKind::Word(word) | TokenKind::DelimitedKeyword(word) = token.kind
+                && let Some(output) = projection.iter().find(|output| output.name == word)
+            {
+                let kind = output.value.column_type(&types, &self.syntax.parameters);
+                if let Some((_, previous)) = routing.iter_mut().find(|(name, _)| name.text == word)
+                {
+                    *previous = kind;
+                } else {
+                    routing.push((
+                        Name {
+                            text: word,
+                            at: token.at,
+                        },
+                        kind,
+                    ));
+                }
+            }
+            if matches!(token.kind, TokenKind::End) {
+                break;
+            }
+            token = lexer.next()?;
+        }
+        let previous = self.resolved_row.replace(routing);
         let page = self.expression_page(|parser| {
             parser.read_resolved_value(
                 &mut |parser| {
@@ -275,7 +308,9 @@ impl<'a> Parser<'a> {
                 },
                 0,
             )
-        })?;
+        });
+        self.resolved_row = previous;
+        let page = page?;
         page.map(|page| page.finish(projection.len(), visible))
             .transpose()
     }
@@ -614,5 +649,59 @@ impl<'a> Parser<'a> {
         })?;
         page.map(|page| page.finish(head.outputs.len(), visible))
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        GqlParameters, GraphPatternTextErrorKind, GraphSetTextErrorKind, GraphSymbol,
+        GraphSymbolKind, PreparedGraphSetText,
+    };
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(9))),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn returned_path_order_uses_the_existing_row_length_program() {
+        for statement in [
+            "CALL fnx.single_source_shortest_path_length(args => [1]) YIELD node \
+             MATCH p = WALK (node)-[:R*0..1]->(next) \
+             RETURN node,next,p ORDER BY node,length(p),p",
+            "MATCH p = (a)-[:R]->(b) WITH p AS route \
+             RETURN route ORDER BY length(route)+1,route",
+            "MATCH p = (a)-[:R]->(b) WITH p \
+             RETURN DISTINCT p AS route ORDER BY path_length(route) DESC,route SKIP 1 LIMIT 2",
+            "MATCH p = (a)-[:R]->(b) WITH a,p RETURN a.p AS value,p AS route \
+             ORDER BY length(route),value",
+        ] {
+            PreparedGraphSetText::prepare(statement, symbols)
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+                .bind_parameters(&GqlParameters::new())
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        }
+    }
+
+    #[test]
+    fn path_order_does_not_restore_dropped_or_shadowed_path_bindings() {
+        for statement in [
+            "MATCH p = (a)-[:R]->(b) WITH a RETURN a ORDER BY path_length(p)",
+            "MATCH p = (a)-[:R]->(b) WITH 7 AS p RETURN p ORDER BY path_length(p)",
+        ] {
+            let error = PreparedGraphSetText::prepare(statement, symbols).unwrap_err();
+            assert!(
+                matches!(
+                    error.kind,
+                    GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::UnknownVariable)
+                ),
+                "{statement}: {error:?}"
+            );
+        }
     }
 }

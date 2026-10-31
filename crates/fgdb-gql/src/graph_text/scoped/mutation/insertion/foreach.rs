@@ -5,9 +5,28 @@
 use super::*;
 use crate::graph_text::parameters::UnresolvedGraphText;
 use crate::graph_text::scoped::mutation::return_projection::pipeline::multipart::UnresolvedReadInput;
-use crate::set_text::ReadProjectionTemplate;
+use crate::set_text::multipart::BoundReadInput;
+use crate::set_text::{ElementKeySlot, ReadProjectionTemplate};
 use crate::write_chain::{ChainTextStep, PreparedGraphForeachText};
 use crate::{GraphWriteChainTextError, PreparedGraphForeach, PreparedGraphWriteChainText};
+
+// Keep suspended native parsers and their already resolved inputs off the
+// thread stack while a nested body prepares. This is preparation state only;
+// the resulting body still contains the original typed write-chain steps.
+struct ForeachPreparation<'a> {
+    statement: &'a str,
+    parser: Parser<'a>,
+    input: BoundReadInput,
+    collection: BoundReadInput,
+    outer: Vec<(Name<'a>, GraphSetColumnType)>,
+    outer_columns: Vec<String>,
+    outer_types: Vec<GraphSetColumnType>,
+    imports: Vec<usize>,
+    slots: Vec<ElementKeySlot>,
+    next: Option<ChainContinuation<'a>>,
+    steps: Vec<ChainTextStep>,
+    close_at: usize,
+}
 
 impl PreparedGraphForeachText {
     pub(crate) fn prepare_step<'a>(
@@ -17,19 +36,47 @@ impl PreparedGraphForeachText {
         resolve: &mut impl GraphSymbolResolver,
         from: Option<ChainContinuation<'a>>,
     ) -> Result<(Self, Option<ChainContinuation<'a>>), GraphWriteChainTextError> {
-        Self::prepare_at_depth(statement, relation, declarations, resolve, from, 0)
+        let mut pending = vec![Self::prepare_at_depth(
+            statement,
+            declarations,
+            resolve,
+            from,
+            0,
+        )?];
+        loop {
+            let frame = pending
+                .last_mut()
+                .ok_or_else(|| expected(statement.len(), "an unfinished FOREACH preparation"))?;
+            if let Some(from) = frame.next_nested(relation, declarations, resolve)? {
+                let statement = &frame.statement[..frame.close_at];
+                let depth = pending.len();
+                let child =
+                    Self::prepare_at_depth(statement, declarations, resolve, Some(from), depth)?;
+                pending.push(child);
+                continue;
+            }
+            let frame = pending
+                .pop()
+                .ok_or_else(|| expected(statement.len(), "a completed FOREACH preparation"))?;
+            let (foreach, after) = frame.finish(resolve)?;
+            if let Some(parent) = pending.last_mut() {
+                parent.steps.push(ChainTextStep::Foreach(Box::new(foreach)));
+                parent.next = after;
+            } else {
+                return Ok((foreach, after));
+            }
+        }
     }
 
-    /// Bound recursion before constructing a descendant parser. Body width
+    /// Bound nesting before constructing a descendant parser. Body width
     /// and step count remain independent bounds; siblings reuse this depth.
     fn prepare_at_depth<'a>(
         statement: &'a str,
-        relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
         resolve: &mut impl GraphSymbolResolver,
         from: Option<ChainContinuation<'a>>,
         depth: usize,
-    ) -> Result<(Self, Option<ChainContinuation<'a>>), GraphWriteChainTextError> {
+    ) -> Result<ForeachPreparation<'a>, GraphWriteChainTextError> {
         if depth >= crate::MAX_GRAPH_SET_DEPTH {
             return Err(crate::GraphSetTextError {
                 offset: from.as_ref().map_or(0, |from| from.at),
@@ -162,16 +209,39 @@ impl PreparedGraphForeachText {
 
         let mut local: Vec<_> = imports.iter().map(|&column| outer[column]).collect();
         local.push((variable, GraphSetColumnType::Any));
-        let mut next = Some(ChainContinuation {
+        let next = Some(ChainContinuation {
             at: body_at,
             row: local,
             boundary: None,
             parameters: parser.syntax.parameters.clone(),
         });
-        let body_text = &statement[..close_at];
-        let mut steps = Vec::new();
-        while let Some(from) = next {
-            if steps.len() >= crate::MAX_GRAPH_SET_DEPTH {
+        Ok(ForeachPreparation {
+            statement,
+            parser,
+            input,
+            collection,
+            outer,
+            outer_columns,
+            outer_types,
+            imports,
+            slots,
+            next,
+            steps: Vec::new(),
+            close_at,
+        })
+    }
+}
+
+impl<'a> ForeachPreparation<'a> {
+    fn next_nested(
+        &mut self,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut impl GraphSymbolResolver,
+    ) -> Result<Option<ChainContinuation<'a>>, GraphWriteChainTextError> {
+        let body_text = &self.statement[..self.close_at];
+        while let Some(from) = self.next.take() {
+            if self.steps.len() >= crate::MAX_GRAPH_SET_DEPTH {
                 return Err(expected(from.at, "bounded FOREACH body step count").into());
             }
             let mut lexer = Lexer {
@@ -181,16 +251,7 @@ impl PreparedGraphForeachText {
             };
             match lexer.next()?.kind {
                 TokenKind::Word(word) if word.eq_ignore_ascii_case("FOREACH") => {
-                    let (foreach, after) = Self::prepare_at_depth(
-                        body_text,
-                        relation,
-                        declarations,
-                        resolve,
-                        Some(from),
-                        depth + 1,
-                    )?;
-                    steps.push(ChainTextStep::Foreach(Box::new(foreach)));
-                    next = after;
+                    return Ok(Some(from));
                 }
                 TokenKind::Word(word)
                     if word.eq_ignore_ascii_case("CREATE")
@@ -207,8 +268,9 @@ impl PreparedGraphForeachText {
                         // from this iteration's staged graph before IDs.
                         true,
                     )?;
-                    steps.push(ChainTextStep::Insert(Box::new((step, returning))));
-                    next = after;
+                    self.steps
+                        .push(ChainTextStep::Insert(Box::new((step, returning))));
+                    self.next = after;
                 }
                 TokenKind::Word(word)
                     if ["SET", "REMOVE", "DELETE", "DETACH"]
@@ -227,8 +289,9 @@ impl PreparedGraphForeachText {
                             // input prepares fields from this staged cut.
                             true,
                         )?;
-                    steps.push(ChainTextStep::Mutation(Box::new((step, returning))));
-                    next = after;
+                    self.steps
+                        .push(ChainTextStep::Mutation(Box::new((step, returning))));
+                    self.next = after;
                 }
                 TokenKind::Word(word) if word.eq_ignore_ascii_case("MERGE") => {
                     if PreparedGraphWriteChainText::named_merge_pattern(lexer.clone())? {
@@ -248,19 +311,21 @@ impl PreparedGraphForeachText {
                             )?;
                         match (returning, after) {
                             (Some(returning), Some((_, after))) => {
-                                steps.push(ChainTextStep::EdgeMerge(Box::new((
+                                self.steps.push(ChainTextStep::EdgeMerge(Box::new((
                                     merge,
                                     Some(returning),
                                 ))));
-                                next = Some(after);
+                                self.next = Some(after);
                             }
                             (None, Some((keep, after))) => {
-                                steps.push(ChainTextStep::EdgeMergeRows(Box::new((merge, keep))));
-                                next = Some(after);
+                                self.steps
+                                    .push(ChainTextStep::EdgeMergeRows(Box::new((merge, keep))));
+                                self.next = Some(after);
                             }
                             (returning, None) => {
-                                steps.push(ChainTextStep::EdgeMerge(Box::new((merge, returning))));
-                                next = None;
+                                self.steps
+                                    .push(ChainTextStep::EdgeMerge(Box::new((merge, returning))));
+                                self.next = None;
                             }
                         }
                     } else {
@@ -275,8 +340,8 @@ impl PreparedGraphForeachText {
                                 // other writes in this FOREACH body.
                                 true,
                             )?;
-                        steps.push(ChainTextStep::VertexMerge(Box::new(merge)));
-                        next = after;
+                        self.steps.push(ChainTextStep::VertexMerge(Box::new(merge)));
+                        self.next = after;
                     }
                 }
                 _ => {
@@ -288,6 +353,29 @@ impl PreparedGraphForeachText {
                 }
             }
         }
+        Ok(None)
+    }
+
+    fn finish(
+        self,
+        resolve: &mut impl GraphSymbolResolver,
+    ) -> Result<(PreparedGraphForeachText, Option<ChainContinuation<'a>>), GraphWriteChainTextError>
+    {
+        let Self {
+            statement,
+            mut parser,
+            input,
+            collection,
+            outer,
+            outer_columns,
+            outer_types,
+            imports,
+            mut slots,
+            steps,
+            close_at,
+            next: _,
+        } = self;
+        let body_text = &statement[..close_at];
         let body = PreparedGraphWriteChainText {
             statement: body_text.to_owned(),
             steps,
@@ -358,7 +446,7 @@ impl PreparedGraphForeachText {
             })
             .collect();
         Ok((
-            Self {
+            PreparedGraphForeachText {
                 input,
                 collection,
                 output,
@@ -372,7 +460,9 @@ impl PreparedGraphForeachText {
             continuation,
         ))
     }
+}
 
+impl PreparedGraphForeachText {
     pub(crate) fn parameter_schema(&self) -> Vec<GqlParameterSpec> {
         let mut schema: Vec<GqlParameterSpec> = Vec::new();
         let body_schema = self.body.parameter_schema();
@@ -711,13 +801,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(merged.parameter_schema().len(), 3);
-        arguments
+        let mut scalar_arguments = arguments.clone();
+        scalar_arguments
             .insert(
                 "seed",
                 GqlParameterValue::Scalar(
                     crate::GqlScalarParameter::new(CanonicalScalar::Int(4)).unwrap(),
                 ),
             )
+            .unwrap();
+        assert!(matches!(
+            merged.bind_parameters(&scalar_arguments),
+            Err(GraphWriteChainTextError::VertexMerge(
+                crate::GraphVertexMergeTextError {
+                    kind: crate::GraphVertexMergeTextErrorKind::Query(
+                        GraphPatternTextErrorKind::ParameterTypeMismatch {
+                            expected: GqlParameterType::Int64,
+                            found: GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Int),
+                        }
+                    ),
+                    ..
+                }
+            ))
+        ));
+        arguments
+            .insert("seed", GqlParameterValue::Int64(4))
             .unwrap();
         merged.bind_parameters(&arguments).unwrap();
     }

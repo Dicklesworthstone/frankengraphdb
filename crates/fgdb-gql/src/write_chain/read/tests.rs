@@ -347,15 +347,50 @@ fn vertex_merge_tail_filters_final_properties_and_preserves_the_native_budget() 
         work_units: 13,
         scratch_entries: 5,
     };
-    let finished = query
-        .finish_governed::<(), ()>(
+    // This is a finalizer unit fixture, not a live database reader. The native
+    // tail reads the post-MERGE overlay; the reader-free API cannot supply it.
+    assert!(matches!(
+        query.finish_governed::<(), ()>(
             rows(),
             selected,
             before,
             GqlQueryPolicy::new(3, 1, HIGH, HIGH),
             || Ok(()),
+        ),
+        Err(GqlQueryError::Source(
+            crate::GraphSetExecutionError::Projection {
+                row: 0,
+                column: 2,
+                error: crate::GraphIntegerError {
+                    kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+                    ..
+                },
+            }
+        ))
+    ));
+    let reads = Cell::new(0);
+    let reader = |element, key| {
+        let value = match (element, key) {
+            (fgdb_delta_types::ElementId::Vertex(VId(1)), PropertyKeyId(1)) => 1,
+            (fgdb_delta_types::ElementId::Vertex(VId(2)), PropertyKeyId(1)) => 2,
+            (fgdb_delta_types::ElementId::Vertex(VId(3)), PropertyKeyId(1)) => 3,
+            _ => return Err("unexpected post-MERGE point read"),
+        };
+        reads.set(reads.get() + 1);
+        Ok(Some(CanonicalScalar::Int(value).into()))
+    };
+    let finished = query
+        .finish_governed_reading::<&str, ()>(
+            rows(),
+            selected,
+            before,
+            GqlQueryPolicy::new(3, 1, HIGH, HIGH),
+            reader,
+            || Ok(()),
         )
         .unwrap();
+    // Three WHERE probes, then two p reads for each of the two selected rows.
+    assert_eq!(reads.get(), 3 + 2 * 2);
     assert_eq!(finished.value.len(), 1);
     assert_eq!(finished.value[0].values(), &[int(30)]);
     assert_eq!(finished.rows.snapshot_records, 3);
@@ -369,17 +404,43 @@ fn vertex_merge_tail_filters_final_properties_and_preserves_the_native_budget() 
     ] {
         assert!(
             query
-                .finish_governed::<(), ()>(rows(), selected, before, budget, || Ok(()))
+                .finish_governed_reading::<&str, ()>(
+                    rows(),
+                    selected,
+                    before,
+                    budget,
+                    reader,
+                    || Ok(()),
+                )
                 .is_err(),
         );
     }
-    let mut checkpoints = 0;
+    let failed_reads = Cell::new(0);
     assert!(matches!(
-        query.finish_governed::<(), &str>(
+        query.finish_governed_reading::<&str, ()>(
             rows(),
             selected,
             before,
             GqlQueryPolicy::new(3, 1, HIGH, HIGH),
+            |_, _| {
+                failed_reads.set(failed_reads.get() + 1);
+                Err("point read refused")
+            },
+            || Ok(()),
+        ),
+        Err(GqlQueryError::Source(
+            crate::GraphSetExecutionError::Source("point read refused")
+        ))
+    ));
+    assert_eq!(failed_reads.get(), 1, "a failed source must never resume");
+    let mut checkpoints = 0;
+    assert!(matches!(
+        query.finish_governed_reading::<&str, &str>(
+            rows(),
+            selected,
+            before,
+            GqlQueryPolicy::new(3, 1, HIGH, HIGH),
+            reader,
             || {
                 checkpoints += 1;
                 if checkpoints >= 20 {
