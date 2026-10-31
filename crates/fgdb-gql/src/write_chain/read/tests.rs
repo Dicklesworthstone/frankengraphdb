@@ -368,15 +368,15 @@ fn vertex_merge_tail_filters_final_properties_and_preserves_the_native_budget() 
             }
         ))
     ));
-    let reads = Cell::new(0);
+    let reads = std::cell::RefCell::new(Vec::new());
     let reader = |element, key| {
+        reads.borrow_mut().push((element, key));
         let value = match (element, key) {
             (fgdb_delta_types::ElementId::Vertex(VId(1)), PropertyKeyId(1)) => 1,
             (fgdb_delta_types::ElementId::Vertex(VId(2)), PropertyKeyId(1)) => 2,
             (fgdb_delta_types::ElementId::Vertex(VId(3)), PropertyKeyId(1)) => 3,
             _ => return Err("unexpected post-MERGE point read"),
         };
-        reads.set(reads.get() + 1);
         Ok(Some(CanonicalScalar::Int(value).into()))
     };
     let finished = query
@@ -389,8 +389,29 @@ fn vertex_merge_tail_filters_final_properties_and_preserves_the_native_budget() 
             || Ok(()),
         )
         .unwrap();
-    // Three WHERE probes, then two p reads for each of the two selected rows.
-    assert_eq!(reads.get(), 3 + 2 * 2);
+    // WHERE reads the admitted Property(P) cell, so vertex 1 never reaches
+    // the point reader. UNWIND reads p twice for each retained vertex.
+    assert_eq!(
+        reads.borrow().as_slice(),
+        &[
+            (
+                fgdb_delta_types::ElementId::Vertex(VId(2)),
+                PropertyKeyId(1)
+            ),
+            (
+                fgdb_delta_types::ElementId::Vertex(VId(2)),
+                PropertyKeyId(1)
+            ),
+            (
+                fgdb_delta_types::ElementId::Vertex(VId(3)),
+                PropertyKeyId(1)
+            ),
+            (
+                fgdb_delta_types::ElementId::Vertex(VId(3)),
+                PropertyKeyId(1)
+            ),
+        ]
+    );
     assert_eq!(finished.value.len(), 1);
     assert_eq!(finished.value[0].values(), &[int(30)]);
     assert_eq!(finished.rows.snapshot_records, 3);

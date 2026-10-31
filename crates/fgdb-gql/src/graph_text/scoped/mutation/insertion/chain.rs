@@ -1379,182 +1379,25 @@ impl PreparedGraphWriteChainText {
                 Ok(own)
             };
         let mut steps = Vec::with_capacity(self.steps.len());
-        // The row a later step reads is exactly the previous step's output.
-        let reads_previous = |owned: Option<&(Vec<String>, Vec<GraphSetColumnType>)>,
-                              previous: &Option<Vec<GraphSetColumnType>>,
-                              at: usize|
-         -> Result<(), GraphInsertTextError> {
-            match owned {
-                Some((_, types)) if previous.as_ref() != Some(types) => {
-                    Err(expected(at, "the previous write's WITH row"))
-                }
-                _ => Ok(()),
-            }
-        };
         for step in &self.steps {
-            match step {
-                ChainTextStep::Foreach(foreach) => {
-                    let bound = foreach
-                        .bind_parameters(&own(&foreach.parameter_schema())?, previous.as_deref())?;
-                    previous = Some(bound.column_types().to_vec());
-                    steps.push(GraphWriteChainStep::Foreach(Box::new(bound)));
-                }
-                ChainTextStep::VertexMerge(merge) => {
-                    let own = own(merge.parameter_schema())?;
-                    if let Some(input) = merge.owned_column_types()
-                        && previous.as_deref() != Some(input)
-                    {
-                        return Err(expected(merge.end, "the previous write's WITH row").into());
-                    }
-                    let bound = merge.bind_parameters(&own)?;
-                    // Its rows: the row's visible columns, then the vertex;
-                    // or the rows of its WITH head (or RETURN).
-                    previous = match &bound {
-                        GraphWriteChainStep::VertexMerge(rows) => {
-                            let mut output = rows.input_column_types().to_vec();
-                            output.truncate(merge.keep);
-                            output.push(GraphSetColumnType::Vertex);
-                            Some(output)
-                        }
-                        GraphWriteChainStep::VertexMergeQuery(query) => {
-                            Some(query.column_types().to_vec())
-                        }
-                        _ => None,
-                    };
-                    steps.push(bound);
-                }
-                ChainTextStep::Insert(step) => {
-                    let (insertion, returning) = &**step;
-                    let values =
-                        insertion.checked_arguments(&own(insertion.parameter_schema())?)?;
-                    let owned = match &insertion.input {
-                        InsertTextInput::Relation { input, .. } => input.owned.as_deref(),
-                        InsertTextInput::Multipart { input, .. } => input.first.owned.as_deref(),
-                        InsertTextInput::Match(_) | InsertTextInput::Unit { .. } => None,
-                    };
-                    reads_previous(owned, &previous, insertion.create_at)?;
-                    let selection = match &insertion.input {
-                        InsertTextInput::Match(selection) => Some(selection.bind_values(&values)?),
-                        InsertTextInput::Relation { .. }
-                        | InsertTextInput::Multipart { .. }
-                        | InsertTextInput::Unit { .. } => None,
-                    };
-                    let bound = insertion.instantiate(selection, Some(&values))?;
-                    steps.push(match returning {
-                        Some(returning) => {
-                            let query = returning.bind(bound, &values)?;
-                            previous = Some(query.column_types().to_vec());
-                            GraphWriteChainStep::Query(Box::new(query))
-                        }
-                        None => {
-                            previous = None;
-                            GraphWriteChainStep::Insert(bound)
-                        }
-                    });
-                }
-                ChainTextStep::EdgeMerge(step) => {
-                    let (merge, returning) = &**step;
-                    let own = own(merge.parameter_schema())?;
-                    let owned = match &merge.input {
-                        crate::mutation_text::EdgeMergeTextInput::Row { input, .. } => {
-                            input.owned.as_deref()
-                        }
-                        crate::mutation_text::EdgeMergeTextInput::Multipart { input, .. } => {
-                            input.first.owned.as_deref()
-                        }
-                        crate::mutation_text::EdgeMergeTextInput::Match(_) => None,
-                    };
-                    reads_previous(owned, &previous, merge.input.return_at())?;
-                    let values = merge
-                        .input
-                        .checked_arguments(&own)
-                        .map_err(crate::GraphEdgeMergeTextError::from)?;
-                    let bound = merge.bind_values(&values)?;
-                    let upsert = merge.bind_row_upsert(&bound, &values)?;
-                    // A RETURN, or a WITH head another write reads.
-                    steps.push(match returning {
-                        Some(returning) => {
-                            let query = returning.bind(bound, &values)?;
-                            previous = Some(query.column_types().to_vec());
-                            match upsert {
-                                Some(upsert) => GraphWriteChainStep::EdgeUpsertQuery {
-                                    upsert: Box::new(upsert),
-                                    query: Box::new(query),
-                                },
-                                None => GraphWriteChainStep::EdgeMergeQuery(Box::new(query)),
-                            }
-                        }
-                        None => {
-                            previous = None;
-                            match upsert {
-                                Some(upsert) => GraphWriteChainStep::EdgeUpsert(Box::new(upsert)),
-                                None => GraphWriteChainStep::EdgeMerge(Box::new(bound)),
-                            }
-                        }
-                    });
-                }
-                ChainTextStep::EdgeMergeRows(step) => {
-                    let (merge, keep) = &**step;
-                    let own = own(merge.parameter_schema())?;
-                    let owned = match &merge.input {
-                        crate::mutation_text::EdgeMergeTextInput::Row { input, .. } => {
-                            input.owned.as_deref()
-                        }
-                        crate::mutation_text::EdgeMergeTextInput::Multipart { input, .. } => {
-                            input.first.owned.as_deref()
-                        }
-                        crate::mutation_text::EdgeMergeTextInput::Match(_) => None,
-                    };
-                    reads_previous(owned, &previous, merge.input.return_at())?;
-                    let values = merge
-                        .input
-                        .checked_arguments(&own)
-                        .map_err(crate::GraphEdgeMergeTextError::from)?;
-                    let bound = merge.bind_values(&values)?;
-                    let upsert = merge.bind_row_upsert(&bound, &values)?;
-                    // Its rows: the row's visible columns, then the edge. The
-                    // row is the previous write's, or a MATCH-led first step's
-                    // own read row, which no owned leaf carries.
-                    let mut output = bound.input_column_types();
-                    output.truncate(*keep);
-                    output.push(GraphSetColumnType::Edge);
-                    previous = Some(output);
-                    steps.push(match upsert {
-                        Some(upsert) => GraphWriteChainStep::EdgeUpsertRows {
-                            upsert: Box::new(upsert),
-                            keep: *keep,
-                        },
-                        None => GraphWriteChainStep::EdgeMergeRows {
-                            merge: Box::new(bound),
-                            keep: *keep,
-                        },
-                    });
-                }
-                ChainTextStep::Mutation(step) => {
-                    let (mutation, returning) = &**step;
-                    let own = own(mutation.parameter_schema())?;
-                    if mutation.owned_column_types() != previous.as_deref() {
-                        return Err(expected(mutation.at, "the previous write's WITH row").into());
-                    }
-                    steps.push(match returning {
-                        Some(returning) => {
-                            let query = mutation.bind_query(returning, &own)?;
-                            previous = Some(query.column_types().to_vec());
-                            GraphWriteChainStep::MutationQuery(Box::new(query))
-                        }
-                        None => {
-                            previous = None;
-                            GraphWriteChainStep::Mutation(Box::new(mutation.bind_parameters(&own)?))
-                        }
-                    });
-                }
+            if let ChainTextStep::Foreach(foreach) = step {
+                let bound = foreach
+                    .bind_parameters(&own(&foreach.parameter_schema())?, previous.as_deref())?;
+                previous = Some(bound.column_types().to_vec());
+                steps.push(GraphWriteChainStep::Foreach(Box::new(bound)));
+            } else {
+                self.bind_non_foreach_step(step, &mut own, &mut previous, &mut steps)?;
             }
         }
         let read = self
             .read
             .as_ref()
             .map(|read| {
-                reads_previous(read.first.owned.as_deref(), &previous, self.statement.len())?;
+                Self::reads_previous_write_row(
+                    read.first.owned.as_deref(),
+                    &previous,
+                    self.statement.len(),
+                )?;
                 read.bind_parameters(&own(read.parameter_schema())?)
                     .map_err(GraphWriteChainTextError::from)
             })
@@ -1585,6 +1428,187 @@ impl PreparedGraphWriteChainText {
             .into());
         }
         Ok(chain)
+    }
+
+    fn reads_previous_write_row(
+        owned: Option<&(Vec<String>, Vec<GraphSetColumnType>)>,
+        previous: &Option<Vec<GraphSetColumnType>>,
+        at: usize,
+    ) -> Result<(), GraphInsertTextError> {
+        // The row a later step reads is exactly the previous step's output.
+        match owned {
+            Some((_, types)) if previous.as_ref() != Some(types) => {
+                Err(expected(at, "the previous write's WITH row"))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    // Every write-family binder keeps its original typed path and error
+    // order. Its large sibling temporaries must not stay on the thread stack
+    // while the separate FOREACH branch descends into another bounded body.
+    #[inline(never)]
+    fn bind_non_foreach_step(
+        &self,
+        step: &ChainTextStep,
+        own: &mut impl FnMut(&[GqlParameterSpec]) -> Result<GqlParameters, GraphPatternTextError>,
+        previous: &mut Option<Vec<GraphSetColumnType>>,
+        steps: &mut Vec<GraphWriteChainStep>,
+    ) -> Result<(), GraphWriteChainTextError> {
+        match step {
+            ChainTextStep::Foreach(_) => {
+                return Err(expected(self.statement.len(), "a non-FOREACH write binding").into());
+            }
+            ChainTextStep::VertexMerge(merge) => {
+                let own = own(merge.parameter_schema())?;
+                if let Some(input) = merge.owned_column_types()
+                    && previous.as_deref() != Some(input)
+                {
+                    return Err(expected(merge.end, "the previous write's WITH row").into());
+                }
+                let bound = merge.bind_parameters(&own)?;
+                // Its rows: the row's visible columns, then the vertex;
+                // or the rows of its WITH head (or RETURN).
+                *previous = match &bound {
+                    GraphWriteChainStep::VertexMerge(rows) => {
+                        let mut output = rows.input_column_types().to_vec();
+                        output.truncate(merge.keep);
+                        output.push(GraphSetColumnType::Vertex);
+                        Some(output)
+                    }
+                    GraphWriteChainStep::VertexMergeQuery(query) => {
+                        Some(query.column_types().to_vec())
+                    }
+                    _ => None,
+                };
+                steps.push(bound);
+            }
+            ChainTextStep::Insert(step) => {
+                let (insertion, returning) = &**step;
+                let values = insertion.checked_arguments(&own(insertion.parameter_schema())?)?;
+                let owned = match &insertion.input {
+                    InsertTextInput::Relation { input, .. } => input.owned.as_deref(),
+                    InsertTextInput::Multipart { input, .. } => input.first.owned.as_deref(),
+                    InsertTextInput::Match(_) | InsertTextInput::Unit { .. } => None,
+                };
+                Self::reads_previous_write_row(owned, previous, insertion.create_at)?;
+                let selection = match &insertion.input {
+                    InsertTextInput::Match(selection) => Some(selection.bind_values(&values)?),
+                    InsertTextInput::Relation { .. }
+                    | InsertTextInput::Multipart { .. }
+                    | InsertTextInput::Unit { .. } => None,
+                };
+                let bound = insertion.instantiate(selection, Some(&values))?;
+                steps.push(match returning {
+                    Some(returning) => {
+                        let query = returning.bind(bound, &values)?;
+                        *previous = Some(query.column_types().to_vec());
+                        GraphWriteChainStep::Query(Box::new(query))
+                    }
+                    None => {
+                        *previous = None;
+                        GraphWriteChainStep::Insert(bound)
+                    }
+                });
+            }
+            ChainTextStep::EdgeMerge(step) => {
+                let (merge, returning) = &**step;
+                let own = own(merge.parameter_schema())?;
+                let owned = match &merge.input {
+                    crate::mutation_text::EdgeMergeTextInput::Row { input, .. } => {
+                        input.owned.as_deref()
+                    }
+                    crate::mutation_text::EdgeMergeTextInput::Multipart { input, .. } => {
+                        input.first.owned.as_deref()
+                    }
+                    crate::mutation_text::EdgeMergeTextInput::Match(_) => None,
+                };
+                Self::reads_previous_write_row(owned, previous, merge.input.return_at())?;
+                let values = merge
+                    .input
+                    .checked_arguments(&own)
+                    .map_err(crate::GraphEdgeMergeTextError::from)?;
+                let bound = merge.bind_values(&values)?;
+                let upsert = merge.bind_row_upsert(&bound, &values)?;
+                // A RETURN, or a WITH head another write reads.
+                steps.push(match returning {
+                    Some(returning) => {
+                        let query = returning.bind(bound, &values)?;
+                        *previous = Some(query.column_types().to_vec());
+                        match upsert {
+                            Some(upsert) => GraphWriteChainStep::EdgeUpsertQuery {
+                                upsert: Box::new(upsert),
+                                query: Box::new(query),
+                            },
+                            None => GraphWriteChainStep::EdgeMergeQuery(Box::new(query)),
+                        }
+                    }
+                    None => {
+                        *previous = None;
+                        match upsert {
+                            Some(upsert) => GraphWriteChainStep::EdgeUpsert(Box::new(upsert)),
+                            None => GraphWriteChainStep::EdgeMerge(Box::new(bound)),
+                        }
+                    }
+                });
+            }
+            ChainTextStep::EdgeMergeRows(step) => {
+                let (merge, keep) = &**step;
+                let own = own(merge.parameter_schema())?;
+                let owned = match &merge.input {
+                    crate::mutation_text::EdgeMergeTextInput::Row { input, .. } => {
+                        input.owned.as_deref()
+                    }
+                    crate::mutation_text::EdgeMergeTextInput::Multipart { input, .. } => {
+                        input.first.owned.as_deref()
+                    }
+                    crate::mutation_text::EdgeMergeTextInput::Match(_) => None,
+                };
+                Self::reads_previous_write_row(owned, previous, merge.input.return_at())?;
+                let values = merge
+                    .input
+                    .checked_arguments(&own)
+                    .map_err(crate::GraphEdgeMergeTextError::from)?;
+                let bound = merge.bind_values(&values)?;
+                let upsert = merge.bind_row_upsert(&bound, &values)?;
+                // Its rows: the row's visible columns, then the edge. The
+                // row is the previous write's, or a MATCH-led first step's
+                // own read row, which no owned leaf carries.
+                let mut output = bound.input_column_types();
+                output.truncate(*keep);
+                output.push(GraphSetColumnType::Edge);
+                *previous = Some(output);
+                steps.push(match upsert {
+                    Some(upsert) => GraphWriteChainStep::EdgeUpsertRows {
+                        upsert: Box::new(upsert),
+                        keep: *keep,
+                    },
+                    None => GraphWriteChainStep::EdgeMergeRows {
+                        merge: Box::new(bound),
+                        keep: *keep,
+                    },
+                });
+            }
+            ChainTextStep::Mutation(step) => {
+                let (mutation, returning) = &**step;
+                let own = own(mutation.parameter_schema())?;
+                if mutation.owned_column_types() != previous.as_deref() {
+                    return Err(expected(mutation.at, "the previous write's WITH row").into());
+                }
+                steps.push(match returning {
+                    Some(returning) => {
+                        let query = mutation.bind_query(returning, &own)?;
+                        *previous = Some(query.column_types().to_vec());
+                        GraphWriteChainStep::MutationQuery(Box::new(query))
+                    }
+                    None => {
+                        *previous = None;
+                        GraphWriteChainStep::Mutation(Box::new(mutation.bind_parameters(&own)?))
+                    }
+                });
+            }
+        }
+        Ok(())
     }
 }
 
