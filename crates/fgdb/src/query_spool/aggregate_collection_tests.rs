@@ -453,7 +453,7 @@ fn a_wider_later_row_does_not_refund_still_live_collection_payloads() {
 }
 
 #[test]
-fn direct_graph_collection_still_requires_its_own_order_proof() {
+fn direct_graph_collection_requires_the_complete_ordered_relation() {
     let parameters = GqlParameters::new();
     let prepared = PreparedNativeRead::prepare(
         "MATCH (n) RETURN COLLECT(n) AS nodes",
@@ -465,12 +465,17 @@ fn direct_graph_collection_still_requires_its_own_order_proof() {
         panic!("direct aggregate");
     };
     let bound = template.bind_parameters(&parameters).unwrap();
+    let logical = bound.canonical_bytes();
     assert!(matches!(
         SpillAggregatePlan::compile(&bound),
         Err(SpillAggregateBuildError::Unsupported)
     ));
-    assert!(matches!(
-        AsyncSpillAggregatePlan::compile(&bound),
-        Err(SpillAggregateBuildError::Unsupported)
-    ));
+    let plan = AsyncSpillAggregatePlan::compile(&bound).unwrap();
+    let AsyncSpillAggregatePlan::Relation { input, definition } = plan else {
+        panic!("a direct pull cursor has no collection occurrence-order proof");
+    };
+    assert!(definition.has_collections());
+    assert!(input.stage_count() > 0);
+    assert_eq!(definition.aggregate_columns(), &["nodes"]);
+    assert_eq!(bound.canonical_bytes(), logical);
 }

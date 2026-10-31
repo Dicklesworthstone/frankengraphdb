@@ -419,8 +419,13 @@ impl PreparedNativeRead {
     /// DISTINCT, ordering and pagination in external stages. Binary set inputs
     /// finish both operands before reduction. Leading UNWIND/MATCH inputs
     /// retain their complete native Cartesian relation and correlation filter.
-    /// COLLECT, keyed/theta joins,
-    /// OPTIONAL/variable-length expansion and probes refuse at preparation.
+    /// Direct COLLECT/COLLECT DISTINCT uses a complete ordered relation when
+    /// the native occurrence order is proved: vertex and uncaptured one-edge
+    /// scans, and computed inputs with canonical complete-source row order.
+    /// Each group's collected value must fit the admitted memory and row
+    /// ceilings; groups may exceed resident capacity collectively and spill.
+    /// Sources outside the asynchronous ordered input contract still refuse
+    /// before storage opens.
     /// Join routing and one record per hop use the view pool;
     /// routing metadata remains resident and may refuse when it does not fit.
     pub fn prepare_buffered_aggregate(

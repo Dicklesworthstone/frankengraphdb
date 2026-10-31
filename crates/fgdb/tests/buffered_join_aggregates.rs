@@ -17,8 +17,8 @@ use fgdb_gql::{
 };
 use fgdb_strata::tiered::memory::{SpillFile, SpillLimits};
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts,
-    QueryCx, VId,
+    CanonicalF64, CanonicalList, CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq,
+    DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
 };
 use std::future::poll_fn;
 use std::io::{self, Cursor, Seek, SeekFrom};
@@ -212,6 +212,410 @@ fn summary(count: u64, sum: i128) -> LogicalRows {
             GraphAggregateValue::Integer(sum),
         ],
     )]
+}
+
+fn collected(values: impl IntoIterator<Item = GraphValue>) -> GraphAggregateValue {
+    GraphAggregateValue::Value(GraphValue::List(values.into_iter().collect()))
+}
+
+fn collected_ints(values: &[i64]) -> GraphAggregateValue {
+    collected(
+        values
+            .iter()
+            .map(|value| GraphValue::Scalar(CanonicalScalar::Int(*value))),
+    )
+}
+
+#[test]
+fn cold_direct_collections_preserve_native_occurrence_order_and_complete_result_clauses() {
+    let ((), report) = run_async_under_lab(0xc01d_c011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let mut writer = Database::open_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
+        change.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
+        writer.write(&commit, change).await.unwrap();
+        writer.compact(&commit).await.unwrap();
+        drop(writer);
+
+        // Current identity order yields [7,2,7], not value order [2,7,7].
+        // The computed path instead sorts its complete source before applying
+        // negation. Literal outputs distinguish both contracts and preserve
+        // the two parallel edges from 1 to 2 and the self-loop at 2.
+        for (text, cut, expected) in [
+            (
+                "MATCH (n) RETURN COLLECT(n.p) AS items,COLLECT(DISTINCT n.p) AS support,COLLECT(n) AS nodes",
+                4,
+                vec![(
+                    vec![],
+                    vec![
+                        collected_ints(&[7, 2, 7]),
+                        collected_ints(&[7, 2]),
+                        collected([1, 2, 3].map(|id| GraphValue::Vertex(VId(id)))),
+                    ],
+                )],
+            ),
+            (
+                "MATCH (n) RETURN COLLECT(-n.p) AS items,COLLECT(DISTINCT -n.p) AS support",
+                4,
+                vec![(
+                    vec![],
+                    vec![collected_ints(&[-2, -7, -7]), collected_ints(&[-2, -7])],
+                )],
+            ),
+            (
+                "MATCH (a)-[:R]->(b) RETURN COLLECT(a.p) AS items,COLLECT(DISTINCT a.p) AS support",
+                4,
+                vec![(
+                    vec![],
+                    vec![collected_ints(&[7, 7, 2, 2]), collected_ints(&[7, 2])],
+                )],
+            ),
+            (
+                "MATCH (a)<-[:R]-(b) RETURN COLLECT(a.p) AS items,COLLECT(DISTINCT a.p) AS support",
+                4,
+                vec![(
+                    vec![],
+                    vec![collected_ints(&[2, 2, 2, 7]), collected_ints(&[2, 7])],
+                )],
+            ),
+            (
+                "MATCH REPEATABLE ELEMENTS (a)-[r:R]->(b)-[s:R]->(c) RETURN COLLECT(r.p+s.p) AS items",
+                4,
+                vec![(vec![], vec![collected_ints(&[17, 18, 18, 19, 26, 27])])],
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COLLECT(n.p) AS items",
+                2,
+                vec![(vec![], vec![collected_ints(&[1, 2, 13, 4])])],
+            ),
+            (
+                "MATCH (n) RETURN n.p AS bucket,COLLECT(n) AS nodes,COLLECT(DISTINCT n.p) AS support GROUP BY n.p ORDER BY bucket DESC",
+                4,
+                vec![
+                    (
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(7))],
+                        vec![
+                            collected([1, 3].map(|id| GraphValue::Vertex(VId(id)))),
+                            collected_ints(&[7]),
+                        ],
+                    ),
+                    (
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(2))],
+                        vec![
+                            collected([GraphValue::Vertex(VId(2))]),
+                            collected_ints(&[2]),
+                        ],
+                    ),
+                ],
+            ),
+            (
+                "MATCH (n) RETURN DISTINCT [x IN COLLECT(n.p) | x*2] AS items GROUP BY n.p HAVING COUNT(*)>0 ORDER BY COUNT(*) DESC SKIP 1 LIMIT 1",
+                4,
+                vec![(vec![], vec![collected_ints(&[4])])],
+            ),
+            (
+                "MATCH (n) WHERE n.p<0 RETURN COLLECT(n.p) AS items,COLLECT(DISTINCT n.p) AS support,COUNT(*) AS total",
+                4,
+                vec![(
+                    vec![],
+                    vec![
+                        collected_ints(&[]),
+                        collected_ints(&[]),
+                        GraphAggregateValue::Count(0),
+                    ],
+                )],
+            ),
+            ("MATCH (n) RETURN COLLECT(n.p) AS items LIMIT 0", 4, vec![]),
+        ] {
+            let prepared = prepare(text);
+            assert!(prepared.stage_count() >= 2, "{text}");
+            assert_eq!(prepared.aggregate_count(), 1);
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+            let mut view = view(&commit, &vfs, &source_pool).await;
+            let baseline = source_pool.used();
+            let (mut source, _) = file(&cx, &spill_pool).await;
+            let (mut partition, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (spool, _) = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    policy(expected.len() as u64),
+                    &mut source,
+                    &mut partition,
+                    &mut destination,
+                    1,
+                    512,
+                    1,
+                    512,
+                    1024,
+                    16 * 1024,
+                    1000,
+                    WORK,
+                    None,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error}"));
+            assert_eq!(spool.snapshot_seq(), CommitSeq(cut), "{text}");
+            assert!(
+                spool
+                    .columns()
+                    .iter()
+                    .all(|name| !name.starts_with("_fgdb_collect_order_"))
+            );
+            assert_eq!(spool.row_count(), expected.len() as u64);
+            assert_eq!(
+                contents(&spool, &mut destination, &cx).await,
+                expected,
+                "{text}"
+            );
+            assert!(view.buffer_stats().bypasses > 0, "{text}");
+            assert_eq!(source_pool.used(), baseline, "{text}");
+            assert_eq!(spill_pool.used(), 0, "{text}");
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_direct_collections_keep_typed_values_null_elision_and_full_width_identities() {
+    let ((), report) = run_async_under_lab(0xc01d_c012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut writer =
+            Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+                .await
+                .unwrap();
+        let integer = CanonicalScalar::Int(2);
+        let float = CanonicalScalar::Float(CanonicalF64::new(2.0));
+        let nested = CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![integer.clone().into(), CanonicalScalar::Null.into()])
+                .unwrap(),
+        );
+        let mut batch = WriteBatch::new(RelationId(1));
+        for (id, value) in [
+            (0, None),
+            (1, Some(CanonicalScalar::Null.into())),
+            (2, Some(float.clone().into())),
+            (3, Some(integer.clone().into())),
+            (4, Some(float.clone().into())),
+            (5, Some(integer.clone().into())),
+            (6, Some(nested.clone())),
+            (u128::MAX, Some(nested)),
+        ] {
+            batch.create_vertex_values(
+                VId(id),
+                vec![],
+                value
+                    .into_iter()
+                    .map(|value| (PropertyKeyId(1), value))
+                    .collect(),
+            );
+        }
+        writer.write(&commit, batch).await.unwrap();
+        drop(writer);
+        let prepared = prepare(
+            "MATCH (n) RETURN COLLECT(n.p) AS items,COLLECT(DISTINCT n.p) AS support,COLLECT(n) AS nodes,COUNT(*) AS count",
+        );
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let (mut source, _) = file(&cx, &spill_pool).await;
+        let (mut partition, _) = file(&cx, &spill_pool).await;
+        let (mut destination, _) = file(&cx, &spill_pool).await;
+        let (spool, _) = prepared
+            .spool_in_view(
+                &mut view,
+                &cx,
+                policy(1),
+                &mut source,
+                &mut partition,
+                &mut destination,
+                1,
+                512,
+                1,
+                512,
+                1024,
+                16 * 1024,
+                1000,
+                WORK,
+                None,
+            )
+            .await
+            .unwrap();
+        let integer = GraphValue::Scalar(integer);
+        let float = GraphValue::Scalar(float);
+        let nested = GraphValue::List(
+            vec![integer.clone(), GraphValue::Scalar(CanonicalScalar::Null)].into_boxed_slice(),
+        );
+        assert_eq!(
+            contents(&spool, &mut destination, &cx).await,
+            vec![(
+                vec![],
+                vec![
+                    collected([
+                        float.clone(),
+                        integer.clone(),
+                        float.clone(),
+                        integer.clone(),
+                        nested.clone(),
+                        nested.clone(),
+                    ]),
+                    // Canonical Int and Float are distinct domains. Repeated
+                    // same-domain values and whole equal lists contribute once.
+                    collected([float, integer, nested]),
+                    collected(
+                        [0, 1, 2, 3, 4, 5, 6, u128::MAX].map(|id| GraphValue::Vertex(VId(id)))
+                    ),
+                    GraphAggregateValue::Count(8),
+                ]
+            )],
+        );
+        assert_eq!(source_pool.used(), baseline);
+        assert_eq!(spill_pool.used(), 0);
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_direct_collections_refuse_oversized_results_and_late_errors_before_limit_zero() {
+    let ((), report) = run_async_under_lab(0xc01d_c013, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        for (text, max_row_bytes, diagnostic) in [
+            (
+                "MATCH (n) RETURN COLLECT(n.q) AS items",
+                1024,
+                "RowTooLarge",
+            ),
+            (
+                "MATCH (n) RETURN COLLECT(n.q) AS items LIMIT 0",
+                1024,
+                "RowTooLarge",
+            ),
+            (
+                "MATCH (n) RETURN COLLECT(1/(n.p-13)) AS items LIMIT 0",
+                16 * 1024,
+                "DivisionByZero",
+            ),
+        ] {
+            let prepared = prepare(text);
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+            let mut view = view(&commit, &vfs, &source_pool).await;
+            let baseline = source_pool.used();
+            let (mut source, _) = file(&cx, &spill_pool).await;
+            let (mut partition, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let error = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    policy(1),
+                    &mut source,
+                    &mut partition,
+                    &mut destination,
+                    1,
+                    512,
+                    1,
+                    512,
+                    1024,
+                    max_row_bytes,
+                    1000,
+                    WORK,
+                    None,
+                )
+                .await
+                .expect_err("no result handle may survive an incomplete collection");
+            assert!(
+                format!("{error:?}").contains(diagnostic),
+                "{text}: {error:?}"
+            );
+            assert_eq!(source_pool.used(), baseline, "{text}");
+            assert_eq!(spill_pool.used(), 0, "{text}");
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn dropping_a_direct_collection_during_ordered_input_releases_source_and_spill_memory() {
+    let ((), report) = run_async_under_lab(0xc01d_c014, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let prepared = prepare("MATCH (n) RETURN COLLECT(n.q) AS items");
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let (mut source, backing) = file(&cx, &spill_pool).await;
+        let (mut partition, _) = file(&cx, &spill_pool).await;
+        let (mut destination, _) = file(&cx, &spill_pool).await;
+        {
+            let mut state = backing.0.lock().unwrap();
+            state.pending = true;
+            state.writes = 0;
+        }
+        let mut future = prepared.spool_in_view(
+            &mut view,
+            &cx,
+            policy(1),
+            &mut source,
+            &mut partition,
+            &mut destination,
+            1,
+            512,
+            1,
+            512,
+            63,
+            16 * 1024,
+            1000,
+            WORK,
+            None,
+        );
+        poll_fn(|task| {
+            let result = future.as_mut().poll(task);
+            if backing.0.lock().unwrap().writes != 0 {
+                assert!(result.is_pending());
+                Poll::Ready(())
+            } else {
+                assert!(
+                    result.is_pending(),
+                    "collection failed before the suspended append"
+                );
+                Poll::Pending
+            }
+        })
+        .await;
+        assert!(spill_pool.used() > 0);
+        drop(future);
+        assert_eq!(source_pool.used(), baseline);
+        assert_eq!(spill_pool.used(), 0);
+        assert!(source.is_poisoned());
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

@@ -101,8 +101,10 @@ impl SpillAggregatePlan {
 /// variable-length expansion refuse before the host opens storage.
 /// Relational inputs retain every projection, filter, UNWIND, binary set,
 /// DISTINCT, ordering and window barrier before reduction. Values inputs use the
-/// native singleton without a graph source. This plan contains no result or
-/// authority.
+/// native singleton without a graph source. Direct graph collections also use
+/// the complete relation owner, after native occurrence-order normalization;
+/// their graph rows are never reduced in a direct cursor's physical order.
+/// This plan contains no result or authority.
 #[derive(Clone, Debug)]
 pub enum AsyncSpillAggregatePlan {
     Vertex(AsyncVertexSpillAggregatePlan),
@@ -116,6 +118,26 @@ pub enum AsyncSpillAggregatePlan {
 
 impl AsyncSpillAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
+        if aggregate.input_relation().is_none()
+            && aggregate.aggregates().iter().any(|spec| {
+                matches!(
+                    spec.function(),
+                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+                )
+            })
+        {
+            // Native graph aggregation does not generally visit bindings in
+            // aggregate-argument order. Reuse the proved normalization that
+            // carries its original occurrence order as private leading cells.
+            // The complete ordered relation then owns source admission and
+            // every computed expression before the reducer sees any rows.
+            // Selecting a direct cursor, or sorting only the collected value,
+            // would change COLLECT and first-occurrence COLLECT DISTINCT.
+            let relation = aggregate
+                .incremental_collection_relation()
+                .ok_or(SpillAggregateBuildError::Unsupported)?;
+            return Self::compile_relation(&relation);
+        }
         if let Some(relation) = aggregate.input_relation() {
             // The complete relation, never just its graph leaf, owns the rows
             // summarized by this definition. Admit both halves before I/O.
