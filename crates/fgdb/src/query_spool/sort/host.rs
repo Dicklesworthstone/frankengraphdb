@@ -29,7 +29,7 @@ pub(crate) trait ExternalOrderHost: Send {
     fn native_event(&mut self, event: GlaExecutionEvent) -> Result<()>;
 
     /// Only owners with governed exact-cut point candidates may narrow a
-    /// compiler-proved vertex leaf. Signed/resident hosts retain their own
+    /// compiler-proved vertex-rooted leaf. Signed/resident hosts retain their own
     /// ordinary admission until they explicitly implement this capability.
     fn supports_vertex_seeds(&self) -> bool {
         false

@@ -367,6 +367,87 @@ fn vertex_seed_proof_keeps_root_columns_and_expression_window_boundaries() {
 }
 
 #[test]
+fn walk_seed_proof_keeps_native_path_modes_and_requires_the_root_identity() {
+    let pattern = |text: &str| -> PreparedGraphSet {
+        PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => {
+                Some(GraphSymbol::Relation(fgdb_delta_types::RelationId(7)))
+            }
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .with_duplicates()
+        .into()
+    };
+    let left = pattern("MATCH (wanted) RETURN wanted");
+    let selected = |right: PreparedGraphSet, predicate: &[GraphSetPredicateOp]| {
+        let query = left
+            .clone()
+            .cross_join(right)
+            .unwrap()
+            .filter(predicate)
+            .unwrap();
+        let plan = AsyncSpillSetPlan::compile_with_bounded_walks(&query).unwrap();
+        let AsyncSpillSetSourcePlan::Cross(cross) = plan.source() else {
+            panic!("selected external product");
+        };
+        cross.clone()
+    };
+    for mode in ["WALK", "TRAIL", "ACYCLIC", "SIMPLE", "ANY SHORTEST WALK"] {
+        let right = pattern(&format!(
+            "MATCH REPEATABLE ELEMENTS {mode} p=(a)-[:R*0..2]->(b) \
+             WHERE a.p>=1 RETURN b,a,p"
+        ));
+        let plan = selected(right.clone(), &[equal(0, 2)]);
+        assert!(matches!(
+            plan.right().source(),
+            AsyncSpillSetSourcePlan::Walk(_)
+        ));
+        assert_eq!(plan.vertex_seed_column(), Some(0), "{mode}");
+        assert_eq!(
+            selected(right.clone(), &[equal(0, 1)]).vertex_seed_column(),
+            None,
+            "an endpoint identity cannot seed the root"
+        );
+        assert_eq!(
+            selected(
+                right.clone(),
+                &[
+                    equal(0, 2),
+                    GraphSetPredicateOp::Truth(Some(true)),
+                    GraphSetPredicateOp::Or,
+                ],
+            )
+            .vertex_seed_column(),
+            None
+        );
+        for right in [
+            right.clone().with_page(0, Some(0)),
+            right.clone().with_page(1, None),
+            right
+                .with_order_by(&[GraphValueOrder::ascending(0)])
+                .unwrap(),
+        ] {
+            assert_eq!(selected(right, &[equal(0, 2)]).vertex_seed_column(), None);
+        }
+    }
+    for right in [
+        pattern("MATCH WALK (a)-[:R*1..2]->(b) WHERE 1/(b.p-2)>0 RETURN b,a"),
+        pattern("MATCH (a)-[:R]->(b) RETURN b,a"),
+        pattern("MATCH (a)-[:R]->(c)-[:R]->(b) RETURN b,a"),
+    ] {
+        assert_eq!(
+            selected(right, &[equal(0, 2)]).vertex_seed_column(),
+            None,
+            "fallible predicates and edge-ordered sources retain their full input"
+        );
+    }
+}
+
+#[test]
 fn keyed_selection_uses_native_boolean_proof_and_counts_every_physical_barrier() {
     use GraphSetPredicateOp::{And, Not, Or, Truth};
     assert!(!cross(&product()).supports_keyed_selection());

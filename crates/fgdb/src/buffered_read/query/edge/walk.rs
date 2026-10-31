@@ -22,20 +22,34 @@ impl<V: Vfs + Clone> AsyncGraphWalkSource for Source<'_, '_, V> {
         // The combined driver loans the same authenticated partition to the
         // vertex merge and incidence reader. Isolates and zero-hop routes are
         // therefore real vertex candidates, never inferred from edge endpoints.
-        let candidate = self
-            .cx
-            .with_restriction_async(self.scan.next_vertex_candidate(self.cx, &mut |event| {
-                control(match event {
-                    BufferedScanEvent::Work => AsyncVertexScanEvent::Work,
-                    BufferedScanEvent::Identity(vid) => AsyncVertexScanEvent::Candidate(vid),
-                })
-            }))
-            .erase_send()
-            .await
-            .map_err(|error| match error {
-                BufferedScanError::Read(error) => EdgeScanSourceError::Source(error),
-                BufferedScanError::Control(error) => EdgeScanSourceError::Control(error),
-            })?;
+        let mut observe = |event| {
+            control(match event {
+                BufferedScanEvent::Work => AsyncVertexScanEvent::Work,
+                BufferedScanEvent::Identity(vid) => AsyncVertexScanEvent::Candidate(vid),
+            })
+        };
+        let candidate = if let Some(seeds) = &mut self.vertex_seeds {
+            let Some(vid) = seeds.next() else {
+                return Ok(None);
+            };
+            // Admission comes from the COMPLETE leading relation. Each sorted
+            // distinct identity is still resolved and admitted at this scan's
+            // pinned cut, including missing/retired roots. No root heap is
+            // built; incidence and point reads retain one shared work meter.
+            self.cx
+                .with_restriction_async(self.scan.vertex_candidate_with(self.cx, vid, &mut observe))
+                .erase_send()
+                .await
+        } else {
+            self.cx
+                .with_restriction_async(self.scan.next_vertex_candidate(self.cx, &mut observe))
+                .erase_send()
+                .await
+        }
+        .map_err(|error| match error {
+            BufferedScanError::Read(error) => EdgeScanSourceError::Source(error),
+            BufferedScanError::Control(error) => EdgeScanSourceError::Control(error),
+        })?;
         candidate
             .map(|candidate| {
                 let record = candidate
@@ -168,6 +182,34 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         EdgeQueryError,
     > {
         let (source, checkpoint) = self.edge_input_source(cx, as_of, EdgeRelation::Any)?;
+        Ok(AsyncGraphWalkCursor::new(source, plan, policy, checkpoint))
+    }
+
+    /// Restrict root enumeration after the selected-product proof has admitted
+    /// the complete leading bag's sorted distinct identities. The native walk
+    /// cursor still owns every path occurrence, shortest tie, predicate and
+    /// output charge; its normal incidence driver shares the point-root cut.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn open_seeded_graph_walk_input<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncGraphWalkPlan,
+        seeds: BufferedVertexSeeds,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        AsyncGraphWalkCursor<
+            impl AsyncGraphWalkSource<
+                Error = BufferedReadError,
+                OutputGuard = MemoryCharge,
+                TraversalGuard = MemoryCharge,
+            > + use<'view, 'q, V>,
+            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
+        >,
+        EdgeQueryError,
+    > {
+        let (mut source, checkpoint) = self.edge_input_source(cx, as_of, EdgeRelation::Any)?;
+        source.vertex_seeds = Some(seeds);
         Ok(AsyncGraphWalkCursor::new(source, plan, policy, checkpoint))
     }
 }

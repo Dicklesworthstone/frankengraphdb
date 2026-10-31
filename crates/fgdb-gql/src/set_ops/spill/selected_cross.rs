@@ -113,15 +113,18 @@ pub(super) fn compile(
 
 impl SpillSetCrossPlan {
     /// The original left column whose vertex identities necessarily equal the
-    /// right pattern's root in every accepted pair. Only a plain vertex leaf
-    /// with the resident single-root proof qualifies: no right page, ordered
-    /// source, expression or probe may be skipped by candidate admission.
+    /// right pattern's root in every accepted pair. Vertex and bounded-walk
+    /// leaves with the resident single-root proof qualify: no right page,
+    /// ordered source, expression or probe may be skipped by root admission.
     /// A host may restrict that leaf to the sorted distinct vertex identities
     /// from the COMPLETE left bag, then run the original pair selection. NULL
     /// and other value domains seed nothing; original left occurrences remain.
     /// Hosts without governed same-cut point reads keep the ordinary leaf.
     pub fn vertex_seed_column(&self) -> Option<usize> {
-        if !matches!(self.right().source(), AsyncSpillSetSourcePlan::Vertex(_)) {
+        if !matches!(
+            self.right().source(),
+            AsyncSpillSetSourcePlan::Vertex(_) | AsyncSpillSetSourcePlan::Walk(_)
+        ) {
             return None;
         }
         self.selection.as_ref()?.vertex_seed_column

@@ -5,7 +5,7 @@
 mod join;
 mod walk;
 
-use super::{Cancel, Checkpoint};
+use super::{BufferedVertexSeeds, Cancel, Checkpoint};
 use crate::{BufferedReadError, BufferedReadView, MemoryPool};
 use asupersync::fs::Vfs;
 use fgdb_gql::algebra::{
@@ -67,6 +67,7 @@ impl AsyncEdgeScanRecord for Record {
 
 struct Source<'view, 'q, V: Vfs> {
     scan: BufferedEdgeJoinScan<'view, V>,
+    vertex_seeds: Option<BufferedVertexSeeds>,
     cx: &'q QueryCx,
     pool: MemoryPool,
 }
@@ -417,6 +418,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         .map_err(source_error)?;
         let source = Source {
             scan: scan.into_join_scan(),
+            vertex_seeds: None,
             cx,
             pool,
         };

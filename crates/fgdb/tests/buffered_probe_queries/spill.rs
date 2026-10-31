@@ -1,6 +1,9 @@
 //! Public prepared external-query routes, not explicit join-cursor selection.
 //! Reuse the committed graph fixture; only scratch I/O is an in-memory test file.
 
+#[path = "walk_seeds.rs"]
+mod walk_seeds;
+
 use super::*;
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use fgdb::{NativeAggregateSpoolError, NativeSpoolError, PreparedNativeRead};
@@ -80,6 +83,7 @@ async fn file(cx: &QueryCx, pool: &MemoryPool) -> SpillFile<File> {
 }
 fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
+        (GraphSymbolKind::Label, "Root") => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(11))),
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         _ => None,

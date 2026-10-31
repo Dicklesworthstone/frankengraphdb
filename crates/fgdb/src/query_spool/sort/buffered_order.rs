@@ -562,31 +562,61 @@ impl<V: Vfs + Clone> ExternalOrderHost for BufferedHost<'_, V> {
     {
         Box::pin(async move {
             self.check_snapshot(snapshot)?;
-            let AsyncSpillSetSourcePlan::Vertex(source) = plan.source() else {
-                return Err(SpillError::InvalidRun.into());
-            };
             let tail = plan.source_tail().cloned().ok_or(SpillError::InvalidRun)?;
-            let cursor = self
-                .view
-                .open_seeded_vertex_input(cx, source.clone(), seeds, snapshot, policy)
-                .map_err(|error| {
-                    NativeSpoolError::BufferedExecute(Box::new(error.map_source(ScanError::Vertex)))
-                })?;
-            ordered_input(
-                cx,
-                plan.source_columns().to_vec(),
-                cursor,
-                tail,
-                policy,
-                scratch,
-                destination,
-                limits.run_rows,
-                limits.max_runs,
-                limits.page_bytes,
-                limits.max_row_bytes,
-                limits.max_sort_work,
-            )
-            .await
+            let columns = plan.source_columns().to_vec();
+            match plan.source() {
+                AsyncSpillSetSourcePlan::Vertex(source) => {
+                    let cursor = self
+                        .view
+                        .open_seeded_vertex_input(cx, source.clone(), seeds, snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Vertex),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
+                AsyncSpillSetSourcePlan::Walk(source) => {
+                    let cursor = self
+                        .view
+                        .open_seeded_graph_walk_input(cx, source.clone(), seeds, snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Edge),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
+                _ => Err(SpillError::InvalidRun.into()),
+            }
         })
     }
 
