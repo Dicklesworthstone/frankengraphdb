@@ -280,6 +280,7 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                 assert_eq!(opposite.charged_workspace_bytes(),
                     mandatory_auxiliary + degree_bytes);
                 let minimum = scalar + mandatory_auxiliary;
+                let mut previous_reduced = None;
                 for bytes in [mem.max_kernel_workspace_bytes - 1, minimum] {
                     let fallback_memory = FnxMemoryLimits {
                         max_kernel_workspace_bytes: bytes,
@@ -294,10 +295,29 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                     assert_eq!(fallback.certificate.execution_kernel, expected.certificate.execution_kernel);
                     assert_eq!(fallback.certificate.witness, expected.certificate.witness);
                     assert_eq!(fallback.certificate.estimated_work, expected.certificate.estimated_work);
+                    assert_eq!(fallback.certificate.registry_version, expected.certificate.registry_version);
+                    assert_eq!(fallback.certificate.implementation_revision, expected.certificate.implementation_revision);
+                    assert_eq!(fallback.certificate.kernel_source_digest, expected.certificate.kernel_source_digest);
+                    assert_eq!(fallback.certificate.numeric_profile, expected.certificate.numeric_profile);
+                    assert_eq!(fallback.certificate.call_digest, expected.certificate.call_digest);
+                    assert_eq!(fallback.certificate.adapter, expected.certificate.adapter);
+                    assert_eq!(fallback.certificate.vertices, expected.certificate.vertices);
+                    assert_eq!(fallback.certificate.edges, expected.certificate.edges);
+                    assert_eq!(fallback.certificate.input_edges, expected.certificate.input_edges);
+                    assert_eq!(fallback.certificate.bfs_decision_card, expected.certificate.bfs_decision_card);
+                    assert_eq!(fallback.certificate.component_decision_card, expected.certificate.component_decision_card);
                     assert_eq!(fallback.certificate.kernel_workspace_bytes, minimum);
+                    // The attested workspace changes, so its hashed
+                    // certificate changes too. Both reduced allowances use
+                    // the same physical backing and must agree in full.
+                    assert_ne!(fallback.certificate.digest, expected.certificate.digest);
+                    if let Some(previous) = &previous_reduced {
+                        assert_eq!(&fallback, previous);
+                    }
                     compare_execution(&call.execute_sealed_cooperative(
                         &cx, &graph, exact, fallback_memory, quantum(1), yield_now,
                     ).await.unwrap(), &fallback);
+                    previous_reduced = Some(fallback);
                 }
                 minimum
             } else {
@@ -318,7 +338,7 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                         && direction != Directedness::Undirected;
                     let result = if cooperative {
                         if directed_workspace {
-                            // The auxiliary constructor checks its own exact
+                            // The auxiliary constructor checks its mandatory
                             // bound while running the normal bounded driver.
                             call.execute_sealed_cooperative(&cx, &graph, limits, memory,
                                 quantum(1), yield_now).await
@@ -344,7 +364,8 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                                 )) if requested == incoming && limit == incoming - 1));
                             }
                             Directedness::Reversed => {
-                                let auxiliary = 3 * (size_of::<VId>() + size_of::<usize>());
+                                let auxiliary = graph.node_count()
+                                    * (size_of::<VId>() + size_of::<usize>());
                                 assert!(matches!(result, Err(FnxSealedExecutionError::Source(
                                     SealedProjectionError::Projection(ProjectionError::LimitExceeded {
                                         resource: "workspace bytes", observed, limit,

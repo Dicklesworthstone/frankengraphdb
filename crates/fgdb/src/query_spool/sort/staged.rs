@@ -3,7 +3,7 @@
 //! DISTINCT/window and expression-failure precedence survive composition.
 
 use super::*;
-use crate::{BufferedEdge, BufferedReadView, BufferedValue};
+use crate::{BufferedReadView, BufferedValue};
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
 use fgdb_gql::spill_set::{
@@ -17,14 +17,14 @@ use fgdb_types::CanonicalScalarResolver;
 // cloning; neither a property table nor an uncharged value crosses the seam.
 pub(super) enum PinnedProperty {
     Vertex(BufferedValue<fgdb_types::CanonicalPropertyValue>),
-    Edge(BufferedValue<BufferedEdge>, usize),
+    Edge(BufferedValue<fgdb_types::CanonicalPropertyValue>),
 }
 
 impl std::borrow::Borrow<fgdb_types::CanonicalPropertyValue> for PinnedProperty {
     fn borrow(&self) -> &fgdb_types::CanonicalPropertyValue {
         match self {
             Self::Vertex(value) => value.as_ref(),
-            Self::Edge(record, at) => &record.props[*at].1,
+            Self::Edge(value) => value.as_ref(),
         }
     }
 }
@@ -100,17 +100,11 @@ impl<V: Vfs + Clone> AsyncSpillElementSource for ElementSource<'_, '_, V> {
                     Ok(value.map(PinnedProperty::Vertex))
                 }
                 ElementId::Edge(eid) => {
-                    let record = view
-                        .edge_at(cx, eid, as_of)
+                    let value = view
+                        .edge_property_at(cx, eid, key, as_of)
                         .await
                         .map_err(|error| NativeSpoolError::BufferedRead(Box::new(error)))?;
-                    Ok(record.and_then(|record| {
-                        record
-                            .props
-                            .binary_search_by_key(&key, |(key, _)| *key)
-                            .ok()
-                            .map(|at| PinnedProperty::Edge(record, at))
-                    }))
+                    Ok(value.map(PinnedProperty::Edge))
                 }
             }
         };

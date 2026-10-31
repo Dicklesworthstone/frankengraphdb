@@ -790,6 +790,30 @@ exact-tree proof and successful verifier; all source-dependent qualification
 tasks remain open. These focused results establish no performance, release or
 G1–G4 qualification.
 
+Before final qualification, a fresh remote read finds two missing peer commits:
+selective cold edge-property materialization and distance-workspace controls.
+They are integrated directly into canonical main, preserving both histories.
+The selected-property path reuses complete keyed identity/framing/admission and
+winner/retirement rules, distinguishes a missing physical locator from a missing
+key, retains stored NULL and charges the selected value's actual ownership. Whole
+extent I/O/authentication remains; this is no measured speedup or RSS result.
+
+The sole test conflict retains the stronger local independent opposite-face,
+literal-answer and exact mandatory-bound controls. An incoming assertion changes
+expected workspace but incorrectly retains the old certificate digest, which
+hashes workspace. The resolution checks all 17 stable certificate fields, exact
+reduced workspace and changed digest, and compares the two actual reduced-budget
+results completely. All nine other distance tests remain byte-identical.
+Incoming test seed spelling is corrected without changing its numeric value.
+Combined all-target/all-feature Clippy passes; complete buffered UNWIND is
+**31/0** and cooperative analytics **80/0 with one existing ignored test**.
+
+The earlier proof9 remains incomplete: its obsolete Cargo compiler and checker
+were stopped only after verified ownership, while the wrapper recorded stable
+RED143. The verifier rejects its missing aggregate verdict; it is not qualified
+evidence. Refresh remote history before the next clean proof, then run the full
+integrated mandatory chain and verifier. No source-dependent task closes early.
+
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,
 not a new gate or capability. Retire it from active use when these work units
