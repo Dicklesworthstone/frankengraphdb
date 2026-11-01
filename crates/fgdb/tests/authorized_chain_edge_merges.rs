@@ -4538,6 +4538,205 @@ fn matched_relationship_merge_masks_hidden_inputs_and_refuses_denied_actions_ato
 }
 
 #[test]
+fn on_create_null_keeps_the_relationship_live_with_no_property_keys() {
+    use fgdb::{QueryResult, QueryValue};
+    use fgdb_gql::{GraphSymbolResolver, GraphWriteProgramPolicy, ReverseSymbolCatalog};
+
+    #[derive(Clone, Copy)]
+    struct TckNames;
+    impl GraphSymbolResolver for TckNames {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            match (kind, name) {
+                (GraphSymbolKind::Label, "Visible") => Some(GraphSymbol::Label(L)),
+                (GraphSymbolKind::Relation, "TYPE") => Some(GraphSymbol::Relation(R)),
+                (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(P)),
+                (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+                (GraphSymbolKind::Property, "secret") => Some(GraphSymbol::Property(SECRET)),
+                _ => None,
+            }
+        }
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = ReverseSymbolCatalog::new();
+            catalog.insert_label(L, "Visible");
+            catalog.insert_relation(R, "TYPE");
+            for (key, name) in [(P, "name"), (Q, "q"), (SECRET, "secret")] {
+                catalog.insert_property(key, name);
+            }
+            Some(catalog)
+        }
+    }
+
+    // openCypher TCK 677cbafabb8c3c5eed458fd3b1ec0daec8d67d23,
+    // Merge6 [4] and its neighboring non-NULL property control [3].
+    // These original statements identify their two nodes by name, so the
+    // native fixture's existing visible label does not affect their matches.
+    lab(0xc4a1_3740, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+        let parameters = GqlParameters::new();
+        let read_policy = GqlQueryPolicy::new(10_000, 1, 1_000_000, 100_000);
+        let write_policy = GraphWriteProgramPolicy::new(read_policy, 100, 100, 100);
+        let control = "MATCH ()-[r:TYPE]->() \
+            RETURN [key IN keys(r) | key + '->' + r[key]] AS keyValue";
+        for (statement, expected_value) in [
+            (
+                "MATCH (a {name: 'A'}), (b {name: 'B'}) \
+                 MERGE (a)-[r:TYPE]->(b) ON CREATE SET r.name = null",
+                None,
+            ),
+            (
+                "MATCH (a {name: 'A'}), (b {name: 'B'}) \
+                 MERGE (a)-[r:TYPE]->(b) ON CREATE SET r.name = 'foo'",
+                Some("foo"),
+            ),
+        ] {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(R);
+            for (id, name) in [(1, "A"), (2, "B")] {
+                seed.create_vertex(
+                    VId(id),
+                    vec![L],
+                    vec![(P, CanonicalScalar::ucs_basic_text(name).unwrap())],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let vertices = db.vertices().unwrap();
+            let result = db
+                .query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    statement,
+                    &parameters,
+                    TckNames,
+                    R,
+                    write_policy,
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            let QueryResult::Write {
+                receipt,
+                completion: Some(completion),
+            } = result
+            else {
+                panic!("expected one completed native statement: {result:?}");
+            };
+            assert_eq!(receipt.stats().completed_statements, 1);
+            assert_eq!(receipt.stats().created_vertices, 0);
+            assert_eq!(receipt.stats().created_edges, 1);
+            let frontier = db.frontier().unwrap();
+            assert_eq!(frontier.0, before.0 + 1);
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: frontier
+                }
+            );
+            assert_eq!(db.vertices().unwrap(), vertices);
+            let edges = db.edges().unwrap();
+            assert_eq!(edges.len(), 1);
+            assert_eq!((edges[0].entry.src, edges[0].entry.dst), (VId(1), VId(2)));
+            assert_eq!(
+                edges[0].props,
+                expected_value
+                    .map(|value| vec![(P, CanonicalScalar::ucs_basic_text(value).unwrap().into())])
+                    .unwrap_or_default()
+            );
+            let key_value = expected_value
+                .map(|_| {
+                    vec![GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text("name->foo").unwrap(),
+                    )]
+                })
+                .unwrap_or_default();
+            let expected = QueryResult::Rows {
+                columns: vec!["keyValue".into()],
+                rows: vec![vec![QueryValue::Value(GraphValue::List(
+                    key_value.into_boxed_slice(),
+                ))]],
+            };
+            assert_eq!(
+                db.query_authorized(
+                    &query,
+                    &issuer,
+                    &token,
+                    "main",
+                    control,
+                    &parameters,
+                    TckNames,
+                    read_policy,
+                    || NOW,
+                )
+                .unwrap(),
+                expected
+            );
+            // A forbidden selected property cannot publish a preceding CREATE.
+            let denied = db
+                .query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    "CREATE (marker:Visible {q:9}) WITH marker \
+                     MATCH (a {name: 'A'}), (b {name: 'B'}) \
+                     MERGE (a)-[r:TYPE]->(b) ON MATCH SET r.secret=1",
+                    &parameters,
+                    TckNames,
+                    R,
+                    write_policy,
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                authorization(&denied),
+                Some(Error::ScopeDenied),
+                "{denied:?}"
+            );
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert_eq!(db.vertices().unwrap(), vertices);
+            assert_eq!(db.edges().unwrap(), edges);
+            drop(db);
+            let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(reopened.frontier().unwrap(), frontier);
+            assert_eq!(reopened.vertices().unwrap(), vertices);
+            assert_eq!(reopened.edges().unwrap(), edges);
+            assert_eq!(
+                reopened
+                    .query_authorized(
+                        &query,
+                        &issuer,
+                        &token,
+                        "main",
+                        control,
+                        &parameters,
+                        TckNames,
+                        read_policy,
+                        || NOW,
+                    )
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
 fn relationship_on_values_read_scoped_metadata_only_in_the_selected_branch() {
     lab(0xc4a1_3734, |contexts| async move {
         let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
