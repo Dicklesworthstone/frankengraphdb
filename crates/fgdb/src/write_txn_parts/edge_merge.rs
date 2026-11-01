@@ -362,12 +362,16 @@ type EdgeMergeFault<E, A, C> = fgdb_gql::GqlQueryError<fgdb_gql::GraphEdgeMergeE
 type EdgeMergeSelection<E, A, C> =
     Result<fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>, EdgeMergeFault<E, A, C>>;
 
-/// Statement-local resolutions admitted by the native collector. Only the
-/// simple upsert's key-invariance proof enables them; row actions, deletions,
-/// unbound endpoints and non-reflexive keys keep the ordinary source path.
+/// The row component is the native MERGE's query-equality encoding, never
+/// the storage encoding. Fixed-key statements use an empty row component.
+type EdgeUpsertMatchKey = ((VId, VId), Vec<u8>);
+
+/// Resolutions belong to one immutable upsert step, never an entire chain.
+/// Only its action-invariance proof enables them. Unbound endpoints, dynamic
+/// edge maps/clears and writes to match keys retain ordinary resolution.
 /// The caller discards this owner together with its workspace on any refusal.
 struct EdgeUpsertMatchTargets {
-    pairs: ResolvedPairEdges,
+    pairs: std::collections::BTreeMap<EdgeUpsertMatchKey, ResolvedEdges>,
 }
 
 impl EdgeUpsertMatchTargets {
@@ -375,6 +379,74 @@ impl EdgeUpsertMatchTargets {
         upsert.preserves_match_targets().then(|| Self {
             pairs: std::collections::BTreeMap::new(),
         })
+    }
+
+    fn for_rows(upsert: &fgdb_gql::PreparedGraphEdgeUpsertRows) -> Option<Self> {
+        upsert.preserves_match_targets().then(|| Self {
+            pairs: std::collections::BTreeMap::new(),
+        })
+    }
+
+    fn lookup<C>(
+        &self,
+        key: &EdgeUpsertMatchKey,
+        row_keyed: bool,
+        control: &mut impl FnMut(Option<fgdb_gql::GlaExecutionEvent>) -> Result<(), C>,
+    ) -> Result<Option<&ResolvedEdges>, C> {
+        use fgdb_gql::GlaExecutionEvent;
+        if row_keyed {
+            // A variable-key probe is neither constant work nor free payload
+            // comparison. Charge a deterministic logical allowance for its
+            // payload chunks and the retained map's bit-depth. The per-level
+            // allowance covers several comparisons; it is not an exact CPU
+            // comparison counter or a dependency on std's tree layout.
+            control(Some(GlaExecutionEvent::Work))?;
+            let depth = usize::BITS - self.pairs.len().leading_zeros();
+            let chunks = key
+                .1
+                .len()
+                .div_ceil(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+                .max(1);
+            // Nested bounded loops avoid multiplying attacker-sized lengths.
+            // Each event uses the native meter's checked u128 admission.
+            for _ in 0..depth {
+                for _ in 0..chunks {
+                    for _ in 0..12 {
+                        control(Some(GlaExecutionEvent::Work))?;
+                    }
+                }
+            }
+        }
+        Ok(self.pairs.get(key))
+    }
+
+    fn invalidate<C>(
+        &mut self,
+        control: &mut impl FnMut(Option<fgdb_gql::GlaExecutionEvent>) -> Result<(), C>,
+    ) -> Result<(), C> {
+        for _ in 0..self.pairs.len() {
+            control(Some(fgdb_gql::GlaExecutionEvent::Work))?;
+        }
+        self.pairs.clear();
+        Ok(())
+    }
+
+    fn admit_key<C>(
+        key: &EdgeUpsertMatchKey,
+        control: &mut impl FnMut(Option<fgdb_gql::GlaExecutionEvent>) -> Result<(), C>,
+    ) -> Result<(), C> {
+        use fgdb_gql::GlaExecutionEvent;
+        control(Some(GlaExecutionEvent::ScratchEntry))?;
+        // Moving a native equality key avoids a second encoding/copy. Its
+        // retained payload still consumes the statement's scratch allowance.
+        for _ in 0..key
+            .1
+            .len()
+            .div_ceil(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+        {
+            control(Some(GlaExecutionEvent::ScratchEntry))?;
+        }
+        Ok(())
     }
 }
 
@@ -413,7 +485,7 @@ fn collect_edge_merge_output_reusing_targets<Output: EdgeMergeOutput, E, A, C>(
     // still checks the original endpoints and live permit; only its physical
     // candidate lookup returns an empty vector when targets_reused is true.
     // Returned candidates are ignored on a hit; the admitted identities are
-    // already complete. This is private to the two native upsert owners.
+    // already complete. This is private to the native upsert occurrence owners.
     mut edge_source: impl FnMut(
         VId,
         VId,
@@ -469,6 +541,14 @@ fn collect_edge_merge_output_reusing_targets<Output: EdgeMergeOutput, E, A, C>(
     };
 
     event(Some(GlaExecutionEvent::Work))?;
+    // The upsert owners transfer one occurrence at a time. A wider relation
+    // uses the original reducer and cannot leave prior cached misses intact.
+    if selected.value.len() != 1 {
+        if let Some(targets) = targets.as_deref_mut() {
+            targets.invalidate(&mut event)?;
+        }
+        targets = None;
+    }
     let width = merge.input_column_types().len();
     let source_column = merge.source_column();
     let destination_column = merge.destination_column();
@@ -543,6 +623,22 @@ fn collect_edge_merge_output_reusing_targets<Output: EdgeMergeOutput, E, A, C>(
     if row_keyed {
         outcome.group_rows(representatives);
     }
+    // For a single transferred row, the original group owns exactly the
+    // native row_values equality key. None creates no group and never reuses
+    // a target. Move this already evaluated key; do not encode/copy it again.
+    let mut row_match_key = if targets.is_some() && row_keyed {
+        groups.pop_first().map(|((_, key), _)| key)
+    } else {
+        None
+    };
+    if row_keyed && row_match_key.is_none() {
+        // No encoding means no disjointness proof against prior key groups.
+        // Conservatively forget them before this occurrence can create an edge.
+        // Retained scratch is cumulative; invalidation grants no budget refund.
+        if let Some(targets) = targets.as_deref_mut() {
+            targets.invalidate(&mut event)?;
+        }
+    }
     let mut overlay_edges = 0u64;
     let mut created_edges = 0u64;
     let mut creation: Option<WriteBatch> = None;
@@ -553,9 +649,18 @@ fn collect_edge_merge_output_reusing_targets<Output: EdgeMergeOutput, E, A, C>(
             .map_or(&[][..], Vec::as_slice);
         // A scoped host admits candidates BEFORE they reach these counters or
         // the uniqueness reducer. Repeated physical scans spend the SAME cap.
-        let reused = targets
-            .as_deref()
-            .and_then(|targets| targets.pairs.get(&(source, destination)));
+        let match_key = targets.as_ref().and_then(|_| {
+            let key = if row_keyed {
+                row_match_key.take()
+            } else {
+                Some(Vec::new())
+            };
+            key.map(|key| ((source, destination), key))
+        });
+        let reused = match (targets.as_deref(), match_key.as_ref()) {
+            (Some(targets), Some(key)) => targets.lookup(key, row_keyed, &mut event)?,
+            _ => None,
+        };
         let edges = edge_source(source, destination, reused.is_some())
             .map_err(|error| error.map_source(GraphEdgeMergeError::Source))?;
         let observed = u128::from(overlay_edges)
@@ -645,11 +750,11 @@ fn collect_edge_merge_output_reusing_targets<Output: EdgeMergeOutput, E, A, C>(
                     &mut event,
                 )?;
             }
-            if let Some(targets) = targets.as_deref_mut() {
-                // The matching entries were charged before construction above.
-                // Transfer their ownership, and separately admit the pair key.
-                event(Some(GlaExecutionEvent::ScratchEntry))?;
-                targets.pairs.insert((source, destination), matching);
+            if let (Some(targets), Some(key)) = (targets.as_deref_mut(), match_key) {
+                // Matching entries were charged before construction above.
+                // Transfer them after admitting the retained pair/key payload.
+                EdgeUpsertMatchTargets::admit_key(&key, &mut event)?;
+                targets.pairs.insert(key, matching);
             }
             continue;
         }
@@ -684,13 +789,13 @@ fn collect_edge_merge_output_reusing_targets<Output: EdgeMergeOutput, E, A, C>(
             .get_or_insert_with(|| WriteBatch::new(merge.relation()))
             .add_edge_values(edge, source, destination, properties);
         created_edges += 1;
-        if let Some(targets) = targets.as_deref_mut() {
-            // This vector and its pair key are additional retained owners.
+        if let (Some(targets), Some(key)) = (targets.as_deref_mut(), match_key) {
+            // This vector and its pair/key are additional retained owners.
             event(Some(GlaExecutionEvent::ScratchEntry))?;
-            event(Some(GlaExecutionEvent::ScratchEntry))?;
+            EdgeUpsertMatchTargets::admit_key(&key, &mut event)?;
             targets
                 .pairs
-                .insert((source, destination), vec![(edge, (source, destination))]);
+                .insert(key, vec![(edge, (source, destination))]);
         }
         // All proposals remain private until every pair has succeeded.
         event(None)?;
@@ -1470,6 +1575,431 @@ mod edge_merge_target_reuse_tests {
             } else {
                 assert!(matches!(result, Err(GqlQueryError::Evaluator(_))));
             }
+        }
+    }
+
+    fn row_upsert() -> fgdb_gql::PreparedGraphEdgeUpsertRows {
+        let program = fgdb_gql::PreparedGraphWriteChainText::prepare(
+            "UNWIND [1] AS x MATCH (a),(b)              MERGE (a)-[r:R {key:x}]-(b) ON MATCH SET r.value=x",
+            RELATION,
+            |kind, name| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RELATION)),
+                (GraphSymbolKind::Property, "key") => Some(GraphSymbol::Property(KEY)),
+                (GraphSymbolKind::Property, "value") => Some(GraphSymbol::Property(VALUE)),
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let upsert = match program.steps().last().unwrap() {
+            fgdb_gql::GraphWriteChainStep::EdgeUpsert(upsert)
+            | fgdb_gql::GraphWriteChainStep::EdgeUpsertRows { upsert, .. }
+            | fgdb_gql::GraphWriteChainStep::EdgeUpsertQuery { upsert, .. } => upsert,
+            _ => panic!("expected a row-valued relationship upsert"),
+        };
+        assert!(upsert.preserves_match_targets());
+        upsert.clone()
+    }
+
+    fn keyed_row(
+        upsert: &fgdb_gql::PreparedGraphEdgeUpsertRows,
+        pair: (u128, u128),
+        key: GraphValue,
+    ) -> GraphValueRow {
+        let merge = upsert.merge();
+        let width = merge.input_column_types().len();
+        assert_eq!(width, 3);
+        let mut values = vec![GraphValue::Scalar(CanonicalScalar::Null); width];
+        values[merge.source_column()] = GraphValue::Vertex(VId(pair.0));
+        values[merge.destination_column()] = GraphValue::Vertex(VId(pair.1));
+        let column = (0..width)
+            .find(|column| {
+                *column != merge.source_column() && *column != merge.destination_column()
+            })
+            .unwrap();
+        values[column] = key;
+        GraphValueRow::from_owned_values(values)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_keys(
+        upsert: &fgdb_gql::PreparedGraphEdgeUpsertRows,
+        targets: Option<&mut EdgeUpsertMatchTargets>,
+        rows: Vec<GraphValueRow>,
+        edges: &[EdgeRecord],
+        allowance: GraphEdgeMergePolicy,
+        admissions: &Cell<usize>,
+        scans: &Cell<usize>,
+        refused: Option<&'static str>,
+        checkpoint: impl FnMut() -> Result<(), &'static str>,
+    ) -> Result<EdgeMergeProposal<EdgeMergeRows>, Fault> {
+        let count = rows.len() as u64;
+        let select = |_| {
+            Ok(GqlQueryExecution {
+                value: rows,
+                rows: GqlExecutionStats {
+                    snapshot_records: 0,
+                    result_rows: count,
+                },
+                evaluator: GlaExecutionStats::default(),
+            })
+        };
+        let mut source = |_, _, reused| {
+            admissions.set(admissions.get() + 1);
+            if let Some(error) = refused {
+                return Err(GqlQueryError::Source(error));
+            }
+            if reused {
+                return Ok(Vec::new());
+            }
+            scans.set(scans.get() + 1);
+            Ok(edges.to_vec())
+        };
+        match targets {
+            Some(targets) => collect_edge_merge_output_reusing_targets(
+                upsert.merge(),
+                allowance,
+                Some(targets),
+                select,
+                source,
+                |_| Ok(ElementId::Edge(EId(1000))),
+                checkpoint,
+            ),
+            None => collect_edge_merge_output(
+                upsert.merge(),
+                allowance,
+                select,
+                |src, dst| source(src, dst, false),
+                |_| Ok(ElementId::Edge(EId(1000))),
+                checkpoint,
+            ),
+        }
+    }
+
+    #[test]
+    fn row_key_targets_equal_full_resolution_and_use_native_numeric_equality() {
+        let upsert = row_upsert();
+        let mut targets = EdgeUpsertMatchTargets::for_rows(&upsert).unwrap();
+        let edges = [
+            record(HIGH, 2, 1, 1),
+            record(EId(3), 1, 2, 1),
+            record(EId(4), 1, 2, 2),
+            record(EId(5), 1, 3, 1),
+        ];
+        let admissions = Cell::new(0);
+        let scans = Cell::new(0);
+        let ordinary_scans = Cell::new(0);
+        let float_one = CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.0));
+        for (pair, key) in [
+            ((1, 2), CanonicalScalar::Int(1)),
+            ((1, 2), CanonicalScalar::Int(2)),
+            ((1, 2), CanonicalScalar::Int(1)),
+            ((1, 2), float_one),
+            ((2, 1), CanonicalScalar::Int(1)),
+        ] {
+            let row = keyed_row(&upsert, pair, GraphValue::Scalar(key));
+            let ordinary = resolve_keys(
+                &upsert,
+                None,
+                vec![row.clone()],
+                &edges,
+                policy(),
+                &Cell::new(0),
+                &ordinary_scans,
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+            let reused = resolve_keys(
+                &upsert,
+                Some(&mut targets),
+                vec![row],
+                &edges,
+                policy(),
+                &admissions,
+                &scans,
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(reused.selected, ordinary.selected);
+            assert_eq!(reused.outcome.edges, ordinary.outcome.edges);
+            assert_eq!(reused.outcome.occurrences, ordinary.outcome.occurrences);
+            assert_eq!(
+                reused.outcome.representatives,
+                ordinary.outcome.representatives
+            );
+            assert_eq!(reused.outcome.outcomes, ordinary.outcome.outcomes);
+            assert!(reused.creation.is_none() && ordinary.creation.is_none());
+            assert_eq!(reused.stats.created_edges, 0);
+        }
+        assert_eq!(
+            (admissions.get(), scans.get(), ordinary_scans.get()),
+            (5, 3, 5)
+        );
+        assert_eq!(targets.pairs.len(), 3);
+        let mut values: Vec<_> = targets.pairs.values().cloned().collect();
+        values.sort();
+        assert_eq!(
+            values,
+            vec![
+                vec![(EId(3), (VId(1), VId(2))), (HIGH, (VId(2), VId(1)))],
+                vec![(EId(3), (VId(1), VId(2))), (HIGH, (VId(2), VId(1)))],
+                vec![(EId(4), (VId(1), VId(2)))],
+            ]
+        );
+    }
+
+    #[test]
+    fn unencodable_row_key_and_wide_input_invalidate_prior_targets() {
+        let upsert = row_upsert();
+        let mut targets = EdgeUpsertMatchTargets::for_rows(&upsert).unwrap();
+        let valid = keyed_row(&upsert, (1, 2), GraphValue::Scalar(CanonicalScalar::Int(1)));
+        let nullable = keyed_row(
+            &upsert,
+            (1, 2),
+            GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Null)].into()),
+        );
+        let (_, key) = upsert
+            .merge()
+            .row_values::<&'static str, &'static str, &'static str>(0, &nullable, &mut |_| Ok(()))
+            .unwrap();
+        assert!(
+            key.is_none(),
+            "the oracle must actually exercise the unencoded path"
+        );
+        let mut edges = vec![record(EId(3), 1, 2, 1)];
+        let scans = Cell::new(0);
+        for (at, row) in [valid.clone(), nullable, valid.clone()]
+            .into_iter()
+            .enumerate()
+        {
+            let ordinary = resolve_keys(
+                &upsert,
+                None,
+                vec![row.clone()],
+                &edges,
+                policy(),
+                &Cell::new(0),
+                &Cell::new(0),
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+            let reused = resolve_keys(
+                &upsert,
+                Some(&mut targets),
+                vec![row],
+                &edges,
+                policy(),
+                &Cell::new(0),
+                &scans,
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(reused.outcome.occurrences, ordinary.outcome.occurrences);
+            assert_eq!(reused.outcome.outcomes, ordinary.outcome.outcomes);
+            if at == 1 {
+                assert!(targets.pairs.is_empty());
+                let expected = ordinary.creation.unwrap();
+                let actual = reused.creation.unwrap();
+                assert_eq!(actual.relation, expected.relation);
+                let (
+                    [
+                        PendingRow::Edge {
+                            eid,
+                            src,
+                            dst,
+                            props,
+                            ensure: false,
+                        },
+                    ],
+                    [
+                        PendingRow::Edge {
+                            props: expected_props,
+                            ensure: false,
+                            ..
+                        },
+                    ],
+                ) = (&actual.rows[..], &expected.rows[..])
+                else {
+                    panic!("the unencoded occurrence must use ordinary edge creation");
+                };
+                assert_eq!(props, expected_props);
+                assert_eq!((*eid, *src, *dst), (EId(1000), VId(1), VId(2)));
+                let mut created = record(*eid, src.0, dst.0, 0);
+                created.props.clone_from(props);
+                edges.push(created);
+            } else {
+                assert!(reused.creation.is_none() && ordinary.creation.is_none());
+                assert_eq!(targets.pairs.len(), 1);
+            }
+        }
+        assert_eq!(
+            scans.get(),
+            3,
+            "a valid key after None resolves the current overlay"
+        );
+
+        // A caller transferring a relation instead of one occurrence retains
+        // the native group reducer and must not leave its old memo usable.
+        edges.push(record(EId(4), 1, 2, 1));
+        let ordinary = resolve_keys(
+            &upsert,
+            None,
+            vec![valid.clone(), valid.clone()],
+            &edges,
+            policy(),
+            &Cell::new(0),
+            &Cell::new(0),
+            None,
+            || Ok(()),
+        )
+        .unwrap();
+        let reused = resolve_keys(
+            &upsert,
+            Some(&mut targets),
+            vec![valid.clone(), valid],
+            &edges,
+            policy(),
+            &Cell::new(0),
+            &scans,
+            None,
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(reused.outcome.occurrences, ordinary.outcome.occurrences);
+        assert_eq!(
+            reused.outcome.representatives,
+            ordinary.outcome.representatives
+        );
+        assert_eq!(reused.outcome.outcomes, ordinary.outcome.outcomes);
+        assert!(targets.pairs.is_empty());
+        assert_eq!(scans.get(), 4);
+    }
+
+    #[test]
+    fn row_key_hit_keeps_native_refusals_and_exact_resource_boundaries() {
+        let upsert = row_upsert();
+        let mut targets = EdgeUpsertMatchTargets::for_rows(&upsert).unwrap();
+        let row = keyed_row(&upsert, (1, 2), GraphValue::Scalar(CanonicalScalar::Int(1)));
+        let edges = [record(EId(3), 1, 2, 1)];
+        resolve_keys(
+            &upsert,
+            Some(&mut targets),
+            vec![row.clone()],
+            &edges,
+            policy(),
+            &Cell::new(0),
+            &Cell::new(0),
+            None,
+            || Ok(()),
+        )
+        .unwrap();
+        for input in [
+            GraphValueRow::from_owned_values(Vec::new()),
+            keyed_row(&upsert, (1, 2), GraphValue::Scalar(CanonicalScalar::Null)),
+            row.clone(),
+        ] {
+            let ordinary = resolve_keys(
+                &upsert,
+                None,
+                vec![input.clone()],
+                &edges,
+                policy(),
+                &Cell::new(0),
+                &Cell::new(0),
+                Some("source denied"),
+                || Ok(()),
+            )
+            .err()
+            .unwrap();
+            let reused = resolve_keys(
+                &upsert,
+                Some(&mut targets),
+                vec![input],
+                &edges,
+                policy(),
+                &Cell::new(0),
+                &Cell::new(0),
+                Some("source denied"),
+                || Ok(()),
+            )
+            .err()
+            .unwrap();
+            assert_eq!(format!("{ordinary:?}"), format!("{reused:?}"));
+        }
+        let calls = Cell::new(0);
+        let completed = resolve_keys(
+            &upsert,
+            Some(&mut targets),
+            vec![row.clone()],
+            &edges,
+            policy(),
+            &Cell::new(0),
+            &Cell::new(0),
+            None,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        let measured = completed.stats.evaluator;
+        assert_eq!(completed.stats.overlay_edges, 0);
+        let held = targets.pairs.clone();
+        for stop in 0..calls.get() {
+            let mut at = 0;
+            let result = resolve_keys(
+                &upsert,
+                Some(&mut targets),
+                vec![row.clone()],
+                &edges,
+                policy(),
+                &Cell::new(0),
+                &Cell::new(0),
+                None,
+                || {
+                    let current = at;
+                    at += 1;
+                    if current == stop {
+                        Err("cancelled")
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(GqlQueryError::Interrupted("cancelled"))
+            ));
+            assert_eq!(at, stop + 1);
+            assert_eq!(targets.pairs, held);
+        }
+        for (work, scratch, succeeds) in [
+            (measured.work_units, measured.scratch_entries, true),
+            (measured.work_units - 1, measured.scratch_entries, false),
+            (measured.work_units, measured.scratch_entries - 1, false),
+        ] {
+            let result = resolve_keys(
+                &upsert,
+                Some(&mut targets),
+                vec![row.clone()],
+                &edges,
+                GraphEdgeMergePolicy::new(GqlQueryPolicy::new(u64::MAX, u64::MAX, work, scratch)),
+                &Cell::new(0),
+                &Cell::new(0),
+                None,
+                || Ok(()),
+            );
+            if succeeds {
+                assert_eq!(result.unwrap().stats.evaluator, measured);
+            } else {
+                assert!(matches!(result, Err(GqlQueryError::Evaluator(_))));
+            }
+            assert_eq!(targets.pairs, held);
         }
     }
 }

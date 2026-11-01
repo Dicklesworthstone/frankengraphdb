@@ -899,6 +899,9 @@ impl WriteTxn {
         let mut outcomes = Vec::new();
         let mut created = Vec::new();
         let mut effects = 0_u64;
+        // This memo belongs only to this immutable chain step. Every occurrence
+        // still evaluates its row keys and RHS actions through the native owners.
+        let mut match_targets = EdgeUpsertMatchTargets::for_rows(upsert);
         for (at, row) in selected.value.into_iter().enumerate() {
             // Transfer the already admitted row through the real collector;
             // do not deep-copy a carried map to construct a singleton source.
@@ -964,57 +967,66 @@ impl WriteTxn {
                     .max_edges
                     .checked_sub(stats.created_edges)
                     .ok_or_else(invalid)?;
-                let proposal =
-                    collect_edge_merge_output::<EdgeUpsertRowTargets, WriteTxnError, A, _>(
-                        merge,
-                        GraphEdgeMergePolicy::new(private).with_creation_limit(remaining),
-                        |_| {
-                            Ok(GqlQueryExecution {
-                                value: vec![row],
-                                rows: GqlExecutionStats {
-                                    snapshot_records: stats.selection.snapshot_records,
-                                    result_rows: 1,
-                                },
-                                evaluator: stats.evaluator,
-                            })
-                        },
-                        |source, destination| {
+                let proposal = collect_edge_merge_output_reusing_targets::<
+                    EdgeUpsertRowTargets,
+                    WriteTxnError,
+                    A,
+                    _,
+                >(
+                    merge,
+                    GraphEdgeMergePolicy::new(private).with_creation_limit(remaining),
+                    match_targets.as_mut(),
+                    |_| {
+                        Ok(GqlQueryExecution {
+                            value: vec![row],
+                            rows: GqlExecutionStats {
+                                snapshot_records: stats.selection.snapshot_records,
+                                result_rows: 1,
+                            },
+                            evaluator: stats.evaluator,
+                        })
+                    },
+                    |source, destination, targets_reused| {
+                        if targets_reused {
+                            Ok(Vec::new())
+                        } else {
                             self.merge_candidate_edges(database, merge, source, destination, || {
                                 cx.checkpoint()
                             })
-                        },
-                        |_| allocate(GraphInsertRequest::Edge { row: at, edge: 0 }),
-                        || cx.checkpoint(),
-                    )
-                    .map_err(|error| {
-                        error.map_source(|error| {
-                            chained(GraphEdgeUpsertError::Merge(match error {
-                                GraphEdgeMergeError::CreationLimit { observed, .. } => {
-                                    GraphEdgeMergeError::CreationLimit {
-                                        limit: policy.max_edges,
-                                        observed: u128::from(stats.created_edges) + observed,
-                                    }
+                        }
+                    },
+                    |_| allocate(GraphInsertRequest::Edge { row: at, edge: 0 }),
+                    || cx.checkpoint(),
+                )
+                .map_err(|error| {
+                    error.map_source(|error| {
+                        chained(GraphEdgeUpsertError::Merge(match error {
+                            GraphEdgeMergeError::CreationLimit { observed, .. } => {
+                                GraphEdgeMergeError::CreationLimit {
+                                    limit: policy.max_edges,
+                                    observed: u128::from(stats.created_edges) + observed,
                                 }
-                                GraphEdgeMergeError::InputSchema { column, .. } => {
-                                    GraphEdgeMergeError::InputSchema { row: at, column }
-                                }
-                                GraphEdgeMergeError::NullEndpoint { column, .. } => {
-                                    GraphEdgeMergeError::NullEndpoint { row: at, column }
-                                }
-                                GraphEdgeMergeError::RowValue { property, .. } => {
-                                    GraphEdgeMergeError::RowValue { row: at, property }
-                                }
-                                GraphEdgeMergeError::RowExpression {
-                                    property, source, ..
-                                } => GraphEdgeMergeError::RowExpression {
-                                    row: at,
-                                    property,
-                                    source,
-                                },
-                                error => error,
-                            }))
-                        })
-                    })?;
+                            }
+                            GraphEdgeMergeError::InputSchema { column, .. } => {
+                                GraphEdgeMergeError::InputSchema { row: at, column }
+                            }
+                            GraphEdgeMergeError::NullEndpoint { column, .. } => {
+                                GraphEdgeMergeError::NullEndpoint { row: at, column }
+                            }
+                            GraphEdgeMergeError::RowValue { property, .. } => {
+                                GraphEdgeMergeError::RowValue { row: at, property }
+                            }
+                            GraphEdgeMergeError::RowExpression {
+                                property, source, ..
+                            } => GraphEdgeMergeError::RowExpression {
+                                row: at,
+                                property,
+                                source,
+                            },
+                            error => error,
+                        }))
+                    })
+                })?;
                 let EdgeMergeProposal {
                     stats: merged,
                     outcome,
@@ -1047,7 +1059,8 @@ impl WriteTxn {
             for (row, targets) in resolved.rows() {
                 let input_at = input.len();
                 // The collector froze all parallel matches for this occurrence.
-                // A key rewrite below affects only the next occurrence's lookup.
+                // Key-writing steps have no memo, so the next occurrence resolves
+                // against their updated overlay through the original full path.
                 for (outcome, endpoints) in targets.targets() {
                     let (edge, branch, on) = match outcome {
                         GraphEdgeMergeOutcome::Matched(edge) => (
@@ -1333,9 +1346,9 @@ impl WriteTxn {
 fn mixed_edge_merge_direct_element_reads_keep_original_row_coordinates() {
     use fgdb_gql::algebra::{GraphValue, GraphValueRow};
     use fgdb_gql::{
-        GlaExecutionStats, GqlParameters, GqlQueryError, GqlQueryPolicy,
-        GraphEdgeMergeRowAction, GraphSymbol, GraphSymbolKind, GraphVertexMergeRowInput,
-        GraphWriteChainStep, PreparedGraphEdgeUpsertRows, PreparedGraphWriteChainText,
+        GlaExecutionStats, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeMergeRowAction,
+        GraphSymbol, GraphSymbolKind, GraphVertexMergeRowInput, GraphWriteChainStep,
+        PreparedGraphEdgeUpsertRows, PreparedGraphWriteChainText,
     };
     const P: fgdb_delta_types::PropertyKeyId = fgdb_delta_types::PropertyKeyId(1);
     let ((), report) = asupersync::lab::run_async_under_lab(0xf0ec_1014, |root| async move {
@@ -1344,13 +1357,17 @@ fn mixed_edge_merge_direct_element_reads_keep_original_row_coordinates() {
         let definition = PreparedGraphWriteChainText::prepare(
             "WITH {p:2} AS row MERGE (a:F {p:1}) MERGE (b:F {p:2}) \
              MERGE (a)-[r:R]->(b) ON MATCH SET r.p=r.p+row.p",
-            RelationId(1), |kind, name: &str| match (kind, name) {
+            RelationId(1),
+            |kind, name: &str| match (kind, name) {
                 (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
                 (GraphSymbolKind::Label, "F") => Some(GraphSymbol::Label(LabelId(1))),
                 (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
                 _ => None,
             },
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
         let upsert = match definition.steps().last().unwrap() {
             GraphWriteChainStep::EdgeUpsert(upsert)
             | GraphWriteChainStep::EdgeUpsertRows { upsert, .. }
@@ -1358,26 +1375,57 @@ fn mixed_edge_merge_direct_element_reads_keep_original_row_coordinates() {
             _ => panic!("compiled relationship row owner"),
         };
         let mut actions = upsert.actions().clone();
-        let [GraphEdgeMergeRowAction::Value { inputs: Some(inputs), .. }] =
-            &mut actions.on_match[..] else { panic!("compiled mixed frame") };
-        assert_eq!(&inputs[..], &[GraphVertexMergeRowInput::Property(P),
-            GraphVertexMergeRowInput::Column(0)]);
+        let [
+            GraphEdgeMergeRowAction::Value {
+                inputs: Some(inputs),
+                ..
+            },
+        ] = &mut actions.on_match[..]
+        else {
+            panic!("compiled mixed frame")
+        };
+        assert_eq!(
+            &inputs[..],
+            &[
+                GraphVertexMergeRowInput::Property(P),
+                GraphVertexMergeRowInput::Column(0)
+            ]
+        );
         // The same prepared VM dereferences its second cell. The native
         // typed action API binds that cell to a real carried vertex instead
         // of a map; its source coordinate is ORIGINAL column 2, not frame 1.
         inputs[1] = GraphVertexMergeRowInput::Column(2);
         let upsert = PreparedGraphEdgeUpsertRows::prepare(upsert.merge().clone(), actions).unwrap();
         let input = GraphValueRow::from_owned_values(vec![
-            GraphValue::map(vec![("p".into(), GraphValue::Scalar(CanonicalScalar::Int(2)))]).unwrap(),
-            GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2)),
+            GraphValue::map(vec![(
+                "p".into(),
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+            )])
+            .unwrap(),
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(2)),
         ]);
         let mut db = Database::<crate::MemVfs>::open_memory(
-            &contexts.commit(), crate::DatabaseKeys::new([0x97; 32],
-                fgdb_types::DatabaseSecurityNamespaceId([0x98; 32]), [0x99; 32]),
-        ).await.unwrap();
+            &contexts.commit(),
+            crate::DatabaseKeys::new(
+                [0x97; 32],
+                fgdb_types::DatabaseSecurityNamespaceId([0x98; 32]),
+                [0x99; 32],
+            ),
+        )
+        .await
+        .unwrap();
         let mut seed = WriteBatch::new(RelationId(1));
-        seed.create_vertex(VId(1), vec![LabelId(1)], vec![(P, CanonicalScalar::Int(10))]);
-        seed.create_vertex(VId(2), vec![LabelId(1)], vec![(P, CanonicalScalar::Int(20))]);
+        seed.create_vertex(
+            VId(1),
+            vec![LabelId(1)],
+            vec![(P, CanonicalScalar::Int(10))],
+        );
+        seed.create_vertex(
+            VId(2),
+            vec![LabelId(1)],
+            vec![(P, CanonicalScalar::Int(20))],
+        );
         seed.add_edge(EId(3), VId(1), VId(2), vec![(P, CanonicalScalar::Int(1))]);
         db.write(&contexts.commit(), seed).await.unwrap();
         let frontier = db.frontier().unwrap();
@@ -1388,39 +1436,76 @@ fn mixed_edge_merge_direct_element_reads_keep_original_row_coordinates() {
         {
             let state = std::cell::RefCell::new((&mut transaction, &mut db));
             edge_merge_row_actions_controlled::<WriteTxnError, std::convert::Infallible, _>(
-                (RelationId(1), EId(3)), (0, &input), [&upsert.actions().on_match, &[]],
+                (RelationId(1), EId(3)),
+                (0, &input),
+                [&upsert.actions().on_match, &[]],
                 GqlQueryPolicy::new(100, 100, 1_000_000, 1_000_000),
-                &mut evaluator, (100, &mut effects), || query.checkpoint(),
+                &mut evaluator,
+                (100, &mut effects),
+                || query.checkpoint(),
                 |key, control| {
                     let state = state.borrow();
-                    edge_upsert_row_property(state.0, state.1, ElementId::Edge(EId(3)), key, control)
+                    edge_upsert_row_property(
+                        state.0,
+                        state.1,
+                        ElementId::Edge(EId(3)),
+                        key,
+                        control,
+                    )
                 },
                 |column, element, key, control| {
-                    let ElementId::Vertex(vertex) = element else { panic!("vertex input") };
+                    let ElementId::Vertex(vertex) = element else {
+                        panic!("vertex input")
+                    };
                     let column = column.expect("a direct original input reference");
-                    assert_eq!(input.values().get(column), Some(&GraphValue::Vertex(vertex)),
-                        "the host must receive the reached element's original row coordinate");
+                    assert_eq!(
+                        input.values().get(column),
+                        Some(&GraphValue::Vertex(vertex)),
+                        "the host must receive the reached element's original row coordinate"
+                    );
                     reached.set(true);
                     let state = state.borrow();
-                    edge_upsert_row_property_with(state.0, state.1, element, key, control,
-                        |value| Ok(value.cloned()))
+                    edge_upsert_row_property_with(
+                        state.0,
+                        state.1,
+                        element,
+                        key,
+                        control,
+                        |value| Ok(value.cloned()),
+                    )
                 },
-                |_| panic!("no replacement"), |_, _, _, _| panic!("no metadata"),
+                |_| panic!("no replacement"),
+                |_, _, _, _| panic!("no metadata"),
                 |batch| {
                     let mut state = state.borrow_mut();
                     let (transaction, database) = &mut *state;
-                    transaction.stage_edge_upsert_row_batch(database, batch).map_err(|error|
-                        GqlQueryError::Source(fgdb_gql::GraphEdgeUpsertError::Staging(error)))
+                    transaction
+                        .stage_edge_upsert_row_batch(database, batch)
+                        .map_err(|error| {
+                            GqlQueryError::Source(fgdb_gql::GraphEdgeUpsertError::Staging(error))
+                        })
                 },
-            ).unwrap();
+            )
+            .unwrap();
         }
-        assert!(reached.get(), "the real carried vertex's point reader must execute");
-        assert_eq!(transaction.edge_property(&db, EId(3), P).unwrap(),
-            Some(CanonicalScalar::Int(21).into()));
-        assert!(transaction.point_reads.borrow()
-            .contains(ElementId::Vertex(VId(2)), PointReadField::Property(P)));
-        assert_eq!(db.edge(EId(3)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1).into())]);
+        assert!(
+            reached.get(),
+            "the real carried vertex's point reader must execute"
+        );
+        assert_eq!(
+            transaction.edge_property(&db, EId(3), P).unwrap(),
+            Some(CanonicalScalar::Int(21).into())
+        );
+        assert!(
+            transaction
+                .point_reads
+                .borrow()
+                .contains(ElementId::Vertex(VId(2)), PointReadField::Property(P))
+        );
+        assert_eq!(
+            db.edge(EId(3)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(1).into())]
+        );
         assert_eq!(db.frontier().unwrap(), frontier);
         transaction.abort();
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
@@ -1455,7 +1540,10 @@ fn mixed_edge_merge_payload_is_admitted_before_owner_frame_copy() {
                 (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
                 _ => None,
             },
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
         let upsert = match definition.steps().last().unwrap() {
             GraphWriteChainStep::EdgeUpsert(upsert)
             | GraphWriteChainStep::EdgeUpsertRows { upsert, .. }
@@ -1463,15 +1551,30 @@ fn mixed_edge_merge_payload_is_admitted_before_owner_frame_copy() {
             _ => panic!("the compiled final stage must be relationship MERGE"),
         };
         let actions = &upsert.actions().on_match;
-        let [GraphEdgeMergeRowAction::Value { inputs: Some(inputs), .. }] = &actions[..] else {
+        let [
+            GraphEdgeMergeRowAction::Value {
+                inputs: Some(inputs),
+                ..
+            },
+        ] = &actions[..]
+        else {
             panic!("the genuine compiled assignment must have a mixed frame");
         };
-        assert_eq!(&inputs[..], &[
-            GraphVertexMergeRowInput::Property(Q), GraphVertexMergeRowInput::Column(0),
-        ]);
+        assert_eq!(
+            &inputs[..],
+            &[
+                GraphVertexMergeRowInput::Property(Q),
+                GraphVertexMergeRowInput::Column(0),
+            ]
+        );
         let input = GraphValueRow::from_owned_values(vec![
-            GraphValue::map(vec![("result".into(), GraphValue::Scalar(CanonicalScalar::Int(7)))]).unwrap(),
-            GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2)),
+            GraphValue::map(vec![(
+                "result".into(),
+                GraphValue::Scalar(CanonicalScalar::Int(7)),
+            )])
+            .unwrap(),
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(2)),
         ]);
         // Fixed frame, scalar and CASE costs fit 128. The large stored field's
         // 129 payload quanta alone exceed that SAME allowance, even though the
@@ -1483,17 +1586,29 @@ fn mixed_edge_merge_payload_is_admitted_before_owner_frame_copy() {
                 let stored = CanonicalScalar::ucs_basic_text(&"x".repeat(payload_bytes)).unwrap();
                 let mut db = Database::<crate::MemVfs>::open_memory(
                     &contexts.commit(),
-                    crate::DatabaseKeys::new([0x94; 32],
-                        fgdb_types::DatabaseSecurityNamespaceId([0x95; 32]), [0x96; 32]),
-                ).await.unwrap();
+                    crate::DatabaseKeys::new(
+                        [0x94; 32],
+                        fgdb_types::DatabaseSecurityNamespaceId([0x95; 32]),
+                        [0x96; 32],
+                    ),
+                )
+                .await
+                .unwrap();
                 let mut seed = WriteBatch::new(RelationId(1));
                 for id in [1, 2] {
-                    seed.create_vertex(VId(id), vec![LabelId(1)],
-                        vec![(P, CanonicalScalar::Int(id as i64))]);
+                    seed.create_vertex(
+                        VId(id),
+                        vec![LabelId(1)],
+                        vec![(P, CanonicalScalar::Int(id as i64))],
+                    );
                 }
                 if !staged_target {
-                    seed.add_edge(EId(3), VId(1), VId(2),
-                        vec![(P, CanonicalScalar::Int(1)), (Q, stored.clone())]);
+                    seed.add_edge(
+                        EId(3),
+                        VId(1),
+                        VId(2),
+                        vec![(P, CanonicalScalar::Int(1)), (Q, stored.clone())],
+                    );
                 }
                 db.write(&contexts.commit(), seed).await.unwrap();
                 let frontier = db.frontier().unwrap();
@@ -1502,8 +1617,12 @@ fn mixed_edge_merge_payload_is_admitted_before_owner_frame_copy() {
                     let mut prefix = WriteBatch::new(RelationId(1));
                     prefix.create_vertex(VId(77), vec![], vec![]);
                     if staged_target {
-                        prefix.add_edge(EId(3), VId(1), VId(2),
-                            vec![(P, CanonicalScalar::Int(1)), (Q, stored.clone())]);
+                        prefix.add_edge(
+                            EId(3),
+                            VId(1),
+                            VId(2),
+                            vec![(P, CanonicalScalar::Int(1)), (Q, stored.clone())],
+                        );
                     }
                     transaction.write(&mut db, prefix).unwrap();
                     let before = transaction.staged_effect_digest().unwrap();
@@ -1511,13 +1630,27 @@ fn mixed_edge_merge_payload_is_admitted_before_owner_frame_copy() {
                     let mut effects = 1;
                     let result = {
                         let state = std::cell::RefCell::new((&mut transaction, &mut db));
-                        edge_merge_row_actions_controlled::<WriteTxnError, std::convert::Infallible, _>(
-                            (RelationId(1), EId(3)), (0, &input), [actions, &[]],
+                        edge_merge_row_actions_controlled::<
+                            WriteTxnError,
+                            std::convert::Infallible,
+                            _,
+                        >(
+                            (RelationId(1), EId(3)),
+                            (0, &input),
+                            [actions, &[]],
                             GqlQueryPolicy::new(100, 100, 1_000_000, scratch),
-                            &mut evaluator, (100, &mut effects), || query.checkpoint(),
+                            &mut evaluator,
+                            (100, &mut effects),
+                            || query.checkpoint(),
                             |key, control| {
                                 let state = state.borrow();
-                                edge_upsert_row_property(state.0, state.1, ElementId::Edge(EId(3)), key, control)
+                                edge_upsert_row_property(
+                                    state.0,
+                                    state.1,
+                                    ElementId::Edge(EId(3)),
+                                    key,
+                                    control,
+                                )
                             },
                             |_, _, _, _| panic!("this compiled CASE has no carried element read"),
                             |_| panic!("this compiled assignment does not replace a property map"),
@@ -1525,27 +1658,41 @@ fn mixed_edge_merge_payload_is_admitted_before_owner_frame_copy() {
                             |batch| {
                                 let mut state = state.borrow_mut();
                                 let (transaction, database) = &mut *state;
-                                transaction.stage_edge_upsert_row_batch(database, batch)
-                                    .map_err(|error| GqlQueryError::Source(
-                                        fgdb_gql::GraphEdgeUpsertError::Staging(error)))
+                                transaction
+                                    .stage_edge_upsert_row_batch(database, batch)
+                                    .map_err(|error| {
+                                        GqlQueryError::Source(
+                                            fgdb_gql::GraphEdgeUpsertError::Staging(error),
+                                        )
+                                    })
                             },
                         )
                     };
                     if scratch == 1 || (scratch == SCRATCH && payload_bytes == large) {
-                        assert!(matches!(&result, Err(GqlQueryError::Evaluator(error))
+                        assert!(
+                            matches!(&result, Err(GqlQueryError::Evaluator(error))
                             if error.dimension == GlaLimitDimension::ScratchEntries
                                 && error.limit == scratch && error.observed == u128::from(scratch + 1)),
-                            "payload={payload_bytes},staged={staged_target},scratch={scratch}: {result:?}");
+                            "payload={payload_bytes},staged={staged_target},scratch={scratch}: {result:?}"
+                        );
                         assert_eq!(transaction.staged_effect_digest().unwrap(), before);
                         let reads = transaction.point_reads.borrow();
-                        assert!(!reads.contains(ElementId::Edge(EId(3)), PointReadField::Property(Q)));
+                        assert!(
+                            !reads.contains(ElementId::Edge(EId(3)), PointReadField::Property(Q))
+                        );
                         assert_eq!(reads.1, (scratch != 1).then_some(ElementId::Edge(EId(3))));
                     } else {
                         result.unwrap();
-                        assert!(transaction.point_reads.borrow()
-                            .contains(ElementId::Edge(EId(3)), PointReadField::Property(Q)));
-                        assert_eq!(transaction.edge_property(&db, EId(3), P).unwrap(),
-                            Some(CanonicalScalar::Int(7).into()));
+                        assert!(
+                            transaction
+                                .point_reads
+                                .borrow()
+                                .contains(ElementId::Edge(EId(3)), PointReadField::Property(Q))
+                        );
+                        assert_eq!(
+                            transaction.edge_property(&db, EId(3), P).unwrap(),
+                            Some(CanonicalScalar::Int(7).into())
+                        );
                     }
                     assert_eq!(db.frontier().unwrap(), frontier);
                     transaction.abort();
@@ -1553,6 +1700,135 @@ fn mixed_edge_merge_payload_is_admitted_before_owner_frame_copy() {
             }
         }
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[cfg(test)]
+#[test]
+fn row_key_target_reuse_restores_saved_prefix_after_late_action_failure() {
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_gql::insertion::GraphInsertPolicy;
+    use fgdb_gql::{
+        GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphWriteChainText,
+    };
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+    const P: fgdb_delta_types::PropertyKeyId = fgdb_delta_types::PropertyKeyId(1);
+    const Q: fgdb_delta_types::PropertyKeyId = fgdb_delta_types::PropertyKeyId(2);
+    let ((), report) = run_async_under_lab(0x7471_0004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(
+            &commit,
+            crate::DatabaseKeys::new(
+                [0x76; 32],
+                DatabaseSecurityNamespaceId([0x77; 32]),
+                [0x78; 32],
+            ),
+        )
+        .await
+        .unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for id in [1, 2] {
+            seed.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(P, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        seed.add_edge(
+            EId(50),
+            VId(1),
+            VId(2),
+            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(0))],
+        );
+        db.write(&commit, seed).await.unwrap();
+        let published = (db.frontier().unwrap(), db.edges().unwrap());
+        let prepare = |action: &str| {
+            PreparedGraphWriteChainText::prepare(
+                &format!(
+                    "UNWIND [1,1,1] AS x MATCH (a:A {{p:1}}),(b:A {{p:2}})                      MERGE (a)-[r:R {{p:x}}]->(b) ON MATCH SET r.q={action}"
+                ),
+                RelationId(1),
+                |kind, name: &str| match (kind, name) {
+                    (GraphSymbolKind::Label, "A") => Some(GraphSymbol::Label(LabelId(1))),
+                    (GraphSymbolKind::Relation, "R") =>
+                        Some(GraphSymbol::Relation(RelationId(1))),
+                    (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+                    (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+                    _ => None,
+                },
+            ).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+        };
+        let allowance =
+            GraphInsertPolicy::new(GqlQueryPolicy::new(10_000, 100, 1_000_000, 100_000), 0, 0)
+                .with_mutation_limit(10);
+        let mut transaction = db.begin(&txn).unwrap();
+        let mut prefix = WriteBatch::new(RelationId(1));
+        prefix.set_vertex_property(VId(1), Q, Some(CanonicalScalar::Int(99)));
+        transaction.write(&mut db, prefix).unwrap();
+        transaction.savepoint(&db, "before-row-upsert").unwrap();
+        let saved = transaction.prepared.clone().unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let staged = transaction.staged.len();
+        let failure = transaction
+            .execute_graph_write_chain_engine_governed(
+                &mut db,
+                &query,
+                &prepare("1/(1-r.q)"),
+                allowance,
+            )
+            .unwrap_err();
+        assert!(
+            format!("{failure:?}").contains("DivisionByZero"),
+            "{failure:?}"
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            transaction.prepared.as_ref().unwrap(),
+            &saved
+        ));
+        assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        assert_eq!(transaction.staged.len(), staged);
+        assert_eq!(
+            transaction.edge_property(&db, EId(50), Q).unwrap(),
+            Some(CanonicalScalar::Int(0).into()),
+        );
+        for attempt in 0..2 {
+            let (stats, _, _) = transaction
+                .execute_graph_write_chain_engine_governed(
+                    &mut db,
+                    &query,
+                    &prepare("r.q+x"),
+                    allowance,
+                )
+                .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+            assert_eq!(
+                transaction.edge_property(&db, EId(50), Q).unwrap(),
+                Some(CanonicalScalar::Int(3).into()),
+            );
+            assert_eq!((db.frontier().unwrap(), db.edges().unwrap()), published);
+            if attempt == 0 {
+                transaction
+                    .rollback_to_savepoint(&db, "before-row-upsert")
+                    .unwrap();
+                assert!(std::sync::Arc::ptr_eq(
+                    transaction.prepared.as_ref().unwrap(),
+                    &saved
+                ));
+                assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            }
+        }
+        transaction.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, published.0.0 + 1);
+        assert_eq!(
+            db.edge(EId(50)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(3).into()),
+            ]
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

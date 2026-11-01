@@ -599,6 +599,9 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
         };
         let mut effects = 0_u64;
         let mut retained = Vec::new();
+        // Reuse is local to this immutable step. The authorized occurrence
+        // adapter still rechecks scope, live authority and both endpoints.
+        let mut match_targets = crate::write_txn::EdgeUpsertMatchTargets::for_rows(upsert);
         for (at, row) in selected.value.into_iter().enumerate() {
             event(
                 cx,
@@ -716,7 +719,7 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 // Move the original row into and back out of the native collector;
                 // do not duplicate a carried list/map for each relationship probe.
                 let (merged, targets, mut rows) =
-                    edge_merge::apply_occurrence::<EdgeUpsertRowTargets, _, _>(
+                    edge_merge::apply_occurrence_reusing_targets::<EdgeUpsertRowTargets, _, _>(
                         transaction,
                         database,
                         cx,
@@ -733,6 +736,7 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                             evaluator: stats.evaluator,
                         },
                         at,
+                        match_targets.as_mut(),
                     )
                     .map_err(|error| {
                         action_error(error.map_source(|error| {

@@ -397,6 +397,37 @@ impl PreparedGraphEdgeUpsertRows {
         &self.merge
     }
 
+    /// Whether this step's actions preserve each bound pair's match keys.
+    /// The native collector must still evaluate every row's keys and use its
+    /// query-equality encoding; different keys have different target sets.
+    ///
+    /// Named non-key relationship assignments and carried-vertex property
+    /// assignments preserve edge identity, topology and endpoint labels. The
+    /// original input rows are already selected. Whole-map writes and clears
+    /// are not proved here, nor are newly introduced endpoints. A row whose
+    /// evaluated key is non-reflexive must retain native resolution.
+    #[must_use]
+    pub fn preserves_match_targets(&self) -> bool {
+        self.merge.shares_pair_outcomes()
+            && self
+                .actions
+                .on_match
+                .iter()
+                .chain(&self.actions.on_create)
+                .chain(&self.actions.after)
+                .all(|action| {
+                    let key = match action {
+                        GraphEdgeMergeRowAction::Edge(action) => action.key,
+                        GraphEdgeMergeRowAction::Expression { key, .. }
+                        | GraphEdgeMergeRowAction::Value { key, .. } => *key,
+                        GraphEdgeMergeRowAction::RowVertex { .. } => return true,
+                        GraphEdgeMergeRowAction::ClearProperties { .. }
+                        | GraphEdgeMergeRowAction::Properties { .. } => return false,
+                    };
+                    self.merge.property_keys().all(|matched| matched != key)
+                })
+    }
+
     #[must_use]
     pub fn actions(&self) -> &GraphEdgeMergeRowActions {
         &self.actions
@@ -1457,5 +1488,49 @@ mod tests {
             &query.merge().actions().unwrap().on_match[..],
             [GraphVertexMergeRowAction::Properties { replace: true, .. }]
         ));
+    }
+    #[test]
+    fn row_target_reuse_proves_only_bound_key_preserving_actions() {
+        let prefix = "UNWIND [1,2,1.0] AS x MATCH (a:A),(b:A) ";
+        let stable = bound(
+            &format!(
+                "{prefix} MERGE (a)-[r:R {{p:x}}]->(b)                  ON CREATE SET r.q=x ON MATCH SET r.q=r.q+x SET a.p=x"
+            ),
+            &GqlParameters::new(),
+        );
+        let upsert = definition(stable.steps().last().unwrap());
+        assert!(upsert.merge().has_row_properties());
+        assert!(upsert.preserves_match_targets());
+        assert!(matches!(
+            upsert.actions().after.first(),
+            Some(GraphEdgeMergeRowAction::RowVertex { key: P, .. })
+        ));
+
+        for action in [
+            "ON CREATE SET r.p=x",
+            "ON MATCH SET r.p=x",
+            "SET r.p=x",
+            "SET r = {q:x}",
+        ] {
+            let program = bound(
+                &format!("{prefix} MERGE (a)-[r:R {{p:x}}]->(b) {action}"),
+                &GqlParameters::new(),
+            );
+            assert!(
+                !definition(program.steps().last().unwrap()).preserves_match_targets(),
+                "{action}"
+            );
+        }
+
+        for text in [
+            "UNWIND [1] AS x MATCH (a:A)              MERGE (a)-[r:R {p:x}]->(b:A {p:2}) SET r.q=x",
+            "UNWIND [1] AS x MATCH (a:A),(b:A)              MERGE (a)-[r:R {p:[1,null]}]->(b) SET r.q=x",
+        ] {
+            let program = bound(text, &GqlParameters::new());
+            assert!(
+                !definition(program.steps().last().unwrap()).preserves_match_targets(),
+                "{text}"
+            );
+        }
     }
 }
