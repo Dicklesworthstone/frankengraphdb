@@ -1,10 +1,11 @@
-//! Cardinality-only reduction of independent factors and selected products.
+//! Cardinality-only reduction of independent factors and correlated bodies.
 //!
 //! A product contributes |left| * |right| and UNION ALL contributes their sum.
 //! No pair is constructed and no factor is executed twice. Value-sensitive
 //! operators retain the existing row executor, including their local pages,
 //! expression failures, equality and order. Only a cardinality-only suffix may
 //! elide sorting: which rows a parent filter sees is never changed.
+//! Apply sums one complete body count per outer occurrence under its own frame.
 
 use super::*;
 
@@ -136,6 +137,10 @@ impl PreparedGraphSet {
                 operation: GraphSetOperation::Union,
                 quantifier: GraphSetQuantifier::All,
                 ..
+            }
+            | SetNode::Apply {
+                kind: ApplyKind::Inner | ApplyKind::Optional,
+                ..
             } => true,
             SetNode::Unwind { value, .. } => constant(value),
             SetNode::Project {
@@ -226,6 +231,36 @@ where
                 let right = count(right, source, meter, operand)?;
                 left.multiply(right)
             }
+            SetNode::Apply {
+                left,
+                right,
+                imports,
+                kind: kind @ (ApplyKind::Inner | ApplyKind::Optional),
+            } => {
+                // Imports observe actual selected rows, so finish the outer
+                // relation before any body, exactly as materialized Apply.
+                // Duplicates each invoke the body; no value or result is cached.
+                let left = run(left, source, meter, operand)?;
+                let right_operand = *operand;
+                *operand += right.operands;
+                let mut size = Amount::ZERO;
+                for (row_at, row) in left.iter().enumerate() {
+                    let inner = with_apply_arguments(row, row_at, imports, meter, |meter| {
+                        let mut inner_operand = right_operand;
+                        count(right, source, meter, &mut inner_operand)
+                    })?;
+                    // Empty OPTIONAL emits one null extension, including for
+                    // NULL imports. A zero-valued aggregate row is not empty.
+                    let inner = if inner.is_zero() && matches!(kind, ApplyKind::Optional) {
+                        Amount::ONE
+                    } else {
+                        inner
+                    };
+                    meter.event(GlaExecutionEvent::Work)?;
+                    size = size.add(inner);
+                }
+                size
+            }
             SetNode::Binary {
                 operation: GraphSetOperation::Union,
                 quantifier: GraphSetQuantifier::All,
@@ -282,3 +317,6 @@ mod tests;
 
 #[cfg(test)]
 mod pipeline_tests;
+
+#[cfg(test)]
+mod apply_tests;

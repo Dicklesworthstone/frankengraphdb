@@ -103,6 +103,117 @@ fn trillion_pair_count_finishes_under_factor_sized_allowances() {
 }
 
 #[test]
+fn correlated_body_counts_finish_under_occurrence_and_factor_sized_allowances() {
+    // Three duplicate NULL outer occurrences each invoke an imported frame.
+    // Four inclusive 1024-member ranges contribute 3 * 1024^4 rows; COUNT
+    // never needs those rows or their outer/inner concatenations in memory.
+    let input = factor(3)
+        .project(
+            vec![GraphSetProjection::new(
+                "seed",
+                GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+            )],
+            crate::GraphSetQuantifier::All,
+        )
+        .unwrap();
+    let mut body = PreparedGraphSet::arguments(
+        vec!["imported".into()],
+        vec![crate::GraphSetColumnType::Scalar],
+    )
+    .unwrap();
+    for at in 0..4 {
+        body = body
+            .unwind(
+                format!("member{at}"),
+                GraphSetValue::Range {
+                    start: Box::new(GraphSetValue::Value(GraphValue::Scalar(
+                        CanonicalScalar::Int(0),
+                    ))),
+                    end: Box::new(GraphSetValue::Value(GraphValue::Scalar(
+                        CanonicalScalar::Int(1023),
+                    ))),
+                    step: None,
+                },
+            )
+            .unwrap();
+    }
+    let body = body
+        .project(
+            vec![GraphSetProjection::new("carried", GraphSetValue::Column(0))],
+            crate::GraphSetQuantifier::All,
+        )
+        .unwrap();
+    let q = query(input.apply(body, vec![0]).unwrap(), None);
+    assert!(q.uses_factorized_cardinality());
+    let transcript = q.canonical_bytes();
+    let result = q
+        .execute_relational_with_source(GqlQueryPolicy::new(0, 1, 20_000, 5_000), no_source, || {
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(result.rows.result_rows, 1);
+    assert_eq!(result.rows.snapshot_records, 0);
+    assert_eq!(result.value[0].values()[0].as_count(), Some(3_u64 << 40));
+    assert_eq!(result.value[0].values()[1].as_count(), Some(3_u64 << 40));
+    assert_eq!(q.canonical_bytes(), transcript);
+}
+
+#[test]
+fn correlated_overflow_keeps_body_pages_outer_pages_and_output_refusal_distinct() {
+    let body = PreparedGraphSet::arguments(vec![], vec![])
+        .unwrap()
+        .unwind(
+            "all_ints".into(),
+            GraphSetValue::Range {
+                start: Box::new(GraphSetValue::Value(GraphValue::Scalar(
+                    CanonicalScalar::Int(i64::MIN),
+                ))),
+                end: Box::new(GraphSetValue::Value(GraphValue::Scalar(
+                    CanonicalScalar::Int(i64::MAX),
+                ))),
+                step: None,
+            },
+        )
+        .unwrap();
+    // One complete signed-i64 range contains 2^64 rows. The aggregate
+    // result page cannot suppress COUNT's overflow, even when it is empty.
+    for output_limit in [None, Some(0), Some(1)] {
+        let q = query(
+            PreparedGraphSet::singleton()
+                .apply(body.clone(), vec![])
+                .unwrap(),
+            output_limit,
+        );
+        assert!(matches!(
+            q.execute_relational_with_source(wide(), no_source, || Ok(())),
+            Err(GqlQueryError::Source(
+                GraphAggregateError::ArithmeticOverflow { aggregate: 0 }
+            ))
+        ));
+    }
+    let locally_paged = factor(2)
+        .apply(body.clone().with_page(u64::MAX, None), vec![])
+        .unwrap();
+    let outer_paged = PreparedGraphSet::singleton()
+        .apply(body.clone(), vec![])
+        .unwrap()
+        .with_page(u64::MAX, None);
+    let optional_empty = factor(2)
+        .optional_apply(body.with_page(0, Some(0)), vec![])
+        .unwrap();
+    for (input, expected) in [(locally_paged, 2), (outer_paged, 1), (optional_empty, 2)] {
+        let result = query(input, None)
+            .execute_relational_with_source(
+                GqlQueryPolicy::new(0, 1, 20_000, 5_000),
+                no_source,
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(result.value[0].values()[0].as_count(), Some(expected));
+    }
+}
+
+#[test]
 fn input_page_can_recover_from_overflow_but_output_limit_cannot_hide_it() {
     let mut relation = factor(16);
     for _ in 0..4 {

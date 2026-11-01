@@ -317,6 +317,35 @@ fn inline_call_aggregate_keeps_its_one_source_relational() {
         .unwrap();
     assert_eq!(result.value[0].values()[0].as_count(), Some(3));
 }
+
+#[test]
+fn correlated_call_count_uses_factorized_body_cardinality_through_public_text() {
+    let text = "UNWIND [2,2,null] AS seed CALL (seed) { \
+        UNWIND range(0,1023) AS a UNWIND range(0,1023) AS b \
+        UNWIND range(0,1023) AS c UNWIND range(0,1023) AS d \
+        RETURN seed AS carried } RETURN count(*) AS total";
+    let template = PreparedGraphPipelineAggregateText::prepare(text, symbols).unwrap();
+    assert!(template.template_operators().contains(&"Apply"));
+    let query = template
+        .bind_relation_parameters(&GqlParameters::new())
+        .unwrap();
+    let result = query
+        .execute_governed(
+            GqlQueryPolicy::new(0, 1, 20_000, 5_000),
+            |_: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+             _: GqlQueryPolicy|
+             -> Result<_, GqlQueryError<(), ()>> {
+                panic!("a scalar correlated count cannot open a graph")
+            },
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    // This is an exact cardinality/work-bound law, not a timing benchmark.
+    assert_eq!(result.value[0].values()[0].as_count(), Some(3_u64 << 40));
+    assert_eq!(result.rows.result_rows, 1);
+    assert_eq!(result.rows.snapshot_records, 0);
+}
+
 fn query(text: &str) -> PreparedGraphAggregate {
     PreparedGraphPipelineAggregateText::prepare(text, symbols)
         .unwrap()

@@ -468,6 +468,49 @@ where
     Ok(arguments)
 }
 
+/// Install one checked Apply occurrence's imports for exactly one body visit.
+/// Row and cardinality execution share the same copies, charging and failure
+/// coordinates. Even a failed or interrupted body restores its parent frame.
+fn with_apply_arguments<E, C, Checkpoint, T>(
+    row: &GraphValueRow,
+    row_at: usize,
+    imports: &[usize],
+    meter: &mut Meter<Checkpoint>,
+    body: impl FnOnce(&mut Meter<Checkpoint>) -> SetResult<T, E, C>,
+) -> SetResult<T, E, C>
+where
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    meter.event(GlaExecutionEvent::ScratchEntry)?;
+    let mut arguments = Vec::with_capacity(imports.len());
+    for (column, &input) in imports.iter().enumerate() {
+        let value =
+            projection::evaluate_value(&GraphSetValue::Column(input), row, column, &mut |event| {
+                meter.event(event)
+            })
+            .map_err(|error| match error {
+                projection::ProjectionFailure::Control(error) => error,
+                projection::ProjectionFailure::Arithmetic { column, error } => {
+                    GqlQueryError::Source(GraphSetExecutionError::Projection {
+                        row: row_at,
+                        column,
+                        error,
+                    })
+                }
+            })?;
+        arguments.push(value);
+    }
+    meter.event(GlaExecutionEvent::ScratchEntry)?;
+    meter
+        .arguments
+        .push(std::sync::Arc::new(GraphValueRow::from_owned_values(
+            arguments,
+        )));
+    let result = body(meter);
+    meter.arguments.pop();
+    result
+}
+
 fn run_node<E, C, S, Checkpoint>(
     query: &PreparedGraphSet,
     source: &mut S,
@@ -595,38 +638,10 @@ where
                         continue;
                     }
                 }
-                meter.event(GlaExecutionEvent::ScratchEntry)?;
-                let mut arguments = Vec::with_capacity(imports.len());
-                for (column, &input) in imports.iter().enumerate() {
-                    let value = projection::evaluate_value(
-                        &GraphSetValue::Column(input),
-                        row,
-                        column,
-                        &mut |event| meter.event(event),
-                    )
-                    .map_err(|error| match error {
-                        projection::ProjectionFailure::Control(error) => error,
-                        projection::ProjectionFailure::Arithmetic { column, error } => {
-                            GqlQueryError::Source(GraphSetExecutionError::Projection {
-                                row: row_at,
-                                column,
-                                error,
-                            })
-                        }
-                    })?;
-                    arguments.push(value);
-                }
-                meter.event(GlaExecutionEvent::ScratchEntry)?;
-                meter
-                    .arguments
-                    .push(std::sync::Arc::new(GraphValueRow::from_owned_values(
-                        arguments,
-                    )));
-                let mut inner_operand = right_operand;
-                let inner = run(right, source, meter, &mut inner_operand);
-                // Restore the enclosing frame on errors and cancellation too.
-                meter.arguments.pop();
-                let inner = inner?;
+                let inner = with_apply_arguments(row, row_at, imports, meter, |meter| {
+                    let mut inner_operand = right_operand;
+                    run(right, source, meter, &mut inner_operand)
+                })?;
                 if matches!(kind, ApplyKind::Collect { .. }) {
                     // The body is a checked one-column relation. Its input
                     // UNWIND and per-member graph Apply preserve list order;
