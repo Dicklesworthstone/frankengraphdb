@@ -11,6 +11,65 @@ This audit does not award G1–G4 or release qualification.
 
 ## Current delta — 2026-10-30
 
+### Integrated runtime repair checkpoint — 2026-10-31 23:20 UTC
+
+**Latest update, 2026-11-01 00:12 UTC:** the 47-file repair wave passes the
+complete focused library cut (4,218 tests, excluding the expensive root
+library test binary) and thirteen named integration targets (367 tests across
+sixteen package/target summaries). Both Cargo invocations exit zero; no test
+is filtered, and the 23 pre-existing ignored tests remain unchanged. The
+2,485 Rust/Cargo/toolchain inputs, HEAD, tree, status and full dirty diff are
+identical before and after execution. These are focused, dirty-tree results;
+the mandatory complete clean-tree proof, including the new root-library
+ownership laws, is still required. Receipts are in
+`/data/ssd/tmp/fgdb-preflight-owner-repair-20261031-v3`.
+
+The implemented connections are lazy closed MERGE branch values using the
+captured statement instant; property/column frames through the existing
+relationship MERGE evaluator; imported-identity seeds through the existing
+join selector; imported named-path equality through the existing correlation
+channel; and typed native insertion limits through the wire budget classifier.
+The original FGP batch SQL, cumulative creation quota, late rollback and
+simultaneous conflicting-assignment laws pass. An explicit WITH boundary
+exercises the native value-frame authority tests; the unsupported flat CASE
+profile retains its exact refusal. RHS syntax does not silently change the
+ordinary mutation owner's semantics.
+
+The earlier frozen 44-file scanner diagnostic completed all 32 partitions and
+passed the unchanged exact ratchet at 277 critical findings. Every original
+finding identity is conserved; seven false-positive additions are removed
+without scanner rules, suppressions or baseline changes. Its full source/tool
+guards pass. Later fixture, correlation and classification repairs still need
+the mandatory gate's fresh scan of the final committed source. This is
+calibration evidence, not a whole-source security clearance.
+
+The frozen `3f986ea55f1bbafab0b8fe8c504c5c89167087bc` preflight is **RED**:
+the cheaper library cut (excluding the expensive root library) executed
+4,204 passing and eight failing tests; eleven selected integration target
+names executed 305 passing and twelve failing tests. No failure was filtered
+away. Raw terminal logs and the eight copied, hash-checked crashpacks are at
+`/data/ssd/tmp/fgdb-current3f986-runtime-20261031-v1`. These are diagnostic
+subsets, not a substitute for the mandatory complete workspace proof.
+
+That source's complete 32-partition scanner also finished **RED**: 284 critical
+findings against the unchanged 277-site ratchet, with zero partial/unrun
+partitions. All 277 old sites map to unchanged rule/code/message identities.
+The seven additions are five private test-helper panic sites and two public
+Dijkstra dispatch comparisons. Explicit test-only helper declarations and
+typed input-schema dispatch remove those misclassifications without changing
+the scanner, ratchet, test bodies or public refusal rules. A paired five-file
+control executes completely; the full current-source rerun remains due.
+
+The next repair wave addresses the actual owners: cancellation rechecked
+after an observer; temporal values admitted to the existing pull evaluator;
+lazy, closed MERGE branch values through the existing governed VM; mixed
+relationship/row MERGE frames; and joining imported identities through the
+existing necessary-equality seed selector. Stale syntax, argument-schema,
+canonical-byte and metadata fixtures retain their original inputs as precise
+negative controls. Original positive queries, atomic rollback requirements
+and tight source allowances remain obligations. This wave is still being
+implemented and qualified; no source-dependent Bead is closed.
+
 ### Answer and evidence boundary
 
 **This is a substantial source-built development database. It does not yet
