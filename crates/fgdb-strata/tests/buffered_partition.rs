@@ -573,7 +573,12 @@ fn cold_points_select_all_matching_histories_and_only_the_winning_property_patch
                 .unwrap()
                 .unwrap();
             assert_eq!(row.as_ref(), &expected);
-            assert_eq!(extent_visits(view.stats()) - before, 2);
+            assert_eq!(
+                extent_visits(view.stats()) - before,
+                3,
+                "both historical patches authenticate; the earlier-visited winner \
+                 refaults after the final nonwinner lease drops",
+            );
         }
         for (eid, cut, expected, props, visits) in [
             (
@@ -652,6 +657,109 @@ fn cold_points_select_all_matching_histories_and_only_the_winning_property_patch
             )]
         );
         drop(held);
+        assert_eq!(pool.used(), 0);
+
+        // The directory visits the later publication first. A later
+        // publication may restate only the old retirement, so the creation
+        // sequence still selects the newer row from the final visited patch.
+        // That winner reuses its lease: two extents, with no third refault.
+        let old = vertex(1, Some(3), 11);
+        let mut current = vertex(3, None, 13);
+        current
+            .props
+            .push((PropertyKeyId(12), CanonicalScalar::Null.into()));
+        let complete = store
+            .put_patch(
+                &contexts.commit(),
+                &encode_patch(&[old.clone(), current.clone()]).unwrap(),
+            )
+            .await
+            .unwrap();
+        let restatement = store
+            .put_patch(
+                &contexts.commit(),
+                &encode_patch(std::slice::from_ref(&old)).unwrap(),
+            )
+            .await
+            .unwrap();
+        let root = store
+            .put_root(
+                &contexts.commit(),
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(3),
+                    blocks: vec![],
+                    vertex_patches: [complete, restatement]
+                        .into_iter()
+                        .map(|patch| PatchRef {
+                            patch_id: patch.0,
+                            first_seq: CommitSeq(1),
+                            last_seq: CommitSeq(3),
+                        })
+                        .collect(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut paired = store
+            .open_buffered_root(&cx, root, pool.clone(), limits())
+            .await
+            .unwrap();
+        for (cut, expected, visits) in [
+            (1, &old, 3),
+            (3, &current, 2),
+            (1, &old, 3),
+            (3, &current, 2),
+        ] {
+            let before = extent_visits(paired.stats());
+            let full = paired
+                .vertex_at(&cx, VId(1), CommitSeq(cut))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(full.as_ref(), expected);
+            assert_eq!(extent_visits(paired.stats()) - before, visits);
+            drop(full);
+            // Raw Strata objects can contain a physically stored NULL. This
+            // differs from WriteBatch's NULL assignment/removal contract.
+            let selected = paired
+                .vertex_property_at(&cx, VId(1), PropertyKeyId(12), CommitSeq(cut))
+                .await
+                .unwrap();
+            assert_eq!(
+                selected.as_deref(),
+                (cut == 3).then_some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Null)),
+            );
+            drop(selected);
+            assert!(
+                paired
+                    .vertex_property_at(&cx, VId(1), PropertyKeyId(13), CommitSeq(cut))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            paired
+                .vertex_at(&cx, VId(1), CommitSeq(0))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let before = extent_visits(paired.stats());
+        assert!(matches!(
+            paired
+                .vertex_property_at(&cx, VId(1), PropertyKeyId(12), CommitSeq(4))
+                .await,
+            Err(BufferedReadError::BeyondPublication {
+                requested: CommitSeq(4),
+                publication: CommitSeq(3),
+            })
+        ));
+        assert_eq!(extent_visits(paired.stats()), before);
+        drop(paired);
         assert_eq!(pool.used(), 0);
     });
 }

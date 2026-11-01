@@ -382,16 +382,21 @@ fn historical_winner_properties_survive_reopen_compaction_and_repeated_spill_rea
             .unwrap();
         let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
         // Deliberately revisit an old cut after newer cuts and a different
-        // physical generation. The literal timeline includes present NULL,
-        // removal and deletion, which all render NULL but have distinct owners.
+        // physical generation. WriteBatch's top-level NULL assignment at cut4
+        // removes the key, as does explicit removal at cut5; the vertex stays
+        // live until cut6. Nested NULLs in the collection/document stay stored.
         for cold in [&mut before, &mut after] {
             for cut in [0_u64, 1, 4, 5, 6, 3, 2, 1] {
                 let literal_value = cut
                     .checked_sub(1)
                     .and_then(|at| history.get(at as usize))
                     .and_then(Option::as_ref);
-                let literal_property =
-                    literal_value.map(|value| value.to_property_value().unwrap());
+                let literal_property = match cut {
+                    1 => Some(collection().to_property_value().unwrap()),
+                    2 => Some(scalar(83).to_property_value().unwrap()),
+                    3 => Some(document().to_property_value().unwrap()),
+                    _ => None,
+                };
                 let selected = cold
                     .vertex_property_at(&cx, WIDE_VERTEX, PropertyKeyId(1), CommitSeq(cut))
                     .await
@@ -402,6 +407,28 @@ fn historical_winner_properties_survive_reopen_compaction_and_repeated_spill_rea
                     expected_property(&resident, WIDE_VERTEX, PropertyKeyId(1), CommitSeq(cut)),
                 );
                 drop(selected);
+                let full = cold
+                    .vertex_at(&cx, WIDE_VERTEX, CommitSeq(cut))
+                    .await
+                    .unwrap();
+                assert_eq!(full.is_some(), (1..=5).contains(&cut));
+                if let Some(full) = full.as_deref() {
+                    assert_eq!(
+                        full.props
+                            .iter()
+                            .find(|(key, _)| *key == PropertyKeyId(1))
+                            .map(|(_, value)| value),
+                        literal_property.as_ref(),
+                    );
+                    assert_eq!(
+                        full.props
+                            .iter()
+                            .find(|(key, _)| *key == PropertyKeyId(2))
+                            .map(|(_, value)| value),
+                        Some(&CanonicalScalar::bytes(vec![0x45; 2048]).unwrap().into()),
+                    );
+                }
+                drop(full);
                 let value = literal_value.cloned().unwrap_or_else(null);
                 let expected = vec![
                     vec![scalar(0), value.clone(), value.clone()],
