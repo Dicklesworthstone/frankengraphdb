@@ -214,6 +214,10 @@ fn duplicate_inputs_keep_parallel_full_identities_final_values_and_hidden_fields
             .unwrap();
         assert_eq!(stats.match_selection.result_rows, 2);
         assert_eq!(stats.matched_occurrences, 4);
+        assert_eq!(
+            stats.overlay_edges, 2,
+            "parallel targets are scanned once for the repeated pair"
+        );
         assert_eq!(stats.created_edges, 0);
         assert_eq!(stats.action_effects, 4);
         let rows: Vec<_> = result
@@ -310,6 +314,11 @@ fn creation_is_visible_to_later_occurrences_and_changed_merge_keys_create_again(
             let first = result.value[0].values()[0].as_edge().unwrap();
             let second = result.value[1].values()[0].as_edge().unwrap();
             assert_eq!(stats.created_edges, if changed_key { 2 } else { 1 });
+            assert_eq!(
+                stats.overlay_edges,
+                u64::from(changed_key),
+                "key changes retain the later native scan; invariant creations become memoized matches"
+            );
             assert_eq!(stats.matched_occurrences, u64::from(!changed_key));
             assert_eq!(first == second, !changed_key);
             let expected = if changed_key { 1 } else { 8 };
