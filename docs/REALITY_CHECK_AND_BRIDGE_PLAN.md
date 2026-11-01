@@ -1,6 +1,6 @@
 # Reality Check and Bridge Plan
 
-**Latest audit: 2026-10-31; original snapshot: 2026-10-30.** Initial canonical `main` was
+**Latest audit: 2026-11-01; original snapshot: 2026-10-30.** Initial canonical `main` was
 `01c2042f4a72ed171111bab9b283f5a4f2e42768` (tree
 `ea849fed1921382f72dc97b16708a50b61ac8d5d`); concurrent integration advanced it
 through `3180b133d8be96e1a6036f2b13bc609a99231b1e` (tree
@@ -13,7 +13,47 @@ This audit does not award G1–G4 or release qualification.
 
 ### Integrated runtime repair checkpoint — 2026-10-31 23:20 UTC
 
-**Latest update, 2026-11-01 00:12 UTC:** the 47-file repair wave passes the
+**Latest update, 2026-11-01 05:12 UTC:** the complete, unfiltered local Cargo
+diagnostic finished with exit 101: 13,732 passed, nine failed, 34 previously
+ignored and zero filtered tests across 1,094 summaries. The root library
+actually executed: 1,694 passed, zero failed and four previously ignored,
+including the new relationship-frame ownership laws. All 2,619 tracked files
+were byte-identical throughout; the owner's commit process recorded the
+initial dirty files during execution. That HEAD movement and dirty start mean
+this is diagnostic evidence, not a clean committed-tree proof. Raw exits,
+logs, source hashes and retained crashpacks are in
+`/data/ssd/tmp/fgdb-whole-workspace-pending-export-20261101-v1`.
+
+The six red targets exposed five stale fixture assumptions and two unlabeled
+Beads. Repairs preserve the original short budgets, queries and inputs while
+adding discriminating controls for ingress accounting, action-versus-read
+transcripts, explicit WITH scope, NULL assignment/removal, and historical
+winner lease reuse/refault. The architecture labels now resolve the original
+owners of `fgdb-qjmgo` and `fgdb-xbvl4`; no registry pin or gate was relaxed.
+The exact five-record Beads export completed successfully after lossless root
+disk reclaim. No source-dependent work item was closed.
+
+The next source wave fixes server batch-slot admission before allocation and
+adds real socket batch and reusable-bound-handle witnesses. It also repairs
+instant-free PREPARE for closed, time-dependent MERGE list keys through the
+existing value VM and shared MERGE collector. Static argument, insertion and
+pattern admission remain at preparation; execution charges key evaluation,
+copies and encoding before graph access. Unique and all-target cardinality
+policies remain with their original owners. New fixed-authority LAB, fresh
+instant, native-limit, prefix-preservation and ambiguity tests are pending
+runtime execution. Full workspace Clippy passed on the preceding local cut;
+the final admission refinements and current integration still require checks.
+
+Canonical main has additionally fast-forwarded to
+`5f60246f4f1ba0f931d5ab9f298ca9fe7b6f3647`, preserving all 23 local changed
+files byte-for-byte. The incoming three commits add target BFS, governed cold
+projection construction and reuse of admitted ordered write effects. They
+must participate in the next complete proof; their presence is not a benchmark
+win. A deliberately stopped scanner diagnostic retains seven complete
+partitions with 118 unchanged finding identities; its remaining 25 partitions
+are UNRUN. A fresh complete scan of the final source remains mandatory.
+
+**Earlier update, 2026-11-01 00:12 UTC:** the 47-file repair wave passes the
 complete focused library cut (4,218 tests, excluding the expensive root
 library test binary) and thirteen named integration targets (367 tests across
 sixteen package/target summaries). Both Cargo invocations exit zero; no test
