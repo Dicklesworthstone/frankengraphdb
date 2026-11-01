@@ -137,6 +137,10 @@ impl EdgeScanWork {
         }
         observe(BufferedEdgeScanEvent::Work).map_err(BufferedScanError::Control)?;
         self.used = next;
+        // An admitted observer can request cancellation while returning Ok.
+        // Preserve its charged work prefix, then stop before allocation,
+        // decoding or delivery can cross this same source boundary.
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         Ok(())
     }
 }

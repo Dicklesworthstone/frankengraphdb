@@ -2693,14 +2693,44 @@ mod tests {
                     // the deferred parse and retained-value measurement, must
                     // close the public driver and release every in-flight owner.
                     let baseline = pool.used();
-                    for prefix in 0..governed_work {
+                    let mut healthy = view
+                        .edge_scan(&query, CommitSeq(3))
+                        .unwrap()
+                        .into_join_scan();
+                    let mut healthy_events = Vec::new();
+                    let candidate = healthy
+                        .vertex_candidate_with(&query, VId(101), &mut |event| {
+                            healthy_events.push(event);
+                            Ok::<_, ()>(())
+                        })
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(candidate.row.as_deref(), Some(&retired_successor));
+                    assert_eq!(healthy_events.len(), governed_work + 1);
+                    assert_eq!(healthy_events[0], BufferedScanEvent::Identity(VId(101)));
+                    assert!(
+                        healthy_events[1..]
+                            .iter()
+                            .all(|event| *event == BufferedScanEvent::Work)
+                    );
+                    assert_eq!(healthy.work_used(), governed_work);
+                    assert!(!healthy.is_closed());
+                    drop(candidate);
+                    drop(healthy);
+                    assert_eq!(pool.used(), baseline);
+                    // Include cancellation from the final retention callback:
+                    // it must not release a completed value or a live driver.
+                    for prefix in 0..=governed_work {
                         let mut scan = view
                             .edge_scan(&query, CommitSeq(3))
                             .unwrap()
                             .into_join_scan();
                         let mut observed = 0;
+                        let mut events = Vec::new();
                         let result = scan
                             .vertex_candidate_with(&query, VId(101), &mut |event| {
+                                events.push(event);
                                 observed += usize::from(event == BufferedScanEvent::Work);
                                 if observed == prefix {
                                     root.set_cancel_requested(true);
@@ -2715,6 +2745,7 @@ mod tests {
                         ));
                         assert_eq!(observed, prefix);
                         assert_eq!(scan.work_used(), prefix);
+                        assert_eq!(events, healthy_events[..=prefix]);
                         assert!(scan.is_closed());
                         drop(scan);
                         assert_eq!(pool.used(), baseline);
