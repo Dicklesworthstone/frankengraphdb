@@ -1901,12 +1901,41 @@ impl<'a> Parser<'a> {
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let base = core::mem::replace(&mut self.let_base, depth);
         let write = self.write_leaves;
+        let entries = self.resolved_entries;
         self.write_leaves |= matches!(resolve, ValueResolver::Write(_));
-        let parsed = if resolve.whole() {
-            self.resolved_predicate_with_lets(&mut |parser| resolve.leaf(parser))
-        } else {
-            self.resolved_expression(&mut |parser| resolve.leaf(parser))
+        let whole = resolve.whole();
+        let mut leaf = |parser: &mut Parser<'a>| {
+            let column = resolve.leaf(parser)?;
+            if let ValueResolver::Write(leaves) = resolve {
+                // The scalar compiler asks this resolver before consuming a
+                // postfix. Admit only this exact private RETURN slot's entry;
+                // it is not an incoming row or an ambient graph binding.
+                parser.resolved_entries = match (column, parser.current.kind) {
+                    (Some(column), TokenKind::Punct(b'.')) => {
+                        match parser.lexer.clone().next()?.kind {
+                            TokenKind::Word(key) | TokenKind::DelimitedKeyword(key) => {
+                                let types = leaves.types();
+                                map_capable(
+                                    &ReadValueTemplate::Column(column),
+                                    key,
+                                    &|at| types.get(at).copied(),
+                                    &parser.syntax.parameters,
+                                )
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                };
+            }
+            Ok(column)
         };
+        let parsed = if whole {
+            self.resolved_predicate_with_lets(&mut leaf)
+        } else {
+            self.resolved_expression(&mut leaf)
+        };
+        self.resolved_entries = entries;
         self.write_leaves = write;
         self.let_base = base;
         let (operand, slots) = parsed.map_err(expression_error)?;
@@ -3410,6 +3439,11 @@ impl<'a> Parser<'a> {
                         &|at| {
                             if inputs.is_none() && resolve.is_none() {
                                 schema.get(at).map(|(_, kind)| *kind)
+                            } else if let Some(ValueResolver::Write(leaves)) = resolve.as_ref() {
+                                // Write leaves allocate RETURN binding slots
+                                // lazily, in expression order. Their types
+                                // belong to those slots, never incoming indices.
+                                leaves.types().get(at).copied()
                             } else {
                                 // A resolver over a known row (a write's
                                 // WITH row) states its column types.

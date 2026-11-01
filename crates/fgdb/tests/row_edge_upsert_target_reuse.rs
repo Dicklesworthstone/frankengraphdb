@@ -2,13 +2,13 @@
 //! occurrence keeps its actions, authority checks and one atomic publication.
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch, WriteTxnError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertStats};
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteChainStep,
-    PreparedGraphWriteChain, PreparedGraphWriteChainText,
+    GqlParameters, GqlQueryPolicy, GraphMutationError, GraphSymbol, GraphSymbolKind,
+    GraphWriteChainStep, PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
 use fgdb_types::{
     CanonicalF64, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId,
@@ -94,7 +94,7 @@ async fn execute(
     authorized: bool,
     program: &PreparedGraphWriteChain,
     allowance: GraphInsertPolicy,
-) -> Result<(GraphInsertStats, Vec<GraphValueRow>), String> {
+) -> Result<(GraphInsertStats, Vec<GraphValueRow>), Box<dyn core::error::Error + Send + Sync>> {
     let (txn, query, commit) = (contexts.txn(), contexts.query(), contexts.commit());
     let result = if authorized {
         let issuer =
@@ -130,7 +130,7 @@ async fn execute(
         )
         .await
         .map(|(stats, rows, _)| (stats, rows.value))
-        .map_err(|error| format!("{error:?}"))
+        .map_err(|error| Box::new(error) as Box<dyn core::error::Error + Send + Sync>)
     } else {
         let mut transaction = db.begin(&txn).unwrap();
         match transaction.execute_graph_write_chain_engine_governed(db, &query, program, allowance)
@@ -139,7 +139,7 @@ async fn execute(
                 transaction.finish(db, &commit).await.unwrap();
                 Ok((stats, rows.value))
             }
-            Err(error) => Err(format!("{error:?}")),
+            Err(error) => Err(Box::new(error) as Box<dyn core::error::Error + Send + Sync>),
         }
     };
     assert_eq!(txn.outstanding_obligations(), 0);
@@ -185,99 +185,190 @@ fn repeated_row_keys_keep_every_rhs_and_exact_numeric_groups_in_both_hosts() {
             .unwrap();
         let frozen = arguments.canonical_bytes();
         let text = "UNWIND $rows AS row MATCH (a:Visible {p:1}),(b:Visible {p:2})                     MERGE (a)-[e:R {p:row.key}]-(b)                     ON CREATE SET e.q=row.delta ON MATCH SET e.q=e.q+row.delta                     SET a.p=row.delta";
+        // These original common SET clauses belong to the completed native
+        // bag. Their unequal proposals to a.p conflict; they must not become
+        // last-wins occurrence actions just because MERGE reused its targets.
+        // The separate positive writes a.p explicitly in the selected ON
+        // branch, whose contract is per occurrence, including parallel matches.
+        let occurrence_text = "UNWIND $rows AS row MATCH (a:Visible {p:1}),(b:Visible {p:2}) \
+            MERGE (a)-[e:R {p:row.key}]-(b) \
+            ON CREATE SET e.q=row.delta,a.p=row.delta \
+            ON MATCH SET e.q=e.q+row.delta,a.p=row.delta";
         for authorized in [false, true] {
-            let mut reused = seed(&contexts, true).await;
-            let mut ordinary = seed(&contexts, true).await;
-            let stable = program(&format!("{text} RETURN row.delta,e"), &arguments);
-            // A semantic no-op on the match key forces the original resolver,
-            // making this a native full-resolution oracle with the same RHS.
-            let fallback = program(&format!("{text},e.p=e.p RETURN row.delta,e"), &arguments);
-            let mut stable_steps = 0;
-            for step in stable.steps() {
-                if let GraphWriteChainStep::EdgeUpsert(upsert)
-                | GraphWriteChainStep::EdgeUpsertRows { upsert, .. }
-                | GraphWriteChainStep::EdgeUpsertQuery { upsert, .. } = step
-                {
-                    assert!(upsert.preserves_match_targets());
-                    stable_steps += 1;
+            for original_text in [
+                format!("{text} RETURN row.delta,e"),
+                format!("{text},e.p=e.p RETURN row.delta,e"),
+            ] {
+                let original = program(&original_text, &arguments);
+                assert!(matches!(
+                    original.steps().last(),
+                    Some(GraphWriteChainStep::MutationQuery(_))
+                ));
+                let mut unchanged = seed(&contexts, true).await;
+                let before = (
+                    unchanged.frontier().unwrap(),
+                    unchanged.vertices().unwrap(),
+                    unchanged.edges().unwrap(),
+                );
+                let failure = execute(&contexts, &mut unchanged, authorized, &original, policy())
+                    .await
+                    .unwrap_err();
+                // Preserve each host's real native error carrier; inspect the
+                // typed collector cause rather than accepting an arbitrary Err.
+                let mut cause: Option<&(dyn core::error::Error + 'static)> = Some(failure.as_ref());
+                let mut conflict = None;
+                while let Some(error) = cause {
+                    if let Some(error) = error.downcast_ref::<GraphMutationError<WriteTxnError>>() {
+                        conflict = Some(error);
+                        break;
+                    }
+                    cause = error.source();
                 }
+                assert!(
+                    matches!(
+                        conflict,
+                        Some(GraphMutationError::ConflictingAssignment {
+                            first_row: 0,
+                            first_action: 0,
+                            row: 2,
+                            action: 0,
+                        })
+                    ),
+                    "authorized={authorized}, {original_text}: {failure:?}"
+                );
+                assert_eq!(
+                    (
+                        unchanged.frontier().unwrap(),
+                        unchanged.vertices().unwrap(),
+                        unchanged.edges().unwrap(),
+                    ),
+                    before,
+                    "authorized={authorized}, {original_text}",
+                );
+                assert_eq!(contexts.outstanding_obligations(), 0);
+                assert_eq!(arguments.canonical_bytes(), frozen);
             }
-            assert_eq!(stable_steps, 1);
-            assert!(fallback.steps().iter().any(|step| match step {
-                GraphWriteChainStep::EdgeUpsert(upsert)
-                | GraphWriteChainStep::EdgeUpsertRows { upsert, .. }
-                | GraphWriteChainStep::EdgeUpsertQuery { upsert, .. } =>
-                    !upsert.preserves_match_targets(),
-                _ => false,
-            }));
-            let (stats, rows) = execute(&contexts, &mut reused, authorized, &stable, policy())
-                .await
-                .unwrap();
-            let (reference, reference_rows) =
-                execute(&contexts, &mut ordinary, authorized, &fallback, policy())
+            for (items, delta_column, edge_column, increment) in [
+                ("row.delta,e", 0, 1, 0),
+                ("e,row.delta", 1, 0, 0),
+                ("row.delta+1 AS shifted,e", 0, 1, 1),
+                ("e,row.delta+1 AS shifted", 1, 0, 1),
+            ] {
+                let mut reused = seed(&contexts, true).await;
+                let mut ordinary = seed(&contexts, true).await;
+                let stable = program(&format!("{occurrence_text} RETURN {items}"), &arguments);
+                // The key self-write is INSIDE ON MATCH, so it is part of the
+                // same upsert's proof. It preserves the scalar key value while
+                // forcing native resolution for every original input occurrence.
+                let fallback = program(
+                    &format!("{occurrence_text},e.p=e.p RETURN {items}"),
+                    &arguments,
+                );
+                let mut stable_steps = 0;
+                for step in stable.steps() {
+                    if let GraphWriteChainStep::EdgeUpsert(upsert)
+                    | GraphWriteChainStep::EdgeUpsertRows { upsert, .. }
+                    | GraphWriteChainStep::EdgeUpsertQuery { upsert, .. } = step
+                    {
+                        assert!(upsert.preserves_match_targets());
+                        stable_steps += 1;
+                    }
+                }
+                assert_eq!(stable_steps, 1);
+                assert!(fallback.steps().iter().any(|step| match step {
+                    GraphWriteChainStep::EdgeUpsert(upsert)
+                    | GraphWriteChainStep::EdgeUpsertRows { upsert, .. }
+                    | GraphWriteChainStep::EdgeUpsertQuery { upsert, .. } =>
+                        !upsert.preserves_match_targets(),
+                    _ => false,
+                }));
+                let (stats, rows) = execute(&contexts, &mut reused, authorized, &stable, policy())
                     .await
                     .unwrap();
-            assert_eq!((stats.created_vertices, stats.created_edges), (0, 3));
-            assert_eq!(stats.created_edges, reference.created_edges);
-            assert!(stats.selection.snapshot_records < reference.selection.snapshot_records);
-            assert_eq!(edge_values(&reused), edge_values(&ordinary));
-            assert_eq!(reused.vertices().unwrap(), ordinary.vertices().unwrap());
-            let occurrences: Vec<_> = rows.iter().map(|row| row.values()[0].clone()).collect();
-            assert_eq!(occurrences, [10, 10, 20, 30, 30, 40, 40, 50, 60].map(int));
-            assert_eq!(
-                occurrences,
-                reference_rows
+                let (reference, reference_rows) =
+                    execute(&contexts, &mut ordinary, authorized, &fallback, policy())
+                        .await
+                        .unwrap();
+                assert_eq!((stats.created_vertices, stats.created_edges), (0, 3));
+                assert_eq!(stats.created_edges, reference.created_edges);
+                assert!(stats.selection.snapshot_records < reference.selection.snapshot_records);
+                assert_eq!(edge_values(&reused), edge_values(&ordinary));
+                assert_eq!(reused.vertices().unwrap(), ordinary.vertices().unwrap());
+                assert_eq!(
+                    reused
+                        .vertices()
+                        .unwrap()
+                        .into_iter()
+                        .map(|vertex| (vertex.vid, vertex.props))
+                        .collect::<Vec<_>>(),
+                    vec![
+                        (VId(1), vec![(P, CanonicalScalar::Int(60).into())]),
+                        (VId(2), vec![(P, CanonicalScalar::Int(2).into())]),
+                    ],
+                );
+                let occurrences: Vec<_> = rows
                     .iter()
-                    .map(|row| row.values()[0].clone())
-                    .collect::<Vec<_>>(),
-            );
-            assert_eq!(rows[0].values()[1], GraphValue::Edge(EId(3)));
-            assert_eq!(rows[1].values()[1], GraphValue::Edge(HIGH));
-            let mut stored: Vec<_> = reused
-                .edges()
-                .unwrap()
-                .into_iter()
-                .map(|edge| {
-                    let property = |key| {
-                        edge.props
-                            .iter()
-                            .find(|(candidate, _)| *candidate == key)
-                            .unwrap()
-                            .1
-                            .clone()
-                    };
-                    if edge.entry.eid == EId(3) || edge.entry.eid == HIGH {
-                        assert_eq!(property(HIDDEN), CanonicalScalar::Int(99).into());
-                    }
-                    (property(P), property(Q))
-                })
-                .collect();
-            stored.sort();
-            let mut expected: Vec<(CanonicalPropertyValue, CanonicalPropertyValue)> = vec![
-                (
-                    CanonicalScalar::Int(1).into(),
-                    CanonicalScalar::Int(80).into(),
-                ),
-                (
-                    CanonicalScalar::Int(1).into(),
-                    CanonicalScalar::Int(80).into(),
-                ),
-                (
-                    CanonicalScalar::Int(2).into(),
-                    CanonicalScalar::Int(20).into(),
-                ),
-                (
-                    CanonicalScalar::Int(large + 1).into(),
-                    CanonicalScalar::Int(50).into(),
-                ),
-                (
-                    CanonicalScalar::Float(CanonicalF64::new(large as f64)).into(),
-                    CanonicalScalar::Int(60).into(),
-                ),
-            ];
-            expected.sort();
-            assert_eq!(stored, expected);
-            assert_eq!(arguments.canonical_bytes(), frozen);
+                    .map(|row| row.values()[delta_column].clone())
+                    .collect();
+                assert_eq!(
+                    occurrences,
+                    [10, 10, 20, 30, 30, 40, 40, 50, 60].map(|value| int(value + increment))
+                );
+                assert_eq!(
+                    occurrences,
+                    reference_rows
+                        .iter()
+                        .map(|row| row.values()[delta_column].clone())
+                        .collect::<Vec<_>>(),
+                );
+                assert_eq!(rows[0].values()[edge_column], GraphValue::Edge(EId(3)));
+                assert_eq!(rows[1].values()[edge_column], GraphValue::Edge(HIGH));
+                let mut stored: Vec<_> = reused
+                    .edges()
+                    .unwrap()
+                    .into_iter()
+                    .map(|edge| {
+                        let property = |key| {
+                            edge.props
+                                .iter()
+                                .find(|(candidate, _)| *candidate == key)
+                                .unwrap()
+                                .1
+                                .clone()
+                        };
+                        if edge.entry.eid == EId(3) || edge.entry.eid == HIGH {
+                            assert_eq!(property(HIDDEN), CanonicalScalar::Int(99).into());
+                        }
+                        (property(P), property(Q))
+                    })
+                    .collect();
+                stored.sort();
+                let mut expected: Vec<(CanonicalPropertyValue, CanonicalPropertyValue)> = vec![
+                    (
+                        CanonicalScalar::Int(1).into(),
+                        CanonicalScalar::Int(80).into(),
+                    ),
+                    (
+                        CanonicalScalar::Int(1).into(),
+                        CanonicalScalar::Int(80).into(),
+                    ),
+                    (
+                        CanonicalScalar::Int(2).into(),
+                        CanonicalScalar::Int(20).into(),
+                    ),
+                    (
+                        CanonicalScalar::Int(large + 1).into(),
+                        CanonicalScalar::Int(50).into(),
+                    ),
+                    (
+                        CanonicalScalar::Float(CanonicalF64::new(large as f64)).into(),
+                        CanonicalScalar::Int(60).into(),
+                    ),
+                ];
+                expected.sort();
+                assert_eq!(stored, expected);
+                assert_eq!(arguments.canonical_bytes(), frozen);
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -346,6 +437,7 @@ fn late_effect_refusal_after_reused_rows_leaves_both_hosts_unchanged() {
             )
             .await
             .unwrap_err();
+            let failure = format!("{failure:?}");
             assert!(failure.contains("EffectLimit"), "{failure}");
             assert!(failure.contains("observed: 3"), "{failure}");
             assert_eq!(

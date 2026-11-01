@@ -442,80 +442,217 @@ fn directed_betweenness_charges_reverse_workspace_and_preserves_cooperative_resu
                 expected.certificate.result_digest,
                 native.certificate.result_digest
             );
-            let scalar = graph.node_count() * (2 * size_of::<usize>() + 3 * size_of::<f64>());
-            assert!(expected.certificate.kernel_workspace_bytes > scalar);
-            let exact = FnxMemoryLimits {
-                max_kernel_workspace_bytes: expected.certificate.kernel_workspace_bytes,
-                ..memory()
+            let n = graph.node_count();
+            let scalar = n * (2 * size_of::<usize>() + 3 * size_of::<f64>());
+            let count_bytes = n * size_of::<usize>();
+            assert_eq!(n, 7);
+            assert_eq!(graph.scan_incidence_bound(), 7);
+            // Independent requested-backing layout for this exact fixture:
+            // seven sort refs, four row descriptors and four EF chunks.
+            // The incoming source positions are [0,5], [2,4,6], [3], [1]:
+            // three low-u64 words and four high-u64/rank-u32 word pairs.
+            // Source image, Arc metadata and fixed stack scratch are excluded
+            // by IncomingIndexLimits' documented workspace contract.
+            let layout_bytes = |fields: &[std::alloc::Layout]| {
+                fields
+                    .iter()
+                    .fold(std::alloc::Layout::new::<()>(), |layout, field| {
+                        layout.extend(*field).unwrap().0
+                    })
+                    .pad_to_align()
+                    .size()
+            };
+            let incidence_ref = layout_bytes(&[
+                std::alloc::Layout::new::<VId>(),
+                std::alloc::Layout::new::<RelationId>(),
+                std::alloc::Layout::new::<u64>(),
+            ]);
+            let incoming_row = layout_bytes(&[
+                std::alloc::Layout::new::<VId>(),
+                std::alloc::Layout::new::<RelationId>(),
+                std::alloc::Layout::array::<usize>(3).unwrap(),
+            ]);
+            let ef_header = layout_bytes(&[
+                std::alloc::Layout::new::<usize>(),
+                std::alloc::Layout::new::<u64>(),
+                std::alloc::Layout::new::<u8>(),
+                std::alloc::Layout::new::<Vec<u64>>(),
+                std::alloc::Layout::new::<Vec<u64>>(),
+                std::alloc::Layout::new::<usize>(),
+                std::alloc::Layout::new::<Vec<u32>>(),
+            ]);
+            let incoming_peak = 7 * incidence_ref
+                + 4 * (incoming_row + ef_header)
+                + 3 * size_of::<u64>()
+                + 4 * (size_of::<u64>() + size_of::<u32>());
+            let original_index = if direction == Directedness::Reversed {
+                incoming_peak
+            } else {
+                0
             };
             assert_eq!(
-                call.execute_sealed(&cx, &graph, opt.execution_limits, exact)
-                    .unwrap(),
-                expected
+                graph
+                    .incoming_index_stats()
+                    .map_or(0, |stats| stats.charged_workspace_bytes),
+                original_index
             );
-            for q in [1, 7, 257] {
-                let probe = Arc::new(SimulationCheckpointProbe::new(None));
-                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
-                let (actual, pending) = drive(
-                    call.execute_sealed_cooperative(
-                        &controlled,
-                        &graph,
-                        opt.execution_limits,
-                        exact,
-                        quantum(q),
-                        yield_now,
-                    ),
-                    &probe,
-                    q,
+            let original_mandatory = n * (size_of::<VId>() + size_of::<usize>()) + original_index;
+            assert_eq!(
+                graph.charged_workspace_bytes(),
+                original_mandatory + count_bytes,
+                "the original projection already owns the borrowed incoming counts"
+            );
+            let mut tight = opt;
+            tight.projection_limits.max_workspace_bytes = original_mandatory;
+            let no_counts = projection(&db, &cx, tight).await;
+            assert_eq!(no_counts.charged_workspace_bytes(), original_mandatory);
+            assert_eq!(no_counts.vertex_ids(), graph.vertex_ids());
+            assert_eq!(no_counts.binding(), graph.binding());
+            assert_eq!(no_counts.digest(), graph.digest());
+            let incoming = if direction == Directedness::Directed {
+                let mut opposite = opt;
+                opposite.projection.directedness = Directedness::Reversed;
+                let opposite = projection(&db, &cx, opposite).await;
+                let stats = opposite.incoming_index_stats().unwrap();
+                assert_eq!((stats.incidences, stats.rows, stats.chunks), (7, 4, 4));
+                assert_eq!(stats.charged_workspace_bytes, incoming_peak);
+                assert!(stats.charged_workspace_bytes > stats.charged_resident_bytes);
+                incoming_peak
+            } else {
+                0
+            };
+            let borrowed_result = expected;
+            for (selected, added_counts) in [(&graph, 0), (&no_counts, count_bytes)] {
+                let expected = call
+                    .execute_sealed(&cx, selected, opt.execution_limits, memory())
+                    .unwrap();
+                assert_eq!(expected.rows, borrowed_result.rows);
+                assert_eq!(
+                    expected.certificate.result_digest,
+                    borrowed_result.certificate.result_digest
                 );
-                compare_execution(&actual.unwrap(), &expected);
-                assert!(pending > 0);
-            }
-            let scalar_only = FnxMemoryLimits {
-                max_kernel_workspace_bytes: scalar,
-                ..memory()
-            };
-            assert!(
-                call.execute_sealed(&cx, &graph, opt.execution_limits, scalar_only)
-                    .is_err()
-            );
-            assert!(
-                call.execute_sealed_cooperative(
-                    &cx,
-                    &graph,
-                    opt.execution_limits,
-                    scalar_only,
-                    quantum(1),
-                    yield_now
-                )
-                .await
-                .is_err()
-            );
-            let low_work = FnxExecutionLimits {
-                max_estimated_work: expected.certificate.estimated_work - 1,
-                ..opt.execution_limits
-            };
-            let refused = call
-                .execute_sealed_cooperative(
-                    &cx,
-                    &graph,
-                    low_work,
-                    memory(),
-                    quantum(1),
-                    || -> std::future::Ready<()> {
-                        panic!("work refusal precedes reverse construction")
-                    },
-                )
-                .await;
-            assert!(matches!(
-                refused,
-                Err(FnxSealedExecutionError::Execution(
-                    FnxExecutionError::LimitExceeded {
-                        resource: "estimated work",
-                        ..
+                assert_eq!(expected.certificate.snapshot, selected.binding());
+                assert_eq!(expected.certificate.projection_digest, selected.digest());
+                // Price only newly owned backing. A reversed admitted source
+                // lends its outgoing image; missing counts still cost one Vec.
+                let mandatory = scalar + incoming + added_counts;
+                assert_eq!(expected.certificate.kernel_workspace_bytes, mandatory);
+                let exact = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: mandatory,
+                    ..memory()
+                };
+                assert_eq!(
+                    call.execute_sealed(&cx, selected, opt.execution_limits, exact)
+                        .unwrap(),
+                    expected
+                );
+                for q in [1, 7, 257] {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                    let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                    let (actual, pending) = drive(
+                        call.execute_sealed_cooperative(
+                            &controlled,
+                            selected,
+                            opt.execution_limits,
+                            exact,
+                            quantum(q),
+                            yield_now,
+                        ),
+                        &probe,
+                        q,
+                    );
+                    compare_execution(&actual.unwrap(), &expected);
+                    assert!(pending > 0);
+                }
+                let below = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: mandatory - 1,
+                    ..exact
+                };
+                for refused in [
+                    call.execute_sealed(&cx, selected, opt.execution_limits, below)
+                        .unwrap_err(),
+                    call.execute_sealed_cooperative(
+                        &cx,
+                        selected,
+                        opt.execution_limits,
+                        below,
+                        quantum(1),
+                        yield_now,
+                    )
+                    .await
+                    .unwrap_err(),
+                ] {
+                    match (direction, added_counts) {
+                        (Directedness::Reversed, 0) => assert!(matches!(refused,
+                        FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded {
+                            resource: "kernel workspace bytes", requested, limit,
+                        }) if requested == scalar && limit == scalar - 1)),
+                        (Directedness::Reversed, _) => assert!(matches!(refused,
+                        FnxSealedExecutionError::Source(SealedProjectionError::Projection(
+                            fgdb_prism::ProjectionError::LimitExceeded {
+                                resource: "workspace bytes", observed, limit,
+                            }
+                        )) if observed == count_bytes && limit == count_bytes - 1)),
+                        (Directedness::Directed, _) => assert!(matches!(refused,
+                        FnxSealedExecutionError::Source(SealedProjectionError::Read(
+                            fgdb_strata::tiered::sealed::SealedError::Limit {
+                                resource: "incoming workspace bytes", requested, limit,
+                            }
+                        )) if requested == incoming && limit == incoming - 1)),
+                        _ => unreachable!(),
                     }
-                ))
-            ));
+                }
+                let scalar_only = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: scalar,
+                    ..memory()
+                };
+                let original_sync =
+                    call.execute_sealed(&cx, selected, opt.execution_limits, scalar_only);
+                let original_cooperative = call
+                    .execute_sealed_cooperative(
+                        &cx,
+                        selected,
+                        opt.execution_limits,
+                        scalar_only,
+                        quantum(1),
+                        yield_now,
+                    )
+                    .await;
+                if incoming == 0 && added_counts == 0 {
+                    // Preserve the old scalar-only input as the exact borrowed
+                    // positive; every genuinely owned backing still refuses it.
+                    assert_eq!(original_sync.unwrap(), expected);
+                    compare_execution(&original_cooperative.unwrap(), &expected);
+                } else {
+                    assert!(original_sync.is_err());
+                    assert!(original_cooperative.is_err());
+                }
+                let low_work = FnxExecutionLimits {
+                    max_estimated_work: expected.certificate.estimated_work - 1,
+                    ..opt.execution_limits
+                };
+                let refused = call
+                    .execute_sealed_cooperative(
+                        &cx,
+                        selected,
+                        low_work,
+                        memory(),
+                        quantum(1),
+                        || -> std::future::Ready<()> {
+                            panic!("work refusal precedes reverse construction")
+                        },
+                    )
+                    .await;
+                assert!(matches!(
+                    refused,
+                    Err(FnxSealedExecutionError::Execution(
+                        FnxExecutionError::LimitExceeded {
+                            resource: "estimated work",
+                            ..
+                        }
+                    ))
+                ));
+            }
         }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });

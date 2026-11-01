@@ -1492,19 +1492,52 @@ mod tests {
     #[test]
     fn row_target_reuse_proves_only_bound_key_preserving_actions() {
         let prefix = "UNWIND [1,2,1.0] AS x MATCH (a:A),(b:A) ";
-        let stable = bound(
+        let common = bound(
             &format!(
                 "{prefix} MERGE (a)-[r:R {{p:x}}]->(b)                  ON CREATE SET r.q=x ON MATCH SET r.q=r.q+x SET a.p=x"
+            ),
+            &GqlParameters::new(),
+        );
+        // The original common SET is a separate completed-bag mutation,
+        // not an action of this MERGE's occurrence-preserving owner.
+        assert!(matches!(
+            common.steps().last(),
+            Some(GraphWriteChainStep::Mutation(_))
+        ));
+        let upsert = definition(
+            common
+                .steps()
+                .iter()
+                .find(|step| {
+                    matches!(
+                        step,
+                        GraphWriteChainStep::EdgeUpsert(_)
+                            | GraphWriteChainStep::EdgeUpsertRows { .. }
+                            | GraphWriteChainStep::EdgeUpsertQuery { .. }
+                    )
+                })
+                .unwrap(),
+        );
+        assert!(upsert.preserves_match_targets());
+        assert!(upsert.actions().after.is_empty());
+        let stable = bound(
+            &format!(
+                "{prefix} MERGE (a)-[r:R {{p:x}}]->(b) \
+                 ON CREATE SET r.q=x,a.p=x ON MATCH SET r.q=r.q+x,a.p=x"
             ),
             &GqlParameters::new(),
         );
         let upsert = definition(stable.steps().last().unwrap());
         assert!(upsert.merge().has_row_properties());
         assert!(upsert.preserves_match_targets());
-        assert!(matches!(
-            upsert.actions().after.first(),
-            Some(GraphEdgeMergeRowAction::RowVertex { key: P, .. })
-        ));
+        assert!(upsert.actions().after.is_empty());
+        for branch in [&upsert.actions().on_create, &upsert.actions().on_match] {
+            assert_eq!(branch.len(), 2);
+            assert!(matches!(
+                branch.last(),
+                Some(GraphEdgeMergeRowAction::RowVertex { key: P, .. })
+            ));
+        }
 
         for action in [
             "ON CREATE SET r.p=x",
@@ -1530,6 +1563,134 @@ mod tests {
             assert!(
                 !definition(program.steps().last().unwrap()).preserves_match_targets(),
                 "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn returned_map_entries_use_the_write_binding_frame_in_every_item_order() {
+        let prefix = "UNWIND [{delta:7,nested:{value:9}},null] AS row \
+            MATCH (a:A),(b:A) MERGE (a)-[r:R {p:1}]->(b) ON MATCH SET r.q=1";
+        let edge = GraphValue::Edge(EId(41));
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        for (items, expected) in [
+            (
+                "row.delta,r",
+                vec![
+                    vec![scalar(7), edge.clone()],
+                    vec![null.clone(), edge.clone()],
+                ],
+            ),
+            (
+                "r,row.delta",
+                vec![
+                    vec![edge.clone(), scalar(7)],
+                    vec![edge.clone(), null.clone()],
+                ],
+            ),
+            (
+                "row.delta+1,r",
+                vec![
+                    vec![scalar(8), edge.clone()],
+                    vec![null.clone(), edge.clone()],
+                ],
+            ),
+            (
+                "r,row.delta+1",
+                vec![
+                    vec![edge.clone(), scalar(8)],
+                    vec![edge.clone(), null.clone()],
+                ],
+            ),
+            (
+                "r,row.nested.value+1",
+                vec![
+                    vec![edge.clone(), scalar(10)],
+                    vec![edge.clone(), null.clone()],
+                ],
+            ),
+            (
+                "r.p,row.delta",
+                vec![vec![scalar(4), scalar(7)], vec![scalar(4), null.clone()]],
+            ),
+            (
+                "row.nested.value,row.absent,r",
+                vec![
+                    vec![scalar(9), null.clone(), edge.clone()],
+                    vec![null.clone(), null.clone(), edge.clone()],
+                ],
+            ),
+        ] {
+            let text = format!("{prefix} RETURN {items}");
+            let program = bound(&text, &GqlParameters::new());
+            let Some(GraphWriteChainStep::EdgeUpsertQuery { upsert, query }) =
+                program.steps().last()
+            else {
+                panic!("expected the native action-bearing MERGE RETURN: {text}");
+            };
+            let map = GraphValue::map(vec![
+                ("delta".into(), scalar(7)),
+                (
+                    "nested".into(),
+                    GraphValue::map(vec![("value".into(), scalar(9))]).unwrap(),
+                ),
+            ])
+            .unwrap();
+            // Exercise the actual compiled finalizer over its declared input
+            // frame. A graph property remains the native Property binding;
+            // map keys are not schema symbols and never ask the catalog.
+            let rows = [map, null.clone()]
+                .into_iter()
+                .map(|map| {
+                    query
+                        .bindings()
+                        .iter()
+                        .map(|binding| match binding {
+                            crate::GraphEdgeMergeBinding::Input(column) => {
+                                assert_eq!(
+                                    upsert.merge().input_column_types()[*column],
+                                    GraphSetColumnType::Any
+                                );
+                                map.clone()
+                            }
+                            crate::GraphEdgeMergeBinding::Edge => edge.clone(),
+                            crate::GraphEdgeMergeBinding::Property(key) if *key == P => scalar(4),
+                            _ => panic!("unexpected RETURN binding: {text}"),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let result = query
+                .finish_governed::<(), ()>(
+                    rows,
+                    crate::GqlExecutionStats {
+                        snapshot_records: 0,
+                        result_rows: 2,
+                    },
+                    crate::GlaExecutionStats::default(),
+                    crate::GqlQueryPolicy::new(0, 2, 100_000, 20_000),
+                    || Ok(()),
+                )
+                .unwrap();
+            assert_eq!(
+                result
+                    .value
+                    .iter()
+                    .map(|row| row.values().to_vec())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{text}"
+            );
+        }
+        for text in [
+            "WITH 7 AS value MATCH (a:A),(b:A) MERGE (a)-[r:R]->(b) ON MATCH SET r.q=1 RETURN value.delta+1",
+            "WITH [7] AS value MATCH (a:A),(b:A) MERGE (a)-[r:R]->(b) ON MATCH SET r.q=1 RETURN value.delta",
+            "UNWIND [{delta:7}] AS row MATCH (a:A),(b:A) MERGE (a)-[r:R]->(b) ON MATCH SET r.q=1 WITH r RETURN row.delta",
+        ] {
+            let parsed = PreparedGraphWriteChainText::prepare(text, R, symbols);
+            assert!(
+                parsed.is_err(),
+                "a static or dropped source gained an entry: {text}"
             );
         }
     }

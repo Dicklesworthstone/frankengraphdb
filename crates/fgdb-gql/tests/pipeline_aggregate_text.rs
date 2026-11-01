@@ -355,6 +355,17 @@ fn grouped_correlated_call_summaries_retain_outer_values_without_expanding_the_b
         RETURN x AS k,count(*) AS n,sum(x) AS s,avg(x) AS a,count(DISTINCT x) AS d";
     let template = PreparedGraphPipelineAggregateText::prepare(text, symbols).unwrap();
     assert!(template.template_operators().contains(&"Apply"));
+    assert_eq!(template.columns(), &["k", "n", "s", "a", "d"]);
+    assert_eq!(
+        template.output_slots(),
+        &[
+            GraphAggregateTextSlot::GroupKey(0),
+            GraphAggregateTextSlot::Aggregate(0),
+            GraphAggregateTextSlot::Aggregate(1),
+            GraphAggregateTextSlot::Aggregate(2),
+            GraphAggregateTextSlot::Aggregate(3),
+        ]
+    );
     let query = template
         .bind_relation_parameters(&GqlParameters::new())
         .unwrap();
@@ -375,33 +386,53 @@ fn grouped_correlated_call_summaries_retain_outer_values_without_expanding_the_b
     let n = 1_u64 << 40; // Four inclusive ranges of 1024 members per body.
     let mut seen = BTreeSet::new();
     for row in &result.value {
-        let key = row.values()[0].as_value().unwrap().as_scalar().unwrap();
+        // A direct grouped RETURN keeps its key separate from aggregate cells.
+        assert_eq!(row.keys().len(), 1);
+        assert_eq!(row.values().len(), 4);
+        let key = row.keys()[0].as_scalar().unwrap();
         match key {
             CanonicalScalar::Null => {
                 assert!(seen.insert(None));
-                assert_eq!(row.values()[1].as_count(), Some(n));
+                assert_eq!(row.values()[0].as_count(), Some(n));
+                assert!(row.values()[1].is_null());
                 assert!(row.values()[2].is_null());
-                assert!(row.values()[3].is_null());
-                assert_eq!(row.values()[4].as_count(), Some(0));
+                assert_eq!(row.values()[3].as_count(), Some(0));
             }
             CanonicalScalar::Int(value) => {
                 assert!(seen.insert(Some(*value)));
                 let copies = if *value == 2 { 2 } else { 1 };
-                assert_eq!(row.values()[1].as_count(), Some(copies * n));
+                assert_eq!(row.values()[0].as_count(), Some(copies * n));
                 assert_eq!(
-                    row.values()[2].as_integer(),
+                    row.values()[1].as_integer(),
                     Some(i128::from(*value) * i128::from(copies * n))
                 );
                 assert_eq!(
-                    row.values()[3].as_average(),
+                    row.values()[2].as_average(),
                     Some(GraphExactAverage::new(i128::from(*value), 1).unwrap())
                 );
-                assert_eq!(row.values()[4].as_count(), Some(1));
+                assert_eq!(row.values()[3].as_count(), Some(1));
             }
             _ => panic!("unexpected grouping key"),
         }
     }
     assert_eq!(seen, [None, Some(-1), Some(2)].into_iter().collect());
+    let refused = query.execute_governed(
+        GqlQueryPolicy::new(0, 2, 100_000, 20_000),
+        |_: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+         _: GqlQueryPolicy|
+         -> Result<_, GqlQueryError<(), ()>> {
+            panic!("a scalar correlated summary cannot open a graph")
+        },
+        || Ok::<_, ()>(()),
+    );
+    assert!(matches!(
+        refused,
+        Err(GqlQueryError::Rows(fgdb_gql::GqlBudgetExceeded {
+            dimension: fgdb_gql::GqlBudgetDimension::ResultRows,
+            limit: 2,
+            observed: 3,
+        }))
+    ));
     // This asserts a bounded work profile and exact answers; it is not timing data.
 }
 

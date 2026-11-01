@@ -13,7 +13,56 @@ This audit does not award G1–G4 or release qualification.
 
 ### Integrated runtime repair checkpoint — 2026-10-31 23:20 UTC
 
-**Latest update, 2026-11-01 12:38 UTC:** source repair
+**Latest update, 2026-11-01 22:53 UTC:** the shared write `RETURN` compiler now
+uses the actual private binding types when it compiles carried-map fields.
+This connects the already implemented map-entry evaluator to row-valued
+MERGE results, including arithmetic and either RETURN-item order. The native
+and authorized hosts both preserve all nine repeated occurrences and exact
+stored values. Original common-SET conflict/atomicity, late-limit, key-change,
+hidden-property and scope-negative controls remain enforced. This is a real
+production wiring repair, not a new evaluator or a quota change.
+
+The complete affected-target diagnostic exits zero: 2,076 passed, zero failed,
+one existing ignore and zero filtered across architecture (42), GQL (1,897),
+aggregate text (36), cooperative Prism (98) and row-target reuse (3). Formatting,
+all-target check, strict all-feature Clippy and the complete same-feature
+workspace no-run build also exit zero. All 2,630 tracked files and HEAD remain
+stable during this dirty-tree diagnostic. Receipts are under
+`/data/ssd/tmp/fgdb-v6-runtime-fixture-repairs-20261101-v1/diagnostic-v2`.
+These results do not replace the next clean committed-tree proof.
+
+The preceding full V4 proof passed on historical `47cb48ff2`, with 13,810
+passing tests and 34 existing ignores. Incoming reuse code subsequently made
+V5 compile-RED; source commit `c309e8cca` repairs its concrete compilation and
+Send-checking failures. V6's complete core and first default run then executed
+13,823 passes, eight failures and 34 existing ignores. Four failures came from
+Root's preventable missing architecture labels on `fgdb-on8vu`; those labels
+are corrected without changing routing rules. The other four exposed stale
+borrowed-workspace, mutation-owner and grouped-row layout assumptions. Their
+repairs retain original inputs as discriminating controls, including common
+SET's actual simultaneous-conflict behavior and exact borrowed/owned workspace
+floors. A first repaired diagnostic exposed the real map-RETURN defect above.
+
+A conversation interruption stopped V6 during Miri before its manifest and
+terminal receipt existed. The repository verifier exits 1 for the missing
+manifest: V6 is incomplete and unverifiable, not an authenticated whole-proof
+verdict. Its completed failures, crashpacks and all 32 complete scanner
+partitions remain preserved. Those scans conserve all 277 original critical
+identities, with zero additions, removals or suppressions; the generic-token
+detector miss remains disclosed. No security clearance follows.
+
+The next qualification must integrate the owner's documentation-only
+`92a9eadb9` update and execute every unchanged mandatory gate, both actual
+default runs and the repository-bound verifier on that exact clean commit.
+Then run the original public component, text/list, computed-key, alias-write
+authorization, full ordered TCK and paired ingestion/history witnesses against
+acknowledged binaries. No source-dependent Bead is closed at this checkpoint.
+The original no-table grouped-streaming gap, literal unchanged-threshold
+qualification condition, missing authentic provenance record, Studio browser
+integration, broad algorithm catalog and section17 performance requirements
+remain open. The twenty vision boundaries below still apply.
+
+**Earlier update, 2026-11-01 12:38 UTC:** source repair
 `d53758d7a9280f1004872ce5cc226e37f7239190` restores valid cached relationship
 MERGE programs and moves scalar Text copies in list composition after their
 existing admission callbacks. The accounting repair preserves real scan
