@@ -1276,11 +1276,25 @@ pub(crate) fn query_refusal(error: impl Into<SessionError>) -> Refusal {
 /// Classify a write failure by walking its typed cause chain. Nothing here
 /// turns an unknown commit outcome into a refusal: that class is preserved.
 pub(crate) fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refusal {
+    use fgdb_gql::insertion::{GraphInsertError, GraphInsertLimitDimension};
     let mut code = ErrorCode::Statement;
     let mut source = Some(error);
     while let Some(current) = source {
         if let Some(clock) = current.downcast_ref::<fgdb::StatementTimeError>() {
             code = statement_time_code(clock);
+            break;
+        }
+        // Native chain insertions consume the remaining cumulative creation
+        // allowance directly. Their typed collector limit is a budget refusal
+        // even when no GraphWriteProgram::CreationBudget wrapper exists.
+        if matches!(
+            current.downcast_ref::<GraphInsertError<fgdb::WriteTxnError, fgdb::WriteTxnError>>(),
+            Some(GraphInsertError::Limit {
+                dimension: GraphInsertLimitDimension::Vertices | GraphInsertLimitDimension::Edges,
+                ..
+            })
+        ) {
+            code = ErrorCode::Budget;
             break;
         }
         if matches!(

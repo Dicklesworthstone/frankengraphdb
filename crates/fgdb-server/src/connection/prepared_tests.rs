@@ -1092,15 +1092,6 @@ fn prepared_no_return_chains_keep_write_mode_and_fresh_arguments() {
             );
         }
         assert_eq!(
-            run_prepared_batch(&root, db, &token, &definition, &[arguments(&[1])])
-                .await
-                .err()
-                .unwrap()
-                .code,
-            ErrorCode::Statement,
-            "the script-batch owner cannot independently commit chain argument sets"
-        );
-        assert_eq!(
             prepare_statement(
                 &root,
                 db,
@@ -1180,6 +1171,47 @@ fn prepared_no_return_chains_keep_write_mode_and_fresh_arguments() {
         assert_eq!(
             db.db.read(&root).await.unwrap().vertices().unwrap().len(),
             4
+        );
+        // Native chains now share the batch's one workspace and completion.
+        // A missing final argument set still cannot commit the valid prefix.
+        assert_eq!(
+            run_prepared_batch(
+                &root,
+                db,
+                &token,
+                &definition,
+                &[arguments(&[1]), Vec::new()],
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            ErrorCode::Statement
+        );
+        assert_eq!(
+            db.db.read(&root).await.unwrap().frontier().unwrap(),
+            CommitSeq(1)
+        );
+        assert_eq!(
+            db.db.read(&root).await.unwrap().vertices().unwrap().len(),
+            4
+        );
+        // Preserve the original one-record batch input as the newly admitted
+        // capability, after the original direct-write and empty-input checks.
+        let batch =
+            ok(run_prepared_batch(&root, db, &token, &definition, &[arguments(&[1])]).await);
+        assert!(batch.columns.is_empty());
+        assert!(batch.rows.is_empty());
+        assert_eq!(
+            batch.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1
+            }
+        );
+        assert_eq!(
+            db.db.read(&root).await.unwrap().vertices().unwrap().len(),
+            6
         );
         server.join_database_workers(&root).await;
     });

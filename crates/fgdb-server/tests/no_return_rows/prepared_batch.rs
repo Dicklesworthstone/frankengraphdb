@@ -436,7 +436,8 @@ fn prepared_chain_batches_preserve_input_order_atomicity_and_zero_row_grants() {
         assert!(
             matches!(
                 &arithmetic,
-                ClientError::Server { message, .. } if message.contains("argument set 1")
+                ClientError::Server { code: ErrorCode::Execution, message }
+                    if message.contains("argument set 1")
             ),
             "a late arithmetic failure identifies its record and rolls back the entire batch: {arithmetic:?}"
         );
@@ -523,32 +524,59 @@ fn prepared_chain_batches_share_native_creation_limits_without_committed_prefixe
         .await;
         let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
         let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        let statement = "CREATE (a:Person {name:$name}) WITH a \
+                 CREATE (b:Person {name:$tail}) CREATE (a)-[:KNOWS]->(b)";
+        let names = |name: &str, tail: &str| {
+            vec![
+                ("name".into(), WireValue::Text(name.into())),
+                ("tail".into(), WireValue::Text(tail.into())),
+            ]
+        };
+        // Keep the original four-name representative as a strict-unused
+        // refusal. This statement consumes name/tail, not divisor/age.
+        assert_eq!(
+            refusal(
+                writer
+                    .prepare_write(cx, statement, arguments("sample", "sample-tail", 1, 0))
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement
+        );
         let handle = writer
-            .prepare_write(
-                cx,
-                "CREATE (a:Person {name:$name}) WITH a \
-                 CREATE (b:Person {name:$tail}) CREATE (a)-[:KNOWS]->(b)",
-                arguments("sample", "sample-tail", 1, 0),
-            )
+            .prepare_write(cx, statement, names("sample", "sample-tail"))
             .await
             .unwrap();
+        for original in [
+            vec![arguments("Ada", "Bob", 1, 0), arguments("Cy", "De", 1, 0)],
+            vec![arguments("Ada", "Bob", 1, 0)],
+        ] {
+            assert_eq!(
+                refusal(
+                    writer
+                        .execute_prepared_batch(cx, handle, original)
+                        .await
+                        .unwrap_err()
+                ),
+                ErrorCode::Statement
+            );
+        }
+        let exhausted = writer
+            .execute_prepared_batch(cx, handle, vec![names("Ada", "Bob"), names("Cy", "De")])
+            .await
+            .unwrap_err();
         assert!(
-            writer
-                .execute_prepared_batch(
-                    cx,
-                    handle,
-                    vec![arguments("Ada", "Bob", 1, 0), arguments("Cy", "De", 1, 0),],
-                )
-                .await
-                .is_err(),
-            "each record fits, but their four creations exceed the one batch allowance"
+            matches!(&exhausted, ClientError::Server {
+            code: ErrorCode::Budget, message,
+        } if message.contains("argument set 1")),
+            "each record fits, but their four creations exceed the one batch allowance: {exhausted:?}"
         );
         let unchanged = state(cx, &mut observer).await;
         assert!(unchanged.0.rows.is_empty() && unchanged.1.rows.is_empty());
         assert_eq!(unchanged.0.outcome, Outcome::Rows { seq: 0 });
         assert_eq!(
             writer
-                .execute_prepared_batch(cx, handle, vec![arguments("Ada", "Bob", 1, 0)])
+                .execute_prepared_batch(cx, handle, vec![names("Ada", "Bob")])
                 .await
                 .unwrap(),
             Outcome::WriteCommitted {

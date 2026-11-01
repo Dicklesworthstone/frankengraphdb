@@ -219,6 +219,48 @@ fn deferred_returning_checks_its_floor_and_never_crosses_recovery_generations() 
 }
 
 #[test]
+fn native_insertion_limit_taxonomy_survives_the_chain_source_wrappers() {
+    use fgdb_gql::insertion::{GraphInsertError, GraphInsertLimitDimension};
+    use fgdb_gql::{GraphInsertQueryError, GraphWriteChainError};
+    type Native = GraphInsertError<fgdb::WriteTxnError, fgdb::WriteTxnError>;
+    fn chain(
+        error: Native,
+    ) -> GqlQueryError<
+        GraphWriteChainError<fgdb::WriteTxnError, fgdb::WriteTxnError>,
+        fgdb::WriteTxnError,
+    > {
+        GqlQueryError::Source(GraphWriteChainError::Insert(
+            GraphInsertQueryError::Insertion(error),
+        ))
+    }
+    // This is the typed wire-classification boundary, not a substitute for
+    // the real FGP batch creation/refusal/rollback law in prepared_batch.rs.
+    for dimension in [
+        GraphInsertLimitDimension::Vertices,
+        GraphInsertLimitDimension::Edges,
+    ] {
+        let error = chain(Native::Limit {
+            dimension,
+            limit: 0,
+            observed: 1,
+        });
+        let message = error.to_string();
+        let refusal = returning_refusal(error);
+        assert_eq!(refusal.code, ErrorCode::Budget);
+        assert_eq!(refusal.message, message);
+    }
+    let error = chain(Native::InputSchema { row: 1, column: 2 });
+    let message = error.to_string();
+    let refusal = returning_refusal(error);
+    assert_eq!(
+        refusal.code,
+        ErrorCode::Statement,
+        "a non-limit insertion fault must retain its own taxonomy"
+    );
+    assert_eq!(refusal.message, message);
+}
+
+#[test]
 fn retained_returning_definitions_are_not_authority_or_an_identity_bypass() {
     let ((), report) = run_async_under_lab(0xb017_1005, |root| async move {
         let (server, token, _) = served(&root, "returning-retired-definition").await;
