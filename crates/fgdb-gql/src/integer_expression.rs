@@ -2412,19 +2412,6 @@ fn list_plus<'a, E>(
             kind: GraphIntegerErrorKind::Overflow,
         })
     };
-    let member = |cell: &ExpressionCell<'a>| -> Result<GraphValue, GraphIntegerEvaluationError<E>> {
-        Ok(GraphValue::Scalar(match cell {
-            ExpressionCell::Scalar(value) => value.as_ref().clone(),
-            ExpressionCell::Count(value) => {
-                CanonicalScalar::Int(i64::try_from(*value).map_err(|_| overflow())?)
-            }
-            ExpressionCell::Integer(value) => {
-                CanonicalScalar::Int(i64::try_from(*value).map_err(|_| overflow())?)
-            }
-            ExpressionCell::Average(average) => CanonicalScalar::Float(average.binary64()),
-            ExpressionCell::Composite(_) => unreachable!("composites join as values below"),
-        }))
-    };
     let mut joined = Vec::new();
     for cell in [left, right] {
         if let ExpressionCell::Composite(value) = cell {
@@ -2440,13 +2427,26 @@ fn list_plus<'a, E>(
                 );
             }
         } else {
-            let value = member(cell)?;
+            // Keep variable-size payloads borrowed until their existing
+            // admission succeeds. Fixed-size conversions retain their error
+            // precedence before the first output-member event.
+            let scalar = match cell {
+                ExpressionCell::Scalar(value) => Cow::Borrowed(value.as_ref()),
+                ExpressionCell::Count(value) => Cow::Owned(CanonicalScalar::Int(
+                    i64::try_from(*value).map_err(|_| overflow())?,
+                )),
+                ExpressionCell::Integer(value) => Cow::Owned(CanonicalScalar::Int(
+                    i64::try_from(*value).map_err(|_| overflow())?,
+                )),
+                ExpressionCell::Average(average) => {
+                    Cow::Owned(CanonicalScalar::Float(average.binary64()))
+                }
+                ExpressionCell::Composite(_) => unreachable!("composites join as values below"),
+            };
             control(GlaExecutionEvent::ScratchEntry)
                 .map_err(GraphIntegerEvaluationError::Control)?;
-            if let GraphValue::Scalar(scalar) = &value {
-                charge_payload(scalar_payload_bytes(scalar), true, control)?;
-            }
-            joined.push(value);
+            charge_payload(scalar_payload_bytes(scalar.as_ref()), true, control)?;
+            joined.push(GraphValue::Scalar(scalar.into_owned()));
         }
     }
     control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
@@ -2645,6 +2645,114 @@ fn apply_exact_binary(
 mod tests {
     use super::*;
     use GraphIntegerOp::{Binary, Coalesce, Column, Literal, Unary};
+
+    #[test]
+    fn list_scalar_copies_preserve_values_events_and_every_refusal_prefix() {
+        use GlaExecutionEvent::{ScratchEntry, Work};
+
+        let spelling = "é".repeat(65);
+        let scalar = CanonicalScalar::ucs_basic_text(&spelling).unwrap();
+        let empty = GraphValue::List(Box::new([]));
+        let list = ExpressionCell::Composite(Cow::Borrowed(&empty));
+        let member = ExpressionCell::Scalar(Cow::Borrowed(&scalar));
+        let expected = GraphValue::List(Box::new([GraphValue::Scalar(scalar.clone())]));
+        // One member, three 64-byte payload quanta, then the list shell.
+        // These compatibility controls do not measure allocator placement;
+        // the borrowed-to-owned source order establishes that boundary.
+        let expected_events = [
+            ScratchEntry,
+            Work,
+            ScratchEntry,
+            Work,
+            ScratchEntry,
+            Work,
+            ScratchEntry,
+            ScratchEntry,
+        ];
+        for prepend in [false, true] {
+            let (left, right) = if prepend {
+                (&member, &list)
+            } else {
+                (&list, &member)
+            };
+            let mut events = Vec::new();
+            let result = list_plus(left, right, 42, &mut |event| {
+                events.push(event);
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+            let ExpressionCell::Composite(value) = result else {
+                panic!("a list/scalar sum returns a list");
+            };
+            assert_eq!(value.as_ref(), &expected);
+            assert_eq!(events.as_slice(), &expected_events);
+            for stop in 1..=expected_events.len() {
+                let mut seen = Vec::new();
+                let result = list_plus(left, right, 42, &mut |event| {
+                    seen.push(event);
+                    if seen.len() == stop {
+                        Err(stop)
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert!(matches!(
+                    result,
+                    Err(GraphIntegerEvaluationError::Control(at)) if at == stop
+                ));
+                assert_eq!(seen.as_slice(), &expected_events[..stop]);
+                assert_eq!(scalar_text(&scalar).unwrap(), Some(spelling.as_str()));
+                assert_eq!(empty, GraphValue::List(Box::new([])));
+            }
+            let replay = list_plus(left, right, 42, &mut |_| Ok::<_, usize>(())).unwrap();
+            let ExpressionCell::Composite(value) = replay else {
+                panic!("a completed replay returns the full list");
+            };
+            assert_eq!(value.as_ref(), &expected);
+        }
+    }
+
+    #[test]
+    fn list_scalar_null_and_conversion_errors_keep_their_original_precedence() {
+        let empty = GraphValue::List(Box::new([]));
+        let list = ExpressionCell::Composite(Cow::Borrowed(&empty));
+        for member in [
+            ExpressionCell::Count(u64::MAX),
+            ExpressionCell::Integer(i128::MAX),
+        ] {
+            for prepend in [false, true] {
+                let (left, right) = if prepend {
+                    (&member, &list)
+                } else {
+                    (&list, &member)
+                };
+                let mut events = 0;
+                let result = list_plus(left, right, 42, &mut |_| {
+                    events += 1;
+                    Err::<(), _>(())
+                });
+                assert!(matches!(
+                    result,
+                    Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
+                        instruction: 42,
+                        kind: GraphIntegerErrorKind::Overflow,
+                    }))
+                ));
+                assert_eq!(events, 0);
+            }
+        }
+        let null = ExpressionCell::Scalar(Cow::Owned(CanonicalScalar::Null));
+        for (left, right) in [(&null, &list), (&list, &null)] {
+            let mut events = 0;
+            let result = list_plus(left, right, 42, &mut |_| {
+                events += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+            assert!(result.is_null());
+            assert_eq!(events, 0);
+        }
+    }
 
     fn evaluate(
         ops: &[GraphIntegerOp],

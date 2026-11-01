@@ -479,10 +479,10 @@ impl<'a, Access> ExecutionPermit<'a, Access> {
     /// and compiled capability predicates that admitted this permit
     /// (`fgdb.warden.authz_decision.v1`, FG-INV-20).
     ///
-    /// Never includes the macaroon's secret HMAC attenuation tag or mutable
-    /// execution usage/clock state, so identical capability + policy epoch
-    /// produces a byte-identical transcript while any caveat attenuation
-    /// changes it deterministically.
+    /// The authority identifier binds the policy epoch. Secret HMAC tags and
+    /// mutable execution usage/clock state are excluded. Identical verified
+    /// authority and effective compiled predicates produce identical bytes;
+    /// redundant caveats can compile to the same decision transcript.
     #[must_use]
     pub fn canonical_decision_bytes(&self) -> Vec<u8> {
         let mut out = Vec::from(&b"fgdb.warden.authz_decision.v1\0"[..]);

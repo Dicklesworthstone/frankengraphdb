@@ -414,10 +414,12 @@ fn vertex_upsert_actions<E, A, C>(
                             GraphIntegerEvaluationError::Control(error) => error,
                             GraphIntegerEvaluationError::Value(source) => failure(source),
                         })?
-                        .ok_or_else(|| failure(fgdb_gql::GraphIntegerError {
-                            instruction: 0,
-                            kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
-                        }))?;
+                        .ok_or_else(|| {
+                            failure(fgdb_gql::GraphIntegerError {
+                                instruction: 0,
+                                kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
+                            })
+                        })?;
                     point_payload_admission(&written, &mut |event| {
                         control(match event {
                             SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,

@@ -25,16 +25,22 @@ impl MixedMeter {
         let modified =
             created * u128::from(create_actions != 0) + matched * u128::from(match_actions != 0);
         let targets = u128::from(target_edges);
-        // Each occurrence resolves at least once. A creation answers one real
-        // input, and each match came from an examined overlay edge. Multiple
-        // matches and repeated identities are legal, but invented branches,
-        // omitted actions and invented distinct targets are not.
-        if created > selected
-            || resolved < selected
-            || matched > u128::from(stats.overlay_edges)
+        let matching_inputs = selected
+            .checked_sub(created)
+            .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?;
+        let candidates = u128::from(stats.overlay_edges) + created;
+        // Each input either creates one edge or matches at least one. A
+        // retained target can match again without another candidate scan;
+        // every distinct target was nevertheless examined or created here.
+        // Ceiling division checks M <= (N-C)*(O+C) without multiplying the
+        // counts, and the explicit zero case keeps division defined.
+        if resolved < selected
+            || (matched != 0
+                && (matching_inputs == 0 || matched.div_ceil(matching_inputs) > candidates))
             || (selected == 0 && resolved != 0)
             || u128::from(stats.action_effects) != expected
             || targets > modified
+            || targets > candidates
             || (modified != 0 && targets == 0)
             || targets < created * u128::from(create_actions != 0)
         {
@@ -171,6 +177,46 @@ mod tests {
     }
 
     #[test]
+    fn cached_candidates_preserve_real_occurrences_and_distinct_modified_targets() {
+        let input = input();
+        // The first tuple used to be rejected as malformed. Two parallel
+        // matches, one creation, then a match of that creation produce it.
+        // The other tuples cover repeated parallel targets and a creation
+        // reused without any candidate scan. No input rows are fabricated.
+        for (selected, overlay, created, matched, effects, targets) in
+            [(3, 2, 1, 3, 9, 3), (3, 3, 0, 5, 10, 3), (2, 0, 1, 1, 5, 1)]
+        {
+            let stats = GraphEdgeUpsertBatchStats {
+                match_selection: GqlExecutionStats {
+                    snapshot_records: 7,
+                    result_rows: selected,
+                },
+                overlay_edges: overlay,
+                created_edges: created,
+                matched_occurrences: matched,
+                action_effects: effects,
+                ..stats()
+            };
+            let mut meter = meter(policy());
+            meter
+                .absorb_edge_upsert_batch::<(), (), ()>(0, &input, stats, targets)
+                .unwrap();
+            assert_eq!(meter.common.stats.completed_statements, 1);
+            assert_eq!(
+                meter.common.stats.selection,
+                GqlExecutionStats {
+                    snapshot_records: 7 + overlay,
+                    result_rows: selected,
+                }
+            );
+            assert_eq!(meter.common.stats.evaluator, stats.evaluator);
+            assert_eq!(meter.common.stats.effects, effects);
+            assert_eq!(meter.common.stats.target_edge_visits, targets);
+            assert_eq!(meter.edges, created);
+        }
+    }
+
+    #[test]
     fn malformed_bulk_statistics_refuse_without_installing_any_counters() {
         let input = input();
         let baseline = stats();
@@ -198,10 +244,32 @@ mod tests {
             ),
             (
                 GraphEdgeUpsertBatchStats {
-                    overlay_edges: 2,
+                    overlay_edges: 1,
                     ..baseline
                 },
                 3,
+            ),
+            (
+                GraphEdgeUpsertBatchStats {
+                    overlay_edges: 2,
+                    matched_occurrences: 7,
+                    action_effects: 17,
+                    ..baseline
+                },
+                3,
+            ),
+            (
+                GraphEdgeUpsertBatchStats {
+                    match_selection: GqlExecutionStats {
+                        result_rows: 1,
+                        ..baseline.match_selection
+                    },
+                    overlay_edges: 1,
+                    matched_occurrences: 1,
+                    action_effects: 5,
+                    ..baseline
+                },
+                1,
             ),
             (baseline, 0),
             (baseline, 5),

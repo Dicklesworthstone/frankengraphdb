@@ -404,11 +404,23 @@ fn collect_vertex_merge_output<O: VertexMergeOutput, E, A, C>(
         let scratch = u128::from(key_evaluator.scratch_entries)
             + u128::from(kind == GlaExecutionEvent::ScratchEntry);
         for (observed, limit, dimension) in [
-            (work, policy.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-            (scratch, policy.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+            (
+                work,
+                policy.query.evaluator.max_work_units,
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                scratch,
+                policy.query.evaluator.max_scratch_entries,
+                GlaLimitDimension::ScratchEntries,
+            ),
         ] {
             if observed > u128::from(limit) {
-                return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+                return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                    dimension,
+                    limit,
+                    observed,
+                }));
             }
         }
         key_evaluator.work_units = work as u64;
@@ -417,7 +429,9 @@ fn collect_vertex_merge_output<O: VertexMergeOutput, E, A, C>(
     })?;
     let merge = materialized.as_ref();
     let (Some(selection), Some(creation)) = (merge.selection(), merge.creation()) else {
-        return Err(GqlQueryError::Source(GraphVertexMergeError::UnmaterializedKeys));
+        return Err(GqlQueryError::Source(
+            GraphVertexMergeError::UnmaterializedKeys,
+        ));
     };
     let selection_policy = fgdb_gql::GqlQueryPolicy {
         rows: policy.query.rows,
@@ -445,12 +459,20 @@ fn collect_vertex_merge_output<O: VertexMergeOutput, E, A, C>(
             error => error,
         }
     })?;
-    selected.evaluator.work_units = selected.evaluator.work_units
+    selected.evaluator.work_units = selected
+        .evaluator
+        .work_units
         .checked_add(key_evaluator.work_units)
-        .ok_or(GqlQueryError::Source(GraphVertexMergeError::AccountingOverflow))?;
-    selected.evaluator.scratch_entries = selected.evaluator.scratch_entries
+        .ok_or(GqlQueryError::Source(
+            GraphVertexMergeError::AccountingOverflow,
+        ))?;
+    selected.evaluator.scratch_entries = selected
+        .evaluator
+        .scratch_entries
         .checked_add(key_evaluator.scratch_entries)
-        .ok_or(GqlQueryError::Source(GraphVertexMergeError::AccountingOverflow))?;
+        .ok_or(GqlQueryError::Source(
+            GraphVertexMergeError::AccountingOverflow,
+        ))?;
     if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
         return Err(GqlQueryError::Source(
             GraphVertexMergeError::InvalidSourceStatistics,
@@ -1401,10 +1423,12 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
                             GraphIntegerEvaluationError::Control(error) => error,
                             GraphIntegerEvaluationError::Value(source) => failure(source),
                         })?
-                        .ok_or_else(|| failure(fgdb_gql::GraphIntegerError {
-                            instruction: 0,
-                            kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
-                        }))?;
+                        .ok_or_else(|| {
+                            failure(fgdb_gql::GraphIntegerError {
+                                instruction: 0,
+                                kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
+                            })
+                        })?;
                     point_payload_admission(&written, &mut |event| charge(used, payload(event)))?;
                     batch.set_vertex_property_value(vertex, *key, Some(written));
                 }
@@ -1718,10 +1742,12 @@ fn mixed_merge_target_payload_is_admitted_before_owner_frame_copy() {
             panic!("the compiled first stage is the row MERGE");
         };
         let actions = &merge.actions().unwrap().after;
-        let [GraphVertexMergeRowAction::Value {
-            inputs: Some(inputs),
-            ..
-        }] = &actions[..]
+        let [
+            GraphVertexMergeRowAction::Value {
+                inputs: Some(inputs),
+                ..
+            },
+        ] = &actions[..]
         else {
             panic!("the compiled assignment has one mixed value frame");
         };
