@@ -110,30 +110,45 @@ fn deferred_time_keys_keep_original_static_creation_schema_refusals() {
     let arguments = GqlParameters::new()
         .with_statement_time(CanonicalTimestamp::offset_only(0, 0).unwrap())
         .unwrap();
-    let fields = (0..65)
-        .map(|n| format!("p{n}:[timestamp()]"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let template = PreparedGraphVertexMergeText::prepare(
-        &format!("MERGE (n {{{fields}}})"),
-        R,
-        |kind, name: &str| match kind {
-            GraphSymbolKind::Property => name
-                .strip_prefix('p')?
-                .parse::<u64>()
-                .ok()
-                .map(|key| GraphSymbol::Property(PropertyKeyId(key + 1))),
-            _ => None,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        template.bind_parameters(&arguments).unwrap_err().kind,
-        GraphVertexMergeTextErrorKind::InsertBuild(GraphInsertBuildError::TooManyFields {
-            limit: 64,
-            observed: 65,
-        })
-    );
+    // Preserve the actual original boundary (MAX_PATTERN_EDGES + 1),
+    // comparing ordinary concrete keys and deferred time keys at both sides.
+    for count in [65, 66] {
+        for expression in ["[0]", "[timestamp()]"] {
+            let fields = (0..count)
+                .map(|n| format!("p{n}:{expression}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let template = PreparedGraphVertexMergeText::prepare(
+                &format!("MERGE (n {{{fields}}})"),
+                R,
+                |kind, name: &str| match kind {
+                    GraphSymbolKind::Property => name
+                        .strip_prefix('p')?
+                        .parse::<u64>()
+                        .ok()
+                        .map(|key| GraphSymbol::Property(PropertyKeyId(key + 1))),
+                    _ => None,
+                },
+            )
+            .unwrap();
+            let bound = template.bind_parameters(&arguments);
+            if count == 65 {
+                let bound = bound.unwrap();
+                let materialized = bound.materialize::<(), (), ()>(&mut |_| Ok(())).unwrap();
+                assert_eq!(materialized.creation().unwrap().vertices_per_row(), 1);
+            } else {
+                assert_eq!(
+                    bound.unwrap_err().kind,
+                    GraphVertexMergeTextErrorKind::InsertBuild(
+                        GraphInsertBuildError::TooManyFields {
+                            limit: 65,
+                            observed: 66,
+                        }
+                    )
+                );
+            }
+        }
+    }
     for (statement, expected) in [
         (
             "MERGE (n:A:B {p:[timestamp()]})",
@@ -201,7 +216,7 @@ fn deferred_time_keys_keep_original_static_creation_schema_refusals() {
     .unwrap();
     let large = arguments
         .clone()
-        .with_text("s", "x".repeat(32_768))
+        .with_text("s", &"x".repeat(32_768))
         .unwrap();
     assert_eq!(
         template.bind_parameters(&large).unwrap_err().kind,
