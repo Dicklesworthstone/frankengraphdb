@@ -79,8 +79,10 @@ impl PreparedNativeRead {
     /// LIMIT zero cannot hide a reached body error. One bounded variable-length
     /// graph atom streams every WALK/TRAIL/ACYCLIC/SIMPLE route, including
     /// zero-hop isolates and captured paths, into the same complete external
-    /// ordering. Shortest/unbounded paths, unsupported combinations, procedures
-    /// and unlowered optional pattern instructions still refuse.
+    /// ordering. ANY SHORTEST uses canonical breadth-first prefixes and may
+    /// omit its upper hop bound where its repetition constraints are proved
+    /// redundant. Other unbounded modes, ALL SHORTEST, unsupported combinations,
+    /// procedures and unlowered optional pattern instructions still refuse.
     /// Terminal exact aggregate results have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));

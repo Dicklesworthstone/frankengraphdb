@@ -664,20 +664,22 @@ fn cold_shortest_paths_choose_real_routes_across_history_edge_filters_and_pinned
             (A, &[(PARALLEL, B), (BC, C), (EId(17), ISOLATE)]),
         ]);
         for match_mode in ["", "REPEATABLE ELEMENTS "] {
-            for wanted in ["7", "7.0"] {
-                for (cut, expected) in [(3, &before), (4, &after)] {
-                    let text = format!(
-                        "MATCH {match_mode}p = ANY SHORTEST (a {{p:1}})-[:R*0..4 {{p:{wanted}}}]->(b) \
-                         FOR SYSTEM_TIME AS OF SEQ {cut} {CAPTURE}"
-                    );
-                    case(&db, &mut latest, &cx, &text, expected.clone(), cut).await;
+            for upper in ["4", ""] {
+                for wanted in ["7", "7.0"] {
+                    for (cut, expected) in [(3, &before), (4, &after)] {
+                        let text = format!(
+                            "MATCH {match_mode}p = ANY SHORTEST (a {{p:1}})-[:R*0..{upper} {{p:{wanted}}}]->(b) \
+                             FOR SYSTEM_TIME AS OF SEQ {cut} {CAPTURE}"
+                        );
+                        case(&db, &mut latest, &cx, &text, expected.clone(), cut).await;
+                    }
                 }
-            }
-            let text = format!(
-                "MATCH {match_mode}p = ANY SHORTEST (a {{p:1}})-[:R*0..4 {{p:7}}]->(b) {CAPTURE}"
-            );
-            for run_rows in [1, 3] {
-                spooled(&mut pinned, &cx, &text, &before, 3, run_rows).await;
+                let text = format!(
+                    "MATCH {match_mode}p = ANY SHORTEST (a {{p:1}})-[:R*0..{upper} {{p:7}}]->(b) {CAPTURE}"
+                );
+                for run_rows in [1, 3] {
+                    spooled(&mut pinned, &cx, &text, &before, 3, run_rows).await;
+                }
             }
         }
         // Changing the winning edge's historical property selects the next
@@ -741,10 +743,51 @@ fn cold_shortest_paths_choose_real_routes_across_history_edge_filters_and_pinned
             4,
         )
         .await;
+        // The ordinary openCypher spelling omits the upper bound and starts
+        // at one hop. A root cycle remains eligible, and canonical selection
+        // still chooses AB over the larger real parallel edge.
+        case(
+            &db,
+            &mut latest,
+            &cx,
+            &format!("MATCH p = shortestPath((a {{p:1}})-[:R*]->(b)) {CAPTURE}"),
+            paths(&[
+                (A, &[(AB, B)]),
+                (A, &[(AB, B), (BC, C)]),
+                (A, &[(AB, B), (BC, C), (CA, A)]),
+                (A, &[(AB, B), (BC, C), (EId(17), ISOLATE)]),
+            ]),
+            4,
+        )
+        .await;
+        case(
+            &db,
+            &mut latest,
+            &cx,
+            &format!(
+                "MATCH REPEATABLE ELEMENTS p = ANY SHORTEST (a {{p:1}})-[:R*2..]->(b) {CAPTURE}"
+            ),
+            paths(&[
+                (A, &[(AB, B), (BC, C)]),
+                (A, &[(AB, B), (LOOP, B)]),
+                (A, &[(AB, B), (BC, C), (CA, A)]),
+                (A, &[(AB, B), (BC, C), (EId(17), ISOLATE)]),
+            ]),
+            4,
+        )
+        .await;
+        // An unreachable target and the original refused LIMIT-zero shape
+        // both finish normally after complete input, without an invented cap.
+        for text in [
+            "MATCH p = shortestPath((a {p:4})-[:R*]->(b)) RETURN p",
+            "MATCH REPEATABLE ELEMENTS p = ANY SHORTEST (a)-[:R*]->(b) RETURN p LIMIT 0",
+        ] {
+            case(&db, &mut latest, &cx, text, Vec::new(), 4).await;
+        }
         for text in [
             "MATCH p = ANY SHORTEST (a)-[:R*2..3]->(b) RETURN p LIMIT 0",
             "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a)-[:R*0..3]->(b) RETURN p LIMIT 0",
-            "MATCH REPEATABLE ELEMENTS p = ANY SHORTEST (a)-[:R*]->(b) RETURN p LIMIT 0",
+            "MATCH p = ANY SHORTEST (a)-[:R*1..]-(b) RETURN p LIMIT 0",
         ] {
             let parameters = GqlParameters::new();
             let prepared = PreparedNativeRead::prepare(text, &parameters, resolve).unwrap();

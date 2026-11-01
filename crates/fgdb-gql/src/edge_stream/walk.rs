@@ -1,7 +1,8 @@
-//! Awaitable, occurrence-preserving bounded paths for a blocking consumer.
+//! Awaitable, occurrence-preserving paths for a blocking consumer.
 //!
-//! Occurrence modes retain one route and its admitted records. ANY SHORTEST
-//! instead retains a canonical breadth frontier, preserving real path IDs.
+//! Bounded occurrence modes retain one route and its admitted records. ANY
+//! SHORTEST instead retains a canonical breadth frontier, preserving real path
+//! IDs and terminating by endpoint settlement even without an upper hop bound.
 //! Complete rows enter the ordinary external sort before DISTINCT or paging.
 
 use super::*;
@@ -72,7 +73,7 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
     ) -> Result<Self::OutputGuard, EdgeScanSourceError<Self::Error, C>>;
 }
 
-/// A single finite variable-length atom rooted at an admitted vertex scan.
+/// A single variable-length atom rooted at an admitted vertex scan.
 /// WALK, TRAIL, ACYCLIC and SIMPLE retain their native occurrence semantics.
 /// Zero hops include isolates; terminal endpoint filters never prune transit.
 /// Scalar edge property maps filter every traversed hop before route selection.
@@ -83,7 +84,11 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
 /// applied once after complete intake, even for LIMIT zero. ANY SHORTEST keeps
 /// one canonical prefix per endpoint/depth; DIFFERENT EDGES is admitted there
 /// only with a zero lower bound, when every shortest path is vertex-simple.
-/// ALL SHORTEST, unbounded intervals, further atoms, OPTIONAL/probes and
+/// ANY SHORTEST may omit its upper bound: before the lower bound only one
+/// canonical prefix per depth/endpoint survives, and afterward each complete
+/// layer settles its endpoints before expansion. Finite snapshot input thus
+/// exhausts the frontier; resource exhaustion remains an error, never a page.
+/// Other unbounded modes, ALL SHORTEST, further atoms, OPTIONAL/probes and
 /// collection-valued edge predicates refuse during preparation, before any
 /// source or budget is observed.
 #[derive(Clone)]
@@ -132,7 +137,7 @@ impl AsyncGraphWalkPlan {
             return Err(EdgeScanBuildError { operator: at });
         };
         if source.ordinal() != 0
-            || !bounds.is_bounded()
+            || (!bounds.is_bounded() && *search != GraphWalkSearch::AnyShortest)
             // Native collection comparison can raise StoredValueBounds even
             // for an edge unreachable from the selected roots: its incidence
             // filtering precedes root selection. Scalar operands cannot raise
