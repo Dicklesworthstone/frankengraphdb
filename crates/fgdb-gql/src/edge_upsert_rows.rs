@@ -8,18 +8,11 @@ mod provenance;
 use crate::algebra::GraphValueRow;
 use crate::{
     GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphEdgeUpsertBuildError, GraphEdgeUpsertValue,
-    GraphIntegerExpression, GraphSetColumnType, MAX_GRAPH_EDGE_UPSERT_ACTIONS,
-    PreparedGraphEdgeMerge,
+    GraphIntegerExpression, GraphSetColumnType, GraphVertexMergeRowInput,
+    MAX_GRAPH_EDGE_UPSERT_ACTIONS, PreparedGraphEdgeMerge,
 };
 use fgdb_delta_types::PropertyKeyId;
 use std::collections::BTreeSet;
-
-/// A property of the selected relationship, or a column of its input row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GraphEdgeMergeRowInput {
-    Property(PropertyKeyId),
-    Column(usize),
-}
 
 /// A value computed from the carried row by the shared native value compiler.
 #[derive(Clone, PartialEq, Eq)]
@@ -49,6 +42,24 @@ impl GraphEdgeMergeRowComputed {
     ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphIntegerEvaluationError<C>>
     {
         let value = self.0.value_with_elements(row, control, elements)?;
+        // Evaluation produced an owned GraphValue. Conversion makes another
+        // stored-value copy; admit its payload before that copy allocates.
+        // Inline scalars need no payload allocation. Lists also allocate their
+        // nested cells, as counted by the shared native value representation.
+        if let crate::algebra::GraphValue::Scalar(scalar) = &value {
+            crate::algebra_exec::charge_payload(scalar, &mut |event| {
+                control(event)?;
+                control(crate::GlaExecutionEvent::ScratchEntry)
+            })
+            .map_err(crate::GraphIntegerEvaluationError::Control)?;
+        } else if matches!(&value, crate::algebra::GraphValue::List(_)) {
+            for _ in 0..value.payload_units() {
+                control(crate::GlaExecutionEvent::Work)
+                    .map_err(crate::GraphIntegerEvaluationError::Control)?;
+                control(crate::GlaExecutionEvent::ScratchEntry)
+                    .map_err(crate::GraphIntegerEvaluationError::Control)?;
+            }
+        }
         Ok(value.to_written_property())
     }
 
@@ -88,11 +99,14 @@ pub enum GraphEdgeMergeRowAction {
     },
     Expression {
         key: PropertyKeyId,
-        inputs: Vec<GraphEdgeMergeRowInput>,
+        inputs: Vec<GraphVertexMergeRowInput>,
         value: GraphIntegerExpression,
     },
     Value {
         key: PropertyKeyId,
+        /// None borrows the original carried row. Some constructs the native
+        /// value VM's explicit property/column frame for the selected clause.
+        inputs: Option<Vec<GraphVertexMergeRowInput>>,
         value: GraphEdgeMergeRowComputed,
     },
     /// `v.key = value` on the vertex in input column `column` (an endpoint
@@ -246,8 +260,8 @@ impl PreparedGraphEdgeUpsertRows {
                                 });
                             }
                             inputs.iter().all(|input| match input {
-                                GraphEdgeMergeRowInput::Property(_) => true,
-                                GraphEdgeMergeRowInput::Column(column) => matches!(
+                                GraphVertexMergeRowInput::Property(_) => true,
+                                GraphVertexMergeRowInput::Column(column) => matches!(
                                     types.get(*column),
                                     Some(
                                         GraphSetColumnType::Scalar
@@ -260,13 +274,44 @@ impl PreparedGraphEdgeUpsertRows {
                                 .any(|column| column >= inputs.len())
                                 && value.referenced_locals().next().is_none()
                         }
-                        GraphEdgeMergeRowAction::Value { value, .. } => matches!(
-                            crate::GraphSetProjection::admit_output(&value.0.0, &types, action),
-                            Ok(GraphSetColumnType::Scalar
-                                | GraphSetColumnType::Stored
-                                | GraphSetColumnType::List
-                                | GraphSetColumnType::Any)
-                        ),
+                        GraphEdgeMergeRowAction::Value { inputs, value, .. } => {
+                            let frame;
+                            let schema = if let Some(inputs) = inputs {
+                                if inputs.len() > MAX_GRAPH_EDGE_UPSERT_ACTIONS {
+                                    return Err(GraphEdgeUpsertBuildError::TooManyInputs {
+                                        branch,
+                                        action,
+                                        limit: MAX_GRAPH_EDGE_UPSERT_ACTIONS,
+                                        observed: inputs.len(),
+                                    });
+                                }
+                                frame = inputs
+                                    .iter()
+                                    .map(|input| match input {
+                                        GraphVertexMergeRowInput::Property(_) => {
+                                            Some(GraphSetColumnType::Stored)
+                                        }
+                                        GraphVertexMergeRowInput::Column(column) => {
+                                            types.get(*column).copied()
+                                        }
+                                    })
+                                    .collect::<Option<Vec<_>>>()
+                                    .ok_or(GraphEdgeUpsertBuildError::InvalidExpressionInput {
+                                        branch,
+                                        action,
+                                    })?;
+                                &frame[..]
+                            } else {
+                                &types[..]
+                            };
+                            matches!(
+                                crate::GraphSetProjection::admit_output(&value.0.0, schema, action),
+                                Ok(GraphSetColumnType::Scalar
+                                    | GraphSetColumnType::Stored
+                                    | GraphSetColumnType::List
+                                    | GraphSetColumnType::Any)
+                            )
+                        }
                         GraphEdgeMergeRowAction::RowVertex { column, value, .. } => {
                             // As for MERGE's endpoint columns, an open row
                             // value is checked by the native host before its
@@ -291,11 +336,37 @@ impl PreparedGraphEdgeUpsertRows {
                     }
                     // The native schema check above bounds the expression
                     // before the preparation-only provenance walk visits it.
-                    if let GraphEdgeMergeRowAction::Value { value, .. }
-                    | GraphEdgeMergeRowAction::RowVertex { value, .. }
-                    | GraphEdgeMergeRowAction::Properties { value, .. } = assignment
-                        && !provenance::direct_endpoint_reads(&value.0.0, &new_endpoints)
-                    {
+                    let provenance_valid = match assignment {
+                        GraphEdgeMergeRowAction::Value {
+                            inputs: Some(inputs),
+                            value,
+                            ..
+                        } => {
+                            // The VM names frame cells; the source reader names
+                            // original columns. Preserve all newly bound endpoint
+                            // aliases, including repeated cells, in this walk.
+                            let endpoints = inputs
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(at, input)| match input {
+                                    GraphVertexMergeRowInput::Column(column)
+                                        if new_endpoints.contains(column) =>
+                                    {
+                                        Some(at)
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>();
+                            provenance::direct_endpoint_reads(&value.0.0, &endpoints)
+                        }
+                        GraphEdgeMergeRowAction::Value { value, .. }
+                        | GraphEdgeMergeRowAction::RowVertex { value, .. }
+                        | GraphEdgeMergeRowAction::Properties { value, .. } => {
+                            provenance::direct_endpoint_reads(&value.0.0, &new_endpoints)
+                        }
+                        _ => true,
+                    };
+                    if !provenance_valid {
                         return Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {
                             branch,
                             action,
@@ -418,11 +489,11 @@ impl PreparedGraphEdgeUpsertRows {
                         bytes.extend_from_slice(&(inputs.len() as u64).to_be_bytes());
                         for input in inputs {
                             match input {
-                                GraphEdgeMergeRowInput::Property(key) => {
+                                GraphVertexMergeRowInput::Property(key) => {
                                     bytes.push(0);
                                     bytes.extend_from_slice(&key.0.to_be_bytes());
                                 }
-                                GraphEdgeMergeRowInput::Column(column) => {
+                                GraphVertexMergeRowInput::Column(column) => {
                                     bytes.push(1);
                                     bytes.extend_from_slice(&(*column as u64).to_be_bytes());
                                 }
@@ -430,8 +501,26 @@ impl PreparedGraphEdgeUpsertRows {
                         }
                         field(&mut bytes, &value.canonical_bytes());
                     }
-                    GraphEdgeMergeRowAction::Value { value, .. } => {
-                        bytes.push(3);
+                    GraphEdgeMergeRowAction::Value { inputs, value, .. } => {
+                        if let Some(inputs) = inputs {
+                            bytes.push(7);
+                            bytes.extend_from_slice(&(inputs.len() as u64).to_be_bytes());
+                            for input in inputs {
+                                match input {
+                                    GraphVertexMergeRowInput::Property(key) => {
+                                        bytes.push(0);
+                                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                                    }
+                                    GraphVertexMergeRowInput::Column(column) => {
+                                        bytes.push(1);
+                                        bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                                    }
+                                }
+                            }
+                        } else {
+                            // Preserve the row-only value transcript exactly.
+                            bytes.push(3);
+                        }
                         let mut encoded = Vec::new();
                         value.0.0.append_canonical_bytes(&mut encoded);
                         field(&mut bytes, &encoded);
@@ -604,7 +693,12 @@ mod tests {
             GraphValue::Vertex(VId(12)),
         ]);
         for actions in [&upsert.actions().on_create, &upsert.actions().on_match] {
-            let GraphEdgeMergeRowAction::Value { key, value } = &actions[0] else {
+            let GraphEdgeMergeRowAction::Value {
+                key,
+                inputs: None,
+                value,
+            } = &actions[0]
+            else {
                 panic!("row.w must use the shared row-value compiler");
             };
             assert_eq!(*key, P);
@@ -730,8 +824,8 @@ mod tests {
         assert_eq!(
             inputs,
             &[
-                GraphEdgeMergeRowInput::Property(P),
-                GraphEdgeMergeRowInput::Column(0)
+                GraphVertexMergeRowInput::Property(P),
+                GraphVertexMergeRowInput::Column(0)
             ],
         );
         assert_eq!(
@@ -763,11 +857,205 @@ mod tests {
         let GraphEdgeMergeRowAction::Expression { inputs, .. } = &mut malformed.on_match[0] else {
             unreachable!();
         };
-        inputs[1] = GraphEdgeMergeRowInput::Column(99);
+        inputs[1] = GraphVertexMergeRowInput::Column(99);
         assert!(matches!(
             PreparedGraphEdgeUpsertRows::prepare(upsert.merge().clone(), malformed),
             Err(GraphEdgeUpsertBuildError::InvalidExpressionInput { .. }),
         ));
+    }
+
+    #[test]
+    fn mixed_property_and_map_columns_use_the_native_value_frame() {
+        let program = bound(
+            "WITH {step:2} AS row MERGE (a:A {p:1}) MERGE (b:A {p:2}) \
+             MERGE (a)-[r:R]->(b) ON MATCH SET r.p=r.p*10+row.step",
+            &GqlParameters::new(),
+        );
+        let upsert = definition(program.steps().last().unwrap());
+        let [
+            GraphEdgeMergeRowAction::Value {
+                key,
+                inputs: Some(inputs),
+                value,
+            },
+        ] = &upsert.actions().on_match[..]
+        else {
+            panic!("the mixed RHS must keep its explicit native frame");
+        };
+        assert_eq!(*key, P);
+        assert_eq!(
+            &inputs[..],
+            &[
+                GraphVertexMergeRowInput::Property(P),
+                GraphVertexMergeRowInput::Column(0),
+            ]
+        );
+        let frame = GraphValueRow::from_owned_values(vec![
+            scalar(1),
+            GraphValue::map(vec![("step".into(), scalar(2))]).unwrap(),
+        ]);
+        assert_eq!(
+            value.written(&frame, &mut |_| Ok::<_, ()>(())).unwrap(),
+            Some(CanonicalScalar::Int(12).into())
+        );
+        let bytes = upsert.canonical_bytes();
+        let mut changed = upsert.actions().clone();
+        let GraphEdgeMergeRowAction::Value {
+            inputs: Some(inputs),
+            ..
+        } = &mut changed.on_match[0]
+        else {
+            unreachable!()
+        };
+        inputs[0] = GraphVertexMergeRowInput::Property(Q);
+        let changed =
+            PreparedGraphEdgeUpsertRows::prepare(upsert.merge().clone(), changed).unwrap();
+        assert_ne!(
+            bytes,
+            changed.canonical_bytes(),
+            "property coordinates bind the transcript"
+        );
+        let mut malformed = upsert.actions().clone();
+        let GraphEdgeMergeRowAction::Value {
+            inputs: Some(inputs),
+            ..
+        } = &mut malformed.on_match[0]
+        else {
+            unreachable!()
+        };
+        inputs[1] = GraphVertexMergeRowInput::Column(99);
+        assert!(matches!(
+            PreparedGraphEdgeUpsertRows::prepare(upsert.merge().clone(), malformed),
+            Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {
+                branch: GraphEdgeUpsertBranch::Match,
+                action: 0,
+            })
+        ));
+        let mut oversized = upsert.actions().clone();
+        let GraphEdgeMergeRowAction::Value { inputs, .. } = &mut oversized.on_match[0] else {
+            unreachable!()
+        };
+        *inputs = Some(vec![
+            GraphVertexMergeRowInput::Property(P);
+            MAX_GRAPH_EDGE_UPSERT_ACTIONS + 1
+        ]);
+        assert!(matches!(
+            PreparedGraphEdgeUpsertRows::prepare(upsert.merge().clone(), oversized),
+            Err(GraphEdgeUpsertBuildError::TooManyInputs {
+                branch: GraphEdgeUpsertBranch::Match, action: 0, limit, observed,
+            }) if limit == MAX_GRAPH_EDGE_UPSERT_ACTIONS && observed == limit + 1
+        ));
+    }
+
+    #[test]
+    fn stored_conversion_debits_its_own_payload_and_preserves_control_refusal() {
+        use crate::{GlaExecutionEvent, GraphIntegerEvaluationError};
+        let text = GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"x".repeat(129)).unwrap());
+        // 129 text bytes occupy three 64-byte quanta. The list additionally
+        // copies its root cell and its two scalar cells: 3 + 1 + 2 = 6.
+        for (input, conversion_units) in [
+            (text.clone(), 3),
+            (
+                GraphValue::List(vec![text, scalar(7)].into_boxed_slice()),
+                6,
+            ),
+        ] {
+            let parameters = GqlParameters::new()
+                .with_map("arg", vec![("value".into(), input.clone())])
+                .unwrap();
+            let statement = "WITH $arg AS row MERGE (a:A {p:1}) MERGE (b:A {p:2}) \
+                 MERGE (a)-[r:R]->(b) ON MATCH SET r.p=row.value";
+            assert!(PreparedGraphWriteChainText::is_chain(statement).unwrap());
+            // Preparation fixes the row domain before binding sees its value.
+            // The generic bound helper declares no map parameters, so its
+            // default scalar domain cannot admit this row's entry postfix.
+            let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+                statement,
+                R,
+                &[("arg", crate::GqlParameterType::Map)],
+                symbols,
+            )
+            .unwrap();
+            assert_eq!(
+                template.parameter_schema()[0].parameter_type,
+                crate::GqlParameterType::Map
+            );
+            let program = template.bind_parameters(&parameters).unwrap();
+            assert_eq!(template.returns_rows(), program.returns_rows());
+            let upsert = definition(program.steps().last().unwrap());
+            let [
+                GraphEdgeMergeRowAction::Value {
+                    inputs: None,
+                    value,
+                    ..
+                },
+            ] = &upsert.actions().on_match[..]
+            else {
+                panic!("ordinary row-value action")
+            };
+            let row = GraphValueRow::from_owned_values(vec![
+                GraphValue::map(vec![("value".into(), input)]).unwrap(),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(2)),
+            ]);
+            let mut elements =
+                |_: ElementId,
+                 _: PropertyKeyId|
+                 -> Result<Option<fgdb_types::CanonicalPropertyValue>, u8> {
+                    panic!("this compiled row value has no graph property read")
+                };
+            let mut evaluation = Vec::new();
+            let evaluated = value
+                .value_with_elements(
+                    &row,
+                    &mut |event| {
+                        evaluation.push(event);
+                        Ok::<_, u8>(())
+                    },
+                    &mut elements,
+                )
+                .unwrap();
+            let expected = evaluated.to_written_property();
+            let mut events = Vec::new();
+            let written = value
+                .written_with_elements(
+                    &row,
+                    &mut |event| {
+                        events.push(event);
+                        Ok::<_, u8>(())
+                    },
+                    &mut elements,
+                )
+                .unwrap();
+            assert_eq!(written, expected);
+            assert_eq!(&events[..evaluation.len()], &evaluation[..]);
+            assert_eq!(
+                &events[evaluation.len()..],
+                [GlaExecutionEvent::Work, GlaExecutionEvent::ScratchEntry].repeat(conversion_units)
+            );
+            let mut seen = 0;
+            let stopped = value.written_with_elements(
+                &row,
+                &mut |_| {
+                    seen += 1;
+                    if seen > evaluation.len() {
+                        Err(17_u8)
+                    } else {
+                        Ok(())
+                    }
+                },
+                &mut elements,
+            );
+            assert!(matches!(
+                stopped,
+                Err(GraphIntegerEvaluationError::Control(17))
+            ));
+            assert_eq!(
+                seen,
+                evaluation.len() + 1,
+                "the first conversion debit stops before the stored copy"
+            );
+        }
     }
 
     #[test]
@@ -991,7 +1279,13 @@ mod tests {
             .unwrap();
         assert_eq!(values, [(P, CanonicalScalar::Int(7).into())]);
         assert!(equality_key.is_some());
-        let [GraphEdgeMergeRowAction::Value { key, value }] = &upsert.actions().on_create[..]
+        let [
+            GraphEdgeMergeRowAction::Value {
+                key,
+                inputs: None,
+                value,
+            },
+        ] = &upsert.actions().on_create[..]
         else {
             panic!("the ON action must retain its separate row-value input");
         };

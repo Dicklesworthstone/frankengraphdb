@@ -146,7 +146,7 @@ pub use edge_upsert_query::{
 };
 pub use edge_upsert_rows::{
     GraphEdgeMergeRowAction, GraphEdgeMergeRowActions, GraphEdgeMergeRowComputed,
-    GraphEdgeMergeRowInput, PreparedGraphEdgeUpsertRows,
+    PreparedGraphEdgeUpsertRows,
 };
 pub use edge_upsert_text::{
     GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertQueryText,

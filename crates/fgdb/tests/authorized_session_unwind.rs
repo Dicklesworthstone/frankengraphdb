@@ -1697,6 +1697,320 @@ fn native_chain_batches_refuse_late_values_and_cumulative_limits_without_a_prefi
 }
 
 #[test]
+fn mixed_relationship_frames_keep_scope_masks_and_live_prepared_authority() {
+    lab(0xac3b, |contexts| async move {
+        const SECRET: PropertyKeyId = PropertyKeyId(3);
+        fn catalog(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            if (kind, name) == (GraphSymbolKind::Property, "secret") {
+                Some(GraphSymbol::Property(SECRET))
+            } else {
+                symbols(kind, name)
+            }
+        }
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let flat = "UNWIND $rows AS row MATCH (a:Visible {p:row.p}),(b:Visible {p:row.q}) \
+            MERGE (a)-[r:R]->(b) ON MATCH \
+            SET r.q=CASE WHEN r.secret IS NULL THEN row.q ELSE 1/0 END";
+        let text = "UNWIND $rows AS row MATCH (a:Visible {p:row.p}),(b:Visible {p:row.q}) \
+            WITH a,b,{answer:row.q} AS value MERGE (a)-[r:R]->(b) ON MATCH \
+            SET r.q=head(CASE WHEN r.secret IS NULL THEN [value.answer] ELSE [1/0] END)";
+        let arguments = rows(&[(1, 2)]);
+        let input = arguments.canonical_bytes();
+        // Preserve the original flat query as the exact unsupported prepared
+        // script profile. A syntax-dependent reroute must not silently change
+        // the established flat batch owner's simultaneous mutation semantics.
+        {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let token = issuer.issue_at(&grant(), NOW).unwrap();
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    catalog,
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
+                )
+                .unwrap();
+            let error = session.prepare(&query, flat, &arguments).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    Fault::Binding(fgdb_gql::GraphWriteScriptError {
+                        statement: Some(0),
+                        offset: 70,
+                        kind: fgdb_gql::GraphWriteScriptErrorKind::Syntax(
+                            fgdb_gql::GraphPatternTextErrorKind::Expected(
+                                "CREATE or INSERT after WITH/UNWIND/MATCH"
+                            )
+                        ),
+                    })
+                ),
+                "{error:?}"
+            );
+            assert!(session.is_closed());
+            drop(session);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert!(db.edges().unwrap().is_empty());
+        }
+        // The written WITH constructs an actual map in the established native
+        // row relation. HEAD of a list CASE lowers to the native Index value;
+        // unlike a scalar CASE, it cannot become a legacy integer Expression.
+        // The final value and selected-branch failure remain 2 and 1/0.
+        assert!(fgdb_gql::PreparedGraphWriteChainText::is_chain(text).unwrap());
+        let native = fgdb_gql::PreparedGraphWriteChainText::prepare_with_parameter_types(
+            text,
+            R,
+            &[("rows", fgdb_gql::GqlParameterType::List)],
+            catalog,
+        )
+        .unwrap()
+        .bind_parameters(&arguments)
+        .unwrap();
+        let upsert = match native.steps().last().unwrap() {
+            fgdb_gql::GraphWriteChainStep::EdgeUpsert(upsert)
+            | fgdb_gql::GraphWriteChainStep::EdgeUpsertRows { upsert, .. }
+            | fgdb_gql::GraphWriteChainStep::EdgeUpsertQuery { upsert, .. } => upsert,
+            _ => panic!("the explicit WITH must use the native relationship row owner"),
+        };
+        let [
+            fgdb_gql::GraphEdgeMergeRowAction::Value {
+                inputs: Some(inputs),
+                ..
+            },
+        ] = &upsert.actions().on_match[..]
+        else {
+            panic!("a real mixed value frame is required")
+        };
+        assert_eq!(
+            &inputs[..],
+            &[
+                fgdb_gql::GraphVertexMergeRowInput::Property(SECRET),
+                fgdb_gql::GraphVertexMergeRowInput::Column(2),
+            ]
+        );
+        for mode in 0..4 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+            seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+            seed.add_edge(
+                fgdb_types::EId(3),
+                VId(1),
+                VId(2),
+                vec![
+                    (Q, CanonicalScalar::Int(10)),
+                    (SECRET, CanonicalScalar::Int(99)),
+                ],
+            );
+            db.write(&commit, seed).await.unwrap();
+            let before = db.edges().unwrap();
+            let basis = db.frontier().unwrap();
+            let mut scope = grant();
+            if mode == 1 {
+                scope.properties = Scope::only([P, Q, SECRET]);
+            }
+            if mode == 2 {
+                scope.rights = Rights::Write;
+            }
+            let token = issuer.issue_at(&scope, NOW).unwrap();
+            let now = AtomicU64::new(NOW);
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    catalog,
+                    R,
+                    policy(),
+                    64,
+                    || now.load(Ordering::Relaxed),
+                )
+                .unwrap();
+            let result = if mode == 2 {
+                session.query_stats(&query, text, &arguments).await
+            } else {
+                let prepared = session.prepare(&query, text, &arguments).unwrap();
+                if mode == 3 {
+                    now.store(scope.expires_at_ms, Ordering::Relaxed);
+                }
+                session.execute_stats(&query, &prepared, &arguments).await
+            };
+            if mode == 0 {
+                let (_, completion) = result.unwrap();
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: CommitSeq(basis.0 + 1),
+                    }
+                );
+                drop(session);
+                let edge = db.edge(fgdb_types::EId(3)).unwrap().unwrap();
+                assert_eq!(
+                    edge.props,
+                    vec![
+                        (Q, CanonicalScalar::Int(2).into()),
+                        (SECRET, CanonicalScalar::Int(99).into())
+                    ]
+                );
+            } else {
+                let error = result.unwrap_err();
+                if mode == 1 {
+                    let mut cause: Option<&(dyn core::error::Error + 'static)> = Some(&error);
+                    let mut division = false;
+                    while let Some(source) = cause {
+                        division |= source
+                            .downcast_ref::<fgdb_gql::GraphIntegerError>()
+                            .is_some_and(|error| {
+                                error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+                            });
+                        cause = source.source();
+                    }
+                    assert!(
+                        division,
+                        "visible secret selects the failing arm: {error:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        authorization(&error),
+                        Some(if mode == 2 {
+                            Error::PermissionDenied
+                        } else {
+                            Error::Expired
+                        })
+                    );
+                }
+                assert!(session.is_closed());
+                drop(session);
+                assert_eq!(db.frontier().unwrap(), basis);
+                assert_eq!(db.edges().unwrap(), before);
+            }
+            assert_eq!(arguments.canonical_bytes(), input);
+            assert_eq!(db.vertices().unwrap().len(), 2);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn mixed_relationship_frames_keep_nested_carried_elements_at_the_frozen_input_cut() {
+    lab(0xac3c, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(
+            VId(1),
+            vec![L],
+            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(5))],
+        );
+        seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+        seed.add_edge(
+            fgdb_types::EId(3),
+            VId(1),
+            VId(2),
+            vec![(P, CanonicalScalar::Int(1))],
+        );
+        db.write(&commit, seed).await.unwrap();
+        let before = db.read_session().unwrap();
+        let basis = db.frontier().unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                BRANCH,
+                symbols,
+                R,
+                policy(),
+                64,
+                || NOW,
+            )
+            .unwrap();
+        let text = "UNWIND [1,2] AS step MATCH (a:Visible {p:1}) WITH a,{target:a} AS row,step \
+            MERGE (a)-[r:R]->(b:Visible {p:2}) ON MATCH \
+            SET r.p=r.p*10+step+row.target.q,a.q=a.q+step";
+        let native = fgdb_gql::PreparedGraphWriteChainText::prepare(text, R, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let upsert = match native.steps().last().unwrap() {
+            fgdb_gql::GraphWriteChainStep::EdgeUpsert(upsert)
+            | fgdb_gql::GraphWriteChainStep::EdgeUpsertRows { upsert, .. }
+            | fgdb_gql::GraphWriteChainStep::EdgeUpsertQuery { upsert, .. } => upsert,
+            _ => panic!("the native relationship owner must retain the whole-pattern step"),
+        };
+        assert_eq!(upsert.merge().unbound_columns().collect::<Vec<_>>(), [3]);
+        let fgdb_gql::GraphEdgeMergeRowAction::Value {
+            inputs: Some(inputs),
+            ..
+        } = &upsert.actions().on_match[0]
+        else {
+            panic!("mixed relationship frame")
+        };
+        assert_eq!(
+            &inputs[..],
+            &[
+                fgdb_gql::GraphVertexMergeRowInput::Property(P),
+                fgdb_gql::GraphVertexMergeRowInput::Column(2),
+                fgdb_gql::GraphVertexMergeRowInput::Column(1),
+            ]
+        );
+        let (_, completion) = session
+            .query_stats(&query, text, &GqlParameters::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(basis.0 + 1),
+            }
+        );
+        drop(session);
+        // First occurrence: edge 1*10+1+5=16, a.q=6. The second sees
+        // edge 16 but a's carried input q=5: 16*10+2+5=167; a.q=7.
+        // The nested carried identity reads its original input cut, while
+        // each target property and the selected ON clause see prior effects.
+        assert_eq!(
+            db.edge(fgdb_types::EId(3)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(167).into())]
+        );
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(7).into())
+            ]
+        );
+        assert_eq!(
+            before.edge(fgdb_types::EId(3)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(1).into())]
+        );
+        assert_eq!(
+            before.vertex(VId(1)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(5).into())
+            ]
+        );
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(db.edges().unwrap().len(), 1);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn native_chain_batch_missing_arguments_keep_scalar_and_list_record_coordinates() {
     lab(0xac39, |contexts| async move {
         let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());

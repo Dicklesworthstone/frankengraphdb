@@ -1591,9 +1591,8 @@ impl PreparedGraphEdgeMergeText {
         values: &[GqlParameterValue],
     ) -> Result<Option<crate::PreparedGraphEdgeUpsertRows>, GraphEdgeMergeTextError> {
         use crate::{
-            GraphEdgeMergeRowAction as EdgeAction, GraphEdgeMergeRowInput as EdgeInput,
-            GraphEdgeUpsertAction, GraphEdgeUpsertValue, GraphVertexMergeRowAction as VertexAction,
-            GraphVertexMergeRowInput as VertexInput, GraphVertexUpsertAction,
+            GraphEdgeMergeRowAction as EdgeAction, GraphEdgeUpsertAction, GraphEdgeUpsertValue,
+            GraphVertexMergeRowAction as VertexAction, GraphVertexUpsertAction,
         };
         let empty = crate::mutation_text::VertexMergeRowActionTemplates {
             on_match: Vec::new(),
@@ -1648,31 +1647,14 @@ impl PreparedGraphEdgeMergeText {
                         VertexAction::Vertex(GraphVertexUpsertAction::ClearProperties { keep }) => {
                             EdgeAction::ClearProperties { keep }
                         }
-                        VertexAction::Expression { key, inputs, value } => EdgeAction::Expression {
-                            key,
-                            inputs: inputs
-                                .into_iter()
-                                .map(|input| match input {
-                                    VertexInput::Property(key) => EdgeInput::Property(key),
-                                    VertexInput::Column(column) => EdgeInput::Column(column),
-                                })
-                                .collect(),
-                            value,
-                        },
-                        VertexAction::Value { key, inputs, value } => {
-                            if inputs.is_some() {
-                                return Err(GraphEdgeMergeTextError::from(error(
-                                    self.input.return_at(),
-                                    GraphPatternTextErrorKind::Expected(
-                                        "a row value that does not read the MERGE relationship",
-                                    ),
-                                )));
-                            }
-                            EdgeAction::Value {
-                                key,
-                                value: crate::GraphEdgeMergeRowComputed(value),
-                            }
+                        VertexAction::Expression { key, inputs, value } => {
+                            EdgeAction::Expression { key, inputs, value }
                         }
+                        VertexAction::Value { key, inputs, value } => EdgeAction::Value {
+                            key,
+                            inputs,
+                            value: crate::GraphEdgeMergeRowComputed(value),
+                        },
                         VertexAction::Properties {
                             value,
                             replace,
@@ -1682,6 +1664,13 @@ impl PreparedGraphEdgeMergeText {
                             replace,
                             names,
                         },
+                        VertexAction::Vertex(GraphVertexUpsertAction::SetValue { key, value }) => {
+                            EdgeAction::Value {
+                                key,
+                                inputs: None,
+                                value: crate::GraphEdgeMergeRowComputed(value),
+                            }
+                        }
                         VertexAction::Vertex(_) => {
                             return Err(GraphEdgeMergeTextError::from(error(
                                 self.input.return_at(),
