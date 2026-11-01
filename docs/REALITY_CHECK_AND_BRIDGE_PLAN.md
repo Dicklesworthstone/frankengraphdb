@@ -13,7 +13,37 @@ This audit does not award G1–G4 or release qualification.
 
 ### Integrated runtime repair checkpoint — 2026-10-31 23:20 UTC
 
-**Latest update, 2026-11-01 05:12 UTC:** the complete, unfiltered local Cargo
+**Latest update, 2026-11-01 06:00 UTC:** focused runtime qualification now covers
+282 unique tests across 15 package/target summaries. The first run finished
+281 passed and one failed: a new test incorrectly assumed a 64-property
+creation limit. The unchanged existing limit is 65. Its corrected full target
+passes eight tests, preserving 65 as a positive and 66 as a negative for both
+concrete and deferred keys. Every original red target passes its focused run.
+These results include the real socket batch, reused bound handle, exact
+NULL-MERGE/keys control, fixed-authority LAB and fresh-instant key witnesses.
+No test was ignored or filtered to obtain these results. Receipts are in
+`/data/ssd/tmp/fgdb-post-whole-repairs-20261101-v1`.
+
+Shared main subsequently reached `508c46385b9f356fa0cceef70cd260576c9ddcfe`
+with another 18 changed files for relation-image reuse, counted Apply and
+statement-local relationship-target reuse. Older focused results cannot
+qualify that new tree. Independent source review found no concrete ownership,
+history or authority defect in the inspected reuse paths. Their runtime
+qualification remains pending. The first complete-proof attempt found an
+incoming test's unused `mut`; it was intentionally stopped before expensive
+test compilation. Its exit is 143 and its verifier exit is 1, so the retained
+bundle is incomplete and rejected, not passing evidence. Removing that `mut`
+then gives a full workspace Clippy exit zero in 57.46 seconds. A fresh exact
+proof remains required.
+
+Two complete focused scanner runs cover the incoming changes: 59 files expose
+six new misclassifications and 18 later files expose one more. Their original
+finding identities remain conserved. Explicit ownership on four already
+test-only helpers and typed BFS input-schema dispatch address those additions;
+the bodies, scanner rules and exact ratchet are unchanged. These subsets are
+diagnostics, not the final complete 32-partition scan or a security clearance.
+
+**Earlier update, 2026-11-01 05:12 UTC:** the complete, unfiltered local Cargo
 diagnostic finished with exit 101: 13,732 passed, nine failed, 34 previously
 ignored and zero filtered tests across 1,094 summaries. The root library
 actually executed: 1,694 passed, zero failed and four previously ignored,

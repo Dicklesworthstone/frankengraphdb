@@ -1162,7 +1162,7 @@ mod edge_merge_target_reuse_tests {
                 },
             })
         };
-        let mut source = |_, _, reused| {
+        let source = |_, _, reused| {
             admissions.set(admissions.get() + 1);
             if let Some(error) = refused {
                 return Err(GqlQueryError::Source(error));

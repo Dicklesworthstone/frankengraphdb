@@ -9,6 +9,7 @@ fn wide() -> GqlQueryPolicy {
     GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
 }
 
+#[cfg(test)]
 fn no_source(
     _: &PreparedGraphPattern<GraphValueRow>,
     _: GqlQueryPolicy,
