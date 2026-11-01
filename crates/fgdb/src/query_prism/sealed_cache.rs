@@ -8,6 +8,13 @@
 //! checkpoints and I/O disappear on a hit; live entry/return checks and all
 //! kernel/result admissions remain the caller's responsibility. These owner
 //! APIs carry no capability charge transcript and are not authorized hosts.
+//!
+//! Different projection shapes may borrow the unmasked relation image from a
+//! completed entry while rebuilding all selected vertices and graph metadata.
+//! This requires the same owner, source root, cut, relation and physical sealing
+//! bounds. Queries additionally replay the earned pre-compaction record count.
+//! Every retained graph is still charged its complete resident size: shared
+//! images are conservatively counted per entry, never retained off-budget.
 
 use super::cache::Request as ProjectionRequest;
 use super::{FnxSourceLimits, RootReadLimits, SealedGraphView, SealedLimits, SnapshotGraphView};
@@ -62,6 +69,10 @@ pub(crate) struct QueryUsage {
     pub(crate) admission: AdmissionUsage,
     pub(crate) source_work: u64,
     pub(crate) source_scratch: u64,
+    /// Source population admitted before projection. Buffered readers count
+    /// authenticated raw records before sealing discards old history; that
+    /// count cannot be reconstructed from the compacted image or final graph.
+    pub(crate) raw_source_records: u64,
 }
 
 impl QueryUsage {
@@ -100,6 +111,22 @@ impl Retained {
 pub(crate) type SealedProjectionCache = LiveCache<crate::Snapshot, Request, Retained>;
 
 impl SealedProjectionCache {
+    /// Reuse only the immutable source, rebuilding the selected graph with
+    /// fresh vertex, projection and query admission. Source identity and every
+    /// physical sealing bound stay exact; no partially built source is cached.
+    pub(crate) fn lookup_source_controlled<E>(
+        &self,
+        owner: &Arc<crate::Snapshot>,
+        request: Request,
+        poll: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<Retained>, E> {
+        self.lookup_controlled_by(
+            owner,
+            |cached, retained| source_compatible(*cached, request, retained),
+            poll,
+        )
+    }
+
     /// Composed queries charge the saved construction totals again. Only
     /// counter allowances may differ; owner, cut, earned anchor, selection,
     /// graph laws, projection bounds and staging bytes must still match.
@@ -178,6 +205,17 @@ pub(crate) type BufferedSealedCache = BufferedCache<Request, Retained>;
 pub(crate) type BufferedProjectionCache = BufferedCache<ProjectionRequest, SnapshotGraphView>;
 
 impl BufferedSealedCache {
+    pub(crate) fn lookup_source(
+        &self,
+        cx: &QueryCx,
+        request: Request,
+    ) -> Result<Option<Retained>, Box<asupersync::error::Error>> {
+        self.lookup_controlled_by(
+            |cached, retained| source_compatible(*cached, request, retained),
+            || cx.checkpoint(),
+        )
+    }
+
     /// Reuse only completed construction whose exact counters fit this caller.
     /// Root, cut, selection, graph laws and physical source bounds remain exact.
     pub(crate) fn lookup_query(
@@ -190,6 +228,27 @@ impl BufferedSealedCache {
             || cx.checkpoint(),
         )
     }
+}
+
+fn source_compatible(cached: Request, request: Request, retained: &Retained) -> bool {
+    if retained.graph.unmasked_source().is_none()
+        || (request.query_policy.is_some()
+            && (cached.query_policy.is_none() || retained.query_usage.is_none()))
+    {
+        return false;
+    }
+    // These stages execute again under the new request. Normalize only their
+    // dimensions, so source root/cut/relation, sealing/raw limits and any new
+    // identity dimension must still match. Exact graph-cache matching remains
+    // separate: this path never reuses selected vertices or graph laws.
+    let mut compatible = cached;
+    compatible.query_policy = request.query_policy;
+    compatible.projection.selection.vertex_label = request.projection.selection.vertex_label;
+    compatible.projection.selection.weight = request.projection.selection.weight;
+    compatible.projection.projection = request.projection.projection;
+    compatible.projection.projection_limits = request.projection.projection_limits;
+    compatible.projection.source_limits = request.projection.source_limits;
+    compatible == request
 }
 
 fn buffered_query_compatible(cached: Request, request: Request, usage: Option<QueryUsage>) -> bool {
@@ -386,6 +445,7 @@ mod tests {
             admission,
             source_work: 11,
             source_scratch: 5,
+            raw_source_records: 2,
         }
     }
 

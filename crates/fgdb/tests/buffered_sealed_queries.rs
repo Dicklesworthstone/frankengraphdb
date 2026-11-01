@@ -1550,6 +1550,183 @@ fn superseded_history_is_charged_before_compaction_even_under_limit_zero_and_reu
 }
 
 #[test]
+fn changed_projection_sources_replay_raw_history_and_fresh_query_admission() {
+    fn refusal(error: &NativeSpoolError) -> (bool, u128, u128) {
+        let NativeSpoolError::Procedure(inner) = error else {
+            panic!("expected source admission refusal: {error:?}");
+        };
+        match inner.as_ref() {
+            GqlQueryError::Rows(refusal) => {
+                assert_eq!(refusal.dimension, GqlBudgetDimension::SnapshotRecords);
+                (
+                    false,
+                    u128::from(refusal.limit),
+                    u128::from(refusal.observed),
+                )
+            }
+            GqlQueryError::Source(GqlError::Procedure(ProcedureError::Read(inner))) => {
+                let FnxReadError::SourceLimit {
+                    resource,
+                    limit,
+                    requested,
+                } = inner.as_ref()
+                else {
+                    panic!("expected raw source admission refusal: {error:?}");
+                };
+                assert_eq!(*resource, "work units");
+                (true, *limit, *requested)
+            }
+            GqlQueryError::Source(GqlError::Procedure(ProcedureError::BufferedSealedRead(
+                inner,
+            ))) => {
+                let FnxSealedReadError::Input(FnxReadError::SourceLimit {
+                    resource,
+                    limit,
+                    requested,
+                }) = inner.as_ref()
+                else {
+                    panic!("expected buffered source admission refusal: {error:?}");
+                };
+                assert_eq!(*resource, "work units");
+                (true, *limit, *requested)
+            }
+            _ => panic!("expected source admission refusal: {error:?}"),
+        }
+    }
+
+    let ((), report) = run_async_under_lab(0x6273_5340, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let (vfs, mut writer) = fixture(&commit).await;
+        let params = parameters();
+        let directed = prepare(
+            &format!("{BFS} YIELD node,distance RETURN node,distance ORDER BY node"),
+            &params,
+        );
+        let reverse = prepare(
+            &format!(
+                "{} YIELD node,distance RETURN node,distance ORDER BY node",
+                BFS.replace("direction => 'directed'", "direction => 'reversed'"),
+            ),
+            &params,
+        );
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut old = view(&commit, &vfs, &source_pool).await;
+        let before = execute(&reverse, &mut old, &cx, policy(), &spill_pool, 1, WORK)
+            .await
+            .unwrap();
+        assert_eq!(before.rows, vec![vec![vertex(1), integer(0)]]);
+        drop(old);
+        // Both old property versions disappear from the image sealed at 4.
+        // They must remain in the source receipt reused by another direction.
+        for (seq, value) in [(3, 101), (4, 102)] {
+            let mut restatement = WriteBatch::new(R);
+            restatement.set_edge_property(EId(BASE + 1), P, Some(CanonicalScalar::Int(value)));
+            assert_eq!(
+                writer.write(&commit, restatement).await.unwrap(),
+                CommitSeq(seq)
+            );
+        }
+        let mut uncached = view(&commit, &vfs, &source_pool).await;
+        uncached
+            .set_sealed_read_cache_pool(&cx, MemoryPool::new(0, 0).unwrap())
+            .unwrap();
+        let expected = execute(&reverse, &mut uncached, &cx, policy(), &spill_pool, 1, WORK)
+            .await
+            .unwrap();
+        assert_eq!(expected.rows, before.rows);
+        assert_eq!(expected.snapshot, CommitSeq(4));
+        assert!(expected.records > before.records);
+        assert_eq!(uncached.sealed_read_cache_usage().entries, 0);
+
+        let mut reused = view(&commit, &vfs, &source_pool).await;
+        let retained = reused.sealed_read_cache_pool().clone();
+        let first = execute(&directed, &mut reused, &cx, policy(), &spill_pool, 1, WORK)
+            .await
+            .unwrap();
+        assert_eq!(first.rows, bfs_rows());
+        assert_eq!(reused.sealed_read_cache_usage().entries, 1);
+        let changed = execute(&reverse, &mut reused, &cx, policy(), &spill_pool, 1, WORK)
+            .await
+            .unwrap();
+        assert_eq!(
+            changed, expected,
+            "source reuse preserves every logical counter"
+        );
+        assert_eq!(reused.sealed_read_cache_usage().entries, 2);
+        let retained_usage = reused.sealed_read_cache_usage();
+        assert_eq!(
+            execute(&reverse, &mut reused, &cx, policy(), &spill_pool, 1, WORK)
+                .await
+                .unwrap(),
+            expected,
+        );
+
+        let short = GqlQueryPolicy::new(before.records, 100, WORK, WORK);
+        let cold_error = execute(&reverse, &mut uncached, &cx, short, &spill_pool, 1, WORK)
+            .await
+            .unwrap_err();
+        let reused_error = execute(&reverse, &mut reused, &cx, short, &spill_pool, 1, WORK)
+            .await
+            .unwrap_err();
+        assert!(is_snapshot_or_source_work_limit(
+            &reused_error,
+            before.records
+        ));
+        assert_eq!(refusal(&reused_error), refusal(&cold_error));
+        assert_eq!(reused.sealed_read_cache_usage(), retained_usage);
+        assert_eq!(spill_pool.used(), 0);
+
+        // A standalone projection has no authenticated GQL source transcript.
+        // Its retained image cannot turn missing raw admission into zero cost.
+        let mut standalone = view(&commit, &vfs, &source_pool).await;
+        let mut options = fgdb_prism::FnxReadOptions::whole_graph(None);
+        options.selection.vertex_label = Some(PERSON);
+        options.selection.relation = Some(R);
+        options.projection.directedness = fgdb_prism::Directedness::Directed;
+        options.projection.parallel_edges = fgdb_prism::ParallelEdgePolicy::CollapseUnit;
+        options.projection.self_loops = fgdb_prism::SelfLoopPolicy::Drop;
+        standalone
+            .prism_sealed_projection_at(
+                &cx,
+                standalone.frontier(),
+                options.selection,
+                options.projection,
+                options.projection_limits,
+                options.source_limits,
+                sealing(),
+                RAW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(standalone.sealed_read_cache_usage().entries, 1);
+        assert_eq!(
+            execute(
+                &reverse,
+                &mut standalone,
+                &cx,
+                policy(),
+                &spill_pool,
+                1,
+                WORK
+            )
+            .await
+            .unwrap(),
+            expected,
+        );
+        assert_eq!(standalone.sealed_read_cache_usage().entries, 2);
+        drop(uncached);
+        drop(reused);
+        drop(standalone);
+        assert_eq!(source_pool.used(), 0);
+        assert_eq!(retained.used(), 0);
+        assert_eq!(spill_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn sealed_paths_share_limits_and_preserve_reached_errors_under_limit_zero() {
     let ((), report) = run_async_under_lab(0x6273_5111, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

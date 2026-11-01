@@ -730,11 +730,7 @@ impl SealedReadView {
         )
         .map_err(|error| sealed_failure(SealedReadError::Projection(error)))?;
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-        let usage = sealed_cache::QueryUsage {
-            admission: usage.admission,
-            source_work: usage.work,
-            source_scratch: usage.scratch,
-        };
+        let usage = usage.completed();
         let retained = sealed_cache::Retained {
             graph: graph.clone(),
             query_usage: Some(usage),
@@ -776,6 +772,7 @@ pub(crate) struct SourceUsage {
     limits: FnxSourceLimits,
     work: u64,
     scratch: u64,
+    raw_source_records: u64,
 }
 
 impl SourceUsage {
@@ -786,6 +783,7 @@ impl SourceUsage {
             limits,
             work: 0,
             scratch: 0,
+            raw_source_records: 0,
         }
     }
 
@@ -818,7 +816,12 @@ impl SourceUsage {
             u128::from(self.limits.max_work_units),
         )
         .map_err(procedure_failure)?;
-        charge_usage(&mut self.admission, self.policy, records, records, 0)
+        charge_usage(&mut self.admission, self.policy, records, records, 0)?;
+        self.raw_source_records = self
+            .raw_source_records
+            .checked_add(records)
+            .ok_or_else(|| procedure_failure(Error::SizeOverflow))?;
+        Ok(())
     }
 
     /// A completed construction receipt, before kernel or output work. An
@@ -828,6 +831,7 @@ impl SourceUsage {
             admission: self.admission,
             source_work: self.work,
             source_scratch: self.scratch,
+            raw_source_records: self.raw_source_records,
         }
     }
 }
