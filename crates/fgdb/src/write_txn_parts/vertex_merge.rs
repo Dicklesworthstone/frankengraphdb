@@ -445,8 +445,12 @@ fn collect_vertex_merge_output<O: VertexMergeOutput, E, A, C>(
             error => error,
         }
     })?;
-    selected.evaluator.work_units += key_evaluator.work_units;
-    selected.evaluator.scratch_entries += key_evaluator.scratch_entries;
+    selected.evaluator.work_units = selected.evaluator.work_units
+        .checked_add(key_evaluator.work_units)
+        .ok_or(GqlQueryError::Source(GraphVertexMergeError::AccountingOverflow))?;
+    selected.evaluator.scratch_entries = selected.evaluator.scratch_entries
+        .checked_add(key_evaluator.scratch_entries)
+        .ok_or(GqlQueryError::Source(GraphVertexMergeError::AccountingOverflow))?;
     if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
         return Err(GqlQueryError::Source(
             GraphVertexMergeError::InvalidSourceStatistics,
