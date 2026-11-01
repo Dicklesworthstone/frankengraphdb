@@ -168,6 +168,132 @@ fn selection_routes_only_matching_blocks_and_refuses_candidates_before_payloads(
 }
 
 #[test]
+fn sparse_root_scratch_and_selected_payloads_do_not_grow_with_unrelated_blocks() {
+    run(|contexts, path| async move {
+        let (store, base) = fixture(&contexts, &path).await;
+        let commit = contexts.commit();
+        let mut root = store.get_root(&commit, base).await.unwrap();
+        let mut vertices = Vec::new();
+        // Cross a machine-word boundary in the admitted block population.
+        // These are real authenticated blocks with disjoint endpoint domains,
+        // not directory-only doubles or duplicate root references.
+        for at in 0..64u128 {
+            let source = 1000 + at * 2;
+            let rows = [entry(1000 + at, source, source + 1, R, 3, None)];
+            let block = store
+                .put(&commit, &crate::encode_block(0, None, &rows).unwrap())
+                .await
+                .unwrap();
+            root.blocks.push(BlockRef {
+                block_id: block.0,
+                first_seq: CommitSeq(3),
+                last_seq: CommitSeq(3),
+            });
+            vertices.push(vertex(source, 3, None, 0));
+            vertices.push(vertex(source + 1, 3, None, 0));
+        }
+        let patch = store
+            .put_patch(&commit, &encode_patch(&vertices).unwrap())
+            .await
+            .unwrap();
+        root.vertex_patches.push(PatchRef {
+            patch_id: patch.0,
+            first_seq: CommitSeq(3),
+            last_seq: CommitSeq(3),
+        });
+        let expanded = store.put_root(&commit, &root).await.unwrap();
+        let cx = contexts.query();
+        let mut source_limits = limits();
+        source_limits.max_root_bytes = 64 * 1024;
+        source_limits.max_blocks = 128;
+        let mut scratch_requests = Vec::new();
+        for id in [base, expanded] {
+            let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+            let mut view = store
+                .open_buffered_root(&cx, id, pool.clone(), source_limits)
+                .await
+                .unwrap();
+            // Reclaim admission's unpinned frames before measuring query
+            // scratch. The source's resident directory is already charged.
+            drop(view.reserve_scan_bytes(&cx, pool.limit()));
+            let baseline = pool.used();
+            let before = view.stats();
+            let hold = pool.reserve(&cx, pool.limit() - baseline - 512).unwrap();
+            let held = pool.used();
+            let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+            assert_eq!(pool.used(), held, "root heads stay lazy before selection");
+            let result = scan
+                .select_root_vertices_with(
+                    &cx,
+                    &[VId(9), VId(10)],
+                    BufferedEdgeDirection::Undirected,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .await;
+            let Err(BufferedScanError::Read(BufferedReadError::Buffer(BufferError::Memory(
+                MemoryError::ResourceExhausted { requested, .. },
+            )))) = result
+            else {
+                panic!("routing scratch must refuse before a selected block is read: {result:?}");
+            };
+            scratch_requests.push(requested);
+            assert!(scan.is_closed());
+            drop(scan);
+            drop(hold);
+            assert_eq!(pool.used(), baseline, "refused setup refunds every charge");
+            assert_eq!(view.stats(), before, "refused setup never faults payloads");
+
+            let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+            scan.select_root_vertices_with(
+                &cx,
+                &[VId(9), VId(10)],
+                BufferedEdgeDirection::Undirected,
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .await
+            .unwrap();
+            let after = scan.driver.as_ref().unwrap().root.partition.stats();
+            assert_eq!(after.hits + after.misses, before.hits + before.misses + 1);
+            let mut admitted = Vec::new();
+            let candidate = scan
+                .next_with_endpoints(&cx, None, &mut |event| {
+                    if let BufferedEdgeScanEvent::Identity(eid) = event {
+                        admitted.push(eid);
+                    }
+                    Ok::<_, ()>(())
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(candidate.eid, EId(7));
+            assert_eq!(
+                candidate.row.unwrap().edge().props,
+                vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(70)))],
+            );
+            assert!(
+                scan.next_with_endpoints(&cx, None, &mut |event| {
+                    if let BufferedEdgeScanEvent::Identity(eid) = event {
+                        admitted.push(eid);
+                    }
+                    Ok::<_, ()>(())
+                })
+                .await
+                .unwrap()
+                .is_none()
+            );
+            assert_eq!(admitted, [EId(7)], "one selected global root identity");
+            drop(scan);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+        }
+        assert_eq!(
+            scratch_requests[0], scratch_requests[1],
+            "query routing scratch is independent of admitted corpus size"
+        );
+    });
+}
+
+#[test]
 fn selected_root_routing_memos_and_history_share_terminal_controls_and_work_limits() {
     run(|contexts, path| async move {
         let (store, id) = fixture(&contexts, &path).await;

@@ -238,6 +238,205 @@ fn every_descriptor_seek_control_can_refuse_before_inspection() {
     }
 }
 
+fn root_lookup(
+    outgoing: &[Outgoing],
+    incoming: &[Incoming],
+    vertices: &[VId],
+    relation: Option<u64>,
+    direction: BufferedEdgeDirection,
+) -> (Vec<usize>, usize) {
+    let mut cursor = RootCandidates::new(
+        incoming.len(),
+        vertices,
+        relation.map(RelationId),
+        direction,
+    );
+    let mut work = 0;
+    let mut result = Vec::new();
+    while let Some(block) = cursor
+        .next(outgoing, incoming, &mut || {
+            work += 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+    {
+        result.push(block);
+    }
+    (result, work)
+}
+
+#[test]
+fn complete_root_domains_equal_linear_oracle_without_duplicate_descriptors() {
+    let mut bounds = vec![
+        (0, 0, 0, 0),
+        (u128::MAX, u64::MAX, 0, u128::MAX),
+        (7, 1, 7, 7),
+        (7, 1, 7, 7),
+        (7, 2, 3, 19),
+        (11, 1, 1, u128::MAX - 1),
+        (12, 0, u128::MAX, u128::MAX),
+    ];
+    for at in 0..64u128 {
+        bounds.push((at * 4, (at % 3) as u64, at % 31, at % 31 + 31));
+    }
+    let (outgoing, incoming) = ordered(&bounds);
+    let domain = [0, 1, 7, 12, 31, 63, u128::MAX - 1, u128::MAX];
+    for mask in 0..1usize << domain.len() {
+        let vertices: Vec<_> = domain
+            .iter()
+            .enumerate()
+            .filter_map(|(bit, &vertex)| (mask & (1 << bit) != 0).then_some(VId(vertex)))
+            .collect();
+        for relation in [None, Some(0), Some(1), Some(3), Some(u64::MAX)] {
+            for direction in [
+                BufferedEdgeDirection::Outgoing,
+                BufferedEdgeDirection::Incoming,
+                BufferedEdgeDirection::Undirected,
+            ] {
+                let (mut actual, _) =
+                    root_lookup(&outgoing, &incoming, &vertices, relation, direction);
+                actual.sort_unstable();
+                let expected: Vec<_> = bounds
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(block, &(source, rel, first, last))| {
+                        (relation.is_none_or(|r| r == rel)
+                            && vertices.iter().any(|&VId(vertex)| match direction {
+                                BufferedEdgeDirection::Outgoing => source == vertex,
+                                BufferedEdgeDirection::Incoming => {
+                                    first <= vertex && vertex <= last
+                                }
+                                BufferedEdgeDirection::Undirected => {
+                                    source == vertex || (first <= vertex && vertex <= last)
+                                }
+                            }))
+                        .then_some(block)
+                    })
+                    .collect();
+                assert_eq!(actual, expected, "{vertices:?} {relation:?} {direction:?}");
+                assert!(actual.windows(2).all(|pair| pair[0] < pair[1]));
+            }
+        }
+    }
+    for direction in [
+        BufferedEdgeDirection::Outgoing,
+        BufferedEdgeDirection::Incoming,
+        BufferedEdgeDirection::Undirected,
+    ] {
+        assert_eq!(
+            root_lookup(&outgoing, &incoming, &[], None, direction),
+            (vec![], 0)
+        );
+        assert!(
+            root_lookup(&[], &[], &[VId(0), VId(u128::MAX)], None, direction)
+                .0
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn sparse_domain_routing_is_logarithmic_and_overlapping_domains_share_one_tree_walk() {
+    for count in [16usize, 1024, 65536] {
+        let bounds: Vec<_> = (0..count)
+            .rev()
+            .map(|at| {
+                (
+                    at as u128 * 4 + 1,
+                    7,
+                    at as u128 * 4 + 2,
+                    at as u128 * 4 + 3,
+                )
+            })
+            .collect();
+        let (outgoing, incoming) = ordered(&bounds);
+        for endpoint in [0, 1, 2, count as u128 * 2 + 1, u128::MAX] {
+            for direction in [
+                BufferedEdgeDirection::Outgoing,
+                BufferedEdgeDirection::Incoming,
+                BufferedEdgeDirection::Undirected,
+            ] {
+                let (mut actual, work) =
+                    root_lookup(&outgoing, &incoming, &[VId(endpoint)], None, direction);
+                actual.sort_unstable();
+                assert_eq!(actual, oracle(&bounds, endpoint, None, direction));
+                // Includes BOTH the count and initialization passes. This is
+                // a logarithmic metadata bound, separate from payload faults
+                // and later edge/history candidate work.
+                assert!(
+                    work * 2 <= 24 * (count.ilog2() as usize + 2),
+                    "count={count} endpoint={endpoint} direction={direction:?} work={work}"
+                );
+            }
+        }
+    }
+
+    let bounds: Vec<_> = (0..64).map(|at| (1000 + at, 7, 0, u128::MAX)).collect();
+    let (outgoing, incoming) = ordered(&bounds);
+    let vertices: Vec<_> = (0..256).map(VId).collect();
+    let (mut actual, work) = root_lookup(
+        &outgoing,
+        &incoming,
+        &vertices,
+        Some(7),
+        BufferedEdgeDirection::Incoming,
+    );
+    actual.sort_unstable();
+    assert_eq!(actual, (0..bounds.len()).collect::<Vec<_>>());
+    assert!(
+        work < bounds.len() * vertices.len(),
+        "no per-seed replay of broad ranges"
+    );
+}
+
+#[test]
+fn every_domain_route_checkpoint_preserves_the_selected_prefix_on_refusal() {
+    let bounds = [
+        (0, 1, 0, u128::MAX),
+        (7, 1, 0, 100),
+        (7, 2, 7, 7),
+        (8, 1, 0, 9),
+        (11, 1, 1, u128::MAX - 1),
+        (u128::MAX, 1, u128::MAX, u128::MAX),
+    ];
+    let (outgoing, incoming) = ordered(&bounds);
+    let vertices = [VId(0), VId(7), VId(8), VId(40), VId(u128::MAX)];
+    for relation in [None, Some(1), Some(3)] {
+        for direction in [
+            BufferedEdgeDirection::Outgoing,
+            BufferedEdgeDirection::Incoming,
+            BufferedEdgeDirection::Undirected,
+        ] {
+            let (expected, total) =
+                root_lookup(&outgoing, &incoming, &vertices, relation, direction);
+            for stop in 1..=total {
+                let mut cursor = RootCandidates::new(
+                    incoming.len(),
+                    &vertices,
+                    relation.map(RelationId),
+                    direction,
+                );
+                let mut calls = 0;
+                let mut prefix = Vec::new();
+                loop {
+                    match cursor.next(&outgoing, &incoming, &mut || {
+                        calls += 1;
+                        if calls == stop { Err(stop) } else { Ok(()) }
+                    }) {
+                        Ok(Some(block)) => prefix.push(block),
+                        Err(at) => {
+                            assert_eq!((at, calls), (stop, stop));
+                            assert!(expected.starts_with(&prefix));
+                            break;
+                        }
+                        Ok(None) => panic!("domain route skipped refusal {stop}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn ordered_edges(bounds: &[(u128, u128)]) -> Vec<EdgeRange> {
     let mut ranges: Vec<_> = bounds
         .iter()

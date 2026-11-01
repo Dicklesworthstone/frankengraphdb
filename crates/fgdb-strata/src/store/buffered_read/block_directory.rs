@@ -173,6 +173,23 @@ impl BlockDirectory {
         candidates.next(&self.outgoing, &self.incoming, control)
     }
 
+    pub(super) fn root_candidates<'a>(
+        &self,
+        vertices: &'a [VId],
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+    ) -> RootCandidates<'a> {
+        RootCandidates::new(self.incoming.len(), vertices, relation, direction)
+    }
+
+    pub(super) fn next_root<E>(
+        &self,
+        candidates: &mut RootCandidates<'_>,
+        control: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<usize>, E> {
+        candidates.next(&self.outgoing, &self.incoming, control)
+    }
+
     pub(super) fn edge_candidates(&self, eid: EId) -> EdgeCandidates {
         EdgeCandidates::new(self.edges.len(), eid)
     }
@@ -453,6 +470,151 @@ impl Candidates {
                 // including its loops and every matching historical version.
                 && !(self.direction == BufferedEdgeDirection::Undirected
                     && entry.source == self.endpoint)
+            {
+                return Ok(Some(entry.block));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Select each descriptor at most once for a complete sorted, distinct domain.
+/// Outgoing ranges have one exact source; the incoming interval tree is walked
+/// once for the entire domain. Its fixed-depth stack needs no corpus bitmap or
+/// per-seed candidate bag. The caller validates the domain before source work.
+pub(crate) struct RootCandidates<'a> {
+    vertices: &'a [VId],
+    relation: Option<RelationId>,
+    direction: BufferedEdgeDirection,
+    outgoing_seed: usize,
+    outgoing_first: usize,
+    outgoing_at: Option<usize>,
+    pending: [(usize, usize); usize::BITS as usize],
+    depth: usize,
+}
+
+impl<'a> RootCandidates<'a> {
+    fn new(
+        incoming: usize,
+        vertices: &'a [VId],
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+    ) -> Self {
+        let mut result = Self {
+            vertices,
+            relation,
+            direction,
+            outgoing_seed: if direction == BufferedEdgeDirection::Incoming {
+                vertices.len()
+            } else {
+                0
+            },
+            outgoing_first: 0,
+            outgoing_at: None,
+            pending: [(0, 0); usize::BITS as usize],
+            depth: 0,
+        };
+        if !vertices.is_empty() && direction != BufferedEdgeDirection::Outgoing {
+            result.push(0, incoming);
+        }
+        result
+    }
+
+    fn push(&mut self, first: usize, end: usize) {
+        if first < end {
+            self.pending[self.depth] = (first, end);
+            self.depth += 1;
+        }
+    }
+
+    fn intersects<E>(
+        &self,
+        first: VId,
+        last: VId,
+        control: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let (mut low, mut high) = (0, self.vertices.len());
+        while low < high {
+            control()?;
+            let middle = low + (high - low) / 2;
+            if self.vertices[middle] < first {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        control()?;
+        Ok(self.vertices.get(low).is_some_and(|&vertex| vertex <= last))
+    }
+
+    fn next<E>(
+        &mut self,
+        outgoing: &[Outgoing],
+        incoming: &[Incoming],
+        control: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<usize>, E> {
+        while let Some(&vertex) = self.vertices.get(self.outgoing_seed) {
+            control()?;
+            let at = match self.outgoing_at {
+                Some(at) => at,
+                None => {
+                    let key = (vertex, self.relation.unwrap_or(RelationId(0)));
+                    let (mut first, mut end) = (self.outgoing_first, outgoing.len());
+                    while first < end {
+                        control()?;
+                        let middle = first + (end - first) / 2;
+                        let entry = outgoing[middle];
+                        if (entry.source, entry.relation) < key {
+                            first = middle + 1;
+                        } else {
+                            end = middle;
+                        }
+                    }
+                    first
+                }
+            };
+            let Some(entry) = outgoing.get(at) else {
+                self.outgoing_seed = self.vertices.len();
+                break;
+            };
+            control()?;
+            if entry.source == vertex
+                && self
+                    .relation
+                    .is_none_or(|relation| relation == entry.relation)
+            {
+                self.outgoing_at = Some(at + 1);
+                return Ok(Some(entry.block));
+            }
+            self.outgoing_at = None;
+            self.outgoing_first = at;
+            self.outgoing_seed += 1;
+        }
+        while self.depth != 0 {
+            control()?;
+            self.depth -= 1;
+            let (first, end) = self.pending[self.depth];
+            let middle = first + (end - first) / 2;
+            let entry = incoming[middle];
+            if !self.intersects(incoming[first].first, entry.maximum, control)? {
+                continue;
+            }
+            // The last seed can exclude the right subtree without a search;
+            // subtree interval exclusion handles every other absence case.
+            if self
+                .vertices
+                .last()
+                .is_some_and(|&last| entry.first <= last)
+            {
+                self.push(middle + 1, end);
+            }
+            self.push(first, middle);
+            if self
+                .relation
+                .is_none_or(|relation| relation == entry.relation)
+                && !(self.direction == BufferedEdgeDirection::Undirected
+                    && self.intersects(entry.source, entry.source, control)?)
+                && self.intersects(entry.first, entry.last, control)?
             {
                 return Ok(Some(entry.block));
             }

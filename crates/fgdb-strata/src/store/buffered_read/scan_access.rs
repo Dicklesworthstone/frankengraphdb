@@ -12,6 +12,7 @@ mod sealed;
 
 pub(crate) use super::block_directory::Candidates as BufferedIncidenceBlocks;
 use super::block_directory::RelationBlocks;
+pub(crate) use super::block_directory::RootCandidates as BufferedRootBlocks;
 
 pub(crate) type BufferedBlockImage = (Vec<AdjacencyEntry>, Option<BlockProps>);
 type BufferedBlockKeys = (Vec<AdjacencyEntry>, Option<Vec<u8>>);
@@ -107,6 +108,27 @@ impl<V: Vfs> BufferedPartition<V> {
     ) -> Result<Option<usize>, BufferedScanError<C>> {
         self.block_directory
             .next(candidates, &mut || work.step(cx, observe))
+    }
+
+    pub(crate) fn edge_scan_root_blocks<'a>(
+        &self,
+        vertices: &'a [VId],
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+    ) -> BufferedRootBlocks<'a> {
+        self.block_directory
+            .root_candidates(vertices, relation, direction)
+    }
+
+    pub(crate) fn edge_scan_next_root_block<C>(
+        &self,
+        candidates: &mut BufferedRootBlocks<'_>,
+        cx: &QueryCx,
+        work: &mut EdgeScanWork,
+        observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+    ) -> Result<Option<usize>, BufferedScanError<C>> {
+        self.block_directory
+            .next_root(candidates, &mut || work.step(cx, observe))
     }
 
     pub(crate) fn reserve_scan_bytes(
