@@ -583,6 +583,36 @@ be a commit reachable in this repository.
 - **caught_by**: immediate review of the helper's terminal output. Comparison against `256107d7f` proves every non-comment field and ordered comment payload unchanged for both extra records; only numeric comment IDs changed. Incoming IDs 3446/3447/3448 collided with existing comments, and native import assigned 3474/3472/3473.
 - **signature**: invoking an enforcement helper is not the same as obeying its result. The corrective landing explicitly declares `fgdb-48a`, `fgdb-at06q`, `fgdb-epic-verif-phi.2` and `fgdb-qjmgo`, records their actual compile progress and collision provenance, and checks native export exit 0 before committing. The original rejected attempt stays in history; it is not retroactively green. Subsequent orchestration stops before staging on any nonzero export. No helper, attribution rule or gate is weakened.
 
+### NE-0052 — List concatenation copied a scalar payload before its admission
+
+- **doctrine**: FG-CON-08
+- **bead**: fgdb-39ohn
+- **repair**: d53758d7a9280f1004872ce5cc226e37f7239190
+- **claimed**: governed list composition admits an output member and its payload before copying that payload
+- **actual**: `integer_expression.rs::list_plus` called its owned `member` conversion first. For an existing scalar Text, that cloned variable-size data before the original `ScratchEntry` and payload callbacks could refuse it. The finding is source order, not a measured peak-allocation or RSS result; dynamic text/list addition was already implemented under `fgdb-5lg`.
+- **caught_by**: independent inspection of the existing scalar arm. The repair retains a borrowed scalar until the same callbacks succeed, then takes ownership. Count/Integer overflow and Average conversion retain their original precedence; composite values and NULL keep their existing paths.
+- **signature**: logical cost events after an allocation do not govern that allocation. Both append and prepend now have literal value/event checks, every reached refusal prefix, unchanged inputs, successful replay and overflow/NULL precedence controls. The complete current GQL library executes 1,888 passing tests with no failures or filters. These runtime controls establish compatibility and refusal behavior; the reviewed source order establishes admission before copying. Complete committed-tree qualification remains separately required.
+
+### NE-0053 — The operator reported formatting green from an incomplete log reading
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-epic-verif-phi.2
+- **repair**: d53758d7a9280f1004872ce5cc226e37f7239190
+- **claimed**: formatting had passed during the exact `959cad2847799133cd7b4f1519c9e6a7a0a46fc6` full-proof run
+- **actual**: its earlier completed fmt gate exited 1 over 21 diff headers in three included write-transaction sources. Root relied on a summary and trailing check/Clippy successes instead of reading that gate's complete result. Ordinary `cargo fmt` does not visit these `include!` files; the existing mandatory gate correctly runs the standalone formatter as well.
+- **caught_by**: reading the full proof stdout at 07:50 UTC on 2026-11-01. Root corrected the user, tracker and working audit. No task closure or passing whole-proof verdict followed. The original completed bundle remains stable and RED: producer 1, verifier 0 authenticating that RED, with ten actual Cargo failures.
+- **signature**: a later green command cannot qualify an earlier red command. The repair formats only `edge_upsert_rows.rs`, `vertex_merge.rs` and `vertex_upsert.rs` with the pinned standalone formatter; each result was independently byte-compared to formatting its HEAD source. No formatter, gate or test was relaxed. A fresh complete committed-tree proof, not that correction or a verifier's authentication of RED, supplies the eventual verdict.
+
+### NE-0054 — Cached relationship matches were validated as physical scans
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-l74aj
+- **repair**: d53758d7a9280f1004872ce5cc226e37f7239190
+- **claimed**: successful relationship MERGE statistics describe every logical occurrence while `overlay_edges` counts actual candidate examinations
+- **actual**: statement-local target reuse reduced physical scans, but the mixed-program meter still required `matched_occurrences <= overlay_edges`. Valid repeated matches were refused as inconsistent statistics. The original server example performs five logical matches over three examined candidates; deduplicating those matches or inflating scans would change the contract. The complete exact-tree run found ten failures across the original authorized, transaction and server targets.
+- **caught_by**: original native integration laws and independent source review. A tests-only run against the old guard actually exits 101 with four passes and two failures: the retained-target positive is rejected, while an impossible all-inputs-create plus nonzero-match tuple is accepted. The original formerly malformed `N=3,O=2,C=1,M=3,T=3` tuple is explicitly retained as a lawful positive.
+- **signature**: a physical optimization invalidated a necessary accounting bound, not the logical occurrence semantics. With selected inputs N, creations C, examinations O, matches M and distinct modified targets T, the repaired owner checks `C<=N`, `M<=(N-C)*(O+C)` and `T<=O+C` using guarded ceiling division, alongside every original action/effect, empty-input and cumulative-limit check. New negatives cover impossible multiplicity, distinct targets and create-plus-match counts. All ten original failing tests now pass unchanged; the five complete affected targets execute 3,823 unique passes, four existing ignores and zero filters. Queries, quotas, hidden-graph comparisons, rollback and reopen laws are unchanged. This is a correctness repair, not a measured speedup, formal proof or complete security qualification.
+
 ## Reverts
 
 The literal `AGENTS.md` clause, enforced. A performed revert has exactly one

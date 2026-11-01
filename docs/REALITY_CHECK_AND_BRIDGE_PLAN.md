@@ -13,7 +13,56 @@ This audit does not award G1–G4 or release qualification.
 
 ### Integrated runtime repair checkpoint — 2026-10-31 23:20 UTC
 
-**Latest update, 2026-11-01 06:00 UTC:** focused runtime qualification now covers
+**Latest update, 2026-11-01 12:38 UTC:** source repair
+`d53758d7a9280f1004872ce5cc226e37f7239190` restores valid cached relationship
+MERGE programs and moves scalar Text copies in list composition after their
+existing admission callbacks. The accounting repair preserves real scan
+counts, repeated logical actions and all original quotas; it adds impossible
+count refusals rather than removing validation. Three included transaction
+files receive formatting only. The Warden transcript comment now describes
+its existing authority/effective-policy binding accurately, without changing
+bytes or adding a capability. Negative evidence records the two source
+defects and Root's earlier incorrect formatting report.
+
+The completed previous exact proof, on `959cad2847799133cd7b4f1519c9e6a7a0a46fc6`,
+is **RED**: 13,797 passed, ten failed, 34 previously ignored and zero filtered
+tests across 1,094 summaries. Its producer exits 1; verifier exit 0 authenticates
+that RED verdict, not a pass. All original targets link. The ten failures come
+from the physical-scan/logical-occurrence mismatch, across two embedded
+integration targets and the server library. Its fmt gate also fails on the
+three included sources. Root's earlier statement that formatting passed was
+wrong; the existing gate worked. The complete bundle and original crashpacks
+remain preserved under `/data/ssd/tmp/fgdb-local-proof-integrated-20261101-v2`.
+
+The repaired source now executes **3,823 unique passing tests**, four existing
+ignores and zero failures or filters across five complete targets: GQL 1,888,
+server 206, embedded library 1,706, authorized edge upsert 13 and relationship
+upsert 10. All ten original failures pass unchanged. A tests-only run first
+demonstrated the old meter's false rejection and false acceptance. Workspace
+all-target/all-feature Clippy exits zero. The six-file UBS scan completes
+with zero critical findings, 303 warnings and 118 info findings. These are
+source-stable dirty-tree diagnostics, retained in
+`/data/ssd/tmp/fgdb-l74aj-39ohn-production-20261101-b0o8v3pt`; they do not
+replace the pending full committed-tree proof, default-feature runs or public
+acceptance witnesses. No source-dependent Bead is closed.
+
+The previous full scanner's 32 complete partitions conserve all 277 original
+critical identities. Its actual external ast-grep executable changed before
+that scan, so the original bounded calibration was rerun under a byte-verified
+private pin. Real test/runtime panic and public-ID/explicit-credential controls
+have the expected split; generic `expected_token` byte equality is still
+missed. No scanner rule, suppression or ratchet changed. The repaired source
+still needs its own complete mandatory scan and identity readback. These
+observations are not a whole-source security clearance.
+
+The next work is the exact committed-tree mandatory proof and verifier,
+followed by the original public component, ingestion/history, TCK, computed-key
+and text/list acceptance witnesses against acknowledged binaries. Close only
+the original conditions that those results actually satisfy. The twenty
+vision-goal boundaries below remain; this repair does not award G1–G4,
+performance gates or release qualification.
+
+**Earlier update, 2026-11-01 06:00 UTC:** focused runtime qualification now covers
 282 unique tests across 15 package/target summaries. The first run finished
 281 passed and one failed: a new test incorrectly assumed a 64-property
 creation limit. The unchanged existing limit is 65. Its corrected full target
