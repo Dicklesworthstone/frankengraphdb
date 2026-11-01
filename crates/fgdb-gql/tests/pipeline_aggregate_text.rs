@@ -346,6 +346,108 @@ fn correlated_call_count_uses_factorized_body_cardinality_through_public_text() 
     assert_eq!(result.rows.snapshot_records, 0);
 }
 
+#[test]
+fn grouped_correlated_call_summaries_retain_outer_values_without_expanding_the_body() {
+    let text = "UNWIND [2,2,null,-1] AS x CALL (x) { \
+        UNWIND range(0,1023) AS a UNWIND range(0,1023) AS b \
+        UNWIND range(0,1023) AS c UNWIND range(0,1023) AS d \
+        RETURN x AS carried } \
+        RETURN x AS k,count(*) AS n,sum(x) AS s,avg(x) AS a,count(DISTINCT x) AS d";
+    let template = PreparedGraphPipelineAggregateText::prepare(text, symbols).unwrap();
+    assert!(template.template_operators().contains(&"Apply"));
+    let query = template
+        .bind_relation_parameters(&GqlParameters::new())
+        .unwrap();
+    let result = query
+        .execute_governed(
+            GqlQueryPolicy::new(0, 3, 100_000, 20_000),
+            |_: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+             _: GqlQueryPolicy|
+             -> Result<_, GqlQueryError<(), ()>> {
+                panic!("a scalar correlated summary cannot open a graph")
+            },
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert_eq!(result.rows.snapshot_records, 0);
+    assert_eq!(result.rows.result_rows, 3);
+    assert_eq!(result.value.len(), 3);
+    let n = 1_u64 << 40; // Four inclusive ranges of 1024 members per body.
+    let mut seen = BTreeSet::new();
+    for row in &result.value {
+        let key = row.values()[0].as_value().unwrap().as_scalar().unwrap();
+        match key {
+            CanonicalScalar::Null => {
+                assert!(seen.insert(None));
+                assert_eq!(row.values()[1].as_count(), Some(n));
+                assert!(row.values()[2].is_null());
+                assert!(row.values()[3].is_null());
+                assert_eq!(row.values()[4].as_count(), Some(0));
+            }
+            CanonicalScalar::Int(value) => {
+                assert!(seen.insert(Some(*value)));
+                let copies = if *value == 2 { 2 } else { 1 };
+                assert_eq!(row.values()[1].as_count(), Some(copies * n));
+                assert_eq!(
+                    row.values()[2].as_integer(),
+                    Some(i128::from(*value) * i128::from(copies * n))
+                );
+                assert_eq!(
+                    row.values()[3].as_average(),
+                    Some(GraphExactAverage::new(i128::from(*value), 1).unwrap())
+                );
+                assert_eq!(row.values()[4].as_count(), Some(1));
+            }
+            _ => panic!("unexpected grouping key"),
+        }
+    }
+    assert_eq!(seen, [None, Some(-1), Some(2)].into_iter().collect());
+    // This asserts a bounded work profile and exact answers; it is not timing data.
+}
+
+#[test]
+fn correlated_mixed_numeric_summary_matches_explicit_ordered_occurrences() {
+    let queries = [
+        "UNWIND [9007199254740992,1.0,-9007199254740992,null] AS x \
+         CALL (x) { UNWIND [0,1,2] AS unused RETURN x AS carried } \
+         RETURN sum(x) AS s,avg(x) AS a,count(DISTINCT x) AS d,count(*) AS n",
+        "UNWIND [9007199254740992,9007199254740992,9007199254740992,\
+         1.0,1.0,1.0,-9007199254740992,-9007199254740992,-9007199254740992,\
+         null,null,null] AS x \
+         RETURN sum(x) AS s,avg(x) AS a,count(DISTINCT x) AS d,count(*) AS n",
+    ];
+    let mut outputs = Vec::new();
+    for text in queries {
+        let query = PreparedGraphPipelineAggregateText::prepare(text, symbols)
+            .unwrap()
+            .bind_relation_parameters(&GqlParameters::new())
+            .unwrap();
+        let result = query
+            .execute_governed(
+                GqlQueryPolicy::new(0, 1, 100_000, 20_000),
+                |_: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+                 _: GqlQueryPolicy|
+                 -> Result<_, GqlQueryError<(), ()>> {
+                    panic!("a scalar summary cannot open a graph")
+                },
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        outputs.push(result.value);
+    }
+    assert_eq!(outputs[0], outputs[1]);
+    let values = outputs[0][0].values();
+    for (at, expected) in [(0, 3.0), (1, 1.0 / 3.0)] {
+        let CanonicalScalar::Float(number) = values[at].as_value().unwrap().as_scalar().unwrap()
+        else {
+            panic!("mixed numeric summaries retain their binary64 result domain");
+        };
+        assert_eq!(number.get(), expected);
+    }
+    assert_eq!(values[2].as_count(), Some(3));
+    assert_eq!(values[3].as_count(), Some(12));
+}
+
 fn query(text: &str) -> PreparedGraphAggregate {
     PreparedGraphPipelineAggregateText::prepare(text, symbols)
         .unwrap()

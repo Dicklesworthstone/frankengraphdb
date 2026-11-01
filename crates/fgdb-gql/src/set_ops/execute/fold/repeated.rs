@@ -1,10 +1,11 @@
-//! Observed left-factor rows with contiguous, unobserved right multiplicities.
+//! Observed outer rows with contiguous, unobserved factor/body multiplicities.
 //!
 //! This is the left-major Cartesian preservation law, not a commutativity
 //! shortcut: each emitted tuple stands for one contiguous run in the original
 //! input order. SUM's checked prefixes and aggregate error positions therefore
 //! remain meaningful. Both children complete, left-to-right, before any sink
 //! runs. The ordinary executor still owns all value/order-sensitive barriers.
+//! Correlated bodies run once per outer occurrence, with no argument caching.
 
 use super::cardinality::{self, Amount};
 use super::*;
@@ -32,6 +33,11 @@ impl PreparedGraphSet {
         }
         match &self.node {
             SetNode::CrossJoin { left, .. } => columns.iter().all(|&at| at < left.types.len()),
+            SetNode::Apply {
+                left,
+                kind: ApplyKind::Inner | ApplyKind::Optional,
+                ..
+            } => columns.iter().all(|&at| at < left.types.len()),
             SetNode::Unwind { input, value } => {
                 cardinality::constant(value) && columns.iter().all(|&at| at < input.types.len())
             }
@@ -126,6 +132,48 @@ where
                 *weight = weight.multiply(repetitions);
             }
             rows
+        }
+        SetNode::Apply {
+            left,
+            right,
+            imports,
+            kind: kind @ (ApplyKind::Inner | ApplyKind::Optional),
+        } => {
+            // Imports need the complete original outer row, including columns
+            // unobserved by the aggregate. Do not collapse duplicate outer
+            // occurrences or start any body before outer validation finishes.
+            let left = run(left, source, meter, operand)?;
+            let right_operand = *operand;
+            *operand += right.operands;
+            let mut output = Vec::new();
+            for (row_at, row) in left.iter().enumerate() {
+                let weight = with_apply_arguments(row, row_at, imports, meter, |meter| {
+                    let mut inner_operand = right_operand;
+                    cardinality::count(right, source, meter, &mut inner_operand)
+                })?;
+                let weight = if weight.is_zero() && matches!(kind, ApplyKind::Optional) {
+                    Amount::ONE
+                } else {
+                    weight
+                };
+                meter.event(GlaExecutionEvent::Work)?;
+                if weight.is_zero() {
+                    continue;
+                }
+                meter.event(GlaExecutionEvent::ScratchEntry)?;
+                let mut values = Vec::new();
+                for &column in columns {
+                    values.push(projection::copy_value(
+                        &row.values()[column],
+                        &mut |event| meter.event(event),
+                    )?);
+                }
+                // Apply is outer-major: these repetitions are one contiguous
+                // run of identical observed cells. All bodies finish before
+                // the aggregate sink, including when an enclosing page is empty.
+                output.push((GraphValueRow::from_owned_values(values), weight));
+            }
+            output
         }
         SetNode::Scope(input) => collect(input, columns, source, meter, operand)?,
         SetNode::Unwind { input, value } => {
