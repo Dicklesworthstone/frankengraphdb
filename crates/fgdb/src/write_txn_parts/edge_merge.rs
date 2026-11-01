@@ -362,18 +362,63 @@ type EdgeMergeFault<E, A, C> = fgdb_gql::GqlQueryError<fgdb_gql::GraphEdgeMergeE
 type EdgeMergeSelection<E, A, C> =
     Result<fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>, EdgeMergeFault<E, A, C>>;
 
+/// Statement-local resolutions admitted by the native collector. Only the
+/// simple upsert's key-invariance proof enables them; row actions, deletions,
+/// unbound endpoints and non-reflexive keys keep the ordinary source path.
+/// The caller discards this owner together with its workspace on any refusal.
+struct EdgeUpsertMatchTargets {
+    pairs: ResolvedPairEdges,
+}
+
+impl EdgeUpsertMatchTargets {
+    fn new(upsert: &fgdb_gql::PreparedGraphEdgeUpsert) -> Option<Self> {
+        upsert.preserves_match_targets().then(|| Self {
+            pairs: std::collections::BTreeMap::new(),
+        })
+    }
+}
+
 // Private trusted seam: all endpoint rows are selected and validated before
 // any existence inspection. Each callback must retain ALL matching live EIds
 // in its admitted domain and native absence witnesses, including on refusal.
-// Canonical duplicate pairs collapse for plain MERGE; actions use the separate
-// singular upsert owner until a per-occurrence action contract is implemented.
+// Canonical duplicate pairs collapse for plain MERGE; upsert hosts transfer
+// each occurrence separately to preserve its sequential ON/SET actions.
 fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
     merge: &fgdb_gql::PreparedGraphEdgeMerge,
     policy: fgdb_gql::GraphEdgeMergePolicy,
+    select: impl FnOnce(fgdb_gql::GqlQueryPolicy) -> EdgeMergeSelection<E, A, C>,
+    mut edge_source: impl FnMut(VId, VId) -> Result<Vec<EdgeRecord>, fgdb_gql::GqlQueryError<E, C>>,
+    allocate: impl FnMut(usize) -> Result<ElementId, A>,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> Result<EdgeMergeProposal<Output>, EdgeMergeFault<E, A, C>> {
+    collect_edge_merge_output_reusing_targets(
+        merge,
+        policy,
+        None,
+        select,
+        |source, destination, _| edge_source(source, destination),
+        allocate,
+        checkpoint,
+    )
+}
+
+fn collect_edge_merge_output_reusing_targets<Output: EdgeMergeOutput, E, A, C>(
+    merge: &fgdb_gql::PreparedGraphEdgeMerge,
+    policy: fgdb_gql::GraphEdgeMergePolicy,
+    mut targets: Option<&mut EdgeUpsertMatchTargets>,
     // The endpoint rows (`PreparedGraphEdgeMerge::select_governed` over the
     // host's own pattern adapter), under the MERGE's query allowance.
     select: impl FnOnce(fgdb_gql::GqlQueryPolicy) -> EdgeMergeSelection<E, A, C>,
-    mut edge_source: impl FnMut(VId, VId) -> Result<Vec<EdgeRecord>, fgdb_gql::GqlQueryError<E, C>>,
+    // Called for EVERY pair, including a reused resolution. The scoped host
+    // still checks the original endpoints and live permit; only its physical
+    // candidate lookup returns an empty vector when targets_reused is true.
+    // Returned candidates are ignored on a hit; the admitted identities are
+    // already complete. This is private to the two native upsert owners.
+    mut edge_source: impl FnMut(
+        VId,
+        VId,
+        bool,
+    ) -> Result<Vec<EdgeRecord>, fgdb_gql::GqlQueryError<E, C>>,
     mut allocate: impl FnMut(usize) -> Result<ElementId, A>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> Result<EdgeMergeProposal<Output>, EdgeMergeFault<E, A, C>> {
@@ -508,9 +553,17 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
             .map_or(&[][..], Vec::as_slice);
         // A scoped host admits candidates BEFORE they reach these counters or
         // the uniqueness reducer. Repeated physical scans spend the SAME cap.
-        let edges = edge_source(source, destination)
+        let reused = targets
+            .as_deref()
+            .and_then(|targets| targets.pairs.get(&(source, destination)));
+        let edges = edge_source(source, destination, reused.is_some())
             .map_err(|error| error.map_source(GraphEdgeMergeError::Source))?;
-        let observed = u128::from(overlay_edges) + edges.len() as u128;
+        let observed = u128::from(overlay_edges)
+            + if reused.is_some() {
+                0
+            } else {
+                edges.len() as u128
+            };
         let records = u128::from(selected.rows.snapshot_records) + observed;
         policy
             .query
@@ -526,6 +579,25 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
             ));
         }
         overlay_edges = observed as u64;
+
+        if let Some(matching) = reused {
+            // Immutable match keys preserve the complete, identity-sorted
+            // target set. A preceding creation is now an ordinary match; its
+            // ON CREATE clause must never run for this later occurrence.
+            for &(edge, endpoints) in matching {
+                event(Some(GlaExecutionEvent::Work))?;
+                outcome.record(
+                    GraphEdgeMergeOutcome::Matched(edge),
+                    ResolvedEdge {
+                        pair: (source, destination),
+                        endpoints,
+                        occurrence,
+                    },
+                    &mut event,
+                )?;
+            }
+            continue;
+        }
 
         // An edge matches when its relation and orientation agree and every
         // property of the MERGE map equals its stored value (fgdb-at06q).
@@ -562,7 +634,7 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
         }
         if !matching.is_empty() {
             matching.sort_unstable();
-            for (edge, endpoints) in matching {
+            for &(edge, endpoints) in &matching {
                 outcome.record(
                     GraphEdgeMergeOutcome::Matched(edge),
                     ResolvedEdge {
@@ -572,6 +644,12 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
                     },
                     &mut event,
                 )?;
+            }
+            if let Some(targets) = targets.as_deref_mut() {
+                // The matching entries were charged before construction above.
+                // Transfer their ownership, and separately admit the pair key.
+                event(Some(GlaExecutionEvent::ScratchEntry))?;
+                targets.pairs.insert((source, destination), matching);
             }
             continue;
         }
@@ -606,6 +684,14 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
             .get_or_insert_with(|| WriteBatch::new(merge.relation()))
             .add_edge_values(edge, source, destination, properties);
         created_edges += 1;
+        if let Some(targets) = targets.as_deref_mut() {
+            // This vector and its pair key are additional retained owners.
+            event(Some(GlaExecutionEvent::ScratchEntry))?;
+            event(Some(GlaExecutionEvent::ScratchEntry))?;
+            targets
+                .pairs
+                .insert((source, destination), vec![(edge, (source, destination))]);
+        }
         // All proposals remain private until every pair has succeeded.
         event(None)?;
     }
@@ -987,6 +1073,404 @@ impl WriteTxn {
                 || cx.checkpoint(),
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod edge_merge_target_reuse_tests {
+    use super::*;
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
+    use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+    use fgdb_gql::{
+        GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError, GqlQueryExecution,
+        GqlQueryPolicy, GraphEdgeMergeOutcome, GraphEdgeMergePolicy, GraphSymbol, GraphSymbolKind,
+        PreparedGraphEdgeUpsert, PreparedGraphEdgeUpsertText,
+    };
+    use std::cell::Cell;
+
+    const RELATION: RelationId = RelationId(1);
+    const KEY: PropertyKeyId = PropertyKeyId(1);
+    const VALUE: PropertyKeyId = PropertyKeyId(2);
+    const HIGH: EId = EId((1_u128 << 112) + 7);
+    type Fault = EdgeMergeFault<&'static str, &'static str, &'static str>;
+
+    fn upsert() -> PreparedGraphEdgeUpsert {
+        PreparedGraphEdgeUpsertText::prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R {key:7}]-(b) ON MATCH SET r.value=r.value+1",
+            RELATION,
+            |kind, name| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RELATION)),
+                (GraphSymbolKind::Property, "key") => Some(GraphSymbol::Property(KEY)),
+                (GraphSymbolKind::Property, "value") => Some(GraphSymbol::Property(VALUE)),
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    }
+
+    fn policy() -> GraphEdgeMergePolicy {
+        GraphEdgeMergePolicy::new(GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX))
+    }
+
+    fn row(upsert: &PreparedGraphEdgeUpsert, source: u128, destination: u128) -> GraphValueRow {
+        let merge = upsert.merge();
+        let mut values =
+            vec![GraphValue::Scalar(CanonicalScalar::Null); merge.input_column_types().len()];
+        values[merge.source_column()] = GraphValue::Vertex(VId(source));
+        values[merge.destination_column()] = GraphValue::Vertex(VId(destination));
+        GraphValueRow::from_owned_values(values)
+    }
+
+    fn record(edge: EId, source: u128, destination: u128, key: i64) -> EdgeRecord {
+        EdgeRecord {
+            entry: AdjacencyEntry {
+                src: VId(source),
+                relation: RELATION,
+                dst: VId(destination),
+                eid: edge,
+                created_at: CommitSeq(1),
+                retired_at: None,
+            },
+            props: vec![(KEY, CanonicalScalar::Int(key).into())],
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve(
+        upsert: &PreparedGraphEdgeUpsert,
+        targets: Option<&mut EdgeUpsertMatchTargets>,
+        row: GraphValueRow,
+        edges: &[EdgeRecord],
+        policy: GraphEdgeMergePolicy,
+        admissions: &Cell<usize>,
+        scans: &Cell<usize>,
+        refused: Option<&'static str>,
+        checkpoint: impl FnMut() -> Result<(), &'static str>,
+    ) -> Result<EdgeMergeProposal<EdgeMergeRows>, Fault> {
+        let select = |_| {
+            Ok(GqlQueryExecution {
+                value: vec![row],
+                rows: GqlExecutionStats {
+                    snapshot_records: 0,
+                    result_rows: 1,
+                },
+                evaluator: GlaExecutionStats {
+                    work_units: 0,
+                    scratch_entries: 0,
+                },
+            })
+        };
+        let mut source = |_, _, reused| {
+            admissions.set(admissions.get() + 1);
+            if let Some(error) = refused {
+                return Err(GqlQueryError::Source(error));
+            }
+            if reused {
+                return Ok(Vec::new());
+            }
+            scans.set(scans.get() + 1);
+            Ok(edges.to_vec())
+        };
+        let allocate = |_| Ok(ElementId::Edge(EId(1000)));
+        match targets {
+            Some(targets) => collect_edge_merge_output_reusing_targets(
+                upsert.merge(),
+                policy,
+                Some(targets),
+                select,
+                source,
+                allocate,
+                checkpoint,
+            ),
+            None => collect_edge_merge_output(
+                upsert.merge(),
+                policy,
+                select,
+                |src, dst| source(src, dst, false),
+                allocate,
+                checkpoint,
+            ),
+        }
+    }
+
+    #[test]
+    fn reused_parallel_targets_equal_native_resolution_in_both_orientations() {
+        let upsert = upsert();
+        let mut targets = EdgeUpsertMatchTargets::new(&upsert).unwrap();
+        // An unsorted source includes a nonmatching map value and pair. Only
+        // the native matcher selects the complete, identity-sorted target set.
+        let edges = vec![
+            record(HIGH, 2, 1, 7),
+            record(EId(3), 1, 2, 7),
+            record(EId(4), 1, 2, 8),
+            record(EId(5), 1, 3, 7),
+        ];
+        let admissions = Cell::new(0);
+        let scans = Cell::new(0);
+        let ordinary_admissions = Cell::new(0);
+        let ordinary_scans = Cell::new(0);
+        for pair in [(1, 2), (1, 2), (2, 1), (2, 1)] {
+            let ordinary = resolve(
+                &upsert,
+                None,
+                row(&upsert, pair.0, pair.1),
+                &edges,
+                policy(),
+                &ordinary_admissions,
+                &ordinary_scans,
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+            let reused = resolve(
+                &upsert,
+                Some(&mut targets),
+                row(&upsert, pair.0, pair.1),
+                &edges,
+                policy(),
+                &admissions,
+                &scans,
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(reused.outcome.edges, ordinary.outcome.edges);
+            assert_eq!(reused.outcome.outcomes, ordinary.outcome.outcomes);
+            assert_eq!(reused.selected, ordinary.selected);
+            assert_eq!(
+                reused.outcome.outcomes,
+                vec![
+                    GraphEdgeMergeOutcome::Matched(EId(3)),
+                    GraphEdgeMergeOutcome::Matched(HIGH)
+                ]
+            );
+            assert_eq!(
+                reused.outcome.edges[&(VId(pair.0), VId(pair.1))],
+                vec![(EId(3), (VId(1), VId(2))), (HIGH, (VId(2), VId(1)))]
+            );
+            assert!(ordinary.creation.is_none() && reused.creation.is_none());
+        }
+        assert_eq!(
+            admissions.get(),
+            4,
+            "every occurrence retains source admission"
+        );
+        assert_eq!(scans.get(), 2, "only repeated ordered pairs reuse targets");
+        assert_eq!(ordinary_scans.get(), 4);
+        assert_eq!(targets.pairs.len(), 2, "reverse pairs are not conflated");
+    }
+
+    #[test]
+    fn a_new_edge_is_matched_on_the_next_occurrence() {
+        let upsert = upsert();
+        let mut targets = EdgeUpsertMatchTargets::new(&upsert).unwrap();
+        let admissions = Cell::new(0);
+        let scans = Cell::new(0);
+        let created = resolve(
+            &upsert,
+            Some(&mut targets),
+            row(&upsert, 1, 2),
+            &[],
+            policy(),
+            &admissions,
+            &scans,
+            None,
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            created.outcome.outcomes,
+            vec![GraphEdgeMergeOutcome::Created(EId(1000))]
+        );
+        let batch = created.creation.unwrap();
+        assert_eq!(batch.relation, RELATION);
+        assert!(
+            matches!(&batch.rows[..], [PendingRow::Edge { eid: EId(1000), src: VId(1), dst: VId(2), props, ensure: false }] if props == &vec![(KEY, CanonicalScalar::Int(7).into())])
+        );
+        let edges = [record(EId(1000), 1, 2, 7)];
+        let ordinary = resolve(
+            &upsert,
+            None,
+            row(&upsert, 1, 2),
+            &edges,
+            policy().with_creation_limit(0),
+            &Cell::new(0),
+            &Cell::new(0),
+            None,
+            || Ok(()),
+        )
+        .unwrap();
+        let reused = resolve(
+            &upsert,
+            Some(&mut targets),
+            row(&upsert, 1, 2),
+            &edges,
+            policy().with_creation_limit(0),
+            &admissions,
+            &scans,
+            None,
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(reused.outcome.outcomes, ordinary.outcome.outcomes);
+        assert_eq!(
+            reused.outcome.outcomes,
+            vec![GraphEdgeMergeOutcome::Matched(EId(1000))]
+        );
+        assert_eq!(reused.stats.created_edges, 0);
+        assert_eq!(reused.stats.overlay_edges, 0);
+        assert!(reused.creation.is_none());
+        assert_eq!((admissions.get(), scans.get()), (2, 1));
+    }
+
+    #[test]
+    fn reused_targets_keep_validation_source_refusal_and_every_checkpoint() {
+        let upsert = upsert();
+        let edges = [record(EId(3), 1, 2, 7), record(HIGH, 2, 1, 7)];
+        let mut targets = EdgeUpsertMatchTargets::new(&upsert).unwrap();
+        resolve(
+            &upsert,
+            Some(&mut targets),
+            row(&upsert, 1, 2),
+            &edges,
+            policy(),
+            &Cell::new(0),
+            &Cell::new(0),
+            None,
+            || Ok(()),
+        )
+        .unwrap();
+        for input in [GraphValueRow::from_owned_values(Vec::new()), {
+            let mut values = row(&upsert, 1, 2).values().to_vec();
+            values[upsert.merge().source_column()] = GraphValue::Scalar(CanonicalScalar::Null);
+            GraphValueRow::from_owned_values(values)
+        }] {
+            let admissions = Cell::new(0);
+            let ordinary = resolve(
+                &upsert,
+                None,
+                input.clone(),
+                &edges,
+                policy(),
+                &admissions,
+                &Cell::new(0),
+                Some("endpoint denied"),
+                || Ok(()),
+            )
+            .err()
+            .unwrap();
+            let reused = resolve(
+                &upsert,
+                Some(&mut targets),
+                input,
+                &edges,
+                policy(),
+                &admissions,
+                &Cell::new(0),
+                Some("endpoint denied"),
+                || Ok(()),
+            )
+            .err()
+            .unwrap();
+            assert_eq!(format!("{ordinary:?}"), format!("{reused:?}"));
+            assert_eq!(
+                admissions.get(),
+                0,
+                "invalid input refuses before source admission"
+            );
+        }
+        let denied = resolve(
+            &upsert,
+            Some(&mut targets),
+            row(&upsert, 1, 2),
+            &edges,
+            policy(),
+            &Cell::new(0),
+            &Cell::new(0),
+            Some("endpoint denied"),
+            || Ok(()),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(
+            denied,
+            GqlQueryError::Source(fgdb_gql::GraphEdgeMergeError::Source("endpoint denied"))
+        ));
+        let calls = Cell::new(0);
+        let completed = resolve(
+            &upsert,
+            Some(&mut targets),
+            row(&upsert, 1, 2),
+            &edges,
+            policy(),
+            &Cell::new(0),
+            &Cell::new(0),
+            None,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(completed.stats.evaluator.work_units >= 2);
+        let held = targets.pairs.clone();
+        for stop in 0..calls.get() {
+            let mut at = 0;
+            let refused = resolve(
+                &upsert,
+                Some(&mut targets),
+                row(&upsert, 1, 2),
+                &edges,
+                policy(),
+                &Cell::new(0),
+                &Cell::new(0),
+                None,
+                || {
+                    let current = at;
+                    at += 1;
+                    if current == stop {
+                        Err("cancelled")
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert!(matches!(
+                refused,
+                Err(GqlQueryError::Interrupted("cancelled"))
+            ));
+            assert_eq!(at, stop + 1);
+            assert_eq!(targets.pairs, held);
+        }
+        for scratch in [
+            completed.stats.evaluator.scratch_entries,
+            completed.stats.evaluator.scratch_entries - 1,
+        ] {
+            let allowance = GraphEdgeMergePolicy::new(GqlQueryPolicy::new(
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                scratch,
+            ));
+            let result = resolve(
+                &upsert,
+                Some(&mut targets),
+                row(&upsert, 1, 2),
+                &edges,
+                allowance,
+                &Cell::new(0),
+                &Cell::new(0),
+                None,
+                || Ok(()),
+            );
+            if scratch == completed.stats.evaluator.scratch_entries {
+                assert_eq!(result.unwrap().stats.evaluator, completed.stats.evaluator);
+            } else {
+                assert!(matches!(result, Err(GqlQueryError::Evaluator(_))));
+            }
+        }
     }
 }
 

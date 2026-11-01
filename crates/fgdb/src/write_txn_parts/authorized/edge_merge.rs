@@ -1,9 +1,7 @@
 //! Directed relationship get-or-create on the same native MERGE collector.
 //! Selection is masked; existence candidates are confined to its admitted pair.
 
-use super::super::{
-    EdgeMergeOutput, EdgeMergeRows, collect_edge_merge_output, edge_merge_query_rows,
-};
+use super::super::{EdgeMergeOutput, EdgeMergeRows, edge_merge_query_rows};
 use super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxn,
     WriteTxnError, redacted, selection, stage,
@@ -384,6 +382,7 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
         returning,
         None,
         None,
+        None,
     )
 }
 
@@ -413,6 +412,7 @@ pub(super) fn apply_selected<V: Vfs + Clone, Clock: FnMut() -> u64>(
         false,
         Some((selected, None)),
         frozen,
+        None,
     )
 }
 
@@ -432,6 +432,37 @@ pub(super) fn apply_occurrence<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: F
     selected: GqlQueryExecution<GraphValueRow>,
     occurrence: usize,
 ) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
+    apply_occurrence_reusing_targets(
+        transaction,
+        database,
+        cx,
+        merge,
+        policy,
+        scope,
+        execution,
+        selected,
+        occurrence,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_occurrence_reusing_targets<
+    Output: EdgeMergeOutput,
+    V: Vfs + Clone,
+    Clock: FnMut() -> u64,
+>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    merge: &PreparedGraphEdgeMerge,
+    policy: GraphEdgeMergePolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    selected: GqlQueryExecution<GraphValueRow>,
+    occurrence: usize,
+    targets: Option<&mut crate::write_txn::EdgeUpsertMatchTargets>,
+) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
     apply_with_input(
         transaction,
         database,
@@ -443,6 +474,7 @@ pub(super) fn apply_occurrence<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: F
         false,
         Some((selected, Some(occurrence))),
         None,
+        targets,
     )
 }
 
@@ -458,6 +490,7 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
     returning: bool,
     selected: Option<(GqlQueryExecution<GraphValueRow>, Option<usize>)>,
     frozen: Option<&mut crate::write_txn::FrozenCreations>,
+    targets: Option<&mut crate::write_txn::EdgeUpsertMatchTargets>,
 ) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
     if !scope.allows_relation(merge.relation()) {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
@@ -472,9 +505,10 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
     let proposal: super::super::EdgeMergeProposal<Output> = cx.with_restriction(|| {
         let database = RefCell::new(&mut *database);
         let controls = RefCell::new(&mut *execution);
-        collect_edge_merge_output(
+        crate::write_txn::collect_edge_merge_output_reusing_targets(
             merge,
             policy,
+            targets,
             |allowance| {
                 if let Some((selected, _)) = selected {
                     return Ok(selected);
@@ -510,7 +544,7 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
                     },
                 )
             },
-            |src, dst| {
+            |src, dst, targets_reused| {
                 // The selected pair is the entire existence domain. Recheck
                 // original endpoints, never a client-selected or masked image.
                 for vertex in [src, dst] {
@@ -542,6 +576,13 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
                             Error::ScopeDenied,
                         )));
                     }
+                }
+                if targets_reused {
+                    // The original endpoints and live authority were checked
+                    // above even when the native, statement-local resolution
+                    // is invariant. Actions still read and authorize current
+                    // fields through their ordinary owners below.
+                    return Ok(Vec::new());
                 }
                 // Retain the native incidence gaps even when no edge exists.
                 // Raw records stay private. The exact pair/relation source
@@ -610,3 +651,185 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
 #[cfg(test)]
 #[path = "edge_merge_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod target_reuse_authorization_tests {
+    use super::*;
+    use crate::write_txn::{EdgeUpsertMatchTargets, EdgeUpsertOccurrences};
+    use crate::{DatabaseKeys, WriteBatch};
+    use asupersync::lab::run_async_under_lab;
+    use asupersync::security::key::AuthKey;
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{
+        GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryPolicy, GraphSymbol,
+        GraphSymbolKind, PreparedGraphEdgeUpsert, PreparedGraphEdgeUpsertText,
+    };
+    use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+    use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
+    use std::cell::Cell;
+
+    const RELATION: RelationId = RelationId(1);
+    const VISIBLE: LabelId = LabelId(1);
+    const HIDDEN: LabelId = LabelId(2);
+    const KEY: PropertyKeyId = PropertyKeyId(1);
+    const VALUE: PropertyKeyId = PropertyKeyId(2);
+
+    fn selected(upsert: &PreparedGraphEdgeUpsert) -> GqlQueryExecution<GraphValueRow> {
+        let merge = upsert.merge();
+        let mut values =
+            vec![GraphValue::Scalar(CanonicalScalar::Null); merge.input_column_types().len()];
+        values[merge.source_column()] = GraphValue::Vertex(VId(1));
+        values[merge.destination_column()] = GraphValue::Vertex(VId(2));
+        GqlQueryExecution {
+            value: vec![GraphValueRow::from_owned_values(values)],
+            rows: GqlExecutionStats {
+                snapshot_records: 0,
+                result_rows: 1,
+            },
+            evaluator: GlaExecutionStats::default(),
+        }
+    }
+
+    #[test]
+    fn admitted_hit_still_refuses_hidden_endpoint_hidden_key_and_expired_permit() {
+        let ((), report) = run_async_under_lab(0xe6e0_0043, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let namespace = DatabaseSecurityNamespaceId([0x71; 32]);
+            let authority = Authority::new(
+                AuthKey::from_seed(0x7143),
+                namespace,
+                "graph",
+                SchemaEpoch(1),
+                1,
+            )
+            .unwrap();
+            let grant = Grant {
+                branch: "main".into(),
+                labels: Scope::only([VISIBLE]),
+                relations: Scope::only([RELATION]),
+                properties: Scope::only([KEY, VALUE]),
+                rights: Rights::ReadWrite,
+                limits: QueryLimits {
+                    max_nodes: 100_000,
+                    max_work: 1_000_000,
+                    max_rows: 100,
+                },
+                expires_at_ms: 1_000,
+            };
+            let token = authority.issue_at(&grant, 100).unwrap();
+            let verified = authority.verify_at(&token, "main", 100).unwrap();
+            let mut hidden_key_grant = grant.clone();
+            hidden_key_grant.properties = Scope::only([VALUE]);
+            let hidden_key_token = authority.issue_at(&hidden_key_grant, 100).unwrap();
+            let hidden_key = authority.verify_at(&hidden_key_token, "main", 100).unwrap();
+            let upsert = PreparedGraphEdgeUpsertText::prepare(
+                "MATCH (a),(b) MERGE (a)-[r:R {key:7}]->(b) ON MATCH SET r.value=1",
+                RELATION,
+                |kind, name| match (kind, name) {
+                    (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RELATION)),
+                    (GraphSymbolKind::Property, "key") => Some(GraphSymbol::Property(KEY)),
+                    (GraphSymbolKind::Property, "value") => Some(GraphSymbol::Property(VALUE)),
+                    _ => None,
+                },
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let policy =
+                GraphEdgeMergePolicy::new(GqlQueryPolicy::new(1_000, 100, 100_000, 10_000))
+                    .with_creation_limit(0);
+            for refusal in 0..3 {
+                let mut db = Database::open_memory(
+                    &commit,
+                    DatabaseKeys::new([0x70; 32], namespace, [0x72; 32]),
+                )
+                .await
+                .unwrap();
+                let mut seed = WriteBatch::new(RELATION);
+                for vertex in [VId(1), VId(2)] {
+                    seed.create_vertex(vertex, vec![VISIBLE], Vec::new());
+                }
+                seed.add_edge(EId(9), VId(1), VId(2), vec![(KEY, CanonicalScalar::Int(7))]);
+                db.write(&commit, seed).await.unwrap();
+                let frontier = db.frontier().unwrap();
+                let mut transaction = db.begin(&txcx).unwrap();
+                let now = Cell::new(100);
+                let mut execution = Execution {
+                    cx: &commit,
+                    permit: verified.begin_write_at("main", 100).unwrap(),
+                    clock: || now.get(),
+                };
+                let mut targets = EdgeUpsertMatchTargets::new(&upsert).unwrap();
+                for occurrence in 0..2 {
+                    let (stats, result, _) =
+                        apply_occurrence_reusing_targets::<EdgeUpsertOccurrences, _, _>(
+                            &mut transaction,
+                            &mut db,
+                            &cx,
+                            upsert.merge(),
+                            policy,
+                            verified.predicates(),
+                            &mut execution,
+                            selected(&upsert),
+                            occurrence,
+                            Some(&mut targets),
+                        )
+                        .unwrap();
+                    assert_eq!(result.0, vec![GraphEdgeMergeOutcome::Matched(EId(9))]);
+                    assert_eq!(stats.overlay_edges, u64::from(occurrence == 0));
+                }
+                // Inject changes at the private adapter seam: these cannot be
+                // produced by the admitted simple actions, but cached identities
+                // must still never bypass current endpoint or capability checks.
+                if refusal == 0 {
+                    let mut labels = WriteBatch::new(RELATION);
+                    labels.set_vertex_label(VId(2), VISIBLE, false);
+                    labels.set_vertex_label(VId(2), HIDDEN, true);
+                    transaction.write(&mut db, labels).unwrap();
+                } else if refusal == 2 {
+                    now.set(1_001);
+                }
+                let scope = if refusal == 1 {
+                    hidden_key.predicates()
+                } else {
+                    verified.predicates()
+                };
+                let error = apply_occurrence_reusing_targets::<EdgeUpsertOccurrences, _, _>(
+                    &mut transaction,
+                    &mut db,
+                    &cx,
+                    upsert.merge(),
+                    policy,
+                    scope,
+                    &mut execution,
+                    selected(&upsert),
+                    2,
+                    Some(&mut targets),
+                )
+                .err()
+                .unwrap();
+                if refusal == 2 {
+                    assert!(matches!(
+                        error,
+                        GqlQueryError::Interrupted(WriteTxnError::Authorization(_))
+                    ));
+                } else {
+                    assert!(matches!(
+                        error,
+                        GqlQueryError::Source(GraphEdgeMergeError::Source(
+                            WriteTxnError::Authorization(Error::ScopeDenied)
+                        ))
+                    ));
+                }
+                assert_eq!(db.frontier().unwrap(), frontier);
+                transaction.abort();
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

@@ -426,6 +426,27 @@ impl PreparedGraphEdgeUpsert {
     pub fn after(&self) -> &[GraphEdgeUpsertAction<GraphEdgeUpsertValue>] {
         &self.after
     }
+
+    /// Whether repeated occurrences of one bound endpoint pair may reuse the
+    /// native MERGE's resolved identities within this statement. Every ON and
+    /// trailing SET still runs against the current staged properties.
+    ///
+    /// This proof covers only constant, reflexive match keys and named writes
+    /// to other properties. Row-valued keys need their own native comparison;
+    /// a non-reflexive list may not match even its immediately preceding
+    /// creation. No reuse across statements or general row actions is proved.
+    #[must_use]
+    pub fn preserves_match_targets(&self) -> bool {
+        !self.merge.has_row_properties()
+            && self.merge.shares_pair_outcomes()
+            && self
+                .on_match
+                .iter()
+                .chain(&self.on_create)
+                .chain(&self.after)
+                .all(|action| self.merge.property_keys().all(|key| key != action.key))
+    }
+
     #[must_use]
     pub fn action_count(&self, branch: GraphEdgeUpsertBranch) -> usize {
         match branch {
@@ -529,6 +550,92 @@ impl PreparedGraphEdgeUpsert {
             }
         }
         bytes
+    }
+}
+
+#[cfg(test)]
+mod match_target_invariance_tests {
+    use super::*;
+    use crate::vertex_merge::GraphVertexMergeRowValue;
+    use crate::{
+        GqlParameters, GraphSetColumnType, GraphSymbol, GraphSymbolKind,
+        PreparedGraphEdgeUpsertText, PreparedGraphSet,
+    };
+    use fgdb_delta_types::RelationId;
+
+    const KEY: PropertyKeyId = PropertyKeyId(1);
+    const VALUE: PropertyKeyId = PropertyKeyId(2);
+
+    fn prepared(keys: &str, actions: &str) -> PreparedGraphEdgeUpsert {
+        PreparedGraphEdgeUpsertText::prepare(
+            &format!("MATCH (a),(b) MERGE (a)-[r:R {keys}]->(b) {actions}"),
+            RelationId(1),
+            |kind, name| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                (GraphSymbolKind::Property, "key") => Some(GraphSymbol::Property(KEY)),
+                (GraphSymbolKind::Property, "value") => Some(GraphSymbol::Property(VALUE)),
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    }
+
+    #[test]
+    fn all_clauses_must_preserve_every_match_key() {
+        assert!(
+            prepared(
+                "{key:7}",
+                "ON CREATE SET r.value=1 ON MATCH SET r.value=r.value+1 SET r.value=r.value*2",
+            )
+            .preserves_match_targets()
+        );
+        for actions in [
+            "ON CREATE SET r.key=8",
+            "ON MATCH SET r.key=8",
+            "ON CREATE SET r.value=1 ON MATCH SET r.value=2 SET r.key=8",
+        ] {
+            assert!(!prepared("{key:7}", actions).preserves_match_targets());
+        }
+        assert!(prepared("{key:[1,2]}", "SET r.value=1").preserves_match_targets());
+        assert!(!prepared("{key:[1,null]}", "SET r.value=1").preserves_match_targets());
+    }
+
+    #[test]
+    fn row_keys_and_unbound_endpoints_retain_native_resolution() {
+        let merge = || {
+            PreparedGraphEdgeMerge::prepare_relation(
+                PreparedGraphSet::owned(
+                    vec!["a".into(), "b".into(), "key".into()],
+                    vec![GraphSetColumnType::Any; 3],
+                ),
+                RelationId(1),
+                0,
+                1,
+                Vec::new(),
+            )
+            .unwrap()
+        };
+        for merge in [
+            merge()
+                .with_row_properties(vec![(KEY, GraphVertexMergeRowValue::Column(2))])
+                .unwrap(),
+            merge()
+                .with_unbound_endpoints(vec![(0, Vec::new(), Vec::new())])
+                .unwrap(),
+        ] {
+            let upsert = PreparedGraphEdgeUpsert::prepare(
+                merge,
+                vec![GraphEdgeUpsertAction {
+                    key: VALUE,
+                    value: GqlScalarParameter::new(fgdb_types::CanonicalScalar::Int(1)).unwrap(),
+                }],
+                Vec::new(),
+            )
+            .unwrap();
+            assert!(!upsert.preserves_match_targets());
+        }
     }
 }
 

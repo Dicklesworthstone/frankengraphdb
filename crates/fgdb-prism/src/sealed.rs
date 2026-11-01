@@ -868,6 +868,19 @@ impl SealedGraphView {
         self.0.partition.shares_image_with(partition)
     }
 
+    /// The exact immutable source retained by an unrestricted projection.
+    /// Trusted owners may reuse this earned image to build a different graph;
+    /// the new constructor must still admit its vertices, cut, relation,
+    /// projection laws and limits. Borrowing the image grants no authorization.
+    ///
+    /// A source contains incidences and properties outside a masked graph's
+    /// visible projection. Neither a hidden relation nor a hidden weight
+    /// property may expose that source, even when the current graph is empty
+    /// or its weight policy would ignore the hidden property.
+    pub fn unmasked_source(&self) -> Option<&SealedPartition> {
+        (self.0.mask == SealedProjectionMask::UNMASKED).then_some(&self.0.partition)
+    }
+
     pub fn neighbor_cursor(
         &self,
         cx: &QueryCx,

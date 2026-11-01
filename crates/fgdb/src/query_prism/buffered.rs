@@ -334,6 +334,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// Completed exact requests may share this view's separately charged
     /// compressed cache. All construction limits are part of its key; a hit
     /// skips physical build checkpoints/I/O but always checks live cancellation.
+    /// Different projection shapes can share the authenticated relation image
+    /// under identical sealing/source bounds; their vertex selection and full
+    /// projection admission execute again under the new request's allowances.
     #[allow(clippy::too_many_arguments)]
     pub async fn prism_sealed_projection_at(
         &mut self,
@@ -456,11 +459,20 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                     &mut staged_bytes,
                 )
                 .await?;
-            let partition = self
-                .partition
-                .seal_relation(cx, as_of, relation, sealing, max_source_incidences)
-                .await
-                .map_err(FnxSealedReadError::Seal)?;
+            let retained_source = self
+                .sealed_cache
+                .lookup_source(cx, request)
+                .map_err(FnxReadError::Cancelled)?
+                .and_then(|retained| retained.graph.unmasked_source().cloned());
+            let partition = if let Some(partition) = retained_source {
+                cx.checkpoint().map_err(FnxReadError::Cancelled)?;
+                partition
+            } else {
+                self.partition
+                    .seal_relation(cx, as_of, relation, sealing, max_source_incidences)
+                    .await
+                    .map_err(FnxSealedReadError::Seal)?
+            };
             let scope = partition.anchor().scope();
             let root = self.partition.root();
             if scope.source_root != self.partition_root()
@@ -504,6 +516,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// build cannot satisfy this query path. Reuse skips physical I/O and
     /// builder checkpoints but recharges all logical source counters. Live
     /// checks and kernel/output admissions are never cached.
+    /// A different projection shape may reuse only the source image and its
+    /// authenticated pre-compaction record count. It rebuilds the vertices and
+    /// graph with fresh metering; a standalone image has no query receipt.
     #[allow(clippy::too_many_arguments)]
     async fn prism_sealed_query_projection(
         &mut self,
@@ -582,18 +597,36 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         // physical preparation. GQL also admits the authenticated raw input
         // population before payload faults or compaction can remove superseded
         // history, including old versions and excluded endpoints.
-        let partition = self
-            .partition
-            .seal_relation_with_source_admission(
-                cx,
-                as_of,
-                relation,
-                sealing,
-                max_source_incidences,
-                |records| usage.raw_records(sealed_usage_count(records)?),
-                |error| query_sealed_failure(FnxSealedReadError::Seal(error)),
-            )
-            .await?;
+        let retained_source = self
+            .sealed_cache
+            .lookup_source(cx, request)
+            .map_err(GqlQueryError::Interrupted)?
+            .and_then(|retained| {
+                Some((
+                    retained.graph.unmasked_source()?.clone(),
+                    retained.query_usage?.raw_source_records,
+                ))
+            });
+        let partition = if let Some((partition, records)) = retained_source {
+            // Recharge the authenticated pre-compaction population, not the
+            // smaller retained image. Vertex selection above and projection
+            // construction below execute under this caller's fresh limits.
+            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            usage.raw_records(records)?;
+            partition
+        } else {
+            self.partition
+                .seal_relation_with_source_admission(
+                    cx,
+                    as_of,
+                    relation,
+                    sealing,
+                    max_source_incidences,
+                    |records| usage.raw_records(sealed_usage_count(records)?),
+                    |error| query_sealed_failure(FnxSealedReadError::Seal(error)),
+                )
+                .await?
+        };
         let scope = partition.anchor().scope();
         let root = self.partition.root();
         if scope.source_root != self.partition_root()

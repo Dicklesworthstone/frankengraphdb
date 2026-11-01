@@ -1104,18 +1104,27 @@ impl<V: Vfs + Clone> Database<V> {
                 &mut control,
                 &mut staging_bytes,
             )?;
-            let partition = self
-                .store
-                .seal_relation_with_source_limits(
-                    cx,
-                    view.partition_root(),
-                    as_of,
-                    relation,
-                    sealing,
-                    root_limits,
-                )
-                .await
-                .map_err(SealedReadError::Seal)?;
+            let retained_source = cache
+                .lookup_source_controlled(&view.snapshot, request, &mut || {
+                    cx.checkpoint().map_err(Error::Cancelled)
+                })?
+                .and_then(|retained| retained.graph.unmasked_source().cloned());
+            let partition = if let Some(partition) = retained_source {
+                cx.checkpoint().map_err(Error::Cancelled)?;
+                partition
+            } else {
+                self.store
+                    .seal_relation_with_source_limits(
+                        cx,
+                        view.partition_root(),
+                        as_of,
+                        relation,
+                        sealing,
+                        root_limits,
+                    )
+                    .await
+                    .map_err(SealedReadError::Seal)?
+            };
             view.check_sealed_source(&partition, as_of)?;
             let graph = build
                 .build(

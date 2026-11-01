@@ -20,7 +20,7 @@ use fgdb_gql::{
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions, FnxSealedReadError,
     FnxValue, FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy, SealedGraphView,
-    SelfLoopPolicy,
+    SealedProjectionMask, SealedProjectionSpec, SelfLoopPolicy,
 };
 use fgdb_strata::store::{BlockStore, RootReadLimits};
 use fgdb_strata::tiered::sealed::SealedLimits;
@@ -211,6 +211,195 @@ fn cache_limit(database: &Database<MemVfs>, cx: &QueryCx, bytes: usize) {
             },
         )
         .unwrap();
+}
+
+#[test]
+fn only_unmasked_projections_expose_their_exact_admitted_source() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let database = seed(&contexts.commit(), &vfs).await;
+        let original = project(&database, &cx, options()).await;
+        let image = original.unmasked_source().unwrap();
+        assert!(original.shares_storage_with(image));
+        assert!(image.shares_image_with(original.clone().unmasked_source().unwrap()));
+        let config = SealedProjectionSpec {
+            as_of: original.binding().as_of,
+            selection: original.selection(),
+            projection: original.spec(),
+        };
+        // Even an empty graph or a unit-weight reduction can retain private
+        // incidences/properties. Neither permits a restricted source escape.
+        for vertices in [original.vertex_ids(), &[]] {
+            for relation_visible in [false, true] {
+                for weight_property_visible in [false, true] {
+                    let mask = SealedProjectionMask {
+                        relation_visible,
+                        weight_property_visible,
+                    };
+                    let graph = SealedGraphView::build_with_checkpoint(
+                        &cx,
+                        image,
+                        vertices,
+                        config,
+                        mask,
+                        options().projection_limits,
+                        || Ok(()),
+                    )
+                    .unwrap();
+                    assert!(graph.shares_storage_with(image));
+                    assert_eq!(
+                        graph.unmasked_source().is_some(),
+                        relation_visible && weight_property_visible,
+                    );
+                    if let Some(exposed) = graph.unmasked_source() {
+                        assert!(exposed.shares_image_with(image));
+                        assert_eq!(exposed.anchor(), image.anchor());
+                    }
+                    if !relation_visible || vertices.is_empty() {
+                        assert_eq!(graph.edge_count(), 0);
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn changed_projection_shapes_reuse_the_source_and_rebuild_every_selected_graph() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let database = seed(&contexts.commit(), &vfs).await;
+        let admitted = database.read_session().unwrap();
+        let mut cold = buffered(&contexts, &vfs).await;
+        let first = project(&database, &cx, options()).await;
+        let first_buffered = buffered_project(&mut cold, &cx, options()).await;
+        let mut resident_bytes = first.charged_resident_bytes();
+        let mut buffered_bytes = first_buffered.charged_resident_bytes();
+        assert!(!first.shares_storage_with(first_buffered.unmasked_source().unwrap()));
+        for dimension in 0..6 {
+            let mut opt = options();
+            match dimension {
+                0 | 1 => {
+                    opt.selection.weight = FnxWeightSpec::Property {
+                        key: P,
+                        missing: MissingWeightPolicy::Reject,
+                    };
+                    opt.projection.directedness = if dimension == 0 {
+                        Directedness::Directed
+                    } else {
+                        Directedness::Reversed
+                    };
+                    opt.projection.parallel_edges = if dimension == 0 {
+                        ParallelEdgePolicy::Sum
+                    } else {
+                        ParallelEdgePolicy::Minimum
+                    };
+                }
+                2 => opt.selection.vertex_label = None,
+                3 => opt.selection.vertex_label = Some(LabelId(99)),
+                4 => opt.projection.self_loops = SelfLoopPolicy::Keep,
+                5 => {
+                    opt.source_limits.max_work_units -= 1;
+                    opt.source_limits.max_scratch_entries -= 1;
+                    opt.source_limits.max_staging_bytes -= 1;
+                    opt.projection_limits.max_vertices -= 1;
+                    opt.projection_limits.max_input_edges -= 1;
+                    opt.projection_limits.max_adjacency_entries -= 1;
+                    opt.projection_limits.max_workspace_bytes -= 1;
+                }
+                _ => unreachable!(),
+            }
+            let resident = project(&database, &cx, opt).await;
+            let buffered = buffered_project(&mut cold, &cx, opt).await;
+            assert!(!resident.shares_cache_with(&first), "dimension {dimension}");
+            assert!(
+                !buffered.shares_cache_with(&first_buffered),
+                "dimension {dimension}"
+            );
+            assert!(resident.shares_storage_with(first.unmasked_source().unwrap()));
+            assert!(buffered.shares_storage_with(first_buffered.unmasked_source().unwrap()));
+            assert_eq!(resident.digest(), buffered.digest());
+            let decoded = admitted
+                .prism_projection_at(
+                    &cx,
+                    admitted.frontier(),
+                    opt.selection,
+                    opt.projection,
+                    opt.projection_limits,
+                    opt.source_limits,
+                )
+                .unwrap();
+            for graph in [&resident, &buffered] {
+                assert_eq!(graph.vertex_ids(), decoded.vertex_ids());
+                for source in 0..graph.node_count() {
+                    let (targets, weights) = decoded.projected_row(source).unwrap();
+                    let expected: Vec<_> = targets
+                        .iter()
+                        .zip(weights)
+                        .map(|(&target, &weight)| {
+                            (decoded.vertex_id(target).unwrap(), weight.to_bits())
+                        })
+                        .collect();
+                    let mut cursor = graph.neighbor_cursor(&cx, source).unwrap();
+                    let mut actual = Vec::new();
+                    while let Some((target, weight)) = cursor.next(&cx).unwrap() {
+                        actual.push((graph.vertex_id(target).unwrap(), weight.to_bits()));
+                    }
+                    assert_eq!(actual, expected, "dimension {dimension}, row {source}");
+                }
+            }
+            resident_bytes += resident.charged_resident_bytes();
+            buffered_bytes += buffered.charged_resident_bytes();
+            assert_eq!(
+                database
+                    .read_cache_status(&cx)
+                    .unwrap()
+                    .sealed_projections
+                    .retained_bytes,
+                resident_bytes,
+                "every retained graph conservatively charges the complete shared image",
+            );
+            assert_eq!(
+                cold.sealed_read_cache_usage().retained_bytes,
+                buffered_bytes
+            );
+        }
+        assert_eq!(
+            database
+                .read_cache_status(&cx)
+                .unwrap()
+                .sealed_projections
+                .entries,
+            7
+        );
+        assert_eq!(cold.sealed_read_cache_usage().entries, 7);
+        cache_limit(&database, &cx, 0);
+        cold.set_sealed_read_cache_pool(&cx, MemoryPool::new(0, 0).unwrap())
+            .unwrap();
+        let uncached = project(&database, &cx, options()).await;
+        let uncached_buffered = buffered_project(&mut cold, &cx, options()).await;
+        assert!(!uncached.shares_storage_with(first.unmasked_source().unwrap()));
+        assert!(!uncached_buffered.shares_storage_with(first_buffered.unmasked_source().unwrap()));
+        assert_eq!(uncached.digest(), first.digest());
+        assert_eq!(uncached_buffered.digest(), first_buffered.digest());
+        assert_eq!(
+            database
+                .read_cache_status(&cx)
+                .unwrap()
+                .sealed_projections
+                .retained_bytes,
+            0
+        );
+        assert_eq!(cold.sealed_read_cache_usage().retained_bytes, 0);
+    });
 }
 
 #[test]
@@ -757,6 +946,7 @@ fn pinned_roots_and_opaque_source_receipts_prevent_stale_or_cross_owner_reuse() 
         let current = project(&database, &cx, opt).await;
         assert_ne!(current.binding(), original.binding());
         assert!(!current.shares_cache_with(&original));
+        assert!(!current.shares_storage_with(original.unmasked_source().unwrap()));
         assert!(from_receipt.shares_cache_with(&old_project()));
         assert!(old_buffered.shares_cache_with(&buffered_project(&mut cold, &cx, opt).await));
         assert_eq!(
@@ -825,12 +1015,18 @@ fn buffered_slots_do_not_displace_live_entries_and_selection_keys_do_not_alias()
             }
             let changed = buffered_project(&mut view, &cx, variant).await;
             assert!(!first.shares_cache_with(&changed), "dimension {dimension}");
+            assert_eq!(
+                changed.shares_storage_with(first.unmasked_source().unwrap()),
+                dimension != 1,
+                "relation scope must match even when other projection choices change",
+            );
             assert!(changed.shares_cache_with(&buffered_project(&mut view, &cx, variant).await));
         }
         assert_eq!(view.sealed_read_cache_usage().entries, 8);
         let mut extra = options();
         extra.as_of = Some(CommitSeq(1));
         let overflow = buffered_project(&mut view, &cx, extra).await;
+        assert!(!overflow.shares_storage_with(first.unmasked_source().unwrap()));
         assert!(!overflow.shares_cache_with(&buffered_project(&mut view, &cx, extra).await));
         assert!(first.shares_cache_with(&buffered_project(&mut view, &cx, options()).await));
         assert_eq!(view.sealed_read_cache_usage().entries, 8);

@@ -137,6 +137,7 @@ fn apply_all<V: Vfs + Clone, Clock: FnMut() -> u64>(
             evaluator: selected.evaluator,
         };
         let mut targets = BTreeSet::new();
+        let mut match_targets = crate::write_txn::EdgeUpsertMatchTargets::new(input);
         let mut outcomes = Vec::new();
         event(
             cx,
@@ -167,38 +168,42 @@ fn apply_all<V: Vfs + Clone, Clock: FnMut() -> u64>(
             // This tuple already passed the one masked selection. Transfer it
             // and the cumulative prefix to the ordinary collector, not a fake
             // pattern, a text rewrite, or an unchecked privileged graph read.
-            let (merge_stats, resolved, _) =
-                edge_merge::apply_occurrence::<crate::write_txn::EdgeUpsertOccurrences, _, _>(
-                    transaction,
-                    database,
-                    cx,
-                    input.merge(),
-                    remaining,
-                    scope,
-                    execution,
-                    GqlQueryExecution {
-                        value: vec![row],
-                        rows: GqlExecutionStats {
-                            snapshot_records: records,
-                            result_rows: 1,
-                        },
-                        evaluator: stats.evaluator,
+            let (merge_stats, resolved, _) = edge_merge::apply_occurrence_reusing_targets::<
+                crate::write_txn::EdgeUpsertOccurrences,
+                _,
+                _,
+            >(
+                transaction,
+                database,
+                cx,
+                input.merge(),
+                remaining,
+                scope,
+                execution,
+                GqlQueryExecution {
+                    value: vec![row],
+                    rows: GqlExecutionStats {
+                        snapshot_records: records,
+                        result_rows: 1,
                     },
-                    row_at,
-                )
-                .map_err(|error| {
-                    error.map_source(|error| {
-                        GraphEdgeUpsertError::Merge(match error {
-                            GraphEdgeMergeError::CreationLimit { observed, .. } => {
-                                GraphEdgeMergeError::CreationLimit {
-                                    limit: policy.merge.max_created_edges,
-                                    observed: u128::from(stats.created_edges) + observed,
-                                }
+                    evaluator: stats.evaluator,
+                },
+                row_at,
+                match_targets.as_mut(),
+            )
+            .map_err(|error| {
+                error.map_source(|error| {
+                    GraphEdgeUpsertError::Merge(match error {
+                        GraphEdgeMergeError::CreationLimit { observed, .. } => {
+                            GraphEdgeMergeError::CreationLimit {
+                                limit: policy.merge.max_created_edges,
+                                observed: u128::from(stats.created_edges) + observed,
                             }
-                            error => error,
-                        })
+                        }
+                        error => error,
                     })
-                })?;
+                })
+            })?;
             stats.evaluator = merge_stats.evaluator;
             stats.overlay_edges = stats
                 .overlay_edges
@@ -208,8 +213,9 @@ fn apply_all<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 .created_edges
                 .checked_add(merge_stats.created_edges)
                 .ok_or_else(invalid)?;
-            // Freeze all parallel matches for THIS occurrence before changing
-            // any key. The next occurrence must resolve against the new state.
+            // Resolve all parallel matches before this occurrence's actions.
+            // A key-changing action disables reuse for the entire statement;
+            // even reused identities run ON/SET against current staged fields.
             for outcome in resolved.0 {
                 let (edge, branch) = match outcome {
                     GraphEdgeMergeOutcome::Matched(edge) => (edge, GraphEdgeUpsertBranch::Match),
