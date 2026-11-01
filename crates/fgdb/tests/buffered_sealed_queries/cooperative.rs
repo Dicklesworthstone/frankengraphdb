@@ -1,5 +1,5 @@
-//! External CALL/Apply must actually suspend inside the retained kernel, with
-//! unchanged logical admission and no result prefix on cancellation or drop.
+//! External CALL/Apply suspends in cold projection construction and retained
+//! kernels, with unchanged logical admission and no partial publication.
 
 use super::*;
 use asupersync::{Budget, runtime::RuntimeBuilder};
@@ -19,6 +19,200 @@ async fn counted<F: Future>(future: F) -> (F::Output, usize) {
     })
     .await;
     (result, pending)
+}
+
+#[test]
+fn cold_projection_quantum_preserves_answers_receipts_and_typed_work_refusals() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let (vfs, _writer) = fixture(&commit).await;
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let params = parameters();
+        for direction in ["directed", "reversed", "undirected"] {
+            let text = format!(
+                "{} YIELD node,distance RETURN node,distance ORDER BY node",
+                BFS.replace("'directed'", &format!("'{direction}'")),
+            );
+            let prepared = prepare(&text, &params);
+            let mut expected = None;
+            let mut immediate_polls = 0;
+            for steps in [usize::MAX, 1, 2, 7, 64] {
+                // Every quantum starts with a newly admitted owner. A cached
+                // receipt cannot hide differences in cold construction work.
+                let mut cold = view(&commit, &vfs, &source_pool).await;
+                let retained = cold.sealed_read_cache_pool().clone();
+                assert_eq!(retained.used(), 0);
+                let configured = prepared
+                    .clone()
+                    .with_analytics_quantum(NonZeroUsize::new(steps).unwrap());
+                let (answer, polls) = counted(execute(
+                    &configured,
+                    &mut cold,
+                    &cx,
+                    policy(),
+                    &spill_pool,
+                    2,
+                    WORK,
+                ))
+                .await;
+                let answer = answer.unwrap();
+                let literal = if direction == "reversed" {
+                    vec![vec![vertex(1), integer(0)]]
+                } else {
+                    bfs_rows()
+                };
+                assert_eq!(answer.rows, literal);
+                if let Some(expected) = &expected {
+                    assert_eq!(&answer, expected, "{direction}, quantum={steps}");
+                } else {
+                    expected = Some(answer);
+                    immediate_polls = polls;
+                }
+                if steps == 1 {
+                    assert!(polls > immediate_polls, "cold construction must cooperate");
+                }
+                assert!(retained.used() > 0);
+                // Reuse recharges the same complete logical receipt even with
+                // a different scheduling quantum and no physical rebuild.
+                assert_eq!(
+                    execute(&prepared, &mut cold, &cx, policy(), &spill_pool, 2, WORK)
+                        .await
+                        .unwrap(),
+                    *expected.as_ref().unwrap(),
+                );
+                drop(cold);
+                assert_eq!(source_pool.used(), 0);
+                assert_eq!(retained.used(), 0);
+                assert_eq!(spill_pool.used(), 0);
+            }
+            if direction != "directed" {
+                continue;
+            }
+            let expected = expected.unwrap();
+            for allowance in [
+                1,
+                7,
+                expected.evaluator_work / 2,
+                expected.evaluator_work - 1,
+            ] {
+                let mut refusal = None;
+                for steps in [usize::MAX, 1, 7] {
+                    let mut cold = view(&commit, &vfs, &source_pool).await;
+                    let configured = prepared
+                        .clone()
+                        .with_analytics_quantum(NonZeroUsize::new(steps).unwrap());
+                    let error = execute(
+                        &configured,
+                        &mut cold,
+                        &cx,
+                        GqlQueryPolicy::new(10_000, 100, allowance, WORK),
+                        &spill_pool,
+                        2,
+                        WORK,
+                    )
+                    .await
+                    .unwrap_err();
+                    if allowance == expected.evaluator_work - 1 {
+                        let evaluator = match &error {
+                            NativeSpoolError::Procedure(inner) => {
+                                matches!(inner.as_ref(), GqlQueryError::Evaluator(_))
+                            }
+                            NativeSpoolError::BufferedExecute(inner) => {
+                                matches!(inner.as_ref(), GqlQueryError::Evaluator(_))
+                            }
+                            _ => false,
+                        };
+                        assert!(evaluator, "expected a typed evaluator refusal: {error:?}");
+                    }
+                    // Preserve the concrete error variant, dimension, limit
+                    // and observed count, not just the fact that it failed.
+                    let exact = format!("{error:?}");
+                    if let Some(refusal) = &refusal {
+                        assert_eq!(&exact, refusal, "allowance={allowance}, quantum={steps}");
+                    } else {
+                        refusal = Some(exact);
+                    }
+                    drop(cold);
+                    assert_eq!(source_pool.used(), 0);
+                    assert_eq!(spill_pool.used(), 0);
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn suspended_cold_projection_is_unpublished_and_drop_or_cancel_leaves_reader_usable() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let (vfs, _writer) = fixture(&commit).await;
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let prepared = prepare(
+            &format!("{BFS} YIELD node,distance RETURN node,distance ORDER BY node"),
+            &parameters(),
+        )
+        .with_analytics_quantum(NonZeroUsize::new(1).unwrap());
+        let mut first_suspend = None;
+        for cancel in [false, true] {
+            let mut cold = view(&commit, &vfs, &source_pool).await;
+            let retained = cold.sealed_read_cache_pool().clone();
+            assert_eq!(retained.used(), 0);
+            let probe = Arc::new(SimulationCheckpointProbe::new(
+                first_suspend.map(|calls| calls + 1),
+            ));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let mut future = Box::pin(execute(
+                &prepared,
+                &mut cold,
+                &controlled,
+                policy(),
+                &spill_pool,
+                2,
+                WORK,
+            ));
+            poll_fn(|task| {
+                assert!(future.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            // These files have immediate I/O. Unlike the warm-kernel law,
+            // suspension occurs before a completed projection is cached.
+            assert_eq!(retained.used(), 0);
+            if cancel {
+                assert_eq!(Some(probe.calls()), first_suspend);
+                let error = future.await.unwrap_err();
+                assert!(
+                    matches!(error, NativeSpoolError::Procedure(ref inner)
+                    if matches!(inner.as_ref(), GqlQueryError::Interrupted(_))),
+                    "{error:?}"
+                );
+            } else {
+                first_suspend = Some(probe.calls());
+                drop(future);
+            }
+            assert_eq!(retained.used(), 0);
+            assert_eq!(spill_pool.used(), 0);
+            let answer = execute(&prepared, &mut cold, &cx, policy(), &spill_pool, 2, WORK)
+                .await
+                .unwrap();
+            assert_eq!(answer.rows, bfs_rows());
+            assert!(retained.used() > 0);
+            drop(cold);
+            assert_eq!(source_pool.used(), 0);
+            assert_eq!(retained.used(), 0);
+            assert_eq!(spill_pool.used(), 0);
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
 }
 
 #[test]

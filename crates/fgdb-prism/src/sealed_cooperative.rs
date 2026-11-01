@@ -126,6 +126,7 @@ impl FnxCallSpec {
             self.algorithm(),
             FnxAlgorithm::PageRank(_)
                 | FnxAlgorithm::SingleSourceShortestPathLength { .. }
+                | FnxAlgorithm::ShortestPathLength { .. }
                 | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
                 | FnxAlgorithm::DijkstraPathLength { .. }
                 | FnxAlgorithm::ConnectedComponents
@@ -323,6 +324,23 @@ impl FnxCallSpec {
                 return Err(Error::UnsupportedCooperativeAlgorithm(self.algorithm()));
             }
             self.validate_sealed_projection(graph.spec().directedness)?;
+            if matches!(self.algorithm(), FnxAlgorithm::ShortestPathLength { .. }) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::target_bfs::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
+            }
             if matches!(
                 self.algorithm(),
                 FnxAlgorithm::ArticulationPoints | FnxAlgorithm::Bridges

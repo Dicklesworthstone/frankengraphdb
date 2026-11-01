@@ -53,6 +53,8 @@ mod katz;
 mod load;
 #[path = "sealed_shortest_path.rs"]
 mod shortest_path;
+#[path = "sealed_target_bfs.rs"]
+mod target_bfs;
 
 /// Additional admission for native compressed CALLs. These account for
 /// graph-size-dependent vector/string backing stores, not allocator overhead,
@@ -801,6 +803,7 @@ impl FnxCallSpec {
             self.algorithm(),
             FnxAlgorithm::PageRank(_)
                 | FnxAlgorithm::SingleSourceShortestPathLength { .. }
+                | FnxAlgorithm::ShortestPathLength { .. }
                 | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
                 | FnxAlgorithm::DijkstraPathLength { .. }
                 | FnxAlgorithm::ConnectedComponents
@@ -939,6 +942,9 @@ impl FnxCallSpec {
         self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
         let admission = ResultAdmission::for_delivery(self, limits, memory, delivery)?;
+        if matches!(self.algorithm(), FnxAlgorithm::ShortestPathLength { .. }) {
+            return target_bfs::execute(self, cx, graph, limits, memory, &admission);
+        }
         if directional_bfs::eligible(self, graph, limits, memory, &admission)
             && let Some(result) =
                 directional_bfs::execute(self, cx, graph, limits, memory, &admission)?
@@ -1411,6 +1417,17 @@ impl EncodedRows {
                     return Err(ExecutionError::InvalidNumericResult.into());
                 }
                 FnxValue::Float(distance)
+            }
+            KernelValues::TargetHopDistance { distance, .. } => {
+                if index != 0 {
+                    return Err(ExecutionError::InvalidUpstreamResult.into());
+                }
+                let Some(distance) = *distance else {
+                    return Ok(());
+                };
+                FnxValue::Integer(
+                    u64::try_from(distance).map_err(|_| ExecutionError::SizeOverflow)?,
+                )
             }
             KernelValues::Counts(values) => FnxValue::Integer(
                 *values

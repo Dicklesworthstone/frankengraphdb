@@ -39,6 +39,7 @@ mod sealed;
 mod sealed_control;
 mod sealed_execute;
 mod shortest_path;
+mod target_bfs;
 mod traversal;
 
 pub use call::{
@@ -69,6 +70,7 @@ pub use traversal::{
     BfsDecisionCard, BfsPullDecision, ComponentDecisionCard, ComponentPullDecision,
 };
 
+pub use fgdb_strata::tiered::sealed::SealedBuildEvent;
 pub use fnx_algorithms::GraphView;
 pub use projection::{
     AdapterPath, Directedness, PROJECTED_WEIGHT_ATTRIBUTE, ParallelEdgePolicy,

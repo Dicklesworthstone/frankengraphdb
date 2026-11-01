@@ -41,6 +41,8 @@ mod bfs;
 mod clustering;
 #[path = "prism_cooperative/connectivity.rs"]
 mod connectivity;
+#[path = "prism_cooperative/construction.rs"]
+mod construction;
 #[path = "prism_cooperative/core.rs"]
 mod core_numbers;
 #[path = "prism_cooperative/dijkstra.rs"]
@@ -57,6 +59,8 @@ mod katz;
 mod pagerank;
 #[path = "prism_cooperative/send.rs"]
 mod send;
+#[path = "prism_cooperative/target_bfs.rs"]
+mod target_bfs;
 
 fn retained_calls() -> [FnxCallSpec; 23] {
     let bind = |text| FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();

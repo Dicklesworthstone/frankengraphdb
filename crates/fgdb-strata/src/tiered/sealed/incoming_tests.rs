@@ -911,6 +911,288 @@ fn cooperative_sort_matches_std_on_duplicate_and_adversarial_keys() {
     }
 }
 
+mod logical_events {
+    use super::*;
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb_types::PurposeContexts;
+
+    #[derive(Clone, Copy, Debug)]
+    struct Selection {
+        incoming: bool,
+        lower: Option<VId>,
+        empty: bool,
+    }
+
+    #[derive(Debug)]
+    enum Refusal {
+        Source(SealedError),
+        Work(usize),
+        Scheduling,
+    }
+    impl From<SealedError> for Refusal {
+        fn from(error: SealedError) -> Self {
+            Self::Source(error)
+        }
+    }
+
+    fn fixture() -> (SealedPartition, Vec<AdjacencyEntry>) {
+        let mut entries = Vec::new();
+        for at in 0..269 {
+            let mut edge = entry(1, 7, at, 1);
+            edge.retired_at = (![63, 64, 128, 256, 260, 268].contains(&at)).then_some(CommitSeq(3));
+            entries.push(edge);
+        }
+        for at in 1..=64 {
+            let source = if at == 64 { u128::MAX } else { at << 80 };
+            // Most source rows do not contribute an incoming locator. The
+            // selected row crosses a chunk boundary before these sparse jumps.
+            entries.push(entry(source, 8, 1000 + at, 1));
+            if at % 11 == 0 || at == 64 {
+                let mut edge = entry(source, 7, 2000 + at, 1);
+                edge.retired_at = (at % 2 == 0).then_some(CommitSeq(3));
+                entries.push(edge);
+            }
+        }
+        entries.sort_by_key(|edge| (edge.src, edge.relation, edge.dst, edge.eid, edge.created_at));
+        (seal(&entries), entries)
+    }
+
+    // A record-vector model of logical checkpoints. It uses neither source
+    // decoders nor a budgeted cursor: new logical pulls, outgoing 64-position
+    // boundaries, and incoming locators/chunk exhaustion determine the prefix.
+    fn oracle(
+        entries: &[AdjacencyEntry],
+        selection: Selection,
+    ) -> (Vec<AdjacencyEntry>, Vec<usize>) {
+        let mut raw: Vec<_> = entries
+            .iter()
+            .copied()
+            .filter(|edge| {
+                !selection.empty
+                    && edge.relation == RelationId(1)
+                    && if selection.incoming {
+                        edge.dst == VId(7)
+                    } else {
+                        edge.src == VId(1)
+                    }
+            })
+            .collect();
+        if selection.incoming {
+            raw.sort_by_key(|edge| (edge.src, edge.eid, edge.created_at));
+        }
+        let mut visible = Vec::new();
+        let mut prefixes = vec![0];
+        for (at, edge) in raw.iter().enumerate() {
+            if selection.lower.is_some_and(|lower| edge.src < lower) {
+                continue;
+            }
+            if selection.incoming || at.is_multiple_of(64) {
+                prefixes.push(visible.len());
+            }
+            if edge.visible_at(CommitSeq(5)) {
+                visible.push(*edge);
+                prefixes.push(visible.len());
+            }
+            if selection.incoming && ((at + 1).is_multiple_of(CHUNK_ENTRIES) || at + 1 == raw.len())
+            {
+                prefixes.push(visible.len());
+            }
+        }
+        (visible, prefixes)
+    }
+
+    fn run(
+        source: &SealedPartition,
+        incoming: &SealedIncomingIndex,
+        cx: &QueryCx,
+        selection: Selection,
+        quantum: usize,
+        stop: Option<usize>,
+    ) -> (Vec<AdjacencyEntry>, Vec<usize>) {
+        let mut outgoing = source
+            .row(
+                cx,
+                VId(if selection.empty { 42 } else { 1 }),
+                RelationId(1),
+                CommitSeq(5),
+            )
+            .unwrap();
+        let mut reverse = incoming
+            .row_from(
+                cx,
+                VId(if selection.empty { 42 } else { 7 }),
+                RelationId(1),
+                CommitSeq(5),
+                selection.lower,
+            )
+            .unwrap();
+        let mut visible = Vec::new();
+        let mut prefixes = Vec::new();
+        let mut pulls = 0usize;
+        loop {
+            // Empty allowances occur before and after actual progress; neither
+            // retrying a hidden span nor a chunk transition adds logical work.
+            let allowance = if pulls.is_multiple_of(3) { 0 } else { quantum };
+            pulls += 1;
+            assert!(pulls < source.stats().incidences * 6 + 64);
+            let mut budget = SealedScanBudget::new(allowance);
+            let mut guard = |event| {
+                if event == SealedBuildEvent::Work {
+                    prefixes.push(visible.len());
+                    if stop == Some(prefixes.len()) {
+                        return Err(Refusal::Work(prefixes.len()));
+                    }
+                }
+                Ok(())
+            };
+            let step = if selection.incoming {
+                reverse.next_budgeted_with_events(cx, &mut budget, &mut guard)
+            } else {
+                outgoing.next_budgeted_with_events(cx, &mut budget, &mut guard)
+            };
+            match step {
+                Ok(SealedScanStep::Item(edge)) => {
+                    assert_eq!(
+                        edge.properties,
+                        &[(PropertyKeyId(1), CanonicalScalar::Int(1).into())]
+                    );
+                    visible.push(edge.entry);
+                }
+                Ok(SealedScanStep::Yield) => assert_eq!(budget.remaining(), 0),
+                Ok(SealedScanStep::End) => {
+                    assert!(stop.is_none());
+                    break;
+                }
+                Err(Refusal::Work(at)) => {
+                    assert_eq!(Some(at), stop);
+                    break;
+                }
+                Err(Refusal::Source(error)) => panic!("unexpected source error: {error}"),
+                Err(Refusal::Scheduling) => panic!("unexpected scheduling refusal"),
+            }
+        }
+        let mut budget = SealedScanBudget::new(usize::MAX);
+        let deny = |_| -> Result<(), Refusal> { panic!("terminal cursor resumed") };
+        let terminal = if selection.incoming {
+            reverse.next_budgeted_with_events(cx, &mut budget, deny)
+        } else {
+            outgoing.next_budgeted_with_events(cx, &mut budget, deny)
+        };
+        assert!(matches!(terminal.unwrap(), SealedScanStep::End));
+        (visible, prefixes)
+    }
+
+    #[test]
+    fn logical_work_and_every_refusal_prefix_are_independent_of_scan_quantum() {
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let (source, entries) = fixture();
+        let incoming = index(&source);
+        assert!(incoming.find(VId(7), RelationId(1)).unwrap().end_chunk > 1);
+        for selection in [
+            Selection {
+                incoming: false,
+                lower: None,
+                empty: false,
+            },
+            Selection {
+                incoming: true,
+                lower: None,
+                empty: false,
+            },
+            Selection {
+                incoming: true,
+                lower: Some(VId(2)),
+                empty: false,
+            },
+            Selection {
+                incoming: true,
+                lower: Some(VId(u128::MAX)),
+                empty: false,
+            },
+            Selection {
+                incoming: false,
+                lower: None,
+                empty: true,
+            },
+            Selection {
+                incoming: true,
+                lower: None,
+                empty: true,
+            },
+        ] {
+            let (expected, prefixes) = oracle(&entries, selection);
+            for quantum in [1, 2, 7, 64, usize::MAX] {
+                assert_eq!(
+                    run(&source, &incoming, &cx, selection, quantum, None),
+                    (expected.clone(), prefixes.clone()),
+                    "{selection:?} quantum={quantum}"
+                );
+                for stop in 1..=prefixes.len() {
+                    let (visible, actual) =
+                        run(&source, &incoming, &cx, selection, quantum, Some(stop));
+                    assert_eq!(actual, prefixes[..stop]);
+                    assert_eq!(visible, expected[..prefixes[stop - 1]]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scheduling_refusal_after_zero_or_hidden_progress_fuses_both_cursors() {
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let (source, _) = fixture();
+        let incoming = index(&source);
+        for reverse in [false, true] {
+            for allowance in [0, 1] {
+                let mut out = source
+                    .row(&cx, VId(1), RelationId(1), CommitSeq(5))
+                    .unwrap();
+                let mut inc = incoming
+                    .row(&cx, VId(7), RelationId(1), CommitSeq(5))
+                    .unwrap();
+                let mut budget = SealedScanBudget::new(allowance);
+                let guard = |event| {
+                    assert_eq!(event, SealedBuildEvent::Work);
+                    Ok::<(), Refusal>(())
+                };
+                let step = if reverse {
+                    inc.next_budgeted_with_events(&cx, &mut budget, guard)
+                } else {
+                    out.next_budgeted_with_events(&cx, &mut budget, guard)
+                };
+                assert!(matches!(step.unwrap(), SealedScanStep::Yield));
+                let mut budget = SealedScanBudget::new(1);
+                let deny = |event| {
+                    assert_eq!(event, SealedBuildEvent::Scheduling);
+                    Err::<(), _>(Refusal::Scheduling)
+                };
+                let refused = if reverse {
+                    inc.next_budgeted_with_events(&cx, &mut budget, deny)
+                } else {
+                    out.next_budgeted_with_events(&cx, &mut budget, deny)
+                };
+                assert!(matches!(refused, Err(Refusal::Scheduling)));
+                assert_eq!(
+                    budget.remaining(),
+                    1,
+                    "retry guard precedes source progress"
+                );
+                let deny = || -> Result<(), Refusal> { panic!("failed cursor resumed") };
+                let next = if reverse {
+                    inc.next_with_checkpoint(&cx, deny)
+                } else {
+                    out.next_with_checkpoint(&cx, deny)
+                };
+                assert!(next.unwrap().is_none());
+            }
+        }
+    }
+}
+
 #[test]
 #[ignore = "manual release-mode incoming hidden-history decode-elision benchmark"]
 fn benchmark_sealed_incoming_history_decode_elision_against_unfiltered() {

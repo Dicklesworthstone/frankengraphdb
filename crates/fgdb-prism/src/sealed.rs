@@ -15,11 +15,10 @@ use crate::{
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_strata::tiered::sealed::{
-    IncomingIndexLimits, IncomingIndexStats, SealedEdge, SealedError, SealedIncomingIndex,
-    SealedPartition, SealedScanBudget, SealedScanStep,
+    IncomingIndexLimits, IncomingIndexStats, SealedBuildEvent, SealedEdge, SealedError,
+    SealedIncomingIndex, SealedPartition, SealedScanBudget, SealedScanStep,
 };
 use fgdb_types::{CommitSeq, EId, QueryCx, VId};
-use std::cell::RefCell;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -231,12 +230,18 @@ impl SealedGraphView {
         config: SealedProjectionSpec,
         mask: SealedProjectionMask,
         limits: ProjectionLimits,
-        guard: impl FnMut() -> Result<(), SealedProjectionError>,
+        mut guard: impl FnMut() -> Result<(), SealedProjectionError>,
     ) -> Result<Self, SealedProjectionError> {
-        let guard = RefCell::new(guard);
-        let invoke = || (guard.borrow_mut())();
-        let control = Control::new(cx, &invoke);
-        Self::build_controlled(&control, partition, vertices, config, mask, limits)
+        let mut control = construction::BuildControl::new(cx, |_| guard());
+        construction::immediately(Self::construct(
+            &mut control,
+            partition,
+            vertices,
+            config,
+            mask,
+            limits,
+            &mut construction::Schedule::immediate(),
+        ))
     }
 
     fn build_controlled(
@@ -247,8 +252,9 @@ impl SealedGraphView {
         mask: SealedProjectionMask,
         limits: ProjectionLimits,
     ) -> Result<Self, SealedProjectionError> {
+        let mut control = construction::BuildControl::new(cx.query, |_| cx.guard());
         construction::immediately(Self::construct(
-            cx,
+            &mut control,
             partition,
             vertices,
             config,
@@ -277,19 +283,17 @@ impl SealedGraphView {
         Y: FnMut() -> F,
         F: Future<Output = ()>,
     {
-        cx.with_restriction_async(async {
-            let control = Control::new(cx, &|| Ok(()));
-            Self::construct(
-                &control,
-                partition,
-                vertices,
-                config,
-                SealedProjectionMask::UNMASKED,
-                limits,
-                &mut construction::Schedule::cooperative(quantum, yield_now),
-            )
-            .await
-        })
+        Self::build_cooperative_with_events(
+            cx,
+            partition,
+            vertices,
+            config,
+            SealedProjectionMask::UNMASKED,
+            limits,
+            quantum,
+            yield_now,
+            |_| Ok(()),
+        )
         .await
     }
 
@@ -307,18 +311,56 @@ impl SealedGraphView {
         limits: ProjectionLimits,
         quantum: NonZeroUsize,
         yield_now: Y,
-        guard: impl FnMut() -> Result<(), SealedProjectionError>,
+        mut guard: impl FnMut() -> Result<(), SealedProjectionError>,
+    ) -> Result<Self, SealedProjectionError>
+    where
+        Y: FnMut() -> F,
+        F: Future<Output = ()>,
+    {
+        Self::build_cooperative_with_events(
+            cx,
+            partition,
+            vertices,
+            config,
+            mask,
+            limits,
+            quantum,
+            yield_now,
+            |_| guard(),
+        )
+        .await
+    }
+
+    /// Cooperatively construct under an event-aware live observer. Work
+    /// events match the immediate builder's logical checkpoints, including
+    /// incoming-index construction and every raw-history pull. Additional
+    /// Scheduling events fence yields without changing logical work admission.
+    /// A live authorization observer must check both event kinds; a pure work
+    /// meter may charge only Work. QueryCx always checkpoints first.
+    ///
+    /// Mutable observers are owned across suspension, so this future is Send
+    /// whenever its observer and yield callback/future are Send. Local guards
+    /// remain supported. No lock, atomic counter or guard borrow spans await.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_cooperative_with_events<Y, F>(
+        cx: &QueryCx,
+        partition: &SealedPartition,
+        vertices: &[VId],
+        config: SealedProjectionSpec,
+        mask: SealedProjectionMask,
+        limits: ProjectionLimits,
+        quantum: NonZeroUsize,
+        yield_now: Y,
+        observe: impl FnMut(SealedBuildEvent) -> Result<(), SealedProjectionError>,
     ) -> Result<Self, SealedProjectionError>
     where
         Y: FnMut() -> F,
         F: Future<Output = ()>,
     {
         cx.with_restriction_async(async {
-            let guard = RefCell::new(guard);
-            let invoke = || (guard.borrow_mut())();
-            let control = Control::new(cx, &invoke);
+            let mut control = construction::BuildControl::new(cx, observe);
             Self::construct(
-                &control,
+                &mut control,
                 partition,
                 vertices,
                 config,
@@ -333,7 +375,10 @@ impl SealedGraphView {
 
     #[allow(clippy::too_many_arguments)]
     async fn construct<Y, F>(
-        cx: &Control<'_, impl Guard>,
+        cx: &mut construction::BuildControl<
+            '_,
+            impl FnMut(SealedBuildEvent) -> Result<(), SealedProjectionError>,
+        >,
         partition: &SealedPartition,
         vertices: &[VId],
         config: SealedProjectionSpec,
@@ -486,7 +531,7 @@ impl SealedGraphView {
             hash.update(&[0]);
             hash.update(&owned_vertices[source].0.to_le_bytes());
             let mut cursor = SealedNeighborCursor::open(
-                cx,
+                &cx.source(),
                 partition,
                 incoming.as_ref(),
                 &owned_vertices,
@@ -525,15 +570,20 @@ impl SealedGraphView {
                     Ok(())
                 };
                 loop {
-                    let (target, weight) =
-                        match cursor.next_budgeted_observed(cx, schedule.fuel(), &mut observe)? {
-                            SealedScanStep::Item(neighbor) => neighbor,
-                            SealedScanStep::End => break,
-                            SealedScanStep::Yield => {
-                                schedule.refill(cx).await?;
-                                continue;
-                            }
-                        };
+                    // Finish the synchronous borrow before a possible await.
+                    // Only the cursor's raw progress crosses the suspension.
+                    let step = {
+                        let source = cx.source();
+                        cursor.next_budgeted_observed(&source, schedule.fuel(), &mut observe)?
+                    };
+                    let (target, weight) = match step {
+                        SealedScanStep::Item(neighbor) => neighbor,
+                        SealedScanStep::End => break,
+                        SealedScanStep::Yield => {
+                            schedule.refill(cx).await?;
+                            continue;
+                        }
+                    };
                     // Certify the final projected weight, after visibility,
                     // loop policy and parallel reduction. A Unit selection
                     // alone is insufficient: Sum may combine several edges.
@@ -736,8 +786,9 @@ impl SealedGraphView {
         F: Future<Output = ()>,
     {
         let (config, limits) = self.reverse_projection_request(max_workspace_bytes)?;
+        let mut control = construction::BuildControl::new(cx.query, |_| cx.guard());
         Self::construct(
-            cx,
+            &mut control,
             &self.0.partition,
             &self.0.vertices,
             config,
@@ -884,6 +935,7 @@ pub struct SealedNeighborCursor<'a> {
     pending: Option<(usize, f64)>,
     accumulating: Option<(usize, f64)>,
     finished: bool,
+    suspended: bool,
 }
 
 impl<'a> SealedNeighborCursor<'a> {
@@ -915,6 +967,7 @@ impl<'a> SealedNeighborCursor<'a> {
             // The first pull must still observe live cancellation. Only a
             // successful EOF or failure makes a cursor terminal.
             finished: false,
+            suspended: false,
         })
     }
 
@@ -954,6 +1007,7 @@ impl<'a> SealedNeighborCursor<'a> {
             pending: None,
             accumulating: None,
             finished: false,
+            suspended: false,
         })
     }
 
@@ -1018,6 +1072,7 @@ impl<'a> SealedNeighborCursor<'a> {
             return Ok(SealedScanStep::End);
         }
         let result = self.next_inner(cx, budget, observe);
+        self.suspended = matches!(&result, Ok(SealedScanStep::Yield));
         if result.is_err() || matches!(&result, Ok(SealedScanStep::End)) {
             self.finished = true;
             self.pending = None;
@@ -1032,7 +1087,11 @@ impl<'a> SealedNeighborCursor<'a> {
         budget: &mut SealedScanBudget,
         observe: &mut impl FnMut(EId, VId, Option<f64>) -> Result<(), SealedProjectionError>,
     ) -> Result<SealedScanStep<(usize, f64)>, SealedProjectionError> {
-        checkpoint(cx)?;
+        cx.checkpoint_event(if self.suspended {
+            SealedBuildEvent::Scheduling
+        } else {
+            SealedBuildEvent::Work
+        })?;
         if budget.remaining() == 0 {
             return Ok(SealedScanStep::Yield);
         }

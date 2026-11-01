@@ -51,6 +51,17 @@ use fgdb_types::{
 use image::{Image, Row, RowScan, RowScanStep};
 use std::sync::Arc;
 
+/// A checkpoint shared by immediate and cooperative builders and cursors.
+/// Work events describe the same logical construction or scan in either mode;
+/// scheduling events are extra liveness checks around a suspension. Callers
+/// may meter only Work, but a live authorization guard must observe both.
+/// These are checkpoint units, not instruction counts or elapsed time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SealedBuildEvent {
+    Work,
+    Scheduling,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SealedLimits {
     pub max_rows: usize,
@@ -773,6 +784,7 @@ pub struct SealedCursor<'a> {
     scan: Option<RowScan<'a>>,
     as_of: CommitSeq,
     finished: bool,
+    suspended: bool,
 }
 
 impl<'a> SealedCursor<'a> {
@@ -782,6 +794,7 @@ impl<'a> SealedCursor<'a> {
             scan: row.map(|row| RowScan::new(image, row, position)),
             as_of,
             finished: false,
+            suspended: false,
         }
     }
 
@@ -850,15 +863,44 @@ impl<'a> SealedCursor<'a> {
         })
     }
 
+    /// Separate logical scan work from retry checks after Yield. Metering only
+    /// Work gives the same checkpoint sequence for every scheduling quantum,
+    /// including hidden history and zero-fuel retries. A live guard must still
+    /// observe both events; QueryCx is checked first and any refusal is terminal.
+    pub fn next_budgeted_with_events<E: From<SealedError>>(
+        &mut self,
+        cx: &QueryCx,
+        budget: &mut SealedScanBudget,
+        mut checkpoint: impl FnMut(SealedBuildEvent) -> Result<(), E>,
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
+        self.next_budgeted_events_inner(budget, &mut |event| {
+            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            checkpoint(event)
+        })
+    }
+
     fn next_budgeted_inner<E>(
         &mut self,
         budget: &mut SealedScanBudget,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
+        self.next_budgeted_events_inner(budget, &mut |_| checkpoint())
+    }
+
+    fn next_budgeted_events_inner<E>(
+        &mut self,
+        budget: &mut SealedScanBudget,
+        checkpoint: &mut impl FnMut(SealedBuildEvent) -> Result<(), E>,
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
         if self.finished {
             return Ok(SealedScanStep::End);
         }
-        if let Err(error) = checkpoint() {
+        let event = if self.suspended {
+            SealedBuildEvent::Scheduling
+        } else {
+            SealedBuildEvent::Work
+        };
+        if let Err(error) = checkpoint(event) {
             self.finished = true;
             return Err(error);
         }
@@ -868,10 +910,11 @@ impl<'a> SealedCursor<'a> {
         };
         while scan.position < scan.len() {
             if !budget.spend() {
+                self.suspended = true;
                 return Ok(SealedScanStep::Yield);
             }
             if scan.position.is_multiple_of(64)
-                && let Err(error) = checkpoint()
+                && let Err(error) = checkpoint(SealedBuildEvent::Work)
             {
                 self.finished = true;
                 return Err(error);
@@ -899,6 +942,7 @@ impl<'a> SealedCursor<'a> {
                 } else {
                     self.image.properties[locator as usize - 1].as_slice()
                 };
+                self.suspended = false;
                 return Ok(SealedScanStep::Item(SealedEdge { entry, properties }));
             }
         }

@@ -107,8 +107,8 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 25);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 24);
+    assert_eq!(FnxSignatureRegistry::version(), 26);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 25);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);
@@ -157,14 +157,102 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
         foundation.execution_kernel,
         "fgdb-prism/brandes-csr-source-order-v4"
     );
-    // The bounded native Katz kernel now carries its result and witness.
+    // Native Katz retains its own checked iteration witness on refusal.
     let katz = FnxSignatureRegistry::lookup("fnx.katz_centrality").unwrap();
     assert_eq!(
         katz.outputs,
         &[fgdb_prism::FnxOutput::Vertex, fgdb_prism::FnxOutput::Score]
     );
+    assert_eq!(katz.execution_kernel, "fgdb-prism/katz-csr-source-order-v1");
     assert!(FnxSignatureRegistry::lookup("fnx.katz_centrality_unknown").is_none());
     assert!(FnxSignatureRegistry::lookup("pagerank").is_none());
+}
+
+#[test]
+fn target_bfs_binds_exact_endpoints_cutoff_and_preserves_existing_bfs_identity() {
+    let source = VId((1u128 << 113) + 7);
+    let target = VId(u128::MAX);
+    let parameters = FnxParameters::from([
+        ("source".to_owned(), FnxArgument::Vertex(source)),
+        ("target".to_owned(), FnxArgument::Vertex(target)),
+    ]);
+    let positional = FnxCallSpec::bind(
+        "CALL fnx.shortest_path_length($source,$target,3) YIELD distance AS hops,node AS destination",
+        &parameters,
+    ).unwrap();
+    let named = FnxCallSpec::bind(
+        "CALL fnx.shortest_path_length(target => $target,cutoff => 3,source => $source) YIELD distance AS hops,node AS destination",
+        &parameters,
+    ).unwrap();
+    assert_eq!(positional, named);
+    assert_eq!(
+        positional.algorithm(),
+        FnxAlgorithm::ShortestPathLength {
+            source,
+            target,
+            cutoff: Some(3)
+        }
+    );
+    assert_eq!(
+        positional.signature().numeric_profile,
+        fgdb_prism::FNX_DISCRETE_PROFILE
+    );
+    assert!(positional.supports_sealed_execution());
+    assert!(positional.supports_cooperative_sealed_execution());
+    let default = FnxCallSpec::shortest_path_length(source, target, None);
+    assert_eq!(
+        default,
+        FnxCallSpec::bind(
+            "CALL fnx.shortest_path_length($source,$target)",
+            &parameters
+        )
+        .unwrap()
+    );
+    for changed in [
+        FnxCallSpec::shortest_path_length(VId(source.0 + 1), target, None),
+        FnxCallSpec::shortest_path_length(source, VId(target.0 - 1), None),
+        FnxCallSpec::shortest_path_length(source, target, Some(0)),
+        FnxCallSpec::shortest_path_length(source, target, Some(3)),
+        positional,
+    ] {
+        assert_ne!(changed.digest(), default.digest());
+    }
+    for invalid in [
+        "CALL fnx.shortest_path_length(1)",
+        "CALL fnx.shortest_path_length(NULL,2)",
+        "CALL fnx.shortest_path_length(1,NULL)",
+        "CALL fnx.shortest_path_length(1,-1)",
+        "CALL fnx.shortest_path_length(1,2.0)",
+        "CALL fnx.shortest_path_length(1,2,-1)",
+        "CALL fnx.shortest_path_length(1,2,0.5)",
+        "CALL fnx.shortest_path_length(source => 1,target => 2,target => 3)",
+        "CALL fnx.shortest_path_length(1,2) YIELD score",
+    ] {
+        assert!(
+            FnxCallSpec::bind(invalid, &FnxParameters::new()).is_err(),
+            "{invalid}"
+        );
+    }
+
+    let mut legacy = fgdb_crypto::Hasher::new();
+    legacy.update(b"fgdb:prism:bound-call:v3");
+    legacy.update(&23_u16.to_le_bytes());
+    let name = b"fnx.single_source_shortest_path_length";
+    legacy.update(&(name.len() as u128).to_le_bytes());
+    legacy.update(name);
+    legacy.update(&source.0.to_le_bytes());
+    legacy.update(&[1]);
+    legacy.update(&3_u128.to_le_bytes());
+    legacy.update(&2_u128.to_le_bytes());
+    for (field, name) in [(0_u8, "vertex"), (2_u8, "distance")] {
+        legacy.update(&[field]);
+        legacy.update(&(name.len() as u128).to_le_bytes());
+        legacy.update(name.as_bytes());
+    }
+    assert_eq!(
+        FnxCallSpec::single_source_shortest_path_length(source, Some(3)).digest(),
+        legacy.finalize()
+    );
 }
 
 #[test]

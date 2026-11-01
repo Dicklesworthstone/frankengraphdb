@@ -39,9 +39,10 @@ struct SealedOptions {
 /// Input rows use the private input cap; only the final selected relation uses
 /// the query's result cap. Cache reuse never refunds native source/evaluator
 /// work, and each invocation executes its kernel and result processing afresh.
-/// Kernel raw-incidence, scalar and result-encoding steps cooperatively yield
-/// after a shared nonzero quantum. Source admission, sealing and initial
-/// projection preparation still contain synchronous stages.
+/// Projection preparation and kernel raw-incidence, scalar and result-encoding
+/// steps cooperatively yield after a nonzero quantum. Scheduling checkpoints
+/// never spend additional logical source work. Source admission and sealing
+/// still contain synchronous stages.
 #[derive(Clone)]
 pub struct PreparedBufferedSealedOrder {
     plan: AsyncSpillSetPlan,
@@ -245,7 +246,7 @@ impl PreparedBufferedSealedOrder {
         self.plan.aggregate_count()
     }
 
-    /// Set the shared kernel scheduling quantum for every CALL, including
+    /// Set the projection and kernel scheduling quantum for every CALL, including
     /// repeated Apply bodies. Defaults to 1024 counted steps. This controls
     /// scheduling only: work, memory, result and scratch allowances are
     /// unchanged. A step may include an indivisible allocation or lookup, so

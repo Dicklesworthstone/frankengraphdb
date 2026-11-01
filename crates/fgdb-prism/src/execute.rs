@@ -485,6 +485,11 @@ pub(crate) enum KernelValues {
         target: usize,
         distance: Option<f64>,
     },
+    /// Unweighted target distances retain their exact integer representation.
+    TargetHopDistance {
+        target: usize,
+        distance: Option<usize>,
+    },
     Counts(Vec<u64>),
     SelectedVertices(Vec<bool>),
     /// At most V-1 canonical bridge pairs; output indexes select pairs rather
@@ -500,6 +505,7 @@ impl KernelValues {
     pub(crate) fn scan_len(&self, population: usize) -> usize {
         match self {
             Self::TargetDistance { distance, .. } => usize::from(distance.is_some()),
+            Self::TargetHopDistance { distance, .. } => usize::from(distance.is_some()),
             _ => population,
         }
     }
@@ -516,6 +522,7 @@ impl KernelValues {
             Self::Components(values) => index < values.len(),
             Self::WeightedDistances(values) => values.get(index).is_some_and(Option::is_some),
             Self::TargetDistance { distance, .. } => index == 0 && distance.is_some(),
+            Self::TargetHopDistance { distance, .. } => index == 0 && distance.is_some(),
             Self::Counts(values) => index < values.len(),
             Self::SelectedVertices(values) => values.get(index).copied().unwrap_or(false),
             Self::EndpointPairs(values) => index < values.len(),
@@ -528,8 +535,9 @@ impl KernelValues {
         vertices: &[VId],
     ) -> Result<FnxValue, FnxExecutionError<C>> {
         match (field, self) {
-            (FnxOutput::Vertex, Self::TargetDistance { target, distance }) => {
-                if index != 0 || distance.is_none() {
+            (FnxOutput::Vertex, Self::TargetDistance { target, .. })
+            | (FnxOutput::Vertex, Self::TargetHopDistance { target, .. }) => {
+                if !self.contains(index) {
                     return Err(FnxExecutionError::InvalidUpstreamResult);
                 }
                 vertices
@@ -613,6 +621,12 @@ impl KernelValues {
             (FnxOutput::Distance, Self::TargetDistance { distance, .. }) if index == 0 => distance
                 .map(FnxValue::Float)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult),
+            (FnxOutput::Distance, Self::TargetHopDistance { distance, .. }) if index == 0 => {
+                let distance = distance.ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                Ok(FnxValue::Integer(
+                    u64::try_from(distance).map_err(|_| FnxExecutionError::SizeOverflow)?,
+                ))
+            }
             (FnxOutput::Triangles | FnxOutput::Core, Self::Counts(values)) => values
                 .get(index)
                 .copied()
@@ -1472,6 +1486,7 @@ impl FnxCallSpec {
         if !matches!(
             algorithm,
             FnxAlgorithm::SingleSourceShortestPathLength { .. }
+                | FnxAlgorithm::ShortestPathLength { .. }
                 | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
                 | FnxAlgorithm::DijkstraPathLength { .. }
                 | FnxAlgorithm::ArticulationPoints
@@ -1506,6 +1521,9 @@ impl FnxCallSpec {
             | FnxAlgorithm::DijkstraPathLength { .. } => {
                 Some(crate::shortest_path::decoded_work::<C>(graph, arcs)?)
             }
+            FnxAlgorithm::ShortestPathLength { .. } => Some(
+                crate::target_bfs::estimated_work::<C>(n, arcs, n, self.outputs().len())?,
+            ),
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 Some(crate::clustering::estimated_work(graph, &mut checkpoint)?)
             }
@@ -1545,7 +1563,8 @@ impl FnxCallSpec {
             FnxAlgorithm::PageRank(_)
             | FnxAlgorithm::Cdlp { .. }
             | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
-            | FnxAlgorithm::DijkstraPathLength { .. } => 0,
+            | FnxAlgorithm::DijkstraPathLength { .. }
+            | FnxAlgorithm::ShortestPathLength { .. } => 0,
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 crate::clustering::workspace_bytes::<C>(n, graph.edge_count())?
             }
@@ -1575,6 +1594,22 @@ impl FnxCallSpec {
         let mut bfs_decision_card = None;
         let mut component_decision_card = None;
         let output = match algorithm {
+            FnxAlgorithm::ShortestPathLength {
+                source,
+                target,
+                cutoff,
+            } => {
+                let (output, workspace_bytes) = crate::target_bfs::run(
+                    graph,
+                    source,
+                    target,
+                    cutoff,
+                    limits.max_result_rows,
+                    &mut checkpoint,
+                )?;
+                kernel_workspace_bytes = workspace_bytes;
+                output
+            }
             FnxAlgorithm::PageRank(options) => {
                 let (scores, witness, workspace_bytes) =
                     pagerank(graph, options, arcs, &mut checkpoint)?;

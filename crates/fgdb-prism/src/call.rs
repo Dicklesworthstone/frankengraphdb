@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 25;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 26;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -170,6 +170,16 @@ const BFS_PARAMETERS: &[FnxParameterSpec] = &[
         positional: true,
         default: Some(FnxArgument::Null),
     },
+];
+const BFS_TARGET_PARAMETERS: &[FnxParameterSpec] = &[
+    BFS_PARAMETERS[0],
+    FnxParameterSpec {
+        name: "target",
+        value_type: FnxParameterType::Vertex,
+        positional: true,
+        default: None,
+    },
+    BFS_PARAMETERS[1],
 ];
 const DIJKSTRA_PARAMETERS: &[FnxParameterSpec] = &[
     FnxParameterSpec {
@@ -495,6 +505,19 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_laws: "explicit simple projection; weights ignored; retained self-loops contribute once per row; incoming Katz x=alpha*A^T*x+beta from zero; alpha finite nonnegative, scalar beta finite; successive-iterate L1 < |V|*tol, then L2 normalization; zero vector stays zero, nonfinite or underflowed norm refuses; non-convergence refuses at max_iter; defaults .1/1/1000/1e-6 match checked FNX, including singleton score 1 without iteration; custom settings iterate singletons; isolates retained",
         complexity: "O(k * (|V| + |E|)); O(|V|) kernel workspace",
         execution_kernel: "fgdb-prism/katz-csr-source-order-v1",
+    },
+    FnxSignature {
+        name: "fnx.shortest_path_length",
+        graph_input_arity: 1,
+        parameters: BFS_TARGET_PARAMETERS,
+        outputs: &[FnxOutput::Vertex, FnxOutput::Distance],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Any,
+        numeric_profile: FNX_DISCRETE_PROFILE,
+        rng_policy: "none",
+        graph_laws: "explicit projection; known source and target; finite projected weights ignored; exact integer hop distance; inclusive hop cutoff; only the target row, or no row when unreachable/beyond cutoff; stop when the target leaves the FIFO between completely drained rows; isolates retained",
+        complexity: "O(|V| + |E|) worst-case traversal, stopping at the target; O(|V|) FIFO plus visited bits, with no distance vector; O(1) retained result",
+        execution_kernel: "fgdb-prism/target-bfs-bitmap-fifo-v1",
     },
 ];
 
@@ -877,6 +900,12 @@ pub enum FnxAlgorithm {
         source: VId,
         cutoff: Option<usize>,
     },
+    /// Exact unweighted distance to one destination, with no all-source result.
+    ShortestPathLength {
+        source: VId,
+        target: VId,
+        cutoff: Option<usize>,
+    },
     ConnectedComponents,
     WeaklyConnectedComponents,
     StronglyConnectedComponents,
@@ -925,6 +954,7 @@ impl FnxAlgorithm {
             Self::ArticulationPoints => 20,
             Self::Bridges => 21,
             Self::KatzCentrality(_) => 23,
+            Self::ShortestPathLength { .. } => 24,
         }]
     }
 }
@@ -977,6 +1007,15 @@ impl FnxCallSpec {
     }
     pub fn single_source_shortest_path_length(source: VId, cutoff: Option<usize>) -> Self {
         Self::new(FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff })
+    }
+    /// Return only the target and its integer hop distance, or no row if it
+    /// cannot be reached within the inclusive cutoff. Weights are ignored.
+    pub fn shortest_path_length(source: VId, target: VId, cutoff: Option<usize>) -> Self {
+        Self::new(FnxAlgorithm::ShortestPathLength {
+            source,
+            target,
+            cutoff,
+        })
     }
     pub fn connected_components() -> Self {
         Self::new(FnxAlgorithm::ConnectedComponents)
@@ -1336,21 +1375,43 @@ impl FnxCallSpec {
                     KatzOptions::new(alpha, beta, max_iter, tol).map_err(whole)?,
                 )
             }
-            "fnx.single_source_shortest_path_length" => {
+            "fnx.single_source_shortest_path_length" | "fnx.shortest_path_length" => {
                 let source = match arguments[0] {
                     FnxArgument::Vertex(vertex) => vertex,
                     FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
                     _ => return Err(invalid(0, "VId or nonnegative integer source required")),
                 };
-                let cutoff = match arguments[1] {
+                let target = if signature.name == "fnx.shortest_path_length" {
+                    Some(match arguments[1] {
+                        FnxArgument::Vertex(vertex) => vertex,
+                        FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
+                        _ => return Err(invalid(1, "VId or nonnegative integer target required")),
+                    })
+                } else {
+                    None
+                };
+                let cutoff_at = 1 + usize::from(target.is_some());
+                let cutoff = match arguments[cutoff_at] {
                     FnxArgument::Null => None,
                     FnxArgument::Integer(value) if value >= 0 => Some(
                         usize::try_from(value)
-                            .map_err(|_| invalid(1, "cutoff exceeds ordinal width"))?,
+                            .map_err(|_| invalid(cutoff_at, "cutoff exceeds ordinal width"))?,
                     ),
-                    _ => return Err(invalid(1, "nonnegative integer or NULL cutoff required")),
+                    _ => {
+                        return Err(invalid(
+                            cutoff_at,
+                            "nonnegative integer or NULL cutoff required",
+                        ));
+                    }
                 };
-                FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff }
+                match target {
+                    Some(target) => FnxAlgorithm::ShortestPathLength {
+                        source,
+                        target,
+                        cutoff,
+                    },
+                    None => FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff },
+                }
             }
             "fnx.single_source_dijkstra_path_length" | "fnx.dijkstra_path_length" => {
                 let source = match arguments[0] {
@@ -1720,6 +1781,7 @@ impl FnxCallSpec {
         let binding_version: u16 = match algorithm {
             FnxAlgorithm::DijkstraPathLength { .. } => 24,
             FnxAlgorithm::KatzCentrality(_) => 25,
+            FnxAlgorithm::ShortestPathLength { .. } => 26,
             _ => 23,
         };
         hash.update(&binding_version.to_le_bytes());
@@ -1751,7 +1813,8 @@ impl FnxCallSpec {
                     }
                 }
             }
-            FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff } => {
+            FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff }
+            | FnxAlgorithm::ShortestPathLength { source, cutoff, .. } => {
                 hash.update(&source.0.to_le_bytes());
                 match cutoff {
                     None => {
@@ -1761,6 +1824,9 @@ impl FnxCallSpec {
                         hash.update(&[1]);
                         hash.update(&(cutoff as u128).to_le_bytes());
                     }
+                }
+                if let FnxAlgorithm::ShortestPathLength { target, .. } = algorithm {
+                    hash.update(&target.0.to_le_bytes());
                 }
             }
             FnxAlgorithm::SingleSourceDijkstraPathLength(options)

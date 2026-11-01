@@ -8,8 +8,8 @@
 
 use super::image::{RowScan, RowScanStep, reserved};
 use super::{
-    Image, SealedAnchor, SealedEdge, SealedError, SealedPartition, SealedScanBudget,
-    SealedScanStep, check_limit,
+    Image, SealedAnchor, SealedBuildEvent, SealedEdge, SealedError, SealedPartition,
+    SealedScanBudget, SealedScanStep, check_limit,
 };
 use fgdb_codec::elias_fano::{EliasFano, EliasFanoSequentialCursor, EntryLimit};
 use fgdb_delta_types::RelationId;
@@ -198,7 +198,31 @@ impl SealedPartition {
         limits: IncomingIndexLimits,
         quantum: std::num::NonZeroUsize,
         yield_now: Y,
-        checkpoint: impl FnMut() -> Result<(), E>,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<SealedIncomingIndex, E>
+    where
+        E: From<SealedError>,
+        Y: FnMut() -> F,
+        F: std::future::Future<Output = ()>,
+    {
+        self.incoming_index_cooperative_with_events(cx, limits, quantum, yield_now, |_| {
+            checkpoint()
+        })
+        .await
+    }
+
+    /// Distinguish logical build work from extra scheduling checkpoints while
+    /// retaining the same QueryCx-first live checks. The Work event sequence
+    /// equals `incoming_index_with_checkpoint` for every quantum. Scheduling
+    /// events preserve caller liveness after yields without charging the
+    /// scheduler's chosen quantum as additional logical source work.
+    pub async fn incoming_index_cooperative_with_events<E, Y, F>(
+        &self,
+        cx: &QueryCx,
+        limits: IncomingIndexLimits,
+        quantum: std::num::NonZeroUsize,
+        yield_now: Y,
+        checkpoint: impl FnMut(SealedBuildEvent) -> Result<(), E>,
     ) -> Result<SealedIncomingIndex, E>
     where
         E: From<SealedError>,
@@ -341,6 +365,7 @@ impl SealedIncomingIndex {
             source_row: None,
             as_of,
             finished: false,
+            suspended: false,
         })
     }
 }
@@ -363,6 +388,7 @@ pub struct SealedIncomingCursor<'a> {
     source_row: Option<SourceRowScan<'a>>,
     as_of: CommitSeq,
     finished: bool,
+    suspended: bool,
 }
 
 // Incoming locators are strictly increasing source-image positions. Keep the
@@ -442,32 +468,70 @@ impl<'a> SealedIncomingCursor<'a> {
         })
     }
 
+    /// Distinguish logical pull/locator work from retry checks after Yield.
+    /// Work events are independent of scheduling quantum; both event kinds
+    /// retain QueryCx-first live authorization, including zero-fuel retries.
+    /// Refusal on either kind terminally fuses this cursor.
+    pub fn next_budgeted_with_events<E: From<SealedError>>(
+        &mut self,
+        cx: &QueryCx,
+        budget: &mut SealedScanBudget,
+        mut checkpoint: impl FnMut(SealedBuildEvent) -> Result<(), E>,
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
+        self.next_budgeted_events_inner(budget, &mut |event| {
+            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            checkpoint(event)
+        })
+    }
+
     fn next_budgeted_inner<E: From<SealedError>>(
         &mut self,
         budget: &mut SealedScanBudget,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
+        self.next_budgeted_events_inner(budget, &mut |_| checkpoint())
+    }
+
+    fn next_budgeted_events_inner<E: From<SealedError>>(
+        &mut self,
+        budget: &mut SealedScanBudget,
+        checkpoint: &mut impl FnMut(SealedBuildEvent) -> Result<(), E>,
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
         if self.finished {
             return Ok(SealedScanStep::End);
         }
-        let result = self.pull::<true, E>(budget, checkpoint);
+        let result = self.pull_events::<true, E>(budget, checkpoint);
         if result.is_err() || matches!(&result, Ok(SealedScanStep::End)) {
             self.finished = true;
         }
         result
     }
 
+    #[cfg(test)]
     fn pull<const FILTER: bool, E: From<SealedError>>(
         &mut self,
         budget: &mut SealedScanBudget,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
-        checkpoint()?;
+        self.pull_events::<FILTER, E>(budget, &mut |_| checkpoint())
+    }
+
+    fn pull_events<const FILTER: bool, E: From<SealedError>>(
+        &mut self,
+        budget: &mut SealedScanBudget,
+        checkpoint: &mut impl FnMut(SealedBuildEvent) -> Result<(), E>,
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
+        checkpoint(if self.suspended {
+            SealedBuildEvent::Scheduling
+        } else {
+            SealedBuildEvent::Work
+        })?;
         while self.chunk < self.chunks.len() {
             if !budget.spend() {
+                self.suspended = true;
                 return Ok(SealedScanStep::Yield);
             }
-            checkpoint()?;
+            checkpoint(SealedBuildEvent::Work)?;
             let Some(position) = self.positions.as_mut().and_then(Iterator::next) else {
                 self.chunk += 1;
                 self.positions = self
@@ -489,6 +553,7 @@ impl<'a> SealedIncomingCursor<'a> {
                         .ok_or(SealedError::NonCanonical)?
                         .as_slice()
                 };
+                self.suspended = false;
                 return Ok(SealedScanStep::Item(SealedEdge { entry, properties }));
             }
         }
@@ -656,17 +721,17 @@ mod construction {
         E: From<SealedError>,
         Y: FnMut() -> F,
         F: Future<Output = ()>,
-        G: FnMut() -> Result<(), E>,
+        G: FnMut(SealedBuildEvent) -> Result<(), E>,
     {
         type Error = E;
         async fn check(&mut self) -> Result<(), E> {
             self.cx.checkpoint().map_err(SealedError::Interrupted)?;
-            (self.guard)()?;
+            (self.guard)(SealedBuildEvent::Work)?;
             if !self.fuel.spend() {
                 (self.yield_now)().await;
                 // Reauthorize BEFORE refuelling or touching any source/output.
                 self.cx.checkpoint().map_err(SealedError::Interrupted)?;
-                (self.guard)()?;
+                (self.guard)(SealedBuildEvent::Scheduling)?;
                 self.fuel = SealedScanBudget::new(self.quantum.get());
                 self.fuel.spend();
             }

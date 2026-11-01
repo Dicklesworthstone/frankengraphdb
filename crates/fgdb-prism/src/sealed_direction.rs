@@ -5,8 +5,8 @@
 use super::{Directedness, SealedProjectionError, SealedProjectionSpec};
 use crate::sealed_control::{Control, Guard};
 use fgdb_strata::tiered::sealed::{
-    SealedCursor, SealedEdge, SealedIncomingCursor, SealedIncomingIndex, SealedPartition,
-    SealedScanBudget, SealedScanStep,
+    SealedBuildEvent, SealedCursor, SealedEdge, SealedIncomingCursor, SealedIncomingIndex,
+    SealedPartition, SealedScanBudget, SealedScanStep,
 };
 use fgdb_types::{CommitSeq, EId, VId};
 
@@ -18,6 +18,7 @@ pub(super) struct Incidences<'a> {
     source: VId,
     undirected: bool,
     finished: bool,
+    suspended: bool,
 }
 
 impl<'a> Incidences<'a> {
@@ -32,6 +33,7 @@ impl<'a> Incidences<'a> {
             source,
             undirected,
             finished: false,
+            suspended: false,
         }
     }
 
@@ -102,6 +104,7 @@ impl<'a> Incidences<'a> {
             source,
             undirected: direction == Directedness::Undirected,
             finished: false,
+            suspended: false,
         })
     }
 
@@ -114,6 +117,7 @@ impl<'a> Incidences<'a> {
             return Ok(SealedScanStep::End);
         }
         let result = self.next_inner(cx, budget);
+        self.suspended = matches!(&result, Ok(SealedScanStep::Yield));
         if result.is_err() || matches!(&result, Ok(SealedScanStep::End)) {
             self.finished = true;
             self.outgoing = None;
@@ -129,14 +133,20 @@ impl<'a> Incidences<'a> {
         cx: &Control<'_, impl Guard>,
         budget: &mut SealedScanBudget,
     ) -> Result<SealedScanStep<(VId, SealedEdge<'a>)>, SealedProjectionError> {
-        super::checkpoint(cx)?;
+        cx.checkpoint_event(if self.suspended {
+            SealedBuildEvent::Scheduling
+        } else {
+            SealedBuildEvent::Work
+        })?;
         if budget.remaining() == 0 {
             return Ok(SealedScanStep::Yield);
         }
         if self.out_head.is_none()
             && let Some(cursor) = &mut self.outgoing
         {
-            match cursor.next_budgeted_with_checkpoint(cx.query, budget, || cx.guard())? {
+            match cursor
+                .next_budgeted_with_events(cx.query, budget, |event| cx.guard_event(event))?
+            {
                 SealedScanStep::Item(edge) => self.out_head = Some(edge),
                 SealedScanStep::End => self.outgoing = None,
                 SealedScanStep::Yield => return Ok(SealedScanStep::Yield),
@@ -146,7 +156,8 @@ impl<'a> Incidences<'a> {
             && let Some(cursor) = &mut self.incoming
         {
             loop {
-                let edge = cursor.next_budgeted_with_checkpoint(cx.query, budget, || cx.guard())?;
+                let edge = cursor
+                    .next_budgeted_with_events(cx.query, budget, |event| cx.guard_event(event))?;
                 match edge {
                     // The outgoing face owns a loop. Skip its incoming copy
                     // before property observation or any input-edge counting.

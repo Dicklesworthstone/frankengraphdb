@@ -24,8 +24,9 @@ use fgdb_prism::{
     FnxCallSpec, FnxExecutionError, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions,
     FnxReadResult, FnxRowCursor, FnxSealedExecutionError, FnxSealedReadError, FnxSelection,
     FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError,
-    ProjectionLimits, ProjectionSpec, SealedGraphView, SealedProjectionError, SealedProjectionMask,
-    SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView, SortedVertexLookup,
+    ProjectionLimits, ProjectionSpec, SealedBuildEvent, SealedGraphView, SealedProjectionError,
+    SealedProjectionMask, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
+    SortedVertexLookup,
 };
 use fgdb_strata::store::{BufferedScanError, BufferedScanEvent};
 use fgdb_strata::tiered::buffer::BufferError;
@@ -258,6 +259,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                     policy,
                     sealing,
                     max_source_incidences,
+                    quantum,
                 )
                 .await?;
             // Sparse cursors also inspect unreachable ordinals. Reserve the
@@ -511,6 +513,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         policy: GqlQueryPolicy,
         sealing: SealedLimits,
         max_source_incidences: usize,
+        quantum: NonZeroUsize,
     ) -> Result<(SealedGraphView, AdmissionUsage), QueryFailure> {
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
         let relation = options.selection.relation.ok_or_else(|| {
@@ -602,7 +605,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             return Err(query_sealed_failure(FnxSealedReadError::SourceMismatch));
         }
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-        let graph = SealedGraphView::build_with_checkpoint(
+        let graph = SealedGraphView::build_cooperative_with_events(
             cx,
             &partition,
             &vertices,
@@ -613,12 +616,18 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             },
             SealedProjectionMask::UNMASKED,
             options.projection_limits,
-            || {
-                usage
-                    .event(SourceEvent::Work)
-                    .map_err(|error| SealedProjectionError::Guard(Box::new(error)))
+            quantum,
+            asupersync::runtime::yield_now::yield_now,
+            |event| {
+                if event == SealedBuildEvent::Work {
+                    usage
+                        .event(SourceEvent::Work)
+                        .map_err(|error| SealedProjectionError::Guard(Box::new(error)))?;
+                }
+                Ok(())
             },
         )
+        .await
         .map_err(|error| query_sealed_failure(FnxSealedReadError::Projection(error)))?;
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
         let usage = usage.completed();

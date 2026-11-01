@@ -83,7 +83,7 @@ fn drive<F: Future>(future: F, guards: &Cell<usize>, quantum: usize) -> (F::Outp
         let before = guards.get();
         let result = future.as_mut().poll(&mut task);
         assert!(
-            guards.get() - before <= quantum + 2,
+            guards.get() - before <= quantum.saturating_add(2),
             "unbounded checkpoint work in a poll"
         );
         match result {
@@ -402,4 +402,149 @@ fn native_allocation_admission_and_typed_source_errors_do_not_reset_on_resume() 
         }))
     ));
     assert_eq!(checks, 1);
+}
+
+#[test]
+fn classified_build_work_matches_immediate_work_for_every_quantum() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    for count in [0, 24, 257] {
+        for one_group in [false, true] {
+            let source = source(count, one_group);
+            let mut immediate_work = 0;
+            let immediate = source
+                .incoming_index_with_checkpoint(&cx, IncomingIndexLimits::default(), || {
+                    immediate_work += 1;
+                    Ok::<(), SealedError>(())
+                })
+                .unwrap();
+            let expected = expected(&source);
+            for q in [1, 2, 7, 64, usize::MAX] {
+                let guards = Cell::new(0);
+                let work = Cell::new(0);
+                let scheduling = Cell::new(0);
+                let (result, pending) = drive(
+                    source.incoming_index_cooperative_with_events(
+                        &cx,
+                        IncomingIndexLimits::default(),
+                        quantum(q),
+                        yield_now,
+                        |event| {
+                            guards.set(guards.get() + 1);
+                            match event {
+                                SealedBuildEvent::Work => work.set(work.get() + 1),
+                                SealedBuildEvent::Scheduling => {
+                                    scheduling.set(scheduling.get() + 1);
+                                }
+                            }
+                            Ok::<(), SealedError>(())
+                        },
+                    ),
+                    &guards,
+                    q,
+                );
+                let built = result.unwrap();
+                assert_eq!(actual(&built), expected);
+                assert_eq!(built.stats(), immediate.stats());
+                assert_eq!(work.get(), immediate_work);
+                assert_eq!(scheduling.get(), pending);
+                assert_eq!(guards.get(), work.get() + pending);
+                assert_eq!(built.source_anchor(), source.anchor());
+                assert!(built.source().shares_image_with(&source));
+                if q == usize::MAX {
+                    assert_eq!(pending, 0);
+                }
+            }
+        }
+    }
+    assert_eq!(contexts.outstanding_obligations(), 0);
+}
+
+#[test]
+fn every_classified_work_and_scheduling_refusal_abandons_the_build() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let source = source(24, false);
+    let anchor = source.anchor();
+    let mut immediate_work = 0;
+    let immediate = source
+        .incoming_index_with_checkpoint(&cx, IncomingIndexLimits::default(), || {
+            immediate_work += 1;
+            Ok::<(), Refusal>(())
+        })
+        .unwrap();
+    for q in [1, 2, 7, 64, usize::MAX] {
+        for stop in 1..=immediate_work {
+            let guards = Cell::new(0);
+            let work = Cell::new(0);
+            let (result, _) = drive(
+                source.incoming_index_cooperative_with_events(
+                    &cx,
+                    IncomingIndexLimits::default(),
+                    quantum(q),
+                    yield_now,
+                    |event| {
+                        guards.set(guards.get() + 1);
+                        if event == SealedBuildEvent::Work {
+                            work.set(work.get() + 1);
+                            if work.get() == stop {
+                                return Err(Refusal::Guard(stop));
+                            }
+                        }
+                        Ok(())
+                    },
+                ),
+                &guards,
+                q,
+            );
+            assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
+            assert_eq!(work.get(), stop);
+            assert_eq!(source.anchor(), anchor);
+        }
+        // Each full allowance is followed by one scheduling check before the
+        // pending logical step may advance. MAX has no suspension to refuse.
+        for stop in 1..=(immediate_work - 1) / q {
+            let guards = Cell::new(0);
+            let work = Cell::new(0);
+            let scheduling = Cell::new(0);
+            let (result, pending) = drive(
+                source.incoming_index_cooperative_with_events(
+                    &cx,
+                    IncomingIndexLimits::default(),
+                    quantum(q),
+                    yield_now,
+                    |event| {
+                        guards.set(guards.get() + 1);
+                        match event {
+                            SealedBuildEvent::Work => work.set(work.get() + 1),
+                            SealedBuildEvent::Scheduling => {
+                                scheduling.set(scheduling.get() + 1);
+                                if scheduling.get() == stop {
+                                    return Err(Refusal::Guard(stop));
+                                }
+                            }
+                        }
+                        Ok(())
+                    },
+                ),
+                &guards,
+                q,
+            );
+            assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
+            assert_eq!(scheduling.get(), stop);
+            assert_eq!(pending, stop);
+            assert_eq!(work.get(), q * stop + 1);
+            assert_eq!(source.anchor(), anchor);
+        }
+    }
+    let retry = source
+        .incoming_index(&cx, IncomingIndexLimits::default())
+        .unwrap();
+    assert_eq!(actual(&retry), expected(&source));
+    assert_eq!(retry.stats(), immediate.stats());
+    assert_eq!(contexts.outstanding_obligations(), 0);
 }

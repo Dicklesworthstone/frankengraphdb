@@ -4,6 +4,118 @@ use fgdb_gql::GlaLimitDimension;
 use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetApplyKind};
 
 #[test]
+fn target_hop_routes_compose_with_repeated_apply_full_width_ids_and_snapshot_topology() {
+    let ((), report) = run_async_under_lab(0x6273_5330, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let (vfs, mut writer) = fixture(&commit).await;
+        let mut change = WriteBatch::new(R);
+        change.add_edge(
+            EId(BASE + 8),
+            VId(1),
+            VId(THIRD),
+            vec![(P, CanonicalScalar::Int(-7))],
+        );
+        assert_eq!(writer.write(&commit, change).await.unwrap(), CommitSeq(3));
+        writer.compact(&commit).await.unwrap();
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let retained = cold.sealed_read_cache_pool().clone();
+        let params = GqlParameters::new()
+            .with_list(
+                "starts",
+                [SECOND, 1, SECOND, THIRD, FOURTH, u128::MAX]
+                    .into_iter()
+                    .map(vertex)
+                    .collect(),
+            )
+            .unwrap()
+            .with_list(
+                "targets",
+                [THIRD, u128::MAX].into_iter().map(vertex).collect(),
+            )
+            .unwrap();
+        let call = "CALL fnx.shortest_path_length(source => start,target => destination,cutoff => 2, \
+            label => 'Person',relation => 'R',weight => 'p',missing => 'unit', \
+            direction => 'directed',parallel => 'min',self_loops => 'drop')";
+        let prefix = "UNWIND $starts AS start UNWIND $targets AS destination";
+        let queries = [
+            format!(
+                "{prefix} {call} YIELD distance AS hops,node AS endpoint \
+                RETURN start,endpoint,hops ORDER BY start,endpoint,hops"
+            ),
+            format!(
+                "{prefix} CALL (start,destination) {{ {call} \
+                YIELD distance AS hops,node AS endpoint RETURN endpoint,hops }} \
+                RETURN start,endpoint,hops ORDER BY start,endpoint,hops"
+            ),
+            format!(
+                "{prefix} {call} YIELD distance AS hops \
+                RETURN start,destination AS endpoint,hops ORDER BY start,endpoint,hops"
+            ),
+        ];
+        let expected = |first| {
+            [
+                (1, THIRD, first),
+                (SECOND, THIRD, 1),
+                (SECOND, THIRD, 1),
+                (THIRD, THIRD, 0),
+                (u128::MAX, u128::MAX, 0),
+            ]
+            .into_iter()
+            .map(|(source, target, hops)| vec![vertex(source), vertex(target), integer(hops)])
+            .collect::<Vec<_>>()
+        };
+        for text in queries {
+            let prepared = prepare(&text, &params);
+            assert_eq!(
+                resident_rows(
+                    writer
+                        .query(&cx, &text, &params, resolve, policy())
+                        .unwrap()
+                ),
+                expected(1)
+            );
+            for run_rows in [1, 4] {
+                let current = execute(
+                    &prepared,
+                    &mut cold,
+                    &cx,
+                    policy(),
+                    &spill_pool,
+                    run_rows,
+                    WORK,
+                )
+                .await
+                .unwrap();
+                assert_eq!(current.rows, expected(1), "{text}");
+                assert_eq!(current.snapshot, CommitSeq(3));
+                let historical = prepared.clone().with_as_of(CommitSeq(2)).unwrap();
+                let old = execute(
+                    &historical,
+                    &mut cold,
+                    &cx,
+                    policy(),
+                    &spill_pool,
+                    run_rows,
+                    WORK,
+                )
+                .await
+                .unwrap();
+                assert_eq!(old.rows, expected(2), "{text}");
+                assert_eq!(old.snapshot, CommitSeq(2));
+                assert_eq!(spill_pool.used(), 0);
+            }
+        }
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+        assert_eq!(retained.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn targeted_weighted_routes_compose_with_repeated_apply_scalar_yields_and_history() {
     let ((), report) = run_async_under_lab(0x6273_5329, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
