@@ -15,6 +15,7 @@ use super::{
     SealedGraphView, SealedRows, add, admit, checkpoint, directional_pass_work, finish, mul,
     require_loop_free_degree, reserve,
 };
+use crate::sealed::SealedRowSource;
 use crate::sealed_control::{Control, Guard};
 use std::mem::size_of;
 
@@ -311,7 +312,11 @@ pub(super) fn execute(
     admission: &ResultAdmission,
 ) -> Result<Finished> {
     let estimated = prepare(call, graph, limits, memory, admission)?;
-    let rows = SealedRows { cx, graph };
+    let original_face = graph.row_view();
+    let rows = SealedRows {
+        cx,
+        graph: &original_face,
+    };
     let mut control = || checkpoint(cx);
     let reverse =
         if graph.node_count() != 0 && graph.spec().directedness != Directedness::Undirected {
@@ -325,12 +330,13 @@ pub(super) fn execute(
         };
     let auxiliary = reverse
         .as_ref()
-        .map_or(0, SealedGraphView::charged_workspace_bytes);
+        .map_or(0, |face| face.charged_workspace_bytes());
     let remaining = memory
         .max_kernel_workspace_bytes
         .checked_sub(auxiliary)
         .ok_or(ExecutionError::SizeOverflow)?;
-    let reverse_rows = reverse.as_ref().map(|graph| SealedRows { cx, graph });
+    let reverse_face = reverse.as_ref().map(SealedRowSource::row_view);
+    let reverse_rows = reverse_face.as_ref().map(|graph| SealedRows { cx, graph });
     let (output, peak) = run(&rows, reverse_rows.as_ref(), remaining, &mut control)?;
     let peak = add(peak, auxiliary)?;
     drop(reverse);

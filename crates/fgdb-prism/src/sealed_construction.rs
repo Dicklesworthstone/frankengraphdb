@@ -157,9 +157,9 @@ where
 // This driver is used only with the immediate schedule. There
 // is no executor, blocking wait or poll loop. A mistakenly introduced suspend
 // fails closed and drops every unpublished allocation.
-pub(super) fn immediately(
-    future: impl Future<Output = Result<SealedGraphView, SealedProjectionError>>,
-) -> Result<SealedGraphView, SealedProjectionError> {
+pub(super) fn immediately<T>(
+    future: impl Future<Output = Result<T, SealedProjectionError>>,
+) -> Result<T, SealedProjectionError> {
     let mut future = std::pin::pin!(future);
     match future
         .as_mut()

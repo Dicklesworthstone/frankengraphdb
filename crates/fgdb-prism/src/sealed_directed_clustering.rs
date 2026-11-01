@@ -13,6 +13,7 @@ use super::{
     SealedRows, add, admit, checkpoint, directional_pass_work, finish, mul, reserve,
 };
 use crate::Directedness;
+use crate::sealed::{SealedRowSource, SealedRowView};
 use crate::sealed_control::{Control, Guard};
 use std::future::Future;
 use std::mem::size_of;
@@ -66,16 +67,21 @@ pub(super) fn execute(
     )?;
     let reverse_work = reverse_work(n, graph.scan_incidence_bound())?;
     admit("estimated work", reverse_work, limits.max_estimated_work)?;
-    // The additional projection copies only its vertex directory/degrees and,
-    // when needed, compressed incoming locators. Its construction peak belongs
-    // to this kernel, not to the already-admitted original projection.
+    // Borrow the admitted selection and degree proof. Only a missing exact
+    // transpose directory and compressed incoming locators belong to this
+    // kernel's construction peak.
     let opposite =
         graph.reverse_projection_controlled(cx, memory.max_kernel_workspace_bytes - arrays)?;
     let base = opposite.charged_workspace_bytes();
-    let outgoing = SealedRows { cx, graph };
+    let original_face = graph.row_view();
+    let opposite_face = opposite.row_view();
+    let outgoing = SealedRows {
+        cx,
+        graph: &original_face,
+    };
     let incoming = SealedRows {
         cx,
-        graph: &opposite,
+        graph: &opposite_face,
     };
     let plan = prepare(
         &outgoing,
@@ -559,8 +565,8 @@ fn run(
 }
 
 fn sealed_neighbors<'a>(
-    outgoing: &'a SealedGraphView,
-    incoming: &'a SealedGraphView,
+    outgoing: SealedRowView<'a>,
+    incoming: SealedRowView<'a>,
     source: usize,
     cx: &Control<'_, impl Guard>,
 ) -> Result<WeakNeighbors<super::SealedNeighborCursor<'a>, super::SealedNeighborCursor<'a>>> {
@@ -634,6 +640,8 @@ where
     if opposite.node_count() != n {
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
+    let outgoing = graph.row_view();
+    let incoming = opposite.row_view();
     let mut plan = Plan::new(
         n,
         history,
@@ -656,7 +664,7 @@ where
     }
     for source in 0..n {
         control.tick().await?;
-        let mut row = sealed_neighbors(graph, &opposite, source, control.cx)?;
+        let mut row = sealed_neighbors(outgoing, incoming, source, control.cx)?;
         let mut degree = 0;
         while let Some((target, _)) = row.next_cooperative(control).await? {
             control.tick().await?;
@@ -690,7 +698,7 @@ where
         control.tick().await?;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
         {
-            let mut row = sealed_neighbors(graph, &opposite, source, control.cx)?;
+            let mut row = sealed_neighbors(outgoing, incoming, source, control.cx)?;
             let mut marked = 0;
             while let Some((target, multiplicity)) = row.next_cooperative(control).await? {
                 control.tick().await?;
@@ -703,13 +711,13 @@ where
             witness.queue_peak = witness.queue_peak.max(marked);
             witness.edges_scanned = add(witness.edges_scanned, row.scans()?)?;
         }
-        let mut row = sealed_neighbors(graph, &opposite, source, control.cx)?;
+        let mut row = sealed_neighbors(outgoing, incoming, source, control.cx)?;
         while let Some((target, multiplicity)) = row.next_cooperative(control).await? {
             control.tick().await?;
             if !lower(&costs, target, source) {
                 continue;
             }
-            let mut other = sealed_neighbors(graph, &opposite, target, control.cx)?;
+            let mut other = sealed_neighbors(outgoing, incoming, target, control.cx)?;
             while let Some((third, arcs)) = other.next_cooperative(control).await? {
                 control.tick().await?;
                 if lower(&costs, third, target) && marks[third] == source {

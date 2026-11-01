@@ -1,7 +1,7 @@
 //! Distance centralities through authenticated history and compressed rows.
 
 use super::*;
-use fgdb_prism::{AdapterPath, FnxGraphKind, FnxValue, ProjectionError};
+use fgdb_prism::{AdapterPath, FnxGraphKind, FnxValue};
 
 fn call(harmonic: bool) -> FnxCallSpec {
     FnxCallSpec::bind(
@@ -216,12 +216,15 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                 assert_eq!(opposite.binding(), graph.binding());
                 assert_eq!(opposite.vertex_ids(), graph.vertex_ids());
                 assert_ne!(opposite.digest(), graph.digest());
-                // An independently admitted opposite face prices the actual
-                // source directory/index beside the three scalar vectors.
+                // The independent opposite projection supplies the index
+                // construction price. The kernel borrows all retained IDs and
+                // incoming degrees from the original admitted projection.
                 let scalar = graph.node_count()
                     * (2 * size_of::<usize>() + size_of::<f64>());
+                let incoming = opposite.incoming_index_stats()
+                    .map_or(0, |stats| stats.charged_workspace_bytes);
                 assert_eq!(expected.certificate.kernel_workspace_bytes,
-                    scalar + opposite.charged_workspace_bytes());
+                    scalar + incoming);
                 Some(opposite)
             };
             let columns = call.outputs().len() * size_of::<String>()
@@ -243,20 +246,20 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
             let minimum_workspace = if let Some(opposite) = &opposite {
                 assert_eq!(graph.node_count(), 3);
                 let scalar = 3 * (2 * size_of::<usize>() + size_of::<f64>());
-                // Three full-width IDs and three degree slots are mandatory.
-                // The public opposite-face build supplies the separately
-                // admitted index peak; neither optional directory is needed.
+                // The public opposite projection still owns its directory,
+                // unlike the borrowed kernel face. Bound that independent
+                // oracle to its mandatory layout and compare every literal row.
                 let directory = 3 * (size_of::<VId>() + size_of::<usize>());
                 let incoming = opposite.incoming_index_stats().map_or(0, |stats| {
                     assert_eq!(stats.rows, 2);
                     assert_eq!(stats.incidences, 2);
                     stats.charged_workspace_bytes
                 });
-                let mandatory_auxiliary = directory + incoming;
+                let projection_minimum = directory + incoming;
                 let mut bounded = options(opposite.spec().directedness);
-                bounded.projection_limits.max_workspace_bytes = mandatory_auxiliary;
+                bounded.projection_limits.max_workspace_bytes = projection_minimum;
                 let admitted = projection(&db, &cx, bounded).await;
-                assert_eq!(admitted.charged_workspace_bytes(), mandatory_auxiliary);
+                assert_eq!(admitted.charged_workspace_bytes(), projection_minimum);
                 assert_eq!(admitted.incoming_index_stats(), opposite.incoming_index_stats());
                 assert_eq!(admitted.binding(), opposite.binding());
                 assert_eq!(admitted.digest(), opposite.digest());
@@ -273,52 +276,21 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                     assert_eq!(row(&admitted, &cx, source, None, 1).0, literal);
                     assert_eq!(row(opposite, &cx, source, None, 1).0, literal);
                 }
-                // This tiny population retains no ordinal-prefix accelerator.
-                // The complete build's only optional backing is one incoming
-                // degree per vertex; losing it must preserve the result.
+                // No ordinal-prefix allocation fits this small population.
+                // Both full projections retain incoming degrees, and the
+                // kernel borrows the original array without another owner.
                 let degree_bytes = 3 * size_of::<usize>();
                 assert_eq!(opposite.charged_workspace_bytes(),
-                    mandatory_auxiliary + degree_bytes);
-                let minimum = scalar + mandatory_auxiliary;
-                let mut previous_reduced = None;
-                for bytes in [mem.max_kernel_workspace_bytes - 1, minimum] {
-                    let fallback_memory = FnxMemoryLimits {
-                        max_kernel_workspace_bytes: bytes,
-                        ..mem
-                    };
-                    let fallback = call.execute_sealed(&cx, &graph, exact, fallback_memory).unwrap();
-                    assert_eq!(fallback.columns, expected.columns);
-                    assert_eq!(fallback.rows, expected.rows);
-                    assert_eq!(fallback.certificate.result_digest, expected.certificate.result_digest);
-                    assert_eq!(fallback.certificate.snapshot, expected.certificate.snapshot);
-                    assert_eq!(fallback.certificate.projection_digest, expected.certificate.projection_digest);
-                    assert_eq!(fallback.certificate.execution_kernel, expected.certificate.execution_kernel);
-                    assert_eq!(fallback.certificate.witness, expected.certificate.witness);
-                    assert_eq!(fallback.certificate.estimated_work, expected.certificate.estimated_work);
-                    assert_eq!(fallback.certificate.registry_version, expected.certificate.registry_version);
-                    assert_eq!(fallback.certificate.implementation_revision, expected.certificate.implementation_revision);
-                    assert_eq!(fallback.certificate.kernel_source_digest, expected.certificate.kernel_source_digest);
-                    assert_eq!(fallback.certificate.numeric_profile, expected.certificate.numeric_profile);
-                    assert_eq!(fallback.certificate.call_digest, expected.certificate.call_digest);
-                    assert_eq!(fallback.certificate.adapter, expected.certificate.adapter);
-                    assert_eq!(fallback.certificate.vertices, expected.certificate.vertices);
-                    assert_eq!(fallback.certificate.edges, expected.certificate.edges);
-                    assert_eq!(fallback.certificate.input_edges, expected.certificate.input_edges);
-                    assert_eq!(fallback.certificate.bfs_decision_card, expected.certificate.bfs_decision_card);
-                    assert_eq!(fallback.certificate.component_decision_card, expected.certificate.component_decision_card);
-                    assert_eq!(fallback.certificate.kernel_workspace_bytes, minimum);
-                    // The attested workspace changes, so its hashed
-                    // certificate changes too. Both reduced allowances use
-                    // the same physical backing and must agree in full.
-                    assert_ne!(fallback.certificate.digest, expected.certificate.digest);
-                    if let Some(previous) = &previous_reduced {
-                        assert_eq!(&fallback, previous);
-                    }
-                    compare_execution(&call.execute_sealed_cooperative(
-                        &cx, &graph, exact, fallback_memory, quantum(1), yield_now,
-                    ).await.unwrap(), &fallback);
-                    previous_reduced = Some(fallback);
-                }
+                    projection_minimum + degree_bytes);
+                assert_eq!(graph.charged_workspace_bytes(),
+                    directory + graph.incoming_index_stats()
+                        .map_or(0, |stats| stats.charged_workspace_bytes)
+                        + degree_bytes);
+                let minimum = scalar + incoming;
+                assert_eq!(mem.max_kernel_workspace_bytes, minimum);
+                // Exact execution above already uses the mandatory footprint.
+                // No optional auxiliary degree allocation remains; its former
+                // full-minus-one fallback is now the refusal checked below.
                 minimum
             } else {
                 mem.max_kernel_workspace_bytes
@@ -337,9 +309,10 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                     let directed_workspace = resource == "kernel workspace bytes"
                         && direction != Directedness::Undirected;
                     let result = if cooperative {
-                        if directed_workspace {
-                            // The auxiliary constructor checks its mandatory
-                            // bound while running the normal bounded driver.
+                        if directed_workspace && direction == Directedness::Directed {
+                            // Only a missing incoming index reaches the bounded
+                            // auxiliary builder; borrowed reverse faces need no
+                            // construction before the kernel arrays admission.
                             call.execute_sealed_cooperative(&cx, &graph, limits, memory,
                                 quantum(1), yield_now).await
                         } else {
@@ -364,13 +337,13 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                                 )) if requested == incoming && limit == incoming - 1));
                             }
                             Directedness::Reversed => {
-                                let auxiliary = graph.node_count()
-                                    * (size_of::<VId>() + size_of::<usize>());
-                                assert!(matches!(result, Err(FnxSealedExecutionError::Source(
-                                    SealedProjectionError::Projection(ProjectionError::LimitExceeded {
-                                        resource: "workspace bytes", observed, limit,
-                                    })
-                                )) if observed == auxiliary && limit == auxiliary - 1));
+                                let arrays = graph.node_count()
+                                    * (2 * size_of::<usize>() + size_of::<f64>());
+                                assert!(matches!(result, Err(FnxSealedExecutionError::Execution(
+                                    FnxExecutionError::LimitExceeded {
+                                        resource: "kernel workspace bytes", requested, limit,
+                                    }
+                                )) if requested == arrays && limit == arrays - 1));
                             }
                             Directedness::Undirected => unreachable!(),
                         }

@@ -3,7 +3,7 @@
 //! certificate parity are checked at the same seam as the other kernels.
 
 use super::*;
-use fgdb_prism::{AdapterPath, FnxValue, ProjectionError};
+use fgdb_prism::{AdapterPath, FnxValue};
 
 #[test]
 fn topology_calls_preserve_history_reductions_aliases_and_certificates_across_quanta() {
@@ -677,13 +677,13 @@ fn directed_clustering_preserves_exact_admission_and_empty_or_isolated_graph_law
                 assert_eq!(stats.incidences, edges.len());
                 stats.charged_workspace_bytes
             });
-            // IDs and outgoing degree slots are mandatory. The independently
-            // admitted incoming index supplies its own construction-peak price.
+            // This independent projection supplies the missing index's peak
+            // and a row oracle. The kernel borrows the original IDs and degrees.
             let directory = 4 * (size_of::<VId>() + size_of::<usize>());
-            let auxiliary = directory + incoming;
-            opposite_options.projection_limits.max_workspace_bytes = auxiliary;
+            let projection_minimum = directory + incoming;
+            opposite_options.projection_limits.max_workspace_bytes = projection_minimum;
             let mandatory = projection(&db, &cx, opposite_options).await;
-            assert_eq!(mandatory.charged_workspace_bytes(), auxiliary);
+            assert_eq!(mandatory.charged_workspace_bytes(), projection_minimum);
             assert_eq!(mandatory.binding(), opposite.binding());
             assert_eq!(mandatory.digest(), opposite.digest());
             assert_eq!(mandatory.vertex_ids(), opposite.vertex_ids());
@@ -711,55 +711,25 @@ fn directed_clustering_preserves_exact_admission_and_empty_or_isolated_graph_law
             // score conversion instead retains two usize columns and f64.
             let arrays = (4 * (4 * size_of::<usize>() + size_of::<u8>()))
                 .max(4 * (2 * size_of::<usize>() + size_of::<f64>()));
-            let minimum = auxiliary + arrays;
-            let optional_degrees = 4 * size_of::<usize>();
+            let minimum = incoming + arrays;
+            let degree_bytes = 4 * size_of::<usize>();
             assert_eq!(
                 opposite.charged_workspace_bytes(),
-                auxiliary + optional_degrees
+                projection_minimum + degree_bytes
             );
-            assert_eq!(mem.max_kernel_workspace_bytes, minimum + optional_degrees);
-            // Preserve the original one-byte-short input as a lawful cache
-            // fallback, and prove success at the mandatory footprint itself.
-            for allowance in [mem.max_kernel_workspace_bytes - 1, minimum] {
-                let fallback_memory = FnxMemoryLimits {
-                    max_kernel_workspace_bytes: allowance,
-                    ..mem
-                };
-                let fallback = call
-                    .execute_sealed(&cx, &graph, limits, fallback_memory)
-                    .unwrap();
-                assert_eq!(fallback.columns, sync.columns);
-                assert_eq!(fallback.rows, sync.rows);
-                assert_eq!(
-                    fallback.certificate.result_digest,
-                    sync.certificate.result_digest
-                );
-                assert_eq!(fallback.certificate.snapshot, sync.certificate.snapshot);
-                assert_eq!(
-                    fallback.certificate.projection_digest,
-                    sync.certificate.projection_digest
-                );
-                assert_eq!(fallback.certificate.witness, sync.certificate.witness);
-                assert_eq!(
-                    fallback.certificate.estimated_work,
-                    sync.certificate.estimated_work
-                );
-                assert_eq!(fallback.certificate.kernel_workspace_bytes, minimum);
-                compare_execution(
-                    &call
-                        .execute_sealed_cooperative(
-                            &cx,
-                            &graph,
-                            limits,
-                            fallback_memory,
-                            quantum(1),
-                            yield_now,
-                        )
-                        .await
-                        .unwrap(),
-                    &fallback,
-                );
-            }
+            assert_eq!(
+                graph.charged_workspace_bytes(),
+                directory
+                    + graph
+                        .incoming_index_stats()
+                        .map_or(0, |stats| stats.charged_workspace_bytes)
+                    + degree_bytes,
+                "the original projection retains the degrees borrowed by the opposite face"
+            );
+            assert_eq!(mem.max_kernel_workspace_bytes, minimum);
+            // Exact synchronous/cooperative admission above uses this full
+            // mandatory footprint. Shared degrees leave no optional allocation
+            // to drop, so the one-byte-short input must refuse below.
             for (limits, mem) in [
                 (
                     FnxExecutionLimits {
@@ -806,11 +776,11 @@ fn directed_clustering_preserves_exact_admission_and_empty_or_isolated_graph_law
                             )
                         ) if requested == incoming && limit == incoming - 1));
                     } else {
-                        assert!(matches!(sync, FnxSealedExecutionError::Source(
-                            SealedProjectionError::Projection(ProjectionError::LimitExceeded {
-                                resource: "workspace bytes", observed, limit,
-                            })
-                        ) if observed == directory && limit == directory - 1));
+                        assert!(matches!(sync, FnxSealedExecutionError::Execution(
+                            FnxExecutionError::LimitExceeded {
+                                resource: "kernel workspace bytes", requested, limit,
+                            }
+                        ) if requested == arrays && limit == arrays - 1));
                     }
                 }
             }

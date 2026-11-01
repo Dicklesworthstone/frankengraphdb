@@ -21,6 +21,7 @@ use super::{
     ResultAdmission, Rows, SealedGraphView, SealedRows, add, admit, checkpoint,
     directional_pass_work, finish, finish_encoded, mul, reserve,
 };
+use crate::sealed::SealedRowSource;
 use crate::sealed_control::{Control, Guard};
 use std::future::Future;
 use std::mem::size_of;
@@ -563,7 +564,11 @@ pub(super) fn execute(
     let (max_iter, estimated) = admit_call(call, graph, limits, admission)?;
     let n = graph.node_count();
     let mut control = || checkpoint(cx);
-    let rows = SealedRows { cx, graph };
+    let original_face = graph.row_view();
+    let rows = SealedRows {
+        cx,
+        graph: &original_face,
+    };
     let mut state = Labels::new(n, max_iter, memory.max_kernel_workspace_bytes)?;
     state.prepare(&rows, max_iter, &mut control)?;
     let reverse =
@@ -583,7 +588,8 @@ pub(super) fn execute(
         } else {
             None
         };
-    let reverse_rows = reverse.as_ref().map(|graph| SealedRows { cx, graph });
+    let reverse_face = reverse.as_ref().map(SealedRowSource::row_view);
+    let reverse_rows = reverse_face.as_ref().map(|graph| SealedRows { cx, graph });
     // The mandatory reverse projection keeps its existing admission first;
     // optional frontier storage must never make a formerly admitted call fail.
     state.reserve_frontier(max_iter, memory.max_kernel_workspace_bytes)?;
@@ -683,7 +689,9 @@ where
             while let Some((source, notify)) = state.next_row(&mut fallback_source) {
                 control.tick().await?;
                 let (mut best, mut best_count) = state.begin_row(source)?;
-                for face in std::iter::once(graph).chain(reverse.as_ref()) {
+                for face in std::iter::once(graph.row_view())
+                    .chain(reverse.as_ref().map(SealedRowSource::row_view))
+                {
                     let mut row = face.neighbor_cursor_controlled(control.cx, source, None)?;
                     while let Some((neighbor, _)) = control.next(&mut row).await? {
                         control.tick().await?;

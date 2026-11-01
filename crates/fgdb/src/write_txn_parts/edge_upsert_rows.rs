@@ -899,6 +899,9 @@ impl WriteTxn {
         let mut outcomes = Vec::new();
         let mut created = Vec::new();
         let mut effects = 0_u64;
+        // This memo belongs only to this immutable chain step. Every occurrence
+        // still evaluates its row keys and RHS actions through the native owners.
+        let mut match_targets = EdgeUpsertMatchTargets::for_rows(upsert);
         for (at, row) in selected.value.into_iter().enumerate() {
             // Transfer the already admitted row through the real collector;
             // do not deep-copy a carried map to construct a singleton source.
@@ -964,57 +967,66 @@ impl WriteTxn {
                     .max_edges
                     .checked_sub(stats.created_edges)
                     .ok_or_else(invalid)?;
-                let proposal =
-                    collect_edge_merge_output::<EdgeUpsertRowTargets, WriteTxnError, A, _>(
-                        merge,
-                        GraphEdgeMergePolicy::new(private).with_creation_limit(remaining),
-                        |_| {
-                            Ok(GqlQueryExecution {
-                                value: vec![row],
-                                rows: GqlExecutionStats {
-                                    snapshot_records: stats.selection.snapshot_records,
-                                    result_rows: 1,
-                                },
-                                evaluator: stats.evaluator,
-                            })
-                        },
-                        |source, destination| {
+                let proposal = collect_edge_merge_output_reusing_targets::<
+                    EdgeUpsertRowTargets,
+                    WriteTxnError,
+                    A,
+                    _,
+                >(
+                    merge,
+                    GraphEdgeMergePolicy::new(private).with_creation_limit(remaining),
+                    match_targets.as_mut(),
+                    |_| {
+                        Ok(GqlQueryExecution {
+                            value: vec![row],
+                            rows: GqlExecutionStats {
+                                snapshot_records: stats.selection.snapshot_records,
+                                result_rows: 1,
+                            },
+                            evaluator: stats.evaluator,
+                        })
+                    },
+                    |source, destination, targets_reused| {
+                        if targets_reused {
+                            Ok(Vec::new())
+                        } else {
                             self.merge_candidate_edges(database, merge, source, destination, || {
                                 cx.checkpoint()
                             })
-                        },
-                        |_| allocate(GraphInsertRequest::Edge { row: at, edge: 0 }),
-                        || cx.checkpoint(),
-                    )
-                    .map_err(|error| {
-                        error.map_source(|error| {
-                            chained(GraphEdgeUpsertError::Merge(match error {
-                                GraphEdgeMergeError::CreationLimit { observed, .. } => {
-                                    GraphEdgeMergeError::CreationLimit {
-                                        limit: policy.max_edges,
-                                        observed: u128::from(stats.created_edges) + observed,
-                                    }
+                        }
+                    },
+                    |_| allocate(GraphInsertRequest::Edge { row: at, edge: 0 }),
+                    || cx.checkpoint(),
+                )
+                .map_err(|error| {
+                    error.map_source(|error| {
+                        chained(GraphEdgeUpsertError::Merge(match error {
+                            GraphEdgeMergeError::CreationLimit { observed, .. } => {
+                                GraphEdgeMergeError::CreationLimit {
+                                    limit: policy.max_edges,
+                                    observed: u128::from(stats.created_edges) + observed,
                                 }
-                                GraphEdgeMergeError::InputSchema { column, .. } => {
-                                    GraphEdgeMergeError::InputSchema { row: at, column }
-                                }
-                                GraphEdgeMergeError::NullEndpoint { column, .. } => {
-                                    GraphEdgeMergeError::NullEndpoint { row: at, column }
-                                }
-                                GraphEdgeMergeError::RowValue { property, .. } => {
-                                    GraphEdgeMergeError::RowValue { row: at, property }
-                                }
-                                GraphEdgeMergeError::RowExpression {
-                                    property, source, ..
-                                } => GraphEdgeMergeError::RowExpression {
-                                    row: at,
-                                    property,
-                                    source,
-                                },
-                                error => error,
-                            }))
-                        })
-                    })?;
+                            }
+                            GraphEdgeMergeError::InputSchema { column, .. } => {
+                                GraphEdgeMergeError::InputSchema { row: at, column }
+                            }
+                            GraphEdgeMergeError::NullEndpoint { column, .. } => {
+                                GraphEdgeMergeError::NullEndpoint { row: at, column }
+                            }
+                            GraphEdgeMergeError::RowValue { property, .. } => {
+                                GraphEdgeMergeError::RowValue { row: at, property }
+                            }
+                            GraphEdgeMergeError::RowExpression {
+                                property, source, ..
+                            } => GraphEdgeMergeError::RowExpression {
+                                row: at,
+                                property,
+                                source,
+                            },
+                            error => error,
+                        }))
+                    })
+                })?;
                 let EdgeMergeProposal {
                     stats: merged,
                     outcome,
@@ -1047,7 +1059,8 @@ impl WriteTxn {
             for (row, targets) in resolved.rows() {
                 let input_at = input.len();
                 // The collector froze all parallel matches for this occurrence.
-                // A key rewrite below affects only the next occurrence's lookup.
+                // Key-writing steps have no memo, so the next occurrence resolves
+                // against their updated overlay through the original full path.
                 for (outcome, endpoints) in targets.targets() {
                     let (edge, branch, on) = match outcome {
                         GraphEdgeMergeOutcome::Matched(edge) => (
@@ -1687,6 +1700,135 @@ fn mixed_edge_merge_payload_is_admitted_before_owner_frame_copy() {
             }
         }
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[cfg(test)]
+#[test]
+fn row_key_target_reuse_restores_saved_prefix_after_late_action_failure() {
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_gql::insertion::GraphInsertPolicy;
+    use fgdb_gql::{
+        GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphWriteChainText,
+    };
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+    const P: fgdb_delta_types::PropertyKeyId = fgdb_delta_types::PropertyKeyId(1);
+    const Q: fgdb_delta_types::PropertyKeyId = fgdb_delta_types::PropertyKeyId(2);
+    let ((), report) = run_async_under_lab(0x7471_0004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(
+            &commit,
+            crate::DatabaseKeys::new(
+                [0x76; 32],
+                DatabaseSecurityNamespaceId([0x77; 32]),
+                [0x78; 32],
+            ),
+        )
+        .await
+        .unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for id in [1, 2] {
+            seed.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(P, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        seed.add_edge(
+            EId(50),
+            VId(1),
+            VId(2),
+            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(0))],
+        );
+        db.write(&commit, seed).await.unwrap();
+        let published = (db.frontier().unwrap(), db.edges().unwrap());
+        let prepare = |action: &str| {
+            PreparedGraphWriteChainText::prepare(
+                &format!(
+                    "UNWIND [1,1,1] AS x MATCH (a:A {{p:1}}),(b:A {{p:2}})                      MERGE (a)-[r:R {{p:x}}]->(b) ON MATCH SET r.q={action}"
+                ),
+                RelationId(1),
+                |kind, name: &str| match (kind, name) {
+                    (GraphSymbolKind::Label, "A") => Some(GraphSymbol::Label(LabelId(1))),
+                    (GraphSymbolKind::Relation, "R") =>
+                        Some(GraphSymbol::Relation(RelationId(1))),
+                    (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+                    (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+                    _ => None,
+                },
+            ).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+        };
+        let allowance =
+            GraphInsertPolicy::new(GqlQueryPolicy::new(10_000, 100, 1_000_000, 100_000), 0, 0)
+                .with_mutation_limit(10);
+        let mut transaction = db.begin(&txn).unwrap();
+        let mut prefix = WriteBatch::new(RelationId(1));
+        prefix.set_vertex_property(VId(1), Q, Some(CanonicalScalar::Int(99)));
+        transaction.write(&mut db, prefix).unwrap();
+        transaction.savepoint(&db, "before-row-upsert").unwrap();
+        let saved = transaction.prepared.clone().unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let staged = transaction.staged.len();
+        let failure = transaction
+            .execute_graph_write_chain_engine_governed(
+                &mut db,
+                &query,
+                &prepare("1/(1-r.q)"),
+                allowance,
+            )
+            .unwrap_err();
+        assert!(
+            format!("{failure:?}").contains("DivisionByZero"),
+            "{failure:?}"
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            transaction.prepared.as_ref().unwrap(),
+            &saved
+        ));
+        assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        assert_eq!(transaction.staged.len(), staged);
+        assert_eq!(
+            transaction.edge_property(&db, EId(50), Q).unwrap(),
+            Some(CanonicalScalar::Int(0).into()),
+        );
+        for attempt in 0..2 {
+            let (stats, _, _) = transaction
+                .execute_graph_write_chain_engine_governed(
+                    &mut db,
+                    &query,
+                    &prepare("r.q+x"),
+                    allowance,
+                )
+                .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+            assert_eq!(
+                transaction.edge_property(&db, EId(50), Q).unwrap(),
+                Some(CanonicalScalar::Int(3).into()),
+            );
+            assert_eq!((db.frontier().unwrap(), db.edges().unwrap()), published);
+            if attempt == 0 {
+                transaction
+                    .rollback_to_savepoint(&db, "before-row-upsert")
+                    .unwrap();
+                assert!(std::sync::Arc::ptr_eq(
+                    transaction.prepared.as_ref().unwrap(),
+                    &saved
+                ));
+                assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            }
+        }
+        transaction.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, published.0.0 + 1);
+        assert_eq!(
+            db.edge(EId(50)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(3).into()),
+            ]
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

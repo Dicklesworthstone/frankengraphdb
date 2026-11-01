@@ -27,7 +27,10 @@ use std::sync::Arc;
 mod construction;
 #[path = "sealed_direction.rs"]
 mod direction;
+#[path = "sealed_opposite.rs"]
+mod opposite;
 use direction::Incidences;
+pub(crate) use opposite::{SealedOppositeFace, SealedRowSource, SealedRowView};
 
 /// One selected relation in one already-admitted scalar snapshot. Reversed and
 /// undirected projections use the source image's authenticated incoming index.
@@ -233,26 +236,6 @@ impl SealedGraphView {
         mut guard: impl FnMut() -> Result<(), SealedProjectionError>,
     ) -> Result<Self, SealedProjectionError> {
         let mut control = construction::BuildControl::new(cx, |_| guard());
-        construction::immediately(Self::construct(
-            &mut control,
-            partition,
-            vertices,
-            config,
-            mask,
-            limits,
-            &mut construction::Schedule::immediate(),
-        ))
-    }
-
-    fn build_controlled(
-        cx: &Control<'_, impl Guard>,
-        partition: &SealedPartition,
-        vertices: &[VId],
-        config: SealedProjectionSpec,
-        mask: SealedProjectionMask,
-        limits: ProjectionLimits,
-    ) -> Result<Self, SealedProjectionError> {
-        let mut control = construction::BuildControl::new(cx.query, |_| cx.guard());
         construction::immediately(Self::construct(
             &mut control,
             partition,
@@ -744,86 +727,6 @@ impl SealedGraphView {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    /// The opposite directed face of this exact admitted projection. The
-    /// source image, selected vertices, historical cut, masks and reduction
-    /// laws are preserved; only direction changes. No edge or property column
-    /// is decoded into a second graph.
-    ///
-    /// This is temporary kernel workspace, not a new authorization boundary.
-    /// Its directory and any compressed incoming index, including construction
-    /// peak, must fit the remaining kernel allowance. The same live guard
-    /// reaches every construction and raw-pull checkpoint. Undirected kernels
-    /// already have both faces and do not need this auxiliary projection.
-    pub(crate) fn reverse_projection_controlled(
-        &self,
-        cx: &Control<'_, impl Guard>,
-        max_workspace_bytes: usize,
-    ) -> Result<Self, SealedProjectionError> {
-        let (config, limits) = self.reverse_projection_request(max_workspace_bytes)?;
-        Self::build_controlled(
-            cx,
-            &self.0.partition,
-            &self.0.vertices,
-            config,
-            self.0.mask,
-            limits,
-        )
-    }
-
-    /// The same temporary opposite face, with directory, raw incidence and
-    /// incoming-index construction driven by the ordinary bounded scheduler.
-    /// The kernel keeps its original live control; no permission or mask is
-    /// replaced at this construction boundary.
-    pub(crate) async fn reverse_projection_cooperative_controlled<Y, F>(
-        &self,
-        cx: &Control<'_, impl Guard>,
-        max_workspace_bytes: usize,
-        quantum: NonZeroUsize,
-        yield_now: Y,
-    ) -> Result<Self, SealedProjectionError>
-    where
-        Y: FnMut() -> F,
-        F: Future<Output = ()>,
-    {
-        let (config, limits) = self.reverse_projection_request(max_workspace_bytes)?;
-        let mut control = construction::BuildControl::new(cx.query, |_| cx.guard());
-        Self::construct(
-            &mut control,
-            &self.0.partition,
-            &self.0.vertices,
-            config,
-            self.0.mask,
-            limits,
-            &mut construction::Schedule::cooperative(quantum, yield_now),
-        )
-        .await
-    }
-
-    fn reverse_projection_request(
-        &self,
-        max_workspace_bytes: usize,
-    ) -> Result<(SealedProjectionSpec, ProjectionLimits), SealedProjectionError> {
-        let mut config = self.0.config;
-        config.projection.directedness = match config.projection.directedness {
-            Directedness::Directed => Directedness::Reversed,
-            Directedness::Reversed => Directedness::Directed,
-            Directedness::Undirected => {
-                return Err(SealedProjectionError::UnsupportedDirectedness(
-                    Directedness::Undirected,
-                ));
-            }
-        };
-        Ok((
-            config,
-            ProjectionLimits {
-                max_vertices: self.node_count(),
-                max_input_edges: self.scan_incidence_bound(),
-                max_adjacency_entries: self.adjacency_entry_count(),
-                max_workspace_bytes,
-            },
-        ))
-    }
-
     /// Conservative retained-incidence bound, not the reduced simple-edge count.
     pub fn scan_incidence_bound(&self) -> usize {
         self.0.scan_bound
@@ -834,34 +737,7 @@ impl SealedGraphView {
         &self,
         ordinal: usize,
     ) -> Result<usize, SealedProjectionError> {
-        let vertex = self
-            .vertex_id(ordinal)
-            .ok_or(SealedProjectionError::UnknownOrdinal(ordinal))?;
-        let relation = self
-            .0
-            .config
-            .selection
-            .relation
-            .ok_or(SealedProjectionError::RelationRequired)?;
-        if !self.0.mask.relation_visible {
-            return Ok(0);
-        }
-        let direction = self.0.config.projection.directedness;
-        let outgoing = if direction == Directedness::Reversed {
-            0
-        } else {
-            self.0.partition.retained_row_len(vertex, relation)
-        };
-        let incoming = if direction == Directedness::Directed {
-            0
-        } else {
-            self.0
-                .incoming
-                .as_ref()
-                .ok_or(SealedProjectionError::UnsupportedDirectedness(direction))?
-                .retained_row_len(vertex, relation)
-        };
-        add(outgoing, incoming)
+        self.row_view().retained_row_incidence_bound(ordinal)
     }
 
     pub fn shares_storage_with(&self, partition: &SealedPartition) -> bool {
@@ -906,32 +782,8 @@ impl SealedGraphView {
         source: usize,
         lower_bound: Option<VId>,
     ) -> Result<SealedNeighborCursor<'_>, SealedProjectionError> {
-        // Complete projection admission already visited every retained row
-        // and proved this exact selected/reduced degree. A zero row can still
-        // hide substantial retired or excluded history; kernels need not
-        // decode it again on every visit. Construction deliberately calls
-        // SealedNeighborCursor::open directly, before this proof exists.
-        if self.degree(source) == Some(0) {
-            return SealedNeighborCursor::empty(
-                cx,
-                &self.0.vertices,
-                self.0.vertex_prefix.first(),
-                &self.0.config,
-                self.0.mask,
-                source,
-            );
-        }
-        SealedNeighborCursor::open(
-            cx,
-            &self.0.partition,
-            self.0.incoming.as_ref(),
-            &self.0.vertices,
-            self.0.vertex_prefix.first(),
-            &self.0.config,
-            self.0.mask,
-            source,
-            lower_bound,
-        )
+        self.row_view()
+            .neighbor_cursor_controlled(cx, source, lower_bound)
     }
 }
 
