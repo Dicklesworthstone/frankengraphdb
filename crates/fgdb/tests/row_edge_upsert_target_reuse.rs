@@ -146,9 +146,9 @@ async fn execute(
     result
 }
 
-fn edge_values(
-    db: &Database<MemVfs>,
-) -> Vec<(VId, VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>)> {
+type EdgeValues = (VId, VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>);
+
+fn edge_values(db: &Database<MemVfs>) -> Vec<EdgeValues> {
     let mut values: Vec<_> = db
         .edges()
         .unwrap()

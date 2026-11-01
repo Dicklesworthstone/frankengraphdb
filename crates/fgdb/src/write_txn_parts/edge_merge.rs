@@ -1582,7 +1582,7 @@ mod edge_merge_target_reuse_tests {
         let program = fgdb_gql::PreparedGraphWriteChainText::prepare(
             "UNWIND [1] AS x MATCH (a),(b)              MERGE (a)-[r:R {key:x}]-(b) ON MATCH SET r.value=x",
             RELATION,
-            |kind, name| match (kind, name) {
+            |kind: GraphSymbolKind, name: &str| match (kind, name) {
                 (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RELATION)),
                 (GraphSymbolKind::Property, "key") => Some(GraphSymbol::Property(KEY)),
                 (GraphSymbolKind::Property, "value") => Some(GraphSymbol::Property(VALUE)),
@@ -1599,7 +1599,7 @@ mod edge_merge_target_reuse_tests {
             _ => panic!("expected a row-valued relationship upsert"),
         };
         assert!(upsert.preserves_match_targets());
-        upsert.clone()
+        upsert.as_ref().clone()
     }
 
     fn keyed_row(
@@ -1645,7 +1645,7 @@ mod edge_merge_target_reuse_tests {
                 evaluator: GlaExecutionStats::default(),
             })
         };
-        let mut source = |_, _, reused| {
+        let source = |_, _, reused| {
             admissions.set(admissions.get() + 1);
             if let Some(error) = refused {
                 return Err(GqlQueryError::Source(error));

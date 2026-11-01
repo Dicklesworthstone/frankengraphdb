@@ -417,35 +417,9 @@ pub(super) fn apply_selected<V: Vfs + Clone, Clock: FnMut() -> u64>(
 }
 
 /// Resolve one already-masked MATCH occurrence through the SAME endpoint
-/// admission, existence scan and original-image staging as ordinary MERGE.
+/// admission, existence resolution and original-image staging as ordinary MERGE.
 /// The caller owns the frozen input and cumulative source/evaluator prefix.
 /// This crate-private seam grants no new permit and never re-runs MATCH.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn apply_occurrence<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u64>(
-    transaction: &mut WriteTxn,
-    database: &mut Database<V>,
-    cx: &QueryCx,
-    merge: &PreparedGraphEdgeMerge,
-    policy: GraphEdgeMergePolicy,
-    scope: &PlannerPredicates,
-    execution: &mut Execution<'_, '_, Clock>,
-    selected: GqlQueryExecution<GraphValueRow>,
-    occurrence: usize,
-) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
-    apply_occurrence_reusing_targets(
-        transaction,
-        database,
-        cx,
-        merge,
-        policy,
-        scope,
-        execution,
-        selected,
-        occurrence,
-        None,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_occurrence_reusing_targets<
     Output: EdgeMergeOutput,

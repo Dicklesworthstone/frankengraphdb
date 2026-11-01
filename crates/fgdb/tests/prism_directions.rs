@@ -1,4 +1,6 @@
 //! Public Chronicle -> Strata -> Prism checks. No fabricated source anchors.
+#![recursion_limit = "256"]
+
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
