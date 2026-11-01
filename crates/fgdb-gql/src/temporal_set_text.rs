@@ -332,14 +332,15 @@ fn locate(statement: &str) -> Result<(usize, usize, Selector), GraphTemporalSetT
             GraphTemporalSetTextErrorKind::InvalidSystemTimePosition,
         ));
     }
-    // The clause closes the first MATCH, as in the aggregate facade: a WITH
-    // stage or a correlated CALL body may follow it, and the set facade runs
-    // the stages and every body at the cut.
+    // A following row expansion, WITH stage or correlated CALL body belongs
+    // to this same historical statement. The set owner pins every graph read,
+    // including property reads through the expanded values, to the cut.
     if !tokens.get(at + 6).is_some_and(|next| {
         next.word("WHERE")
             || next.word("OPTIONAL")
             || next.word("WITH")
             || next.word("CALL")
+            || next.word("UNWIND")
             || next.word("RETURN")
     }) {
         return Err(fail(
@@ -624,12 +625,123 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert_ne!(first.canonical_bytes(), second.canonical_bytes());
     }
+
+    #[test]
+    fn unwind_after_the_selector_preserves_parameters_and_template_identity() {
+        let text = "/* λ */ MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at \
+                    UNWIND $values AS value RETURN a.p + value AS p ORDER BY p";
+        let calls = Cell::new(0);
+        let template = PreparedTemporalGraphSetText::prepare_with_parameter_types(
+            text,
+            &[("values", GqlParameterType::List)],
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .unwrap();
+        let catalog_calls = calls.get();
+        assert!(catalog_calls > 0);
+        let definition = template.canonical_template_bytes();
+        let arguments = |at| {
+            GqlParameters::new()
+                .with_uint64("at", at)
+                .unwrap()
+                .with_list(
+                    "values",
+                    [1, 1, 3]
+                        .map(|value| {
+                            crate::GraphValue::Scalar(fgdb_types::CanonicalScalar::Int(value))
+                        })
+                        .to_vec(),
+                )
+                .unwrap()
+        };
+        let first = template.bind_parameters(&arguments(1)).unwrap();
+        let second = template.bind_parameters(&arguments(2)).unwrap();
+        assert_eq!(first.query(), second.query());
+        assert_eq!(first.as_of(), CommitSeq(1));
+        assert_eq!(second.as_of(), CommitSeq(2));
+        assert_ne!(first.canonical_bytes(), second.canonical_bytes());
+        assert_eq!(template.canonical_template_bytes(), definition);
+        assert_eq!(
+            calls.get(),
+            catalog_calls,
+            "binding never reopens the catalog"
+        );
+
+        let missing = template
+            .bind_parameters(&arguments(1).subset_for(&[GqlParameterSpec {
+                name: "values".to_owned(),
+                parameter_type: GqlParameterType::List,
+                requires_positive: false,
+                occurrences: 1,
+            }]))
+            .unwrap_err();
+        assert_eq!(
+            missing.kind,
+            GraphTemporalSetTextErrorKind::MissingParameter
+        );
+        assert_eq!(missing.offset, text.find("$at").unwrap());
+    }
+
+    #[test]
+    fn temporal_unwind_keeps_duplicate_null_and_empty_list_semantics() {
+        use crate::{GqlQueryPolicy, GraphValue};
+        use fgdb_types::CanonicalScalar;
+
+        for (values, expected) in [
+            (
+                "[3,1,3,null]",
+                vec![
+                    CanonicalScalar::Null,
+                    CanonicalScalar::Int(1),
+                    CanonicalScalar::Int(3),
+                    CanonicalScalar::Int(3),
+                ],
+            ),
+            ("[]", vec![]),
+            ("null", vec![]),
+        ] {
+            let text = format!(
+                "UNWIND [1] AS seed FOR SYSTEM_TIME AS OF SEQ $at \
+                 UNWIND {values} AS value RETURN value ORDER BY value NULLS FIRST"
+            );
+            let bound = PreparedTemporalGraphSetText::prepare(&text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new().with_uint64("at", 7).unwrap())
+                .unwrap();
+            let result = bound
+                .query()
+                .execute_governed::<(), ()>(
+                    GqlQueryPolicy::new(100, 100, 10_000, 10_000),
+                    |_, _| panic!("source-free UNWIND cannot read the graph"),
+                    || Ok(()),
+                )
+                .unwrap();
+            assert_eq!(
+                result
+                    .value
+                    .iter()
+                    .map(|row| row.values()[0].clone())
+                    .collect::<Vec<_>>(),
+                expected
+                    .into_iter()
+                    .map(GraphValue::Scalar)
+                    .collect::<Vec<_>>(),
+                "{text}",
+            );
+        }
+    }
     #[test]
     fn second_temporal_selector_or_late_selector_refuses_before_catalog() {
         for text in [
             "MATCH (a) RETURN a UNION MATCH (b) RETURN b",
             "MATCH (a) RETURN a FOR SYSTEM_TIME AS OF SEQ 1 UNION MATCH (b) RETURN b",
             "MATCH (a) FOR SYSTEM_TIME AS OF SEQ 1 RETURN a UNION MATCH (b) FOR SYSTEM_TIME AS OF SEQ 1 RETURN b",
+            "MATCH (a) UNWIND [a] AS item RETURN item FOR SYSTEM_TIME AS OF SEQ 1",
+            "MATCH (a) FOR SYSTEM_TIME AS OF SEQ 1 UNWIND [a] AS item FOR SYSTEM_TIME AS OF SEQ 2 RETURN item",
+            "MATCH (a) FOR SYSTEM_TIME AS OF SEQ 1 SET a.p=2 RETURN a",
         ] {
             let calls = Cell::new(0);
             assert!(

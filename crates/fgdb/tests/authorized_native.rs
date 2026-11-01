@@ -1631,6 +1631,114 @@ fn temporal_native_rebinding_uses_one_exact_cut_but_current_credential_validity(
 }
 
 #[test]
+fn temporal_unwind_preserves_historical_path_scope_and_signed_delivery_limits() {
+    let ((), report) = run_async_under_lab(0x5ec0_4018, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = database(&commit).await;
+        let issuer = authority(418);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let before = db.frontier().unwrap();
+        let old = GqlParameters::new().with_uint64("at", before.0).unwrap();
+        let text = "MATCH path=(a)-[:R]->(b) FOR SYSTEM_TIME AS OF SEQ $at \
+                    UNWIND nodes(path) AS node \
+                    RETURN node.p AS p,node.hidden AS hidden ORDER BY p";
+        let prepared = PreparedNativeRead::prepare(text, &old, symbols).unwrap();
+        assert_eq!(prepared.facade_class(), NativeReadClass::TemporalSet);
+        let expected = |values: &[i64]| {
+            native_rows(
+                &["p", "hidden"],
+                values
+                    .iter()
+                    .map(|&p| {
+                        vec![
+                            value(p),
+                            QueryValue::Value(fgdb_gql::GraphValue::Scalar(CanonicalScalar::Null)),
+                        ]
+                    })
+                    .collect(),
+            )
+        };
+        let previous = expected(&[10, 10, 10, 30, 30, 30]);
+        let mut changes = WriteBatch::new(RelationId(1));
+        changes.delete_edge(EId(12));
+        changes.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(31)));
+        changes.set_vertex_property(VId(3), PropertyKeyId(2), Some(CanonicalScalar::Int(777)));
+        let after = db.write(&commit, changes).await.unwrap();
+        let current = GqlParameters::new().with_uint64("at", after.0).unwrap();
+
+        let latest = expected(&[10, 10, 31, 31]);
+        for (parameters, answer) in [(&old, &previous), (&current, &latest)] {
+            assert_eq!(
+                prepared
+                    .execute_authorized(
+                        &db,
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        parameters,
+                        policy(),
+                        || 100
+                    )
+                    .unwrap(),
+                *answer,
+            );
+            assert_eq!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    parameters,
+                    symbols,
+                    policy(),
+                    || 100,
+                )
+                .unwrap(),
+                *answer,
+            );
+            // The owner sees the hidden transit vertex and hidden fields;
+            // comparing only two privileged adapters cannot establish masking.
+            assert_ne!(
+                prepared.execute(&db, &cx, parameters, policy()).unwrap(),
+                *answer
+            );
+        }
+        let exact = token.attenuate(Restriction::MaxRows(6)).unwrap();
+        assert_eq!(
+            prepared
+                .execute_authorized(&db, &cx, &issuer, &exact, BRANCH, &old, policy(), || 100)
+                .unwrap(),
+            previous,
+        );
+        let too_few = token.attenuate(Restriction::MaxRows(5)).unwrap();
+        assert!(matches!(
+            prepared.execute_authorized(
+                &db,
+                &cx,
+                &issuer,
+                &too_few,
+                BRANCH,
+                &old,
+                policy(),
+                || 100
+            ),
+            Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Rows
+            )))
+        ));
+        assert!(matches!(
+            prepared.execute_authorized(&db, &cx, &issuer, &token, BRANCH, &old, policy(), || 1000),
+            Err(QueryError::Authorization(Error::Expired))
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn compound_native_permits_do_not_reset_and_private_rows_do_not_consume_delivery() {
     let ((), report) = run_async_under_lab(0x5ec0_4006, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
