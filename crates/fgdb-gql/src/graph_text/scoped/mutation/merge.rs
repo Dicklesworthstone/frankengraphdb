@@ -1027,12 +1027,23 @@ impl<'a> Parser<'a> {
                 inputs.push(input);
                 Ok(Some(inputs.len() - 1))
             };
-            let operand = if mixed {
+            let operand = if mixed || row.is_none() {
                 // One parse admits both domains. Scalar templates retain the
                 // existing integer action and its accounting; only a real
                 // composite template needs the explicit mixed value frame.
-                match self.read_resolved_value(&mut resolve, 0)? {
+                let value = if row.is_none() {
+                    // A unique MERGE assignment owns its entire Boolean
+                    // expression, just like the original scalar predicate.
+                    self.read_resolved_item(&mut resolve, 0)?
+                } else {
+                    self.read_resolved_value(&mut resolve, 0)?
+                };
+                match value {
                     ReadValueTemplate::Column(column) => Operand::Column(column),
+                    ReadValueTemplate::Literal(value) => Operand::Literal(value),
+                    ReadValueTemplate::Parameter { index, .. } => {
+                        Operand::Number(Number::Parameter(index))
+                    }
                     ReadValueTemplate::Integer { program, at } => Operand::Integer { program, at },
                     value => {
                         return Ok(ParsedUpsertAction::RowValue {
@@ -1229,6 +1240,12 @@ pub(super) fn bind_row_actions(
                     }
                     VertexUpsertActionTemplate::ClearProperties { keep } => {
                         GraphVertexUpsertAction::ClearProperties { keep: keep.clone() }
+                    }
+                    VertexUpsertActionTemplate::Value { key, value, at } => {
+                        GraphVertexUpsertAction::SetValue {
+                            key: *key,
+                            value: bind_row_value(value, values, *at)?,
+                        }
                     }
                     VertexUpsertActionTemplate::Expression { at, .. } => {
                         return Err(error(
@@ -1801,7 +1818,17 @@ impl PreparedGraphVertexUpsertText {
                                 at,
                             }
                         }
-                        // A unique MERGE parses with no row to read.
+                        ParsedUpsertAction::RowValue {
+                            key,
+                            inputs,
+                            value,
+                            at,
+                        } if inputs.as_ref().is_none_or(Vec::is_empty) => {
+                            let key = property_symbol(&mut symbol, key)?;
+                            VertexUpsertActionTemplate::Value { key, value, at }
+                        }
+                        // A unique MERGE has no ambient row. Closed value
+                        // actions are checked again after native binding.
                         ParsedUpsertAction::RowValue { at, .. }
                         | ParsedUpsertAction::RowVertex { at, .. }
                         | ParsedUpsertAction::RowProperties { at, .. } => {
@@ -1902,6 +1929,11 @@ impl PreparedGraphVertexUpsertText {
                         key: *key,
                         properties: properties.clone(),
                         value: super::integer::bind_integer(program, &values, *at)?,
+                    },
+                VertexUpsertActionTemplate::Value { key, value, at } =>
+                    GraphVertexUpsertAction::SetValue {
+                        key: *key,
+                        value: bind_row_value(value, &values, *at)?,
                     },
                 VertexUpsertActionTemplate::Label { label, present } =>
                     GraphVertexUpsertAction::SetLabel { label: *label, present: *present },

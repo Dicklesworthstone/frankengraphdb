@@ -1331,6 +1331,31 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
                     point_payload_admission(value, &mut |event| charge(used, payload(event)))?;
                     batch.set_vertex_property_value(vertex, *key, Some(value.clone()));
                 }
+                GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetValue {
+                    key,
+                    value,
+                }) => {
+                    let failure = |source| {
+                        GqlQueryError::Source(GraphVertexMergeError::RowAction {
+                            row: at,
+                            clause,
+                            action,
+                            source,
+                        })
+                    };
+                    let written = value
+                        .written_without_input(&mut |event| charge(used, event))
+                        .map_err(|error| match error {
+                            GraphIntegerEvaluationError::Control(error) => error,
+                            GraphIntegerEvaluationError::Value(source) => failure(source),
+                        })?
+                        .ok_or_else(|| failure(fgdb_gql::GraphIntegerError {
+                            instruction: 0,
+                            kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
+                        }))?;
+                    point_payload_admission(&written, &mut |event| charge(used, payload(event)))?;
+                    batch.set_vertex_property_value(vertex, *key, Some(written));
+                }
                 GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetLabel {
                     label,
                     present,

@@ -120,6 +120,9 @@ fn admit_actions(
             | GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetStored {
                 key, ..
             })
+            | GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetValue {
+                key, ..
+            })
             | GraphVertexMergeRowAction::Value { key, .. } => {
                 if !scope.allows_property(*key) {
                     return Err(denied());

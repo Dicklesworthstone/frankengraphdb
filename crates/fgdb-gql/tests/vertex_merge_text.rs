@@ -157,7 +157,8 @@ fn malformed_duplicate_and_relationship_merge_syntax_refuse_before_catalog_acces
 #[test]
 fn row_merge_target_reuse_requires_every_branch_to_preserve_keys_and_visibility() {
     use fgdb_gql::{
-        GraphSymbolResolver, GraphWriteChainStep, PreparedGraphWriteChainText, ReverseSymbolCatalog,
+        GraphSymbolResolver, GraphVertexMergeRowAction, GraphWriteChainStep,
+        PreparedGraphWriteChainText, ReverseSymbolCatalog,
     };
 
     struct Catalog;
@@ -191,7 +192,13 @@ fn row_merge_target_reuse_requires_every_branch_to_preserve_keys_and_visibility(
         ("p:k", "ON CREATE SET n:Person", false),
         ("p:k", "ON MATCH SET n:Person", false),
         ("p:k", "SET n={active:k}", false),
-        ("p:k", "ON MATCH SET n += {active:k}", false),
+        ("p:k", "ON MATCH SET n += {active:k}", true),
+        ("p:k", "ON MATCH SET n += {p:k}", false),
+        (
+            "p:k",
+            "ON MATCH SET n += CASE WHEN k=1 THEN {active:k} ELSE {} END",
+            false,
+        ),
     ] {
         let text = format!("UNWIND [1,1] AS k MERGE (n:Person {{{pattern}}}) {actions} RETURN n");
         let chain = PreparedGraphWriteChainText::prepare(&text, R, Catalog)
@@ -202,5 +209,20 @@ fn row_merge_target_reuse_requires_every_branch_to_preserve_keys_and_visibility(
             panic!("expected one row MERGE query: {text}");
         };
         assert_eq!(query.merge().preserves_match_targets(), expected, "{text}");
+        if actions == "ON MATCH SET n += {active:k}" {
+            // A literal += map becomes one named assignment. A runtime map
+            // above remains a whole-map action and cannot earn target reuse.
+            let actions = query.merge().actions().unwrap();
+            assert!(actions.on_create.is_empty());
+            assert!(actions.after.is_empty());
+            assert!(matches!(
+                &actions.on_match[..],
+                [GraphVertexMergeRowAction::Value {
+                    key,
+                    inputs: None,
+                    ..
+                }] if *key == ACTIVE
+            ));
+        }
     }
 }

@@ -28,6 +28,11 @@ pub(crate) enum VertexUpsertActionTemplate {
         key: PropertyKeyId,
         value: VertexUpsertValueTemplate,
     },
+    Value {
+        key: PropertyKeyId,
+        value: crate::set_text::ReadValueTemplate,
+        at: usize,
+    },
     Expression {
         key: PropertyKeyId,
         properties: Vec<PropertyKeyId>,

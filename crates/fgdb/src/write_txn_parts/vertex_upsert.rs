@@ -400,6 +400,32 @@ fn vertex_upsert_actions<E, A, C>(
                     })?;
                     batch.set_vertex_property_value(outcome.vertex(), *key, Some(value.clone()));
                 }
+                GraphVertexUpsertAction::SetValue { key, value } => {
+                    let failure = |source| {
+                        GqlQueryError::Source(GraphVertexUpsertError::Expression {
+                            clause,
+                            action,
+                            source,
+                        })
+                    };
+                    let written = value
+                        .written_without_input(&mut control)
+                        .map_err(|error| match error {
+                            GraphIntegerEvaluationError::Control(error) => error,
+                            GraphIntegerEvaluationError::Value(source) => failure(source),
+                        })?
+                        .ok_or_else(|| failure(fgdb_gql::GraphIntegerError {
+                            instruction: 0,
+                            kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
+                        }))?;
+                    point_payload_admission(&written, &mut |event| {
+                        control(match event {
+                            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                            _ => GlaExecutionEvent::Work,
+                        })
+                    })?;
+                    batch.set_vertex_property_value(outcome.vertex(), *key, Some(written));
+                }
                 GraphVertexUpsertAction::ClearProperties { keep } => {
                     for key in keys(&mut control)? {
                         control(GlaExecutionEvent::Work)?;

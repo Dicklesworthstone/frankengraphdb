@@ -546,6 +546,43 @@ impl core::fmt::Debug for GraphVertexMergeRowAction {
 pub struct GraphVertexMergeRowComputed(pub(crate) crate::GraphSetValue);
 
 impl GraphVertexMergeRowComputed {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.0.is_input_independent() && !self.0.may_read_element_properties()
+    }
+
+    /// Evaluate a prepared closed action with the ordinary VM and meter its
+    /// stored payload before conversion allocates. No host reader is present.
+    pub fn written_without_input<C>(
+        &self,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphIntegerEvaluationError<C>>
+    {
+        let row = GraphValueRow::from_owned_values(Vec::new());
+        let value =
+            crate::set_ops::evaluate_value(&self.0, &row, 0, control).map_err(|failure| {
+                match failure {
+                    crate::set_ops::ProjectionFailure::Control(error) => {
+                        crate::GraphIntegerEvaluationError::Control(error)
+                    }
+                    crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                        crate::GraphIntegerEvaluationError::Value(error)
+                    }
+                }
+            })?;
+        if value.is_null() {
+            return Ok(Some(fgdb_types::CanonicalPropertyValue::Scalar(
+                CanonicalScalar::Null,
+            )));
+        }
+        if let crate::algebra::GraphValue::Scalar(scalar) = &value {
+            crate::algebra_exec::charge_payload(scalar, &mut |event| {
+                control(event)?;
+                control(crate::GlaExecutionEvent::ScratchEntry)
+            })
+            .map_err(crate::GraphIntegerEvaluationError::Control)?;
+        }
+        written_merge_value(&value, control).map_err(crate::GraphIntegerEvaluationError::Control)
+    }
     /// The property value written for `row`, each evaluation event charged
     /// to `control`. A List is the stored List it is. `None` is a value no
     /// property holds, by the rule CREATE writes with: a Map at any depth, a
@@ -597,10 +634,11 @@ impl GraphVertexMergeRowComputed {
     }
 }
 
-/// One input of a row action's expression.
+/// One input of a vertex or relationship row action's expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphVertexMergeRowInput {
-    /// A property of the merged vertex; missing reads NULL.
+    /// A property of the merged target at the current clause cut; missing or
+    /// capability-masked fields read NULL.
     Property(fgdb_delta_types::PropertyKeyId),
     /// A column of the row the MERGE read.
     Column(usize),
@@ -901,7 +939,8 @@ impl PreparedGraphVertexMergeRows {
                     let key = match action {
                         GraphVertexMergeRowAction::Vertex(
                             crate::GraphVertexUpsertAction::SetProperty { key, .. }
-                            | crate::GraphVertexUpsertAction::SetStored { key, .. },
+                            | crate::GraphVertexUpsertAction::SetStored { key, .. }
+                            | crate::GraphVertexUpsertAction::SetValue { key, .. },
                         )
                         | GraphVertexMergeRowAction::Expression { key, .. }
                         | GraphVertexMergeRowAction::Value { key, .. } => key,

@@ -587,7 +587,8 @@ impl PreparedGraphWriteProgram {
                                         == Some(bytes.as_slice())
                             })
                     }
-                    GraphVertexUpsertAction::SetStored { key: written, .. } => {
+                    GraphVertexUpsertAction::SetStored { key: written, .. }
+                    | GraphVertexUpsertAction::SetValue { key: written, .. } => {
                         !names.contains(written)
                     }
                     GraphVertexUpsertAction::SetLabel { label, .. } => !key.labels.contains(label),

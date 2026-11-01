@@ -30,6 +30,13 @@ pub enum GraphVertexUpsertAction {
         key: PropertyKeyId,
         value: fgdb_types::CanonicalPropertyValue,
     },
+    /// A closed value program, evaluated only in the selected clause. It
+    /// cannot read a row, graph element, clock or random source. Current-time
+    /// constructors use the statement instant already captured at binding.
+    SetValue {
+        key: PropertyKeyId,
+        value: crate::GraphVertexMergeRowComputed,
+    },
     /// Unset the chosen vertex's currently visible properties except `keep`.
     /// The kept values are ordinary assignments in this same simultaneous
     /// clause. Keys are strictly increasing; the host reads them at the
@@ -57,6 +64,7 @@ impl core::fmt::Debug for GraphVertexUpsertAction {
         match self {
             Self::SetProperty { .. } => f.write_str("SetProperty([REDACTED])"),
             Self::SetStored { .. } => f.write_str("SetStored([REDACTED])"),
+            Self::SetValue { .. } => f.write_str("SetValue([REDACTED])"),
             Self::ClearProperties { .. } => f.write_str("ClearProperties([REDACTED])"),
             Self::SetExpression { .. } => f.write_str("SetExpression([REDACTED])"),
             Self::SetLabel { present, .. } => f
@@ -247,9 +255,18 @@ fn validate_branch(
         match action {
             GraphVertexUpsertAction::SetProperty { key, .. }
             | GraphVertexUpsertAction::SetStored { key, .. }
+            | GraphVertexUpsertAction::SetValue { key, .. }
             | GraphVertexUpsertAction::SetExpression { key, .. } => {
                 if !properties.insert(*key) {
                     return Err(GraphVertexUpsertBuildError::DuplicateProperty { branch });
+                }
+                if let GraphVertexUpsertAction::SetValue { value, .. } = action
+                    && !value.is_closed()
+                {
+                    return Err(GraphVertexUpsertBuildError::ExpressionInputs {
+                        branch,
+                        action: at,
+                    });
                 }
                 if let GraphVertexUpsertAction::SetExpression {
                     properties, value, ..
@@ -420,6 +437,11 @@ impl PreparedGraphVertexUpsert {
                             }
                             Err(_) => bytes.push(4),
                         }
+                    }
+                    GraphVertexUpsertAction::SetValue { key, value } => {
+                        bytes.push(6);
+                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                        value.0.append_canonical_bytes(&mut bytes);
                     }
                     GraphVertexUpsertAction::ClearProperties { keep } => {
                         bytes.push(5);
