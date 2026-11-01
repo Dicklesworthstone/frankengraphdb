@@ -30,6 +30,7 @@ async fn selected_weight_cold(
     .unwrap()
 }
 
+#[cfg(test)]
 fn expected_selected_weight(
     binding: SnapshotBinding,
     options: FnxReadOptions,

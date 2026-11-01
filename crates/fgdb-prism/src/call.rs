@@ -1358,7 +1358,27 @@ impl FnxCallSpec {
                     FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
                     _ => return Err(invalid(0, "VId or nonnegative integer source required")),
                 };
-                let target = if signature.name == "fnx.dijkstra_path_length" {
+                let target = if matches!(
+                    signature.parameters,
+                    [
+                        FnxParameterSpec {
+                            value_type: FnxParameterType::Vertex,
+                            ..
+                        },
+                        FnxParameterSpec {
+                            value_type: FnxParameterType::Vertex,
+                            ..
+                        },
+                        FnxParameterSpec {
+                            value_type: FnxParameterType::OptionalNonNegativeFloat,
+                            ..
+                        },
+                        FnxParameterSpec {
+                            value_type: FnxParameterType::Boolean,
+                            ..
+                        },
+                    ]
+                ) {
                     Some(match arguments[1] {
                         FnxArgument::Vertex(vertex) => vertex,
                         FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
@@ -1369,7 +1389,7 @@ impl FnxCallSpec {
                 };
                 let cutoff_index = 1 + usize::from(target.is_some());
                 let strict_index = cutoff_index + 1;
-                let cutoff = if arguments[cutoff_index] == FnxArgument::Null {
+                let cutoff = if matches!(arguments[cutoff_index], FnxArgument::Null) {
                     None
                 } else {
                     Some(

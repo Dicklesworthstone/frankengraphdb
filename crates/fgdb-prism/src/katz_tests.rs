@@ -53,6 +53,7 @@ fn limits() -> FnxExecutionLimits {
     }
 }
 
+#[cfg(test)]
 fn bits(result: &crate::FnxResult) -> Vec<u64> {
     result
         .rows
@@ -64,6 +65,7 @@ fn bits(result: &crate::FnxResult) -> Vec<u64> {
         .collect()
 }
 
+#[cfg(test)]
 fn compare_pinned(view: &SnapshotGraphView) {
     let names = view.nodes_ordered();
     let expected = if view.is_directed() {

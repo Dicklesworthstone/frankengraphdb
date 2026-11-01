@@ -157,9 +157,13 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
         foundation.execution_kernel,
         "fgdb-prism/brandes-csr-source-order-v4"
     );
-    // Katz stays unregistered: its checked foundation entry drops the result
-    // and witness on non-convergence, so a refusal would have to invent one.
-    assert!(FnxSignatureRegistry::lookup("fnx.katz_centrality").is_none());
+    // The bounded native Katz kernel now carries its result and witness.
+    let katz = FnxSignatureRegistry::lookup("fnx.katz_centrality").unwrap();
+    assert_eq!(
+        katz.outputs,
+        &[fgdb_prism::FnxOutput::Vertex, fgdb_prism::FnxOutput::Score]
+    );
+    assert!(FnxSignatureRegistry::lookup("fnx.katz_centrality_unknown").is_none());
     assert!(FnxSignatureRegistry::lookup("pagerank").is_none());
 }
 
