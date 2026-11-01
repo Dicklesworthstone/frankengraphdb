@@ -217,9 +217,9 @@ trait Rows {
     }
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>>;
 }
-struct SealedRows<'a, G: Guard> {
+struct SealedRows<'a, G: Guard, S: crate::sealed::SealedRowSource = SealedGraphView> {
     cx: &'a Control<'a, G>,
-    graph: &'a SealedGraphView,
+    graph: &'a S,
 }
 struct SealedRow<'a, G: Guard = GuardFn> {
     cx: &'a Control<'a, G>,
@@ -230,39 +230,40 @@ impl<G: Guard> Cursor for SealedRow<'_, G> {
         self.row.next_controlled(self.cx).map_err(Into::into)
     }
 }
-impl<G: Guard> Rows for SealedRows<'_, G> {
+impl<G: Guard, S: crate::sealed::SealedRowSource> Rows for SealedRows<'_, G, S> {
     type Cursor<'a>
         = SealedRow<'a, G>
     where
         Self: 'a;
     fn node_count(&self) -> usize {
-        self.graph.node_count()
+        self.graph.row_view().node_count()
     }
     fn degree(&self, source: usize) -> Option<usize> {
-        self.graph.degree(source)
+        self.graph.row_view().degree(source)
     }
     fn incoming_degrees(&self) -> Option<&[usize]> {
-        self.graph.incoming_degrees()
+        self.graph.row_view().incoming_degrees()
     }
     fn has_validated_adjacency(&self) -> bool {
-        // SealedGraphView's only constructors drain every selected row before
-        // publishing the immutable projection, degrees and direction binding.
+        // Both faces borrow a completely admitted immutable projection. An
+        // opposite face carries its exact transposed degree proof as well.
         true
     }
     fn is_undirected(&self) -> bool {
-        self.graph.spec().directedness == Directedness::Undirected
+        self.graph.row_view().is_undirected()
     }
     fn has_unit_weights(&self) -> bool {
-        self.graph.has_unit_weights()
+        self.graph.row_view().has_unit_weights()
     }
     fn has_nonnegative_weights(&self) -> bool {
-        self.graph.has_nonnegative_weights()
+        self.graph.row_view().has_nonnegative_weights()
     }
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
         Ok(SealedRow {
             cx: self.cx,
             row: self
                 .graph
+                .row_view()
                 .neighbor_cursor_controlled(self.cx, source, None)?,
         })
     }

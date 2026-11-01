@@ -23,6 +23,7 @@ use super::{
     checkpoint, directional_pass_work, finish, finish_encoded, mul, require_loop_free_degree,
     reserve,
 };
+use crate::sealed::SealedRowSource;
 use crate::sealed_control::{Control, Guard};
 use std::future::Future;
 use std::mem::size_of;
@@ -851,15 +852,15 @@ pub(super) fn execute(
     };
     let auxiliary = reverse
         .as_ref()
-        .map_or(0, SealedGraphView::charged_workspace_bytes);
+        .map_or(0, |face| face.charged_workspace_bytes());
     let remaining = memory
         .max_kernel_workspace_bytes
         .checked_sub(auxiliary)
         .ok_or(ExecutionError::SizeOverflow)?;
-    let rows = SealedRows {
-        cx,
-        graph: reverse.as_ref().unwrap_or(graph),
-    };
+    let face = reverse
+        .as_ref()
+        .map_or_else(|| graph.row_view(), SealedRowSource::row_view);
+    let rows = SealedRows { cx, graph: &face };
     let mut control = || checkpoint(cx);
     let (mut output, peak) = run_with_policy(
         &rows,
@@ -920,7 +921,9 @@ where
     } else {
         None
     };
-    let incoming = reverse.as_ref().unwrap_or(graph);
+    let incoming = reverse
+        .as_ref()
+        .map_or_else(|| graph.row_view(), SealedRowSource::row_view);
     while !state.complete() {
         control.tick().await?;
         if let Some(vertex) = state.row() {

@@ -14,6 +14,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{Cursor, Rows, betweenness::work};
+use crate::sealed::SealedRowSource;
 use crate::sealed_control::Guard;
 use std::future::Future;
 use std::mem::size_of;
@@ -338,9 +339,11 @@ where
         control.tick().await?;
         if let Some(vertex) = state.row() {
             let face = if matches!(state.phase, Phase::Dependencies { .. }) {
-                reverse.as_ref().unwrap_or(graph)
+                reverse
+                    .as_ref()
+                    .map_or_else(|| graph.row_view(), SealedRowSource::row_view)
             } else {
-                graph
+                graph.row_view()
             };
             let mut row = face.neighbor_cursor_controlled(control.cx, vertex, None)?;
             while let Some((neighbor, _)) = control.next(&mut row).await? {

@@ -2,7 +2,7 @@
 //! Reachability is an independent partition oracle, not another union-find.
 
 use super::*;
-use fgdb_prism::{FnxValue, ProjectionError};
+use fgdb_prism::FnxValue;
 
 fn modes() -> Vec<(FnxCallSpec, Directedness)> {
     vec![
@@ -1009,8 +1009,8 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                 .unwrap();
             compare_execution(&exact, &expected);
             // Frontier storage is optional. Removing one byte from its peak
-            // selects the original full sweep; only falling below that sweep's
-            // mandatory label/reverse-projection footprint must refuse.
+            // selects the original full sweep; falling below its labels plus
+            // any missing incoming index must refuse. The face borrows degrees.
             let frontier_bytes =
                 4 * size_of::<usize>() + 2 * (size_of::<u64>() + size_of::<usize>());
             let label_bytes = 4 * 4 * size_of::<usize>();
@@ -1033,10 +1033,10 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                     assert_eq!(stats.incidences, edges.len());
                     stats.charged_workspace_bytes
                 });
-                let auxiliary = directory_bytes + incoming;
-                opposite_options.projection_limits.max_workspace_bytes = auxiliary;
+                let projection_minimum = directory_bytes + incoming;
+                opposite_options.projection_limits.max_workspace_bytes = projection_minimum;
                 let mandatory = projection(&db, &cx, opposite_options).await;
-                assert_eq!(mandatory.charged_workspace_bytes(), auxiliary);
+                assert_eq!(mandatory.charged_workspace_bytes(), projection_minimum);
                 assert_eq!(mandatory.binding(), opposite.binding());
                 assert_eq!(mandatory.digest(), opposite.digest());
                 assert_eq!(mandatory.vertex_ids(), opposite.vertex_ids());
@@ -1060,16 +1060,22 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                     assert_eq!(row(&mandatory, &cx, source, None, 1).0, row_literal);
                     assert_eq!(row(&opposite, &cx, source, None, 1).0, row_literal);
                 }
-                let optional_degrees = 4 * size_of::<usize>();
+                let degree_bytes = 4 * size_of::<usize>();
                 assert_eq!(
                     opposite.charged_workspace_bytes(),
-                    auxiliary + optional_degrees
+                    projection_minimum + degree_bytes
                 );
-                let minimum = label_bytes + auxiliary;
                 assert_eq!(
-                    mem.max_kernel_workspace_bytes,
-                    minimum + optional_degrees + frontier_bytes
+                    graph.charged_workspace_bytes(),
+                    directory_bytes
+                        + graph
+                            .incoming_index_stats()
+                            .map_or(0, |stats| stats.charged_workspace_bytes)
+                        + degree_bytes,
+                    "the original projection retains the degrees borrowed by the opposite face"
                 );
+                let minimum = label_bytes + incoming;
+                assert_eq!(mem.max_kernel_workspace_bytes, minimum + frontier_bytes);
                 (minimum, incoming)
             };
             let baseline_bytes = mem.max_kernel_workspace_bytes - frontier_bytes;
@@ -1126,60 +1132,10 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                     .unwrap();
                 compare_execution(&actual, &fallback);
             }
-            if direction != Directedness::Undirected {
-                // Preserve the former baseline-minus-one refusal input as a
-                // successful degree-cache fallback. No frontier fits at these
-                // allowances, so the complete sweep's witness stays identical.
-                for allowance in [baseline_bytes - 1, minimum_bytes] {
-                    let minimum_memory = FnxMemoryLimits {
-                        max_kernel_workspace_bytes: allowance,
-                        ..mem
-                    };
-                    let minimum_result = call
-                        .execute_sealed(&cx, &graph, limits, minimum_memory)
-                        .unwrap();
-                    assert_eq!(minimum_result.columns, expected.columns);
-                    assert_eq!(minimum_result.rows, literal);
-                    assert_eq!(
-                        minimum_result.certificate.result_digest,
-                        expected.certificate.result_digest
-                    );
-                    assert_eq!(
-                        minimum_result.certificate.snapshot,
-                        expected.certificate.snapshot
-                    );
-                    assert_eq!(
-                        minimum_result.certificate.projection_digest,
-                        expected.certificate.projection_digest
-                    );
-                    assert_eq!(
-                        minimum_result.certificate.estimated_work,
-                        expected.certificate.estimated_work
-                    );
-                    assert_eq!(
-                        minimum_result.certificate.witness,
-                        fallback.certificate.witness
-                    );
-                    assert_eq!(
-                        minimum_result.certificate.kernel_workspace_bytes,
-                        minimum_bytes
-                    );
-                    compare_execution(
-                        &call
-                            .execute_sealed_cooperative(
-                                &cx,
-                                &graph,
-                                limits,
-                                minimum_memory,
-                                quantum(1),
-                                yield_now,
-                            )
-                            .await
-                            .unwrap(),
-                        &minimum_result,
-                    );
-                }
-            }
+            // The borrowed face adds no optional degree owner. Once the
+            // frontier is absent, the baseline is the mandatory footprint;
+            // the former baseline-minus-one input must now refuse below.
+            assert_eq!(baseline_bytes, minimum_bytes);
             for (limits, mem) in [
                 (
                     FnxExecutionLimits {
@@ -1225,22 +1181,18 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                 assert_eq!(format!("{cooperative:?}"), format!("{sync:?}"));
                 if mem.max_kernel_workspace_bytes == minimum_bytes - 1 {
                     match direction {
-                        Directedness::Undirected => assert!(matches!(sync,
+                        Directedness::Undirected | Directedness::Reversed => {
+                            assert!(matches!(sync,
                             FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded {
                                 resource: "kernel workspace bytes", requested, limit,
-                            }) if requested == label_bytes && limit == label_bytes - 1)),
+                            }) if requested == label_bytes && limit == label_bytes - 1))
+                        }
                         Directedness::Directed => assert!(matches!(sync,
                             FnxSealedExecutionError::Source(SealedProjectionError::Read(
                                 fgdb_strata::tiered::sealed::SealedError::Limit {
                                     resource: "incoming workspace bytes", requested, limit,
                                 }
                             )) if requested == incoming_bytes && limit == incoming_bytes - 1)),
-                        Directedness::Reversed => assert!(matches!(sync,
-                            FnxSealedExecutionError::Source(SealedProjectionError::Projection(
-                                ProjectionError::LimitExceeded {
-                                    resource: "workspace bytes", observed, limit,
-                                }
-                            )) if observed == directory_bytes && limit == directory_bytes - 1)),
                     }
                 }
             }

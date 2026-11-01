@@ -151,10 +151,10 @@ async fn exact_sealed_limits(
     let integer = size_of::<usize>();
     assert_eq!(graph.selection(), options.selection);
     assert_eq!(graph.spec(), options.projection);
-    // These kernels retain a temporary opposite projection and/or an
-    // optional active frontier. Derive mandatory arrays from their layouts,
-    // and incoming-index construction backing from the actual source owner,
-    // independently of the kernel certificate being tested.
+    // These kernels borrow the admitted opposite face and/or retain an
+    // optional active frontier. Derive mandatory arrays from their layouts
+    // and any missing incoming-index peak from an independent source owner.
+    // Shared projection directories and degrees are already charged once.
     let layout = match procedure.algorithm() {
         FnxAlgorithm::Cdlp { max_iter } => Some((
             n * if max_iter == 0 { integer } else { 4 * integer },
@@ -178,11 +178,20 @@ async fn exact_sealed_limits(
         _ => None,
     };
     let workspace = if let Some((arrays, reverse, frontier)) = layout {
-        // The affected fixtures have five or six selected identities. Below
-        // the producer's 512-vertex threshold, no optional ordinal prefix
-        // contributes another allocation to the temporary projection.
+        // The affected fixtures are below the producer's 512-vertex prefix
+        // threshold. Their generous original admission retains incoming
+        // degrees, which the opposite face borrows without another allocation.
         assert!(n < 512, "this declared layout is for the small fixtures");
-        let (directory, index) = if reverse {
+        let index = if reverse {
+            let source_directory = n * (size_of::<VId>() + integer)
+                + graph
+                    .incoming_index_stats()
+                    .map_or(0, |stats| stats.charged_workspace_bytes);
+            assert_eq!(
+                graph.charged_workspace_bytes(),
+                source_directory + n * integer,
+                "the fixture retains the incoming degrees borrowed by the opposite face"
+            );
             let mut opposite_options = options;
             assert_ne!(graph.spec().directedness, Directedness::Undirected);
             opposite_options.projection.directedness =
@@ -199,26 +208,25 @@ async fn exact_sealed_limits(
                 opposite.scan_incidence_bound(),
                 graph.scan_incidence_bound()
             );
-            let index = if opposite.spec().directedness == Directedness::Reversed {
+            if opposite.spec().directedness == Directedness::Reversed {
                 let stats = opposite.incoming_index_stats().unwrap();
                 assert_eq!(stats.incidences, graph.scan_incidence_bound());
                 stats.charged_workspace_bytes
             } else {
                 assert!(opposite.incoming_index_stats().is_none());
                 0
-            };
-            (n * (size_of::<VId>() + integer), index)
+            }
         } else {
-            (0, 0)
+            0
         };
-        let mandatory = arrays + directory + index;
-        let optional = if reverse { n * integer } else { 0 } + frontier;
+        let mandatory = arrays + index;
+        let optional = frontier;
         assert_eq!(
             expected.certificate.kernel_workspace_bytes,
             mandatory + optional,
             "full allowance retains the declared optional backing"
         );
-        Some((arrays, directory, index, mandatory, optional))
+        Some((arrays, index, mandatory, optional))
     } else {
         None
     };
@@ -279,10 +287,10 @@ async fn exact_sealed_limits(
     .enumerate()
     {
         let result = procedure.execute_sealed(query, graph, limits, memory);
-        if dimension == 2 && workspace.is_some_and(|(_, _, _, _, optional)| optional != 0) {
+        if dimension == 2 && workspace.is_some_and(|(_, _, _, optional)| optional != 0) {
             let actual = result.unwrap();
             same_workspace_answer(&actual, expected);
-            let (_, _, _, mandatory, _) = workspace.unwrap();
+            let (_, _, mandatory, _) = workspace.unwrap();
             assert!(actual.certificate.kernel_workspace_bytes >= mandatory);
             assert!(actual.certificate.kernel_workspace_bytes <= memory.max_kernel_workspace_bytes);
             assert!(
@@ -296,7 +304,7 @@ async fn exact_sealed_limits(
             );
         }
     }
-    if let Some((arrays, directory, index, mandatory, _)) = workspace {
+    if let Some((arrays, index, mandatory, _)) = workspace {
         let exact_memory = FnxMemoryLimits {
             max_kernel_workspace_bytes: mandatory,
             ..memory
@@ -322,12 +330,6 @@ async fn exact_sealed_limits(
                         resource: "incoming workspace bytes", requested, limit,
                     })
                 )) if *requested == index && *limit == index - 1)
-            } else if directory != 0 {
-                matches!(&below, Err(FnxSealedExecutionError::Source(
-                    SealedProjectionError::Projection(ProjectionError::LimitExceeded {
-                        resource: "workspace bytes", observed, limit,
-                    })
-                )) if *observed == directory && *limit == directory - 1)
             } else {
                 matches!(&below, Err(FnxSealedExecutionError::Execution(
                     FnxExecutionError::LimitExceeded {
@@ -362,8 +364,8 @@ fn same_workspace_answer(actual: &FnxResult, expected: &FnxResult) {
     assert_eq!(actual.edges, expected.edges);
     assert_eq!(actual.input_edges, expected.input_edges);
     assert_eq!(actual.estimated_work, expected.estimated_work);
-    // Optional reverse-directory/frontier backing may change the kernel's
-    // actual witness and certificate digest. Logical answers and all selected
+    // Optional frontier backing may change the kernel's actual witness and
+    // certificate digest. Logical answers and all selected
     // source identities above remain exact; this is not RSS or a perf win.
 }
 
@@ -2480,5 +2482,576 @@ fn retained_endpoint_directory_matches_tight_workspace_fallback_in_every_directi
                 );
             }
         }
+    });
+}
+
+// This independent one-round oracle uses the fixture's logical simple pairs,
+// not a Prism row or either degree directory. Reciprocal arcs cast two votes;
+// parallel EIds in one direction cast only one reduced-neighbor vote.
+fn opposite_one_round_labels(vertices: &[VId], pairs: &[(u128, u128)]) -> Vec<Vec<FnxValue>> {
+    vertices
+        .iter()
+        .map(|&vertex| {
+            let mut votes = std::collections::BTreeMap::<u128, usize>::new();
+            for &(source, target) in pairs {
+                if source == target {
+                    continue;
+                }
+                if source == vertex.0 {
+                    *votes.entry(target).or_default() += 1;
+                }
+                if target == vertex.0 {
+                    *votes.entry(source).or_default() += 1;
+                }
+            }
+            let mut label = vertex.0;
+            let mut largest = 0;
+            for (candidate, count) in votes {
+                if count > largest {
+                    label = candidate;
+                    largest = count;
+                }
+            }
+            vec![FnxValue::Vertex(vertex), FnxValue::Vertex(VId(label))]
+        })
+        .collect()
+}
+
+#[test]
+fn opposite_faces_borrow_admitted_counts_or_own_only_reduced_neighbor_counts() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let original = db.write(&commit, fixture()).await.unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.create_vertex(VId(40), vec![LabelId(1)], vec![]);
+        update.delete_edge(EId(6));
+        update.add_edge(
+            EId(3000),
+            VId(1),
+            VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        let current = db.write(&commit, update).await.unwrap();
+        let procedure = call("CALL fnx.cdlp(max_iter => 1) YIELD vertex,component");
+        for at in [original, current] {
+            let mut pairs = vec![
+                (1, 2),
+                (2, 1),
+                (2, 3),
+                (3, 4),
+                (4, 2),
+                (4, u128::MAX),
+                (1, 3),
+            ];
+            if at == current {
+                pairs.retain(|&pair| pair != (4, 2));
+                pairs.push((1, u128::MAX));
+            }
+            for direction in [Directedness::Directed, Directedness::Reversed] {
+                for reduction in [
+                    ParallelEdgePolicy::Sum,
+                    ParallelEdgePolicy::Minimum,
+                    ParallelEdgePolicy::Maximum,
+                    ParallelEdgePolicy::CollapseUnit,
+                ] {
+                    let mut opt = options(direction);
+                    opt.as_of = Some(at);
+                    opt.projection.self_loops = SelfLoopPolicy::Drop;
+                    opt.projection.parallel_edges = reduction;
+                    let graph = project(&db, &query, opt).await;
+                    let count_bytes = graph.node_count() * size_of::<usize>();
+                    let original_mandatory = graph.node_count()
+                        * (size_of::<VId>() + size_of::<usize>())
+                        + graph
+                            .incoming_index_stats()
+                            .map_or(0, |stats| stats.charged_workspace_bytes);
+                    assert_eq!(
+                        graph.charged_workspace_bytes(),
+                        original_mandatory + count_bytes
+                    );
+                    // These admitted rows contain hidden endpoints, parallel
+                    // incidences, a dropped loop and retained retired history.
+                    assert!(graph.scan_incidence_bound() > graph.adjacency_entry_count());
+                    let expected = opposite_one_round_labels(graph.vertex_ids(), &pairs);
+                    let before: Vec<_> = (0..graph.node_count())
+                        .map(|source| row(&graph, &query, source, None))
+                        .collect();
+                    let mut tight = opt;
+                    tight.projection_limits.max_workspace_bytes = original_mandatory;
+                    let no_counts = project(&db, &query, tight).await;
+                    assert_eq!(no_counts.charged_workspace_bytes(), original_mandatory);
+                    assert_eq!(graph.digest(), no_counts.digest());
+                    assert_eq!(graph.binding(), no_counts.binding());
+
+                    let added_index = if direction == Directedness::Directed {
+                        let mut opposite = opt;
+                        opposite.projection.directedness = Directedness::Reversed;
+                        let rebuilt = project(&db, &query, opposite).await;
+                        let stats = rebuilt.incoming_index_stats().unwrap();
+                        assert_eq!(stats.incidences, graph.scan_incidence_bound());
+                        assert!(stats.charged_workspace_bytes > stats.charged_resident_bytes);
+                        stats.charged_workspace_bytes
+                    } else {
+                        0
+                    };
+                    for (selected, added_counts) in [(&graph, 0), (&no_counts, count_bytes)] {
+                        // A single round has four mandatory label vectors and
+                        // no optional frontier. Borrowed selection/prefix/count
+                        // storage belongs to the original graph, not this call.
+                        let mandatory = 4 * count_bytes + added_index + added_counts;
+                        let exact = FnxMemoryLimits {
+                            max_kernel_workspace_bytes: mandatory,
+                            ..memory()
+                        };
+                        let actual = procedure
+                            .execute_sealed(&query, selected, opt.execution_limits, exact)
+                            .unwrap();
+                        assert_eq!(actual.rows, expected, "{at:?} {direction:?} {reduction:?}");
+                        assert_eq!(actual.certificate.kernel_workspace_bytes, mandatory);
+                        assert_eq!(actual.certificate.snapshot, selected.binding());
+                        assert_eq!(actual.certificate.projection_digest, selected.digest());
+                        let refused = procedure
+                            .execute_sealed(
+                                &query,
+                                selected,
+                                opt.execution_limits,
+                                FnxMemoryLimits {
+                                    max_kernel_workspace_bytes: mandatory - 1,
+                                    ..exact
+                                },
+                            )
+                            .unwrap_err();
+                        match (direction, added_counts) {
+                            (Directedness::Reversed, 0) => assert!(matches!(
+                                refused,
+                                FnxSealedExecutionError::Execution(
+                                    FnxExecutionError::LimitExceeded {
+                                        resource: "kernel workspace bytes",
+                                        requested,
+                                        limit,
+                                    }
+                                ) if requested == mandatory && limit == mandatory - 1
+                            )),
+                            (Directedness::Reversed, _) => assert!(matches!(
+                                refused,
+                                FnxSealedExecutionError::Source(
+                                    SealedProjectionError::Projection(
+                                        ProjectionError::LimitExceeded {
+                                            resource: "workspace bytes",
+                                            observed,
+                                            limit,
+                                        }
+                                    )
+                                ) if observed == count_bytes && limit == count_bytes - 1
+                            )),
+                            (Directedness::Directed, _) => assert!(matches!(
+                                refused,
+                                FnxSealedExecutionError::Source(
+                                    SealedProjectionError::Read(SealedError::Limit {
+                                        resource: "incoming workspace bytes",
+                                        requested,
+                                        limit,
+                                    })
+                                ) if requested == added_index && limit == added_index - 1
+                            )),
+                            _ => unreachable!(),
+                        }
+                        if at == current && reduction == ParallelEdgePolicy::Sum {
+                            for quantum in [1, 7, usize::MAX] {
+                                let cooperative = procedure
+                                    .execute_sealed_cooperative(
+                                        &query,
+                                        selected,
+                                        opt.execution_limits,
+                                        exact,
+                                        std::num::NonZeroUsize::new(quantum).unwrap(),
+                                        asupersync::runtime::yield_now::yield_now,
+                                    )
+                                    .await
+                                    .unwrap();
+                                assert_eq!(cooperative.rows, actual.rows);
+                                assert_eq!(
+                                    cooperative.certificate.result_digest,
+                                    actual.certificate.result_digest
+                                );
+                                assert_eq!(
+                                    cooperative.certificate.kernel_workspace_bytes,
+                                    mandatory
+                                );
+                                assert_eq!(
+                                    cooperative.certificate.witness,
+                                    actual.certificate.witness
+                                );
+                            }
+                        }
+                    }
+                    for (source, expected_row) in before.into_iter().enumerate() {
+                        assert_eq!(row(&graph, &query, source, None), expected_row);
+                        assert_eq!(row(&no_counts, &query, source, None), expected_row);
+                    }
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn opposite_count_fallback_keeps_literal_incoming_distances_and_original_identity() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let vertices = [VId(1), VId(2), VId(u128::MAX)];
+        let mut batch = WriteBatch::new(RelationId(1));
+        for vertex in vertices {
+            batch.create_vertex(vertex, vec![LabelId(1)], vec![]);
+        }
+        for (eid, source, target) in [(1, vertices[0], vertices[1]), (2, vertices[1], vertices[2])]
+        {
+            batch.add_edge(EId(eid), source, target, vec![]);
+        }
+        db.write(&commit, batch).await.unwrap();
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let mut opt = options(direction);
+            opt.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+            opt.projection.self_loops = SelfLoopPolicy::Drop;
+            let admitted = project(&db, &query, opt).await;
+            let count_bytes = vertices.len() * size_of::<usize>();
+            opt.projection_limits.max_workspace_bytes = vertices.len()
+                * (size_of::<VId>() + size_of::<usize>())
+                + admitted
+                    .incoming_index_stats()
+                    .map_or(0, |stats| stats.charged_workspace_bytes);
+            let fallback = project(&db, &query, opt).await;
+            assert_eq!(
+                admitted.charged_workspace_bytes(),
+                fallback.charged_workspace_bytes() + count_bytes
+            );
+            for (text, mut scores) in [
+                (
+                    "CALL fnx.closeness_centrality() YIELD vertex,score",
+                    [0.0, 0.5, 2.0 / 3.0],
+                ),
+                (
+                    "CALL fnx.harmonic_centrality() YIELD vertex,score",
+                    [0.0, 1.0, 1.5],
+                ),
+            ] {
+                if direction == Directedness::Reversed {
+                    scores.reverse();
+                }
+                let expected: Vec<_> = vertices
+                    .into_iter()
+                    .zip(scores)
+                    .map(|(vertex, score)| vec![FnxValue::Vertex(vertex), FnxValue::Score(score)])
+                    .collect();
+                let procedure = call(text);
+                let borrowed = procedure
+                    .execute_sealed(&query, &admitted, opt.execution_limits, memory())
+                    .unwrap();
+                let counted = procedure
+                    .execute_sealed(&query, &fallback, opt.execution_limits, memory())
+                    .unwrap();
+                assert_eq!(borrowed.rows, expected);
+                assert_eq!(counted.rows, expected);
+                assert_eq!(
+                    counted.certificate.kernel_workspace_bytes,
+                    borrowed.certificate.kernel_workspace_bytes + count_bytes
+                );
+                assert_eq!(counted.certificate.snapshot, fallback.binding());
+                assert_eq!(counted.certificate.projection_digest, fallback.digest());
+                assert_eq!(
+                    counted.certificate.result_digest,
+                    borrowed.certificate.result_digest
+                );
+            }
+        }
+    });
+}
+
+fn opposite_pause_once() -> impl std::future::Future<Output = ()> {
+    let mut suspended = false;
+    std::future::poll_fn(move |cx| {
+        if suspended {
+            std::task::Poll::Ready(())
+        } else {
+            suspended = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+}
+
+#[test]
+fn opposite_count_fallback_preserves_every_refusal_and_live_yield_drop_boundary() {
+    use std::cell::Cell;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    fn require_send<T: Send>(future: T) -> T {
+        future
+    }
+
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        db.write(&commit, fixture()).await.unwrap();
+        let mut retired = WriteBatch::new(RelationId(1));
+        retired.delete_edge(EId(6));
+        db.write(&commit, retired).await.unwrap();
+        let procedure = call("CALL fnx.cdlp(max_iter => 1) YIELD vertex,component");
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let mut opt = options(direction);
+            opt.projection.self_loops = SelfLoopPolicy::Drop;
+            let retained = project(&db, &query, opt).await;
+            opt.projection_limits.max_workspace_bytes = retained.node_count()
+                * (size_of::<VId>() + size_of::<usize>())
+                + retained
+                    .incoming_index_stats()
+                    .map_or(0, |stats| stats.charged_workspace_bytes);
+            let graph = project(&db, &query, opt).await;
+            assert_eq!(
+                retained.charged_workspace_bytes(),
+                graph.charged_workspace_bytes() + graph.node_count() * size_of::<usize>()
+            );
+            let before: Vec<_> = (0..graph.node_count())
+                .map(|source| row(&graph, &query, source, None))
+                .collect();
+            let digest = graph.digest();
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let measured = query.with_checkpoint_probe(Arc::clone(&probe));
+            let expected = procedure
+                .execute_sealed(&measured, &graph, opt.execution_limits, memory())
+                .unwrap();
+            let checkpoints = probe.calls();
+            assert!(checkpoints > graph.scan_incidence_bound());
+            for stop in 1..=checkpoints {
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+                assert!(matches!(
+                    procedure.execute_sealed(&controlled, &graph, opt.execution_limits, memory(),),
+                    Err(FnxSealedExecutionError::Cancelled(_))
+                ));
+                assert_eq!(probe.calls(), stop);
+            }
+
+            // This owner future must remain movable even while its missing
+            // count directory or incoming locator builder is suspended.
+            let quantum = std::num::NonZeroUsize::new(1).unwrap();
+            let mut task = Context::from_waker(Waker::noop());
+            let mut measured = Box::pin(require_send(procedure.execute_sealed_cooperative(
+                &query,
+                &graph,
+                opt.execution_limits,
+                memory(),
+                quantum,
+                opposite_pause_once,
+            )));
+            let mut pauses = 0;
+            let cooperative = loop {
+                match measured.as_mut().poll(&mut task) {
+                    Poll::Pending => pauses += 1,
+                    Poll::Ready(result) => break result.unwrap(),
+                }
+            };
+            drop(measured);
+            assert!(pauses > graph.node_count());
+            assert_eq!(cooperative.rows, expected.rows);
+            assert_eq!(
+                cooperative.certificate.witness,
+                expected.certificate.witness
+            );
+            assert_eq!(
+                cooperative.certificate.kernel_workspace_bytes,
+                expected.certificate.kernel_workspace_bytes
+            );
+
+            // Refuse at early, middle and final yielded prefixes, then abandon
+            // identical prefixes. All unpublished count/index state belongs to
+            // that one future; neither action changes the admitted graph.
+            for prefix in [0, 1, pauses / 2, pauses] {
+                let allow = Cell::new(true);
+                let guards = Cell::new(0usize);
+                let mut future = Box::pin(procedure.execute_sealed_cooperative_with_checkpoint(
+                    &query,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum,
+                    opposite_pause_once,
+                    || {
+                        guards.set(guards.get() + 1);
+                        if allow.get() {
+                            Ok(())
+                        } else {
+                            Err(SealedProjectionError::Guard(Box::new(
+                                std::io::Error::other("opposite face live refusal"),
+                            )))
+                        }
+                    },
+                ));
+                for _ in 0..prefix {
+                    assert!(future.as_mut().poll(&mut task).is_pending());
+                }
+                let prior = guards.get();
+                allow.set(false);
+                let Poll::Ready(result) = future.as_mut().poll(&mut task) else {
+                    panic!("live refusal must precede further suspended work");
+                };
+                assert!(matches!(
+                    result,
+                    Err(FnxSealedExecutionError::Source(SealedProjectionError::Guard(error)))
+                        if error.to_string() == "opposite face live refusal"
+                ));
+                assert_eq!(guards.get(), prior + 1);
+                drop(future);
+
+                let mut abandoned = Box::pin(procedure.execute_sealed_cooperative(
+                    &query,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum,
+                    opposite_pause_once,
+                ));
+                for _ in 0..prefix {
+                    assert!(abandoned.as_mut().poll(&mut task).is_pending());
+                }
+                drop(abandoned);
+                assert_eq!(graph.digest(), digest);
+                for (source, expected_row) in before.iter().enumerate() {
+                    assert_eq!(&row(&graph, &query, source, None), expected_row);
+                }
+                assert_eq!(
+                    procedure
+                        .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                        .unwrap(),
+                    expected
+                );
+                assert_eq!(contexts.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn opposite_faces_borrow_large_identity_prefixes_and_keep_hidden_relations_empty() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let mut batch = fixture();
+        for id in 1..=513u128 {
+            batch.create_vertex(VId((id << 118) | id), vec![LabelId(1)], vec![]);
+        }
+        db.write(&commit, batch).await.unwrap();
+        let mut opt = options(Directedness::Reversed);
+        opt.projection.self_loops = SelfLoopPolicy::Drop;
+        opt.projection_limits.max_vertices = 1024;
+        opt.execution_limits.max_result_rows = 1024;
+        let graph = project(&db, &query, opt).await;
+        let n = graph.node_count();
+        assert_eq!(n, 518);
+        let count_bytes = n * size_of::<usize>();
+        let mandatory = n * (size_of::<VId>() + size_of::<usize>())
+            + graph
+                .incoming_index_stats()
+                .unwrap()
+                .charged_workspace_bytes;
+        // More than the mandatory directory and incoming counts: admission
+        // also retained its optional full-width identity-prefix accelerator.
+        assert!(graph.charged_workspace_bytes() > mandatory + count_bytes);
+        let procedure = call("CALL fnx.cdlp(max_iter => 1) YIELD vertex,component");
+        let exact = FnxMemoryLimits {
+            max_kernel_workspace_bytes: 4 * count_bytes,
+            ..memory()
+        };
+        let actual = procedure
+            .execute_sealed(&query, &graph, opt.execution_limits, exact)
+            .unwrap();
+        let pairs = [
+            (1, 2),
+            (2, 1),
+            (2, 3),
+            (3, 4),
+            (4, 2),
+            (4, u128::MAX),
+            (1, 3),
+        ];
+        assert_eq!(
+            actual.rows,
+            opposite_one_round_labels(graph.vertex_ids(), &pairs)
+        );
+        assert_eq!(actual.certificate.kernel_workspace_bytes, 4 * count_bytes);
+        assert_eq!(actual.certificate.projection_digest, graph.digest());
+
+        // No relation incidence can be observed under either hidden-weight
+        // bit. Tight admission has no incoming index, prefix or count cache;
+        // an empty admitted graph may borrow its known-zero outgoing degrees.
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            for weight_property_visible in [false, true] {
+                let mut config = SealedProjectionSpec {
+                    as_of: graph.binding().as_of,
+                    selection: graph.selection(),
+                    projection: graph.spec(),
+                };
+                config.projection.directedness = direction;
+                let hidden = SealedGraphView::build_with_checkpoint(
+                    &query,
+                    graph.unmasked_source().unwrap(),
+                    graph.vertex_ids(),
+                    config,
+                    SealedProjectionMask {
+                        relation_visible: false,
+                        weight_property_visible,
+                    },
+                    ProjectionLimits {
+                        max_workspace_bytes: n * (size_of::<VId>() + size_of::<usize>()),
+                        ..opt.projection_limits
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
+                assert_eq!(hidden.adjacency_entry_count(), 0);
+                assert!(hidden.incoming_index_stats().is_none());
+                let empty = procedure
+                    .execute_sealed(&query, &hidden, opt.execution_limits, exact)
+                    .unwrap();
+                let expected: Vec<_> = hidden
+                    .vertex_ids()
+                    .iter()
+                    .map(|&vertex| vec![FnxValue::Vertex(vertex), FnxValue::Vertex(vertex)])
+                    .collect();
+                assert_eq!(empty.rows, expected);
+                assert_eq!(empty.certificate.kernel_workspace_bytes, 4 * count_bytes);
+                assert_eq!(empty.certificate.witness.edges_scanned, 0);
+                assert_eq!(empty.certificate.projection_digest, hidden.digest());
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }

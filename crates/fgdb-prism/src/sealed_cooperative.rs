@@ -75,11 +75,11 @@ where
         }
     }
 
-    pub(super) async fn reverse_projection(
+    pub(super) async fn reverse_projection<'graph>(
         &mut self,
-        graph: &SealedGraphView,
+        graph: &'graph SealedGraphView,
         max_workspace_bytes: usize,
-    ) -> Result<SealedGraphView> {
+    ) -> Result<crate::sealed::SealedOppositeFace<'graph>> {
         // Construction and its incoming index have their own bounded fuel.
         // Separate both boundaries with an actual host scheduling opportunity.
         self.pause().await?;
