@@ -40,6 +40,7 @@ impl GraphSymbolResolver for Catalog {
     }
 }
 
+#[cfg(test)]
 fn prepared(text: &str) -> PreparedNativeRead {
     PreparedNativeRead::prepare(text, &GqlParameters::new(), Catalog)
         .unwrap_or_else(|error| panic!("{text}: {error:?}"))

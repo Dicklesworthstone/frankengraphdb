@@ -327,6 +327,16 @@ fn external_apply_identity_roots_do_not_rescan_the_graph_or_hide_late_errors() {
         let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
         let text =
             "UNWIND $ids AS wanted CALL (wanted) { MATCH (n) WHERE n=wanted RETURN n } RETURN n";
+        let logical = PreparedGraphSetText::prepare(text, resolve)
+            .unwrap()
+            .bind_parameters(&parameters)
+            .unwrap();
+        let physical = AsyncSpillSetPlan::compile(&logical).unwrap();
+        assert!(
+            matches!(physical.source(), AsyncSpillSetSourcePlan::Apply(apply)
+            if matches!(apply.right().source(), AsyncSpillSetSourcePlan::RowJoin(join)
+                if join.vertex_seed_column() == Some(0)))
+        );
         let (rows, _, stats) = ordered_parameters(
             &mut view,
             &cx,
@@ -365,6 +375,37 @@ fn external_apply_identity_roots_do_not_rescan_the_graph_or_hide_late_errors() {
             matches!(error, NativeSpoolError::BufferedExecute(ref error) if matches!(**error, GqlQueryError::Rows(ref error) if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords && error.limit == 3 && error.observed == 4)),
             "{error:?}"
         );
+        // An integer equal to a live vertex's numeric ID is not that vertex.
+        // Only the actual vertex occurrence may spend a point-read record.
+        let typed = GqlParameters::new()
+            .with_list(
+                "ids",
+                vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(0)),
+                    GraphValue::Vertex(IDS[0]),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ],
+            )
+            .unwrap();
+        let (rows, _, stats) = ordered_parameters(
+            &mut view,
+            &cx,
+            text,
+            &typed,
+            GqlQueryPolicy::new(1, 100, SORT_WORK, SORT_WORK),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                GraphValueRow::from_owned_values(vec![GraphValue::Vertex(IDS[0])])
+                    .canonical_bytes()
+                    .unwrap()
+            ]
+        );
+        assert_eq!(stats.snapshot_records, 1);
         let groups = GqlParameters::new()
             .with_list(
                 "groups",

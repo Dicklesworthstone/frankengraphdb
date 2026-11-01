@@ -1473,6 +1473,7 @@ fn compile_stages<'a>(
                 spec: spec.clone(),
                 columns: query.columns.clone(),
                 types: query.types.clone(),
+                vertex_seed_column: SpillSetJoinPlan::seed_column_for(right, spec),
             }),
             query.types.clone(),
             Operation::Identity,

@@ -10,8 +10,58 @@ pub struct SpillSetJoinPlan {
     pub(super) spec: RowJoinSpec,
     pub(super) columns: Vec<String>,
     pub(super) types: Vec<GraphSetColumnType>,
+    pub(super) vertex_seed_column: Option<usize>,
 }
 impl SpillSetJoinPlan {
+    pub(super) fn seed_column_for(right: &PreparedGraphSet, spec: &RowJoinSpec) -> Option<usize> {
+        // Right/full joins must retain right occurrences with no left peer.
+        // The existing pattern proof also excludes fallible expressions,
+        // independent roots and global operators from source narrowing.
+        if !matches!(
+            spec.kind(),
+            RowJoinKind::Inner | RowJoinKind::Left | RowJoinKind::Semi | RowJoinKind::Anti
+        ) || !right.order.is_empty()
+            || right.offset != 0
+            || right.count.is_some()
+        {
+            return None;
+        }
+        let SetNode::Pattern(pattern) = &right.node else {
+            return None;
+        };
+        let root = pattern.seeded_root_column()?;
+        if !spec.keys().is_empty() {
+            return spec
+                .keys()
+                .iter()
+                .find_map(|&(left, right)| (right == root).then_some(left));
+        }
+        // Exactly the same necessary ON-equality proof as runtime probing:
+        // AND retains requirements, OR intersects them, and NOT supplies none.
+        let mut free = |_| Ok::<(), core::convert::Infallible>(());
+        spec.predicate_probe_keys_with_control(&mut free)
+            .unwrap_or_else(|never| match never {})
+            .into_iter()
+            .find_map(|(left, right)| (right == root).then_some(left))
+    }
+
+    /// A necessary left identity column for this join's safe right root.
+    /// Restrict only source admission after the COMPLETE left child; the
+    /// original native matcher still owns domain equality and all witnesses.
+    /// NULL/non-vertex cells seed nothing and never become vertex identities.
+    pub fn vertex_seed_column(&self) -> Option<usize> {
+        if !matches!(
+            self.right().source(),
+            AsyncSpillSetSourcePlan::Vertex(_)
+                | AsyncSpillSetSourcePlan::Edge(_)
+                | AsyncSpillSetSourcePlan::Join(_)
+                | AsyncSpillSetSourcePlan::Walk(_)
+        ) {
+            return None;
+        }
+        self.vertex_seed_column
+    }
+
     pub fn left(&self) -> &AsyncSpillSetPlan {
         &self.left
     }

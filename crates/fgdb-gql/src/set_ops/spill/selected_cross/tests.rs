@@ -397,8 +397,24 @@ fn walk_seed_proof_keeps_native_path_modes_and_requires_the_root_identity() {
         cross.clone()
     };
     for mode in ["WALK", "TRAIL", "ACYCLIC", "SIMPLE", "ANY SHORTEST WALK"] {
-        let right = pattern(&format!(
+        let invalid = format!(
             "MATCH REPEATABLE ELEMENTS {mode} p=(a)-[:R*0..2]->(b) \
+             WHERE a.p>=1 RETURN b,a,p"
+        );
+        let mut resolutions = 0;
+        let Err(error) = PreparedGraphText::prepare(&invalid, |_, _| {
+            resolutions += 1;
+            None
+        }) else {
+            panic!("the path binding precedes its search/mode prefix");
+        };
+        assert!(matches!(
+            error.kind,
+            crate::GraphPatternTextErrorKind::Expected("(")
+        ));
+        assert_eq!(resolutions, 0);
+        let right = pattern(&format!(
+            "MATCH REPEATABLE ELEMENTS p={mode} (a)-[:R*0..2]->(b) \
              WHERE a.p>=1 RETURN b,a,p"
         ));
         let plan = selected(right.clone(), &[equal(0, 2)]);

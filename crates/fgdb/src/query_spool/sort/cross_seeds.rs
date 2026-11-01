@@ -7,6 +7,32 @@ use crate::query::view::spool::sort::ChargedVec;
 use fgdb_strata::tiered::memory::MemoryError;
 use fgdb_types::VId;
 
+#[derive(Clone, Copy)]
+pub(in crate::query::view::spool::sort) enum SeedPlan<'a> {
+    Cross(&'a SpillSetCrossPlan),
+    Join(&'a fgdb_gql::spill_set::SpillSetJoinPlan),
+}
+
+impl SeedPlan<'_> {
+    fn column(self) -> Option<usize> {
+        match self {
+            Self::Cross(plan) => plan.vertex_seed_column(),
+            Self::Join(plan) => plan.vertex_seed_column(),
+        }
+    }
+
+    fn validate<E>(
+        self,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> core::result::Result<(), E>,
+    ) -> core::result::Result<(), SpillSetRowError<E>> {
+        match self {
+            Self::Cross(plan) => plan.validate_input_with_control(row, 0, control),
+            Self::Join(plan) => plan.validate_row_with_control(row, 0, control),
+        }
+    }
+}
+
 // A fallible in-place heap sort keeps comparison/swap work cancellable without
 // another allocation or an infallible comparator hiding a control refusal.
 fn sort(values: &mut [VId], control: &mut impl FnMut() -> Result<()>) -> Result<()> {
@@ -44,7 +70,7 @@ fn sort(values: &mut [VId], control: &mut impl FnMut() -> Result<()>) -> Result<
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::query::view::spool::sort) async fn prepare<H, F>(
-    plan: &SpillSetCrossPlan,
+    plan: SeedPlan<'_>,
     left: &mut NativeResultSpool,
     host: &mut H,
     cx: &QueryCx,
@@ -59,7 +85,7 @@ where
     H: ExternalOrderHost,
     F: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
-    let Some(column) = plan.vertex_seed_column() else {
+    let Some(column) = plan.column() else {
         return Ok(None);
     };
     if !host.supports_vertex_seeds() || u128::from(left.row_count()) > run_rows as u128 {
@@ -87,7 +113,7 @@ where
             return Err(NativeSpoolError::IncompleteCursor);
         }
         let row = decode(bytes, &pool, &mut work, resolver)?;
-        plan.validate_input_with_control(&row.row, 0, &mut |event| {
+        plan.validate(&row.row, &mut |event| {
             host::event(host, cx, policy, &mut left.evaluator, event)
         })
         .map_err(|error| match error {

@@ -92,6 +92,92 @@ fn allow(_: GlaExecutionEvent) -> Result<(), usize> {
 }
 
 #[test]
+fn identity_seeds_require_a_safe_right_root_and_a_necessary_join_equality() {
+    use GraphSetPredicateOp::{And, Not, Or, Truth};
+    let vertex = || -> PreparedGraphSet {
+        PreparedGraphText::prepare("MATCH (n) RETURN n", |_, _| None)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .with_duplicates()
+            .into()
+    };
+    for kind in [
+        RowJoinKind::Inner,
+        RowJoinKind::Left,
+        RowJoinKind::Right,
+        RowJoinKind::Full,
+        RowJoinKind::Semi,
+        RowJoinKind::Anti,
+    ] {
+        for (code, necessary) in [
+            (vec![equal(0, 1)], true),
+            (vec![equal(1, 0)], true),
+            (vec![equal(0, 1), Truth(None), And], true),
+            (vec![equal(0, 1), equal(1, 0), Or], true),
+            (vec![equal(0, 1), Truth(Some(true)), Or], false),
+            (vec![equal(0, 1), Not], false),
+            (vec![equal(0, 1), Not, Not], false),
+        ] {
+            let left = PreparedGraphSet::arguments(
+                vec!["wanted".to_owned()],
+                vec![GraphSetColumnType::Any],
+            )
+            .unwrap();
+            let right = vertex();
+            let spec = RowJoinSpec::cross(left.column_types(), right.column_types())
+                .unwrap()
+                .with_kind(kind)
+                .with_predicate(&code)
+                .unwrap();
+            let query = left.join(right, spec).unwrap();
+            let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+            let join = compiled_join(&plan);
+            let allowed = necessary && !matches!(kind, RowJoinKind::Right | RowJoinKind::Full);
+            assert_eq!(join.vertex_seed_column(), allowed.then_some(0));
+            assert!(join.keys().is_empty(), "Any equality remains native ON");
+        }
+        let left = PreparedGraphSet::arguments(
+            vec!["wanted".to_owned()],
+            vec![GraphSetColumnType::Vertex],
+        )
+        .unwrap();
+        let right = vertex();
+        let spec = RowJoinSpec::new(left.column_types(), right.column_types(), &[(0, 0)])
+            .unwrap()
+            .with_kind(kind);
+        let plan = AsyncSpillSetPlan::compile(&left.join(right, spec).unwrap()).unwrap();
+        assert_eq!(
+            compiled_join(&plan).vertex_seed_column(),
+            (!matches!(kind, RowJoinKind::Right | RowJoinKind::Full)).then_some(0)
+        );
+    }
+    let fallible =
+        crate::PreparedGraphSetText::prepare("MATCH (n) RETURN n,1/0 AS bad", |_, _| None)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+    for right in [
+        vertex().with_page(0, Some(1)),
+        vertex().with_page(1, None),
+        vertex()
+            .with_order_by(&[crate::algebra::GraphValueOrder::descending(0)])
+            .unwrap(),
+        fallible,
+    ] {
+        let left =
+            PreparedGraphSet::arguments(vec!["wanted".to_owned()], vec![GraphSetColumnType::Any])
+                .unwrap();
+        let spec = RowJoinSpec::cross(left.column_types(), right.column_types())
+            .unwrap()
+            .with_predicate(&[equal(0, 1)])
+            .unwrap();
+        let plan = AsyncSpillSetPlan::compile(&left.join(right, spec).unwrap()).unwrap();
+        assert_eq!(compiled_join(&plan).vertex_seed_column(), None);
+    }
+}
+
+#[test]
 fn inferred_probe_admission_preserves_boolean_boundaries_and_physical_stage_counts() {
     use GraphSetPredicateOp::{And, Not, Or, Truth};
     for kind in [

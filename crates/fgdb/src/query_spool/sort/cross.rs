@@ -89,7 +89,7 @@ where
     } = binary::complete_children(
         plan.left(),
         plan.right(),
-        Some(plan),
+        Some(seeds::SeedPlan::Cross(plan)),
         arguments,
         snapshot,
         host,

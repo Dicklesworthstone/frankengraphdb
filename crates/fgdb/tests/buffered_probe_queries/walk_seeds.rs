@@ -146,10 +146,7 @@ fn path_pattern(mode: &str, direction: usize) -> String {
         1 => "<-[:R*0..2]-(b)",
         _ => "-[:R*0..2]-(b)",
     };
-    format!(
-        "MATCH REPEATABLE ELEMENTS {mode} path=(a:Root){atom} \
-         WHERE a=wanted AND a.p>=1"
-    )
+    format!("MATCH REPEATABLE ELEMENTS path={mode} (a:Root){atom}")
 }
 
 fn record_refusal(error: NativeSpoolError, required: u64) {
@@ -195,8 +192,26 @@ fn seeded_external_paths_match_literal_routes_across_modes_directions_and_histor
             ("ANY SHORTEST WALK", 2, 2),
         ] {
             let pattern = path_pattern(mode, direction);
+            // Preserve the original misplaced temporal selector as an exact
+            // refusal before any graph source is opened.
+            let original = format!(
+                "UNWIND $ids AS wanted {} WHERE a=wanted AND a.p>=1 \
+                 FOR SYSTEM_TIME AS OF SEQ {cut} \
+                 RETURN ALL wanted,a,b,path,a.p AS root_value,b.p AS end_value \
+                 ORDER BY wanted,a,b,path",
+                pattern.replacen(&format!("path={mode} "), &format!("{mode} path="), 1)
+            );
+            let before = view.buffer_stats();
+            let error = PreparedNativeRead::prepare(&original, &parameters, resolve)
+                .err()
+                .expect("a temporal selector after WHERE must refuse");
+            assert!(matches!(error, fgdb::QueryError::Refused { source, .. }
+                if matches!(source.as_ref(), fgdb::QueryError::TemporalText(error)
+                    if error.kind == fgdb_gql::GraphTemporalTextErrorKind::InvalidSystemTimePosition)));
+            assert_eq!(view.buffer_stats(), before);
             let text = format!(
                 "UNWIND $ids AS wanted {pattern} FOR SYSTEM_TIME AS OF SEQ {cut} \
+                 WHERE a=wanted AND a.p>=1 \
                  RETURN ALL wanted,a,b,path,a.p AS root_value,b.p AS end_value \
                  ORDER BY wanted,a,b,path"
             );
@@ -255,9 +270,47 @@ fn seeded_external_shortest_apply_keeps_occurrences_and_the_complete_left_barrie
         let pattern = path_pattern("ANY SHORTEST WALK", 0);
         let text = format!(
             "UNWIND $ids AS wanted CALL (wanted) {{ {pattern} \
+             WHERE a=wanted AND a.p>=1 \
              RETURN ALL a,b,path,a.p AS root_value,b.p AS end_value }} \
              RETURN ALL wanted,a,b,path,root_value,end_value ORDER BY wanted,a,b,path"
         );
+        // A path binding precedes the search mode in the native grammar.
+        // Keep the original mode-before-binding query as a typed negative.
+        let original = text.replacen("path=ANY SHORTEST WALK ", "ANY SHORTEST WALK path=", 1);
+        let before = view.buffer_stats();
+        let error = PreparedNativeRead::prepare(&original, &parameters, resolve)
+            .err()
+            .expect("a path mode before its binding must refuse");
+        assert!(matches!(error, fgdb::QueryError::Refused { source, .. }
+            if matches!(source.as_ref(), fgdb::QueryError::PipelineText(error)
+                if matches!(error.kind,
+                    fgdb_gql::GraphPipelineAggregateTextErrorKind::Input(
+                        fgdb_gql::GraphSetTextErrorKind::Pattern(
+                            fgdb_gql::GraphPatternTextErrorKind::Expected("(")))))));
+        assert_eq!(view.buffer_stats(), before);
+        // Only an explicitly imported, necessary AND equality can feed the
+        // native correlation owner. No alternate Boolean branch may narrow
+        // the path source, and an outer name is not an implicit CALL import.
+        for refused in [
+            text.replacen("CALL (wanted)", "CALL ()", 1),
+            text.replacen("WHERE a=wanted AND", "WHERE a=wanted OR", 1),
+            text.replacen("WHERE a=wanted", "WHERE NOT a=wanted", 1),
+        ] {
+            let mut resolutions = 0;
+            let error = PreparedNativeRead::prepare(
+                &refused,
+                &parameters,
+                |kind: fgdb_gql::GraphSymbolKind, name: &str| {
+                    resolutions += 1;
+                    resolve(kind, name)
+                },
+            )
+            .err()
+            .expect("an unowned or non-conjunctive path correlation must refuse");
+            assert!(matches!(error, fgdb::QueryError::Refused { .. }));
+            assert_eq!(resolutions, 0, "{refused}");
+            assert_eq!(view.buffer_stats(), before);
+        }
         let (rows, snapshot, stats) = ordered_parameters(
             &mut view,
             &cx,
@@ -281,6 +334,22 @@ fn seeded_external_shortest_apply_keeps_occurrences_and_the_complete_left_barrie
         .await
         .unwrap_err();
         record_refusal(error, stats.snapshot_records);
+        // The same identity law in the opposite operand order retains every
+        // occurrence and shortest path, with the same source accounting.
+        let reversed = text.replacen("WHERE a=wanted", "WHERE wanted=a", 1);
+        let (reversed_rows, reversed_snapshot, reversed_stats) = ordered_parameters(
+            &mut view,
+            &cx,
+            &reversed,
+            &parameters,
+            GqlQueryPolicy::new(64, 1000, SORT_WORK, SORT_WORK),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reversed_rows, oracle("ANY SHORTEST WALK", 0, 2));
+        assert_eq!(reversed_snapshot, snapshot);
+        assert_eq!(reversed_stats.snapshot_records, stats.snapshot_records);
         let groups = GqlParameters::new()
             .with_list(
                 "groups",
@@ -292,7 +361,8 @@ fn seeded_external_shortest_apply_keeps_occurrences_and_the_complete_left_barrie
             .unwrap();
         let before = view.buffer_stats();
         let late_error = format!(
-            "UNWIND $groups AS items UNWIND items AS wanted {pattern} RETURN a,b,path LIMIT 0"
+            "UNWIND $groups AS items UNWIND items AS wanted {pattern} \
+             WHERE a=wanted AND a.p>=1 RETURN a,b,path LIMIT 0"
         );
         let error = ordered_parameters(&mut view, &cx, &late_error, &groups, policy(), 8)
             .await

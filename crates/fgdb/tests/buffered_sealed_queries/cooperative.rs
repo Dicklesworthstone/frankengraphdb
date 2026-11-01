@@ -39,14 +39,30 @@ fn external_calls_and_repeated_apply_share_kernel_quantum_without_changing_bags_
             parallel => 'collapse',self_loops => 'drop') \
             YIELD node,distance RETURN node,distance } \
             RETURN node,distance ORDER BY node,distance";
-        for (text, copies) in [
+        // This original query has no $start parameter. Keep its unused
+        // binding as a strict preparation refusal; the row argument API is
+        // still args => [start] under the actual imported frame.
+        let before = cold.buffer_stats();
+        let error = PreparedNativeRead::prepare(repeated, &params, resolve)
+            .unwrap()
+            .prepare_buffered_sealed_order(&params, R, memory(), sealing(), RAW)
+            .unwrap_err();
+        assert!(matches!(error, NativeSpoolError::Prepare(source)
+            if matches!(source.as_ref(), fgdb::QueryError::SetText(error)
+                if error.offset == repeated.len()
+                    && error.kind == fgdb_gql::GraphSetTextErrorKind::Pattern(
+                        fgdb_gql::GraphPatternTextErrorKind::UnexpectedArguments))));
+        assert_eq!(cold.buffer_stats(), before);
+        let no_parameters = GqlParameters::new();
+        for (text, copies, bindings) in [
             (
                 format!("{BFS} YIELD node,distance RETURN node,distance ORDER BY node,distance"),
                 1,
+                &params,
             ),
-            (repeated.to_owned(), 2),
+            (repeated.to_owned(), 2, &no_parameters),
         ] {
-            let prepared = prepare(&text, &params);
+            let prepared = prepare(&text, bindings);
             let expected = execute(&prepared, &mut cold, &cx, policy(), &spill_pool, 2, WORK)
                 .await
                 .unwrap();

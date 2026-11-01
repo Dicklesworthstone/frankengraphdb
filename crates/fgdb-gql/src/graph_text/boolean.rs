@@ -339,11 +339,15 @@ impl<'a> Parser<'a> {
         self.boolean_predicates_of(false)
     }
 
-    /// A scalar AND conjunct (`id(a) < id(b)`, arithmetic, a function call)
-    /// of a root WHERE whose path predicates are read term by term: it ends
-    /// at the next AND, which a following `length(p) > 2` needs. None when
-    /// the term is not scalar; nothing is consumed then.
+    /// A scalar or imported-equality AND conjunct of a named path's root
+    /// WHERE. Read one term so a following `length(p) > 2` keeps its path
+    /// owner. Imported equality uses the ordinary MATCH correlation channel;
+    /// OR/NOT never become unconditional join keys.
     pub(super) fn scalar_conjunct(&mut self) -> Result<Option<bool>, GraphPatternTextError> {
+        if let Some((variable, key, row, _)) = self.row_correlation()? {
+            self.read_correlations.push((variable, key, row));
+            return Ok(Some(false));
+        }
         if !self.starts_scalar_predicate()? {
             return Ok(None);
         }

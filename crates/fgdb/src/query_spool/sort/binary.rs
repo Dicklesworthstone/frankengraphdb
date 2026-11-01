@@ -155,7 +155,7 @@ pub(super) struct CompletedChildren {
 pub(super) async fn complete_children<H, A, B, C>(
     left_plan: &AsyncSpillSetPlan,
     right_plan: &AsyncSpillSetPlan,
-    seed_plan: Option<&fgdb_gql::spill_set::SpillSetCrossPlan>,
+    seed_plan: Option<cross::seeds::SeedPlan<'_>>,
     arguments: Option<&GraphValueRow>,
     snapshot: CommitSeq,
     host: &mut H,
@@ -209,7 +209,7 @@ where
         resolver,
     )
     .await?;
-    // Only a selected product's single-root proof permits source narrowing.
+    // Only a selected product/join's single-root proof permits source narrowing.
     // The complete leading relation (including late errors) precedes every
     // seed decision. Large/unaffordable bags preserve the ordinary path.
     let seeds = if let Some(plan) = seed_plan {

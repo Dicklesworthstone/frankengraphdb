@@ -337,7 +337,7 @@ where
     } = binary::complete_children(
         plan.left(),
         plan.right(),
-        None,
+        Some(cross::seeds::SeedPlan::Join(plan)),
         arguments,
         snapshot,
         host,
