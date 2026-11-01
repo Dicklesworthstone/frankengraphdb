@@ -1,4 +1,4 @@
-//! Reuse an admitted single-relation prefix without interpreting it again.
+//! Reuse an admitted prefix without interpreting it again.
 //!
 //! Only the prior net effects needed by the new instructions are replayed into
 //! the ordinary native evaluator. Deletions and edge ENSURE stay on the full
@@ -12,6 +12,8 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+mod ordered;
 
 fn supported(row: &PendingRow) -> bool {
     match row {
@@ -36,6 +38,89 @@ fn target(row: &DeltaRow) -> Option<ElementId> {
         DeltaRow::Property { elem, .. } => Some(*elem),
         _ => None,
     }
+}
+
+/// Reconstruct a supported net effect as an ordinary evaluator instruction.
+/// The optional ordinal belongs to an already exposed birth, not this replay.
+fn seed_row(
+    row: &DeltaRow,
+    relation: crate::RelationId,
+    prefix_visits: u64,
+) -> Option<(PendingRow, Option<u64>)> {
+    let (pending, birth) = match row {
+        DeltaRow::CreateVertex {
+            vid,
+            birth_ordinal,
+            labels,
+            props,
+            valid_time: None,
+        } if *birth_ordinal <= prefix_visits => (
+            PendingRow::Vertex {
+                vid: *vid,
+                labels: labels.clone(),
+                props: props.clone(),
+                ensure: false,
+            },
+            Some(*birth_ordinal),
+        ),
+        DeltaRow::CreateEdge {
+            eid,
+            birth_ordinal,
+            src,
+            relation: edge_relation,
+            dst,
+            canonical_key: None,
+            props,
+            valid_time: None,
+        } if *edge_relation == relation && *birth_ordinal <= prefix_visits => (
+            PendingRow::Edge {
+                eid: *eid,
+                src: *src,
+                dst: *dst,
+                props: props.clone(),
+                ensure: false,
+            },
+            Some(*birth_ordinal),
+        ),
+        DeltaRow::LabelMembership {
+            vid, label, after, ..
+        } => (
+            PendingRow::SetLabel {
+                vid: *vid,
+                label: *label,
+                member: *after,
+            },
+            None,
+        ),
+        DeltaRow::Property {
+            elem: ElementId::Vertex(vid),
+            property,
+            after,
+            ..
+        } => (
+            PendingRow::SetProperty {
+                vid: *vid,
+                key: *property,
+                value: after.clone(),
+            },
+            None,
+        ),
+        DeltaRow::Property {
+            elem: ElementId::Edge(eid),
+            property,
+            after,
+            ..
+        } => (
+            PendingRow::SetEdgeProperty {
+                eid: *eid,
+                key: *property,
+                value: after.clone(),
+            },
+            None,
+        ),
+        _ => return None,
+    };
+    Some((pending, birth))
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -136,76 +221,12 @@ impl<V: Vfs + Clone> Database<V> {
                 untouched.push(row.clone());
                 continue;
             }
-            let pending = match row {
-                DeltaRow::CreateVertex {
-                    vid,
-                    birth_ordinal,
-                    labels,
-                    props,
-                    valid_time: None,
-                } => {
-                    if *birth_ordinal > prefix_visits {
-                        return Ok(None);
-                    }
-                    retained_births.insert(element, *birth_ordinal);
-                    PendingRow::Vertex {
-                        vid: *vid,
-                        labels: labels.clone(),
-                        props: props.clone(),
-                        ensure: false,
-                    }
-                }
-                DeltaRow::CreateEdge {
-                    eid,
-                    birth_ordinal,
-                    src,
-                    relation,
-                    dst,
-                    canonical_key: None,
-                    props,
-                    valid_time: None,
-                } if *relation == suffix.relation => {
-                    if *birth_ordinal > prefix_visits {
-                        return Ok(None);
-                    }
-                    retained_births.insert(element, *birth_ordinal);
-                    PendingRow::Edge {
-                        eid: *eid,
-                        src: *src,
-                        dst: *dst,
-                        props: props.clone(),
-                        ensure: false,
-                    }
-                }
-                DeltaRow::LabelMembership {
-                    vid, label, after, ..
-                } => PendingRow::SetLabel {
-                    vid: *vid,
-                    label: *label,
-                    member: *after,
-                },
-                DeltaRow::Property {
-                    elem: ElementId::Vertex(vid),
-                    property,
-                    after,
-                    ..
-                } => PendingRow::SetProperty {
-                    vid: *vid,
-                    key: *property,
-                    value: after.clone(),
-                },
-                DeltaRow::Property {
-                    elem: ElementId::Edge(eid),
-                    property,
-                    after,
-                    ..
-                } => PendingRow::SetEdgeProperty {
-                    eid: *eid,
-                    key: *property,
-                    value: after.clone(),
-                },
-                _ => return Ok(None),
+            let Some((pending, birth)) = seed_row(row, suffix.relation, prefix_visits) else {
+                return Ok(None);
             };
+            if let Some(birth) = birth {
+                retained_births.insert(element, birth);
+            }
             seed.rows.push(pending);
         }
         let seed_visits =

@@ -24,7 +24,7 @@ use std::sync::Arc;
 /// A request identity cannot be declared under two relation types in one
 /// ordered program. Reject even ambiguous ENSURE declarations: their requested
 /// ID may be unused, but must never authorize a cross-type identity collision.
-fn edge_owners<'a>(
+pub(super) fn edge_owners<'a>(
     writer: &BlockWriter,
     batches: impl IntoIterator<Item = &'a WriteBatch>,
 ) -> Result<BTreeMap<EId, RelationId>, WriteTxnError> {
@@ -52,7 +52,7 @@ fn edge_owners<'a>(
 /// Only edge creation takes its type from the enclosing batch. Existing edge
 /// mutations are identity-addressed; putting one in another batch must not
 /// move it to that batch's relation or lose its earlier same-program writes.
-fn route(
+pub(super) fn route(
     writer: &BlockWriter,
     declarations: &BTreeMap<EId, RelationId>,
     relation: RelationId,
@@ -83,7 +83,7 @@ fn route(
         .or(Some(relation))
 }
 
-fn vertex_effect(row: &DeltaRow) -> Result<bool, WriteTxnError> {
+pub(super) fn vertex_effect(row: &DeltaRow) -> Result<bool, WriteTxnError> {
     match row {
         DeltaRow::CreateVertex { .. }
         | DeltaRow::DeleteVertex { .. }
@@ -103,7 +103,7 @@ fn vertex_effect(row: &DeltaRow) -> Result<bool, WriteTxnError> {
     }
 }
 
-fn restore_ordinal(row: &mut DeltaRow, visits: &[u64]) -> Result<(), WriteTxnError> {
+pub(super) fn restore_ordinal(row: &mut DeltaRow, visits: &[u64]) -> Result<(), WriteTxnError> {
     if let DeltaRow::CreateVertex { birth_ordinal, .. }
     | DeltaRow::CreateEdge { birth_ordinal, .. } = row
     {

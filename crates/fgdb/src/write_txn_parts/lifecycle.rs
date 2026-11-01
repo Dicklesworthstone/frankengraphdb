@@ -54,7 +54,7 @@ impl WriteTxn {
     }
 
     /// Stage a batch against this transaction's pinned snapshot.
-    /// Same-relation prefixes reuse already admitted effects where the native
+    /// Ordered prefixes reuse already admitted effects where the native
     /// evaluator can reconstruct only the suffix's required state. Unsupported
     /// intent families retain full preparation. Once an
     /// explicit composition call has staged multiple relations, subsequent
@@ -162,10 +162,11 @@ impl WriteTxn {
 
     /// Stage source-ordered, dependent writes spanning edge relations.
     ///
-    /// The complete staged prefix is prepared by `Database::prepare_ordered_writes`:
-    /// later batches can use earlier endpoints, properties and identity-addressed
-    /// edge mutations without publishing an intermediate commit. The existing
-    /// overlay readers immediately see the newly prepared net effects.
+    /// Later batches use earlier endpoints, properties and identity-addressed
+    /// edge mutations without publishing an intermediate commit. Supported
+    /// prefixes reuse already admitted effects through the same native relation
+    /// slices as `Database::prepare_ordered_writes`; other intent families retain
+    /// full preparation. Overlay readers immediately see the new net effects.
     ///
     /// A refusal preserves the previous overlay and all observations; savepoints
     /// retain the exact prepared prefix without introducing another mode or pin.
@@ -207,11 +208,22 @@ impl WriteTxn {
         let previous_len = self.staged.len();
         self.staged.extend(batches);
         let result = if ordered {
+            let incremental = match self.prepared.as_deref() {
+                Some(previous) => database.try_extend_prepared_ordered_writes(
+                    previous,
+                    &self.staged[..previous_len],
+                    &self.staged[previous_len..],
+                ),
+                None => Ok(None),
+            };
             // An ordered suffix must not renumber births the prefix already
             // exposed. Atomic groups stay canonical instead: relation order
             // assigns births on every call, so a new group may move them.
-            database
-                .prepare_ordered_writes(self.staged.clone())
+            incremental
+                .and_then(|prepared| match prepared {
+                    Some(prepared) => Ok(prepared),
+                    None => database.prepare_ordered_writes(self.staged.clone()),
+                })
                 .and_then(|prepared| prepared.retain_birth_ordinals(self.prepared.as_deref()))
         } else {
             database.prepare_atomic_writes(self.staged.clone())
@@ -385,6 +397,95 @@ mod ordered_staging_tests {
             assert_eq!(
                 db.vertex(VId(5)).unwrap().unwrap().props,
                 vec![(P, CanonicalScalar::Int(3).into())]
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn late_ordered_failure_and_savepoint_restore_the_exact_prepared_prefix() {
+        let ((), report) = run_async_under_lab(0x6972_0107, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let mut db = seeded(&cx).await;
+            let basis = db.frontier().unwrap();
+            let int = CanonicalScalar::Int;
+            let mut first = WriteBatch::new(RelationId(9));
+            first.ensure_vertex(VId(1), vec![], vec![(P, int(999))]);
+            first.create_vertex(VId(5), vec![], vec![(P, int(5))]);
+            let mut same_relation = WriteBatch::new(RelationId(9));
+            same_relation.add_edge(EId(50), VId(1), VId(5), vec![(P, int(50))]);
+            same_relation.set_vertex_property(VId(2), P, Some(int(7)));
+            let mut second = WriteBatch::new(RelationId(2));
+            second.create_vertex(VId(6), vec![], vec![(P, int(6))]);
+            second.add_edge(EId(60), VId(5), VId(6), vec![(P, int(60))]);
+            second.set_edge_property(EId(50), P, Some(int(51)));
+            second.set_vertex_label(VId(5), fgdb_delta_types::LabelId(2), true);
+            let prefix = vec![first, same_relation, second];
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            for batch in &prefix {
+                txn.write_ordered(&mut db, vec![batch.clone()]).unwrap();
+            }
+            txn.savepoint(&db, "prefix").unwrap();
+            let previous = std::sync::Arc::clone(txn.prepared.as_ref().unwrap());
+            let mut first = WriteBatch::new(RelationId(1));
+            first.create_vertex(VId(500), vec![], vec![]);
+            let mut last = WriteBatch::new(RelationId(3));
+            last.compare_and_set_edge_property(
+                EId(60),
+                P,
+                Some(int(999)),
+                int(61),
+                WriteMismatchPolicy::AbortWrite,
+            );
+            assert!(
+                txn.write_ordered(&mut db, vec![first.clone(), last])
+                    .is_err()
+            );
+            assert!(std::sync::Arc::ptr_eq(
+                txn.prepared.as_ref().unwrap(),
+                &previous
+            ));
+            assert_eq!(txn.staged.len(), prefix.len());
+            assert!(txn.vertex(&db, VId(500)).unwrap().is_none());
+            let mut last = WriteBatch::new(RelationId(3));
+            last.compare_and_set_edge_property(
+                EId(60),
+                P,
+                Some(int(60)),
+                int(61),
+                WriteMismatchPolicy::AbortWrite,
+            );
+            let suffix = vec![first, last];
+            txn.write_ordered(&mut db, suffix.clone()).unwrap();
+            let full = db
+                .prepare_ordered_writes(prefix.into_iter().chain(suffix.clone()).collect())
+                .unwrap();
+            let actual = txn.prepared.as_ref().unwrap();
+            assert_eq!(
+                actual.template.canonical_bytes(),
+                full.template.canonical_bytes()
+            );
+            assert_eq!(
+                actual.dependencies.observations().collect::<Vec<_>>(),
+                full.dependencies.observations().collect::<Vec<_>>(),
+            );
+            assert_eq!(actual.replay_row_allowance, full.replay_row_allowance);
+            assert_eq!(actual.basis(), full.basis());
+            txn.rollback_to_savepoint(&db, "prefix").unwrap();
+            assert!(std::sync::Arc::ptr_eq(
+                txn.prepared.as_ref().unwrap(),
+                &previous
+            ));
+            assert!(txn.vertex(&db, VId(500)).unwrap().is_none());
+            txn.write_ordered(&mut db, suffix).unwrap();
+            assert_eq!(db.frontier().unwrap(), basis);
+            txn.commit(&mut db, &cx).await.unwrap();
+            assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+            assert!(db.vertex(VId(500)).unwrap().is_some());
+            assert_eq!(
+                db.edge(EId(60)).unwrap().unwrap().props,
+                vec![(P, int(61).into())]
             );
         });
         assert!(report.lab_test_passed(), "{report:?}");
