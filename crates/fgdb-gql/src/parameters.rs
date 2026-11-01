@@ -1117,6 +1117,9 @@ mod tests {
                 GqlScalarParameter::new(CanonicalScalar::bytes(vec![0xab; size]).unwrap()).unwrap(),
             )
         };
+        // Preserve the original admitted 32 KiB block and its transcript.
+        // Its final raw-length-derived tail, rather than the block, exceeded
+        // the scalar literal bound before clock-context admission was reached.
         let block = scalar(32_768);
         let mut full = GqlParameters::new();
         for index in 0..MAX_GQL_PARAMETER_COUNT {
@@ -1131,8 +1134,39 @@ mod tests {
             full.insert(name, block.clone()).unwrap();
         }
         let remaining = MAX_GQL_PARAMETER_TRANSCRIPT_BYTES - full.canonical_byte_len();
-        let payload = remaining - scalar(0).transcript_entry_bytes("tail".len()).unwrap();
-        full.insert("tail", scalar(payload)).unwrap();
+        let original_tail = remaining - scalar(0).transcript_entry_bytes("tail".len()).unwrap();
+        assert!(matches!(
+            GqlScalarParameter::new(CanonicalScalar::bytes(vec![0xab; original_tail]).unwrap()),
+            Err(crate::algebra::ScalarPredicateError::LiteralTooLarge { limit, observed })
+                if limit == 65_536 && observed > limit
+        ));
+        // Fill the same transcript using individually admitted blocks. Leave
+        // at most two small blocks for a tail whose full encoding is measured.
+        let block = scalar(16_384);
+        let entry_bytes = block.transcript_entry_bytes("tail".len()).unwrap();
+        let mut index = 0;
+        while MAX_GQL_PARAMETER_TRANSCRIPT_BYTES - full.canonical_byte_len() > 2 * entry_bytes {
+            full.insert(format!("fill{index}"), block.clone()).unwrap();
+            index += 1;
+        }
+        let remaining = MAX_GQL_PARAMETER_TRANSCRIPT_BYTES - full.canonical_byte_len();
+        // Raw byte lengths omit names and encoding frames. Search by complete
+        // canonical entry length, then fill a small gap with real name bytes.
+        let mut low = 0_usize;
+        let mut high = 32_768_usize;
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if scalar(middle).transcript_entry_bytes("tail".len()).unwrap() <= remaining {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let tail = scalar(low);
+        let padding = remaining - tail.transcript_entry_bytes("tail".len()).unwrap();
+        assert!(padding <= MAX_GQL_PARAMETER_NAME_BYTES - "tail".len());
+        full.insert(format!("tail{}", "x".repeat(padding)), tail)
+            .unwrap();
         assert_eq!(
             full.canonical_byte_len(),
             MAX_GQL_PARAMETER_TRANSCRIPT_BYTES
@@ -1140,7 +1174,8 @@ mod tests {
         let frozen = full.clone();
         assert!(matches!(
             full.copy_statement_time_from(&context),
-            Err(GqlParameterError::TranscriptBytesExceeded { .. })
+            Err(GqlParameterError::TranscriptBytesExceeded { limit, observed })
+                if limit == MAX_GQL_PARAMETER_TRANSCRIPT_BYTES && observed > limit
         ));
         assert_eq!(full, frozen);
         assert_eq!(

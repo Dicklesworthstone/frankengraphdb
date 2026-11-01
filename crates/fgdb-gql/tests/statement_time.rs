@@ -187,17 +187,33 @@ fn compound_reads_and_argument_rewrites_preserve_one_context() {
             vec![("p".into(), GraphValue::Scalar(CanonicalScalar::Int(7)))],
         )
         .unwrap();
+    // RETURN's map entry is an ordinary value expression. Pattern-only
+    // lowering must leave the original SQL and original map argument intact.
+    let text = "RETURN $m.p AS p, datetime() AS t";
+    assert!(GqlMapArgumentText::lower_fields(text, &supplied).is_none());
+    let declarations = supplied.parameter_types().collect::<Vec<_>>();
+    let template =
+        PreparedGraphSetText::prepare_with_parameter_types(text, &declarations, symbols).unwrap();
+    let rows = execute(&template.bind_parameters(&supplied).unwrap());
+    assert_eq!(
+        rows[0].values()[0].as_scalar(),
+        Some(&CanonicalScalar::Int(7))
+    );
+    assert_eq!(
+        rows[0].values()[1].as_scalar(),
+        Some(&CanonicalScalar::Timestamp(instant()))
+    );
+    // A genuine pattern-map field uses the existing lowering recipe and
+    // retains the same implicit statement context through native binding.
     let (lowered, derived) =
-        GqlMapArgumentText::lower_fields("RETURN $m.p AS p, datetime() AS t", &supplied).unwrap();
+        GqlMapArgumentText::lower_fields("MATCH (n {p:$m.p}) RETURN datetime() AS t", &supplied)
+            .unwrap();
     assert_eq!(derived.statement_time(), Some(&instant()));
     let declarations = derived.parameter_types().collect::<Vec<_>>();
     let template =
         PreparedGraphSetText::prepare_with_parameter_types(lowered.text(), &declarations, symbols)
             .unwrap();
-    assert_eq!(
-        execute(&template.bind_parameters(&derived).unwrap())[0].values()[0].as_scalar(),
-        Some(&CanonicalScalar::Int(7))
-    );
+    template.bind_parameters(&derived).unwrap();
 
     let temporal = PreparedTemporalGraphSetText::prepare(
         "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $seq RETURN datetime() AS t",

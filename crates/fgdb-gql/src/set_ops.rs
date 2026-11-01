@@ -1643,8 +1643,9 @@ impl PreparedGraphSet {
     /// The row-by-row pull of this relation, when it has one (fgdb-7xqxb):
     /// `Project ALL` over one vertex-rooted pattern without relationships,
     /// with no order or page at either level. The first output cell is the
-    /// root vertex itself; every other cell is a column, a bound constant or
-    /// integer arithmetic over columns.
+    /// root vertex itself; every other cell is a column, a bound constant,
+    /// integer arithmetic over columns or a temporal constructor over a
+    /// closed bound value.
     ///
     /// The vertex scan visits strictly increasing identities, and each row
     /// leads with its own identity. Its visitation order is therefore exactly
@@ -1743,15 +1744,22 @@ impl PreparedGraphSet {
             return None;
         }
         if projection.is_empty()
-            || !projection.iter().all(|cell| {
-                matches!(
-                    cell.value(),
-                    GraphSetValue::Column(_)
-                        | GraphSetValue::Literal(_)
-                        | GraphSetValue::Value(_)
+            || !projection.iter().all(|cell| match cell.value() {
+                GraphSetValue::Column(_)
+                | GraphSetValue::Literal(_)
+                | GraphSetValue::Value(_)
+                | GraphSetValue::TypedNull(_)
+                | GraphSetValue::Integer(_) => true,
+                // Current-time constructors already bind their one trusted
+                // instant as a literal. The existing projection VM owns the
+                // temporal conversion; no clock or element read runs here.
+                GraphSetValue::Temporal { argument, .. } => matches!(
+                    argument.as_ref(),
+                    GraphSetValue::Literal(_)
                         | GraphSetValue::TypedNull(_)
-                        | GraphSetValue::Integer(_)
-                )
+                        | GraphSetValue::Value(_)
+                ),
+                _ => false,
             })
         {
             return None;
@@ -1927,6 +1935,65 @@ mod pulled_projection_tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn bound_temporal_projections_pull_through_the_native_vm_without_element_reads() {
+        let instant = fgdb_types::CanonicalTimestamp::offset_only(123_000_000_000, 0).unwrap();
+        let arguments = GqlParameters::new()
+            .with_statement_time(instant.clone())
+            .unwrap();
+        let query = crate::PreparedGraphSetText::prepare(
+            "MATCH (n) RETURN n AS vertex, datetime() AS t, datetime() AS repeated",
+            |_: GraphSymbolKind, _: &str| None,
+        )
+        .unwrap()
+        .bind_parameters(&arguments)
+        .unwrap();
+        let pull = query.row_pull().unwrap();
+        let row = GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(7))]);
+        let projected = pull
+            .project(
+                &row,
+                0,
+                &mut |_| Ok::<_, &'static str>(()),
+                |_, _| "expression",
+            )
+            .unwrap();
+        assert_eq!(
+            projected.values(),
+            &[
+                GraphValue::Vertex(VId(7)),
+                GraphValue::Scalar(CanonicalScalar::Timestamp(instant.clone())),
+                GraphValue::Scalar(CanonicalScalar::Timestamp(instant)),
+            ]
+        );
+        assert_eq!(
+            pull.project(&row, 0, &mut |_| Err("stopped"), |_, _| "expression"),
+            Err("stopped")
+        );
+        let requires_element = input("MATCH (n) RETURN n AS id")
+            .project(
+                vec![
+                    GraphSetProjection::new("id", GraphSetValue::Column(0)),
+                    GraphSetProjection::new(
+                        "t",
+                        GraphSetValue::Temporal {
+                            function: crate::GraphTemporalFunction::DateTime,
+                            argument: Box::new(GraphSetValue::ElementMetadata {
+                                kind: crate::GraphElementMetadata::Properties,
+                                value: Box::new(GraphSetValue::Column(0)),
+                                catalog: None,
+                            }),
+                            zones: None,
+                        },
+                    ),
+                ],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
+        assert!(requires_element.row_pull().is_none());
+        assert!(requires_element.ordered_row_pull().is_none());
     }
 
     #[test]

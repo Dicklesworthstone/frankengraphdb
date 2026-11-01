@@ -624,15 +624,25 @@ fn output_property() -> crate::GraphSetValue {
 
 fn output_query(value: crate::GraphSetValue, ranked: bool) -> PreparedGraphAggregate {
     use crate::{GraphSetProjection as Projection, GraphSetValue as Value};
-    let query =
-        prepare("MATCH (n) RETURN n AS v,COUNT(*) AS c,SUM(n.p) AS s,AVG(n.p) AS a GROUP BY n")
-            .with_output_projection(vec![
-                Projection::new("p", value),
-                Projection::new("c", Value::Column(1)),
-                Projection::new("s", Value::Column(2)),
-                Projection::new("a", Value::Column(3)),
-            ])
-            .unwrap();
+    let query = crate::PreparedGraphAggregateText::prepare(
+        "MATCH (n) RETURN n AS v,COUNT(*) AS c,SUM(n.p) AS s,AVG(n.p) AS a GROUP BY n",
+        |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            (GraphSymbolKind::Property, "hidden") => Some(GraphSymbol::Property(HIDDEN)),
+            _ => None,
+        },
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
+    .with_output_projection(vec![
+        Projection::new("p", value),
+        Projection::new("c", Value::Column(1)),
+        Projection::new("s", Value::Column(2)),
+        Projection::new("a", Value::Column(3)),
+    ])
+    .unwrap();
     if !ranked {
         return query;
     }

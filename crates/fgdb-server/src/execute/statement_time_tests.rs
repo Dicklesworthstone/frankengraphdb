@@ -44,6 +44,7 @@ fn instant(observation: usize) -> WireValue {
     })
 }
 
+#[cfg(test)]
 fn accepted<T>(result: Result<T, Refusal>) -> T {
     result.unwrap_or_else(|error| panic!("{}: {}", error.code.name(), error.message))
 }
@@ -132,7 +133,7 @@ fn statement_time_prepared_reads_stream_once_and_recovery_keeps_the_authority() 
             assert!(cursor.is_aggregate());
             assert_eq!(
                 accepted(cursor.next().await),
-                Some(vec![WireValue::Int(2), instant(3)])
+                Some(vec![WireValue::Count(2), instant(3)])
             );
             assert!(accepted(cursor.next().await).is_none());
             assert_eq!(calls.load(Ordering::SeqCst), 4);
