@@ -1381,7 +1381,23 @@ impl FnxCallSpec {
                     FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
                     _ => return Err(invalid(0, "VId or nonnegative integer source required")),
                 };
-                let target = if signature.name == "fnx.shortest_path_length" {
+                let target = if matches!(
+                    signature.parameters,
+                    [
+                        FnxParameterSpec {
+                            value_type: FnxParameterType::Vertex,
+                            ..
+                        },
+                        FnxParameterSpec {
+                            value_type: FnxParameterType::Vertex,
+                            ..
+                        },
+                        FnxParameterSpec {
+                            value_type: FnxParameterType::OptionalNonNegativeInteger,
+                            ..
+                        },
+                    ]
+                ) {
                     Some(match arguments[1] {
                         FnxArgument::Vertex(vertex) => vertex,
                         FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
