@@ -345,16 +345,72 @@ fn sealed_pagerank_omits_admitted_empty_history_rows_and_retains_exact_results()
                 opt.as_of = Some(at);
                 let graph = projection(&db, &cx, opt).await;
                 assert_eq!(graph.node_count(), vertices.len());
-                let mut omitted_raw_work = 0;
+                let retained_empty_history = (vertices.len() - 2) * HISTORY;
+                assert!(graph.scan_incidence_bound() >= retained_empty_history);
+                assert_eq!(
+                    graph.adjacency_entry_count(),
+                    if at == original {
+                        if direction == Directedness::Undirected {
+                            8
+                        } else {
+                            5
+                        }
+                    } else {
+                        2
+                    }
+                );
                 for source in 2..vertices.len() {
                     if at == original {
                         assert!(graph.degree(source).unwrap() > 0);
                     } else {
                         assert_eq!(graph.degree(source), Some(0));
-                        let (neighbors, spent, _) = row(&graph, &cx, source, None, 7);
+                        let observe = Arc::new(SimulationCheckpointProbe::new(None));
+                        let controlled = cx.with_checkpoint_probe(Arc::clone(&observe));
+                        let (neighbors, spent, yields) = row(&graph, &controlled, source, None, 7);
                         assert!(neighbors.is_empty());
-                        assert!(spent >= HISTORY, "an empty row still has real source work");
-                        omitted_raw_work += spent;
+                        // Complete admission already drained the retained
+                        // history. Opening its proved-empty row visits no raw
+                        // incidences, but still checks open, zero-fuel pull,
+                        // first positive-fuel pull and that pull's EOF face.
+                        assert_eq!(spent, 0);
+                        assert_eq!(yields, 0);
+                        assert_eq!(observe.calls(), 4);
+                        for stop in 1..=4 {
+                            let refusal = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                            let controlled = cx.with_checkpoint_probe(Arc::clone(&refusal));
+                            let error = match graph.neighbor_cursor_from(&controlled, source, None) {
+                                Err(error) => error,
+                                Ok(mut cursor) => {
+                                    let mut zero = SealedScanBudget::new(0);
+                                    let mut fuel = SealedScanBudget::new(7);
+                                    let result = cursor
+                                        .next_budgeted(&controlled, &mut zero)
+                                        .and_then(|step| {
+                                            assert!(matches!(step, SealedScanStep::Yield));
+                                            cursor.next_budgeted(&controlled, &mut fuel)
+                                        });
+                                    let error = result.expect_err(
+                                        "proved empty is not permission to skip a live checkpoint",
+                                    );
+                                    assert_eq!(zero.remaining(), 0);
+                                    assert_eq!(fuel.remaining(), 7);
+                                    assert!(matches!(
+                                        cursor
+                                            .next_budgeted(&cx, &mut SealedScanBudget::new(0))
+                                            .unwrap(),
+                                        SealedScanStep::End
+                                    ));
+                                    error
+                                }
+                            };
+                            assert!(matches!(
+                                error,
+                                SealedProjectionError::Read(
+                                    fgdb_strata::tiered::sealed::SealedError::Interrupted(_)
+                                )
+                            ));
+                            assert_eq!(refusal.calls(), stop);
+                        }
                     }
                 }
                 let mut last = None;
@@ -379,13 +435,17 @@ fn sealed_pagerank_omits_admitted_empty_history_rows_and_retains_exact_results()
                             "nonempty zero-weight rows remain actual edge visits"
                         );
                         if at == current {
-                            // This counts the entire controlled execution, not
-                            // wall time. Even one scan of the admitted empty
-                            // rows costs more raw work than the whole kernel.
+                            // Keep a bound on the entire controlled execution.
+                            // The literal retired ring contributes at least
+                            // 3 * HISTORY retained incidences to admission;
+                            // the public cursor now omits that history too.
+                            // This is an operation bound, not a measured
+                            // rescan comparison or a wall-time speedup claim.
+                            assert!(checkpoints > 0);
                             assert!(
-                                checkpoints < omitted_raw_work,
+                                checkpoints < retained_empty_history,
                                 "direction={direction:?} weighted={weighted} source={source:?}: \
-                                 checkpoints={checkpoints}, empty-row raw work={omitted_raw_work}"
+                                 checkpoints={checkpoints}, retained-history bound={retained_empty_history}"
                             );
                         }
                         if weighted && source.is_some() {
