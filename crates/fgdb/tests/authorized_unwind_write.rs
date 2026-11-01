@@ -633,6 +633,8 @@ fn hidden_fields_stay_masked_and_original_forbidden_writes_cannot_escape() {
 
 #[test]
 fn binding_exhaustion_does_not_refresh_the_execution_permit() {
+    use fgdb_gql::{GraphMutationProgramError, GraphWriteProgramError};
+
     lab(0xa611_0008, |contexts| async move {
         let commit = contexts.commit();
         let query = contexts.query();
@@ -656,9 +658,8 @@ fn binding_exhaustion_does_not_refresh_the_execution_permit() {
             })
             .unwrap();
         let mut scope = grant();
-        // One fewer unit stops inside binding, before a batch can exist.
-        // Both lexical classifications have real live checkpoints: native
-        // chain dispatch first, then UNWIND mutation dispatch.
+        // Ingress spends one authorization checkpoint before the two lexical
+        // dispatch checkpoints. Keep both original below-binding limits.
         scope.limits.max_work = text.len() as u64 + 1 + binding_work;
         let too_small = issuer.issue_at(&scope, NOW).unwrap();
         let error = db
@@ -685,8 +686,8 @@ fn binding_exhaustion_does_not_refresh_the_execution_permit() {
         );
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertices().unwrap().is_empty());
-        // Original text, both classification checks, then exactly the
-        // controlled binding bill. There is no spare unit for program admission.
+        // Without the ingress authorization checkpoint, this appeared to be
+        // the exact binding boundary. It is still one binding unit short.
         scope.limits.max_work = text.len() as u64 + 2 + binding_work;
         let token = issuer.issue_at(&scope, NOW).unwrap();
         let error = db
@@ -706,9 +707,52 @@ fn binding_exhaustion_does_not_refresh_the_execution_permit() {
             )
             .await
             .unwrap_err();
-        assert!(authorization(&error).is_some(), "{error:?}");
         assert!(
-            matches!(error, Fault::BatchProgram { location: None, .. }),
+            matches!(
+                error,
+                Fault::Program(GraphWriteProgramError::Program(
+                    GraphMutationProgramError::Preflight(WriteTxnError::Authorization(
+                        Error::LimitExceeded(fgdb_warden::LimitDimension::Work)
+                    ))
+                ))
+            ),
+            "the original short permit must still stop inside binding: {error:?}"
+        );
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(db.vertices().unwrap().is_empty());
+        // Original text, the authorization checkpoint, both dispatch checks,
+        // and exactly the controlled binding bill leave no unit for execution.
+        scope.limits.max_work = text.len() as u64 + 3 + binding_work;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let error = db
+            .query_write_authorized(
+                &txcx,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                text,
+                &args,
+                symbols,
+                R,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Fault::BatchProgram {
+                    location: None,
+                    source: GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(
+                        WriteTxnError::Authorization(Error::LimitExceeded(
+                            fgdb_warden::LimitDimension::Work
+                        ))
+                    )),
+                }
+            ),
             "binding must finish and the SAME exhausted permit must refuse execution: {error:?}"
         );
         assert_eq!(db.frontier().unwrap(), before);

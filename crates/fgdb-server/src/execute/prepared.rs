@@ -506,7 +506,21 @@ async fn write_chain_prepared_batch(
                 },
             ));
         }
-        let mut chains = Vec::with_capacity(argument_sets.len());
+        // Reserve the complete native-chain slot bill before allocating its
+        // vector. Each record's existing binding charges remain distinct.
+        query
+            .checkpoint()
+            .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+        permit
+            .charge_work_at(unix_millis(), argument_sets.len() as u64)
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        let mut chains = Vec::new();
+        chains.try_reserve(argument_sets.len()).map_err(|_| {
+            Refusal::new(
+                ErrorCode::Budget,
+                "native chain batch capacity could not be reserved",
+            )
+        })?;
         for (index, parameters) in argument_sets.iter().enumerate() {
             permit
                 .charge_work_at(unix_millis(), parameters.len() as u64 + 1)

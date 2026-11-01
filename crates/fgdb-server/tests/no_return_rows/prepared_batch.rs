@@ -590,3 +590,147 @@ fn prepared_chain_batches_share_native_creation_limits_without_committed_prefixe
         fixture.stop(cx, 1, 2, 1).await;
     });
 }
+
+#[test]
+fn text_chain_batches_cross_the_real_wire_and_keep_one_atomic_completion() {
+    run(async |cx| {
+        // Retain the host's existing default 64-statement limit.
+        let fixture = Fixture::start(cx, "text-chain-batch", |config| {
+            assert_eq!(config.max_statements, 64);
+        })
+        .await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        let statement = "UNWIND $rows AS row MERGE (a:Person {name:row.s}) \
+            MERGE (b:Person {name:row.d}) MERGE (a)-[r:KNOWS]->(b) \
+            ON CREATE SET r.age=row.w/row.divisor \
+            ON MATCH SET r.age=r.age*10+row.w/row.divisor";
+        assert_eq!(
+            writer
+                .execute_batch(
+                    cx,
+                    statement,
+                    vec![
+                        relationship_arguments("Ada", "Bob", 1, 1),
+                        relationship_arguments("Ada", "Bob", 2, 1),
+                        relationship_arguments("Bob", "Cy", 3, 1),
+                    ]
+                )
+                .await
+                .unwrap(),
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 3
+            }
+        );
+        let committed = state(cx, &mut observer).await;
+        assert_eq!(committed.0.outcome, Outcome::Rows { seq: 1 });
+        assert_eq!((committed.0.rows.len(), committed.1.rows.len()), (3, 2));
+        assert_eq!(
+            committed
+                .0
+                .rows
+                .iter()
+                .map(|row| row[1].clone())
+                .collect::<Vec<_>>(),
+            ["Ada", "Bob", "Cy"].map(|name| WireValue::Text(name.into()))
+        );
+        assert_eq!(
+            committed
+                .1
+                .rows
+                .iter()
+                .map(|row| (row[0].clone(), row[1].clone(), row[3].clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    WireValue::Text("Ada".into()),
+                    WireValue::Text("Bob".into()),
+                    WireValue::Int(12)
+                ),
+                (
+                    WireValue::Text("Bob".into()),
+                    WireValue::Text("Cy".into()),
+                    WireValue::Int(3)
+                ),
+            ],
+            "later native chains must read the earlier records' staged graph"
+        );
+
+        let error = writer
+            .execute_batch(
+                cx,
+                statement,
+                vec![
+                    relationship_arguments("Cy", "De", 4, 1),
+                    relationship_arguments("Ada", "Bob", 5, 0),
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ClientError::Server {
+            code: ErrorCode::Execution, message,
+        } if message.contains("argument set 1")),
+            "{error:?}"
+        );
+        assert_eq!(state(cx, &mut observer).await, committed);
+        let error = writer
+            .execute_batch(
+                cx,
+                statement,
+                vec![relationship_arguments("Cy", "De", 4, 1), vec![]],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ClientError::Server {
+            code: ErrorCode::Statement, message,
+        } if message.contains("argument set 1")),
+            "{error:?}"
+        );
+        assert_eq!(state(cx, &mut observer).await, committed);
+
+        let no_effect = "MERGE (a:Person {name:'Ada'}) MERGE (b:Person {name:'Bob'}) \
+            MERGE (a)-[:KNOWS]->(b)";
+        assert_eq!(
+            writer
+                .execute_batch(cx, no_effect, vec![vec![]; 64])
+                .await
+                .unwrap(),
+            Outcome::ReadClosed {
+                seq: 1,
+                statements: 64
+            }
+        );
+        assert_eq!(
+            refusal(
+                writer
+                    .execute_batch(cx, no_effect, vec![vec![]; 65])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Budget
+        );
+        assert_eq!(
+            refusal(
+                writer
+                    .execute_batch(
+                        cx,
+                        &format!("{statement} RETURN 1"),
+                        vec![relationship_arguments("Cy", "De", 4, 1)]
+                    )
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::PermissionDenied,
+            "ordinary returning chains stay outside stats-only batches"
+        );
+        assert_eq!(state(cx, &mut observer).await, committed);
+        observer.close(cx).await.unwrap();
+        writer.close(cx).await.unwrap();
+        // Shutdown and reopen the same durable database, checking its actual
+        // frontier and graph rather than retaining only the wire response.
+        fixture.stop(cx, 1, 3, 2).await;
+    });
+}

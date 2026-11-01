@@ -1217,3 +1217,117 @@ fn prepared_no_return_chains_keep_write_mode_and_fresh_arguments() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn prepared_chain_batch_slots_precede_allocation_and_keep_native_binding_coordinates() {
+    let ((), report) = run_async_under_lab(0x79a0_0443, |root| async move {
+        let (mut server, token, _) = served(&root, "prepared-chain-slot-admission").await;
+        std::sync::Arc::get_mut(server.databases.get_mut("test").unwrap())
+            .unwrap()
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Property, "p", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let text = "FOREACH (x IN [1] | CREATE ({p:$key}))";
+        let arguments = |key| vec![("key".into(), WireValue::Int(key))];
+        // Compile the real definition before constructing the low-work
+        // invocation; its representative value cannot become a default.
+        let definition = ok(prepare_statement(
+            &root,
+            db,
+            &token,
+            &Prepare {
+                mode: PrepareMode::Write,
+                statement: text.into(),
+                parameters: arguments(99),
+            },
+        )
+        .await);
+        let limited = token
+            .attenuate(fgdb_warden::Restriction::MaxWork(2))
+            .unwrap();
+        let basis = db.db.read(&root).await.unwrap().frontier().unwrap();
+        let before = db.db.read(&root).await.unwrap().vertices().unwrap();
+        assert!(before.is_empty());
+        for (credential, records, code, missing) in [
+            (
+                &limited,
+                vec![vec![], arguments(7), arguments(8)],
+                ErrorCode::Budget,
+                None,
+            ),
+            (
+                &token,
+                vec![vec![], arguments(7), arguments(8)],
+                ErrorCode::Statement,
+                Some(0),
+            ),
+            (
+                &token,
+                vec![arguments(7), vec![]],
+                ErrorCode::Statement,
+                Some(1),
+            ),
+        ] {
+            let error = run_prepared_batch(&root, db, credential, &definition, &records)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.code, code, "{}", error.message);
+            if let Some(record) = missing {
+                assert!(
+                    error.message.contains(&format!("argument set {record}:")),
+                    "{}",
+                    error.message
+                );
+                assert!(
+                    error.message.contains("missing parameter value"),
+                    "{}",
+                    error.message
+                );
+            } else {
+                // Old code allocated all three slots, then exposed the first
+                // record's missing parameter after its one existing work unit.
+                assert!(!error.message.contains("argument set"), "{}", error.message);
+            }
+            let guard = db.db.read(&root).await.unwrap();
+            assert_eq!(guard.frontier().unwrap(), basis);
+            assert_eq!(guard.vertices().unwrap(), before);
+        }
+        let answer = ok(run_prepared_batch(
+            &root,
+            db,
+            &token,
+            &definition,
+            &[arguments(7), arguments(8)],
+        )
+        .await);
+        assert!(answer.columns.is_empty() && answer.rows.is_empty());
+        assert_eq!(
+            answer.outcome,
+            Outcome::WriteCommitted {
+                seq: basis.0 + 1,
+                statements: 2
+            }
+        );
+        let guard = db.db.read(&root).await.unwrap();
+        let mut values: Vec<_> = guard
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .map(|vertex| vertex.props)
+            .collect();
+        values.sort();
+        assert_eq!(
+            values,
+            [7, 8].map(|value| vec![(
+                fgdb_delta_types::PropertyKeyId(1),
+                fgdb_types::CanonicalScalar::Int(value).into()
+            ),])
+        );
+        assert_eq!(guard.frontier().unwrap(), CommitSeq(basis.0 + 1));
+        drop(guard);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

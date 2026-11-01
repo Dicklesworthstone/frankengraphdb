@@ -1587,6 +1587,110 @@ fn native_chain_batches_share_one_overlay_and_commit_without_rebinding_prepared_
 }
 
 #[test]
+fn native_bound_chain_batches_reuse_the_same_handle_at_two_real_committed_cuts() {
+    lab(0xac3d, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let mut scope = grant();
+        scope.limits.max_rows = 0;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let text = "FOREACH (row IN $rows | MERGE (n:Visible {p:row.p}) \
+                    ON CREATE SET n.q=0 \
+                    FOREACH (step IN [row.q] | SET n.q=n.q+step))";
+        let arguments = [rows(&[(1, 2)]), rows(&[(1, 3), (2, 7)]), rows(&[(2, 5)])];
+        let original: Vec<_> = arguments
+            .iter()
+            .map(GqlParameters::canonical_bytes)
+            .collect();
+        let calls = AtomicUsize::new(0);
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                BRANCH,
+                |kind, name: &str| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    symbols(kind, name)
+                },
+                R,
+                policy(),
+                3,
+                || NOW,
+            )
+            .unwrap();
+        let prepared = session.prepare(&query, text, &rows(&[(999, 111)])).unwrap();
+        let bound = session.bind_batch(&query, &prepared, &arguments).unwrap();
+        assert_eq!(bound.argument_sets(), 3);
+        let resolved = calls.load(Ordering::Relaxed);
+        for (pass, created, effects) in [(1, 2, 6), (2, 0, 4)] {
+            let (receipt, completion) = session.execute_bound_batch(&query, &bound).await.unwrap();
+            assert_eq!(receipt.stats().completed_statements, 3);
+            assert_eq!(receipt.stats().created_vertices, created);
+            assert_eq!(receipt.stats().mutation_effects, effects);
+            assert_eq!(receipt.stats().selection.result_rows, 0);
+            assert!(receipt.steps().is_empty());
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: CommitSeq(basis.0 + pass),
+                }
+            );
+            assert!(!session.is_closed());
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), resolved);
+        drop(session);
+        assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 2));
+        assert_eq!(db.delta_since(basis).unwrap().count(), 2);
+        let first = db.vertices_at(CommitSeq(basis.0 + 1)).unwrap();
+        let second = db.vertices().unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert_eq!(
+            first.iter().map(|vertex| vertex.vid).collect::<Vec<_>>(),
+            second.iter().map(|vertex| vertex.vid).collect::<Vec<_>>()
+        );
+        for (vertices, expected) in [(&first, [(1, 5), (2, 12)]), (&second, [(1, 10), (2, 24)])] {
+            let mut properties: Vec<_> =
+                vertices.iter().map(|vertex| vertex.props.clone()).collect();
+            properties.sort();
+            assert_eq!(
+                properties,
+                expected
+                    .into_iter()
+                    .map(|(p, q)| vec![
+                        (P, CanonicalScalar::Int(p).into()),
+                        (Q, CanonicalScalar::Int(q).into()),
+                    ])
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            arguments
+                .iter()
+                .map(GqlParameters::canonical_bytes)
+                .collect::<Vec<_>>(),
+            original
+        );
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(reopened.vertices().unwrap(), second);
+        assert_eq!(reopened.vertices_at(CommitSeq(basis.0 + 1)).unwrap(), first);
+        assert_eq!(reopened.frontier().unwrap(), CommitSeq(basis.0 + 2));
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn native_chain_batches_refuse_late_values_and_cumulative_limits_without_a_prefix() {
     lab(0xac37, |contexts| async move {
         let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
