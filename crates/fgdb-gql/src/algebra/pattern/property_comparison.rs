@@ -88,9 +88,21 @@ impl GraphPatternBuilder {
         &mut self,
         expression: &crate::algebra::GraphBooleanExpression,
     ) -> Result<&mut Self, PatternBuildError> {
-        let observed = self
-            .predicate_count
-            .saturating_add(expression.predicate_count());
+        let observed = self.checked_predicate_count(expression.predicate_count())?;
+        let bound = expression.bind(|name| self.variable(name), |name| self.path_capture(name))?;
+        self.property_comparisons
+            .push(PropertyComparison::Boolean(bound));
+        self.predicate_count = observed;
+        Ok(self)
+    }
+
+    /// Admit a known predicate count without inventing a value or mutating
+    /// the builder. Closed MERGE keys use the ordinary pattern profile.
+    pub(crate) fn checked_predicate_count(
+        &self,
+        additional: usize,
+    ) -> Result<usize, PatternBuildError> {
+        let observed = self.predicate_count.saturating_add(additional);
         if observed > MAX_PATTERN_PREDICATES {
             return Err(PatternBuildError::LimitExceeded {
                 dimension: PatternLimitDimension::Predicates,
@@ -98,11 +110,7 @@ impl GraphPatternBuilder {
                 observed,
             });
         }
-        let bound = expression.bind(|name| self.variable(name), |name| self.path_capture(name))?;
-        self.property_comparisons
-            .push(PropertyComparison::Boolean(bound));
-        self.predicate_count = observed;
-        Ok(self)
+        Ok(observed)
     }
 
     pub(super) fn require_identity_projection(&self) -> Result<(), PatternBuildError> {

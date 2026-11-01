@@ -61,8 +61,8 @@ fn list_parameters_bind_freshly_without_reentering_the_catalog() {
             .bind_parameters(&GqlParameters::new())
             .unwrap();
     assert_eq!(literal.canonical_bytes(), bytes);
-    assert_eq!(first.creation().vertices_per_row(), 1);
-    assert_eq!(first.creation().edges_per_row(), 0);
+    assert_eq!(first.creation().unwrap().vertices_per_row(), 1);
+    assert_eq!(first.creation().unwrap().edges_per_row(), 0);
 }
 
 #[test]

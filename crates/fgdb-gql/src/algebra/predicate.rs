@@ -76,7 +76,22 @@ impl ScalarPredicate {
         value: CanonicalScalar,
         comparison: IntegerComparison,
     ) -> Result<Self, ScalarPredicateError> {
-        let payload = match &value {
+        Self::validate_literal(&value)?;
+        let encoded = value.encode().map_err(ScalarPredicateError::Encoding)?;
+        check_size(encoded.len())?;
+        Ok(Self {
+            operand: Arc::new(ScalarOperand {
+                value,
+                encoded: encoded.into_boxed_slice(),
+            }),
+            comparison,
+        })
+    }
+
+    /// The same definition bounds without encoding or taking ownership. A
+    /// deferred closed key must still meet them when its template is bound.
+    pub(crate) fn validate_literal(value: &CanonicalScalar) -> Result<(), ScalarPredicateError> {
+        let payload = match value {
             CanonicalScalar::Bytes(value) => value.as_slice().len(),
             CanonicalScalar::Text(value) => value
                 .len()
@@ -87,15 +102,11 @@ impl ScalarPredicate {
             _ => 0,
         };
         check_size(payload)?;
-        let encoded = value.encode().map_err(ScalarPredicateError::Encoding)?;
-        check_size(encoded.len())?;
-        Ok(Self {
-            operand: Arc::new(ScalarOperand {
-                value,
-                encoded: encoded.into_boxed_slice(),
-            }),
-            comparison,
-        })
+        check_size(
+            value
+                .canonical_encoded_len()
+                .map_err(ScalarPredicateError::Encoding)?,
+        )
     }
 
     /// Explicit plaintext operand export. No source scalar is cloned to match.

@@ -23,7 +23,8 @@ fn relationship_merge_final_tails_bind_and_read_computed_identities() {
     use fgdb_gql::algebra::{GraphPath, GraphPathFunction, GraphValue, GraphValueRow};
     use fgdb_gql::{
         GlaExecutionStats, GqlExecutionStats, GqlQueryPolicy, GraphEdgeMergeBinding,
-        GraphWriteChainStep, PreparedGraphWriteChainText,
+        GraphEdgeMergeRowAction, GraphEdgeUpsertValue, GraphWriteChainStep,
+        PreparedGraphWriteChainText,
     };
     use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
@@ -40,7 +41,8 @@ fn relationship_merge_final_tails_bind_and_read_computed_identities() {
     .unwrap();
     let resolved = calls.get();
     assert!(template.returns_rows());
-    let mut identities = Vec::new();
+    let mut read_identities = Vec::new();
+    let mut action_identities = Vec::new();
     for value in [7, 19] {
         let bound = template
             .bind_parameters(&GqlParameters::new().with_int64("value", value).unwrap())
@@ -53,9 +55,20 @@ fn relationship_merge_final_tails_bind_and_read_computed_identities() {
         assert!(bound.returns_rows());
         assert!(bound.read_continuation().is_none());
         assert_eq!(bound.columns(), &["value", "hops"]);
-        let [GraphWriteChainStep::EdgeUpsertQuery { query, .. }] = bound.steps() else {
+        let [GraphWriteChainStep::EdgeUpsertQuery { upsert, query }] = bound.steps() else {
             panic!("the existing MERGE query owner must execute its final tail");
         };
+        assert!(matches!(
+            upsert.actions().on_create.as_slice(),
+            [GraphEdgeMergeRowAction::Edge(action)]
+                if action.key == P && matches!(
+                    &action.value,
+                    GraphEdgeUpsertValue::Literal(literal)
+                        if literal.value() == &CanonicalScalar::Int(value)
+                )
+        ));
+        assert_eq!(upsert.actions().on_match.len(), 1);
+        assert!(upsert.actions().after.is_empty());
         assert_eq!(
             query.bindings(),
             &[GraphEdgeMergeBinding::Path {
@@ -114,10 +127,14 @@ fn relationship_merge_final_tails_bind_and_read_computed_identities() {
             cancelled,
             fgdb_gql::GqlQueryError::Interrupted("cancelled")
         ));
-        identities.push(query.canonical_bytes());
+        read_identities.push(query.canonical_bytes());
+        action_identities.push(upsert.canonical_bytes());
     }
+    // The selection and final read tail do not use $value. Its selected ON
+    // action belongs to the separate upsert carried by the same chain step.
+    assert_eq!(read_identities[0], read_identities[1]);
     assert_ne!(
-        identities[0], identities[1],
+        action_identities[0], action_identities[1],
         "the bound action retains its parameter"
     );
 }

@@ -736,10 +736,9 @@ impl<'a> Parser<'a> {
         template: &crate::set_text::ReadValueTemplate,
         values: &[crate::GqlParameterValue],
     ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphSetTextError> {
-        const CONSTANT_LIST_EVENTS: u32 = 1 << 20;
         let value = return_projection::bind_read_value(template, values)?;
         let row = crate::algebra::GraphValueRow::from_owned_values(Vec::new());
-        let mut remaining = CONSTANT_LIST_EVENTS;
+        let mut remaining = crate::vertex_merge::CONSTANT_MERGE_VALUE_EVENTS;
         Ok(crate::set_ops::evaluate_value(&value, &row, 0, &mut |_| {
             remaining = remaining.checked_sub(1).ok_or(())?;
             Ok::<_, ()>(())

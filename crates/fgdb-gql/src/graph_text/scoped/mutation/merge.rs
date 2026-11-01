@@ -1530,6 +1530,146 @@ fn bind_merge_values(
     template: &PreparedGraphVertexMergeText,
     values: &[GqlParameterValue],
 ) -> Result<PreparedGraphVertexMerge, GraphVertexMergeTextError> {
+    let instant = template
+        .parameter_schema()
+        .iter()
+        .position(crate::GqlParameterSpec::is_statement_time);
+    if instant.is_some_and(|instant| {
+        template.properties.iter().any(|(_, value)| {
+            matches!(value, VertexMergeValueTemplate::Stored { value, .. }
+            if value.uses_parameter(instant))
+        })
+    }) {
+        use crate::vertex_merge::{GraphVertexMergeRowValue, GraphVertexMergeRowsInput};
+        let mut properties = Vec::with_capacity(template.properties.len());
+        let mut stored_predicates = 0;
+        for (key, value_template) in &template.properties {
+            let value = match value_template {
+                VertexMergeValueTemplate::Stored { value, at }
+                    if instant.is_some_and(|instant| value.uses_parameter(instant)) =>
+                {
+                    GraphVertexMergeRowValue::Computed(
+                        return_projection::bind_read_value(value, values).map_err(|error| {
+                            GraphVertexMergeTextError {
+                                offset: *at,
+                                ..GraphVertexMergeTextError::from(error)
+                            }
+                        })?,
+                    )
+                }
+                VertexMergeValueTemplate::Stored { value, at } => {
+                    let value =
+                        Parser::constant_written_value(value, values)?.ok_or_else(|| {
+                            error(
+                                *at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "non-null scalar or bounded list MERGE property value",
+                                ),
+                            )
+                        })?;
+                    if matches!(value.as_scalar(), Some(CanonicalScalar::Null)) {
+                        return Err(error(
+                            *at,
+                            GraphPatternTextErrorKind::Expected(
+                                "non-null scalar or bounded list MERGE property value",
+                            ),
+                        )
+                        .into());
+                    }
+                    if let Some(scalar) = value.as_scalar() {
+                        crate::algebra::ScalarPredicate::validate_literal(scalar)
+                            .map_err(|_| error(*at, GraphPatternTextErrorKind::ScalarLiteral))?;
+                    } else if value
+                        .canonical_encoded_len()
+                        .ok()
+                        .is_none_or(|len| len > crate::algebra::MAX_SCALAR_PREDICATE_BYTES)
+                    {
+                        return Err(error(*at, GraphPatternTextErrorKind::ScalarLiteral).into());
+                    }
+                    let value = crate::algebra::GraphValue::from_property_value(&value)
+                        .ok_or_else(|| error(*at, GraphPatternTextErrorKind::ScalarLiteral))?;
+                    GraphVertexMergeRowValue::Computed(crate::GraphSetValue::Value(value))
+                }
+                VertexMergeValueTemplate::Bound(value) => {
+                    GraphVertexMergeRowValue::Bound(value.clone())
+                }
+                VertexMergeValueTemplate::Parameter { index, at } => {
+                    let value = scalar(values[*index].clone(), *at)?;
+                    if matches!(value.value(), CanonicalScalar::Null) {
+                        return Err(error(
+                            *at,
+                            GraphPatternTextErrorKind::Expected("non-null MERGE property value"),
+                        )
+                        .into());
+                    }
+                    GraphVertexMergeRowValue::Bound(value)
+                }
+            };
+            if let VertexMergeValueTemplate::Stored { at, .. } = value_template {
+                stored_predicates += 1;
+                built(
+                    *at,
+                    template
+                        .selection
+                        .builder
+                        .checked_predicate_count(stored_predicates),
+                )?;
+            }
+            properties.push((*key, value));
+        }
+        // Ordinary scalar filters bind after the stored-key predicates in
+        // the existing builder; preserve that admission order and location.
+        for additional in 1..=template.selection.filters.len() {
+            built(
+                template.selection.return_at,
+                template
+                    .selection
+                    .builder
+                    .checked_predicate_count(stored_predicates + additional),
+            )?;
+        }
+        // The deferred values do not defer the ordinary insertion schema.
+        // Preserve the same static limits, duplicate checks and error causes
+        // as its one-vertex/no-edge creation arm, without evaluating the keys.
+        use crate::insertion::GraphInsertBuildError;
+        let refused = |source| GraphVertexMergeTextError {
+            offset: template.selection.return_at,
+            kind: GraphVertexMergeTextErrorKind::InsertBuild(source),
+        };
+        let fields = template.labels.len().saturating_add(properties.len());
+        if fields > crate::insertion::MAX_GRAPH_INSERT_FIELDS {
+            return Err(refused(GraphInsertBuildError::TooManyFields {
+                limit: crate::insertion::MAX_GRAPH_INSERT_FIELDS,
+                observed: fields,
+            }));
+        }
+        let mut labels = template.labels.clone();
+        labels.sort_unstable();
+        if labels.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(refused(GraphInsertBuildError::DuplicateLabel { vertex: 0 }));
+        }
+        if properties.len() > crate::algebra::MAX_PATTERN_VERTICES {
+            return Err(refused(GraphInsertBuildError::TooManyFields {
+                limit: crate::algebra::MAX_PATTERN_VERTICES,
+                observed: properties.len(),
+            }));
+        }
+        properties.sort_by_key(|(key, _)| *key);
+        if properties.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(refused(GraphInsertBuildError::DuplicateProperty {
+                declaration: 0,
+            }));
+        }
+        return PreparedGraphVertexMerge::prepare_closed(crate::PreparedGraphVertexMergeRows {
+            relation: template.relation,
+            labels,
+            properties,
+            input: GraphVertexMergeRowsInput::Unit,
+            keep: 0,
+            actions: None,
+        })
+        .map_err(|source| merge_error(template.selection.return_at, source));
+    }
     let mut selection = template.selection.clone();
     let variable = selection.columns[0].variable.clone();
     let mut fields = Vec::new();

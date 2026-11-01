@@ -294,7 +294,7 @@ fn frozen_merge_predicates(
     merge: &fgdb_gql::PreparedGraphVertexMerge,
 ) -> Option<Vec<fgdb_gql::algebra::VertexPredicate>> {
     use fgdb_gql::algebra::GlaOperator;
-    let selection = merge.selection();
+    let selection = merge.selection()?;
     if selection.columns().len() != 1 || merge.target_column() != 0 {
         return None;
     }
@@ -397,8 +397,56 @@ fn collect_vertex_merge_output<O: VertexMergeOutput, E, A, C>(
         GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlQueryError,
         GraphVertexMergeError, GraphVertexMergeStats,
     };
-    let selected = source(merge.selection(), policy.query)
-        .map_err(|error| error.map_source(GraphVertexMergeError::Source))?;
+    let mut key_evaluator = fgdb_gql::GlaExecutionStats::default();
+    let materialized = merge.materialize(&mut |kind| {
+        checkpoint().map_err(GqlQueryError::Interrupted)?;
+        let work = u128::from(key_evaluator.work_units) + 1;
+        let scratch = u128::from(key_evaluator.scratch_entries)
+            + u128::from(kind == GlaExecutionEvent::ScratchEntry);
+        for (observed, limit, dimension) in [
+            (work, policy.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
+            (scratch, policy.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+        ] {
+            if observed > u128::from(limit) {
+                return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+            }
+        }
+        key_evaluator.work_units = work as u64;
+        key_evaluator.scratch_entries = scratch as u64;
+        Ok(())
+    })?;
+    let merge = materialized.as_ref();
+    let (Some(selection), Some(creation)) = (merge.selection(), merge.creation()) else {
+        return Err(GqlQueryError::Source(GraphVertexMergeError::UnmaterializedKeys));
+    };
+    let selection_policy = fgdb_gql::GqlQueryPolicy {
+        rows: policy.query.rows,
+        evaluator: fgdb_gql::GlaExecutionLimits::new(
+            policy.query.evaluator.max_work_units - key_evaluator.work_units,
+            policy.query.evaluator.max_scratch_entries - key_evaluator.scratch_entries,
+        ),
+    };
+    let mut selected = source(selection, selection_policy).map_err(|error| {
+        let error = error.map_source(GraphVertexMergeError::Source);
+        match error {
+            GqlQueryError::Evaluator(mut error) => {
+                match error.dimension {
+                    GlaLimitDimension::WorkUnits => {
+                        error.limit = policy.query.evaluator.max_work_units;
+                        error.observed += u128::from(key_evaluator.work_units);
+                    }
+                    GlaLimitDimension::ScratchEntries => {
+                        error.limit = policy.query.evaluator.max_scratch_entries;
+                        error.observed += u128::from(key_evaluator.scratch_entries);
+                    }
+                }
+                GqlQueryError::Evaluator(error)
+            }
+            error => error,
+        }
+    })?;
+    selected.evaluator.work_units += key_evaluator.work_units;
+    selected.evaluator.scratch_entries += key_evaluator.scratch_entries;
     if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
         return Err(GqlQueryError::Source(
             GraphVertexMergeError::InvalidSourceStatistics,
@@ -435,7 +483,7 @@ fn collect_vertex_merge_output<O: VertexMergeOutput, E, A, C>(
         Ok(())
     };
     event(GlaExecutionEvent::Work)?;
-    let expected_columns = merge.selection().columns().len();
+    let expected_columns = selection.columns().len();
     let target = merge.target_column();
     let mut matches = std::collections::BTreeSet::new();
     for (row_at, row) in selected.value.iter().enumerate() {
@@ -499,7 +547,7 @@ fn collect_vertex_merge_output<O: VertexMergeOutput, E, A, C>(
                 .expect("successful reduction is within the scratch limit"),
         ),
     };
-    let created = merge.creation().execute_governed::<E, A, C>(
+    let created = creation.execute_governed::<E, A, C>(
         GraphInsertPolicy::new(remaining, policy.max_created_vertices, 0),
         |_, _| unreachable!("validated MERGE creation is standalone"),
         allocate,

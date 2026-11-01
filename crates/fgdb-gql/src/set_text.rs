@@ -309,6 +309,94 @@ impl ElementCatalogSlot {
 }
 
 impl ReadValueTemplate {
+    /// Dependency metadata, including lazy branches. In particular, a closed
+    /// MERGE key that reads the statement instant must remain executable IR
+    /// during PREPARE rather than evaluating a representative instant.
+    pub(crate) fn uses_parameter(&self, parameter: usize) -> bool {
+        use crate::mutation_text::MutationIntegerTemplateOp as Op;
+        match self {
+            Self::Parameter { index, .. } => *index == parameter,
+            Self::Integer { program, .. } => program.iter().any(|op| match op {
+                Op::Parameter { index, .. }
+                | Op::ParameterField { index, .. }
+                | Op::ListMembers { index, .. } => *index == parameter,
+                Op::Bound(_) => false,
+            }),
+            Self::Column(_) | Self::Literal(_) | Self::Local(_) | Self::Random { .. } => false,
+            Self::List(values) => values.iter().any(|value| value.uses_parameter(parameter)),
+            Self::Index { list, index } => {
+                list.uses_parameter(parameter) || index.uses_parameter(parameter)
+            }
+            Self::Size(value) | Self::Keys(value) => value.uses_parameter(parameter),
+            Self::In { value, list } => {
+                value.uses_parameter(parameter) || list.uses_parameter(parameter)
+            }
+            Self::Equal { left, right } | Self::Ordered { left, right, .. } => {
+                left.uses_parameter(parameter) || right.uses_parameter(parameter)
+            }
+            Self::Temporal { argument, .. }
+            | Self::Function { argument, .. }
+            | Self::ElementMetadata {
+                value: argument, ..
+            } => argument.uses_parameter(parameter),
+            Self::Comprehension { list, filter, map } => {
+                list.uses_parameter(parameter)
+                    || filter
+                        .as_deref()
+                        .is_some_and(|value| value.uses_parameter(parameter))
+                    || map
+                        .as_deref()
+                        .is_some_and(|value| value.uses_parameter(parameter))
+            }
+            Self::Quantifier {
+                list, predicate, ..
+            } => list.uses_parameter(parameter) || predicate.uses_parameter(parameter),
+            Self::Slice { list, from, to } => {
+                list.uses_parameter(parameter)
+                    || from
+                        .as_deref()
+                        .is_some_and(|value| value.uses_parameter(parameter))
+                    || to
+                        .as_deref()
+                        .is_some_and(|value| value.uses_parameter(parameter))
+            }
+            Self::Range { start, end, step } => {
+                start.uses_parameter(parameter)
+                    || end.uses_parameter(parameter)
+                    || step
+                        .as_deref()
+                        .is_some_and(|value| value.uses_parameter(parameter))
+            }
+            Self::Reduce { init, list, expr } => {
+                init.uses_parameter(parameter)
+                    || list.uses_parameter(parameter)
+                    || expr.uses_parameter(parameter)
+            }
+            Self::MapLiteral { values, guard, .. } => {
+                values.iter().any(|value| value.uses_parameter(parameter))
+                    || guard
+                        .as_deref()
+                        .is_some_and(|value| value.uses_parameter(parameter))
+            }
+            Self::MapGet { map, .. } => map.uses_parameter(parameter),
+            Self::MapOverlay { base, values, .. } => {
+                base.uses_parameter(parameter)
+                    || values.iter().any(|value| value.uses_parameter(parameter))
+            }
+            Self::Let { values, body } => {
+                values.iter().any(|value| value.uses_parameter(parameter))
+                    || body.uses_parameter(parameter)
+            }
+            Self::Case { arms, otherwise } => {
+                arms.iter().any(|(condition, value)| {
+                    condition.uses_parameter(parameter) || value.uses_parameter(parameter)
+                }) || otherwise
+                    .as_deref()
+                    .is_some_and(|value| value.uses_parameter(parameter))
+            }
+        }
+    }
+
     /// Whether this expression can run after grouping without an input row.
     /// Element locals belong to their enclosing comprehension/LET; random
     /// draws remain row-dependent even when all explicit arguments are fixed.

@@ -169,6 +169,61 @@ fn statement_time_prepared_reads_stream_once_and_recovery_keeps_the_authority() 
 }
 
 #[test]
+fn returning_merge_prepare_defers_time_dependent_list_keys() {
+    let ((), report) = run_async_under_lab(0xc10c_0048, |root| async move {
+        let (mut server, token, _) = served(&root, "statement-clock-merge-key").await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        install_clock(
+            &root,
+            &mut server,
+            StatementClock::new(move |_| {
+                let ms = observed.fetch_add(1, Ordering::SeqCst) + 1;
+                CanonicalTimestamp::offset_only(ms as i128 * 1_000_000, 0).ok()
+            }),
+        )
+        .await;
+        Arc::get_mut(server.databases.get_mut("test").unwrap())
+            .unwrap()
+            .symbols
+            .bind(GraphSymbolKind::Property, "stamp", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let definition = accepted(prepare_statement(&root, db, &token, &Prepare {
+            mode: PrepareMode::WriteReturning,
+            statement: "MERGE (n {stamp:[1/timestamp()]}) RETURN n.stamp AS stored, timestamp() AS ms".into(),
+            parameters: Vec::new(),
+        }).await);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state(&root, db).await, (CommitSeq(0), 0));
+        for (ms, key) in [(1, 1), (2, 0)] {
+            let answer = accepted(
+                run_prepared(
+                    &root,
+                    db,
+                    &token,
+                    &definition,
+                    PreparedExecutionMode::WriteReturning,
+                    &[],
+                )
+                .await,
+            );
+            assert_eq!(
+                answer.rows,
+                [vec![
+                    WireValue::List(vec![WireValue::Int(key)]),
+                    WireValue::Int(ms)
+                ]]
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), ms as usize);
+            assert_eq!(state(&root, db).await, (CommitSeq(ms as u64), ms as usize));
+        }
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn statement_time_writes_prepare_without_sampling_and_batches_capture_per_record() {
     let ((), report) = run_async_under_lab(0xc10c_0002, |root| async move {
         let (mut server, token, _) = served(&root, "statement-clock-write").await;

@@ -122,6 +122,7 @@ impl core::fmt::Debug for GraphVertexMergeOutcome {
 pub enum GraphVertexMergeError<E, A> {
     Source(E),
     InvalidSourceStatistics,
+    UnmaterializedKeys,
     InputSchema {
         row: usize,
         column: usize,
@@ -188,6 +189,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             Self::InvalidSourceStatistics => {
                 f.write_str("MERGE source returned inconsistent statistics")
             }
+            Self::UnmaterializedKeys => f.write_str("MERGE keys have not been materialized"),
             Self::InputSchema { row, column } => {
                 write!(f, "MERGE row {row} has incompatible column {column}")
             }
@@ -264,11 +266,23 @@ pub(crate) struct MergeEqualityKey {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphVertexMerge {
-    selection: PreparedGraphPattern<GraphValueRow>,
+    definition: VertexMergeDefinition,
     relation: RelationId,
     target: usize,
-    creation: PreparedGraphInsert,
 }
+
+#[derive(Clone, PartialEq, Eq)]
+enum VertexMergeDefinition {
+    Concrete {
+        selection: PreparedGraphPattern<GraphValueRow>,
+        creation: PreparedGraphInsert,
+    },
+    /// Closed values over the statement's single empty row. This is the same
+    /// key VM as a row MERGE, but retains the caller's unique/all-target policy.
+    Closed(PreparedGraphVertexMergeRows),
+}
+
+pub(crate) const CONSTANT_MERGE_VALUE_EVENTS: u64 = 1 << 20;
 impl core::fmt::Debug for PreparedGraphVertexMerge {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphVertexMerge")
@@ -310,16 +324,42 @@ impl PreparedGraphVertexMerge {
             });
         }
         Ok(Self {
-            selection,
+            definition: VertexMergeDefinition::Concrete {
+                selection,
+                creation,
+            },
             relation,
             target,
-            creation,
+        })
+    }
+
+    pub(crate) fn prepare_closed(
+        keys: PreparedGraphVertexMergeRows,
+    ) -> Result<Self, GraphVertexMergeBuildError> {
+        if !matches!(keys.input, GraphVertexMergeRowsInput::Unit)
+            || keys.keep != 0
+            || keys.actions.is_some()
+            || !keys.properties.iter().all(|(_, value)| match value {
+                GraphVertexMergeRowValue::Bound(_) => true,
+                GraphVertexMergeRowValue::Computed(value) => value.is_input_independent(),
+                GraphVertexMergeRowValue::Column(_) => false,
+            })
+        {
+            return Err(GraphVertexMergeBuildError::CreationMustBeStandalone);
+        }
+        Ok(Self {
+            relation: keys.relation,
+            target: 0,
+            definition: VertexMergeDefinition::Closed(keys),
         })
     }
 
     #[must_use]
-    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> {
-        &self.selection
+    pub fn selection(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
+        match &self.definition {
+            VertexMergeDefinition::Concrete { selection, .. } => Some(selection),
+            VertexMergeDefinition::Closed(_) => None,
+        }
     }
     #[must_use]
     pub const fn relation(&self) -> RelationId {
@@ -330,8 +370,188 @@ impl PreparedGraphVertexMerge {
         self.target
     }
     #[must_use]
-    pub fn creation(&self) -> &PreparedGraphInsert {
-        &self.creation
+    pub fn creation(&self) -> Option<&PreparedGraphInsert> {
+        match &self.definition {
+            VertexMergeDefinition::Concrete { creation, .. } => Some(creation),
+            VertexMergeDefinition::Closed(_) => None,
+        }
+    }
+
+    /// Materialize closed keys before opening the graph or allocating an
+    /// identity. The host debits every event to its cumulative native and
+    /// signed allowances; the former constant-expression event cap still
+    /// applies separately to each value. Concrete definitions borrow unchanged.
+    pub fn materialize<E, A, C>(
+        &self,
+        control: &mut impl FnMut(
+            crate::GlaExecutionEvent,
+        )
+            -> Result<(), crate::GqlQueryError<GraphVertexMergeError<E, A>, C>>,
+    ) -> Result<std::borrow::Cow<'_, Self>, crate::GqlQueryError<GraphVertexMergeError<E, A>, C>>
+    {
+        use crate::{GlaExecutionEvent, GqlQueryError};
+        let VertexMergeDefinition::Closed(keys) = &self.definition else {
+            return Ok(std::borrow::Cow::Borrowed(self));
+        };
+        // Admit the complete tuple's slots before allocating its owner.
+        for _ in &keys.properties {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        let mut tuple = Vec::with_capacity(keys.properties.len());
+        for (property, (_, value)) in keys.properties.iter().enumerate() {
+            let value = match value {
+                GraphVertexMergeRowValue::Bound(value) => {
+                    crate::algebra_exec::charge_payload(value.value(), &mut |event| {
+                        control(event)?;
+                        control(GlaExecutionEvent::ScratchEntry)
+                    })?;
+                    fgdb_types::CanonicalPropertyValue::Scalar(value.value().clone())
+                }
+                GraphVertexMergeRowValue::Computed(value) => {
+                    let mut events = 0_u64;
+                    let mut bounded = |event| {
+                        events += 1;
+                        if events > CONSTANT_MERGE_VALUE_EVENTS {
+                            return Err(GqlQueryError::Evaluator(crate::GlaLimitExceeded {
+                                dimension: crate::GlaLimitDimension::WorkUnits,
+                                limit: CONSTANT_MERGE_VALUE_EVENTS,
+                                observed: u128::from(events),
+                            }));
+                        }
+                        control(event)
+                    };
+                    let row = GraphValueRow::from_owned_values(Vec::new());
+                    let evaluated =
+                        crate::set_ops::evaluate_value(value, &row, property, &mut bounded)
+                            .map_err(|error| match error {
+                                crate::set_ops::ProjectionFailure::Control(error) => error,
+                                crate::set_ops::ProjectionFailure::Arithmetic {
+                                    error: source,
+                                    ..
+                                } => GqlQueryError::Source(GraphVertexMergeError::RowExpression {
+                                    row: 0,
+                                    property,
+                                    source,
+                                }),
+                            })?;
+                    GraphVertexMergeRowComputed::admit_written(&evaluated, control)?
+                        .filter(|value| !matches!(value.as_scalar(), Some(CanonicalScalar::Null)))
+                        .ok_or(GqlQueryError::Source(
+                            GraphVertexMergeError::RowExpressionValue { row: 0, property },
+                        ))?
+                }
+                GraphVertexMergeRowValue::Column(column) => {
+                    return Err(GqlQueryError::Source(GraphVertexMergeError::InputSchema {
+                        row: 0,
+                        column: *column,
+                    }));
+                }
+            };
+            tuple.push(value);
+        }
+        // A conservative logical bill for the existing builder's metadata:
+        // its fixed pattern/insertion owners, per-key filters/projections and
+        // label slots. This covers both its scalar and mixed/list routes; it
+        // is cumulative work/scratch accounting, not an allocator/RSS claim.
+        for _ in 0..64 {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        for _ in &keys.labels {
+            for _ in 0..8 {
+                control(GlaExecutionEvent::ScratchEntry)?;
+            }
+        }
+        let scalar_tuple = tuple.iter().all(|value| value.as_scalar().is_some());
+        for (property, value) in tuple.iter().enumerate() {
+            for _ in 0..16 {
+                control(GlaExecutionEvent::ScratchEntry)?;
+            }
+            let invalid = || {
+                GqlQueryError::Source(GraphVertexMergeError::RowExpressionValue {
+                    row: 0,
+                    property,
+                })
+            };
+            if let Some(scalar) = value.as_scalar() {
+                // Scalar-only tuples copy through merge_for's temporary
+                // scalars and final operand, then share its one encoding.
+                // In mixed tuples the predicate and creation encode separately.
+                let encoded = scalar.canonical_encoded_len().map_err(|_| invalid())?;
+                for _ in 0..2 {
+                    crate::algebra::GraphValue::charge_property_value(value, control)?;
+                }
+                for _ in 0..if scalar_tuple { 1 } else { 2 } {
+                    for _ in 0..encoded.div_ceil(64) {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                    }
+                }
+            } else {
+                // StoredOperand, creation's GraphValue, and the existing
+                // stored-domain validation each copy this complete tree.
+                for _ in 0..3 {
+                    crate::algebra::GraphValue::charge_property_value(value, control)?;
+                }
+                let encoded = value.canonical_encoded_len().map_err(|_| invalid())?;
+                for _ in 0..encoded.div_ceil(64) {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+                fn scalar_encoding_work<E, A, C>(
+                    value: &fgdb_types::CanonicalPropertyValue,
+                    property: usize,
+                    control: &mut impl FnMut(
+                        GlaExecutionEvent,
+                    ) -> Result<
+                        (),
+                        crate::GqlQueryError<GraphVertexMergeError<E, A>, C>,
+                    >,
+                ) -> Result<usize, crate::GqlQueryError<GraphVertexMergeError<E, A>, C>>
+                {
+                    use fgdb_types::CanonicalPropertyValue;
+                    let invalid = || {
+                        GqlQueryError::Source(GraphVertexMergeError::RowExpressionValue {
+                            row: 0,
+                            property,
+                        })
+                    };
+                    control(GlaExecutionEvent::Work)?;
+                    match value {
+                        CanonicalPropertyValue::Scalar(value) => {
+                            let encoded = value.canonical_encoded_len().map_err(|_| invalid())?;
+                            for _ in 0..encoded.div_ceil(64) {
+                                control(GlaExecutionEvent::Work)?;
+                            }
+                            Ok(encoded)
+                        }
+                        CanonicalPropertyValue::List(list) => {
+                            let mut maximum = 0;
+                            for value in list.values() {
+                                maximum =
+                                    maximum.max(scalar_encoding_work(value, property, control)?);
+                            }
+                            Ok(maximum)
+                        }
+                        CanonicalPropertyValue::Map(_) => Err(invalid()),
+                    }
+                }
+                let scratch = scalar_encoding_work(value, property, control)?;
+                for _ in 0..scratch.div_ceil(64) {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+                // The insertion validator's borrowed canonical-length walk
+                // keeps only nesting frames, bounded before it can allocate.
+                for _ in 0..crate::algebra::GraphValue::MAX_LIST_DEPTH + 2 {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+            }
+        }
+        keys.merge_for_stored(&tuple)
+            .map(std::borrow::Cow::Owned)
+            .map_err(|source| {
+                GqlQueryError::Source(GraphVertexMergeError::RowMerge {
+                    row: 0,
+                    source: Box::new(source),
+                })
+            })
     }
 
     /// The selection's identity key when it is nothing but one vertex scan
@@ -344,7 +564,7 @@ impl PreparedGraphVertexMerge {
     /// returns None. Definition-only: no source or callback.
     pub(crate) fn equality_key(&self) -> Option<MergeEqualityKey> {
         use crate::algebra::{GlaOperator, IntegerComparison, VertexPredicate};
-        let operators = self.selection.plan().operators();
+        let operators = self.selection()?.plan().operators();
         let (GlaOperator::ScanVertices, rest) = operators.split_first()? else {
             return None;
         };
@@ -396,13 +616,46 @@ impl PreparedGraphVertexMerge {
 
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
+        let (selection, creation) = match &self.definition {
+            VertexMergeDefinition::Concrete {
+                selection,
+                creation,
+            } => (selection, creation),
+            VertexMergeDefinition::Closed(keys) => {
+                let mut bytes = b"fgdb:closed-unique-vertex-merge:v1\0".to_vec();
+                bytes.extend_from_slice(&self.relation.0.to_be_bytes());
+                bytes.extend_from_slice(&(keys.labels.len() as u64).to_be_bytes());
+                for label in &keys.labels {
+                    bytes.extend_from_slice(&label.0.to_be_bytes());
+                }
+                bytes.extend_from_slice(&(keys.properties.len() as u64).to_be_bytes());
+                for (key, value) in &keys.properties {
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                    let mut encoded = Vec::new();
+                    match value {
+                        GraphVertexMergeRowValue::Bound(value) => {
+                            encoded.push(0);
+                            encoded.extend_from_slice(value.canonical_bytes());
+                        }
+                        GraphVertexMergeRowValue::Computed(value) => {
+                            encoded.push(1);
+                            value.append_canonical_bytes(&mut encoded);
+                        }
+                        GraphVertexMergeRowValue::Column(column) => {
+                            encoded.push(2);
+                            encoded.extend_from_slice(&(*column as u64).to_be_bytes());
+                        }
+                    }
+                    bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(&encoded);
+                }
+                return bytes;
+            }
+        };
         let mut bytes = b"fgdb:unique-vertex-merge:v1\0".to_vec();
         bytes.extend_from_slice(&self.relation.0.to_be_bytes());
         bytes.extend_from_slice(&(self.target as u64).to_be_bytes());
-        for definition in [
-            self.selection.canonical_bytes(),
-            self.creation.canonical_bytes(),
-        ] {
+        for definition in [selection.canonical_bytes(), creation.canonical_bytes()] {
             bytes.extend_from_slice(&(definition.len() as u64).to_be_bytes());
             bytes.extend_from_slice(&definition);
         }
@@ -557,31 +810,45 @@ impl GraphVertexMergeRowComputed {
         control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphIntegerEvaluationError<C>>
     {
+        Self::written_closed(&self.0, control)
+    }
+
+    fn written_closed<C>(
+        value: &crate::GraphSetValue,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphIntegerEvaluationError<C>>
+    {
         let row = GraphValueRow::from_owned_values(Vec::new());
         let value =
-            crate::set_ops::evaluate_value(&self.0, &row, 0, control).map_err(|failure| {
-                match failure {
+            crate::set_ops::evaluate_value(value, &row, 0, control).map_err(
+                |failure| match failure {
                     crate::set_ops::ProjectionFailure::Control(error) => {
                         crate::GraphIntegerEvaluationError::Control(error)
                     }
                     crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
                         crate::GraphIntegerEvaluationError::Value(error)
                     }
-                }
-            })?;
+                },
+            )?;
+        Self::admit_written(&value, control).map_err(crate::GraphIntegerEvaluationError::Control)
+    }
+
+    fn admit_written<C>(
+        value: &crate::algebra::GraphValue,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, C> {
         if value.is_null() {
             return Ok(Some(fgdb_types::CanonicalPropertyValue::Scalar(
                 CanonicalScalar::Null,
             )));
         }
-        if let crate::algebra::GraphValue::Scalar(scalar) = &value {
+        if let crate::algebra::GraphValue::Scalar(scalar) = value {
             crate::algebra_exec::charge_payload(scalar, &mut |event| {
                 control(event)?;
                 control(crate::GlaExecutionEvent::ScratchEntry)
-            })
-            .map_err(crate::GraphIntegerEvaluationError::Control)?;
+            })?;
         }
-        written_merge_value(&value, control).map_err(crate::GraphIntegerEvaluationError::Control)
+        written_merge_value(value, control)
     }
     /// The property value written for `row`, each evaluation event charged
     /// to `control`. A List is the stored List it is. `None` is a value no

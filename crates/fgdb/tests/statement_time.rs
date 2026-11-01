@@ -106,6 +106,92 @@ where
 }
 
 #[test]
+fn fixed_statement_authority_reproduces_literal_results_across_lab_runs() {
+    let mut executions = Vec::new();
+    for seed in [0x48a5, 0x48a6] {
+        let (execution, report) = run_async_under_lab(seed, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            // 2015-07-21T21:40:32.142+01:00. Both independent lab roots
+            // receive the same explicit calendar authority and empty graph.
+            let fixed = CanonicalTimestamp::offset_only(1_437_511_232_142_000_000, 3600).unwrap();
+            db.set_statement_clock(Some(StatementClock::new(move |_| Some(fixed.clone()))));
+            let result = db
+                .query(
+                    &cx,
+                    "UNWIND [2,1] AS n RETURN n, toString(date()) AS d, \
+                     toString(time()) AS t, toString(localtime()) AS lt, \
+                     toString(datetime()) AS dt, toString(localdatetime()) AS ld, \
+                     timestamp() AS ms, datetime() = datetime() AS same ORDER BY n",
+                    &GqlParameters::new(),
+                    symbols,
+                    policy(),
+                )
+                .unwrap();
+            let expected = QueryResult::Rows {
+                columns: ["n", "d", "t", "lt", "dt", "ld", "ms", "same"]
+                    .map(String::from)
+                    .to_vec(),
+                rows: [1, 2]
+                    .into_iter()
+                    .map(|n| {
+                        let mut row = vec![QueryValue::Value(GraphValue::Scalar(
+                            CanonicalScalar::Int(n),
+                        ))];
+                        for value in [
+                            "2015-07-21",
+                            "21:40:32.142+01:00",
+                            "21:40:32.142",
+                            "2015-07-21T21:40:32.142+01:00",
+                            "2015-07-21T21:40:32.142",
+                        ] {
+                            row.push(QueryValue::Value(GraphValue::Scalar(
+                                CanonicalScalar::ucs_basic_text(value).unwrap(),
+                            )));
+                        }
+                        row.extend([
+                            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+                                1_437_511_232_142,
+                            ))),
+                            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(true))),
+                        ]);
+                        row
+                    })
+                    .collect(),
+            };
+            assert_eq!(result, expected);
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("the current-time statement must return rows");
+            };
+            let canonical_rows = rows
+                .into_iter()
+                .map(|row| {
+                    fgdb_gql::algebra::GraphValueRow::from_owned_values(
+                        row.into_iter()
+                            .map(|cell| {
+                                let QueryValue::Value(value) = cell else {
+                                    panic!("the literal oracle contains only scalar values");
+                                };
+                                value
+                            })
+                            .collect(),
+                    )
+                    .canonical_bytes()
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            (columns, canonical_rows)
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+        executions.push(execution);
+    }
+    assert_eq!(executions[0], executions[1]);
+}
+
+#[test]
 fn prepared_execution_samples_once_and_read_views_retain_the_host_authority() {
     lab(0x48a1, |contexts| async move {
         let cx = contexts.query();
@@ -276,6 +362,65 @@ fn authorized_write_preparation_is_instant_free_and_batches_capture_per_statemen
             .unwrap(),
             integers(&["p", "q"], &[&[1, 1], &[2, 2], &[3, 3], &[3, 3], &[3, 3]])
         );
+    });
+}
+
+#[test]
+fn prepared_merge_list_keys_evaluate_only_at_each_execution_instant() {
+    lab(0x48a7, |contexts| async move {
+        let (cx, txn, commit) = (contexts.query(), contexts.txn(), contexts.commit());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let (clock, calls) = advancing_clock();
+        db.set_statement_clock(Some(clock));
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                R,
+                write_policy(),
+                100,
+                || 100,
+            )
+            .unwrap();
+        let arguments = GqlParameters::new();
+        let prepared = session
+            .prepare(&cx, "MERGE (n:L {p:[1/timestamp()]})", &arguments)
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "PREPARE never evaluates epoch zero"
+        );
+        for expected_calls in [1, 2] {
+            let (stats, _) = session
+                .execute_stats(&cx, &prepared, &arguments)
+                .await
+                .unwrap();
+            assert_eq!(stats.completed_statements, 1);
+            assert_eq!(stats.created_vertices, 1);
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+        }
+        drop(session);
+        let vertices = db.vertices().unwrap();
+        assert_eq!(vertices.len(), 2);
+        let mut values: Vec<_> = vertices.iter().map(|vertex| vertex.props.clone()).collect();
+        values.sort();
+        assert_eq!(
+            values,
+            [0, 1].map(|n| vec![(
+                P,
+                GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(n))].into())
+                    .to_written_property()
+                    .unwrap(),
+            )])
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
 

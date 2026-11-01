@@ -386,13 +386,29 @@ fn unwind_property_reads_stop_at_its_as_and_do_not_revive_dropped_bindings() {
         "WITH r AS edge UNWIND [1] AS x RETURN edge.p AS p",
         "WITH r AS edge UNWIND [1] AS x UNWIND [edge.p] AS y RETURN y",
         "WITH 0 AS edge UNWIND [edge.p] AS x RETURN x",
-        "WITH r AS edge WITH edge UNWIND [edge.p] AS x RETURN x",
+        "WITH r AS edge WITH 1 AS kept UNWIND [edge.p] AS x RETURN x",
+        "WITH r AS edge WITH edge UNWIND [r.p] AS x RETURN x",
     ] {
         let text = format!("{PREFIX} {tail}");
         let result = PreparedGraphEdgeUpsertQueryText::prepare(&text, R, symbols)
             .and_then(|template| template.bind_parameters(&GqlParameters::new()));
         assert!(result.is_err(), "{tail}");
     }
+    // A plain WITH explicitly keeps the edge identity. Its property is a
+    // hidden final-state cell read before the first UNWIND's AS, rather than
+    // a revival of a dropped binding or a new read after that scope boundary.
+    let query = prepare("WITH r AS edge WITH edge UNWIND [edge.p] AS x RETURN x");
+    assert_eq!(
+        query.bindings(),
+        &[
+            GraphEdgeReturnBinding::Edge,
+            GraphEdgeReturnBinding::Property(P),
+        ]
+    );
+    assert_eq!(input(&query, 4), vec![GraphValue::Edge(EDGE), int(4)]);
+    let output = finish(&query, Some(4), 1).unwrap();
+    assert_eq!(values(&output), vec![vec![int(4)]]);
+    assert_eq!(output.rows.result_rows, 1);
     // A caller that needs a later scalar read can explicitly retain it.
     let query = prepare("WITH r.p AS p UNWIND [p] AS x UNWIND [p+x] AS y RETURN p, y");
     assert_eq!(

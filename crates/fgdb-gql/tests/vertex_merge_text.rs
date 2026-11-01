@@ -25,6 +25,199 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 
 #[test]
+fn statement_time_list_keys_remain_closed_programs_until_governed_materialization() {
+    use fgdb_gql::{GqlQueryError, GraphVertexMergeError};
+    use fgdb_types::CanonicalTimestamp;
+
+    for (statement, literals) in [
+        ("MERGE (n:Person {p:[1/timestamp()]})", ["[1]", "[0]"]),
+        (
+            "MERGE (n:Person {p:[{p:7}.p,1/timestamp()]})",
+            ["[7,1]", "[7,0]"],
+        ),
+    ] {
+        let template = PreparedGraphVertexMergeText::prepare(statement, R, symbols).unwrap();
+        let arguments = |ms: i128| {
+            GqlParameters::new()
+                .with_statement_time(CanonicalTimestamp::offset_only(ms * 1_000_000, 0).unwrap())
+                .unwrap()
+        };
+        let zero = template.bind_parameters(&arguments(0)).unwrap();
+        assert!(zero.selection().is_none() && zero.creation().is_none());
+        let error = zero.materialize::<(), (), ()>(&mut |_| Ok(())).unwrap_err();
+        assert!(matches!(
+            error,
+            GqlQueryError::Source(GraphVertexMergeError::RowExpression {
+                row: 0,
+                property: 0,
+                ..
+            })
+        ));
+        let mut checkpoints = 0;
+        let error = zero
+            .materialize::<(), (), u8>(&mut |_| {
+                checkpoints += 1;
+                Err(GqlQueryError::Interrupted(17))
+            })
+            .unwrap_err();
+        assert!(matches!(error, GqlQueryError::Interrupted(17)));
+        assert_eq!(
+            checkpoints, 1,
+            "slot admission precedes even a lazy arithmetic fault"
+        );
+        let mut identities = Vec::new();
+        for (ms, literal) in [1, 2].into_iter().zip(literals) {
+            let bound = template.bind_parameters(&arguments(ms)).unwrap();
+            let before = bound.canonical_bytes();
+            let materialized = bound.materialize::<(), (), ()>(&mut |_| Ok(())).unwrap();
+            let expected = PreparedGraphVertexMergeText::prepare(
+                &format!("MERGE (n:Person {{p:{literal}}})"),
+                R,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            assert_eq!(
+                materialized.creation().unwrap().canonical_bytes(),
+                expected.creation().unwrap().canonical_bytes()
+            );
+            assert!(materialized.selection().is_some());
+            assert_eq!(
+                bound.canonical_bytes(),
+                before,
+                "materialization cannot mutate the bound IR"
+            );
+            identities.push(before);
+        }
+        assert_ne!(
+            identities[0], identities[1],
+            "the actual captured instant binds the program"
+        );
+        assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+        assert!(
+            template
+                .bind_parameters(&arguments(1).with_int64("unused", 1).unwrap())
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn deferred_time_keys_keep_original_static_creation_schema_refusals() {
+    use fgdb_gql::algebra::{PatternBuildError, PatternLimitDimension};
+    use fgdb_types::CanonicalTimestamp;
+    let arguments = GqlParameters::new()
+        .with_statement_time(CanonicalTimestamp::offset_only(0, 0).unwrap())
+        .unwrap();
+    let fields = (0..65)
+        .map(|n| format!("p{n}:[timestamp()]"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let template = PreparedGraphVertexMergeText::prepare(
+        &format!("MERGE (n {{{fields}}})"),
+        R,
+        |kind, name: &str| match kind {
+            GraphSymbolKind::Property => name
+                .strip_prefix('p')?
+                .parse::<u64>()
+                .ok()
+                .map(|key| GraphSymbol::Property(PropertyKeyId(key + 1))),
+            _ => None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        template.bind_parameters(&arguments).unwrap_err().kind,
+        GraphVertexMergeTextErrorKind::InsertBuild(GraphInsertBuildError::TooManyFields {
+            limit: 64,
+            observed: 65,
+        })
+    );
+    for (statement, expected) in [
+        (
+            "MERGE (n:A:B {p:[timestamp()]})",
+            GraphInsertBuildError::DuplicateLabel { vertex: 0 },
+        ),
+        (
+            "MERGE (n {p:[timestamp()],same:[timestamp()]})",
+            GraphInsertBuildError::DuplicateProperty { declaration: 0 },
+        ),
+    ] {
+        let template =
+            PreparedGraphVertexMergeText::prepare(statement, R, |kind, name: &str| {
+                match (kind, name) {
+                    (GraphSymbolKind::Label, "A" | "B") => Some(GraphSymbol::Label(PERSON)),
+                    (GraphSymbolKind::Property, "p" | "same") => Some(GraphSymbol::Property(P)),
+                    _ => None,
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            template.bind_parameters(&arguments).unwrap_err().kind,
+            GraphVertexMergeTextErrorKind::InsertBuild(expected)
+        );
+    }
+    let labels = (0..193).map(|n| format!(":L{n}")).collect::<String>();
+    let fields = (0..64)
+        .map(|n| format!("p{n}:[timestamp()]"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let template = PreparedGraphVertexMergeText::prepare(
+        &format!("MERGE (n{labels} {{{fields}}})"),
+        R,
+        |kind, name: &str| match kind {
+            GraphSymbolKind::Label => name
+                .strip_prefix('L')?
+                .parse::<u64>()
+                .ok()
+                .map(|id| GraphSymbol::Label(LabelId(id + 1))),
+            GraphSymbolKind::Property => name
+                .strip_prefix('p')?
+                .parse::<u64>()
+                .ok()
+                .map(|id| GraphSymbol::Property(PropertyKeyId(id + 1))),
+            _ => None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        template.bind_parameters(&arguments).unwrap_err().kind,
+        GraphVertexMergeTextErrorKind::Query(GraphPatternTextErrorKind::Build(
+            PatternBuildError::LimitExceeded {
+                dimension: PatternLimitDimension::Predicates,
+                limit: 256,
+                observed: 257,
+            },
+        ))
+    );
+    let text = "MERGE (n {p:$s+$s,active:[timestamp()]})";
+    let template = PreparedGraphVertexMergeText::prepare_with_parameter_types(
+        text,
+        R,
+        &[("s", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
+        symbols,
+    )
+    .unwrap();
+    let large = arguments
+        .clone()
+        .with_text("s", "x".repeat(32_768))
+        .unwrap();
+    assert_eq!(
+        template.bind_parameters(&large).unwrap_err().kind,
+        GraphVertexMergeTextErrorKind::Query(GraphPatternTextErrorKind::ScalarLiteral)
+    );
+    let small = arguments.with_text("s", "ok").unwrap();
+    assert!(
+        template
+            .bind_parameters(&small)
+            .unwrap()
+            .materialize::<(), (), ()>(&mut |_| Ok(()))
+            .is_ok()
+    );
+}
+
+#[test]
 fn integer_scalar_and_literal_values_share_match_and_creation_binding() {
     let text = "MERGE (n:Person {p:$p,name:$name,active:TRUE})";
     let text_kind = CanonicalScalarKind::of(&CanonicalScalar::ucs_basic_text("x").unwrap());
@@ -54,8 +247,8 @@ fn integer_scalar_and_literal_values_share_match_and_creation_binding() {
         resolved,
         "binding must not re-enter the catalog"
     );
-    assert_eq!(first.creation().vertices_per_row(), 1);
-    assert_eq!(first.creation().edges_per_row(), 0);
+    assert_eq!(first.creation().unwrap().vertices_per_row(), 1);
+    assert_eq!(first.creation().unwrap().edges_per_row(), 0);
     assert_eq!(first.target_column(), 0);
     assert_eq!(
         template.bind_parameters(&args).unwrap().canonical_bytes(),

@@ -67,6 +67,135 @@ async fn seed(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) {
 }
 
 #[test]
+fn closed_time_keys_share_native_limits_and_preserve_unique_match_policy() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GlaLimitDimension, PreparedGraphVertexMergeText};
+    use fgdb_types::CanonicalTimestamp;
+
+    let ((), report) = run_async_under_lab(0x6e29_0048, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let key = GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into())
+            .to_written_property()
+            .unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex_values(VId(7), vec![], vec![(P, key.clone())]);
+        db.write(&commit, batch).await.unwrap();
+        let template =
+            PreparedGraphVertexMergeText::prepare("MERGE (n {p:[1/timestamp()]})", R, symbols)
+                .unwrap();
+        let definition = template
+            .bind_parameters(
+                &GqlParameters::new()
+                    .with_statement_time(CanonicalTimestamp::offset_only(1_000_000, 0).unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+        let allocations = Cell::new(0);
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(100), vec![], vec![(P, CanonicalScalar::Int(77))]);
+        txn.write(&mut db, prefix).unwrap();
+        let before = txn.staged_effect_digest().unwrap();
+        for (query_policy, dimension) in [
+            (
+                GqlQueryPolicy::new(0, 100, 0, 1_000_000),
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                GqlQueryPolicy::new(0, 100, 1_000_000, 0),
+                GlaLimitDimension::ScratchEntries,
+            ),
+        ] {
+            let error = txn
+                .execute_graph_vertex_merge_governed(
+                    &mut db,
+                    &query,
+                    &definition,
+                    GraphVertexMergePolicy::new(query_policy),
+                    |_| {
+                        allocations.set(allocations.get() + 1);
+                        Ok::<_, ()>(ElementId::Vertex(VId(1000)))
+                    },
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, GqlQueryError::Evaluator(error)
+                if error.dimension == dimension && error.limit == 0 && error.observed == 1),
+                "closed-key admission precedes the zero-record source allowance: {error:?}"
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), before);
+        }
+        let (stats, outcome) = txn
+            .execute_graph_vertex_merge_governed(&mut db, &query, &definition, policy(), |_| {
+                allocations.set(allocations.get() + 1);
+                Ok::<_, ()>(ElementId::Vertex(VId(1000)))
+            })
+            .unwrap();
+        assert_eq!(outcome, GraphVertexMergeOutcome::Matched(VId(7)));
+        assert!(stats.evaluator.work_units > 0 && stats.evaluator.scratch_entries > 0);
+        for (work, scratch, dimension, limit) in [
+            (
+                stats.evaluator.work_units - 1,
+                stats.evaluator.scratch_entries,
+                GlaLimitDimension::WorkUnits,
+                stats.evaluator.work_units - 1,
+            ),
+            (
+                stats.evaluator.work_units,
+                stats.evaluator.scratch_entries - 1,
+                GlaLimitDimension::ScratchEntries,
+                stats.evaluator.scratch_entries - 1,
+            ),
+        ] {
+            let error = txn
+                .execute_graph_vertex_merge_governed(
+                    &mut db,
+                    &query,
+                    &definition,
+                    GraphVertexMergePolicy::new(GqlQueryPolicy::new(10_000, 10_000, work, scratch)),
+                    |_| {
+                        allocations.set(allocations.get() + 1);
+                        Ok::<_, ()>(ElementId::Vertex(VId(1000)))
+                    },
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, GqlQueryError::Evaluator(error)
+                if error.dimension == dimension && error.limit == limit
+                    && error.observed == u128::from(limit) + 1),
+                "{error:?}"
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), before);
+        }
+        assert_eq!(allocations.get(), 0);
+        txn.abort();
+        assert!(db.vertex(VId(100)).unwrap().is_none());
+        let mut duplicate = WriteBatch::new(R);
+        duplicate.create_vertex_values(VId(8), vec![], vec![(P, key)]);
+        db.write(&commit, duplicate).await.unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let before = txn.staged_effect_digest().unwrap();
+        let error = txn
+            .execute_graph_vertex_merge_governed(&mut db, &query, &definition, policy(), |_| {
+                allocations.set(allocations.get() + 1);
+                Ok::<_, ()>(ElementId::Vertex(VId(1000)))
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GqlQueryError::Source(GraphVertexMergeError::AmbiguousMatches { observed: 2 })
+        ));
+        assert_eq!(allocations.get(), 0);
+        assert_eq!(txn.staged_effect_digest().unwrap(), before);
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn duplicate_match_occurrences_collapse_to_one_existing_vertex_without_allocation() {
     let ((), report) = run_async_under_lab(0x6e29_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

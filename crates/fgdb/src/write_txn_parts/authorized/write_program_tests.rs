@@ -1120,7 +1120,7 @@ fn duplicate_match_occurrences_collapse_and_distinct_vertices_keep_complete_rece
                 .clone(),
             R,
             0,
-            base.creation().clone(),
+            base.creation().unwrap().clone(),
         )
         .unwrap();
         let program = PreparedGraphWriteProgram::prepare(vec![
