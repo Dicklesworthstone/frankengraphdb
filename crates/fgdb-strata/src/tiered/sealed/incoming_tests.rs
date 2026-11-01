@@ -1001,6 +1001,7 @@ mod logical_events {
         (visible, prefixes)
     }
 
+    #[cfg(test)]
     fn run(
         source: &SealedPartition,
         incoming: &SealedIncomingIndex,

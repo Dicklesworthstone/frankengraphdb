@@ -67,6 +67,7 @@ impl Rows for Fixture {
     }
 }
 
+#[cfg(test)]
 fn distance(output: &KernelOutput) -> Option<usize> {
     let KernelValues::TargetHopDistance { target, distance } = output.values else {
         panic!("integer target distance")

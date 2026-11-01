@@ -156,6 +156,7 @@ fn assert_same_projection(cx: &QueryCx, actual: &SealedGraphView, expected: &Sea
     }
 }
 
+#[cfg(test)]
 fn refusal(error: SealedProjectionError, stop: usize) {
     let SealedProjectionError::Guard(error) = error else {
         panic!("typed construction refusal was lost: {error}")
