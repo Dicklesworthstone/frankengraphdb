@@ -32,11 +32,16 @@ proof must never be relabeled as a proof of a later metadata commit.
 The final remote refresh also exposes subsequent feature commits
 `fc4e63c19` (historical-selector UNWIND) and `788655f39` (cold unbounded
 ANY SHORTEST). Their author reports runtime/typecheck qualification unrun
-after compiler SIGKILL on an 8 GiB host. They must be preserved and qualified
-on the combined canonical source; V7 does not cover them. Bounded independent
-source reviews find no executable blocker, with nine new native test functions
-authored in total. The final handoff's source-bound manifest and public
-receipts distinguish that later integration from the accepted 187c cut.
+after compiler SIGKILL on an 8 GiB host. Canonical merge `4572f430e` preserves
+both histories and the exact 22-local-plus-two-incoming tracker-record union;
+native import preserves all 1,370 issues and prior acceptance comments. V7 does
+not cover this new source. Bounded independent reviews find no executable
+blocker, with nine new native test functions authored in total. The expected
+new full-core denominator is 13,841 executed functions plus 34 existing ignores,
+with no filters and 1,095 summaries. Current integrated qualification is a
+separate requirement, recorded by the final handoff's own manifest and public
+receipts; these authored cases are not execution evidence. Broad W5's original
+dependency block remains intact; narrower `fgdb-694ga` verification is claimed.
 
 The source landing `42bff8bbf` connects carried-map write RETURN fields and
 arithmetic to their actual private binding types. Four item orders preserve
