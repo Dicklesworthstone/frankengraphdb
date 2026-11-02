@@ -43,6 +43,17 @@ separate requirement, recorded by the final handoff's own manifest and public
 receipts; these authored cases are not execution evidence. Broad W5's original
 dependency block remains intact; narrower `fgdb-694ga` verification is claimed.
 
+The first integrated preflights expose test-only import errors missed by that
+source review: `GraphValue` belongs to `fgdb_gql::algebra`, not the crate root.
+Two actual typecheck exits of 101 are retained in
+`/data/ssd/tmp/fgdb-incoming-0206428-preflight-20261102-v1` and `-v2`.
+The repair changes only type paths/imports in temporal unit, temporal integration
+and authorized-native tests; all queries, assertions, data and limits remain.
+Independent exact-diff review confirms the type ownership and acknowledges the
+earlier review miss. Guarded preflight `-v3` exits zero for formatting, explicit
+included-file formatting, all-target typecheck and strict all-feature Clippy.
+That dirty-tree preflight is not the mandatory committed-tree runtime proof.
+
 The source landing `42bff8bbf` connects carried-map write RETURN fields and
 arithmetic to their actual private binding types. Four item orders preserve
 the original nine occurrences in native and authorized hosts. Original

@@ -584,6 +584,7 @@ impl BoundTemporalGraphSetQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::algebra::GraphValue;
     use fgdb_delta_types::PropertyKeyId;
     use std::cell::Cell;
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -650,9 +651,7 @@ mod tests {
                 .with_list(
                     "values",
                     [1, 1, 3]
-                        .map(|value| {
-                            crate::GraphValue::Scalar(fgdb_types::CanonicalScalar::Int(value))
-                        })
+                        .map(|value| GraphValue::Scalar(fgdb_types::CanonicalScalar::Int(value)))
                         .to_vec(),
                 )
                 .unwrap()
@@ -687,7 +686,7 @@ mod tests {
 
     #[test]
     fn temporal_unwind_keeps_duplicate_null_and_empty_list_semantics() {
-        use crate::{GqlQueryPolicy, GraphValue};
+        use crate::GqlQueryPolicy;
         use fgdb_types::CanonicalScalar;
 
         for (values, expected) in [

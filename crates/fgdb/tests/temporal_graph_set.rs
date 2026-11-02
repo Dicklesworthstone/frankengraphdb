@@ -5,8 +5,9 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlParameterType, GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphValue,
+    GqlParameterType, GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
     PreparedTemporalGraphSetText,
 };
 use fgdb_types::{

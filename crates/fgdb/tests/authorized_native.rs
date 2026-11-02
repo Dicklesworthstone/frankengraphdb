@@ -1654,7 +1654,9 @@ fn temporal_unwind_preserves_historical_path_scope_and_signed_delivery_limits() 
                     .map(|&p| {
                         vec![
                             value(p),
-                            QueryValue::Value(fgdb_gql::GraphValue::Scalar(CanonicalScalar::Null)),
+                            QueryValue::Value(fgdb_gql::algebra::GraphValue::Scalar(
+                                CanonicalScalar::Null,
+                            )),
                         ]
                     })
                     .collect(),
