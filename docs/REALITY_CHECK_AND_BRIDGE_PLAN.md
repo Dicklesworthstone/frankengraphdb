@@ -1,6 +1,6 @@
 # Reality Check and Bridge Plan
 
-**Latest audit: 2026-11-01; original snapshot: 2026-10-30.** Initial canonical `main` was
+**Latest audit: 2026-11-02 UTC; original snapshot: 2026-10-30.** Initial canonical `main` was
 `01c2042f4a72ed171111bab9b283f5a4f2e42768` (tree
 `ea849fed1921382f72dc97b16708a50b61ac8d5d`); concurrent integration advanced it
 through `3180b133d8be96e1a6036f2b13bc609a99231b1e` (tree
@@ -13,7 +13,147 @@ This audit does not award G1–G4 or release qualification.
 
 ### Integrated runtime repair checkpoint — 2026-10-31 23:20 UTC
 
-**Latest update, 2026-11-01 22:53 UTC:** the shared write `RETURN` compiler now
+**Latest accepted source, 2026-11-02 UTC:** canonical `main` commit
+`187c1f284b9e1237c382f007c177c56021d92f38`, tree
+`6bca01e85f9b5e39286d4dc77f76fe462ee07243`, passes the complete local proof.
+Both its producer and repository-bound verifier exit zero. All ten core and
+forty registered gates execute and pass; none is red or unrun. The complete
+workspace run reports **13,832 passed, zero failed, 34 existing ignores and
+zero filtered**, across 1,095 summaries. Both real default-feature runs also
+exit zero with those counts and identical normalized outcomes. One actual
+nine-test Miri invocation passes and covers two ledger entries; it is counted
+once. All source, 1,483 tool-file, system-tool and pinned-AST guards hold.
+The immutable bundle is
+`/data/ssd/tmp/fgdb-local-proof-integrated-20261101-v7`; its controller retains
+the native exits and source-bound readbacks. Final report/tracker publication
+has its own separately verified exact-tree proof at handoff; this product-code
+proof must never be relabeled as a proof of a later metadata commit.
+
+The final remote refresh also exposes subsequent feature commits
+`fc4e63c19` (historical-selector UNWIND) and `788655f39` (cold unbounded
+ANY SHORTEST). Their author reports runtime/typecheck qualification unrun
+after compiler SIGKILL on an 8 GiB host. They must be preserved and qualified
+on the combined canonical source; V7 does not cover them. Bounded independent
+source reviews find no executable blocker, with nine new native test functions
+authored in total. The final handoff's source-bound manifest and public
+receipts distinguish that later integration from the accepted 187c cut.
+
+The source landing `42bff8bbf` connects carried-map write RETURN fields and
+arithmetic to their actual private binding types. Four item orders preserve
+the original nine occurrences in native and authorized hosts. Original
+simultaneous common-SET conflicts, atomicity, cache invalidation, exact limits
+and hidden/scope negatives remain. Merge `187c1f284` adds only the owner's
+documentation update `92a9eadb9`; both histories are preserved. GitHub Actions
+was never invoked. The existing DSR-only policy remains binding.
+
+Eighteen original scoped Beads are accepted and closed, with independent
+reviews, original-criteria dispositions and native evidence on their records:
+
+| Scope | Closed original records |
+|---|---|
+| Build and mandatory qualification | `fgdb-on8vu`, `fgdb-epic-verif-phi.3`, `fgdb-epic-verif-phi.4`, `fgdb-epic-verif-phi.2`, `fgdb-chkpq`, `fgdb-vy1rf` |
+| Write accounting, allocation order and markers | `fgdb-l74aj`, `fgdb-39ohn`, `fgdb-g9af0` |
+| Native batch and language connections | `fgdb-qjmgo`, `fgdb-48a`, `fgdb-at06q` |
+| Admitted components and pinned native reads | `fgdb-epic-w8-syz.1`, `fgdb-epic-w8-syz.2` |
+| Text/list, computed keys and alias writes | `fgdb-5lg`, `fgdb-2npty`, `fgdb-xbvl4` |
+| Scalable append and retained history | `fgdb-ewc7i` |
+
+Public acceptance uses fresh Cargo-acknowledged normal CLI/server binaries,
+not test harnesses, with retained byte-verified copies and actual compiler
+profiles in `/data/ssd/tmp/fgdb-public-artifacts-187c-7hns6tvd/manifest.json`.
+The acknowledgement exits zero; no-run supplies provenance, not test credit.
+The following are distinct scoped campaigns, not extra unique Cargo tests:
+
+- Components: 175 native processes, 143 complete queries, six databases,
+  eleven retained cuts and four routes. Parent independently rehashes every
+  stream and recomputes all partitions by Boolean reachability. Three proper
+  test-owner executions additionally emit 72 model, twelve reached-fault and
+  six stored/cooperative records, including both required last-EOF failures.
+  Evidence: `/data/ssd/tmp/fgdb-public-components-187c-20261102-v1` and
+  `/data/ssd/tmp/fgdb-components-structured-187c-20261102-v1`.
+- Text/list and computed keys: all 37 original commands plus two separately
+  counted native key-generation setup commands. Twelve exact text/list
+  answers, five indexed reads, six writes, new-key MERGE and three complete
+  401-row states pass at the original 200-record allowance. The unkeyed
+  control exits 3 at 201 records with no output prefix; NULL leaves sequence8
+  unchanged. Parent rereads all streams, argv, exits and literal states.
+  Evidence: `/data/ssd/tmp/fgdb-public187c-jademeadow-v2-awr9o3pm/public37`.
+- Alias authorization: six native successes including one setup, twelve HTTP
+  successes and two exact scope-denial responses. The same SQL succeeds with
+  full authority, refuses a hidden-Q write with narrow authority, preserves
+  complete p/q state and frontier, accepts an allowed-P write, and succeeds on
+  full-authority retries. The owned server exits zero and stops. This proves
+  admission/no-publication, not late rollback or a direct Rust-enum assertion.
+  Manifest equality was asserted live but historical hash pairs were not
+  separately emitted. Evidence:
+  `/data/ssd/tmp/fgdb-xbvl4-public187c-jademeadow-v2-oc0e3hsb/http`.
+- Full unchanged TCK: **3,897 ordered occurrences / 3,896 unique IDs**, with
+  the duplicate retained. Results: 3,140 PASS, 680 PASS-ERR, 23 REFUSED,
+  four WRONG and fifty FIXTURE. All 25 original MERGE positives and all five
+  Temporal10[12] outlines pass. Against the retained 703 baseline there are
+  exactly ten REFUSED-to-PASS changes and no regressions; every status and
+  multiline detail equals the 959 diagnostic. The four existing wrong-answer
+  classifications and broad PASS-ERR matcher remain explicit limitations.
+  Parent independently reads the entire ordered report, including multiline
+  details. Evidence: `/data/ssd/tmp/fgdb-tck-current187c-topaz-5pcrj0tv`.
+
+The initial text/key and HTTP runners omitted database key creation. Both
+stopped at their first create with native4/driver1 before semantic execution.
+Those packets and original runner bytes remain preserved. Reviewed v2 changes
+add only the real server keygen setup, guarded server identity and separate
+setup counts; all original queries, limits and oracles remain. Parent corrected
+two readback adapters for multiline TCK detail and the terminal server-record
+shape. Neither adapter correction changes a native verdict or product source.
+
+The paired official ingestion run appends all **332,334 edges** to **986
+previously loaded vertices**, in seventeen whole-timestamp windows and eighteen
+total durable commits. All 68 historical queries after all writes, four bulk
+final queries and two issued-ID maps agree with independent recomputation.
+Of 97 native commands, 96 exit zero and the malformed-endpoint negative exits3
+without a committed prefix; the driver exits zero. Both independent reviewer
+and Parent read all 519 artifact hashes and actual input/output/oracle data.
+
+| Same-invocation production load leg | Wall seconds | Edges/s | Durable commits | Successful load processes |
+|---|---:|---:|---:|---:|
+| Seed plus append | 100.535 | 3,305.7 | 18 | 18 |
+| Standard 65,536-row bulk load | 59.860 | 5,551.9 | 6 | 1 |
+
+**Append is 1.6795 times slower.** The non-author reviewer accepts this paired
+observation as the original qualitative load-class requirement; no numerical
+passing ceiling was invented. Input sizes differ (64,631,891 versus 37,380,503
+bytes), as do endpoint resolution, opens and durable commit counts. Timings
+include load-process open, admission, durability and output; they exclude
+creation, negative/control commands, queries and guards. Append runs first;
+cache and host isolation, a distribution, cold behavior and RSS are unclaimed.
+This is not parity, an external-incumbent speedup or a section17 win.
+Evidence: `/data/ssd/tmp/fgdb-ewc7i-paired187c-20261102-v1`.
+
+The fresh complete scanner conserves all 277 original critical identities,
+with no additions, removals or suppressions, across 2,460 Rust files and 33
+Cargo contexts. The earlier classifier's 784 severity moves and five lost
+public comparisons remain documented. Generic-token byte equality remains
+missed. Calibration is maintenance, not security clearance. Root's earlier
+false formatting claim (NE0053), missing on8 labels and every old red/void or
+interrupted bundle remain disclosed. V6 remains incomplete and rejected;
+its completed failures are not erased by V7.
+
+The original general no-table aggregate path (`fgdb-61p1n`), literal
+unchanged-threshold companion clause (`fgdb-epic-verif-phi.1`), authentic
+historical provenance (`fgdb-rc1017-bridge-wvze5.3`) and Studio owner-scope,
+opt-out and C/Wasm-source conditions (`fgdb-rc1017-bridge-wvze5.12`) remain
+open on their original records. Node49 passes do not prove browser DOM or
+those Studio conditions. Broad algorithm/catalog, larger-than-memory and
+section17 goals remain bounded by the twenty vision assessments below.
+Nothing here awards G1–G4 or release qualification.
+
+Operationally, two closed-artifact relocation passes reclaimed
+13,105,672,192 bytes on the root filesystem. Fourteen historical executables
+retain their original path aliases and two byte/metadata-verified SSD copies;
+the manifests are under
+`/data/ssd/tmp/fgdb-root-disk-remediation-20261101-v{1,2}`. This enabled the
+build and tracker work; it earns no database performance credit.
+
+**Earlier update, 2026-11-01 22:53 UTC:** the shared write `RETURN` compiler now
 uses the actual private binding types when it compiles carried-map fields.
 This connects the already implemented map-entry evaluator to row-valued
 MERGE results, including arithmetic and either RETURN-item order. The native
