@@ -437,6 +437,26 @@ impl DegreeCentrality {
         Ok(())
     }
 
+    fn push_average_neighbor_degree(&mut self, total: usize, degree: usize) -> Result<()> {
+        if self.values.len() == self.nodes || degree >= self.nodes || (degree == 0 && total != 0) {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        self.values.push(if degree == 0 {
+            0.0
+        } else {
+            total as f64 / degree as f64
+        });
+        Ok(())
+    }
+
+    fn finish_average_neighbor_degree(self, arcs: usize) -> Result<KernelOutput> {
+        self.finish_with_witness(
+            "fgdb_average_neighbor_degree",
+            arcs,
+            "O(|V| log(1+H) + H log(1+|V|)) compressed row visits; H = retained incidences; O(H) degree-directory reads",
+        )
+    }
+
     fn finish(self) -> Result<KernelOutput> {
         self.finish_with_witness(
             "degree_centrality",
@@ -496,6 +516,41 @@ fn degree_centrality(
     }
     checkpoint()?;
     output.finish()
+}
+
+fn average_neighbor_degree(
+    graph: &impl Rows,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<KernelOutput> {
+    checkpoint()?;
+    let mut output = DegreeCentrality::new(graph.node_count())?;
+    let mut arcs = 0;
+    for source in 0..graph.node_count() {
+        checkpoint()?;
+        let mut row = graph.open(source)?;
+        let mut total = 0;
+        let mut degree = 0;
+        while let Some((target, _)) = row.next()? {
+            checkpoint()?;
+            if target == source {
+                return Err(ExecutionError::SelfLoopRefused.into());
+            }
+            total = add(
+                total,
+                graph
+                    .degree(target)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?,
+            )?;
+            degree = add(degree, 1)?;
+        }
+        if Some(degree) != graph.degree(source) {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        output.push_average_neighbor_degree(total, degree)?;
+        arcs = add(arcs, degree)?;
+    }
+    checkpoint()?;
+    output.finish_average_neighbor_degree(arcs)
 }
 
 fn directed_degree_centrality(
@@ -828,6 +883,7 @@ impl FnxCallSpec {
                         | FoundationAlgorithm::CoreNumber
                         | FoundationAlgorithm::EigenvectorCentrality
                         | FoundationAlgorithm::LoadCentrality
+                        | FoundationAlgorithm::AverageNeighborDegree
                 )
         )
     }
@@ -1013,6 +1069,15 @@ impl FnxCallSpec {
         }
         let pass = execution_pass_work(self, graph)?;
         let (kernel, estimated_work, mut workspace, source) = match self.algorithm() {
+            FnxAlgorithm::Foundation(FoundationAlgorithm::AverageNeighborDegree) => {
+                admission.rows(n)?;
+                (
+                    "fgdb-prism/sealed-average-neighbor-degree-v1",
+                    pass,
+                    mul(n, size_of::<f64>())?,
+                    None,
+                )
+            }
             FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
                 admission.rows(n)?;
                 let incoming = matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality);
@@ -1133,13 +1198,18 @@ impl FnxCallSpec {
         )?;
         if matches!(
             self.algorithm(),
-            FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+            FnxAlgorithm::Foundation(
+                FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::AverageNeighborDegree
+            )
         ) {
             require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
         }
         let rows = SealedRows { cx, graph };
         let mut control = || checkpoint(cx);
         let output = match self.algorithm() {
+            FnxAlgorithm::Foundation(FoundationAlgorithm::AverageNeighborDegree) => {
+                average_neighbor_degree(&rows, &mut control)?
+            }
             FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
                 directed_degree_centrality(
                     &rows,
@@ -3448,6 +3518,11 @@ mod tests {
             for call in [
                 FnxCallSpec::triangles(),
                 FnxCallSpec::clustering_coefficient(),
+                FnxCallSpec::bind(
+                    "CALL fnx.average_neighbor_degree() YIELD vertex,score",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
                 FnxCallSpec::bind(
                     "CALL fnx.degree_centrality() YIELD vertex,score",
                     &FnxParameters::new(),

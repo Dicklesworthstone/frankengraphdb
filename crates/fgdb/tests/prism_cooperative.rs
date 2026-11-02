@@ -62,7 +62,7 @@ mod send;
 #[path = "prism_cooperative/target_bfs.rs"]
 mod target_bfs;
 
-fn retained_calls() -> [FnxCallSpec; 23] {
+fn retained_calls() -> [FnxCallSpec; 24] {
     let bind = |text| FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();
     [
         FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap()),
@@ -90,6 +90,7 @@ fn retained_calls() -> [FnxCallSpec; 23] {
         FnxCallSpec::articulation_points(),
         bind("CALL fnx.bridges() YIELD neighbor AS target,node AS source"),
         FnxCallSpec::katz_centrality(KatzOptions::default()),
+        bind("CALL fnx.average_neighbor_degree() YIELD score AS value, vertex AS id"),
     ]
 }
 

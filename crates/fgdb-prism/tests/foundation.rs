@@ -14,6 +14,172 @@ use std::convert::Infallible;
 /// every score to the wrong vertex.
 const PATH: [u128; 4] = [40, 10, 30, 20];
 
+#[test]
+fn average_neighbor_degree_matches_pinned_fnx_for_all_small_simple_graphs() {
+    let vertices = [u128::MAX, 0, 1 << 100, 29, 101];
+    for n in 0..=5 {
+        let pairs: Vec<_> = (0..n)
+            .flat_map(|a| ((a + 1)..n).map(move |b| (a, b)))
+            .collect();
+        for mask in 0usize..(1 << pairs.len()) {
+            let edges: Vec<_> = pairs
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, &(a, b))| (vertices[a], vertices[b]))
+                .collect();
+            check_average_neighbor_degree(&vertices[..n], &edges);
+        }
+    }
+    for seed in [3u64, 71, 0x51ee_d123] {
+        let vertices: Vec<_> = (0..23).rev().map(|i| (1u128 << 100) + i * 7919).collect();
+        let mut state = seed;
+        let mut edges = Vec::new();
+        for a in 0..vertices.len() {
+            for b in a + 1..vertices.len() {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                if state >> 61 == 0 {
+                    edges.push((vertices[a], vertices[b]));
+                }
+            }
+        }
+        check_average_neighbor_degree(&vertices, &edges);
+    }
+    assert_eq!(
+        by_vertex(&run("average_neighbor_degree", &path())),
+        BTreeMap::from([(10, 1.5), (20, 2.0), (30, 1.5), (40, 2.0)])
+    );
+}
+
+fn check_average_neighbor_degree(vertices: &[u128], edges: &[(u128, u128)]) {
+    let projection = view(vertices, edges, SelfLoopPolicy::Keep);
+    let mut oracle = Graph::strict();
+    for vertex in vertices {
+        oracle.add_node(vertex.to_string());
+    }
+    for (a, b) in edges {
+        oracle.add_edge(a.to_string(), b.to_string()).unwrap();
+    }
+    let expected: BTreeMap<_, _> = fnx_algorithms::average_neighbor_degree(&oracle)
+        .scores
+        .into_iter()
+        .map(|row| {
+            (
+                VId(row.node.parse().unwrap()),
+                row.avg_neighbor_degree.to_bits(),
+            )
+        })
+        .collect();
+    let actual = run("average_neighbor_degree", &projection);
+    assert_eq!(degree_bits(&actual), expected, "{vertices:?} {edges:?}");
+    assert_eq!(actual, run("average_neighbor_degree", &projection));
+    assert_eq!(actual.rows.len(), vertices.len());
+    assert_eq!(actual.certificate.witness.nodes_touched, vertices.len());
+    assert_eq!(actual.certificate.witness.edges_scanned, 2 * edges.len());
+    assert_eq!(
+        actual.certificate.estimated_work,
+        vertices.len() + 2 * edges.len()
+    );
+    assert_eq!(
+        actual.certificate.kernel_workspace_bytes,
+        vertices.len() * size_of::<f64>()
+    );
+    assert_eq!(
+        actual.certificate.execution_kernel,
+        "fgdb-prism/average-neighbor-degree-csr-v1"
+    );
+}
+
+#[test]
+fn average_neighbor_degree_keeps_exact_admission_and_every_refusal() {
+    let graph = path();
+    let procedure = call("average_neighbor_degree");
+    let mut baseline = NativeControl::default();
+    let result = procedure
+        .execute(&graph, limits(10), &mut baseline)
+        .unwrap();
+    assert_eq!(result.rows.len(), 4);
+    assert!(matches!(
+        procedure.execute(&graph, limits(9), &mut NativeControl::default()),
+        Err(FnxExecutionError::LimitExceeded {
+            resource: "estimated work",
+            requested: 10,
+            limit: 9
+        })
+    ));
+    assert!(matches!(
+        procedure.execute(
+            &graph,
+            FnxExecutionLimits {
+                max_result_rows: 3,
+                ..limits(10)
+            },
+            &mut NativeControl::default()
+        ),
+        Err(FnxExecutionError::LimitExceeded {
+            resource: "result rows",
+            requested: 4,
+            limit: 3
+        })
+    ));
+    for stop in (1..=baseline.units)
+        .map(NativeStop::Work)
+        .chain((1..=baseline.polls.len()).map(NativeStop::Poll))
+    {
+        let mut meter = NativeControl {
+            stop: Some(stop),
+            ..NativeControl::default()
+        };
+        assert!(
+            matches!(procedure.execute(&graph, limits(10), &mut meter), Err(FnxExecutionError::Cancelled(at)) if at == stop)
+        );
+        assert!(meter.stopped);
+    }
+    let directed = view_direction(
+        &[0, 1],
+        &[(0, 1)],
+        SelfLoopPolicy::Keep,
+        Directedness::Directed,
+    );
+    assert!(matches!(
+        procedure.execute(&directed, limits(10), &mut NativeControl::default()),
+        Err(FnxExecutionError::GraphKind {
+            required: FnxGraphKind::Undirected
+        })
+    ));
+    let looped = view(&[0], &[(0, 0)], SelfLoopPolicy::Keep);
+    assert!(matches!(
+        procedure.execute(&looped, limits(10), &mut NativeControl::default()),
+        Err(FnxExecutionError::SelfLoopRefused)
+    ));
+    assert!(
+        FnxCallSpec::bind("CALL fnx.average_neighbor_degree(1)", &FnxParameters::new()).is_err()
+    );
+}
+
+#[test]
+fn average_neighbor_degree_polls_inside_a_hub_before_delivering_rows() {
+    let n = 5000usize;
+    let vertices: Vec<_> = (0..n as u128).collect();
+    let edges: Vec<_> = (1..n as u128).map(|v| (0, v)).collect();
+    let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+    let mut meter = NativeControl {
+        stop: Some(NativeStop::Poll(2)),
+        ..NativeControl::default()
+    };
+    let limits = FnxExecutionLimits {
+        max_result_rows: n,
+        ..limits(3 * n)
+    };
+    assert!(matches!(
+        call("average_neighbor_degree").execute(&graph, limits, &mut meter),
+        Err(FnxExecutionError::Cancelled(NativeStop::Poll(2)))
+    ));
+    // The second arithmetic poll happens inside vertex zero's 4999-entry row,
+    // before the foundation call's completion charge or any result delivery.
+    assert_eq!(meter.units, 3 * n + 2 + n + 2 * (n - 1));
+}
+
 fn view(vertices: &[u128], edges: &[(u128, u128)], loops: SelfLoopPolicy) -> SnapshotGraphView {
     view_direction(vertices, edges, loops, Directedness::Undirected)
 }

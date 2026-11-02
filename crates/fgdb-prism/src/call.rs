@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 26;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 27;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -519,6 +519,13 @@ const SIGNATURES: &[FnxSignature] = &[
         complexity: "O(|V| + |E|) worst-case traversal, stopping at the target; O(|V|) FIFO plus visited bits, with no distance vector; O(1) retained result",
         execution_kernel: "fgdb-prism/target-bfs-bitmap-fifo-v1",
     },
+    foundation(
+        "fnx.average_neighbor_degree",
+        FnxOutput::Score,
+        "explicit undirected simple projection; unweighted; self-loops refused; arithmetic mean of neighbor degrees; isolates score zero",
+        "O(|V| + |E|)",
+        "fgdb-prism/average-neighbor-degree-csr-v1",
+    ),
 ];
 
 const fn directed_degree(name: &'static str, execution_kernel: &'static str) -> FnxSignature {
@@ -945,6 +952,7 @@ impl FnxAlgorithm {
             Self::Triangles => 6,
             Self::ClusteringCoefficient => 7,
             Self::Foundation(FoundationAlgorithm::LoadCentrality) => 18,
+            Self::Foundation(FoundationAlgorithm::AverageNeighborDegree) => 25,
             Self::Foundation(algorithm) => 8 + algorithm as usize,
             Self::Cdlp { .. } => 14,
             Self::DirectedClusteringCoefficient => 15,
@@ -973,6 +981,7 @@ pub enum FoundationAlgorithm {
     EigenvectorCentrality = 4,
     CoreNumber = 5,
     LoadCentrality = 6,
+    AverageNeighborDegree = 7,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnxOutputColumn {
@@ -1519,6 +1528,9 @@ impl FnxCallSpec {
             }
             "fnx.core_number" => FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber),
             "fnx.load_centrality" => FnxAlgorithm::Foundation(FoundationAlgorithm::LoadCentrality),
+            "fnx.average_neighbor_degree" => {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::AverageNeighborDegree)
+            }
             "fnx.in_degree_centrality" => FnxAlgorithm::InDegreeCentrality,
             "fnx.out_degree_centrality" => FnxAlgorithm::OutDegreeCentrality,
             "fnx.hits_centrality" => FnxAlgorithm::HitsCentrality,

@@ -42,7 +42,9 @@ pub(crate) fn estimated_work(
 ) -> Option<usize> {
     let step = n.checked_add(arcs)?;
     match algorithm {
-        FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::CoreNumber => Some(step),
+        FoundationAlgorithm::DegreeCentrality
+        | FoundationAlgorithm::CoreNumber
+        | FoundationAlgorithm::AverageNeighborDegree => Some(step),
         FoundationAlgorithm::ClosenessCentrality | FoundationAlgorithm::HarmonicCentrality => {
             n.checked_mul(step)
         }
@@ -155,6 +157,9 @@ pub(crate) fn run<C>(
         FoundationAlgorithm::ClosenessCentrality => distance::run::<false, C>(graph, checkpoint)?,
         FoundationAlgorithm::HarmonicCentrality => distance::run::<true, C>(graph, checkpoint)?,
         FoundationAlgorithm::LoadCentrality => native::load(graph, checkpoint)?,
+        FoundationAlgorithm::AverageNeighborDegree => {
+            native::average_neighbor_degree(graph, checkpoint)?
+        }
     };
     checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
     Ok(result)

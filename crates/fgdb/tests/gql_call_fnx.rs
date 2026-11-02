@@ -63,7 +63,7 @@ fn graph() -> WriteBatch {
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected. An empty value field names a
 /// vertex-only result, such as the sparse set of articulation points.
-const CALLS: [(&str, &str, &str, bool); 25] = [
+const CALLS: [(&str, &str, &str, bool); 26] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -93,6 +93,7 @@ const CALLS: [(&str, &str, &str, bool); 25] = [
     ("dijkstra_path_length", "1,5", "distance", false),
     ("katz_centrality", "", "score", false),
     ("shortest_path_length", "1,5", "distance", false),
+    ("average_neighbor_degree", "", "score", true),
 ];
 
 /// The whole graph spelled out field by field, independent of
@@ -635,6 +636,49 @@ fn load_centrality_composes_against_the_pinned_read_snapshot() {
         );
         assert_eq!(
             old.query(cx, text, &GqlParameters::new(), symbols, policy())
+                .unwrap(),
+            before
+        );
+    });
+}
+
+#[test]
+fn average_neighbor_degree_composes_with_literal_scores_and_replays_the_pinned_cut() {
+    run(async |commit, cx| {
+        let mut db = open(commit).await;
+        let old = db.read_session().unwrap();
+        let text = "CALL fnx.average_neighbor_degree() YIELD node, score \
+                    RETURN node, score ORDER BY node";
+        let params = GqlParameters::new();
+        let (before, certificate) = db
+            .execute_certified(cx, text, &params, symbols, policy())
+            .unwrap();
+        let expected = |scores: [f64; 6]| -> Vec<Vec<GraphValue>> {
+            scores
+                .into_iter()
+                .enumerate()
+                .map(|(i, score)| {
+                    vec![
+                        GraphValue::Vertex(VId(i as u128 + 1)),
+                        GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(score))),
+                    ]
+                })
+                .collect()
+        };
+        let (columns, before_rows) = rows(before.clone());
+        assert_eq!(columns, vec!["node", "score"]);
+        assert_eq!(before_rows, expected([2.5, 2.5, 2.0, 2.0, 2.0, 0.0]));
+        let mut more = WriteBatch::new(R);
+        more.add_edge(EId(6), VId(5), VId(6), vec![]);
+        db.write(commit, more).await.unwrap();
+        let current = db.query(cx, text, &params, symbols, policy()).unwrap();
+        assert_eq!(rows(current).1, expected([2.5, 2.5, 2.0, 2.5, 1.5, 2.0]));
+        assert_eq!(
+            old.query(cx, text, &params, symbols, policy()).unwrap(),
+            before
+        );
+        assert_eq!(
+            db.replay(cx, &certificate, &params, symbols, policy())
                 .unwrap(),
             before
         );

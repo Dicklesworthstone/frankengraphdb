@@ -1,4 +1,4 @@
-//! Deterministic degree, core and Newman-load kernels over the admitted CSR.
+//! Deterministic degree, neighbor-degree, core and Newman-load CSR kernels.
 //!
 //! These kernels borrow the projection. They do not build an fnx Graph, node
 //! names, or a second adjacency index. The caller retains the catalog's
@@ -103,6 +103,74 @@ pub(super) fn degree<C>(
             row_count: n,
             witness: ComplexityWitness {
                 algorithm: "degree_centrality".to_owned(),
+                complexity_claim: "O(|V| + |E|)".to_owned(),
+                nodes_touched: n,
+                edges_scanned: arcs,
+                queue_peak: 0,
+            },
+        },
+        workspace,
+    ))
+}
+
+/// The pinned foundation sums integer neighbor degrees before one division.
+/// The projection's immutable row boundaries already contain every degree;
+/// reading them keeps the same arithmetic without a second degree directory.
+pub(super) fn average_neighbor_degree<C>(
+    graph: &SnapshotGraphView,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
+    let n = graph.node_count();
+    let arcs = graph
+        .outgoing_offsets()
+        .last()
+        .copied()
+        .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+    let mut work = n.checked_add(arcs).ok_or(FnxExecutionError::SizeOverflow)?;
+    while work != 0 {
+        let run = work.min(crate::FNX_METER_RUN);
+        checkpoint
+            .units(run)
+            .map_err(FnxExecutionError::Cancelled)?;
+        work -= run;
+    }
+    let mut arithmetic = Arithmetic::new(checkpoint);
+    arithmetic.step()?;
+    let mut values = reserve(n)?;
+    let mut arcs = 0usize;
+    for vertex in 0..n {
+        arithmetic.step()?;
+        let neighbors = graph
+            .neighbors_indices(vertex)
+            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        let mut total = 0usize;
+        for &neighbor in neighbors {
+            arithmetic.step()?;
+            let degree = graph
+                .neighbors_indices(neighbor)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+                .len();
+            total = total
+                .checked_add(degree)
+                .ok_or(FnxExecutionError::SizeOverflow)?;
+        }
+        arcs = arcs
+            .checked_add(neighbors.len())
+            .ok_or(FnxExecutionError::SizeOverflow)?;
+        values.push(if neighbors.is_empty() {
+            0.0
+        } else {
+            total as f64 / neighbors.len() as f64
+        });
+    }
+    let workspace = vector_bytes(&values)?;
+    arithmetic.finish()?;
+    Ok((
+        KernelOutput {
+            values: KernelValues::Scores(values),
+            row_count: n,
+            witness: ComplexityWitness {
+                algorithm: "fgdb_average_neighbor_degree".to_owned(),
                 complexity_claim: "O(|V| + |E|)".to_owned(),
                 nodes_touched: n,
                 edges_scanned: arcs,

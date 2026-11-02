@@ -150,6 +150,7 @@ impl FnxCallSpec {
                         | FoundationAlgorithm::CoreNumber
                         | FoundationAlgorithm::EigenvectorCentrality
                         | FoundationAlgorithm::LoadCentrality
+                        | FoundationAlgorithm::AverageNeighborDegree
                 )
         )
     }
@@ -582,6 +583,15 @@ impl FnxCallSpec {
             }
             let pass = execution_pass_work(self, graph)?;
             let (kernel, estimated_work, mut workspace, source) = match self.algorithm() {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::AverageNeighborDegree) => {
+                    admission.rows(n)?;
+                    (
+                        "fgdb-prism/sealed-average-neighbor-degree-cooperative-v1",
+                        pass,
+                        mul(n, size_of::<f64>())?,
+                        None,
+                    )
+                }
                 FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
                     admission.rows(n)?;
                     let incoming = matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality);
@@ -711,7 +721,10 @@ impl FnxCallSpec {
             )?;
             if matches!(
                 self.algorithm(),
-                FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+                FnxAlgorithm::Foundation(
+                    FoundationAlgorithm::DegreeCentrality
+                        | FoundationAlgorithm::AverageNeighborDegree
+                )
             ) {
                 require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
             }
@@ -722,6 +735,9 @@ impl FnxCallSpec {
                 yield_now,
             };
             let output = match self.algorithm() {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::AverageNeighborDegree) => {
+                    average_neighbor_degree(graph, &mut control).await?
+                }
                 FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
                     directed_degree_centrality(
                         graph,
@@ -822,6 +838,45 @@ where
     }
     control.tick().await?;
     output.finish()
+}
+
+async fn average_neighbor_degree<Yield, YieldFuture>(
+    graph: &SealedGraphView,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
+) -> Result<KernelOutput>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    control.tick().await?;
+    let mut output = DegreeCentrality::new(graph.node_count())?;
+    let mut arcs = 0;
+    for source in 0..graph.node_count() {
+        control.tick().await?;
+        let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
+        let mut total = 0;
+        let mut degree = 0;
+        while let Some((target, _)) = control.next(&mut row).await? {
+            control.tick().await?;
+            if target == source {
+                return Err(ExecutionError::SelfLoopRefused.into());
+            }
+            total = add(
+                total,
+                graph
+                    .degree(target)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?,
+            )?;
+            degree = add(degree, 1)?;
+        }
+        if Some(degree) != graph.degree(source) {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        output.push_average_neighbor_degree(total, degree)?;
+        arcs = add(arcs, degree)?;
+    }
+    control.tick().await?;
+    output.finish_average_neighbor_degree(arcs)
 }
 
 async fn directed_degree_centrality<Yield, YieldFuture>(

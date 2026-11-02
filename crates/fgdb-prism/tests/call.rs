@@ -107,8 +107,8 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 26);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 25);
+    assert_eq!(FnxSignatureRegistry::version(), 27);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 26);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);

@@ -969,6 +969,26 @@ fn robot_schema_is_frozen_and_help_is_a_complete_robot_invocation() {
     plain.success();
     assert_eq!(plain.stdout, ROBOT_SCHEMA);
     assert_eq!(json(&plain.stdout), json(ROBOT_SCHEMA));
+    let schema = json(&plain.stdout);
+    let advertised: BTreeSet<_> = schema
+        .get("analytics")
+        .get("procedures")
+        .array()
+        .iter()
+        .map(Json::string)
+        .collect();
+    let registered: BTreeSet<_> = fgdb_prism::FnxSignatureRegistry::signatures()
+        .iter()
+        .map(|signature| signature.name.strip_prefix("fnx.").unwrap())
+        .collect();
+    assert_eq!(
+        advertised.len(),
+        schema.get("analytics").get("procedures").array().len()
+    );
+    assert_eq!(
+        advertised, registered,
+        "robot schema must advertise every implemented procedure exactly once"
+    );
     robot(&["robot", "schema"]).success();
     let help = robot(&["help"]);
     assert_eq!(help.code, 0);
