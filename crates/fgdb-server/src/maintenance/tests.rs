@@ -669,39 +669,57 @@ fn caller_budget_wakes_the_wait_without_starting_an_early_masked_tick() {
             .with_timer_driver(timer.clone())
             .build()
             .unwrap();
-        let cx = runtime.request_cx_with_budget(Budget::INFINITE.with_deadline(Time::from_secs(5)));
-        let server = Server::new(&cx, ServerLimits::default()).unwrap();
-        let wakes = Arc::new(WakeCounter::default());
-        let waker = Waker::from(Arc::clone(&wakes));
-        let mut task = Context::from_waker(&waker);
-        let mut wait = Box::pin(server.wait_for_maintenance(&cx, Time::from_secs(3_600)));
-        assert!(wait.as_mut().poll(&mut task).is_pending());
-        let before = wakes.0.load(Ordering::Relaxed);
-        if masked {
-            cx.masked(|| {
-                clock.advance_to(Time::from_secs(5));
-                assert_eq!(timer.process_timers(), 1);
-                assert!(wakes.0.load(Ordering::Relaxed) > before);
-                let from_timer = wakes.0.load(Ordering::Relaxed);
-                assert!(
-                    wait.as_mut().poll(&mut task).is_pending(),
-                    "a masked budget alarm must not admit an early maintenance tick"
-                );
-                assert_eq!(timer.pending_count(), 1);
-                assert!(
-                    wakes.0.load(Ordering::Relaxed) > from_timer,
-                    "queue a follow-up poll after the synchronous mask ends"
-                );
+        // Between block_on calls the runtime's background worker also drives
+        // this wheel. Borrow it for one root poll, then run the manual host
+        // sequence on a joined thread with no ambient Cx. That thread drives
+        // its timer directly and never waits for runtime-scheduled work.
+        runtime.block_on(async {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        assert!(Cx::current().is_none());
+                        let cx = runtime.request_cx_with_budget(
+                            Budget::INFINITE.with_deadline(Time::from_secs(5)),
+                        );
+                        let server = Server::new(&cx, ServerLimits::default()).unwrap();
+                        let wakes = Arc::new(WakeCounter::default());
+                        let waker = Waker::from(Arc::clone(&wakes));
+                        let mut task = Context::from_waker(&waker);
+                        let mut wait =
+                            Box::pin(server.wait_for_maintenance(&cx, Time::from_secs(3_600)));
+                        assert!(wait.as_mut().poll(&mut task).is_pending());
+                        assert!(Cx::current().is_none());
+                        let before = wakes.0.load(Ordering::Relaxed);
+                        if masked {
+                            cx.masked(|| {
+                                clock.advance_to(Time::from_secs(5));
+                                assert_eq!(timer.process_timers(), 1);
+                                assert!(wakes.0.load(Ordering::Relaxed) > before);
+                                let from_timer = wakes.0.load(Ordering::Relaxed);
+                                assert!(
+                                    wait.as_mut().poll(&mut task).is_pending(),
+                                    "a masked budget alarm must not admit an early maintenance tick"
+                                );
+                                assert_eq!(timer.pending_count(), 1);
+                                assert!(
+                                    wakes.0.load(Ordering::Relaxed) > from_timer,
+                                    "queue a follow-up poll after the synchronous mask ends"
+                                );
+                            });
+                        } else {
+                            clock.advance_to(Time::from_secs(5));
+                            assert_eq!(timer.process_timers(), 1);
+                            assert!(wakes.0.load(Ordering::Relaxed) > before);
+                        }
+                        assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(false)));
+                        drop(wait);
+                        assert_eq!(timer.pending_count(), 0);
+                        assert_eq!(cx.now(), Time::from_secs(5));
+                        assert!(cx.cancelled_by(CancelKind::Deadline));
+                    })
+                    .join()
+                    .expect("manual timer assertions complete");
             });
-        } else {
-            clock.advance_to(Time::from_secs(5));
-            assert_eq!(timer.process_timers(), 1);
-            assert!(wakes.0.load(Ordering::Relaxed) > before);
-        }
-        assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(false)));
-        drop(wait);
-        assert_eq!(timer.pending_count(), 0);
-        assert_eq!(cx.now(), Time::from_secs(5));
-        assert!(cx.cancelled_by(CancelKind::Deadline));
+        });
     }
 }
