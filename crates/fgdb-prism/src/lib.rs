@@ -34,6 +34,7 @@ mod foundation;
 mod hits;
 mod input;
 mod katz;
+mod label_propagation;
 mod projection;
 mod sealed;
 mod sealed_control;

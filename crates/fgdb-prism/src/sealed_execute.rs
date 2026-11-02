@@ -49,6 +49,8 @@ mod eigenvector;
 mod hits;
 #[path = "sealed_katz.rs"]
 mod katz;
+#[path = "sealed_label_propagation.rs"]
+mod label_propagation;
 #[path = "sealed_load.rs"]
 mod load;
 #[path = "sealed_shortest_path.rs"]
@@ -872,6 +874,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::InDegreeCentrality
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::HitsCentrality
+                | FnxAlgorithm::LabelPropagationCommunities
                 | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
@@ -1013,6 +1016,9 @@ impl FnxCallSpec {
         }
         if matches!(self.algorithm(), FnxAlgorithm::HitsCentrality) {
             return hits::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(self.algorithm(), FnxAlgorithm::LabelPropagationCommunities) {
+            return label_propagation::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(self.algorithm(), FnxAlgorithm::KatzCentrality(_)) {
             return katz::execute(self, cx, graph, limits, memory, &admission);

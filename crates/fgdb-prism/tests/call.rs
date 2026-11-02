@@ -107,8 +107,8 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 27);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 26);
+    assert_eq!(FnxSignatureRegistry::version(), 28);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 27);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);
@@ -166,6 +166,43 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
     assert_eq!(katz.execution_kernel, "fgdb-prism/katz-csr-source-order-v1");
     assert!(FnxSignatureRegistry::lookup("fnx.katz_centrality_unknown").is_none());
     assert!(FnxSignatureRegistry::lookup("pagerank").is_none());
+}
+
+#[test]
+fn label_propagation_binds_canonical_community_identities_without_parameters() {
+    let call = FnxCallSpec::label_propagation_communities();
+    let signature = call.signature();
+    assert_eq!(signature.name, "fnx.label_propagation_communities");
+    assert_eq!(signature.graph_kind, FnxGraphKind::Undirected);
+    assert_eq!(
+        signature.outputs,
+        &[FnxOutput::Vertex, FnxOutput::Component]
+    );
+    assert!(signature.parameters.is_empty());
+    assert_eq!(signature.rng_policy, "none");
+    assert_eq!(
+        call,
+        bind("CALL fnx.label_propagation_communities() YIELD *")
+    );
+    assert!(call.supports_sealed_execution());
+    assert!(call.supports_cooperative_sealed_execution());
+    let selected =
+        bind("CALL fnx.label_propagation_communities() YIELD component AS community,node AS id");
+    assert_eq!(selected.outputs()[0].field, FnxOutput::Component);
+    assert_eq!(selected.outputs()[1].field, FnxOutput::Vertex);
+    assert_ne!(selected.digest(), call.digest());
+    for text in [
+        "CALL fnx.label_propagation_communities(1)",
+        "CALL fnx.label_propagation_communities(max_iter => 5)",
+        "CALL fnx.label_propagation_communities() YIELD score",
+        "CALL fnx.label_propagation_communities() YIELD component,component",
+        "CALL fnx.label_propagation_communities() YIELD node,vertex",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
 }
 
 #[test]

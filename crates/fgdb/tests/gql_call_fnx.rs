@@ -63,7 +63,7 @@ fn graph() -> WriteBatch {
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected. An empty value field names a
 /// vertex-only result, such as the sparse set of articulation points.
-const CALLS: [(&str, &str, &str, bool); 26] = [
+const CALLS: [(&str, &str, &str, bool); 27] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -94,6 +94,7 @@ const CALLS: [(&str, &str, &str, bool); 26] = [
     ("katz_centrality", "", "score", false),
     ("shortest_path_length", "1,5", "distance", false),
     ("average_neighbor_degree", "", "score", true),
+    ("label_propagation_communities", "", "component", true),
 ];
 
 /// The whole graph spelled out field by field, independent of
@@ -682,6 +683,67 @@ fn average_neighbor_degree_composes_with_literal_scores_and_replays_the_pinned_c
                 .unwrap(),
             before
         );
+    });
+}
+
+#[test]
+fn label_propagation_composes_with_staged_topology_and_replays_the_pinned_cut() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit).await;
+        let old = db.read_session().unwrap();
+        let text = "CALL fnx.label_propagation_communities() YIELD node,component \
+                    RETURN node,component ORDER BY node";
+        let params = GqlParameters::new();
+        let expected = |components: [u128; 6]| -> Vec<Vec<GraphValue>> {
+            components
+                .into_iter()
+                .enumerate()
+                .map(|(i, component)| {
+                    vec![
+                        GraphValue::Vertex(VId(i as u128 + 1)),
+                        GraphValue::Vertex(VId(component)),
+                    ]
+                })
+                .collect()
+        };
+        let (before, certificate) = db
+            .execute_certified(cx, text, &params, symbols, policy())
+            .unwrap();
+        let (columns, values) = rows(before.clone());
+        assert_eq!(columns, vec!["node", "component"]);
+        // Greedy colors are {1,4,6}, {2,5}, {3}; maximal ties retain the
+        // current label. The triangle, tail and isolate stabilize separately.
+        assert_eq!(values, expected([1, 1, 1, 4, 4, 6]));
+
+        let mut txn = db.begin(txcx).unwrap();
+        let mut change = WriteBatch::new(R);
+        change.add_edge(EId(6), VId(5), VId(6), vec![]);
+        txn.write(&mut db, change).unwrap();
+        // Joining the isolate changes the coloring's label trajectory. This
+        // must use the staged edge before it becomes a durable snapshot.
+        let staged = txn
+            .query(&db, cx, text, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(rows(staged.clone()).1, expected([1, 1, 1, 1, 5, 5]));
+        assert_eq!(
+            db.query(cx, text, &params, symbols, policy()).unwrap(),
+            before
+        );
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            db.query(cx, text, &params, symbols, policy()).unwrap(),
+            staged
+        );
+        assert_eq!(
+            old.query(cx, text, &params, symbols, policy()).unwrap(),
+            before
+        );
+        assert_eq!(
+            db.replay(cx, &certificate, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
 

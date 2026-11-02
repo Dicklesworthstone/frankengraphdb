@@ -139,6 +139,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::InDegreeCentrality
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::HitsCentrality
+                | FnxAlgorithm::LabelPropagationCommunities
                 | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
@@ -387,6 +388,23 @@ impl FnxCallSpec {
                     yield_now,
                 };
                 return super::hits::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
+            }
+            if matches!(self.algorithm(), FnxAlgorithm::LabelPropagationCommunities) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::label_propagation::execute_cooperative(
                     self,
                     graph,
                     limits,

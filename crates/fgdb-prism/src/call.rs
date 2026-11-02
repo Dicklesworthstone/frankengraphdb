@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 27;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 28;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -526,6 +526,19 @@ const SIGNATURES: &[FnxSignature] = &[
         "O(|V| + |E|)",
         "fgdb-prism/average-neighbor-degree-csr-v1",
     ),
+    FnxSignature {
+        name: "fnx.label_propagation_communities",
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Component],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Undirected,
+        numeric_profile: FNX_DISCRETE_PROFILE,
+        rng_policy: "none",
+        graph_laws: "explicit undirected simple projection; weights ignored; self-loops refused; greedy coloring in VId order followed by color-order majority-label updates; retain the current label on maximal ties, otherwise choose the smallest label; stop at a stable partition or return the last partition after 100 rounds; communities named by their minimum full-width VId; isolates retained",
+        complexity: "O((k + 1) * (|V| + |E|)); k <= 100; O(|V|) integer workspace",
+        execution_kernel: "fgdb-prism/label-propagation-semisynchronous-csr-v1",
+    },
 ];
 
 const fn directed_degree(name: &'static str, execution_kernel: &'static str) -> FnxSignature {
@@ -938,6 +951,8 @@ pub enum FnxAlgorithm {
     ArticulationPoints,
     Bridges,
     KatzCentrality(KatzOptions),
+    /// Deterministic semi-synchronous community detection, capped at 100 rounds.
+    LabelPropagationCommunities,
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -963,6 +978,7 @@ impl FnxAlgorithm {
             Self::Bridges => 21,
             Self::KatzCentrality(_) => 23,
             Self::ShortestPathLength { .. } => 24,
+            Self::LabelPropagationCommunities => 26,
         }]
     }
 }
@@ -1072,6 +1088,11 @@ impl FnxCallSpec {
     /// 100-update cap the last iterate is returned, as in the fnx oracle.
     pub fn hits_centrality() -> Self {
         Self::new(FnxAlgorithm::HitsCentrality)
+    }
+    /// Pinned semi-synchronous label propagation on an undirected loop-free
+    /// projection. Each community is named by its smallest full-width VId.
+    pub fn label_propagation_communities() -> Self {
+        Self::new(FnxAlgorithm::LabelPropagationCommunities)
     }
     /// Checked incoming Katz centrality with scalar attenuation and baseline.
     /// Text calls accept `alpha`, `beta`, `max_iter` and `tol`, in that order
@@ -1534,6 +1555,7 @@ impl FnxCallSpec {
             "fnx.in_degree_centrality" => FnxAlgorithm::InDegreeCentrality,
             "fnx.out_degree_centrality" => FnxAlgorithm::OutDegreeCentrality,
             "fnx.hits_centrality" => FnxAlgorithm::HitsCentrality,
+            "fnx.label_propagation_communities" => FnxAlgorithm::LabelPropagationCommunities,
             "fnx.articulation_points" => FnxAlgorithm::ArticulationPoints,
             "fnx.bridges" => FnxAlgorithm::Bridges,
             "fnx.cdlp" => {
@@ -1810,6 +1832,7 @@ impl FnxCallSpec {
             FnxAlgorithm::DijkstraPathLength { .. } => 24,
             FnxAlgorithm::KatzCentrality(_) => 25,
             FnxAlgorithm::ShortestPathLength { .. } => 26,
+            FnxAlgorithm::LabelPropagationCommunities => 28,
             _ => 23,
         };
         hash.update(&binding_version.to_le_bytes());

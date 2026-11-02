@@ -314,6 +314,7 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::InDegreeCentrality
         | FnxAlgorithm::OutDegreeCentrality
         | FnxAlgorithm::HitsCentrality
+        | FnxAlgorithm::LabelPropagationCommunities
         | FnxAlgorithm::KatzCentrality(_)
         | FnxAlgorithm::ArticulationPoints
         | FnxAlgorithm::Bridges
