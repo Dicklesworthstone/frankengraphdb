@@ -11,24 +11,30 @@ This audit does not award G1–G4 or release qualification.
 
 ## Fresh-eyes implementation continuation — 2026-11-02
 
-The latest **completed** proof at this checkpoint is canonical `7a59ecd48aa74fb2565a71bfe99f318726653a65`,
-tree `ec673a30456fd31185b8f51a2ef477b1bf2c41b2`, retained at
-`/data/ssd/tmp/fgdb-local-proof-integrated-20261102-v9`. Its actual producer and
-repository-bound verifier both exit zero: all ten core and forty registered
-gates pass, with 13,860 passed tests, zero failures, 34 existing ignores, zero
-filters and 1,095 summaries. Both actual default-feature suites pass with
-identical normalized outcomes. One nine-test Miri invocation passes, counted
-once across two ledger entries. The source/tool guards hold. Full UBS preserves
-all 277 existing critical identities across 2,493 contexts; the known generic
-token blind spot remains. This is not a security-clearance claim.
+The latest **completed product-code proof** is canonical
+`453ffb840beaf019efb8e5313e917d6cc7da592a`, tree
+`7a0ab29e55a189e3301851496fe945916fb391a7`, retained at
+`/data/ssd/tmp/fgdb-local-proof-integrated-20261102-v10-exact`. Its actual
+producer and repository-bound verifier both exit zero: all ten core and forty
+registered gates pass, with **13,867 passed tests, zero failures, 34 unchanged
+existing ignores, zero filters and 1,095 summaries**. Both actual default-feature
+suites also pass with those totals and byte-identical normalized outcomes;
+their 13,901 status records include the 34 ignores. One actual nine-test Miri
+invocation passes and covers two ledger entries, counted once. All 2,630 tracked
+source files, 1,483 tool files, system tools and the pinned AST input remain
+stable through the product proof and public readback. Full UBS preserves all
+277 existing critical identities across 32 partitions and 2,493 contexts, with
+none added, removed or suppressed. Its known generic-token blind spot remains;
+this is not a security-clearance claim. Manifest SHA-256:
+`6237b8ddbc5c1b8ef70212a6a6a6de063f482947a36244a0932c270c13ac20ba`.
 
 The current implementation connects existing pull reducers to ordinary pure
 composite aggregate inputs (`size`, lists and deterministic nested expressions)
 and WITH projections. Named single-edge properties also retain their required
 checked path capture. Graph reads and random draws remain structurally
 ineligible, including inside unused CASE/reduce branches. The real native
-integration target passes all seventeen tests on the four-file intermediate
-source, including exact allowances, literal grouped sums, a later MVCC change,
+integration target passes all eighteen tests on the final product source,
+including exact allowances, literal grouped sums, a later MVCC change,
 retained historical cuts, cancellation, empty input and late SUM type errors
 under LIMIT 0/1. The original tests and limits remain unchanged. This advances
 `fgdb-61p1n`; its broader no-table, scoped and larger-than-memory acceptance
@@ -44,14 +50,37 @@ temporary label sets, cache/list entries and canonical text payloads before
 allocation through the same query allowance. Staged edits, deterministic order
 and deferred unmapped-symbol errors are preserved. Two new owner laws and an
 actual transaction integration law cover values, payload boundaries, every
-callback refusal, exact/one-short budgets and private staged data. These new
-owner cases remain authored until their actual native exits are recorded.
-The current complete native aggregate integration target now executes all
-eighteen functions successfully, including the new transaction law; its
-same-feature compiler acknowledgement, formatting, all-target typecheck and
-strict Clippy also exit zero at
-`/data/ssd/tmp/fgdb-catalog-admission-preflight-rkklfglv`. This dirty-tree
-preflight is not the mandatory complete committed-tree proof.
+callback refusal, exact/one-short budgets and private staged data. All seven
+new regression functions now report `ok` in the complete product proof and
+both actual default runs. `fgdb-ipwec` is accepted and closed against its
+original complete criteria after Root's fresh source re-review and native
+re-executions; no independent human review is claimed for that new fix.
+Logical scratch/work admission is the claim, rather than allocator or RSS
+measurement. The broader original `fgdb-61p1n` remains in progress.
+
+Fresh Cargo-acknowledged normal CLI/server binaries and raw public acceptance
+are retained at `/data/ssd/tmp/fgdb-public453-bound-8utfcraf`. Four ordinary
+vertex/edge composite aggregate queries, including WITH, return the complete
+literal sums (30/31/32/33 for the four vertex groups; 379 for 128 edges). The
+same vertex query accepts 64 source records and returns a typed `budget` error
+at 63 with no rows or commit change. The successful packet has nine actual
+processes: eight exit zero and the intentional refusal exits three. The server
+binary is used for key generation here, not a new live HTTP/server campaign.
+The first public driver stopped before query execution because its setup
+expected one edge-program statement; the actual supported program reports 128
+bound statements in one commit. Source inspection of the receipt contract
+corrects that exact expectation; all data, queries and quotas are retained.
+The failed packet remains intact.
+
+The unchanged complete TCK runner also exits zero, with report bytes exactly
+equal to the accepted `7a59` report: 3,897 ordered occurrences, 3,896 unique
+identities, 3,140 PASS, 680 PASS-ERR, 23 REFUSED, four WRONG, 50 FIXTURE and zero
+ERROR. The duplicate occurrence and all multiline details are preserved; all
+225 pinned feature files are rehashed. The legacy broad PASS-ERR matcher,
+unsupported fixtures and known WRONG cases remain limits, not full ISO
+conformance. Root's raw source/binary/receipt readback exits zero and is retained
+as `parent-readback.json` (SHA-256
+`702fa0ba3730948f2f93ae38ad0c61074ebd3e2401747ab4d6b842b45fb0318c`).
 
 Two stale original tasks are qualified against unchanged `7a59` implementation
 and V9, rather than counted as new code: `fgdb-nge6g` (all ten native maintenance
@@ -65,15 +94,20 @@ with a small list; refusal leaves data unchanged. The generic public syntax
 diagnostic alone does not identify the exact internal limit. These two original
 closures augment the eighteen below; broader feature acceptance is unchanged.
 
-The next exact committed-tree qualification is planned at
-`/data/ssd/tmp/fgdb-local-proof-integrated-20261102-v10`. Until its complete
-native exits and manifest exist, earlier focused results do not qualify the new
-source. The expected complete-core denominator is 13,867 passes plus the same
-34 existing ignores, zero filters and 1,095 summaries **if green**. Existing
-scripts, gates, corpus bytes, thresholds and dependency policy are unchanged.
-The external granular TODO and honesty audit retain intermediate errors,
-interrupted compiler invocations and pending work. In particular, neither this
-sample nor a scanner exit proves the whole repository free of bugs.
+Final tracker/report publication changes only those two metadata files and has
+its own exact committed-tree qualification planned at
+`/data/ssd/tmp/fgdb-local-proof-integrated-20261102-v11-final`. The product proof
+and public receipts above qualify `453ffb840`, not a later metadata commit.
+That final proof must execute every unchanged mandatory gate and its verifier;
+expected complete-core totals remain 13,867 passes, the same 34 ignores, zero
+filters and 1,095 summaries **if green**. Existing scripts, gates, corpus bytes,
+thresholds and dependency policy are unchanged. The external granular TODO and
+honesty audit retain intermediate errors and interrupted compiler invocations.
+The temporary progress monitor also mislabeled the first runtime interval as
+compilation; the native 146m05s compiler receipt is authoritative, and no verdict
+was derived from that monitor. Neither this bounded sample nor a scanner exit
+proves the whole repository free of bugs. General aggregates, SSI, branches,
+replication, formal and section 17 acceptance retain their original open gaps.
 
 ## Current delta — 2026-10-30
 
