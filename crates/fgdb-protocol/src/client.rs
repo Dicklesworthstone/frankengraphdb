@@ -781,7 +781,7 @@ impl Client {
         let (initial_bytes, initial_rows) = self.initial_window;
         let mut available = (initial_bytes, initial_rows);
         let mut grants = 0u64;
-        let mut seen_columns = false;
+        let mut progress = ResultProgress::default();
         loop {
             let frame = self.receive(cx).await?.ok_or(ClientError::Closed)?;
             let header = *frame.header();
@@ -802,9 +802,9 @@ impl Client {
             }
             match header.kind() {
                 FrameKind::SnapshotResultChunk => {
-                    if stream.is_none() {
+                    let Some(id) = stream else {
                         return Err(ClientError::Protocol("chunk on the control stream"));
-                    }
+                    };
                     let chunk = ResultChunk::decode(frame.payload())?;
                     let count = chunk.rows.len() as u64;
                     let cost = header.frame_len() as u64;
@@ -812,33 +812,30 @@ impl Client {
                         return Err(ClientError::Protocol("server exceeded its flow credit"));
                     }
                     available = (available.0 - cost, available.1 - count);
-                    match (chunk.columns, seen_columns) {
-                        (Some(names), false) => {
-                            seen_columns = true;
-                            if let Err(error) = on_columns(&names) {
-                                let id = stream.expect("a chunk has a child stream");
-                                self.send(cx, FrameKind::QueryCancel, id, &Empty).await?;
-                                callback_error = Some(error);
-                            }
-                        }
-                        (None, true) => {}
-                        _ => return Err(ClientError::Protocol("columns out of order")),
+                    // Validate the complete chunk before exposing any of it
+                    // to callbacks, including while draining a refused result.
+                    progress
+                        .observe_chunk(&chunk)
+                        .map_err(ClientError::Protocol)?;
+                    if let Some(names) = chunk.columns
+                        && let Err(error) = on_columns(&names)
+                    {
+                        self.send(cx, FrameKind::QueryCancel, id, &Empty).await?;
+                        callback_error = Some(error);
                     }
                     for row in chunk.rows {
                         if callback_error.is_none()
                             && let Err(error) = on_row(row)
                         {
-                            let id = stream.expect("a chunk has a child stream");
                             self.send(cx, FrameKind::QueryCancel, id, &Empty).await?;
                             callback_error = Some(error);
                         }
                     }
                     let frame_limit = self.send_limits.max_frame_len() as u64;
                     if callback_error.is_none() && (available.0 < frame_limit || available.1 == 0) {
-                        let Some(id) = stream else {
-                            return Err(ClientError::Protocol("chunk on the control stream"));
-                        };
-                        grants += 1;
+                        grants = grants
+                            .checked_add(1)
+                            .ok_or(ClientError::Protocol("result flow sequence overflow"))?;
                         let update = WindowUpdate {
                             sequence: grants,
                             bytes: initial_bytes - available.0,
@@ -849,11 +846,11 @@ impl Client {
                     }
                 }
                 FrameKind::SnapshotResultEnd => {
-                    if !seen_columns {
-                        return Err(ClientError::Protocol("END before columns"));
-                    }
-                    let outcome = ResultEnd::decode(frame.payload())?.outcome;
-                    return callback_error.map_or(Ok(outcome), Err);
+                    let end = ResultEnd::decode(frame.payload())?;
+                    progress
+                        .finish(&end, header.frame_len() as u64, available.0)
+                        .map_err(ClientError::Protocol)?;
+                    return callback_error.map_or(Ok(end.outcome), Err);
                 }
                 FrameKind::Error => {
                     let refusal = ErrorBody::decode(frame.payload())?;
@@ -1162,6 +1159,59 @@ fn server_header(header: &Header, expected: Binding) -> Result<(), ProtocolError
         Ok(())
     } else {
         Err(ProtocolError::InvalidBinding)
+    }
+}
+
+/// Validated progress of one finite result stream. Transport owns request and
+/// stream identities and chunk credit; this state binds every row to the first
+/// schema and the final delivered-row count. Callbacks may reject a prefix, but
+/// the receiver still records and validates every row it drains afterward.
+#[derive(Default)]
+pub(crate) struct ResultProgress {
+    columns: Option<usize>,
+    rows: u64,
+}
+
+impl ResultProgress {
+    pub(crate) fn observe_chunk(
+        &mut self,
+        chunk: &crate::body::ResultChunk,
+    ) -> Result<(), &'static str> {
+        let columns = match (&chunk.columns, self.columns) {
+            (Some(names), None) => names.len(),
+            (None, Some(columns)) => columns,
+            _ => return Err("columns out of order"),
+        };
+        if chunk.rows.iter().any(|row| row.len() != columns) {
+            return Err("result row width differs from columns");
+        }
+        let count = u64::try_from(chunk.rows.len()).map_err(|_| "result row count overflow")?;
+        let rows = self
+            .rows
+            .checked_add(count)
+            .ok_or("result row count overflow")?;
+        // A malformed chunk changes neither the schema nor the row count.
+        self.columns = Some(columns);
+        self.rows = rows;
+        Ok(())
+    }
+
+    pub(crate) fn finish(
+        &self,
+        end: &crate::body::ResultEnd,
+        frame_bytes: u64,
+        available_bytes: u64,
+    ) -> Result<(), &'static str> {
+        if frame_bytes > available_bytes {
+            return Err("server exceeded its flow credit");
+        }
+        if self.columns.is_none() {
+            return Err("END before columns");
+        }
+        if end.rows != self.rows {
+            return Err("END row count differs from delivery");
+        }
+        Ok(())
     }
 }
 
@@ -3117,6 +3167,228 @@ mod tests {
     }
 
     #[test]
+    fn finite_results_validate_chunk_shapes_and_terminal_counts() {
+        let ((), report) = run_async_under_lab(0x79a0_0450, |root| async move {
+            for prepared in [false, true] {
+                for scenario in 0..4 {
+                    let handle = PreparedHandle([0x61; 16]);
+                    let request = if prepared { 5 } else { 4 };
+                    let mut replies = Vec::new();
+                    if prepared {
+                        replies.push(rpc(
+                            FrameKind::Prepared,
+                            4,
+                            StreamId::CONTROL,
+                            &Prepared { handle },
+                        ));
+                    }
+                    if scenario < 2 {
+                        if scenario == 1 {
+                            replies.push(result_chunk(request, &[]));
+                        }
+                        replies.push(rpc(
+                            FrameKind::SnapshotResultChunk,
+                            request,
+                            StreamId([5; 16]),
+                            &ResultChunk {
+                                columns: (scenario == 0).then(|| vec!["value".into()]),
+                                rows: vec![
+                                    vec![WireValue::Int(1)],
+                                    vec![WireValue::Int(2), WireValue::Int(3)],
+                                ],
+                            },
+                        ));
+                    } else {
+                        replies.push(result_chunk(request, &[1]));
+                        replies.push(result_end(request, if scenario == 2 { 0 } else { 2 }));
+                    }
+                    let io = script(replies);
+                    let written = std::sync::Arc::clone(&io.written);
+                    let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                    client.select(&root, "test").await.unwrap();
+                    if prepared {
+                        client
+                            .prepare_read(&root, "RETURN 1", vec![])
+                            .await
+                            .unwrap();
+                    }
+                    let columns = AtomicUsize::new(0);
+                    let rows = AtomicUsize::new(0);
+                    let on_columns = |_: &[String]| {
+                        columns.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    };
+                    let on_row = |_| {
+                        rows.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    };
+                    let result = if prepared {
+                        client
+                            .execute_prepared_streaming(
+                                &root,
+                                PreparedReadMode::SourceStream,
+                                handle,
+                                vec![],
+                                on_columns,
+                                on_row,
+                            )
+                            .await
+                    } else {
+                        client
+                            .execute_streaming(
+                                &root,
+                                ExecuteMode::ReadStream,
+                                "RETURN 1",
+                                vec![],
+                                on_columns,
+                                on_row,
+                            )
+                            .await
+                    };
+                    match scenario {
+                        0 | 1 => assert!(matches!(
+                            result,
+                            Err(ClientError::Protocol(
+                                "result row width differs from columns"
+                            ))
+                        )),
+                        _ => assert!(matches!(
+                            result,
+                            Err(ClientError::Protocol("END row count differs from delivery"))
+                        )),
+                    }
+                    assert_eq!(columns.load(Ordering::Relaxed), usize::from(scenario != 0));
+                    assert_eq!(rows.load(Ordering::Relaxed), usize::from(scenario >= 2));
+                    let sent = sent_frames(&written.lock().unwrap());
+                    assert_eq!(
+                        sent.iter()
+                            .filter(|frame| matches!(
+                                frame.header().kind(),
+                                FrameKind::Execute | FrameKind::ExecutePrepared
+                            ))
+                            .count(),
+                        1,
+                        "an invalid response is never retried"
+                    );
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn cancelled_finite_results_validate_all_drained_rows_before_reuse() {
+        let ((), report) = run_async_under_lab(0x79a0_0451, |root| async move {
+            for declared_rows in [1, 2, 3] {
+                let mut replies = vec![result_chunk(4, &[1, 2]), result_end(4, declared_rows)];
+                if declared_rows == 2 {
+                    replies.extend([result_chunk(6, &[20]), result_end(6, 1)]);
+                }
+                let io = script(replies);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let callbacks = AtomicUsize::new(0);
+                let result = client
+                    .execute_streaming(
+                        &root,
+                        ExecuteMode::ReadStream,
+                        "RETURN 1",
+                        vec![],
+                        |_| Ok(()),
+                        |_| {
+                            callbacks.fetch_add(1, Ordering::Relaxed);
+                            Err(ClientError::Protocol("consumer stopped"))
+                        },
+                    )
+                    .await;
+                assert_eq!(callbacks.load(Ordering::Relaxed), 1);
+                if declared_rows == 2 {
+                    assert!(matches!(
+                        result,
+                        Err(ClientError::Protocol("consumer stopped"))
+                    ));
+                    assert_eq!(
+                        client
+                            .execute(&root, ExecuteMode::Read, "RETURN 20", vec![],)
+                            .await
+                            .unwrap()
+                            .rows,
+                        [vec![WireValue::Int(20)]]
+                    );
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(ClientError::Protocol("END row count differs from delivery"))
+                    ));
+                }
+                let sent = sent_frames(&written.lock().unwrap());
+                assert_eq!(
+                    sent.iter()
+                        .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                        .count(),
+                    1
+                );
+                assert!(
+                    !sent
+                        .iter()
+                        .any(|frame| frame.header().kind() == FrameKind::WindowUpdate)
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn finite_result_end_cannot_exceed_credit_after_schema_refusal() {
+        let ((), report) = run_async_under_lab(0x79a0_0452, |root| async move {
+            let chunk = rpc(
+                FrameKind::SnapshotResultChunk,
+                4,
+                StreamId([5; 16]),
+                &ResultChunk {
+                    columns: Some(vec!["value".into()]),
+                    rows: vec![vec![WireValue::Text("x".repeat(3700))]],
+                },
+            );
+            let end = result_end(4, 1);
+            assert!(chunk.header().frame_len() < 4096);
+            assert!(4096 - chunk.header().frame_len() < end.header().frame_len());
+            let io = script_with_window(vec![chunk, end], 4096, 32);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            let result = client
+                .execute_streaming(
+                    &root,
+                    ExecuteMode::ReadOrdered,
+                    "RETURN 1",
+                    vec![],
+                    |_| Err(ClientError::Protocol("consumer stopped")),
+                    |_| panic!("schema was refused before row delivery"),
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(ClientError::Protocol("server exceeded its flow credit"))
+            ));
+            let sent = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                sent.iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                    .count(),
+                1
+            );
+            assert!(
+                !sent
+                    .iter()
+                    .any(|frame| frame.header().kind() == FrameKind::WindowUpdate)
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
     fn callback_cancellation_never_hides_foreign_or_malformed_result_terminals() {
         let ((), report) = run_async_under_lab(0x79a0_0302, |root| async move {
             let handle = PreparedHandle([0x31; 16]);
@@ -3437,5 +3709,137 @@ mod refresh_tests {
             }))
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::ResultProgress;
+    use crate::body::{Body, Outcome, ResultChunk, ResultEnd, WireValue};
+
+    fn chunk(columns: bool, rows: &[&[i64]]) -> ResultChunk {
+        let body = ResultChunk {
+            columns: columns.then(|| vec!["value".into()]),
+            rows: rows
+                .iter()
+                .map(|row| row.iter().map(|value| WireValue::Int(*value)).collect())
+                .collect(),
+        };
+        ResultChunk::decode(&body.encode().unwrap()).unwrap()
+    }
+
+    fn end(rows: u64) -> ResultEnd {
+        ResultEnd {
+            outcome: Outcome::Rows { seq: 3 },
+            rows,
+        }
+    }
+
+    #[test]
+    fn finite_result_requires_one_schema_and_exact_terminal_rows() {
+        let mut progress = ResultProgress::default();
+        assert_eq!(
+            progress.finish(&end(0), 196, 196),
+            Err("END before columns")
+        );
+        assert_eq!(
+            progress.observe_chunk(&chunk(false, &[&[1]])),
+            Err("columns out of order")
+        );
+        progress.observe_chunk(&chunk(true, &[])).unwrap();
+        assert_eq!(
+            progress.observe_chunk(&chunk(true, &[&[1]])),
+            Err("columns out of order")
+        );
+        progress
+            .observe_chunk(&chunk(false, &[&[1], &[2]]))
+            .unwrap();
+        progress.observe_chunk(&chunk(false, &[])).unwrap();
+        progress.observe_chunk(&chunk(false, &[&[3]])).unwrap();
+        for rows in [0, 2, 4, u64::MAX] {
+            assert_eq!(
+                progress.finish(&end(rows), 196, 196),
+                Err("END row count differs from delivery")
+            );
+        }
+        assert_eq!(progress.finish(&end(3), 196, 196), Ok(()));
+        assert_eq!(
+            progress.finish(&end(3), 196, 195),
+            Err("server exceeded its flow credit")
+        );
+    }
+
+    #[test]
+    fn malformed_rows_never_install_a_schema_or_a_partial_chunk_count() {
+        let mut progress = ResultProgress::default();
+        for rows in [&[&[1][..], &[][..]][..], &[&[1][..], &[2, 3][..]][..]] {
+            assert_eq!(
+                progress.observe_chunk(&chunk(true, rows)),
+                Err("result row width differs from columns")
+            );
+            assert_eq!(progress.columns, None);
+            assert_eq!(progress.rows, 0);
+        }
+        progress.observe_chunk(&chunk(true, &[&[1]])).unwrap();
+        for rows in [&[&[2][..], &[][..]][..], &[&[2][..], &[3, 4][..]][..]] {
+            assert_eq!(
+                progress.observe_chunk(&chunk(false, rows)),
+                Err("result row width differs from columns")
+            );
+            assert_eq!(progress.columns, Some(1));
+            assert_eq!(progress.rows, 1);
+        }
+        assert_eq!(progress.finish(&end(1), 196, 196), Ok(()));
+    }
+
+    #[test]
+    fn finite_result_accepts_empty_schemas_and_every_completion_class() {
+        for rows in 0..=2 {
+            let mut progress = ResultProgress::default();
+            progress
+                .observe_chunk(&ResultChunk {
+                    columns: Some(vec![]),
+                    rows: vec![vec![]; rows],
+                })
+                .unwrap();
+            for outcome in [
+                Outcome::Rows { seq: 3 },
+                Outcome::WriteCommitted {
+                    seq: 3,
+                    statements: 1,
+                },
+                Outcome::ReadClosed {
+                    seq: 3,
+                    statements: 1,
+                },
+            ] {
+                assert_eq!(
+                    progress.finish(
+                        &ResultEnd {
+                            outcome,
+                            rows: rows as u64
+                        },
+                        212,
+                        212
+                    ),
+                    Ok(())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finite_result_row_overflow_refuses_without_changing_progress() {
+        let mut progress = ResultProgress {
+            columns: Some(1),
+            rows: u64::MAX,
+        };
+        assert_eq!(
+            progress.observe_chunk(&chunk(false, &[&[1]])),
+            Err("result row count overflow")
+        );
+        assert_eq!(progress.columns, Some(1));
+        assert_eq!(progress.rows, u64::MAX);
+        assert_eq!(progress.finish(&end(u64::MAX), 196, 196), Ok(()));
     }
 }
