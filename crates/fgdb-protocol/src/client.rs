@@ -868,6 +868,9 @@ impl Client {
     /// every complete batch (the baseline first) as it arrives. Returning
     /// `Ok(false)` from `on_change` cancels the subscription; the server then
     /// ends the stream and this returns the last frontier it delivered.
+    /// A callback error also cancels and drains the child before returning the
+    /// original error. Later batches are validated but not delivered, and no
+    /// more flow credit is granted while cancellation is draining.
     pub async fn subscribe(
         &mut self,
         cx: &Cx,
@@ -892,14 +895,22 @@ impl Client {
         let mut available = (initial_bytes, initial_rows);
         let mut grants = 0u64;
         let mut stream: Option<StreamId> = None;
-        let mut seen_columns = false;
+        let mut progress = SubscriptionProgress::default();
         let mut cancelled = false;
+        let mut callback_error = None;
         let mut pending: Option<Change> = None;
-        let mut completed_wire = None;
         let mut delivered_to_callback = None;
         loop {
-            let frame = self.reply(cx, request).await?;
+            let frame = self.receive(cx).await?.ok_or(ClientError::Closed)?;
             let header = *frame.header();
+            if header.kind() == FrameKind::Goodbye {
+                return Err(ClientError::Closed);
+            }
+            if header.request_id() != request {
+                return Err(ClientError::Protocol(
+                    "subscription frame for a different request",
+                ));
+            }
             match stream {
                 None if !header.stream_id().is_control() => stream = Some(header.stream_id()),
                 Some(id) if id != header.stream_id() => {
@@ -911,54 +922,51 @@ impl Client {
             }
             match header.kind() {
                 FrameKind::SubscriptionBatch => {
+                    let id = stream.ok_or(ClientError::Protocol("batch on the control stream"))?;
                     let part = SubscriptionBatch::decode(frame.payload())?;
-                    match (part.columns, seen_columns) {
-                        (Some(names), false) => {
-                            seen_columns = true;
-                            on_columns(&names);
-                        }
-                        (None, true) => {}
-                        _ => return Err(ClientError::Protocol("columns out of order")),
-                    }
                     let count = part.entries.len() as u64;
                     let cost = header.frame_len() as u64;
                     if cost > available.0 || count > available.1 {
                         return Err(ClientError::Protocol("server exceeded its flow credit"));
                     }
+                    // Validate the entire part before either callback can see
+                    // its schema or values, including late parts after cancel.
+                    progress.batch(&part).map_err(ClientError::Protocol)?;
                     available = (available.0 - cost, available.1 - count);
+                    if let Some(names) = part.columns {
+                        on_columns(&names);
+                    }
                     let change = pending.get_or_insert_with(|| Change {
                         frontier: part.frontier,
                         snapshot: part.snapshot,
                         entries: Vec::new(),
                     });
-                    if change.frontier != part.frontier || change.snapshot != part.snapshot {
-                        return Err(ClientError::Protocol("a batch changed frontier mid-stream"));
-                    }
                     change.entries.extend(part.entries);
                     if part.last {
                         let change = pending.take().expect("a pending batch was just extended");
-                        completed_wire = Some(change.frontier);
                         if !cancelled {
                             let frontier = change.frontier;
-                            let keep = on_change(change)?;
-                            delivered_to_callback = Some(frontier);
+                            let keep = match on_change(change) {
+                                Ok(keep) => {
+                                    delivered_to_callback = Some(frontier);
+                                    keep
+                                }
+                                Err(error) => {
+                                    callback_error = Some(error);
+                                    false
+                                }
+                            };
                             if !keep {
                                 cancelled = true;
-                                let Some(id) = stream else {
-                                    return Err(ClientError::Protocol(
-                                        "batch on the control stream",
-                                    ));
-                                };
                                 self.send(cx, FrameKind::QueryCancel, id, &Empty).await?;
                             }
                         }
                     }
                     let frame_limit = self.send_limits.max_frame_len() as u64;
-                    if available.0 < frame_limit || available.1 == 0 {
-                        let Some(id) = stream else {
-                            return Err(ClientError::Protocol("batch on the control stream"));
-                        };
-                        grants += 1;
+                    if !cancelled && (available.0 < frame_limit || available.1 == 0) {
+                        grants = grants
+                            .checked_add(1)
+                            .ok_or(ClientError::Protocol("flow-credit sequence exhausted"))?;
                         let update = WindowUpdate {
                             sequence: grants,
                             bytes: initial_bytes - available.0,
@@ -969,44 +977,50 @@ impl Client {
                     }
                 }
                 FrameKind::SnapshotResultEnd => {
-                    let Outcome::Rows { seq } = ResultEnd::decode(frame.payload())?.outcome else {
+                    let end = ResultEnd::decode(frame.payload())?;
+                    progress
+                        .end(&end, cancelled)
+                        .map_err(ClientError::Protocol)?;
+                    let Outcome::Rows { seq } = end.outcome else {
                         return Err(ClientError::Protocol(
                             "a subscription ended with a write outcome",
                         ));
                     };
-                    return Ok(if cancelled {
+                    let delivered = if cancelled {
                         delivered_to_callback.unwrap_or(0)
                     } else {
                         seq
-                    });
+                    };
+                    return callback_error.map_or(Ok(delivered), Err);
                 }
                 FrameKind::SubscriptionReset => {
                     let reset = crate::body::SubscriptionReset::decode(frame.payload())?;
-                    if stream.is_none() || reset.last_delivered_seq != completed_wire {
+                    if stream.is_none() {
                         return Err(ClientError::Protocol(
-                            "subscription reset checkpoint does not match completed delivery",
+                            "subscription reset on the control stream",
                         ));
                     }
-                    return Err(ClientError::SubscriptionReset {
+                    progress.reset(&reset).map_err(ClientError::Protocol)?;
+                    return Err(callback_error.unwrap_or(ClientError::SubscriptionReset {
                         last_delivered_seq: delivered_to_callback,
-                    });
+                    }));
                 }
                 FrameKind::Error => {
-                    let error = server_error(&frame);
-                    // A cancel that lands while a batch waits for credit ends
-                    // the stream with this class instead of END.
-                    if cancelled
-                        && matches!(
-                            error,
-                            ClientError::Server {
-                                code: ErrorCode::Cancelled,
-                                ..
-                            }
-                        )
-                    {
+                    // A malformed terminal must not be hidden by a callback
+                    // failure. Only a validated terminal finishes the drain.
+                    let refusal = ErrorBody::decode(frame.payload())?;
+                    if let Some(error) = callback_error {
+                        return Err(error);
+                    }
+                    // A cancel while a batch waits for credit ends with this
+                    // class instead of END and discards any pending fragment.
+                    if cancelled && refusal.code == ErrorCode::Cancelled {
                         return Ok(delivered_to_callback.unwrap_or(0));
                     }
-                    return Err(error);
+                    return Err(ClientError::Server {
+                        code: refusal.code,
+                        message: refusal.message,
+                    });
                 }
                 _ => return Err(ClientError::Protocol("unexpected frame in a subscription")),
             }
@@ -1210,6 +1224,94 @@ impl ResultProgress {
         }
         if end.rows != self.rows {
             return Err("END row count differs from delivery");
+        }
+        Ok(())
+    }
+}
+
+/// Progress of one session-local subscription. Frames partition complete
+/// replacement baselines or exact bag deltas; partial batches are not checkpoints.
+#[derive(Default)]
+pub(crate) struct SubscriptionProgress {
+    columns: Option<usize>,
+    pending: Option<(u64, bool)>,
+    completed: Option<u64>,
+}
+
+impl SubscriptionProgress {
+    pub(crate) fn batch(
+        &mut self,
+        part: &crate::body::SubscriptionBatch,
+    ) -> Result<(), &'static str> {
+        let width = match (&part.columns, self.columns) {
+            (Some(names), None) => names.len(),
+            (None, Some(width)) => width,
+            _ => return Err("subscription columns out of order"),
+        };
+        if part.entries.iter().any(|(_, row)| row.len() != width) {
+            return Err("subscription row width differs from columns");
+        }
+        if part
+            .entries
+            .iter()
+            .any(|(weight, _)| *weight == 0 || (part.snapshot && *weight < 0))
+        {
+            return Err("invalid subscription multiplicity");
+        }
+        match self.pending {
+            Some((frontier, snapshot))
+                if frontier != part.frontier || snapshot != part.snapshot =>
+            {
+                return Err("a batch changed frontier or kind mid-stream");
+            }
+            None => match self.completed {
+                None if !part.snapshot => return Err("subscription delta before baseline"),
+                Some(frontier)
+                    if part.frontier < frontier
+                        || (!part.snapshot && part.frontier == frontier) =>
+                {
+                    return Err("subscription frontier did not advance");
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        // A retention gap may replace the baseline at the same or a later cut.
+        self.columns = Some(width);
+        if part.last {
+            self.pending = None;
+            self.completed = Some(part.frontier);
+        } else {
+            self.pending = Some((part.frontier, part.snapshot));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn end(
+        &self,
+        end: &crate::body::ResultEnd,
+        cancelled: bool,
+    ) -> Result<(), &'static str> {
+        if self.columns.is_none() {
+            return Err("subscription END before columns");
+        }
+        if self.pending.is_some() && !cancelled {
+            return Err("subscription END inside an incomplete batch");
+        }
+        let crate::body::Outcome::Rows { seq } = end.outcome else {
+            return Err("a subscription ended with a write outcome");
+        };
+        // END is the existing credit-free control terminal. Cancellation may
+        // abandon an undelivered fragment, never advance its checkpoint.
+        if end.rows != 0 || Some(seq) != self.completed {
+            return Err("subscription END does not match completed delivery");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reset(&self, reset: &crate::body::SubscriptionReset) -> Result<(), &'static str> {
+        if reset.last_delivered_seq != self.completed {
+            return Err("subscription reset checkpoint does not match completed delivery");
         }
         Ok(())
     }
@@ -3467,6 +3569,263 @@ mod tests {
     }
 
     #[test]
+    fn subscription_callback_errors_cancel_drain_and_preserve_connection_reuse() {
+        let ((), report) = run_async_under_lab(0x79a0_0203, |root| async move {
+            for complete_late_batch in [false, true] {
+                for kind in [
+                    FrameKind::SnapshotResultEnd,
+                    FrameKind::Error,
+                    FrameKind::SubscriptionReset,
+                ] {
+                    let checkpoint = if complete_late_batch { 8 } else { 7 };
+                    let terminal = match kind {
+                        FrameKind::SnapshotResultEnd => output(
+                            kind,
+                            &ResultEnd {
+                                outcome: Outcome::Rows { seq: checkpoint },
+                                rows: 0,
+                            },
+                        ),
+                        FrameKind::SubscriptionReset => output(
+                            kind,
+                            &SubscriptionReset {
+                                last_delivered_seq: Some(checkpoint),
+                            },
+                        ),
+                        _ => output(
+                            kind,
+                            &ErrorBody {
+                                code: ErrorCode::Cancelled,
+                                message: "cancelled".into(),
+                            },
+                        ),
+                    };
+                    let io = script(vec![
+                        batch(7, true, true),
+                        batch(8, false, complete_late_batch),
+                        terminal,
+                        result_chunk(6, &[42]),
+                        result_end(6, 1),
+                    ]);
+                    let written = io.written.clone();
+                    let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                    client.select(&root, "test").await.unwrap();
+                    let mut seen = Vec::new();
+                    let result = client
+                        .subscribe(
+                            &root,
+                            "SUBSCRIBE TO MATCH (n) RETURN n",
+                            vec![],
+                            |_| {},
+                            |change| {
+                                seen.push(change.frontier);
+                                Err(ClientError::Protocol("subscription sink failed"))
+                            },
+                        )
+                        .await;
+                    assert!(matches!(
+                        result,
+                        Err(ClientError::Protocol("subscription sink failed"))
+                    ));
+                    assert_eq!(seen, [7], "a failed callback must never be called again");
+                    let answer = client
+                        .execute(&root, ExecuteMode::Read, "RETURN 42", vec![])
+                        .await
+                        .unwrap();
+                    assert_eq!(answer.rows, [vec![WireValue::Int(42)]]);
+                    let sent = sent_frames(&written.lock().unwrap());
+                    let kinds: Vec<_> = sent.iter().map(|frame| frame.header().kind()).collect();
+                    assert_eq!(
+                        kinds,
+                        [
+                            FrameKind::Hello,
+                            FrameKind::Auth,
+                            FrameKind::SelectDatabase,
+                            FrameKind::Execute,
+                            FrameKind::QueryCancel,
+                            FrameKind::Execute,
+                        ]
+                    );
+                    assert_eq!(sent[4].header().stream_id(), StreamId([5; 16]));
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn subscription_cancel_stops_grants_and_accepts_its_credit_free_terminal() {
+        let ((), report) = run_async_under_lab(0x79a0_0204, |root| async move {
+            let first = batch(7, true, true);
+            let bytes = first.header().frame_len() as u64;
+            let io = script_with_window(
+                vec![
+                    first,
+                    output(
+                        FrameKind::SnapshotResultEnd,
+                        &ResultEnd {
+                            outcome: Outcome::Rows { seq: 7 },
+                            rows: 0,
+                        },
+                    ),
+                ],
+                bytes,
+                1,
+            );
+            let written = io.written.clone();
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            let delivered = client
+                .subscribe(
+                    &root,
+                    "SUBSCRIBE TO MATCH (n) RETURN n",
+                    vec![],
+                    |_| {},
+                    |_| Ok(false),
+                )
+                .await
+                .unwrap();
+            assert_eq!(delivered, 7);
+            let sent = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                sent.iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                    .count(),
+                1
+            );
+            assert!(
+                sent.iter()
+                    .all(|frame| frame.header().kind() != FrameKind::WindowUpdate)
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn subscription_rejects_bad_batch_shapes_before_callbacks() {
+        let ((), report) = run_async_under_lab(0x79a0_0205, |root| async move {
+            let valid = SubscriptionBatch {
+                frontier: 7,
+                snapshot: true,
+                last: true,
+                columns: Some(vec!["n".into()]),
+                entries: vec![(1, vec![WireValue::Int(7)])],
+            };
+            let mut wide = valid.clone();
+            wide.entries[0].1.push(WireValue::Null);
+            let mut negative = valid.clone();
+            negative.entries[0].0 = -1;
+            let mut delta = valid.clone();
+            delta.snapshot = false;
+            let control = rpc(FrameKind::SubscriptionBatch, 4, StreamId::CONTROL, &valid);
+            for first in [
+                output(FrameKind::SubscriptionBatch, &wide),
+                output(FrameKind::SubscriptionBatch, &negative),
+                output(FrameKind::SubscriptionBatch, &delta),
+                control,
+            ] {
+                let mut client = Client::connect_stream(&root, script(vec![first]), vec![1])
+                    .await
+                    .unwrap();
+                client.select(&root, "test").await.unwrap();
+                let mut schemas = 0;
+                let mut changes = 0;
+                let result = client
+                    .subscribe(
+                        &root,
+                        "SUBSCRIBE TO MATCH (n) RETURN n",
+                        vec![],
+                        |_| schemas += 1,
+                        |_| {
+                            changes += 1;
+                            Ok(true)
+                        },
+                    )
+                    .await;
+                assert!(matches!(result, Err(ClientError::Protocol(_))));
+                assert_eq!((schemas, changes), (0, 0));
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn subscription_callback_failure_cannot_hide_bad_or_foreign_terminals() {
+        let ((), report) = run_async_under_lab(0x79a0_0206, |root| async move {
+            let mut stale = ready().binding(session());
+            stale.session.auth_generation += 1;
+            let limits = FrameLimits::new(4096).unwrap();
+            let end = ResultEnd {
+                outcome: Outcome::Rows { seq: 7 },
+                rows: 0,
+            };
+            for terminal in [
+                rpc(FrameKind::SnapshotResultEnd, 5, StreamId([5; 16]), &end),
+                rpc(FrameKind::SnapshotResultEnd, 4, StreamId([6; 16]), &end),
+                output(
+                    FrameKind::SnapshotResultEnd,
+                    &ResultEnd {
+                        outcome: Outcome::Rows { seq: 8 },
+                        rows: 0,
+                    },
+                ),
+                output(
+                    FrameKind::SubscriptionReset,
+                    &SubscriptionReset {
+                        last_delivered_seq: Some(8),
+                    },
+                ),
+                Frame::new(
+                    FrameKind::Error,
+                    4,
+                    StreamId([5; 16]),
+                    Binding::Ready(ready().binding(session())),
+                    vec![0],
+                    limits,
+                )
+                .unwrap(),
+                Frame::new(
+                    FrameKind::SnapshotResultEnd,
+                    4,
+                    StreamId([5; 16]),
+                    Binding::Ready(stale),
+                    end.encode().unwrap(),
+                    limits,
+                )
+                .unwrap(),
+            ] {
+                let mut client = Client::connect_stream(
+                    &root,
+                    script(vec![batch(7, true, true), terminal]),
+                    vec![1],
+                )
+                .await
+                .unwrap();
+                client.select(&root, "test").await.unwrap();
+                let error = client
+                    .subscribe(
+                        &root,
+                        "SUBSCRIBE TO MATCH (n) RETURN n",
+                        vec![],
+                        |_| {},
+                        |_| Err(ClientError::Protocol("subscription sink failed")),
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(!matches!(
+                    error,
+                    ClientError::Protocol("subscription sink failed")
+                ));
+                assert!(matches!(
+                    error,
+                    ClientError::Protocol(_) | ClientError::Body(_) | ClientError::Transport(_)
+                ));
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
     fn cancel_and_recovery_terminals_report_only_successful_callback_delivery() {
         let ((), report) = run_async_under_lab(0x79a0_0201, |root| async move {
             for terminal in [
@@ -3841,5 +4200,202 @@ mod result_tests {
         assert_eq!(progress.columns, Some(1));
         assert_eq!(progress.rows, u64::MAX);
         assert_eq!(progress.finish(&end(u64::MAX), 196, 196), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod subscription_progress_tests {
+    use super::SubscriptionProgress;
+    use crate::body::{Body, Outcome, ResultEnd, SubscriptionBatch, SubscriptionReset, WireValue};
+
+    fn subscription_part(
+        frontier: u64,
+        snapshot: bool,
+        last: bool,
+        columns: bool,
+    ) -> SubscriptionBatch {
+        SubscriptionBatch {
+            frontier,
+            snapshot,
+            last,
+            columns: columns.then(|| vec!["value".into()]),
+            entries: vec![(1, vec![WireValue::Int(7)])],
+        }
+    }
+
+    fn subscription_wire(part: &SubscriptionBatch) -> SubscriptionBatch {
+        SubscriptionBatch::decode(&part.encode().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn subscription_progress_preserves_fragmented_baselines_deltas_and_gap_replacements() {
+        let mut progress = SubscriptionProgress::default();
+        progress
+            .batch(&subscription_wire(&subscription_part(7, true, false, true)))
+            .unwrap();
+        let end = ResultEnd {
+            outcome: Outcome::Rows { seq: 7 },
+            rows: 0,
+        };
+        assert!(progress.end(&end, false).is_err());
+        assert!(progress.end(&end, true).is_err());
+        progress
+            .reset(&SubscriptionReset {
+                last_delivered_seq: None,
+            })
+            .unwrap();
+        progress
+            .batch(&subscription_wire(&subscription_part(7, true, true, false)))
+            .unwrap();
+        let mut delta = subscription_part(9, false, true, false);
+        delta.entries = vec![(-2, vec![WireValue::Int(7)]), (3, vec![WireValue::Int(8)])];
+        progress.batch(&subscription_wire(&delta)).unwrap();
+        let mut empty = subscription_part(10, false, true, false);
+        empty.entries.clear();
+        progress.batch(&subscription_wire(&empty)).unwrap();
+        for frontier in [10, 20] {
+            progress
+                .batch(&subscription_wire(&subscription_part(
+                    frontier, true, true, false,
+                )))
+                .unwrap();
+            progress
+                .end(
+                    &ResultEnd {
+                        outcome: Outcome::Rows { seq: frontier },
+                        rows: 0,
+                    },
+                    false,
+                )
+                .unwrap();
+            progress
+                .reset(&SubscriptionReset {
+                    last_delivered_seq: Some(frontier),
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn subscription_progress_rejects_bad_shapes_without_advancing_delivery() {
+        let mut progress = SubscriptionProgress::default();
+        for bad in [
+            subscription_part(7, false, true, true),
+            subscription_part(7, true, true, false),
+        ] {
+            assert!(progress.batch(&subscription_wire(&bad)).is_err());
+        }
+        let mut wrong_width = subscription_part(7, true, true, true);
+        wrong_width.entries[0].1.push(WireValue::Null);
+        assert!(progress.batch(&subscription_wire(&wrong_width)).is_err());
+        let mut negative_baseline = subscription_part(7, true, true, true);
+        negative_baseline.entries[0].0 = -1;
+        assert!(
+            progress
+                .batch(&subscription_wire(&negative_baseline))
+                .is_err()
+        );
+        progress
+            .batch(&subscription_part(7, true, true, true))
+            .unwrap();
+        for (frontier, snapshot) in [(6, false), (7, false), (6, true)] {
+            assert!(
+                progress
+                    .batch(&subscription_part(frontier, snapshot, true, false))
+                    .is_err()
+            );
+        }
+        assert!(
+            progress
+                .batch(&subscription_part(8, false, true, true))
+                .is_err()
+        );
+        progress
+            .batch(&subscription_part(8, false, false, false))
+            .unwrap();
+        for (frontier, snapshot) in [(9, false), (8, true)] {
+            assert!(
+                progress
+                    .batch(&subscription_part(frontier, snapshot, true, false))
+                    .is_err()
+            );
+        }
+        progress
+            .reset(&SubscriptionReset {
+                last_delivered_seq: Some(7),
+            })
+            .unwrap();
+        assert!(
+            progress
+                .reset(&SubscriptionReset {
+                    last_delivered_seq: Some(8),
+                })
+                .is_err()
+        );
+        progress
+            .batch(&subscription_part(8, false, true, false))
+            .unwrap();
+    }
+
+    #[test]
+    fn subscription_terminals_require_the_last_complete_wire_checkpoint() {
+        let end = ResultEnd {
+            outcome: Outcome::Rows { seq: 7 },
+            rows: 0,
+        };
+        let mut progress = SubscriptionProgress::default();
+        assert!(progress.end(&end, false).is_err());
+        progress
+            .batch(&subscription_part(7, true, true, true))
+            .unwrap();
+        for invalid in [
+            ResultEnd {
+                outcome: Outcome::Rows { seq: 8 },
+                rows: 0,
+            },
+            ResultEnd {
+                outcome: Outcome::Rows { seq: 7 },
+                rows: 1,
+            },
+            ResultEnd {
+                outcome: Outcome::WriteCommitted {
+                    seq: 7,
+                    statements: 1,
+                },
+                rows: 0,
+            },
+            ResultEnd {
+                outcome: Outcome::ReadClosed {
+                    seq: 7,
+                    statements: 1,
+                },
+                rows: 0,
+            },
+        ] {
+            assert!(progress.end(&invalid, false).is_err());
+            assert!(progress.end(&invalid, true).is_err());
+        }
+        progress.end(&end, false).unwrap();
+        progress
+            .batch(&subscription_part(8, false, false, false))
+            .unwrap();
+        assert!(progress.end(&end, false).is_err());
+        progress.end(&end, true).unwrap();
+        progress
+            .reset(&SubscriptionReset {
+                last_delivered_seq: Some(7),
+            })
+            .unwrap();
+        assert!(
+            progress
+                .end(
+                    &ResultEnd {
+                        outcome: Outcome::Rows { seq: 8 },
+                        rows: 0,
+                    },
+                    true,
+                )
+                .is_err()
+        );
     }
 }
