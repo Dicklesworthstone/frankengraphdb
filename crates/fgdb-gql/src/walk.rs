@@ -38,10 +38,11 @@ const UNBOUNDED: u32 = u32::MAX;
 
 /// Inclusive hop interval. Private fields make reversed intervals
 /// unrepresentable. An interval is finite unless built by
-/// [`GraphWalkBounds::unbounded`]: the pattern compiler admits that only where
-/// the repetition rule ends every expansion by itself (TRAIL or DIFFERENT
-/// EDGES reuse no edge, ACYCLIC and SIMPLE no vertex), never for a WALK or a
-/// shortest selector. Zero hops retain the source identity, including an
+/// [`GraphWalkBounds::unbounded`]. Exhaustive expansion requires a repetition
+/// rule that ends every expansion by itself (TRAIL or DIFFERENT EDGES reuse
+/// no edge, ACYCLIC and SIMPLE no vertex). Supported ANY SHORTEST profiles
+/// instead terminate by canonical endpoint settlement. Admission still depends
+/// on the execution profile. Zero hops retain the source identity, including an
 /// isolated vertex whose adjacency entry is absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphWalkBounds {

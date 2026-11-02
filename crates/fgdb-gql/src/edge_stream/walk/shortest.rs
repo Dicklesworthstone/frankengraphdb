@@ -5,6 +5,12 @@
 //! candidates compare real (EId, VId) steps before copying, so parallel edges
 //! and tied routes cannot multiply the next frontier. This is the same WALK
 //! dominance and canonical route rule as the resident GraphPathCursor.
+//! With no upper bound, the finite lower bound still ends depth-local work;
+//! every later nonempty layer settles at least one previously unsettled vertex.
+//! A finite source therefore terminates without inventing a maximum path length.
+//! No repetition restriction is inferred from this proof: the plan admits
+//! DIFFERENT EDGES only when minimum-zero shortest makes it redundant, or when
+//! the native compiler has already proved and removed that constraint.
 //!
 //! A prefix owns only its path identities and final incoming record. Root and
 //! endpoint fields suffice for this admitted single-atom projection; copied

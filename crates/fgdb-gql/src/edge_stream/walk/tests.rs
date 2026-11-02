@@ -88,6 +88,7 @@ struct Counts {
     state_bytes: AtomicUsize,
     state_peak: AtomicUsize,
     state_charges: std::sync::Mutex<BTreeMap<usize, usize>>,
+    traversal_reservations: AtomicUsize,
 }
 struct Data {
     edges: Vec<(EId, VId, VId)>,
@@ -371,6 +372,9 @@ impl AsyncEdgeJoinSource for Source {
         _: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Guard, EdgeScanSourceError<Self::Error, C>> {
+        self.counts
+            .traversal_reservations
+            .fetch_add(1, Ordering::SeqCst);
         if self.refuse_backing {
             return Err(EdgeScanSourceError::Source("route backing refused"));
         }
@@ -1271,6 +1275,176 @@ fn shortest_captures_match_independent_complete_routes_and_native_selection() {
         }
     }
     assert_eq!(cases, 672);
+}
+
+#[test]
+fn unbounded_shortest_matches_finite_route_oracle_on_every_three_vertex_topology() {
+    let mut cases = 0;
+    for mask in 0..512 {
+        for direction in [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ] {
+            for minimum in 0..=2 {
+                for different in [false, true] {
+                    if different && minimum != 0 {
+                        continue;
+                    }
+                    let mut source = Source::new(0);
+                    let data = Arc::get_mut(&mut source.data).unwrap();
+                    for from in 0..3 {
+                        for to in 0..3 {
+                            let at = 3 * from + to;
+                            if mask & (1 << at) != 0 {
+                                let eid = if at == 8 {
+                                    u128::MAX
+                                } else {
+                                    (at as u128) << 100
+                                };
+                                data.edges.push((EId(eid), IDS[from], IDS[to]));
+                            }
+                        }
+                    }
+                    // All edges are among three vertices; IDS[3] is isolated.
+                    // An optimal WALK cannot repeat a vertex after its first
+                    // minimum hops: removing that cycle leaves a shorter legal
+                    // walk. Complete enumeration through minimum+2 therefore
+                    // contains every optimum, independent of BFS settlement.
+                    let maximum = minimum + 2;
+                    let text = statement(direction, minimum, maximum).replacen(
+                        &format!("..{maximum}]"),
+                        "..]",
+                        1,
+                    );
+                    let logical = definition(&text, GraphWalkSearch::AnyShortest, different);
+                    let (physical, _) = AsyncGraphWalkPlan::compile_sort_input(&logical).unwrap();
+                    assert!(!physical.bounds.is_bounded());
+                    let expected = oracle(
+                        &source.data,
+                        direction,
+                        minimum,
+                        maximum,
+                        GraphWalkSearch::AnyShortest,
+                        different,
+                    );
+                    assert_eq!(
+                        native_with_edge_properties(&logical, &source.data),
+                        expected,
+                        "native {text}, mask={mask}, different={different}"
+                    );
+                    let counts = source.counts.clone();
+                    assert_eq!(
+                        drain(logical, source),
+                        expected,
+                        "cold {text}, mask={mask}, different={different}"
+                    );
+                    assert_eq!(counts.traversal_reservations.load(Ordering::SeqCst), 0);
+                    assert!(counts.state_peak.load(Ordering::SeqCst) < 1_000_000);
+                    assert_eq!(counts.state_bytes.load(Ordering::SeqCst), 0);
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 6144);
+}
+
+#[test]
+fn unbounded_shortest_keeps_positive_lower_bounds_and_repetition_refusals() {
+    // A three-hop lower bound is not a filter over the unrestricted optimum:
+    // the shortest admitted root-to-root walk traverses the self-loop three
+    // times. It is longer than this graph's simple-path diameter (zero).
+    let text = "MATCH REPEATABLE ELEMENTS p = ANY SHORTEST (a {p:1})-[:R*3..]->(b) RETURN p";
+    let logical = prepared(text);
+    let source = Source::new(16);
+    let expected = vec![vec![GraphValue::Path(GraphPath::new(
+        IDS[0],
+        vec![(EId(u128::MAX), IDS[0]); 3].into(),
+    ))]];
+    assert_eq!(
+        native_with_edge_properties(logical.plan(), &source.data),
+        expected
+    );
+    assert_eq!(drain(logical.plan().clone(), source), expected);
+
+    // An undirected shortest WALK can return on the same edge. A TRAIL cannot;
+    // its valid root cycle may instead require a third vertex or a parallel
+    // edge. Endpoint-only prefix dominance must not erase that distinction.
+    for mask in [1, 3, 13] {
+        let text =
+            "MATCH REPEATABLE ELEMENTS p = ANY SHORTEST (a {p:1})-[:R*1..]-(b {p:1}) RETURN p";
+        let logical = prepared(text);
+        let source = Source::new(mask);
+        let expected = vec![vec![GraphValue::Path(GraphPath::new(
+            IDS[0],
+            vec![(EId(0), IDS[1]), (EId(0), IDS[0])].into(),
+        ))]];
+        assert_eq!(
+            native_with_edge_properties(logical.plan(), &source.data),
+            expected
+        );
+        assert_eq!(drain(logical.plan().clone(), source), expected);
+        let restricted = prepared(&text.replacen("REPEATABLE ELEMENTS ", "", 1));
+        assert!(AsyncGraphWalkPlan::compile_sort_input(restricted.plan()).is_err());
+    }
+    for text in [
+        "MATCH p = ANY SHORTEST (a)-[:R*2..]->(b) RETURN p LIMIT 0",
+        "MATCH p = ALL SHORTEST (a)-[:R*0..]->(b) RETURN p LIMIT 0",
+        "MATCH p = (a)-[:R*]->(b) RETURN p LIMIT 0",
+    ] {
+        let logical = prepared(text);
+        assert!(
+            AsyncGraphWalkPlan::compile_sort_input(logical.plan()).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn unbounded_shortest_keeps_exact_limits_and_late_cancellation() {
+    for minimum in [0, 2] {
+        let text = format!(
+            "MATCH REPEATABLE ELEMENTS p = ANY SHORTEST (a {{p:1}})-[:R*{minimum}..]->(b) RETURN p LIMIT 0"
+        );
+        let logical = prepared(&text);
+        let (plan, tail) = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap();
+        assert_eq!(tail.count(), Some(0));
+        check_all_live_limits(plan, || Source::new(13));
+    }
+}
+
+#[test]
+fn unbounded_shortest_does_not_invent_the_finite_definition_hop_limit() {
+    let hops = crate::MAX_GRAPH_WALK_HOPS as usize + 1;
+    let mut source = Source::new(0);
+    let data = Arc::get_mut(&mut source.data).unwrap();
+    for at in 1..=hops {
+        let vid = VId(at as u128);
+        data.vertices.insert(
+            vid,
+            vec![(
+                P,
+                CanonicalScalar::Int(if at == hops { 99 } else { 10 }).into(),
+            )],
+        );
+        data.edges.push((EId(at as u128), VId(at as u128 - 1), vid));
+    }
+    let logical = prepared("MATCH p = shortestPath((a {p:1})-[:R*]->(b {p:99})) RETURN p");
+    let expected = vec![vec![GraphValue::Path(GraphPath::new(
+        IDS[0],
+        (1..=hops)
+            .map(|at| (EId(at as u128), VId(at as u128)))
+            .collect(),
+    ))]];
+    assert_eq!(
+        native_with_edge_properties(logical.plan(), &source.data),
+        expected
+    );
+    let counts = source.counts.clone();
+    assert_eq!(drain(logical.plan().clone(), source), expected);
+    assert_eq!(counts.traversal_reservations.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.state_bytes.load(Ordering::SeqCst), 0);
 }
 
 #[test]
