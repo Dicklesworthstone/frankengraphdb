@@ -54,6 +54,34 @@ earlier review miss. Guarded preflight `-v3` exits zero for formatting, explicit
 included-file formatting, all-target typecheck and strict all-feature Clippy.
 That dirty-tree preflight is not the mandatory committed-tree runtime proof.
 
+On `4ac0abacd`, the subsequent complete Cargo transcript reports **13,841
+passed, zero failed, 34 existing ignores and zero filtered**, across 1,095
+summaries. All nine added query tests report `ok`, including the 6,144 model
+variants and the 1,025-hop law. Compilation takes 124m44s. This is bounded
+runtime evidence, not a whole-proof pass: the intermediate V8 checker was
+deliberately stopped after Cargo when newer protocol commits arrived. Its
+producer exits 143 and verifier exits 1 (`red proof lacks QUALITY GATE RED on
+stdout`); defaults, Miri and the unfinished scanner inventory remain unrun.
+The complete Cargo log and interrupted bundle are retained unchanged.
+
+Canonical `main` then fast-forwards to `55c043960` / tree
+`689501a4413425afdb061745719830a749a3f459`. The three new protocol commits
+validate finite result shape/count/credit, cancel and drain failed subscription
+callbacks, and fence abandoned requests before another operation can send.
+Only the client and its diff receiver change. Independent production-path
+reviews find no concrete blocker; all 23 original client test bodies remain,
+with 19 new test functions. Those new cases are state or scripted-transport
+models, not live-server proof, and their runtime qualification is still pending.
+The original `fgdb-w10-fgp-core-5b1` and `fgdb-w10-result-machines-eh7` remain
+open with their broader dependencies and acceptance criteria intact.
+
+The final combined-source receipt is planned at
+`/data/ssd/tmp/fgdb-local-proof-integrated-20261102-v9`, with the repository
+verifier and fresh public captures. It must execute every unchanged mandatory
+gate, both actual default runs and Miri. Expected totals are 13,860 passes,
+34 existing ignores, zero filters and 1,095 summaries if green; these are
+forecasts until its native exits and exact commit/tree manifest exist.
+
 The source landing `42bff8bbf` connects carried-map write RETURN fields and
 arithmetic to their actual private binding types. Four item orders preserve
 the original nine occurrences in native and authorized hosts. Original
