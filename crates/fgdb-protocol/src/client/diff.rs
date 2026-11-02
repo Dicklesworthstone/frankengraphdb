@@ -284,10 +284,12 @@ impl Client {
                             "diff END row count differs from delivery",
                         ));
                     }
+                    self.finish_request(request)?;
                     return callback_error.map_or(Ok(end), Err);
                 }
                 FrameKind::Error => {
                     let refusal = ErrorBody::decode(frame.payload())?;
+                    self.finish_request(request)?;
                     return Err(callback_error.unwrap_or(ClientError::Server {
                         code: refusal.code,
                         message: refusal.message,

@@ -37,7 +37,7 @@ pub enum ClientError {
     Io(std::io::ErrorKind),
     Transport(TransportError),
     Body(BodyError),
-    /// The server broke the protocol (an unexpected frame, binding or body).
+    /// The server broke the protocol, or unfinished work requires reconnecting.
     Protocol(&'static str),
     /// The server refused, with its public error class and diagnostics.
     Server {
@@ -113,6 +113,16 @@ pub struct Answer {
     pub outcome: Outcome,
 }
 
+/// One sequential FGP connection. Once a request is queued, a dropped future,
+/// a transport failure or an invalid response leaves that request outstanding.
+/// Further requests then refuse locally without sending bytes; reconnect to
+/// continue. Reconnecting does not establish whether an interrupted write
+/// committed, and this client never automatically replays one.
+///
+/// A validated terminal or server refusal releases the connection, including
+/// after a callback error has cancelled and drained delivery. Dropping an
+/// unpolled future or failing local request encoding sends nothing and leaves
+/// an idle connection usable.
 pub struct Client {
     reader: FrameReader<DuplexReader<Box<dyn DuplexIo>>>,
     writer: FrameWriter<DuplexWriter<Box<dyn DuplexIo>>>,
@@ -123,6 +133,8 @@ pub struct Client {
     send_limits: FrameLimits,
     initial_window: (u64, u64),
     next_request: u64,
+    /// Survives a dropped future: only a validated response can release it.
+    outstanding_request: Option<u64>,
     selected: Option<Selected>,
 }
 
@@ -170,6 +182,7 @@ impl Client {
             send_limits: limits,
             initial_window: (0, 0),
             next_request: 1,
+            outstanding_request: None,
             selected: None,
         };
         let mut client_nonce = [0u8; 32];
@@ -191,6 +204,7 @@ impl Client {
         client.send_limits = FrameLimits::new(CLIENT_MAX_FRAME.min(ack.max_frame_len) as usize)
             .map_err(|_| ClientError::Protocol("server frame limit too small"))?;
         client.initial_window = (ack.initial_window_bytes, ack.initial_window_rows);
+        client.finish_request(request)?;
         let auth = Auth {
             credential: Credential::WardenCapability(credential),
         };
@@ -201,6 +215,7 @@ impl Client {
         let ok: AuthOk = expect(&frame, FrameKind::AuthOk)?;
         client.expected = Binding::Session(ok.session);
         client.binding = Binding::Session(ok.session);
+        client.finish_request(request)?;
         Ok(client)
     }
 
@@ -226,6 +241,7 @@ impl Client {
             binding,
         };
         self.selected = Some(selected);
+        self.finish_request(request)?;
         Ok(selected)
     }
 
@@ -259,6 +275,14 @@ impl Client {
             })
             .await?
             .ok_or(ClientError::Closed)?;
+        if frame.header().kind() == FrameKind::Error {
+            let refusal = ErrorBody::decode(frame.payload())?;
+            self.finish_request(request)?;
+            return Err(ClientError::Server {
+                code: refusal.code,
+                message: refusal.message,
+            });
+        }
         let refreshed: AuthRefreshed = expect(&frame, FrameKind::AuthRefreshed)?;
         if Some(refreshed.session) != successor.session() {
             return Err(ClientError::Protocol(
@@ -270,6 +294,7 @@ impl Client {
         if let (Some(selected), Binding::Ready(binding)) = (&mut self.selected, successor) {
             selected.binding = binding;
         }
+        self.finish_request(request)?;
         Ok(refreshed.session)
     }
 
@@ -423,7 +448,9 @@ impl Client {
         if !frame.header().stream_id().is_control() {
             return Err(ClientError::Protocol("PREPARED on a child stream"));
         }
-        Ok(expect::<Prepared>(&frame, FrameKind::Prepared)?.handle)
+        let prepared: Prepared = expect(&frame, FrameKind::Prepared)?;
+        self.finish_request(request)?;
+        Ok(prepared.handle)
     }
 
     /// Drop a connection-owned statement template. Repeated/unknown releases have
@@ -454,6 +481,7 @@ impl Client {
                 "released a different prepared handle",
             ));
         }
+        self.finish_request(request)?;
         Ok(())
     }
 
@@ -850,10 +878,12 @@ impl Client {
                     progress
                         .finish(&end, header.frame_len() as u64, available.0)
                         .map_err(ClientError::Protocol)?;
+                    self.finish_request(request)?;
                     return callback_error.map_or(Ok(end.outcome), Err);
                 }
                 FrameKind::Error => {
                     let refusal = ErrorBody::decode(frame.payload())?;
+                    self.finish_request(request)?;
                     return Err(callback_error.unwrap_or(ClientError::Server {
                         code: refusal.code,
                         message: refusal.message,
@@ -991,6 +1021,7 @@ impl Client {
                     } else {
                         seq
                     };
+                    self.finish_request(request)?;
                     return callback_error.map_or(Ok(delivered), Err);
                 }
                 FrameKind::SubscriptionReset => {
@@ -1001,6 +1032,7 @@ impl Client {
                         ));
                     }
                     progress.reset(&reset).map_err(ClientError::Protocol)?;
+                    self.finish_request(request)?;
                     return Err(callback_error.unwrap_or(ClientError::SubscriptionReset {
                         last_delivered_seq: delivered_to_callback,
                     }));
@@ -1009,6 +1041,7 @@ impl Client {
                     // A malformed terminal must not be hidden by a callback
                     // failure. Only a validated terminal finishes the drain.
                     let refusal = ErrorBody::decode(frame.payload())?;
+                    self.finish_request(request)?;
                     if let Some(error) = callback_error {
                         return Err(error);
                     }
@@ -1035,13 +1068,15 @@ impl Client {
         let frame = self.reply(cx, request).await?;
         let pong: Ping = expect(&frame, FrameKind::Pong)?;
         if pong.nonce == nonce {
+            self.finish_request(request)?;
             Ok(())
         } else {
             Err(ClientError::Protocol("PONG echoed a different value"))
         }
     }
 
-    /// Ask the server to drain and wait for its GOODBYE.
+    /// Ask the server to drain and wait for its GOODBYE. An unfinished request
+    /// refuses locally; consuming this client then drops its transport.
     pub async fn close(mut self, cx: &Cx) -> Result<(), ClientError> {
         self.send(cx, FrameKind::Drain, StreamId::CONTROL, &Empty)
             .await?;
@@ -1061,8 +1096,16 @@ impl Client {
         stream: StreamId,
         body: &impl Body,
     ) -> Result<u64, ClientError> {
+        let continuation = matches!(kind, FrameKind::WindowUpdate | FrameKind::QueryCancel);
+        if !continuation && self.outstanding_request.is_some() {
+            return Err(ClientError::Protocol(
+                "an earlier request is unfinished; reconnect",
+            ));
+        }
         let request = self.next_request;
-        self.next_request += 1;
+        let next_request = request
+            .checked_add(1)
+            .ok_or(ClientError::Protocol("request sequence exhausted"))?;
         let frame = Frame::new(
             kind,
             request,
@@ -1072,9 +1115,27 @@ impl Client {
             self.send_limits,
         )
         .map_err(|_| ClientError::Protocol("request exceeds the negotiated frame limit"))?;
+        // queue is synchronous and writes no bytes. Local encoding, size or
+        // admission errors therefore leave an idle connection reusable.
         self.writer.queue(cx, &frame)?;
+        self.next_request = next_request;
+        if !continuation {
+            self.outstanding_request = Some(request);
+        }
+        // Arm before the first await: a partial write, a stopped context or a
+        // dropped receive future must never admit another business request.
         self.writer.send(cx, |_| Ok(())).await?;
         Ok(request)
+    }
+
+    /// A validated terminal releases wire ownership. Callers may still refuse
+    /// a fully drained answer whose semantic mode differs from their API.
+    fn finish_request(&mut self, request: u64) -> Result<(), ClientError> {
+        if self.outstanding_request != Some(request) {
+            return Err(ClientError::Protocol("response has no outstanding request"));
+        }
+        self.outstanding_request = None;
+        Ok(())
     }
 
     async fn receive(&mut self, cx: &Cx) -> Result<Option<Frame>, ClientError> {
@@ -1085,25 +1146,29 @@ impl Client {
             .await?)
     }
 
-    /// The next frame answering `request`. A GOODBYE or EOF ends the session.
+    /// The next control frame answering `request`. A GOODBYE or EOF ends
+    /// the session; an unrelated response cannot complete the pending request.
     async fn reply(&mut self, cx: &Cx, request: u64) -> Result<Frame, ClientError> {
-        loop {
-            let Some(frame) = self.receive(cx).await? else {
-                return Err(ClientError::Closed);
-            };
-            let header = frame.header();
-            if header.kind() == FrameKind::Goodbye {
-                return Err(ClientError::Closed);
-            }
-            if header.request_id() == request {
-                return Ok(frame);
-            }
-            // A connection-level ERROR (request 0 never occurs; a reply to an
-            // earlier request is stale) is surfaced as is.
-            if header.kind() == FrameKind::Error && header.stream_id().is_control() {
-                return Err(server_error(&frame));
-            }
+        let frame = self.receive(cx).await?.ok_or(ClientError::Closed)?;
+        let header = frame.header();
+        if header.kind() == FrameKind::Goodbye {
+            return Err(ClientError::Closed);
         }
+        if header.request_id() != request {
+            return Err(ClientError::Protocol("reply for a different request"));
+        }
+        if !header.stream_id().is_control() {
+            return Err(ClientError::Protocol("control reply on a child stream"));
+        }
+        if header.kind() == FrameKind::Error {
+            let refusal = ErrorBody::decode(frame.payload())?;
+            self.finish_request(request)?;
+            return Err(ClientError::Server {
+                code: refusal.code,
+                message: refusal.message,
+            });
+        }
+        Ok(frame)
     }
 }
 
@@ -1369,6 +1434,63 @@ mod tests {
         }
     }
 
+    // Complete the handshake, then keep reads pending. The shared write
+    // allowance can stop an application frame after an exact physical prefix.
+    struct PausedIo {
+        inner: ScriptIo,
+        write_budget: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for PausedIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.inner.offset == self.inner.input.len() {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_read(task, buffer)
+        }
+    }
+
+    impl AsyncWrite for PausedIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let count = bytes.len().min(self.write_budget.load(Ordering::SeqCst));
+            if count == 0 {
+                return Poll::Pending;
+            }
+            self.inner
+                .written
+                .lock()
+                .unwrap()
+                .extend_from_slice(&bytes[..count]);
+            self.write_budget.fetch_sub(count, Ordering::SeqCst);
+            Poll::Ready(Ok(count))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn requires_reconnect<T>(result: Result<T, ClientError>) {
+        assert!(matches!(
+            result,
+            Err(ClientError::Protocol(
+                "an earlier request is unfinished; reconnect"
+            ))
+        ));
+    }
+
     fn ready() -> Ready {
         Ready {
             namespace: [2; 32],
@@ -1532,6 +1654,302 @@ mod tests {
             StreamId([5; 16]),
             &ResultEnd { outcome, rows },
         )
+    }
+
+    #[test]
+    fn dropped_requests_fence_every_new_operation_before_any_more_bytes() {
+        let ((), report) = run_async_under_lab(0x79a0_0460, |root| async move {
+            for partial_write in [false, true] {
+                for operation in 0..7 {
+                    let inner = script(vec![]);
+                    let written = std::sync::Arc::clone(&inner.written);
+                    let write_budget = std::sync::Arc::new(AtomicUsize::new(usize::MAX));
+                    let io = PausedIo {
+                        inner,
+                        write_budget: std::sync::Arc::clone(&write_budget),
+                    };
+                    let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                    client.select(&root, "test").await.unwrap();
+                    let before = written.lock().unwrap().len();
+                    if partial_write {
+                        write_budget.store(17, Ordering::SeqCst);
+                    }
+                    {
+                        let mut pending = Box::pin(async {
+                            match operation {
+                                0 => client
+                                    .execute(&root, ExecuteMode::Write, "CREATE ()", vec![])
+                                    .await
+                                    .map(|_| ()),
+                                1 => client
+                                    .execute_diff(
+                                        &root,
+                                        DiffMode::Buffered,
+                                        1,
+                                        2,
+                                        "RETURN 1",
+                                        vec![],
+                                    )
+                                    .await
+                                    .map(|_| ()),
+                                2 => client
+                                    .subscribe(
+                                        &root,
+                                        "SUBSCRIBE TO RETURN 1",
+                                        vec![],
+                                        |_| {},
+                                        |_| Ok(true),
+                                    )
+                                    .await
+                                    .map(|_| ()),
+                                3 => client.refresh_authority(&root, vec![2]).await.map(|_| ()),
+                                4 => client
+                                    .prepare_read(&root, "RETURN 1", vec![])
+                                    .await
+                                    .map(|_| ()),
+                                5 => client.ping(&root, 1).await,
+                                _ => client
+                                    .execute_write_if_current(&root, 0, "CREATE ()", vec![])
+                                    .await
+                                    .map(|_| ()),
+                            }
+                        });
+                        std::future::poll_fn(|task| {
+                            assert!(std::future::Future::poll(pending.as_mut(), task).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                        // Dropping loses the operation-local receiver state.
+                    }
+                    let after = written.lock().unwrap().len();
+                    if partial_write {
+                        assert_eq!(after - before, 17);
+                    } else {
+                        let bytes = written.lock().unwrap();
+                        assert_eq!(sent_frames(&bytes[before..]).len(), 1);
+                    }
+                    let handle = PreparedHandle([9; 16]);
+                    requires_reconnect(
+                        client
+                            .execute(&root, ExecuteMode::Write, "CREATE ()", vec![])
+                            .await,
+                    );
+                    requires_reconnect(
+                        client.execute_batch(&root, "CREATE ()", vec![vec![]]).await,
+                    );
+                    requires_reconnect(client.prepare_read(&root, "RETURN 1", vec![]).await);
+                    requires_reconnect(client.release_prepared(&root, handle).await);
+                    requires_reconnect(client.execute_prepared(&root, handle, vec![]).await);
+                    requires_reconnect(client.execute_prepared_write(&root, handle, vec![]).await);
+                    requires_reconnect(
+                        client
+                            .execute_prepared_write_returning(&root, handle, vec![])
+                            .await,
+                    );
+                    requires_reconnect(
+                        client
+                            .execute_prepared_batch(&root, handle, vec![vec![]])
+                            .await,
+                    );
+                    requires_reconnect(
+                        client
+                            .execute_diff(&root, DiffMode::Buffered, 1, 2, "RETURN 1", vec![])
+                            .await,
+                    );
+                    requires_reconnect(
+                        client
+                            .execute_prepared_diff(&root, handle, DiffMode::Buffered, 1, 2, vec![])
+                            .await,
+                    );
+                    requires_reconnect(
+                        client
+                            .execute_write_if_current(&root, 0, "CREATE ()", vec![])
+                            .await,
+                    );
+                    requires_reconnect(
+                        client
+                            .subscribe(
+                                &root,
+                                "SUBSCRIBE TO RETURN 1",
+                                vec![],
+                                |_| {},
+                                |_| Ok(false),
+                            )
+                            .await,
+                    );
+                    requires_reconnect(client.refresh_authority(&root, vec![2]).await);
+                    requires_reconnect(client.ping(&root, 2).await);
+                    requires_reconnect(client.close(&root).await);
+                    assert_eq!(written.lock().unwrap().len(), after);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn unsent_local_failures_and_unpolled_futures_leave_the_connection_idle() {
+        let ((), report) = run_async_under_lab(0x79a0_0461, |root| async move {
+            let io = script(vec![
+                rpc(FrameKind::Pong, 4, StreamId::CONTROL, &Ping { nonce: 7 }),
+                rpc(FrameKind::Pong, 5, StreamId::CONTROL, &Ping { nonce: 8 }),
+            ]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            let before = written.lock().unwrap().len();
+            drop(client.execute(&root, ExecuteMode::Write, "CREATE ()", vec![]));
+            assert!(matches!(
+                client
+                    .execute(
+                        &root,
+                        ExecuteMode::Write,
+                        "CREATE ()",
+                        vec![
+                            ("x".into(), WireValue::Int(1)),
+                            ("x".into(), WireValue::Int(2))
+                        ],
+                    )
+                    .await,
+                Err(ClientError::Body(BodyError::Noncanonical))
+            ));
+            assert!(matches!(
+                client
+                    .execute(&root, ExecuteMode::Write, &"x".repeat(8192), vec![])
+                    .await,
+                Err(ClientError::Protocol(
+                    "request exceeds the negotiated frame limit"
+                ))
+            ));
+            assert_eq!(written.lock().unwrap().len(), before);
+            client.ping(&root, 7).await.unwrap();
+            client.ping(&root, 8).await.unwrap();
+            let bytes = written.lock().unwrap();
+            let sent = sent_frames(&bytes[before..]);
+            assert_eq!(sent.len(), 2);
+            assert_eq!(sent[0].header().request_id(), 4);
+            assert_eq!(sent[1].header().request_id(), 5);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn invalid_or_lost_responses_keep_the_request_fenced() {
+        let ((), report) = run_async_under_lab(0x79a0_0462, |root| async move {
+            for scenario in 0..7 {
+                let frames = match scenario {
+                    0 => vec![rpc(
+                        FrameKind::Pong,
+                        4,
+                        StreamId::CONTROL,
+                        &Ping { nonce: 99 },
+                    )],
+                    1 => vec![rpc(FrameKind::Pong, 4, StreamId::CONTROL, &Empty)],
+                    2 => vec![rpc(
+                        FrameKind::Pong,
+                        5,
+                        StreamId::CONTROL,
+                        &Ping { nonce: 1 },
+                    )],
+                    3 => vec![rpc(
+                        FrameKind::Pong,
+                        4,
+                        StreamId([5; 16]),
+                        &Ping { nonce: 1 },
+                    )],
+                    4 => vec![rpc(FrameKind::Error, 4, StreamId::CONTROL, &Empty)],
+                    5 => vec![result_chunk(4, &[1]), result_end(4, 0)],
+                    _ => vec![],
+                };
+                let io = script(frames);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let result = if scenario >= 5 {
+                    client
+                        .execute(&root, ExecuteMode::Read, "RETURN 1", vec![])
+                        .await
+                        .map(|_| ())
+                } else {
+                    client.ping(&root, 1).await
+                };
+                assert!(result.is_err());
+                let before = written.lock().unwrap().len();
+                requires_reconnect(
+                    client
+                        .execute(&root, ExecuteMode::Write, "CREATE ()", vec![])
+                        .await,
+                );
+                requires_reconnect(client.ping(&root, 2).await);
+                assert_eq!(written.lock().unwrap().len(), before);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn decoded_control_refusals_release_only_their_matching_request() {
+        let ((), report) = run_async_under_lab(0x79a0_0463, |root| async move {
+            for request in [4, 3] {
+                let io = script(vec![
+                    rpc(
+                        FrameKind::Error,
+                        request,
+                        StreamId::CONTROL,
+                        &ErrorBody {
+                            code: ErrorCode::Statement,
+                            message: "statement refused".into(),
+                        },
+                    ),
+                    rpc(FrameKind::Pong, 5, StreamId::CONTROL, &Ping { nonce: 7 }),
+                ]);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let refused = client.prepare_read(&root, "RETURN 1", vec![]).await;
+                if request == 4 {
+                    assert!(matches!(
+                        refused,
+                        Err(ClientError::Server {
+                            code: ErrorCode::Statement,
+                            ..
+                        })
+                    ));
+                    client.ping(&root, 7).await.unwrap();
+                    assert_eq!(sent_frames(&written.lock().unwrap()).len(), 5);
+                } else {
+                    assert!(matches!(
+                        refused,
+                        Err(ClientError::Protocol("reply for a different request"))
+                    ));
+                    let before = written.lock().unwrap().len();
+                    requires_reconnect(client.ping(&root, 7).await);
+                    assert_eq!(written.lock().unwrap().len(), before);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn exhausted_request_ids_refuse_without_writing_or_wrapping() {
+        let ((), report) = run_async_under_lab(0x79a0_0464, |root| async move {
+            let io = script(vec![]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            client.next_request = u64::MAX;
+            let before = written.lock().unwrap().len();
+            for _ in 0..2 {
+                assert!(matches!(
+                    client.ping(&root, 1).await,
+                    Err(ClientError::Protocol("request sequence exhausted"))
+                ));
+            }
+            assert_eq!(written.lock().unwrap().len(), before);
+            assert_eq!(client.next_request, u64::MAX);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]
