@@ -2206,17 +2206,15 @@ impl<'a> Parser<'a> {
         let items = items?;
         returning.projection = items.projection;
         returning.grouping = items.grouping;
-        if let Some(ReadStageTemplate::Page {
-            order,
-            offset,
-            count,
-            ..
-        }) = self.row_page_sourced(&items.output, &items.spellings)?
-        {
-            returning.order = order;
-            returning.offset = offset;
-            returning.count = count;
-        }
+        let page = self.row_page_sourced(
+            &items.output,
+            &items.spellings,
+            !head && keyword == "RETURN",
+        )?;
+        returning.order = page.order;
+        returning.offset = page.offset;
+        returning.count = page.count;
+        returning.tail = page.tail;
         if head || keyword == "WITH" && self.chain_write {
             returning.tail =
                 Some(self.edge_merge_tail(&mut returning, columns, items.output, row.is_some())?);

@@ -852,3 +852,111 @@ fn aggregate_return_uses_post_statement_values_and_refusals_restore_the_overlay(
         );
     });
 }
+
+/// Computed ranking sees the frozen post-write result, and its private keys
+/// never alter the public schema, DISTINCT identity or the effects of paging.
+#[test]
+fn computed_write_ordering_ranks_post_statement_rows_before_final_paging() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut limited = policy();
+        limited.query.rows = fgdb_gql::GqlExecutionBudget::new(1_000_000, 2);
+        let (stats, returned) = txn
+            .execute_graph_mutation_query_governed(
+                &mut db,
+                cx,
+                &prepare(
+                    "MATCH (n:Item) SET n.p=10-n.p \
+                     RETURN n.p AS p,n.q AS q \
+                     ORDER BY -p,coalesce(q,0)+p DESC SKIP 1 LIMIT 2",
+                ),
+                limited,
+            )
+            .unwrap();
+        assert_eq!(stats.effects, 4);
+        assert_eq!(
+            returned.value,
+            rows(vec![vec![int(8), null()], vec![int(7), null()]])
+        );
+        assert_eq!(returned.rows.result_rows, 2);
+
+        let (_, returned) = txn
+            .execute_graph_mutation_query_governed(
+                &mut db,
+                cx,
+                &prepare(
+                    "MATCH (n:Item) SET n.q=99 \
+                     RETURN DISTINCT n.q AS q ORDER BY -q LIMIT 1",
+                ),
+                limited,
+            )
+            .unwrap();
+        assert_eq!(returned.value, rows(vec![vec![int(99)]]));
+
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(
+                &db,
+                cx,
+                "MATCH (n:Item) RETURN n.p AS p,n.q AS q ORDER BY p"
+            ),
+            vec![
+                vec![int(6), int(99)],
+                vec![int(7), int(99)],
+                vec![int(8), int(99)],
+                vec![int(9), int(99)],
+            ],
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+/// Even an empty page evaluates the complete ranking expression. Its failure
+/// restores this statement while preserving earlier transaction-local work.
+#[test]
+fn computed_write_ordering_failure_restores_effects_even_with_limit_zero() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        txn.execute_graph_mutation_query_governed(
+            &mut db,
+            cx,
+            &prepare("MATCH (n:Item) SET n.p=n.p+10 RETURN n.p AS p"),
+            policy(),
+        )
+        .unwrap();
+        let staged = txn.staged_effect_digest().unwrap();
+        let mut hidden = policy();
+        hidden.query.rows = fgdb_gql::GqlExecutionBudget::new(1_000_000, 0);
+        let failed = txn.execute_graph_mutation_query_governed(
+            &mut db,
+            cx,
+            &prepare(
+                "MATCH (n:Item) SET n.q=88 \
+                 RETURN n.p AS p ORDER BY 1/(p-13) LIMIT 0",
+            ),
+            hidden,
+        );
+        assert!(
+            failed.is_err(),
+            "a private sort key must not skip evaluation"
+        );
+        assert_eq!(txn.staged_effect_digest().unwrap(), staged);
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(txn.vertex_property(&db, VId(1), Q).unwrap(), None,);
+        assert_eq!(
+            txn.vertex_property(&db, VId(4), Q).unwrap(),
+            Some(CanonicalScalar::Int(10).into()),
+        );
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(&db, cx, "MATCH (n:Item) RETURN n.p AS p ORDER BY p"),
+            vec![vec![int(11)], vec![int(12)], vec![int(13)], vec![int(14)]],
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}

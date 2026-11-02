@@ -87,6 +87,106 @@ fn projected_rows_see_simultaneous_assignments_and_only_masked_inputs() {
 }
 
 #[test]
+fn computed_return_ordering_uses_only_authorized_post_write_values() {
+    lab(0xb959, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let mut answers = Vec::new();
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut db, &commit, hidden).await;
+            let (stats, result, _) = db
+                .execute_graph_mutation_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &prepared(
+                        "MATCH (n:Visible) SET n.q=n.p+1 \
+                         RETURN n.q AS q,n.secret AS secret \
+                         ORDER BY coalesce(secret,0)*q-q",
+                    ),
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            let values: Vec<_> = result
+                .value
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect();
+            assert_eq!(
+                values,
+                vec![
+                    vec![int(21), GraphValue::Scalar(CanonicalScalar::Null)],
+                    vec![int(11), GraphValue::Scalar(CanonicalScalar::Null)],
+                ],
+            );
+            answers.push((stats.effects, result.evaluator, values));
+
+            let (_, identities, _) = db
+                .execute_graph_mutation_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &prepared(
+                        "MATCH (n:Visible) SET n.q=n.p+2 \
+                         RETURN DISTINCT n AS saved \
+                         ORDER BY coalesce(saved.secret,0)*saved.q-saved.q",
+                    ),
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                identities
+                    .value
+                    .iter()
+                    .map(|row| row.values().to_vec())
+                    .collect::<Vec<_>>(),
+                vec![
+                    vec![GraphValue::Vertex(VId(2))],
+                    vec![GraphValue::Vertex(VId(1))]
+                ],
+            );
+
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            let refused = db
+                .execute_graph_mutation_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &prepared(
+                        "MATCH (n:Visible) SET n.q=99 \
+                         RETURN n.p AS p ORDER BY 1/(p-20) LIMIT 0",
+                    ),
+                    policy(),
+                    || NOW,
+                )
+                .await;
+            assert!(refused.is_err());
+            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        assert_eq!(
+            answers[0], answers[1],
+            "hidden fields cannot affect sorting or work"
+        );
+    });
+}
+
+#[test]
 fn projected_row_limit_and_scope_refusals_never_publish_effects() {
     lab(0xb952, |contexts| async move {
         let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());

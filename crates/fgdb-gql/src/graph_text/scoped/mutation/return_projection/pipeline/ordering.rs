@@ -200,6 +200,56 @@ impl<'a> Parser<'a> {
             .transpose()
     }
 
+    /// A terminal write RETURN orders only its final projected values. A
+    /// returned alias owns its name; otherwise a repeated source spelling
+    /// such as `n.p` names that same output column. No unreturned pre-write
+    /// binding can become a hidden sort input, including under DISTINCT.
+    pub(super) fn write_expression_page(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        sources: &[Name<'a>],
+    ) -> Result<Option<ReadStageTemplate>, GraphSetTextError> {
+        let row = self.resolved_row.replace(schema.to_vec());
+        let graph = core::mem::replace(&mut self.resolved_graph, false);
+        let page = self.expression_page(|parser| {
+            parser.read_resolved_item(
+                &mut |parser| {
+                    let TokenKind::Word(word) = parser.current.kind else {
+                        return Ok(None);
+                    };
+                    if parser.elements.contains(&word)
+                        || matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                    {
+                        return Ok(None);
+                    }
+                    if let Some(column) = schema.iter().position(|(name, _)| name.text == word) {
+                        // An unchanged returned binding can reuse its already
+                        // projected property cell. This preserves column-only
+                        // `RETURN n,n.p AS p ORDER BY n.p` without introducing
+                        // a new point read. An alias of a different expression
+                        // owns its name and must not capture the old source.
+                        if sources
+                            .get(column)
+                            .is_some_and(|source| source.text == word)
+                            && let Some(projected) = parser.sourced_key(sources)?
+                        {
+                            return Ok(Some(projected));
+                        }
+                        parser.advance()?;
+                        return Ok(Some(column));
+                    }
+                    parser.sourced_key(sources)
+                },
+                0,
+            )
+        });
+        self.resolved_graph = graph;
+        self.resolved_row = row;
+        page?
+            .map(|page| page.finish(schema.len(), schema.len()))
+            .transpose()
+    }
+
     /// ORDER BY sees returned aliases first, then the non-DISTINCT input
     /// scope. Retained input cells are private and removed after ranking.
     pub(super) fn return_expression_page(

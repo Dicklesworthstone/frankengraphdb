@@ -109,6 +109,301 @@ fn computed_write_return_pages_never_limit_the_statements_effects() {
 }
 
 #[test]
+fn computed_write_ordering_ranks_completed_groups_and_keeps_private_cells_private() {
+    let query = prepare(
+        "UNWIND [1,1,2,3,3,3,NULL] AS x CREATE (n:Item {p:x}) \
+         RETURN n.p AS key,count(*) AS copies \
+         ORDER BY coalesce(key,0)+copies DESC,-key ASC NULLS FIRST SKIP 1 LIMIT 2",
+    );
+    assert_eq!(query.columns(), &["key", "copies"]);
+    let batch = create(&query, policy(2), || Ok(())).unwrap();
+    assert_eq!(
+        rows(batch.returning()),
+        vec![vec![int(2), int(1)], vec![int(1), int(2)]]
+    );
+    assert_eq!(batch.insertion().stats().created_vertices, 7);
+    assert_eq!(batch.returning().rows.result_rows, 2);
+    assert_eq!(batch.returning().rows.snapshot_records, 0);
+
+    // DISTINCT acts on visible values, never on appended rank cells.
+    let distinct = prepare(
+        "UNWIND [1,2,1,3,2] AS x CREATE (n {p:x}) \
+         RETURN DISTINCT n.p AS p ORDER BY -p,-p DESC SKIP 1 LIMIT 1",
+    );
+    let batch = create(&distinct, policy(1), || Ok(())).unwrap();
+    assert_eq!(rows(batch.returning()), vec![vec![int(2)]]);
+    assert_eq!(batch.insertion().stats().created_vertices, 5);
+
+    let repeated_source =
+        prepare("UNWIND [1,3,2] AS x CREATE (n {p:x}) RETURN n.p AS p ORDER BY n.p * -1");
+    let alias = prepare("UNWIND [1,3,2] AS x CREATE (n {p:x}) RETURN n.p AS p ORDER BY p * -1");
+    assert_eq!(repeated_source.canonical_bytes(), alias.canonical_bytes());
+    assert_eq!(
+        rows(create(&alias, policy(3), || Ok(())).unwrap().returning()),
+        vec![vec![int(3)], vec![int(2)], vec![int(1)]],
+    );
+    assert_ne!(
+        alias.canonical_bytes(),
+        prepare("UNWIND [1,3,2] AS x CREATE (n {p:x}) RETURN n.p AS p ORDER BY p * 1")
+            .canonical_bytes(),
+    );
+
+    // An output alias takes precedence over the pre-write graph binding.
+    let shadowed = prepare("UNWIND [3,1,2] AS x CREATE (n {p:x}) RETURN n.p AS n ORDER BY n+1");
+    assert_eq!(shadowed.columns(), &["n"]);
+    assert_eq!(
+        rows(create(&shadowed, policy(3), || Ok(())).unwrap().returning()),
+        vec![vec![int(1)], vec![int(2)], vec![int(3)]],
+    );
+
+    // Returning the unchanged identity alongside its property must retain
+    // the old projected-column path, with no newly required point reader.
+    let projected_property =
+        prepare("UNWIND [3,1,2] AS x CREATE (n {p:x}) RETURN n,n.p AS p ORDER BY n.p");
+    let projected_alias =
+        prepare("UNWIND [3,1,2] AS x CREATE (n {p:x}) RETURN n,n.p AS p ORDER BY p");
+    assert_eq!(
+        projected_property.canonical_bytes(),
+        projected_alias.canonical_bytes(),
+    );
+    assert_eq!(
+        rows(
+            create(&projected_property, policy(3), || Ok(()))
+                .unwrap()
+                .returning()
+        ),
+        vec![
+            vec![GraphValue::Vertex(VId(116)), int(1)],
+            vec![GraphValue::Vertex(VId(132)), int(2)],
+            vec![GraphValue::Vertex(VId(100)), int(3)],
+        ],
+    );
+}
+
+#[test]
+fn computed_write_ordering_preserves_failures_and_shared_resource_boundaries() {
+    for text in [
+        "UNWIND [1,2,3] AS x CREATE (n {p:x}) RETURN n.p AS p ORDER BY 1/(3-p) LIMIT 0",
+        "UNWIND [1,2,3] AS x CREATE (n {p:x}) RETURN n.p AS p,count(*) AS c \
+         ORDER BY c/(3-p) LIMIT 0",
+    ] {
+        assert!(
+            matches!(
+                create(&prepare(text), policy(0), || Ok(())),
+                Err(GqlQueryError::Source(GraphInsertQueryError::Returning(_)))
+            ),
+            "{text}"
+        );
+    }
+
+    let query = prepare(
+        "UNWIND [1,1,2,3] AS x CREATE (n {p:x}) \
+         RETURN n.p AS p,count(*) AS c ORDER BY p+c DESC LIMIT 1",
+    );
+    let visits = Cell::new(0_usize);
+    let baseline = create(&query, policy(1), || {
+        visits.set(visits.get() + 1);
+        Ok(())
+    })
+    .unwrap();
+    let stats = baseline.returning().evaluator;
+    let exact = GraphInsertPolicy::new(
+        GqlQueryPolicy::new(0, 1, stats.work_units, stats.scratch_entries),
+        100,
+        100,
+    );
+    assert_eq!(
+        create(&query, exact, || Ok(())).unwrap().returning(),
+        baseline.returning()
+    );
+    for limits in [
+        GqlQueryPolicy::new(0, 1, stats.work_units - 1, stats.scratch_entries),
+        GqlQueryPolicy::new(0, 1, stats.work_units, stats.scratch_entries - 1),
+    ] {
+        assert!(matches!(
+            create(&query, GraphInsertPolicy::new(limits, 100, 100), || Ok(())),
+            Err(GqlQueryError::Evaluator(_))
+        ));
+    }
+    let stop = visits.get() - 1;
+    let observed = Cell::new(0_usize);
+    assert!(matches!(
+        create(&query, policy(1), || {
+            let at = observed.get();
+            observed.set(at + 1);
+            if at == stop { Err(at) } else { Ok(()) }
+        }),
+        Err(GqlQueryError::Interrupted(at)) if at == stop
+    ));
+    assert_eq!(
+        create(&query, policy(1), || Ok(())).unwrap().returning(),
+        baseline.returning()
+    );
+}
+
+#[test]
+fn computed_write_ordering_cannot_capture_unreturned_bindings() {
+    for text in [
+        "CREATE (n:Item {p:1,q:2}) RETURN n.p AS p ORDER BY n.q+1",
+        "CREATE (n:Item {p:1,q:2}) RETURN DISTINCT n.p AS p ORDER BY n.q+1",
+        "CREATE (n:Item {p:1}) RETURN count(*) AS c ORDER BY n.p+1",
+    ] {
+        let calls = Cell::new(0);
+        let result = PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "{text}");
+        assert_eq!(calls.get(), 0, "refuse before catalog access: {text}");
+    }
+}
+
+#[test]
+fn computed_ordering_binds_each_write_return_front_end_and_its_parameters() {
+    use fgdb_gql::{
+        PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeUpsertQueryText,
+        PreparedGraphWriteChainText,
+    };
+
+    let arguments = GqlParameters::new().with_int64("direction", -1).unwrap();
+    let calls = Cell::new(0_usize);
+    let template = PreparedGraphInsertQueryText::prepare(
+        "UNWIND [3,1,2] AS x CREATE (n {p:x}) RETURN n.p AS p ORDER BY p*$direction",
+        R,
+        |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        },
+    )
+    .unwrap();
+    let catalog_calls = calls.get();
+    let descending = template.bind_parameters(&arguments).unwrap();
+    let ascending = template
+        .bind_parameters(&GqlParameters::new().with_int64("direction", 1).unwrap())
+        .unwrap();
+    assert_eq!(
+        calls.get(),
+        catalog_calls,
+        "bind never re-enters the catalog"
+    );
+    assert_ne!(descending.canonical_bytes(), ascending.canonical_bytes());
+    assert_eq!(
+        rows(
+            create(&descending, policy(3), || Ok(()))
+                .unwrap()
+                .returning()
+        ),
+        vec![vec![int(3)], vec![int(2)], vec![int(1)]],
+    );
+
+    let vertex = PreparedGraphVertexUpsertQueryText::prepare(
+        "MERGE (n:Item {p:1}) SET n.q=2 RETURN n.q AS q ORDER BY q*$direction",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&arguments)
+    .unwrap();
+    assert_eq!(vertex.columns(), &["q"]);
+    let edge = PreparedGraphEdgeMergeQueryText::prepare(
+        "MATCH (a),(b) MERGE (a)-[r:R {p:1}]->(b) RETURN r.p AS p ORDER BY p*$direction",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&arguments)
+    .unwrap();
+    assert_eq!(edge.columns(), &["p"]);
+    let upsert = PreparedGraphEdgeUpsertQueryText::prepare(
+        "MATCH (a),(b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p=1 \
+         RETURN r.p AS p ORDER BY p*$direction",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&arguments)
+    .unwrap();
+    assert_eq!(upsert.columns(), &["p"]);
+    for text in [
+        "UNWIND [1,2] AS x MERGE (n:Item {p:x}) RETURN n.p AS p ORDER BY p*$direction",
+        "CREATE (a {p:1}),(b {p:2}) MERGE (a)-[r:R {p:3}]->(b) \
+         RETURN r.p AS p ORDER BY p*$direction",
+        "CREATE (n {p:1}) WITH n SET n.q=2 RETURN n.q AS p ORDER BY p*$direction",
+    ] {
+        let chain = PreparedGraphWriteChainText::prepare(text, R, symbols)
+            .expect(text)
+            .bind_parameters(&arguments)
+            .expect(text);
+        assert_eq!(chain.columns(), &["p"], "{text}");
+    }
+}
+
+#[test]
+fn computed_write_ordering_reads_returned_elements_at_the_final_statement_cut() {
+    use fgdb_gql::insertion::GraphInsertIntent;
+
+    for text in [
+        "UNWIND [3,1,2] AS x CREATE (n {p:x}) RETURN n ORDER BY -n.p",
+        "UNWIND [3,1,2] AS x CREATE (n {p:x}) RETURN DISTINCT n AS saved ORDER BY -saved.p",
+    ] {
+        let query = prepare(text);
+        // Pure proposals cannot read identities that have not been staged.
+        assert!(create(&query, policy(3), || Ok(())).is_err(), "{text}");
+        let collection = query
+            .collect_governed_over(
+                None,
+                policy(3),
+                |_: &fgdb_gql::algebra::PreparedGraphPattern<GraphValueRow>,
+                 _: GqlQueryPolicy|
+                 -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), usize>> {
+                    panic!("source-free CREATE must not invent a graph scan")
+                },
+                identity,
+                || Ok(()),
+            )
+            .unwrap();
+        let (insertion, output) = collection.into_parts();
+        assert_eq!(insertion.stats().created_vertices, 3);
+        let mut properties = Props::new();
+        for intent in insertion.intents() {
+            let GraphInsertIntent::Vertex {
+                vertex,
+                properties: values,
+                ..
+            } = intent
+            else {
+                panic!("only vertex creation in this fixture");
+            };
+            for (key, value) in values {
+                properties.insert((*vertex, *key), value.clone());
+            }
+        }
+        // The real host stages this complete native intent bag before the
+        // output phase. Supply exactly those records at the same boundary.
+        let returned = output
+            .finish_governed_reading::<(), usize>(
+                |element, key| {
+                    let ElementId::Vertex(vertex) = element else {
+                        panic!("only vertex property reads in this fixture");
+                    };
+                    Ok(properties.get(&(vertex, key)).cloned())
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            rows(&returned),
+            vec![
+                vec![GraphValue::Vertex(VId(100))],
+                vec![GraphValue::Vertex(VId(132))],
+                vec![GraphValue::Vertex(VId(116))],
+            ],
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn create_groups_actual_frozen_identities_and_null_keys() {
     let query = prepare(
         "UNWIND [1,1,2,NULL] AS x CREATE (n:Item {p:x}) \

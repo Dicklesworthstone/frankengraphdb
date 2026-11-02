@@ -2330,17 +2330,11 @@ impl<'a> Parser<'a> {
             returning.grouping = items.grouping;
             (items.output, items.spellings)
         };
-        if let Some(ReadStageTemplate::Page {
-            order,
-            offset,
-            count,
-            ..
-        }) = self.row_page_sourced(&output, &spellings)?
-        {
-            returning.order = order;
-            returning.offset = offset;
-            returning.count = count;
-        }
+        let page = self.row_page_sourced(&output, &spellings, !head)?;
+        returning.order = page.order;
+        returning.offset = page.offset;
+        returning.count = page.count;
+        returning.tail = page.tail;
         if head {
             let tail = self.vertex_return_tail(&mut returning, output)?;
             returning.tail = Some(tail);
@@ -3137,33 +3131,21 @@ impl<'a> Parser<'a> {
                 });
                 returning.output.push((name, kind));
             }
-            if let Some(ReadStageTemplate::Page {
-                order,
-                offset,
-                count,
-                ..
-            }) = self.row_page_sourced(&returning.output, &[])?
-            {
-                returning.order = order;
-                returning.offset = offset;
-                returning.count = count;
-            }
+            let page = self.row_page_sourced(&returning.output, &[], keyword == "RETURN")?;
+            returning.order = page.order;
+            returning.offset = page.offset;
+            returning.count = page.count;
+            returning.tail = page.tail;
             return Ok(returning);
         }
         let items = self.write_return_items(&mut returning)?;
         returning.projection = items.projection;
         returning.grouping = items.grouping;
-        if let Some(ReadStageTemplate::Page {
-            order,
-            offset,
-            count,
-            ..
-        }) = self.row_page_sourced(&items.output, &items.spellings)?
-        {
-            returning.order = order;
-            returning.offset = offset;
-            returning.count = count;
-        }
+        let page = self.row_page_sourced(&items.output, &items.spellings, keyword == "RETURN")?;
+        returning.order = page.order;
+        returning.offset = page.offset;
+        returning.count = page.count;
+        returning.tail = page.tail;
         returning.output = items.output;
         Ok(returning)
     }
