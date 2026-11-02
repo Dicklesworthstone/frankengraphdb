@@ -1017,17 +1017,11 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        if let Some(ReadStageTemplate::Page {
-            order,
-            offset,
-            count,
-            ..
-        }) = self.row_page_sourced(&output, &spellings)?
-        {
-            returning.order = order;
-            returning.offset = offset;
-            returning.count = count;
-        }
+        let page = self.row_page_sourced(&output, &spellings, !head)?;
+        returning.order = page.order;
+        returning.offset = page.offset;
+        returning.count = page.count;
+        returning.tail = page.tail;
         if head {
             if row.is_some() {
                 self.boundary_reads = input_boundary;

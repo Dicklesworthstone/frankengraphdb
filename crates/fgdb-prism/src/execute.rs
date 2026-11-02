@@ -1481,6 +1481,13 @@ impl FnxCallSpec {
                     limits.max_iterations,
                 )?;
             }
+            FnxAlgorithm::LabelPropagationCommunities => {
+                admit(
+                    "iterations",
+                    crate::label_propagation::MAX_ITERATIONS,
+                    limits.max_iterations,
+                )?;
+            }
             _ => {}
         }
         if !matches!(
@@ -1537,6 +1544,9 @@ impl FnxCallSpec {
                 n,
                 self.outputs().len(),
             )?),
+            FnxAlgorithm::LabelPropagationCommunities => Some(
+                crate::label_propagation::estimated_work::<C>(n, arcs, n, self.outputs().len())?,
+            ),
             FnxAlgorithm::KatzCentrality(options) => Some(crate::katz::estimated_work::<C>(
                 n,
                 arcs,
@@ -1574,6 +1584,7 @@ impl FnxCallSpec {
             | FnxAlgorithm::InDegreeCentrality
             | FnxAlgorithm::OutDegreeCentrality
             | FnxAlgorithm::HitsCentrality
+            | FnxAlgorithm::LabelPropagationCommunities
             | FnxAlgorithm::KatzCentrality(_)
             | FnxAlgorithm::ArticulationPoints
             | FnxAlgorithm::Bridges => 0,
@@ -1700,6 +1711,12 @@ impl FnxCallSpec {
             }
             FnxAlgorithm::HitsCentrality => {
                 let (output, workspace_bytes) = crate::hits::run(graph, &mut checkpoint)?;
+                kernel_workspace_bytes = workspace_bytes;
+                output
+            }
+            FnxAlgorithm::LabelPropagationCommunities => {
+                let (output, workspace_bytes) =
+                    crate::label_propagation::run(graph, &mut checkpoint)?;
                 kernel_workspace_bytes = workspace_bytes;
                 output
             }

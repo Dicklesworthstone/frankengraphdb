@@ -399,6 +399,55 @@ fn hidden_weight_values_and_label_names_are_absent_before_selection_or_reduction
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// Community selection must run on the authorized topology itself. Hidden
+/// edges and malformed hidden weights cannot change a component representative.
+#[test]
+fn label_propagation_uses_the_masked_graph_and_signed_result_limit() {
+    let ((), report) = run_async_under_lab(0x5ec0_3027, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = database(&contexts.commit(), true).await;
+        let control = database(&contexts.commit(), false).await;
+        let issuer = authority(327, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let text = "CALL fnx.label_propagation_communities() YIELD vertex,component";
+        let spec = FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();
+        let mut opt = options(Directedness::Undirected);
+        opt.projection.self_loops = SelfLoopPolicy::Drop;
+        let expected: Vec<_> = [1, 2, 3, u128::MAX]
+            .into_iter()
+            .map(|id| {
+                vec![
+                    FnxValue::Vertex(VId(id)),
+                    FnxValue::Vertex(VId(if id == u128::MAX { id } else { 1 })),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            control.execute_fnx(&cx, &spec, opt).unwrap().analytics.rows,
+            expected
+        );
+        assert_eq!(read(&db, &cx, &issuer, &token, text, opt), expected);
+
+        let restricted = token.attenuate(Restriction::MaxRows(3)).unwrap();
+        let failure = db
+            .call_fnx_authorized(
+                &cx,
+                &issuer,
+                &restricted,
+                BRANCH,
+                text,
+                &FnxParameters::new(),
+                opt,
+                || 100,
+            )
+            .unwrap_err();
+        authorization(failure, Error::LimitExceeded(LimitDimension::Rows));
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn signed_limits_and_native_limits_are_cumulative_and_independent() {
     let ((), report) = run_async_under_lab(0x5ec0_3003, |root| async move {

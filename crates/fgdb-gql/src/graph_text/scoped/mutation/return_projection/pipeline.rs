@@ -2787,22 +2787,58 @@ impl<'a> Parser<'a> {
         self.row_page_in_scope(schema, &[])
     }
 
-    /// `row_page` where `sources[i]` is the source spelling of output `i`, so
-    /// a write RETURN may order by `n.p` whether or not the item was aliased.
-    /// A key matching an output name keeps that meaning.
+    /// A write's result page. Terminal RETURN may rank expressions over its
+    /// completed output; a WITH head keeps its existing column page because
+    /// its continuation may still append hidden preimage columns.
     pub(in crate::graph_text) fn row_page_sourced(
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
         sources: &[Name<'a>],
-    ) -> Result<Option<ReadStageTemplate>, GraphSetTextError> {
+        terminal: bool,
+    ) -> Result<WriteResultPage, GraphSetTextError> {
         // A write has just projected a new output row. Its input's hidden
         // property columns describe a different scope, even when both rows
         // happen to have the same width. Restore those reads afterwards for
         // the write's own WITH continuation and frozen-property lowering.
         let input_boundary = self.boundary_reads.take();
-        let page = self.row_page_in_scope(schema, sources);
+        let page = if terminal {
+            self.write_expression_page(schema, sources)
+        } else {
+            self.row_page_in_scope(schema, sources)
+        };
         self.boundary_reads = input_boundary;
-        page
+        let mut result = WriteResultPage {
+            order: Vec::new(),
+            offset: ReadPageNumber::Literal(0),
+            count: None,
+            tail: None,
+        };
+        match page? {
+            Some(
+                page @ ReadStageTemplate::Page {
+                    computed: Some(_), ..
+                },
+            ) => {
+                // The write owner projects and deduplicates its final-state
+                // rows first. The same governed relational tail used by WITH
+                // then evaluates private sort cells, ranks, pages and removes
+                // those cells. Its final page alone spends the result quota.
+                result.tail = Some(vec![page]);
+            }
+            Some(ReadStageTemplate::Page {
+                order,
+                offset,
+                count,
+                ..
+            }) => {
+                result.order = order;
+                result.offset = offset;
+                result.count = count;
+            }
+            None => {}
+            Some(_) => unreachable!("a result page contains only its native page stage"),
+        }
+        Ok(result)
     }
 
     fn row_page_in_scope(
@@ -2925,6 +2961,15 @@ impl<'a> Parser<'a> {
             _ => unreachable!("UInt64 page parser returns its declared domain"),
         })
     }
+}
+
+/// Column-only pages retain the write owner's existing fast path. Computed
+/// terminal keys use its native row tail and never enter the visible schema.
+pub(in crate::graph_text) struct WriteResultPage {
+    pub(in crate::graph_text) order: Vec<GraphValueOrder>,
+    pub(in crate::graph_text) offset: ReadPageNumber,
+    pub(in crate::graph_text) count: Option<ReadPageNumber>,
+    pub(in crate::graph_text) tail: Option<Vec<ReadStageTemplate>>,
 }
 
 // Production row filters use selection's expression compiler. Keep the older

@@ -141,6 +141,70 @@ fn returning_writes_and_reads_share_one_workspace_and_one_completion() {
 }
 
 #[test]
+fn computed_write_ordering_keeps_robot_rows_frozen_and_rolls_back_late_errors() {
+    let ((), report) = run_async_under_lab(0x7478_6411, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let ordered = options(&[
+            "--write",
+            "UNWIND [3,1,2] AS x CREATE (n:Person {p:x}) \
+             RETURN n.p AS p ORDER BY -p SKIP 1 LIMIT 1",
+            "--write",
+            "MATCH (n:Person) SET n.q=n.p+10 \
+             RETURN n.p AS p,n.q AS q ORDER BY q-p*2",
+            "--write",
+            "MERGE (n:Person {p:1}) SET n.q=99 \
+             RETURN n.q AS q ORDER BY -q",
+        ]);
+        let mut output = Vec::new();
+        okay(run(&mut db, &contexts, &ordered, None, true, &mut output).await);
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(rows_at(&text, 1).len(), 1, "{text}");
+        assert!(rows_at(&text, 1)[0].contains(r#""cells":[{"type":"int","value":"2"}]"#));
+        let second = rows_at(&text, 2);
+        assert_eq!(second.len(), 3, "{text}");
+        for (row, p) in second.iter().zip([3, 2, 1]) {
+            assert!(
+                row.contains(&format!(
+                    r#""cells":[{{"type":"int","value":"{p}"}},{{"type":"int","value":"{}"}}]"#,
+                    p + 10,
+                )),
+                "{row}"
+            );
+        }
+        assert_eq!(rows_at(&text, 3).len(), 1, "{text}");
+        assert!(rows_at(&text, 3)[0].contains(r#""cells":[{"type":"int","value":"99"}]"#));
+        assert_eq!(text.matches("\"event\":\"result\"").count(), 1);
+        assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+
+        let before = db.vertices().unwrap();
+        let refused = options(&[
+            "--write",
+            "CREATE (n:Person {p:4}) RETURN n.p AS p ORDER BY -p",
+            "--write",
+            "MATCH (n:Person) SET n.q=42 \
+             RETURN n.p AS p ORDER BY 1/(p-2) LIMIT 0",
+        ]);
+        let mut output = Vec::new();
+        assert!(
+            run(&mut db, &contexts, &refused, None, true, &mut output)
+                .await
+                .is_err()
+        );
+        assert!(
+            output.is_empty(),
+            "no earlier buffered row escapes a failed transaction"
+        );
+        assert_eq!(db.vertices().unwrap(), before);
+        assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn merge_and_mutation_returning_freeze_post_statement_values_in_clause_order() {
     let ((), report) = run_async_under_lab(0x7478_6409, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

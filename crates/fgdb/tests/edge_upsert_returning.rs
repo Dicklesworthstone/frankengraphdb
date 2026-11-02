@@ -512,6 +512,67 @@ fn computed_edge_outputs_read_the_complete_upsert_bag_in_every_output_phase() {
 }
 
 #[test]
+fn computed_edge_ordering_ranks_final_occurrences_and_preserves_the_upsert_branches() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        seed(&mut db, commit, true).await;
+        let mut extra = WriteBatch::new(S);
+        extra.create_vertex(VId(3), vec![ITEM], vec![(P, CanonicalScalar::Int(3))]);
+        extra.add_edge(EId(13), VId(2), VId(3), vec![]);
+        db.write(commit, extra).await.unwrap();
+        let statement = fgdb_gql::PreparedGraphEdgeUpsertQueryText::prepare(
+            &format!("{UPSERT} RETURN r.p AS p ORDER BY -p SKIP 1 LIMIT 2"),
+            S,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let mut transaction = db.begin(txcx).unwrap();
+        for expected in [[30, 14], [126, 30]] {
+            let (_, output) = transaction
+                .execute_graph_edge_upserts_query_engine_governed(
+                    &mut db,
+                    cx,
+                    &statement,
+                    policy(2),
+                )
+                .unwrap();
+            assert_eq!(
+                output.value,
+                expected
+                    .into_iter()
+                    .map(|value| GraphValueRow::from_owned_values(vec![int(value)]))
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(output.rows.result_rows, 2);
+        }
+        let staged = transaction.staged_effect_digest().unwrap();
+        let failure = fgdb_gql::PreparedGraphEdgeUpsertQueryText::prepare(
+            "MATCH (a:Item)-[:S]->(b:Item) MERGE (a)-[r:R]->(b) \
+             SET r.p=0 RETURN r.p AS p ORDER BY 1/p LIMIT 0",
+            S,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert!(
+            transaction
+                .execute_graph_edge_upserts_query_engine_governed(&mut db, cx, &failure, policy(0),)
+                .is_err()
+        );
+        assert_eq!(transaction.staged_effect_digest().unwrap(), staged);
+        transaction.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(&db, cx, "MATCH ()-[r:R]->() RETURN r.p AS p ORDER BY p"),
+            vec![vec![int(30)], vec![int(126)]],
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn computed_edge_output_errors_beyond_limit_zero_restore_the_outer_prefix() {
     run(async |commit, cx, txcx| {
         for plural in [false, true] {

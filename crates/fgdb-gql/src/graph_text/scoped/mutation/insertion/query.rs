@@ -774,17 +774,11 @@ impl<'a> Parser<'a> {
             output = items.output;
             spellings = items.spellings;
         }
-        if let Some(ReadStageTemplate::Page {
-            order,
-            offset,
-            count,
-            ..
-        }) = self.row_page_sourced(&output, &spellings)?
-        {
-            returning.order = order;
-            returning.offset = offset;
-            returning.count = count;
-        }
+        let page = self.row_page_sourced(&output, &spellings, !head)?;
+        returning.order = page.order;
+        returning.offset = page.offset;
+        returning.count = page.count;
+        returning.tail = page.tail;
         if head {
             let tail = self.insertion_tail(&mut returning, syntax, source, output)?;
             returning.tail = Some(tail);
