@@ -539,6 +539,72 @@ impl GraphListQuantifier {
     }
 }
 impl GraphSetValue {
+    /// A scan may evaluate this expression over one binding without a graph
+    /// reader or the complete input's canonical row ordinal. This admits the
+    /// existing value VM, not a second evaluator. Inspect every lazy branch:
+    /// neither a dead graph read nor an unused random draw loses its contract.
+    /// Typed preparation already bounds the expression tree and lexical locals.
+    pub(crate) fn is_scan_local(&self) -> bool {
+        match self {
+            Self::Column(_)
+            | Self::Literal(_)
+            | Self::TypedNull(_)
+            | Self::Integer(_)
+            | Self::Value(_)
+            | Self::Local(_) => true,
+            // Even a map-valued receiver stays conservative here. Its static
+            // domain can be widened independently, with a reader-free proof.
+            Self::MapGet { .. } | Self::ElementMetadata { .. } | Self::Random { .. } => false,
+            Self::List(values) => values.iter().all(Self::is_scan_local),
+            Self::Size(value)
+            | Self::Keys(value)
+            | Self::Temporal {
+                argument: value, ..
+            }
+            | Self::Function {
+                argument: value, ..
+            } => value.is_scan_local(),
+            Self::Index { list, index } => list.is_scan_local() && index.is_scan_local(),
+            Self::In { value, list } => value.is_scan_local() && list.is_scan_local(),
+            Self::Equal { left, right } | Self::Ordered { left, right, .. } => {
+                left.is_scan_local() && right.is_scan_local()
+            }
+            Self::Comprehension { list, filter, map } => {
+                list.is_scan_local()
+                    && filter.as_deref().is_none_or(Self::is_scan_local)
+                    && map.as_deref().is_none_or(Self::is_scan_local)
+            }
+            Self::Quantifier {
+                list, predicate, ..
+            } => list.is_scan_local() && predicate.is_scan_local(),
+            Self::Slice { list, from, to } => {
+                list.is_scan_local()
+                    && from.as_deref().is_none_or(Self::is_scan_local)
+                    && to.as_deref().is_none_or(Self::is_scan_local)
+            }
+            Self::Range { start, end, step } => {
+                start.is_scan_local()
+                    && end.is_scan_local()
+                    && step.as_deref().is_none_or(Self::is_scan_local)
+            }
+            Self::Reduce { init, list, expr } => {
+                init.is_scan_local() && list.is_scan_local() && expr.is_scan_local()
+            }
+            Self::MapLiteral { values, guard, .. } => {
+                values.iter().all(Self::is_scan_local)
+                    && guard.as_deref().is_none_or(Self::is_scan_local)
+            }
+            Self::MapOverlay { base, values, .. } | Self::Let { body: base, values } => {
+                base.is_scan_local() && values.iter().all(Self::is_scan_local)
+            }
+            Self::Case { arms, otherwise } => {
+                arms.iter()
+                    .all(|(condition, value)| condition.is_scan_local() && value.is_scan_local())
+                    && otherwise.as_deref().is_none_or(Self::is_scan_local)
+            }
+        }
+    }
+
     /// A closed value depends only on bound literals and its own lexical
     /// locals, never the input row, graph state, or a row-ordinal draw. Frozen
     /// write batches may evaluate such values against their entry workspace:
@@ -3751,12 +3817,24 @@ pub(crate) fn value_function<E>(
                 list_members(argument, control).map_err(ProjectionFailure::Control)?
             {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-                let mut reversed = Vec::with_capacity(values.len());
+                // Grow only after each copied member has been admitted; a
+                // short allowance must not preallocate the entire result.
+                let mut reversed = Vec::new();
                 for value in values.iter().rev() {
                     reversed.push(copy_value(value, control).map_err(ProjectionFailure::Control)?);
                 }
                 Ok(GraphValue::List(reversed.into_boxed_slice()))
             } else if let GraphValue::Scalar(CanonicalScalar::Text(value)) = argument {
+                // Reversing preserves UTF-8 byte length. Admit the temporary
+                // before collecting it; text() separately admits the owned
+                // canonical copy made from this temporary.
+                for _ in 0..=value
+                    .as_str()
+                    .len()
+                    .div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+                {
+                    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                }
                 let reversed: String = value.as_str().chars().rev().collect();
                 text(&reversed, control)
             } else {
@@ -4383,6 +4461,50 @@ mod path_function_tests {
     use super::*;
     use crate::algebra::GraphPath;
     use fgdb_types::{EId, VId};
+
+    #[test]
+    fn reversed_text_admits_both_payload_copies_and_preserves_every_refusal() {
+        for len in [
+            0,
+            1,
+            GRAPH_VALUE_PAYLOAD_UNIT_BYTES,
+            GRAPH_VALUE_PAYLOAD_UNIT_BYTES + 1,
+            4096,
+        ] {
+            let input = "ab".repeat(len / 2) + if len % 2 == 0 { "" } else { "c" };
+            let argument = GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&input).unwrap());
+            let reversed = if len % 2 == 0 {
+                "ba".repeat(len / 2)
+            } else {
+                String::from("c") + &"ba".repeat(len / 2)
+            };
+            let expected = GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&reversed).unwrap());
+            let mut events = Vec::new();
+            let actual = value_function(GraphValueFunction::Reverse, &argument, 0, &mut |event| {
+                events.push(event);
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                events,
+                vec![
+                    GlaExecutionEvent::ScratchEntry;
+                    2 * (1 + len.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES))
+                ]
+            );
+            for stop in 0..events.len() {
+                let mut seen = 0;
+                let result = value_function(GraphValueFunction::Reverse, &argument, 0, &mut |_| {
+                    let at = seen;
+                    seen += 1;
+                    if at == stop { Err(stop) } else { Ok(()) }
+                });
+                assert!(matches!(result, Err(ProjectionFailure::Control(at)) if at == stop));
+                assert_eq!(seen, stop + 1);
+            }
+        }
+    }
 
     #[test]
     fn path_lists_preserve_native_copy_charges_and_every_interruption_boundary() {

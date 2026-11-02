@@ -42,7 +42,10 @@ impl WriteTxn {
                     usage.observe(policy, event)
                 },
             )?;
-            let names = source.catalog_names();
+            let names = source.catalog_names(&mut |event| {
+                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                usage.observe(policy, event)
+            })?;
             let maps = source.property_maps(
                 &mut |event| {
                     cx.checkpoint().map_err(GqlQueryError::Interrupted)?;

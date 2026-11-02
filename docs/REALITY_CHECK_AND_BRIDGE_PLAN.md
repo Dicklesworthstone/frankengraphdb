@@ -9,6 +9,72 @@ the separately pinned `c30a48d088a6c176da022b3930dfba401c32056d` cut. Existing
 peer edits were preserved. Current findings, proof limits and the revised bridge are below.
 This audit does not award G1–G4 or release qualification.
 
+## Fresh-eyes implementation continuation — 2026-11-02
+
+The latest **completed** proof at this checkpoint is canonical `7a59ecd48aa74fb2565a71bfe99f318726653a65`,
+tree `ec673a30456fd31185b8f51a2ef477b1bf2c41b2`, retained at
+`/data/ssd/tmp/fgdb-local-proof-integrated-20261102-v9`. Its actual producer and
+repository-bound verifier both exit zero: all ten core and forty registered
+gates pass, with 13,860 passed tests, zero failures, 34 existing ignores, zero
+filters and 1,095 summaries. Both actual default-feature suites pass with
+identical normalized outcomes. One nine-test Miri invocation passes, counted
+once across two ledger entries. The source/tool guards hold. Full UBS preserves
+all 277 existing critical identities across 2,493 contexts; the known generic
+token blind spot remains. This is not a security-clearance claim.
+
+The current implementation connects existing pull reducers to ordinary pure
+composite aggregate inputs (`size`, lists and deterministic nested expressions)
+and WITH projections. Named single-edge properties also retain their required
+checked path capture. Graph reads and random draws remain structurally
+ineligible, including inside unused CASE/reduce branches. The real native
+integration target passes all seventeen tests on the four-file intermediate
+source, including exact allowances, literal grouped sums, a later MVCC change,
+retained historical cuts, cancellation, empty input and late SUM type errors
+under LIMIT 0/1. The original tests and limits remain unchanged. This advances
+`fgdb-61p1n`; its broader no-table, scoped and larger-than-memory acceptance
+remains open. No incumbent or section 17 performance win is claimed.
+
+Fresh-eyes sampling uses seed `0xc0de61102` over 923 production Rust candidates:
+`fgdb-gql/src/evidence_limits.rs`, `fgdb/src/write_txn_parts/aggregate_queries.rs`
+and `fgdb-prism/src/foundation.rs`. The bounded traces find no concrete decoder
+or Prism defect. The transaction trace finds a real resource gap: all three
+governed query callers build catalog-name caches without charging allocations
+or polling cancellation. `fgdb-ipwec` repairs that existing owner, admitting
+temporary label sets, cache/list entries and canonical text payloads before
+allocation through the same query allowance. Staged edits, deterministic order
+and deferred unmapped-symbol errors are preserved. Two new owner laws and an
+actual transaction integration law cover values, payload boundaries, every
+callback refusal, exact/one-short budgets and private staged data. These new
+owner cases remain authored until their actual native exits are recorded.
+The current complete native aggregate integration target now executes all
+eighteen functions successfully, including the new transaction law; its
+same-feature compiler acknowledgement, formatting, all-target typecheck and
+strict Clippy also exit zero at
+`/data/ssd/tmp/fgdb-catalog-admission-preflight-rkklfglv`. This dirty-tree
+preflight is not the mandatory complete committed-tree proof.
+
+Two stale original tasks are qualified against unchanged `7a59` implementation
+and V9, rather than counted as new code: `fgdb-nge6g` (all ten native maintenance
+laws, live authorization/pinned-reader semantics) and `fgdb-zpypj` (the existing
+4 MiB parameter envelope, preserved expression caps and full fuzz target).
+The latter also has seven actual public CLI processes at
+`/data/ssd/tmp/fgdb-zpypj-public7a59-t1sh7ek3`: six exit zero; one intentionally
+oversized operand exits three. The positive writes all 5,000 parameter maps in
+one commit and verifies every typed ordered row. The same operand query succeeds
+with a small list; refusal leaves data unchanged. The generic public syntax
+diagnostic alone does not identify the exact internal limit. These two original
+closures augment the eighteen below; broader feature acceptance is unchanged.
+
+The next exact committed-tree qualification is planned at
+`/data/ssd/tmp/fgdb-local-proof-integrated-20261102-v10`. Until its complete
+native exits and manifest exist, earlier focused results do not qualify the new
+source. The expected complete-core denominator is 13,867 passes plus the same
+34 existing ignores, zero filters and 1,095 summaries **if green**. Existing
+scripts, gates, corpus bytes, thresholds and dependency policy are unchanged.
+The external granular TODO and honesty audit retain intermediate errors,
+interrupted compiler invocations and pending work. In particular, neither this
+sample nor a scanner exit proves the whole repository free of bugs.
+
 ## Current delta — 2026-10-30
 
 ### Integrated runtime repair checkpoint — 2026-10-31 23:20 UTC

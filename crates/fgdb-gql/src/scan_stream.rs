@@ -48,19 +48,11 @@ impl AggregateScanPlan {
         }
         // These cursors retire their source before completed-group output and
         // evaluate each input in physical scan order. Keep graph-reading,
-        // dynamically typed and ordinal-dependent expressions on the host
-        // with an element reader and the complete canonical input relation.
+        // ordinal-dependent expressions on the host with an element reader
+        // and the complete canonical input relation. Pure composite values
+        // use the same row VM as the explicit pull APIs.
         // A dead branch is still part of the prepared expression contract.
-        let row_local = |value: &GraphSetValue| {
-            matches!(
-                value,
-                GraphSetValue::Column(_)
-                    | GraphSetValue::Literal(_)
-                    | GraphSetValue::TypedNull(_)
-                    | GraphSetValue::Value(_)
-                    | GraphSetValue::Integer(_)
-            )
-        };
+        let row_local = GraphSetValue::is_scan_local;
         if aggregate
             .input_projection()
             .is_some_and(|columns| columns.iter().any(|column| !row_local(column.value())))
@@ -84,6 +76,10 @@ impl AggregateScanPlan {
             GlaOperator::ScanEdges { .. }
                 if operators.iter().all(|operator| match operator {
                     GlaOperator::ScanEdges { .. }
+                    // Named root-edge properties use a capture even though
+                    // the input remains this single edge scan. The physical
+                    // compiler below validates its complete capture contract.
+                    | GlaOperator::CapturePath { .. }
                     | GlaOperator::ProjectValues { .. }
                     | GlaOperator::OrderByValues
                     | GlaOperator::Limit {
@@ -518,6 +514,51 @@ mod sort_tail_tests {
     use crate::edge_stream::EdgeScanPlan;
     use crate::stream::VertexScanPlan;
     use fgdb_delta_types::{PropertyKeyId, RelationId};
+
+    #[test]
+    fn scan_local_composites_keep_hidden_graph_reads_and_random_draws_ineligible() {
+        use crate::{GraphElementKey, GraphElementMetadata, GraphSetValue as V};
+        let wraps = |value: V| {
+            vec![
+                V::Size(Box::new(V::List(vec![value.clone()]))),
+                V::Case {
+                    arms: vec![(
+                        V::Value(crate::algebra::GraphValue::Scalar(
+                            fgdb_types::CanonicalScalar::Bool(false),
+                        )),
+                        value.clone(),
+                    )],
+                    otherwise: Some(Box::new(V::Column(0))),
+                },
+                V::Reduce {
+                    init: Box::new(V::Column(0)),
+                    list: Box::new(V::List(vec![])),
+                    expr: Box::new(value),
+                },
+            ]
+        };
+        for value in wraps(V::Column(0)) {
+            assert!(value.is_scan_local());
+        }
+        for effect in [
+            V::Random { site: 0, scope: 0 },
+            V::MapGet {
+                map: Box::new(V::Column(0)),
+                key: "score".into(),
+                property: GraphElementKey::Property(PropertyKeyId(1)),
+            },
+            V::ElementMetadata {
+                kind: GraphElementMetadata::Properties,
+                value: Box::new(V::Column(0)),
+                catalog: None,
+            },
+        ] {
+            assert!(!effect.is_scan_local());
+            for nested in wraps(effect) {
+                assert!(!nested.is_scan_local());
+            }
+        }
+    }
 
     fn plan(
         edge: bool,

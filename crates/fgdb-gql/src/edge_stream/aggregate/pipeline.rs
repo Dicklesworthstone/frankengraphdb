@@ -106,16 +106,10 @@ impl InputPipeline {
                 current = child;
             } else if let Some((child, projection, quantifier)) = current.incremental_projection() {
                 if quantifier != GraphSetQuantifier::All
-                    || !projection.iter().all(|column| {
-                        matches!(
-                            column.value(),
-                            GraphSetValue::Column(_)
-                                | GraphSetValue::Literal(_)
-                                | GraphSetValue::TypedNull(_)
-                                | GraphSetValue::Integer(_)
-                                | GraphSetValue::Value(_)
-                        )
-                    })
+                    || !projection
+                        .iter()
+                        .map(GraphSetProjection::value)
+                        .all(GraphSetValue::is_scan_local)
                 {
                     // rand() depends on each relational stage's canonical
                     // input ordinal, not physical graph order. MapGet may need

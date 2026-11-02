@@ -74,16 +74,28 @@ mod query_source {
             predicate.matches_borrowed(label, property)
         }
         /// The basis labels with this transaction's staged label edits.
-        fn effective_labels(&self) -> BTreeSet<LabelId> {
-            let mut labels: BTreeSet<LabelId> = self.labels.iter().copied().collect();
+        fn effective_labels<E>(
+            &self,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<BTreeSet<LabelId>, E> {
+            let mut labels = BTreeSet::new();
+            for &label in self.labels {
+                control(SourceEvent::Work)?;
+                control(SourceEvent::ScratchEntry)?;
+                labels.insert(label);
+            }
             for (&label, &present) in &self.label_edits {
+                control(SourceEvent::Work)?;
                 if present {
-                    labels.insert(label);
+                    if !labels.contains(&label) {
+                        control(SourceEvent::ScratchEntry)?;
+                        labels.insert(label);
+                    }
                 } else {
                     labels.remove(&label);
                 }
             }
-            labels
+            Ok(labels)
         }
     }
 
@@ -578,6 +590,24 @@ mod query_source {
         }
     }
 
+    /// Admit the value node and UTF-8 payload before the canonical text copy.
+    /// Missing or invalid names remain deferred errors on their own elements.
+    fn catalog_name<E>(
+        text: Option<&String>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<CanonicalScalar>, E> {
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        for _ in 0..=text
+            .len()
+            .div_ceil(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+        {
+            control(SourceEvent::ScratchEntry)?;
+        }
+        Ok(CanonicalScalar::ucs_basic_text(text).ok())
+    }
+
     /// One basis/template pair, with output shape carried by the checked plan.
     /// The borrowed source is the same for scalar and tuple query projections.
     pub(super) struct OverlayQuerySource<'a, Row = VId> {
@@ -619,35 +649,50 @@ mod query_source {
         /// over staged label edits, as the snapshot source resolves them. An
         /// unmapped symbol refuses when its element is read; it never reads
         /// as NULL.
-        pub(super) fn catalog_names(&self) -> CatalogNames {
+        pub(super) fn catalog_names<E>(
+            &self,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<CatalogNames, E> {
             let reverse = self.logical.reverse_catalog.as_deref();
-            let name = |text: Option<&String>| {
-                text.and_then(|text| CanonicalScalar::ucs_basic_text(text).ok())
-            };
             let mut labels = BTreeMap::new();
             if self.logical.projects_labels() {
                 for (vid, view) in &self.vertices {
-                    let names = view
-                        .effective_labels()
-                        .into_iter()
-                        .map(|id| {
-                            name(reverse.and_then(|catalog| catalog.labels.get(&id)))
-                                .map(fgdb_gql::algebra::GraphValue::Scalar)
-                                .ok_or(id)
-                        })
-                        .collect();
-                    labels.insert(*vid, names);
+                    control(SourceEvent::Work)?;
+                    // The retained map entry and list container, before either
+                    // can own storage. These are logical scratch units.
+                    control(SourceEvent::ScratchEntry)?;
+                    control(SourceEvent::ScratchEntry)?;
+                    let mut names = Vec::new();
+                    let mut missing = None;
+                    for id in view.effective_labels(control)? {
+                        control(SourceEvent::Work)?;
+                        let text = catalog_name(
+                            reverse.and_then(|catalog| catalog.labels.get(&id)),
+                            control,
+                        )?;
+                        let Some(text) = text else {
+                            missing = Some(id);
+                            break;
+                        };
+                        names.push(fgdb_gql::algebra::GraphValue::Scalar(text));
+                    }
+                    labels.insert(*vid, missing.map_or(Ok(names), Err));
                 }
             }
             let mut types = BTreeMap::new();
             if self.logical.projects_types() {
                 for ((eid, _, relation, _), _) in &self.edges {
-                    let text = name(reverse.and_then(|catalog| catalog.relations.get(relation)))
-                        .ok_or(*relation);
+                    control(SourceEvent::Work)?;
+                    control(SourceEvent::ScratchEntry)?;
+                    let text = catalog_name(
+                        reverse.and_then(|catalog| catalog.relations.get(relation)),
+                        control,
+                    )?
+                    .ok_or(*relation);
                     types.insert(*eid, text);
                 }
             }
-            CatalogNames { labels, types }
+            Ok(CatalogNames { labels, types })
         }
         pub(super) fn property_maps<E>(
             &self,
@@ -1512,7 +1557,11 @@ mod query_source {
                         usage.observe(policy, event)
                     },
                 )?;
-                let names = source.catalog_names();
+                let names = source.catalog_names(&mut |event| {
+                    cx.checkpoint()
+                        .map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                    usage.observe(policy, event)
+                })?;
                 let maps = source.property_maps(
                     &mut |event| {
                         cx.checkpoint()
@@ -1573,7 +1622,11 @@ mod query_source {
                         usage.observe(policy, event)
                     },
                 )?;
-                let names = source.catalog_names();
+                let names = source.catalog_names(&mut |event| {
+                    cx.checkpoint()
+                        .map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                    usage.observe(policy, event)
+                })?;
                 let maps = source.property_maps(
                     &mut |event| {
                         cx.checkpoint()
@@ -2072,6 +2125,165 @@ mod query_source {
     mod tests {
         use super::*;
         use fgdb_gql::algebra::IntegerComparison;
+
+        #[test]
+        fn catalog_name_caches_admit_staged_labels_types_and_every_refusal() {
+            use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
+            let long = "z".repeat(GRAPH_VALUE_PAYLOAD_UNIT_BYTES + 1);
+            let pattern = fgdb_gql::PreparedGraphText::prepare_with_resolver(
+                "MATCH (a)-[r:R]->(b) RETURN labels(a),type(r)",
+                fgdb_gql::RelationBind::new()
+                    .with_label("removed", LabelId(1))
+                    .with_label("B", LabelId(2))
+                    .with_label(&long, LabelId(3))
+                    .with_relation("R", RelationId(1)),
+            )
+            .unwrap()
+            .bind_parameters(&fgdb_gql::GqlParameters::new())
+            .unwrap();
+            let basis = [LabelId(1), LabelId(2)];
+            let mut changed = VertexView::new(&basis, &[]);
+            changed.label_edits.insert(LabelId(1), false);
+            changed.label_edits.insert(LabelId(3), true);
+            let source = OverlayQuerySource {
+                logical: pattern.plan().clone(),
+                tables: OverlayGraphTables {
+                    vertices: vec![
+                        (VId(1), changed),
+                        (VId(2), VertexView::new(&[LabelId(99)], &[])),
+                    ],
+                    edges: vec![
+                        ((EId(7), VId(1), RelationId(1), VId(2)), EdgeView::new(&[])),
+                        ((EId(8), VId(2), RelationId(99), VId(1)), EdgeView::new(&[])),
+                    ],
+                    snapshot_records: 4,
+                    scan_observations: Vec::new(),
+                },
+            };
+            let mut events = Vec::new();
+            let names = source
+                .catalog_names(&mut |event| {
+                    events.push(event);
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
+            let text =
+                |text: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(text).unwrap());
+            assert_eq!(
+                names.labels(VId(1)).unwrap(),
+                Some([text("B"), text(&long)].as_slice())
+            );
+            assert_eq!(
+                names.edge_type(EId(7)).unwrap(),
+                Some(&CanonicalScalar::ucs_basic_text("R").unwrap())
+            );
+            assert!(matches!(
+                names.labels(VId(2)),
+                Err(WriteTxnError::Read(crate::ReadError::UnmappedLabel(
+                    LabelId(99)
+                )))
+            ));
+            assert!(matches!(
+                names.edge_type(EId(8)),
+                Err(WriteTxnError::Read(crate::ReadError::UnmappedRelation(
+                    RelationId(99)
+                )))
+            ));
+            assert!(names.labels(VId(9)).unwrap().is_none());
+            assert!(names.edge_type(EId(9)).unwrap().is_none());
+            assert_eq!(basis, [LabelId(1), LabelId(2)]);
+            // Four cache entries, two list containers, four temporary label
+            // entries, three text nodes and four units of UTF-8 payload.
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|&&event| event == SourceEvent::ScratchEntry)
+                    .count(),
+                17
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|&&event| event == SourceEvent::Work)
+                    .count(),
+                12
+            );
+            for stop in 0..events.len() {
+                let mut observed = Vec::new();
+                let result = source.catalog_names(&mut |event| {
+                    let index = observed.len();
+                    observed.push(event);
+                    if index == stop { Err(stop) } else { Ok(()) }
+                });
+                assert!(matches!(result, Err(at) if at == stop));
+                assert_eq!(observed, events[..=stop]);
+            }
+        }
+
+        #[test]
+        fn catalog_text_payload_is_reserved_before_copy_and_unused_names_are_free() {
+            use fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES;
+            for bytes in [
+                0,
+                1,
+                GRAPH_VALUE_PAYLOAD_UNIT_BYTES,
+                GRAPH_VALUE_PAYLOAD_UNIT_BYTES + 1,
+                4096,
+            ] {
+                let input = "a".repeat(bytes);
+                let mut events = 0;
+                let value = catalog_name(Some(&input), &mut |event| {
+                    assert_eq!(event, SourceEvent::ScratchEntry);
+                    events += 1;
+                    Ok::<_, ()>(())
+                })
+                .unwrap()
+                .unwrap();
+                assert_eq!(value, CanonicalScalar::ucs_basic_text(&input).unwrap());
+                assert_eq!(events, 1 + bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES));
+                for stop in 0..events {
+                    let mut seen = 0;
+                    assert_eq!(
+                        catalog_name(Some(&input), &mut |_| {
+                            seen += 1;
+                            if seen == stop + 1 { Err(stop) } else { Ok(()) }
+                        }),
+                        Err(stop)
+                    );
+                    assert_eq!(seen, stop + 1);
+                }
+            }
+            assert_eq!(
+                catalog_name(None, &mut |_| -> Result<(), ()> {
+                    panic!("missing name must not copy")
+                }),
+                Ok(None)
+            );
+            let pattern = fgdb_gql::PreparedGraphText::prepare_with_resolver(
+                "MATCH (n) RETURN n",
+                fgdb_gql::RelationBind::new(),
+            )
+            .unwrap()
+            .bind_parameters(&fgdb_gql::GqlParameters::new())
+            .unwrap();
+            let source = OverlayQuerySource {
+                logical: pattern.plan().clone(),
+                tables: OverlayGraphTables {
+                    vertices: vec![(VId(1), VertexView::new(&[LabelId(99)], &[]))],
+                    edges: vec![((EId(7), VId(1), RelationId(99), VId(1)), EdgeView::new(&[]))],
+                    snapshot_records: 2,
+                    scan_observations: Vec::new(),
+                },
+            };
+            let names = source
+                .catalog_names(&mut |_| -> Result<(), ()> {
+                    panic!("unused names must not allocate")
+                })
+                .unwrap();
+            assert!(names.labels.is_empty());
+            assert!(names.types.is_empty());
+        }
+
         #[test]
         fn borrowed_property_overrides_shadow_without_cloning_or_coercion() {
             let key = PropertyKeyId(1);

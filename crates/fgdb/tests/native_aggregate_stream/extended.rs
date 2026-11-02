@@ -6,6 +6,451 @@ use fgdb_gql::{GraphAggregateValue, GraphExactAverage};
 const EXACT: &str = "COUNT(*) AS rows, COUNT(n.score) AS nonnull, COUNT(DISTINCT n.score) AS different, SUM(n.score) AS sum, SUM(DISTINCT n.score) AS distinct_sum, AVG(n.score) AS average, AVG(DISTINCT n.score) AS distinct_average, MIN(n.score) AS minimum, MAX(n.score) AS maximum";
 
 #[test]
+fn transaction_catalog_names_share_the_query_allowance_and_keep_staged_values() {
+    use fgdb_gql::{GlaLimitDimension, PreparedGraphText};
+    let ((), report) = run_async_under_lab(0xa66e_2303, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut basis = WriteBatch::new(RelationId(1));
+        for id in 0..2 {
+            basis.create_vertex(VId(id), vec![LABEL], vec![]);
+        }
+        basis.add_edge(EId(1), VId(0), VId(1), vec![]);
+        db.write(&contexts.commit(), basis).await.unwrap();
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let mut staged = WriteBatch::new(RelationId(1));
+        staged.create_vertex(VId(2), vec![LABEL, LabelId(4)], vec![]);
+        staged.add_edge(EId(2), VId(1), VId(2), vec![]);
+        txn.write(&mut db, staged).unwrap();
+        let catalog = || symbols().with_label("Extra", LabelId(4));
+        let text = |text: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(text).unwrap());
+        let labels =
+            |values: &[&str]| GraphValue::List(values.iter().map(|name| text(name)).collect());
+        let args = GqlParameters::new();
+        for (statement, expected) in [
+            (
+                "MATCH (n:L) RETURN labels(n)",
+                vec![
+                    vec![labels(&["L"])],
+                    vec![labels(&["L"])],
+                    vec![labels(&["L", "Extra"])],
+                ],
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) RETURN type(r)",
+                vec![vec![text("R")], vec![text("R")]],
+            ),
+        ] {
+            let pattern = PreparedGraphText::prepare_with_resolver(statement, catalog())
+                .unwrap()
+                .bind_parameters(&args)
+                .unwrap();
+            let result = txn
+                .execute_graph_pattern_governed(&db, &cx, &pattern, wide())
+                .unwrap();
+            assert_eq!(
+                result
+                    .value
+                    .iter()
+                    .map(|row| row.values().to_vec())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let exact = GqlQueryPolicy::new(
+                result.rows.snapshot_records,
+                result.rows.result_rows,
+                result.evaluator.work_units,
+                result.evaluator.scratch_entries,
+            );
+            assert_eq!(
+                txn.execute_graph_pattern_governed(&db, &cx, &pattern, exact)
+                    .unwrap(),
+                result
+            );
+            for (dimension, allowance) in [
+                (
+                    GlaLimitDimension::ScratchEntries,
+                    GqlQueryPolicy::new(
+                        u64::MAX,
+                        u64::MAX,
+                        u64::MAX,
+                        exact.evaluator.max_scratch_entries - 1,
+                    ),
+                ),
+                (
+                    GlaLimitDimension::WorkUnits,
+                    GqlQueryPolicy::new(
+                        u64::MAX,
+                        u64::MAX,
+                        exact.evaluator.max_work_units - 1,
+                        u64::MAX,
+                    ),
+                ),
+            ] {
+                assert!(
+                    matches!(txn.execute_graph_pattern_governed(&db, &cx, &pattern, allowance), Err(GqlQueryError::Evaluator(limit)) if limit.dimension == dimension)
+                );
+            }
+        }
+        let PreparedNativeRead::Aggregate(prepared) = PreparedNativeRead::prepare(
+            "MATCH (n:L) RETURN labels(n) AS labels,count(*) AS n ORDER BY labels",
+            &args,
+            catalog(),
+        )
+        .unwrap() else {
+            panic!("expected aggregate");
+        };
+        let aggregate = prepared.bind_parameters(&args).unwrap();
+        let result = txn
+            .execute_graph_aggregate_governed(&db, &cx, &aggregate, wide())
+            .unwrap();
+        assert_eq!(
+            result
+                .value
+                .iter()
+                .map(|row| (row.keys().to_vec(), row.values().to_vec()))
+                .collect::<Vec<_>>(),
+            vec![
+                (vec![labels(&["L"])], vec![GraphAggregateValue::Count(2)]),
+                (
+                    vec![labels(&["L", "Extra"])],
+                    vec![GraphAggregateValue::Count(1)]
+                ),
+            ]
+        );
+        let exact = GqlQueryPolicy::new(
+            result.rows.snapshot_records,
+            result.rows.result_rows,
+            result.evaluator.work_units,
+            result.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            txn.execute_graph_aggregate_governed(&db, &cx, &aggregate, exact)
+                .unwrap(),
+            result
+        );
+        assert!(
+            matches!(txn.execute_graph_aggregate_governed(&db, &cx, &aggregate, GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, exact.evaluator.max_scratch_entries - 1)), Err(GqlQueryError::Evaluator(limit)) if limit.dimension == GlaLimitDimension::ScratchEntries)
+        );
+        // A staged vertex/edge remains private after successful and refused reads.
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(db.edges().unwrap().len(), 1);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn ordinary_composite_aggregate_inputs_use_the_existing_pull_reducers() {
+    use fgdb_gql::GraphAggregateTextSlot;
+
+    let ((), report) = run_async_under_lab(0xa66e_2301, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        let mut totals = [0_i128; 4];
+        for id in 0..64_u128 {
+            let group = (id % 4) as usize;
+            let score = (id % 5) as i64;
+            totals[group] += i128::from(score);
+            batch.create_vertex(
+                VId(id),
+                vec![LABEL],
+                vec![
+                    (SCORE, CanonicalScalar::Int(score)),
+                    (
+                        TAG,
+                        CanonicalScalar::ucs_basic_text(&"x".repeat(group + 1)).unwrap(),
+                    ),
+                ],
+            );
+        }
+        let mut edge_total = 0_i128;
+        for id in 0..128_u128 {
+            let score = (id % 7) as i64;
+            edge_total += i128::from(score);
+            batch.add_edge(
+                EId(1000 + id),
+                VId(id % 64),
+                VId((id + 1) % 64),
+                vec![(SCORE, CanonicalScalar::Int(score))],
+            );
+        }
+        let basis = db.write(&commit, batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let params = GqlParameters::new();
+        let width =
+            |value| GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let mut retained = Vec::new();
+        for (text, records, expected) in [
+            (
+                "MATCH (n:L) RETURN size(n.tag) AS width,count(*) AS n,sum(n.score) AS total ORDER BY width",
+                64,
+                (0..4)
+                    .map(|group| {
+                        vec![
+                            width(group as i64 + 1),
+                            GraphAggregateValue::Count(16),
+                            GraphAggregateValue::Integer(totals[group]),
+                        ]
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "MATCH (n:L) WITH size(reverse(n.tag)) AS width,n.score AS score RETURN width,count(*) AS n,sum(score) AS total ORDER BY width",
+                64,
+                (0..4)
+                    .map(|group| {
+                        vec![
+                            width(group as i64 + 1),
+                            GraphAggregateValue::Count(16),
+                            GraphAggregateValue::Integer(totals[group]),
+                        ]
+                    })
+                    .collect(),
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) RETURN size([r.score,r.score+1]) AS width,count(*) AS n,sum(r.score) AS total ORDER BY width",
+                128,
+                vec![vec![
+                    width(2),
+                    GraphAggregateValue::Count(128),
+                    GraphAggregateValue::Integer(edge_total),
+                ]],
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) WITH size([r.score]) AS width,r.score AS score RETURN width,count(*) AS n,sum(score) AS total ORDER BY width",
+                128,
+                vec![vec![
+                    width(1),
+                    GraphAggregateValue::Count(128),
+                    GraphAggregateValue::Integer(edge_total),
+                ]],
+            ),
+        ] {
+            let (definition, columns, slots) =
+                match PreparedNativeRead::prepare(text, &params, symbols()).unwrap() {
+                    PreparedNativeRead::Aggregate(prepared) => (
+                        prepared.bind_parameters(&params).unwrap(),
+                        prepared.columns().to_vec(),
+                        prepared.output_slots().to_vec(),
+                    ),
+                    PreparedNativeRead::PipelineAggregate(prepared) => (
+                        prepared.bind_parameters(&params).unwrap(),
+                        prepared.columns().to_vec(),
+                        prepared.output_slots().to_vec(),
+                    ),
+                    _ => panic!("expected native graph aggregate: {text}"),
+                };
+            assert!(
+                fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(&definition).is_some(),
+                "{text}; input {:?}; explicit edge compiler {:?}",
+                definition.input_pattern().plan().operators(),
+                fgdb_gql::edge_stream::aggregate::EdgeAggregatePlan::compile(&definition).err(),
+            );
+            let mut cursor = db
+                .query_aggregate_stream(&cx, text, &params, symbols(), wide())
+                .unwrap();
+            let groups = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(cursor.row_stats().snapshot_records, records);
+            let exact = GqlQueryPolicy::new(
+                records,
+                groups.len() as u64,
+                cursor.evaluator_stats().work_units,
+                cursor.evaluator_stats().scratch_entries,
+            );
+            let execution = db
+                .execute_graph_aggregate_governed(&cx, &definition, exact)
+                .unwrap();
+            assert!(execution.value == groups);
+            assert_eq!(execution.rows, cursor.row_stats());
+            assert_eq!(execution.evaluator, cursor.evaluator_stats());
+            let typed = groups
+                .iter()
+                .map(|row| {
+                    slots
+                        .iter()
+                        .map(|slot| match *slot {
+                            GraphAggregateTextSlot::GroupKey(at) => {
+                                GraphAggregateValue::Value(row.keys()[at].clone())
+                            }
+                            GraphAggregateTextSlot::Aggregate(at) => row.values()[at].clone(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            assert!(typed == expected, "typed literal rows differ: {text}");
+            let expected = QueryResult::Rows {
+                columns,
+                rows: typed,
+            };
+            assert_eq!(
+                db.query(&cx, text, &params, symbols(), exact).unwrap(),
+                expected
+            );
+            assert_eq!(
+                view.query(&cx, text, &params, symbols(), exact).unwrap(),
+                expected
+            );
+            assert!(matches!(
+                db.query(
+                    &cx,
+                    text,
+                    &params,
+                    symbols(),
+                    GqlQueryPolicy::new(records - 1, u64::MAX, u64::MAX, u64::MAX)
+                ),
+                Err(QueryError::Aggregate(GqlQueryError::Rows(_)))
+            ));
+            retained.push((text, expected, records == 64));
+        }
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_vertex_property(VId(0), SCORE, Some(CanonicalScalar::Int(100)));
+        update.set_vertex_property(
+            VId(0),
+            TAG,
+            Some(CanonicalScalar::ucs_basic_text("longer").unwrap()),
+        );
+        update.set_edge_property(EId(1000), SCORE, Some(CanonicalScalar::Int(1000)));
+        update.delete_edge(EId(1001));
+        update.add_edge(
+            EId(2000),
+            VId(0),
+            VId(1),
+            vec![(SCORE, CanonicalScalar::Int(7))],
+        );
+        assert!(db.write(&commit, update).await.unwrap() > basis);
+        for (text, expected, vertex) in retained {
+            let mut changed = expected.clone();
+            let QueryResult::Rows { rows, .. } = &mut changed else {
+                unreachable!();
+            };
+            if vertex {
+                rows[0][1] = GraphAggregateValue::Count(15);
+                rows.push(vec![
+                    width(6),
+                    GraphAggregateValue::Count(1),
+                    GraphAggregateValue::Integer(100),
+                ]);
+            } else {
+                rows[0][2] = GraphAggregateValue::Integer(edge_total + 1006);
+            }
+            assert_ne!(changed, expected);
+            assert_eq!(
+                db.query(&cx, text, &params, symbols(), wide()).unwrap(),
+                changed
+            );
+            assert_eq!(
+                view.query(&cx, text, &params, symbols(), wide()).unwrap(),
+                expected
+            );
+            let historical = text.replacen(
+                " RETURN ",
+                &format!(" FOR SYSTEM_TIME AS OF SEQ {} RETURN ", basis.0),
+                1,
+            );
+            // A selector belongs to MATCH, before WITH in a pipeline.
+            let historical = if let Some((head, tail)) = text.split_once(" WITH ") {
+                format!("{head} FOR SYSTEM_TIME AS OF SEQ {} WITH {tail}", basis.0)
+            } else {
+                historical
+            };
+            assert_eq!(
+                db.query(&cx, &historical, &params, symbols(), wide())
+                    .unwrap(),
+                expected
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn ordinary_composite_aggregates_keep_empty_late_fault_and_cancellation_contracts() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
+    let ((), report) = run_async_under_lab(0xa66e_2302, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let params = GqlParameters::new();
+        let empty = db.query(
+            &cx,
+            "MATCH (n:L) WHERE n.score > 1000 RETURN size(reverse(n.tag)) AS width,SUM(n.score) AS total",
+            &params,
+            symbols(),
+            wide(),
+        ).unwrap();
+        assert!(matches!(empty, QueryResult::Rows { rows, .. } if rows.is_empty()));
+
+        let text = "MATCH (n:L) RETURN size(reverse(n.tag)) AS width,SUM(n.score) AS total";
+        let expected = db.query(&cx, text, &params, symbols(), wide()).unwrap();
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        assert_eq!(
+            db.query(
+                &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                text,
+                &params,
+                symbols(),
+                wide()
+            )
+            .unwrap(),
+            expected
+        );
+        let calls = probe.calls();
+        assert!(calls > 2);
+        for stop in [1, calls / 2, calls] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            assert!(matches!(
+                db.query(
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    text,
+                    &params,
+                    symbols(),
+                    wide()
+                ),
+                Err(QueryError::Aggregate(GqlQueryError::Interrupted(_)))
+            ));
+            assert_eq!(probe.calls(), stop);
+        }
+        let pinned = db.read_session().unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_vertex_property(
+            VId(u128::MAX),
+            SCORE,
+            Some(CanonicalScalar::ucs_basic_text("late invalid sum operand").unwrap()),
+        );
+        db.write(&commit, update).await.unwrap();
+        for limit in [0, 1] {
+            assert!(matches!(
+                db.query(
+                    &cx,
+                    &format!("{text} LIMIT {limit}"),
+                    &params,
+                    symbols(),
+                    wide()
+                ),
+                Err(QueryError::Aggregate(GqlQueryError::Source(
+                    GraphAggregateError::NonIntegerSum { aggregate: 0 }
+                )))
+            ));
+        }
+        assert_eq!(
+            pinned.query(&cx, text, &params, symbols(), wide()).unwrap(),
+            expected
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn all_nine_native_aggregates_preserve_aliases_parameters_nulls_and_duplicate_support() {
     let ((), report) = run_async_under_lab(0xa66e_2001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
