@@ -719,6 +719,7 @@ mod with_tests {
              WITH r.p AS p ORDER BY p DESC LIMIT 2 \
              RETURN 100-p AS inverse, p AS value",
         );
+        let rows = vec![vec![int(1)], vec![int(2)], vec![int(3)]];
         let selected = query
             .clone()
             .with_order_by(&[GraphValueOrder {
@@ -731,15 +732,37 @@ mod with_tests {
         // Head: p=3,2. Tail sorted by its second column: p=2,3.
         // Skip one tail row, not one source row or the entire WITH input.
         assert_eq!(
-            values(finish(
-                &selected,
-                vec![vec![int(1)], vec![int(2)], vec![int(3)]],
-                1,
-            )),
+            values(finish(&selected, rows.clone(), 1)),
             vec![vec![int(97), int(3)]]
         );
-        assert_eq!(selected.order, query.order);
-        assert_eq!((selected.offset, selected.count), (0, Some(2)));
+        // The WITH window may live in the native tail. Observe its selected
+        // rows and the independent final window, not their private storage.
+        assert_eq!(
+            values(finish(&query, rows.clone(), 2)),
+            vec![vec![int(97), int(3)], vec![int(98), int(2)]]
+        );
+        assert_eq!(
+            values(finish(&query.clone().with_page(1, None), rows.clone(), 1)),
+            vec![vec![int(98), int(2)]]
+        );
+        // Omitting the head limit changes the public window's selected row.
+        // This control detects losing the WITH page during tail admission.
+        let without_head_limit = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) \
+             WITH r.p AS p ORDER BY p DESC \
+             RETURN 100-p AS inverse, p AS value",
+        )
+        .with_order_by(&[GraphValueOrder {
+            column: 1,
+            descending: false,
+            nulls_first: false,
+        }])
+        .unwrap()
+        .with_page(1, Some(1));
+        assert_eq!(
+            values(finish(&without_head_limit, rows, 1)),
+            vec![vec![int(98), int(2)]]
+        );
         assert_ne!(selected.canonical_bytes(), query.canonical_bytes());
         assert!(matches!(
             query.with_order_by(&[GraphValueOrder {
