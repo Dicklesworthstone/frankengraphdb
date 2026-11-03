@@ -529,13 +529,42 @@ fn computed_edge_ordering_ranks_final_occurrences_and_preserves_the_upsert_branc
         .bind_parameters(&GqlParameters::new())
         .unwrap();
         let mut transaction = db.begin(txcx).unwrap();
-        for expected in [[30, 14], [126, 30]] {
+        // The two unique S endpoint pairs need two R creations on the first
+        // execution. The default one-edge allowance must still refuse and
+        // restore the complete prefix before the exact two-edge admission.
+        let before = (
+            db.frontier().unwrap(),
+            transaction.staged_effect_digest().unwrap(),
+        );
+        assert!(matches!(
+            transaction.execute_graph_edge_upserts_query_engine_governed(
+                &mut db,
+                cx,
+                &statement,
+                policy(2),
+            ),
+            Err(GqlQueryError::Source(
+                fgdb_gql::GraphEdgeUpsertQueryError::Upsert(fgdb_gql::GraphEdgeUpsertError::Merge(
+                    fgdb_gql::GraphEdgeMergeError::CreationLimit {
+                        limit: 1,
+                        observed: 2,
+                    }
+                ))
+            ))
+        ));
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                transaction.staged_effect_digest().unwrap()
+            ),
+            before
+        );
+        for (creations, expected) in [(2, [30, 14]), (0, [126, 30])] {
+            let mut allowance = policy(2);
+            allowance.merge = allowance.merge.with_creation_limit(creations);
             let (_, output) = transaction
                 .execute_graph_edge_upserts_query_engine_governed(
-                    &mut db,
-                    cx,
-                    &statement,
-                    policy(2),
+                    &mut db, cx, &statement, allowance,
                 )
                 .unwrap();
             assert_eq!(
