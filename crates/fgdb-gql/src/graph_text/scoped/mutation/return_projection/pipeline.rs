@@ -2069,6 +2069,15 @@ impl<'a> Parser<'a> {
         &mut self,
         mut schema: RowSchema<'a>,
     ) -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, usize), GraphSetTextError> {
+        // A write WITH can append frozen property columns after recording
+        // its projected spellings. They still address this same visible
+        // row, now widened by the private cells needed by the continuation.
+        let visible = self.visible_width(&schema);
+        if let Some((width, _)) = &mut self.projected_sources
+            && *width == visible
+        {
+            *width = schema.len();
+        }
         let mut stages = Vec::new();
         // The MATCH input and first WITH projection each own one relational node.
         let mut depth = 2;
@@ -2794,32 +2803,42 @@ impl<'a> Parser<'a> {
         self.row_page_in_scope(schema, &[])
     }
 
-    /// A write's result page. Terminal RETURN may rank expressions over its
-    /// completed output; a WITH head keeps its existing column page because
-    /// its continuation may still append hidden preimage columns.
+    /// A terminal write's result page. WITH leaves its whole page to the
+    /// existing row pipeline, after its owner establishes frozen properties
+    /// and the complete carried schema.
     pub(in crate::graph_text) fn row_page_sourced(
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
         sources: &[Name<'a>],
         terminal: bool,
     ) -> Result<WriteResultPage, GraphSetTextError> {
-        // A write has just projected a new output row. Its input's hidden
-        // property columns describe a different scope, even when both rows
-        // happen to have the same width. Restore those reads afterwards for
-        // the write's own WITH continuation and frozen-property lowering.
-        let input_boundary = self.boundary_reads.take();
-        let page = if terminal {
-            self.write_expression_page(schema, sources)
-        } else {
-            self.row_page_in_scope(schema, sources)
-        };
-        self.boundary_reads = input_boundary;
         let mut result = WriteResultPage {
             order: Vec::new(),
             offset: ReadPageNumber::Literal(0),
             count: None,
             tail: None,
         };
+        if !terminal {
+            // Preserve the column page's repeated property spelling, e.g.
+            // WITH n.p AS p ORDER BY n.p + 1. Wider source expressions must
+            // not match prefixes and regroup the ORDER BY's operators.
+            let mut repeatable = Vec::new();
+            for (column, source) in sources.iter().enumerate() {
+                let end = source.at + source.text.len();
+                if source.text.contains('.') && self.repeatable_item(source.at, end)? {
+                    repeatable.push((source.at, end, column));
+                }
+            }
+            self.projected_sources = (!repeatable.is_empty()).then_some((schema.len(), repeatable));
+            return Ok(result);
+        }
+        // A write has just projected a new output row. Its input's hidden
+        // property columns describe a different scope, even when both rows
+        // happen to have the same width. Restore those reads afterwards for
+        // the write's own WITH continuation and frozen-property lowering.
+        let input_boundary = self.boundary_reads.take();
+        let page = self.write_expression_page(schema, sources);
+        self.boundary_reads = input_boundary;
         match page? {
             Some(
                 page @ ReadStageTemplate::Page {

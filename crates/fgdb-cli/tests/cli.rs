@@ -383,6 +383,108 @@ fn query_refuses_a_write_statement_without_mutating_or_echoing_it() {
 /// completed assignments. A later expression failure preserves every database
 /// byte and the committed values, including beneath an empty output page.
 #[test]
+fn computed_write_with_pages_keep_effects_front_ends_and_atomic_late_errors() {
+    let fixture = Fixture::new("write-with-order");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let run = |operation: &str, text: &str| {
+        fixture.robot(operation, &["--property", "q=2", "--relation", "R=1", text])
+    };
+    let created = run(
+        "write",
+        "UNWIND [1,2,3] AS id CREATE (n:Person {id:id}) \
+         WITH n.id AS id ORDER BY -id SKIP 1 LIMIT 1 RETURN id",
+    );
+    let seeded = succeeded(&created, "written");
+    assert_eq!(
+        rows(&created),
+        [r#"{"v":1,"event":"row","cells":[{"type":"int","value":"2"}]}"#]
+    );
+    let matched = run(
+        "write",
+        "MATCH (n:Person) SET n.q=n.id*3 WITH n AS saved \
+         ORDER BY -saved.q LIMIT 2 RETURN saved.id AS id,saved.q AS q",
+    );
+    assert_eq!(succeeded(&matched, "written"), seeded + 1);
+    assert_eq!(
+        rows(&matched),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"3"},{"type":"int","value":"9"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"2"},{"type":"int","value":"6"}]}"#,
+        ]
+    );
+    let merged = run(
+        "write",
+        "UNWIND [1,2,3] AS id MERGE (n:Person {id:id}) ON MATCH SET n.q=n.q+1 \
+         WITH n AS saved ORDER BY -saved.q LIMIT 1 RETURN saved.id AS id,saved.q AS q",
+    );
+    succeeded(&merged, "written");
+    assert_eq!(
+        rows(&merged),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"3"},{"type":"int","value":"10"}]}"#
+        ]
+    );
+    for (statement, expected) in [
+        (
+            "MATCH (a:Person {id:1}),(b:Person {id:2}) \
+             MERGE (a)-[r:R {q:5}]->(b) WITH r.q AS q ORDER BY -q RETURN q",
+            "5",
+        ),
+        (
+            "MATCH (a:Person {id:1}),(b:Person {id:2}) \
+             MERGE (a)-[r:R]->(b) ON MATCH SET r.q=r.q+1 \
+             WITH r AS saved ORDER BY -saved.q RETURN saved.q AS q",
+            "6",
+        ),
+    ] {
+        let output = run("write", statement);
+        succeeded(&output, "written");
+        assert_eq!(
+            rows(&output),
+            [format!(
+                r#"{{"v":1,"event":"row","cells":[{{"type":"int","value":"{expected}"}}]}}"#
+            )]
+        );
+    }
+    let chained = run(
+        "write",
+        "MATCH (n:Person) SET n.q=n.id*3 WITH n AS saved ORDER BY -saved.q LIMIT 1 \
+         SET saved.q=saved.q+100 RETURN saved.id AS id,saved.q AS q",
+    );
+    succeeded(&chained, "written");
+    assert_eq!(
+        rows(&chained),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"3"},{"type":"int","value":"109"}]}"#
+        ]
+    );
+    let before = directory_bytes(&fixture.db());
+    let failed = run(
+        "write",
+        "MATCH (n:Person) SET n.q=n.id*7 WITH n AS saved \
+         ORDER BY 1/(saved.q-14) LIMIT 0 RETURN saved.q AS q",
+    );
+    refused(&failed, 3, "query");
+    assert!(terminal(&failed).contains("\"code\":\"invalid_value\""));
+    assert!(String::from_utf8_lossy(&failed.stdout).contains("DivisionByZero"));
+    assert!(rows(&failed).is_empty());
+    assert_eq!(directory_bytes(&fixture.db()), before);
+    let persisted = run(
+        "query",
+        "MATCH (n:Person) RETURN n.id AS id,n.q AS q ORDER BY id",
+    );
+    succeeded(&persisted, "rows");
+    assert_eq!(
+        rows(&persisted),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"1"},{"type":"int","value":"3"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"2"},{"type":"int","value":"6"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"3"},{"type":"int","value":"109"}]}"#,
+        ]
+    );
+}
+
+#[test]
 fn a_write_return_reads_collected_element_properties_at_the_post_write_cut() {
     let fixture = Fixture::new("write-collect");
     succeeded(&fixture.robot("create", &[]), "created");

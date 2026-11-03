@@ -109,6 +109,182 @@ fn computed_write_return_pages_never_limit_the_statements_effects() {
 }
 
 #[test]
+fn computed_write_with_ordering_preserves_pages_groups_and_frozen_property_columns() {
+    for (statement, created, expected) in [
+        (
+            "UNWIND [3,1,2] AS x CREATE (n {p:x}) \
+             WITH n.p AS p ORDER BY -p SKIP 1 LIMIT 1 RETURN p",
+            3,
+            vec![vec![int(2)]],
+        ),
+        (
+            "UNWIND [3,1,2] AS x CREATE (n {p:x}) \
+             WITH n AS saved ORDER BY -saved.p SKIP 1 LIMIT 1 RETURN saved.p AS p",
+            3,
+            vec![vec![int(2)]],
+        ),
+        (
+            "UNWIND [3,1,2] AS x CREATE (n {p:x}) \
+             WITH n.p AS p ORDER BY n.p * -1 LIMIT 1 RETURN p",
+            3,
+            vec![vec![int(3)]],
+        ),
+        (
+            "UNWIND [3,1,2] AS x CREATE (n {p:x}) \
+             WITH n,n.p AS p ORDER BY n.p * -1 LIMIT 1 RETURN n.p AS p",
+            3,
+            vec![vec![int(3)]],
+        ),
+        (
+            "UNWIND [3,1,2] AS x CREATE (n {p:x,q:x*10}) \
+             WITH n.p AS score,n AS saved ORDER BY n.p * -1 LIMIT 1 RETURN saved.q AS q",
+            3,
+            vec![vec![int(30)]],
+        ),
+        (
+            "UNWIND [3,1,1,2] AS x CREATE (n {p:x}) \
+             WITH DISTINCT n.p AS p ORDER BY n.p * -1 RETURN p",
+            4,
+            vec![vec![int(3)], vec![int(2)], vec![int(1)]],
+        ),
+        (
+            "UNWIND [3,1,1,2] AS x CREATE (n {p:x}) \
+             WITH n.p AS p,count(*) AS copies \
+             ORDER BY p+copies DESC,-p LIMIT 2 RETURN p,copies",
+            4,
+            vec![vec![int(3), int(1)], vec![int(2), int(1)]],
+        ),
+        (
+            "UNWIND [3,1,1,2] AS x CREATE (n {p:x}) \
+             WITH n.p AS p,count(*) AS copies ORDER BY p+copies DESC,-p \
+             RETURN collect(p) AS ranked",
+            4,
+            vec![vec![list(vec![int(3), int(2), int(1)])]],
+        ),
+        (
+            "UNWIND [3,1,2] AS x CREATE (n {p:x}) \
+             WITH n AS saved,count(*) AS copies ORDER BY -saved.p LIMIT 1 \
+             UNWIND [saved.p,copies] AS part RETURN sum(part) AS total",
+            3,
+            vec![vec![int(4)]],
+        ),
+        (
+            "UNWIND [3,1,2] AS x CREATE (n {p:x}) \
+             WITH n.p AS n ORDER BY n+1 LIMIT 1 RETURN n",
+            3,
+            vec![vec![int(1)]],
+        ),
+    ] {
+        let query = prepare(statement);
+        let batch = create(&query, policy(expected.len() as u64), || Ok(())).expect(statement);
+        let actual = rows(batch.returning());
+        let numeric: Vec<Vec<_>> = actual
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|value| match value {
+                        GraphValue::Scalar(CanonicalScalar::Int(value)) => Some(*value),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(actual, expected, "{statement}; integer cells: {numeric:?}");
+        assert_eq!(
+            batch.insertion().stats().created_vertices,
+            created,
+            "{statement}"
+        );
+        assert_eq!(batch.returning().rows.snapshot_records, 0, "{statement}");
+        assert!(
+            query
+                .columns()
+                .iter()
+                .all(|name| !name.starts_with("__fg_"))
+        );
+    }
+}
+
+#[test]
+fn computed_write_with_ordering_rebinds_parameters_and_reaches_each_write_front_end() {
+    use fgdb_gql::{
+        PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeUpsertQueryText,
+        PreparedGraphWriteChainText,
+    };
+
+    let statement = "UNWIND [3,1,2] AS x CREATE (n {p:x}) \
+                     WITH n.p AS p ORDER BY p*$direction RETURN p";
+    let template = PreparedGraphInsertQueryText::prepare(statement, R, symbols).unwrap();
+    let descending = GqlParameters::new().with_int64("direction", -1).unwrap();
+    let ascending = GqlParameters::new().with_int64("direction", 1).unwrap();
+    let down = template.bind_parameters(&descending).unwrap();
+    let up = template.bind_parameters(&ascending).unwrap();
+    assert_ne!(down.canonical_bytes(), up.canonical_bytes());
+    for (query, expected) in [(&down, [3, 2, 1]), (&up, [1, 2, 3])] {
+        let batch = create(query, policy(3), || Ok(())).unwrap();
+        assert_eq!(
+            rows(batch.returning()),
+            expected
+                .into_iter()
+                .map(|p| vec![int(p)])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(query.columns(), &["p"]);
+        assert_eq!(batch.insertion().stats().created_vertices, 3);
+    }
+
+    let vertex = PreparedGraphVertexUpsertQueryText::prepare(
+        "MERGE (n:Item {p:1}) SET n.q=2 \
+         WITH n.q AS q ORDER BY q*$direction RETURN q",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&descending)
+    .unwrap();
+    assert_eq!(vertex.columns(), &["q"]);
+    let edge = PreparedGraphEdgeMergeQueryText::prepare(
+        "MATCH (a),(b) MERGE (a)-[r:R {p:1}]->(b) \
+         WITH r.p AS p ORDER BY p*$direction RETURN p",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&descending)
+    .unwrap();
+    assert_eq!(edge.columns(), &["p"]);
+    let upsert = PreparedGraphEdgeUpsertQueryText::prepare(
+        "MATCH (a),(b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p=1 \
+         WITH r.p AS p ORDER BY p*$direction RETURN p",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&descending)
+    .unwrap();
+    assert_eq!(upsert.columns(), &["p"]);
+    let empty = GqlParameters::new();
+    for text in [
+        "UNWIND [1,2] AS x MERGE (n:Item {p:x}) \
+         WITH n.p AS p ORDER BY p*$direction RETURN p",
+        "CREATE (a {p:1}),(b {p:2}) MERGE (a)-[r:R {p:3}]->(b) \
+         WITH r.p AS p ORDER BY p*$direction RETURN p",
+        "CREATE (n {p:1}) WITH n ORDER BY -n.p \
+         SET n.q=2 RETURN n.q AS p",
+    ] {
+        let chain = PreparedGraphWriteChainText::prepare(text, R, symbols)
+            .expect(text)
+            .bind_parameters(if text.contains("$direction") {
+                &descending
+            } else {
+                &empty
+            })
+            .expect(text);
+        assert_eq!(chain.columns(), &["p"], "{text}");
+    }
+}
+
+#[test]
 fn computed_write_ordering_ranks_completed_groups_and_keeps_private_cells_private() {
     let query = prepare(
         "UNWIND [1,1,2,3,3,3,NULL] AS x CREATE (n:Item {p:x}) \
@@ -247,6 +423,13 @@ fn computed_write_ordering_cannot_capture_unreturned_bindings() {
         "CREATE (n:Item {p:1,q:2}) RETURN n.p AS p ORDER BY n.q+1",
         "CREATE (n:Item {p:1,q:2}) RETURN DISTINCT n.p AS p ORDER BY n.q+1",
         "CREATE (n:Item {p:1}) RETURN count(*) AS c ORDER BY n.p+1",
+        "CREATE (n:Item {p:1,q:2}) WITH n.p AS p ORDER BY n.q+1 RETURN p",
+        "CREATE (n:Item {p:1,q:2}) WITH DISTINCT n.p AS p ORDER BY n.q+1 RETURN p",
+        "CREATE (n:Item {p:1}) WITH n.p+1 AS p ORDER BY n.p+1*2 RETURN p",
+        "CREATE (n:Item {p:1}) WITH n.p AS p ORDER BY -p RETURN n.p",
+        "CREATE (n:Item {p:1}) WITH n.p AS p RETURN n.p",
+        "CREATE (n:Item {p:1}) WITH n.p AS p ORDER BY -p RETURN -n.p",
+        "CREATE (n:Item {p:1}) WITH n.p AS p RETURN -n.p",
     ] {
         let calls = Cell::new(0);
         let result = PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {

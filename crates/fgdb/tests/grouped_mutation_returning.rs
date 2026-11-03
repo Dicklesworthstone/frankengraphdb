@@ -267,6 +267,86 @@ fn grouped_head_window_and_unwind_shape_results_not_the_mutation_selection() {
 }
 
 #[test]
+fn computed_with_page_ranks_final_group_keys_without_limiting_mutation_effects() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let (stats, result) = txn
+            .execute_graph_mutation_query_governed(
+                &mut db,
+                cx,
+                &prepare(
+                    "MATCH (n:Item) SET n.p=-n.p \
+                     WITH n AS saved,n.p AS rank,count(*) AS copies \
+                     ORDER BY -rank SKIP 1 LIMIT 1 RETURN saved.p AS p,saved.q AS q,copies",
+                ),
+                policy(1),
+            )
+            .unwrap();
+        assert_eq!(result.value, rows(vec![vec![int(-2), int(20), int(1)]]));
+        assert_eq!(result.rows.result_rows, 1);
+        assert_eq!(stats.effects, 3);
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(matches!(
+            txn.finish(&mut db, commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted { .. }
+        ));
+        assert_eq!(
+            read(&db, cx, "MATCH (n:Item) RETURN n.p AS p ORDER BY p"),
+            vec![vec![int(-3)], vec![int(-2)], vec![int(-1)]]
+        );
+    });
+}
+
+#[test]
+fn computed_with_key_failure_below_limit_zero_preserves_the_staged_prefix() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        txn.execute_graph_mutation_query_governed(
+            &mut db,
+            cx,
+            &prepare("MATCH (n:Item {p:1}) SET n.q=99 RETURN n.q"),
+            policy(1),
+        )
+        .unwrap();
+        let prefix = txn.staged_effect_digest().unwrap();
+        let error = txn
+            .execute_graph_mutation_query_governed(
+                &mut db,
+                cx,
+                &prepare(
+                    "MATCH (n:Item) SET n.p=n.p*7 WITH n AS node \
+                     ORDER BY 1/(node.p-14) LIMIT 0 RETURN node.p AS p",
+                ),
+                policy(0),
+            )
+            .unwrap_err();
+        assert!(matches!(error, GqlQueryError::Source(_)));
+        assert!(format!("{error:?}").contains("DivisionByZero"));
+        assert_eq!(txn.staged_effect_digest().unwrap(), prefix);
+        assert_eq!(db.frontier().unwrap(), before);
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(
+                &db,
+                cx,
+                "MATCH (n:Item) RETURN n.p AS p,n.q AS q ORDER BY p"
+            ),
+            vec![
+                vec![int(1), int(99)],
+                vec![int(2), int(20)],
+                vec![int(3), int(30)]
+            ]
+        );
+    });
+}
+
+#[test]
 fn failed_grouped_results_roll_back_the_statement_but_keep_prior_staging() {
     run(async |commit, cx, txcx| {
         let mut db = Database::open_memory(commit, keys()).await.unwrap();

@@ -1056,6 +1056,9 @@ impl PreparedGraphSet {
     }
 
     fn preserves_row_order(&self) -> bool {
+        if !self.order.is_empty() {
+            return true;
+        }
         match &self.node {
             SetNode::Values
             | SetNode::Arguments
@@ -1066,9 +1069,12 @@ impl PreparedGraphSet {
             SetNode::ProcedureCall(call) => call.preserves_row_order(),
             SetNode::Owned { preserve_order } => *preserve_order,
             SetNode::Pattern(_) | SetNode::Aggregate(_) | SetNode::Join { .. } => false,
-            SetNode::Scope(input)
-            | SetNode::Project { input, .. }
-            | SetNode::Filter { input, .. } => input.preserves_row_order(),
+            SetNode::Project {
+                input,
+                preserve_order,
+                ..
+            } => *preserve_order || input.preserves_row_order(),
+            SetNode::Scope(input) | SetNode::Filter { input, .. } => input.preserves_row_order(),
             // The product retains left-major child delivery, but does not
             // turn canonical graph/procedure rows into a ranked sequence.
             // A later projection must sort its actual tuple unless a child

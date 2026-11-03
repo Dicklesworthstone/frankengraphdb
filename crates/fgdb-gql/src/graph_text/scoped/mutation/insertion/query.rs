@@ -798,53 +798,59 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<crate::set_text::ReadStageTemplate>, GraphInsertTextError> {
         let visible = schema.len();
         let mut reads = Vec::new();
-        // An aggregating WITH carries no element to read later.
-        if returning.grouping.is_none() {
-            for (alias, key) in self.write_tail_reads(&schema)? {
-                let Some(at) = schema[..visible]
-                    .iter()
-                    .position(|(name, _)| name.text == alias.text)
-                else {
-                    continue;
-                };
-                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
-                    continue;
-                };
-                let (binding, _, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) =
-                    returning.bindings[binding]
-                else {
-                    continue;
-                };
-                // The element's own variable, never an output spelling such
-                // as `startNode`: a created slot or a bare MATCH projection.
-                let variable = match binding {
-                    Binding::Vertex(vertex) => syntax.vertices[vertex].name,
-                    Binding::Edge(edge) => syntax.edges[edge].name,
-                    Binding::Input(input) => input
-                        .checked_sub(source.len())
-                        .map(|column| &syntax.projections[column])
-                        .filter(|column| column.property.is_none() && column.path.is_none())
-                        .map(|column| column.variable),
-                    _ => None,
-                };
-                let Some(variable) = variable else {
-                    continue;
-                };
-                let column = returning.map_input(
-                    self,
-                    syntax,
-                    source,
-                    variable,
-                    ReturnMapInput::Property(key),
-                )?;
-                mutation_query::push_tail_read(
-                    &mut returning.projection,
-                    &mut schema,
-                    &mut reads,
-                    (alias, key),
-                    column,
-                )?;
-            }
+        // A direct identity grouping key still determines its frozen fields;
+        // aggregate representatives never become carried element bindings.
+        for (alias, key) in self.write_tail_reads(&schema)? {
+            let Some(at) = schema[..visible]
+                .iter()
+                .position(|(name, _)| name.text == alias.text)
+            else {
+                continue;
+            };
+            let Some(binding) = WriteReturnGroupTemplate::carried_binding(
+                returning.grouping.as_ref(),
+                &returning.projection[at].value,
+            ) else {
+                continue;
+            };
+            let (binding, _, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) =
+                returning.bindings[binding]
+            else {
+                continue;
+            };
+            // The element's own variable, never an output spelling such
+            // as `startNode`: a created slot or a bare MATCH projection.
+            let variable = match binding {
+                Binding::Vertex(vertex) => syntax.vertices[vertex].name,
+                Binding::Edge(edge) => syntax.edges[edge].name,
+                Binding::Input(input) => input
+                    .checked_sub(source.len())
+                    .map(|column| &syntax.projections[column])
+                    .filter(|column| column.property.is_none() && column.path.is_none())
+                    .map(|column| column.variable),
+                _ => None,
+            };
+            let Some(variable) = variable else {
+                continue;
+            };
+            let column = returning.map_input(
+                self,
+                syntax,
+                source,
+                variable,
+                ReturnMapInput::Property(key),
+            )?;
+            let column = match &mut returning.grouping {
+                Some(group) => group.hoist_property(&mut returning.projection, column, key.at)?,
+                None => column,
+            };
+            mutation_query::push_tail_read(
+                &mut returning.projection,
+                &mut schema,
+                &mut reads,
+                (alias, key),
+                column,
+            )?;
         }
         Ok(self.finish_write_tail(schema, visible, reads)?)
     }

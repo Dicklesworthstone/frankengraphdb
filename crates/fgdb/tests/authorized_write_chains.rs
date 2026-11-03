@@ -2712,6 +2712,114 @@ fn public_write_text_reads_final_state_and_counts_private_occurrences_once() {
 }
 
 #[test]
+fn computed_write_with_pages_mask_fields_and_keep_all_effects_and_atomic_failures() {
+    use fgdb_gql::{GraphMutationPolicy, PreparedGraphMutationQueryText};
+
+    lab(0xc4a1_2115, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+        let prepare = |text| {
+            PreparedGraphMutationQueryText::prepare(text, R, symbols)
+                .expect(text)
+                .bind_parameters(&GqlParameters::new())
+                .expect(text)
+        };
+        let program = prepare(
+            "MATCH (n:Visible) SET n.p=-n.p WITH n AS saved \
+             ORDER BY coalesce(saved.secret,0)*saved.p-saved.p LIMIT 1 \
+             RETURN saved.p AS p",
+        );
+        let mut answers = Vec::new();
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for id in 1..=3_i64 {
+                let mut props = vec![(P, CanonicalScalar::Int(id))];
+                if hidden {
+                    props.push((SECRET, CanonicalScalar::Int(99)));
+                }
+                seed.create_vertex(VId(id as u128), vec![L], props);
+            }
+            seed.create_vertex(VId(99), vec![HIDDEN], vec![(P, CanonicalScalar::Int(-999))]);
+            db.write(&commit, seed).await.unwrap();
+            let hidden_before = db.vertex(VId(99)).unwrap();
+            let basis = db.frontier().unwrap();
+            let (stats, result, completion) = db
+                .execute_graph_mutation_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    GraphMutationPolicy::new(policy(1).query, 100),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.value.len(), 1);
+            assert_eq!(
+                result.value[0].values(),
+                &[GraphValue::Scalar(CanonicalScalar::Int(-1))]
+            );
+            assert_eq!(result.rows.result_rows, 1);
+            assert_eq!(stats.effects, 3);
+            assert!(matches!(completion,
+                EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+                    if commit_seq.0 == basis.0 + 1
+            ));
+            for id in 1..=3_i64 {
+                let vertex = db.vertex(VId(id as u128)).unwrap().unwrap();
+                let mut expected = vec![(P, CanonicalScalar::Int(-id).into())];
+                if hidden {
+                    expected.push((SECRET, CanonicalScalar::Int(99).into()));
+                }
+                assert_eq!(vertex.props, expected);
+            }
+            assert_eq!(db.vertex(VId(99)).unwrap(), hidden_before);
+            answers.push((result.evaluator, result.value));
+
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let failure = prepare(
+                "MATCH (n:Visible) SET n.p=n.p*7 WITH n AS saved \
+                 ORDER BY 1/(saved.p+14) LIMIT 0 RETURN saved.p AS p",
+            );
+            let error = db
+                .execute_graph_mutation_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &failure,
+                    GraphMutationPolicy::new(policy(0).query, 100),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert!(format!("{error:?}").contains("DivisionByZero"));
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        assert_eq!(answers[0], answers[1]);
+    });
+}
+
+#[test]
 fn textual_read_after_set_keeps_frozen_aliases_and_reads_current_properties() {
     lab(0xc4a1_20e3, |contexts| async move {
         let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
