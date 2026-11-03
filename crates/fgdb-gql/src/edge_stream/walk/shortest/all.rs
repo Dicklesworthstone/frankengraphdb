@@ -7,6 +7,12 @@
 //! that layer's paths. A repeated vertex before the lower bound is an ordinary
 //! distinct layer node, not an accidental global visited-set rejection.
 //!
+//! An omitted upper bound does not allocate or iterate to a sentinel. Before
+//! the finite minimum, layers remain depth-local; at and after it, every
+//! nonempty layer settles at least one previously unsettled endpoint. A finite
+//! source therefore runs out of endpoints. Tied routes within each finite
+//! layer remain lazy and individually governed, however large their count.
+//!
 //! The DAG owns source records directly; records need neither Clone nor Sync.
 //! Every map entry and vector backing is admitted before allocation. Only one
 //! route is copied for projection, under a temporary state reservation, and

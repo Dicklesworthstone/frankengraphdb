@@ -3,8 +3,9 @@
 //! Bounded occurrence modes retain one route and its admitted records. ANY
 //! SHORTEST instead retains a canonical breadth frontier, preserving real path
 //! IDs and terminating by endpoint settlement even without an upper hop bound.
-//! Bounded ALL SHORTEST shares reachable layers and lazily enumerates every tied
-//! route, retaining real edge identities without a frontier entry per path.
+//! ALL SHORTEST shares reachable layers and lazily enumerates every tied route,
+//! retaining real edge identities without a frontier entry per path. Endpoint
+//! settlement also terminates this search without an upper hop bound.
 //! Complete rows enter the ordinary external sort before DISTINCT or paging.
 
 use super::*;
@@ -99,10 +100,11 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
 /// canonical prefix per depth/endpoint survives, and afterward each complete
 /// layer settles its endpoints before expansion. Finite snapshot input thus
 /// exhausts the frontier; resource exhaustion remains an error, never a page.
-/// Bounded ALL SHORTEST retains shared reachable layers and enumerates tied
-/// routes lazily, preserving parallel-edge identity and multiplicity. Its
-/// DIFFERENT EDGES restriction is the same as ANY's: only a zero lower bound
-/// proves it redundant. Other unbounded modes, further atoms, OPTIONAL/probes
+/// ALL SHORTEST retains shared reachable layers and enumerates tied routes
+/// lazily, preserving parallel-edge identity and multiplicity. It may also
+/// omit its upper bound: after the finite minimum, each nonempty layer settles
+/// new endpoints. Its DIFFERENT EDGES restriction is the same as ANY's: only a
+/// zero lower bound proves it redundant. Other unbounded modes, further atoms, OPTIONAL/probes
 /// and collection-valued edge predicates refuse during preparation, before any
 /// source or budget is observed.
 #[derive(Clone)]
@@ -151,7 +153,11 @@ impl AsyncGraphWalkPlan {
             return Err(EdgeScanBuildError { operator: at });
         };
         if source.ordinal() != 0
-            || (!bounds.is_bounded() && *search != GraphWalkSearch::AnyShortest)
+            || (!bounds.is_bounded()
+                && !matches!(
+                    search,
+                    GraphWalkSearch::AnyShortest | GraphWalkSearch::AllShortest
+                ))
             // Native collection comparison can raise StoredValueBounds even
             // for an edge unreachable from the selected roots: its incidence
             // filtering precedes root selection. Scalar operands cannot raise
@@ -386,8 +392,8 @@ impl<Root, Record, Guard> Frame<Root, Record, Guard> {
 /// Source, evaluator, candidates and emitted input occurrences share one
 /// cumulative policy. Occurrence modes retain one root and at most maximum_hops
 /// edge records. ANY SHORTEST retains two breadth layers with at most one
-/// incoming record per endpoint in each layer. Bounded ALL SHORTEST retains
-/// shared reachable layers and one traversal stack, not every tied route.
+/// incoming record per endpoint in each layer. ALL SHORTEST retains shared
+/// reachable layers and one traversal stack, not every tied route.
 /// One candidate may coexist while it is checked or rejected. Source payloads,
 /// traversal state and output guards have independent host-owned admissions.
 ///

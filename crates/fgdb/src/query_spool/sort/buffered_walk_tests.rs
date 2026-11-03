@@ -792,7 +792,7 @@ fn cold_shortest_paths_choose_real_routes_across_history_edge_filters_and_pinned
         }
         for text in [
             "MATCH p = ANY SHORTEST (a)-[:R*2..3]->(b) RETURN p LIMIT 0",
-            "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a)-[:R*0..]->(b) RETURN p LIMIT 0",
+            "MATCH REPEATABLE ELEMENTS p = WALK (a)-[:R*0..]->(b) RETURN p LIMIT 0",
             "MATCH p = ALL SHORTEST (a)-[:R*2..3]->(b) RETURN p LIMIT 0",
             "MATCH p = ANY SHORTEST (a)-[:R*1..]-(b) RETURN p LIMIT 0",
         ] {
@@ -1304,6 +1304,20 @@ fn cold_all_shortest_paths_keep_filtered_ties_at_pinned_and_reopened_historical_
                 spooled(&mut pinned, &cx, &text, &before, 3, run_rows).await;
             }
         }
+        // Unbounded traversal uses the same retained history and stopping law;
+        // the later property update cannot remove an older tied predecessor.
+        for (cut, expected) in [(3, &before), (4, &after)] {
+            let text = format!(
+                "MATCH p = ALL SHORTEST (a {{p:1}})-[:R*0.. {{p:7}}]->(b) \
+                 FOR SYSTEM_TIME AS OF SEQ {cut} {CAPTURE}"
+            );
+            case(&db, &mut latest, &cx, &text, expected.clone(), cut).await;
+        }
+        let text =
+            format!("MATCH p = ALL SHORTEST (a {{p:1}})-[:R*0.. {{p:7}}]->(b) {CAPTURE}");
+        for run_rows in [1, 3] {
+            spooled(&mut pinned, &cx, &text, &before, 3, run_rows).await;
+        }
         for (cut, end_value, edges) in [
             (3, 3, vec![AB, PARALLEL]),
             (4, 30, vec![PARALLEL]),
@@ -1400,6 +1414,110 @@ fn cold_all_shortest_memory_refusal_precedes_empty_pages_and_refunds_source_owne
             for run_rows in [1, 3] {
                 spooled(&mut cold, &cx, &text, &expected, 2, run_rows).await;
             }
+        }
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_unbounded_all_shortest_terminates_cycles_and_preserves_eligible_lower_bound_ties() {
+    let ((), report) = run_async_under_lab(0xc01d_4201, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (db, vfs) = graph(&contexts.commit()).await;
+        let source_pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut cold = view(&contexts.commit(), &vfs, &source_pool).await;
+        let zero_minimum = paths(&[
+            (A, &[]),
+            (A, &[(AB, B)]),
+            (A, &[(PARALLEL, B)]),
+            (A, &[(AB, B), (BC, C)]),
+            (A, &[(PARALLEL, B), (BC, C)]),
+        ]);
+        for text in [
+            format!("MATCH p = ALL SHORTEST (a {{p:1}})-[:R*0..]->(b) {CAPTURE}"),
+            format!(
+                "MATCH p = allShortestPaths((a {{p:1}})-[:R*0..]->(b)) {CAPTURE}"
+            ),
+        ] {
+            case(&db, &mut cold, &cx, &text, zero_minimum.clone(), 2).await;
+        }
+        // Before the lower bound, B must survive separately at depths one
+        // and two. Its loop is the shortest eligible way back to B, and the
+        // directed cycle is the shortest eligible way back to the root.
+        case(
+            &db,
+            &mut cold,
+            &cx,
+            &format!(
+                "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a {{p:1}})-[:R*2..]->(b) {CAPTURE}"
+            ),
+            paths(&[
+                (A, &[(AB, B), (BC, C)]),
+                (A, &[(PARALLEL, B), (BC, C)]),
+                (A, &[(AB, B), (LOOP, B)]),
+                (A, &[(PARALLEL, B), (LOOP, B)]),
+                (A, &[(AB, B), (BC, C), (CA, A)]),
+                (A, &[(PARALLEL, B), (BC, C), (CA, A)]),
+            ]),
+            2,
+        )
+        .await;
+        for (head, expected) in [
+            (
+                "MATCH p = ALL SHORTEST (a {p:4})-[:R*0..]->(b)",
+                paths(&[(ISOLATE, &[])]),
+            ),
+            (
+                "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a {p:4})-[:R*2..]->(b)",
+                vec![],
+            ),
+            (
+                "MATCH p = ALL SHORTEST (a {p:1})-[:R*0..]->(b {p:4})",
+                vec![],
+            ),
+        ] {
+            case(
+                &db,
+                &mut cold,
+                &cx,
+                &format!("{head} {CAPTURE}"),
+                expected,
+                2,
+            )
+            .await;
+        }
+        case(
+            &db,
+            &mut cold,
+            &cx,
+            "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a {p:1})-[:R*2..]->(b) RETURN DISTINCT b.p AS value ORDER BY value DESC SKIP 1 LIMIT 1",
+            frames(vec![scalar(2)]),
+            2,
+        )
+        .await;
+        case(
+            &db,
+            &mut cold,
+            &cx,
+            "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a)-[:R*0..]->(b) RETURN p LIMIT 0",
+            Vec::new(),
+            2,
+        )
+        .await;
+        for text in [
+            "MATCH REPEATABLE ELEMENTS p = WALK (a)-[:R*0..]->(b) RETURN p LIMIT 0",
+            "MATCH p = ALL SHORTEST (a)-[:R*2..]->(b) RETURN p LIMIT 0",
+            "MATCH p = ALL SHORTEST (a)-[:R*1..]-(b) RETURN p LIMIT 0",
+        ] {
+            let parameters = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(text, &parameters, resolve).unwrap();
+            assert!(
+                prepared.prepare_buffered_order(&parameters).is_err(),
+                "{text}"
+            );
         }
         drop(cold);
         assert_eq!(source_pool.used(), 0);
