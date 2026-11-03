@@ -2,18 +2,19 @@
 //!
 //! Persistent property candidates, a bounded history spine or a cold patch merge
 //! supply ordered roots. An unkeyed cold scan does not build a property index.
-//! Equality keeps at most two roots. Literal membership and numeric ranges merge
-//! at most 64 value-bucket heads; wider memberships retain the history scan and
-//! wider ranges and binary prefixes test historical membership one identity at
-//! a time. Neither
-//! path collects all candidate IDs or resolves unrequested MVCC winners.
+//! Equality keeps at most two governed AVL spines, each bounded by its posting
+//! tree's height. Literal membership and numeric ranges merge at most 64
+//! value-bucket heads; wider memberships retain the history scan and wider
+//! ranges and binary prefixes test historical membership one identity at a
+//! time. Neither path collects all candidate IDs or resolves unrequested MVCC winners.
 //! The source holds an EmbeddedReadView, not a borrow
 //! of the mutable Database: writes, compaction, reopen and handle drop cannot
 //! change its generation. This is not paging an evidence artifact or materialized
 //! graph table, and it does not claim that the pinned generation is out of core.
 
 use crate::gql_exec::source::{
-    IndexMap, SourceEvent, VertexHistoryScanCursor, VertexPatchScanCursor, numeric,
+    IndexMap, SourceEvent, VertexHistoryScanCursor, VertexPatchScanCursor, VertexPostingScanCursor,
+    numeric,
 };
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
@@ -57,6 +58,7 @@ enum RootCandidates {
     },
     Indexed {
         roots: [Option<IndexMap<VId, ()>>; 2],
+        scans: [VertexPostingScanCursor; 2],
         equality: RootEquality,
     },
     // Boxed: a range cursor is several times the size of every other arm.
@@ -253,13 +255,20 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                     ) else {
                         unreachable!("candidate roots resolved from pending keys")
                     };
-                    self.candidates = RootCandidates::Indexed { roots, equality };
+                    self.candidates = RootCandidates::Indexed {
+                        roots,
+                        scans: core::array::from_fn(|_| VertexPostingScanCursor::default()),
+                        equality,
+                    };
                 }
                 let successor = match &mut self.candidates {
-                    RootCandidates::Indexed { roots, .. } => {
+                    RootCandidates::Indexed { roots, scans, .. } => {
                         let mut successor = None;
-                        for root in roots.iter().flatten() {
-                            if let Some(vid) = index_successor(root, self.after, control)? {
+                        for (root, scan) in roots.iter().zip(scans) {
+                            let Some(root) = root else { continue };
+                            if let Some(vid) = scan.successor(root, self.after, &mut |event| {
+                                control(posting_event(event))
+                            })? {
                                 successor = Some(successor.map_or(vid, |next: VId| next.min(vid)));
                             }
                         }
@@ -492,6 +501,13 @@ fn index_successor<T, C>(
         }
     }
     Ok(successor)
+}
+
+fn posting_event(event: SourceEvent) -> VertexScanEvent {
+    match event {
+        SourceEvent::Work | SourceEvent::SnapshotRecord => VertexScanEvent::Work,
+        SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+    }
 }
 
 // Both outer source kinds reuse the same successor and own exactly one pin.

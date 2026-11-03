@@ -11,18 +11,31 @@ use std::sync::Arc;
 /// without a self-borrow, a candidate bag or repeated root descents. Opening
 /// allocates nothing; the first demand reserves at most the tree's height.
 /// The source pins the generation for this cursor's entire lifetime.
-#[derive(Default)]
-pub(super) struct VertexHistoryScanCursor {
-    spine: Vec<Arc<IndexNode<VId, History>>>,
-    pending: Option<Arc<IndexNode<VId, History>>>,
-    current: Option<Arc<IndexNode<VId, History>>>,
+pub(super) struct IndexScanCursor<Value> {
+    spine: Vec<Arc<IndexNode<VId, Value>>>,
+    pending: Option<Arc<IndexNode<VId, Value>>>,
+    current: Option<Arc<IndexNode<VId, Value>>>,
     initialized: bool,
 }
 
-impl VertexHistoryScanCursor {
+pub(super) type VertexHistoryScanCursor = IndexScanCursor<History>;
+pub(super) type VertexPostingScanCursor = IndexScanCursor<()>;
+
+impl<Value> Default for IndexScanCursor<Value> {
+    fn default() -> Self {
+        Self {
+            spine: Vec::new(),
+            pending: None,
+            current: None,
+            initialized: false,
+        }
+    }
+}
+
+impl<Value: Clone> IndexScanCursor<Value> {
     pub(super) fn next<E>(
         &mut self,
-        histories: &IndexMap<VId, History>,
+        histories: &IndexMap<VId, Value>,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<Option<VId>, E> {
         if !self.initialized {
@@ -61,8 +74,8 @@ impl VertexHistoryScanCursor {
     }
 
     fn descend<E>(
-        spine: &mut Vec<Arc<IndexNode<VId, History>>>,
-        mut node: Option<&Arc<IndexNode<VId, History>>>,
+        spine: &mut Vec<Arc<IndexNode<VId, Value>>>,
+        mut node: Option<&Arc<IndexNode<VId, Value>>>,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<(), E> {
         while let Some(current) = node {
@@ -72,7 +85,9 @@ impl VertexHistoryScanCursor {
         }
         Ok(())
     }
+}
 
+impl VertexHistoryScanCursor {
     /// Only the current root can reuse this history. A correlated probe may
     /// resolve a different identity before the next pull and must still seek.
     pub(super) fn history(&self, vid: VId) -> Option<&History> {
@@ -80,6 +95,34 @@ impl VertexHistoryScanCursor {
             .as_ref()
             .filter(|current| current.key == vid)
             .map(|current| &current.value)
+    }
+}
+
+impl VertexPostingScanCursor {
+    /// Keep one lookahead while multiple postings merge in identity order.
+    /// Repeating the same after cursor after a sibling refusal returns the
+    /// same candidate, even if this posting's own advance already succeeded.
+    /// The enclosing source advances only after the complete merge succeeds.
+    /// This is a forward-only cursor: callers advance `after` monotonically
+    /// and keep it unchanged when a complete merge step refuses.
+    pub(super) fn successor<E>(
+        &mut self,
+        postings: &IndexMap<VId, ()>,
+        after: Option<VId>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<VId>, E> {
+        loop {
+            if let Some(current) = &self.current {
+                if after.is_none_or(|after| current.key > after) {
+                    return Ok(Some(current.key));
+                }
+            } else if self.initialized {
+                return Ok(None);
+            }
+            if self.next(postings, control)?.is_none() {
+                return Ok(None);
+            }
+        }
     }
 }
 
