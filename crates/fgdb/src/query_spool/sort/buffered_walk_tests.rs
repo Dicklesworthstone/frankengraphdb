@@ -3,9 +3,9 @@
 //! executor. Native Database::query supplies a second complete-result check.
 
 use super::*;
-use crate::QueryResult;
-use fgdb_gql::GraphAggregateValue;
+use crate::{NativeReadClass, QueryError, QueryResult};
 use fgdb_gql::algebra::GraphPath;
+use fgdb_gql::{GraphAggregateValue, GraphPatternTextErrorKind};
 
 const A: VId = VId(0);
 const B: VId = VId(1 << 100);
@@ -80,6 +80,25 @@ fn paths(routes: &[(VId, &[(EId, VId)])]) -> Vec<Vec<u8>> {
         .collect();
     rows.sort();
     row_bytes(rows)
+}
+
+fn unbounded_exhaustive_walk_refuses_during_parsing() {
+    let parameters = GqlParameters::new();
+    let Err(error) = PreparedNativeRead::prepare(
+        "MATCH REPEATABLE ELEMENTS p = WALK (a)-[:R*0..]->(b) RETURN p LIMIT 0",
+        &parameters,
+        resolve,
+    ) else {
+        panic!("unbounded exhaustive WALK was admitted");
+    };
+    assert!(matches!(
+        error,
+        QueryError::Refused { facade: NativeReadClass::Pattern, source }
+            if matches!(source.as_ref(), QueryError::PatternText(error)
+                if error.offset == 47 && error.kind == GraphPatternTextErrorKind::Expected(
+                    "an upper hop bound, or TRAIL, ACYCLIC, SIMPLE, a shortest selector or DIFFERENT EDGES for an unbounded quantifier"
+                ))
+    ));
 }
 
 fn native(db: &Database<MemVfs>, cx: &QueryCx, text: &str) -> Vec<Vec<u8>> {
@@ -786,9 +805,9 @@ fn cold_shortest_paths_choose_real_routes_across_history_edge_filters_and_pinned
         ] {
             case(&db, &mut latest, &cx, text, Vec::new(), 4).await;
         }
+        unbounded_exhaustive_walk_refuses_during_parsing();
         for text in [
             "MATCH p = ANY SHORTEST (a)-[:R*2..3]->(b) RETURN p LIMIT 0",
-            "MATCH REPEATABLE ELEMENTS p = WALK (a)-[:R*0..]->(b) RETURN p LIMIT 0",
             "MATCH p = ALL SHORTEST (a)-[:R*2..3]->(b) RETURN p LIMIT 0",
             "MATCH p = ANY SHORTEST (a)-[:R*1..]-(b) RETURN p LIMIT 0",
         ] {
@@ -1480,8 +1499,8 @@ fn cold_unbounded_all_shortest_terminates_cycles_and_preserves_eligible_lower_bo
             2,
         )
         .await;
+        unbounded_exhaustive_walk_refuses_during_parsing();
         for text in [
-            "MATCH REPEATABLE ELEMENTS p = WALK (a)-[:R*0..]->(b) RETURN p LIMIT 0",
             "MATCH p = ALL SHORTEST (a)-[:R*2..]->(b) RETURN p LIMIT 0",
             "MATCH p = ALL SHORTEST (a)-[:R*1..]-(b) RETURN p LIMIT 0",
         ] {
