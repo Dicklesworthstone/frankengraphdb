@@ -1017,6 +1017,43 @@ fn charge_runs<C>(len: usize, meter: &mut impl FnxMeter<C>) -> Result<(), FnxExe
     Ok(())
 }
 
+/// Validate one immutable projected row in its original floating-point order.
+/// A bounded lookahead stops at the first invalid weight/sum, then charges only
+/// that prefix, including the failing weight. Cancellation at any earlier unit
+/// (or at that weight) therefore still wins over the numeric refusal. No extra
+/// row copy, validation pass, or unbounded work precedes a live meter call.
+fn outgoing_weight_sum<C>(
+    weights: &[f64],
+    meter: &mut impl FnxMeter<C>,
+) -> Result<f64, FnxExecutionError<C>> {
+    #[cfg(test)]
+    if tests::scalar_weight_validation() {
+        return tests::outgoing_weight_sum_scalar(weights, meter);
+    }
+    let mut sum = 0.0;
+    for run in weights.chunks(FNX_METER_RUN) {
+        let mut count = 0;
+        let mut failure = None;
+        for &weight in run {
+            count += 1;
+            if weight < 0.0 {
+                failure = Some(FnxExecutionError::NegativeWeight);
+                break;
+            }
+            sum += weight;
+            if !sum.is_finite() {
+                failure = Some(FnxExecutionError::NonFiniteWeightSum);
+                break;
+            }
+        }
+        meter.units(count).map_err(FnxExecutionError::Cancelled)?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+    }
+    Ok(sum)
+}
+
 /// Each source's per-arc value for this pass: the scatter's push * share,
 /// push alpha times rank, share 1 / sum unweighted (the weighted share is per
 /// arc). Independent per source, so several threads give identical bits.
@@ -1210,26 +1247,16 @@ fn pagerank_with_threads<C>(
         row_units = row_units
             .checked_add(1 + targets.len())
             .ok_or(FnxExecutionError::SizeOverflow)?;
-        let mut sum = 0.0;
-        if per_arc_weights {
-            for &weight in weights {
-                meter.unit().map_err(FnxExecutionError::Cancelled)?;
-                if weight < 0.0 {
-                    return Err(FnxExecutionError::NegativeWeight);
-                }
-                sum += weight;
-                if !sum.is_finite() {
-                    return Err(FnxExecutionError::NonFiniteWeightSum);
-                }
-            }
+        let sum = if per_arc_weights {
+            outgoing_weight_sum(weights, meter)?
         } else {
             if options.weighted() {
                 // The immutable evidence removes arithmetic and allocation,
                 // not any unit of the weighted call's validation transcript.
                 charge_runs(targets.len(), meter)?;
             }
-            sum = targets.len() as f64;
-        }
+            targets.len() as f64
+        };
         if face_ok {
             face_ok = in_offsets[source] <= in_offsets[source + 1];
         }
@@ -1981,6 +2008,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("execute.rs"));
         hash_text(&mut hash, include_str!("projection.rs"));
         hash_text(&mut hash, include_str!("traversal.rs"));
+        hash_text(&mut hash, include_str!("target_bfs.rs"));
         hash_text(&mut hash, include_str!("call.rs"));
         hash_text(&mut hash, include_str!("shortest_path.rs"));
         hash_text(&mut hash, include_str!("clustering.rs"));
@@ -2058,6 +2086,7 @@ mod tests {
         // Retain the predecessor as a differential and paired-measurement
         // control. This switch does not exist in production builds.
         static FORCE_WEIGHTED_SHARES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static SCALAR_WEIGHT_VALIDATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     pub(super) fn force_weighted_shares() -> bool {
@@ -2073,6 +2102,40 @@ mod tests {
         }
         let _reset = Reset(FORCE_WEIGHTED_SHARES.with(|mode| mode.replace(forced)));
         run()
+    }
+
+    pub(super) fn scalar_weight_validation() -> bool {
+        SCALAR_WEIGHT_VALIDATION.with(std::cell::Cell::get)
+    }
+
+    fn with_scalar_weight_validation<T>(scalar: bool, run: impl FnOnce() -> T) -> T {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SCALAR_WEIGHT_VALIDATION.with(|mode| mode.set(self.0));
+            }
+        }
+        let _reset = Reset(SCALAR_WEIGHT_VALIDATION.with(|mode| mode.replace(scalar)));
+        run()
+    }
+
+    /// The exact predecessor, retained independently of the batched helper.
+    pub(super) fn outgoing_weight_sum_scalar<C>(
+        weights: &[f64],
+        meter: &mut impl FnxMeter<C>,
+    ) -> Result<f64, FnxExecutionError<C>> {
+        let mut sum = 0.0;
+        for &weight in weights {
+            meter.unit().map_err(FnxExecutionError::Cancelled)?;
+            if weight < 0.0 {
+                return Err(FnxExecutionError::NegativeWeight);
+            }
+            sum += weight;
+            if !sum.is_finite() {
+                return Err(FnxExecutionError::NonFiniteWeightSum);
+            }
+        }
+        Ok(sum)
     }
 
     fn projection(mask: u16, direction: Directedness) -> SnapshotGraphView {
@@ -3067,10 +3130,9 @@ mod tests {
                     .iter()
                     .all(|&run| (1..=FNX_METER_RUN).contains(&run))
             );
-            // Proven unit weights still charge every weighted validation unit,
-            // but batch each row's arcs. General weighted shares retain one
-            // callback per arc. Check both paths against the same fnx oracle.
-            let initialization_calls = if weighted && !forced_shares {
+            // Every weighted path charges the same validation units in bounded
+            // row runs. Check both unit-weight and general shares against fnx.
+            let initialization_calls = if weighted {
                 unit_initialization_calls
             } else {
                 initialization
@@ -3098,6 +3160,308 @@ mod tests {
                 });
                 assert!(matches!(result, Err(FnxExecutionError::Cancelled("stop"))));
                 assert_eq!(refusing.seen, stop);
+            }
+        }
+    }
+
+    #[test]
+    fn weighted_row_runs_preserve_sum_bits_and_every_numeric_refusal_prefix() {
+        let fresh = |stop| Recording {
+            calls: Vec::new(),
+            stop,
+            seen: 0,
+            polls: 0,
+        };
+        let check = |weights: &[f64]| {
+            let mut expected = fresh(None);
+            let baseline = outgoing_weight_sum_scalar(weights, &mut expected);
+            for stop in (1..=expected.seen + 1).map(Some).chain([None]) {
+                let (mut scalar, mut runs) = (fresh(stop), fresh(stop));
+                let old = outgoing_weight_sum_scalar(weights, &mut scalar).map(f64::to_bits);
+                let new = outgoing_weight_sum(weights, &mut runs).map(f64::to_bits);
+                assert_eq!(format!("{new:?}"), format!("{old:?}"), "stop={stop:?}");
+                assert_eq!((runs.seen, runs.polls), (scalar.seen, scalar.polls));
+                assert!(
+                    runs.calls
+                        .iter()
+                        .all(|&run| (1..=FNX_METER_RUN).contains(&run))
+                );
+            }
+            if baseline.is_ok() && weights.len() > FNX_METER_RUN {
+                let mut meter = fresh(None);
+                outgoing_weight_sum(weights, &mut meter).unwrap();
+                assert_eq!(meter.calls.len(), weights.len().div_ceil(FNX_METER_RUN));
+            }
+        };
+        for length in [0, 1, 63, 64, 65, 127, 128, 129, 193] {
+            // Non-associative sums, zero-weight rows and subnormals. Any chunk
+            // reduction or regrouping changes the predecessor's binary64 bits.
+            let weights: Vec<f64> = (0..length)
+                .map(|at| {
+                    [
+                        0.0,
+                        -0.0,
+                        f64::from_bits(1),
+                        0.1,
+                        9_007_199_254_740_992.0,
+                        1.0,
+                    ][at % 6]
+                })
+                .collect();
+            check(&weights);
+            check(&vec![0.0; length]);
+        }
+        for failing in [0, 1, 62, 63, 64, 65, 126, 127, 128, 129] {
+            let mut weights = vec![0.5; 133];
+            weights[failing] = -1.0;
+            check(&weights);
+            // The overflow's first invalid sum must beat the later negative
+            // value, while cancellation on either overflow unit wins first.
+            weights[failing] = f64::MAX;
+            weights[failing + 1] = f64::MAX;
+            weights[failing + 2] = -1.0;
+            check(&weights);
+        }
+    }
+
+    #[test]
+    fn weighted_validation_full_calls_keep_certificates_and_every_control_ordinal() {
+        let n = 137;
+        let vertices: Vec<_> = (0..n).map(|at| VId((at as u128) << 64 | 17)).collect();
+        let mut edges: Vec<_> = (0..n)
+            .map(|at| ProjectionEdge {
+                eid: EId((at as u128) << 65 | 23),
+                source: vertices[2],
+                target: vertices[at],
+                weight: [0.0, 0.1, 0.3, 2.0, 7.0][at % 5],
+            })
+            .collect();
+        // A dangling row with arcs, an empty row, a self-loop, and parallel
+        // reductions whose negative input is harmless after canonical Sum.
+        edges.extend([
+            ProjectionEdge {
+                eid: EId(u128::MAX - 3),
+                source: vertices[0],
+                target: vertices[1],
+                weight: 0.0,
+            },
+            ProjectionEdge {
+                eid: EId(u128::MAX - 2),
+                source: vertices[3],
+                target: vertices[4],
+                weight: -3.0,
+            },
+            ProjectionEdge {
+                eid: EId(u128::MAX - 1),
+                source: vertices[3],
+                target: vertices[4],
+                weight: 5.0,
+            },
+        ]);
+        let graph = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([0x64; 32]),
+                as_of: CommitSeq(9),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: Directedness::Directed,
+                parallel_edges: ParallelEdgePolicy::Sum,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: n,
+                max_input_edges: edges.len(),
+                max_adjacency_entries: 2 * edges.len(),
+                max_workspace_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let call = FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap());
+        let limits = FnxExecutionLimits {
+            max_iterations: 2,
+            max_result_rows: n,
+            max_estimated_work: 100_000,
+        };
+        let fresh = |stop| Recording {
+            calls: Vec::new(),
+            stop,
+            seen: 0,
+            polls: 0,
+        };
+        let (mut scalar, mut runs) = (fresh(None), fresh(None));
+        let expected = with_scalar_weight_validation(true, || {
+            call.execute(&graph, limits, RecordingMeter::<true>(&mut scalar))
+        })
+        .unwrap();
+        let actual = call
+            .execute(&graph, limits, RecordingMeter::<true>(&mut runs))
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!((runs.seen, runs.polls), (scalar.seen, scalar.polls));
+        assert_eq!(
+            scalar.calls.len() - runs.calls.len(),
+            n - n.div_ceil(FNX_METER_RUN)
+        );
+        for stop in 1..=scalar.seen {
+            let (mut scalar, mut runs) = (fresh(Some(stop)), fresh(Some(stop)));
+            let old = with_scalar_weight_validation(true, || {
+                call.execute(&graph, limits, RecordingMeter::<true>(&mut scalar))
+            });
+            let new = call.execute(&graph, limits, RecordingMeter::<true>(&mut runs));
+            assert!(matches!(old, Err(FnxExecutionError::Cancelled("stop"))));
+            assert!(matches!(new, Err(FnxExecutionError::Cancelled("stop"))));
+            assert_eq!((runs.seen, runs.polls), (scalar.seen, scalar.polls));
+            assert_eq!(runs.seen, stop);
+        }
+        // Plain closures observe both work and live polls. Sweep that complete
+        // callback transcript independently of the host's bulk-charge contract.
+        let invoke = |scalar, stop| {
+            let mut seen = 0;
+            let result = with_scalar_weight_validation(scalar, || {
+                call.execute(&graph, limits, || {
+                    seen += 1;
+                    if stop == Some(seen) {
+                        Err(seen)
+                    } else {
+                        Ok(())
+                    }
+                })
+            });
+            (result, seen)
+        };
+        let (baseline, count) = invoke(true, None);
+        let (candidate, seen) = invoke(false, None);
+        assert_eq!(candidate.unwrap(), baseline.unwrap());
+        assert_eq!(seen, count);
+        for stop in 1..=count {
+            let (old, before) = invoke(true, Some(stop));
+            let (new, after) = invoke(false, Some(stop));
+            assert!(matches!(old, Err(FnxExecutionError::Cancelled(at)) if at == stop));
+            assert!(matches!(new, Err(FnxExecutionError::Cancelled(at)) if at == stop));
+            assert_eq!((before, after), (stop, stop));
+        }
+    }
+
+    /// Complete registered CALLs, with the scalar predecessor and candidate in
+    /// the same process and alternating order. Includes weighted validation,
+    /// transpose shares, iteration, output rows and certificate hashing. The
+    /// already-admitted projection is shared; this simple counting meter is not
+    /// the signed host permit. These are synthetic in-core maintenance samples,
+    /// not a database-latency, durable-open, GAPBS or authorization claim.
+    #[test]
+    #[ignore = "paired weighted PageRank CALL measurement; run release with --ignored --nocapture"]
+    fn weighted_pagerank_call_paired_measurement() {
+        #[derive(Default)]
+        struct Counter {
+            units: usize,
+            calls: usize,
+            polls: usize,
+        }
+        impl FnxMeter<Infallible> for &mut Counter {
+            #[inline(never)]
+            fn unit(&mut self) -> Result<(), Infallible> {
+                self.units(1)
+            }
+            #[inline(never)]
+            fn units(&mut self, count: usize) -> Result<(), Infallible> {
+                let state = std::hint::black_box(&mut **self);
+                state.units += count;
+                state.calls += 1;
+                Ok(())
+            }
+            #[inline(never)]
+            fn poll(&mut self) -> Result<(), Infallible> {
+                std::hint::black_box(&mut **self).polls += 1;
+                Ok(())
+            }
+        }
+        let n = 8192;
+        let vertices: Vec<_> = (0..n).map(|at| VId((at as u128) << 64 | 17)).collect();
+        for shape in ["roadlike", "uniform", "hubs"] {
+            let sources = if shape == "hubs" { n / 64 } else { n };
+            let degree = match shape {
+                "roadlike" => 2,
+                "uniform" => 16,
+                _ => 1024,
+            };
+            let mut edges = Vec::with_capacity(sources * degree);
+            for source in 0..sources {
+                for at in 0..degree {
+                    let target = match shape {
+                        "roadlike" => (source + if at == 0 { 1 } else { n - 1 }) % n,
+                        "uniform" => (source * 17 + at * 131) % n,
+                        _ => (source * 17 + at) % n,
+                    };
+                    edges.push(ProjectionEdge {
+                        eid: EId((edges.len() as u128) << 64 | 23),
+                        source: vertices[source],
+                        target: vertices[target],
+                        weight: [0.0, 0.125, 0.5, 1.0, 2.0, 7.0][(source + at) % 6],
+                    });
+                }
+            }
+            let graph = SnapshotGraphView::build(
+                SnapshotBinding {
+                    root: ObjectId([0x65; 32]),
+                    as_of: CommitSeq(9),
+                },
+                &vertices,
+                &edges,
+                ProjectionSpec {
+                    directedness: Directedness::Directed,
+                    parallel_edges: ParallelEdgePolicy::Sum,
+                    self_loops: SelfLoopPolicy::Keep,
+                },
+                ProjectionLimits {
+                    max_vertices: n,
+                    max_input_edges: edges.len(),
+                    max_adjacency_entries: edges.len(),
+                    max_workspace_bytes: 64 << 20,
+                },
+            )
+            .unwrap();
+            for iterations in [1, 20] {
+                let call = FnxCallSpec::pagerank(
+                    PageRankOptions::fixed_iterations(0.85, iterations, true).unwrap(),
+                );
+                let limits = FnxExecutionLimits {
+                    max_iterations: iterations,
+                    max_result_rows: n,
+                    max_estimated_work: usize::MAX,
+                };
+                let mut samples = [Vec::new(), Vec::new()];
+                let mut calls = [0; 2];
+                for trial in 0..8 {
+                    let mut results = [None, None];
+                    let mut meters = [Counter::default(), Counter::default()];
+                    for mode in if trial % 2 == 0 { [0, 1] } else { [1, 0] } {
+                        let started = std::time::Instant::now();
+                        let result = with_scalar_weight_validation(mode == 0, || {
+                            call.execute(&graph, limits, &mut meters[mode])
+                        })
+                        .unwrap();
+                        std::hint::black_box(&result.rows);
+                        let elapsed = started.elapsed().as_nanos();
+                        if trial != 0 {
+                            samples[mode].push(elapsed);
+                        }
+                        calls[mode] = meters[mode].calls;
+                        results[mode] = Some(result);
+                    }
+                    assert_eq!(results[0], results[1]);
+                    assert_eq!(meters[0].units, meters[1].units);
+                    assert_eq!(meters[0].polls, meters[1].polls);
+                }
+                println!(
+                    "weighted_pagerank_call shape={shape} vertices={n} arcs={} iterations={iterations} scalar_host_calls={} batched_host_calls={} scalar_ns={:?} batched_ns={:?} projection_excluded=true signed_host_excluded=true equality=exact",
+                    edges.len(),
+                    calls[0],
+                    calls[1],
+                    samples[0],
+                    samples[1]
+                );
             }
         }
     }
@@ -4482,13 +4846,19 @@ mod tests {
                         eid: EId(1),
                         source: VId(1),
                         target: VId(2),
-                        weight: weights[0],
+                        weight: weights[0] / 2.0,
                     },
                     ProjectionEdge {
                         eid: EId(2),
                         source: VId(1),
                         target: VId(3),
                         weight: weights[1],
+                    },
+                    ProjectionEdge {
+                        eid: EId(3),
+                        source: VId(1),
+                        target: VId(2),
+                        weight: weights[0] / 2.0,
                     },
                 ],
                 ProjectionSpec {
@@ -4498,7 +4868,7 @@ mod tests {
                 },
                 ProjectionLimits {
                     max_vertices: 3,
-                    max_input_edges: 2,
+                    max_input_edges: 3,
                     max_adjacency_entries: 2,
                     max_workspace_bytes: 1 << 20,
                 },
@@ -4518,10 +4888,21 @@ mod tests {
             };
             let before = with_weighted_shares(true, || run(None));
             assert_eq!(run(None), before);
+            let scalar = with_scalar_weight_validation(true, || run(None));
+            assert_eq!(
+                (&before.0, before.2, before.3),
+                (&scalar.0, scalar.2, scalar.3)
+            );
             for stop in 1..=before.2 {
                 assert_eq!(
                     run(Some(stop)),
                     with_weighted_shares(true, || run(Some(stop)))
+                );
+                let scalar = with_scalar_weight_validation(true, || run(Some(stop)));
+                let actual = run(Some(stop));
+                assert_eq!(
+                    (actual.0, actual.2, actual.3),
+                    (scalar.0, scalar.2, scalar.3)
                 );
             }
             if weights[0] < 0.0 {
