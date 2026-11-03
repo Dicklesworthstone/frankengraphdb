@@ -320,9 +320,13 @@ async fn prepare_write(
     if chain? {
         return prepare_row_write(cx, db, token, request, false).map(PreparedWrite::Chain);
     }
-    let guard = db.db.read(cx).await.map_err(Refusal::from)?;
+    // Definition admission needs only the authenticated namespace. Pin the
+    // published view briefly instead of queuing behind a writer's commit I/O.
+    // Neither this view nor representative operands enter the cached script.
+    let (view, published_generation) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     generation.check().map_err(Refusal::from)?;
-    let script = guard.prepare_graph_write_script_authorized(
+    published_generation.check().map_err(Refusal::from)?;
+    let script = view.prepare_graph_write_script_authorized(
         &query,
         &contexts.commit(),
         &db.authority,

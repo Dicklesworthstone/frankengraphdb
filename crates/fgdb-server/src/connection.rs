@@ -486,8 +486,12 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     continue;
                 };
                 lane.send_authority = Some((Arc::clone(&chosen), token.clone()));
-                let (frontier, generation) = match chosen.db.read(cx).await {
-                    Ok(db) => (db.frontier().map(|seq| seq.0), db.generation()),
+                // Selection is read admission too: a fresh connection must
+                // not wait behind the writer's publication I/O just to learn
+                // its last published frontier. Pin that frontier together
+                // with its recovery fence, as ordinary read sessions do.
+                let (frontier, generation) = match chosen.db.read_view(cx).await {
+                    Ok((view, generation)) => (view.frontier().0, generation),
                     Err(error) => {
                         let refusal = ErrorBody {
                             code: error.code(),
@@ -508,11 +512,6 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                         }
                         continue;
                     }
-                };
-                let Ok(frontier) = frontier else {
-                    return lane
-                        .fatal(cx, request, ErrorCode::Execution, "database unavailable")
-                        .await;
                 };
                 let ready = Ready {
                     namespace: chosen.namespace,

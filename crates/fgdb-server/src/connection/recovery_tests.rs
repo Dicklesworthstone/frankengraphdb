@@ -72,6 +72,199 @@ fn frames(bytes: &[u8]) -> Vec<Frame> {
     result
 }
 
+/// Feed real FGP frames through the complete connection dispatcher while the
+/// test controls the writer lock independently. Writes use the existing
+/// transport sink; reads remain pending when no frame has been supplied.
+struct SelectionIo {
+    input: Arc<std::sync::Mutex<VecDeque<u8>>>,
+    output: WireIo,
+}
+
+impl asupersync::io::AsyncRead for SelectionIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        buffer: &mut asupersync::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let mut input = self.input.lock().unwrap();
+        if input.is_empty() {
+            return Poll::Pending;
+        }
+        while buffer.remaining() != 0 {
+            let Some(byte) = input.pop_front() else {
+                break;
+            };
+            buffer.put_slice(&[byte]);
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl asupersync::io::AsyncWrite for SelectionIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.output).poll_write(task, bytes)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.output).poll_flush(task)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.output).poll_shutdown(task)
+    }
+}
+
+#[test]
+fn fresh_connection_selection_and_reads_use_the_published_frontier_during_a_write() {
+    let ((), report) = run_async_under_lab(0x79a0_0108, |root| async move {
+        let (server, token, _) = served(&root, "fresh-selection-overlap").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), vertex(1))
+            .await
+            .unwrap();
+
+        // There is no pinned reader. Holding precisely the lock retained by
+        // commit I/O makes a lock-dependent SELECT_DATABASE deterministically
+        // stall, without timing assumptions or a scheduler race.
+        let held = db.db.write(&root).await.unwrap();
+        let input = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let (output, wire) = WireIo::new([], false);
+        let mut connection = run(
+            &root,
+            &server,
+            Box::new(SelectionIo {
+                input: Arc::clone(&input),
+                output,
+            }),
+        );
+        let limits = FrameLimits::new(4096).unwrap();
+        let inject = |kind, request, binding, body: Vec<u8>| {
+            let frame =
+                Frame::new(kind, request, StreamId::CONTROL, binding, body, limits).unwrap();
+            input.lock().unwrap().extend(frame.encode(limits).unwrap());
+        };
+        let advance = |connection: Pin<&mut (dyn Future<Output = ()> + Send)>| {
+            assert!(
+                connection
+                    .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                    .is_pending(),
+                "the connection must remain ready for its next request"
+            );
+        };
+        inject(
+            FrameKind::Hello,
+            1,
+            Binding::Transport,
+            Hello {
+                min_version: crate::SERVED_VERSION,
+                max_version: crate::SERVED_VERSION,
+                client_nonce: [0x18; 32],
+                max_frame_len: 4096,
+            }
+            .encode()
+            .unwrap(),
+        );
+        inject(
+            FrameKind::Auth,
+            2,
+            Binding::Transport,
+            Auth {
+                credential: Credential::WardenCapability(token.encode()),
+            }
+            .encode()
+            .unwrap(),
+        );
+        advance(connection.as_mut());
+        let sent = frames(&wire.bytes());
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].header().kind(), FrameKind::HelloAck);
+        assert_eq!(sent[1].header().kind(), FrameKind::AuthOk);
+        let session = AuthOk::decode(sent[1].payload()).unwrap().session;
+
+        // Unknown databases still refuse before touching graph state and do
+        // not prevent a later authorized selection on the same connection.
+        for (request, name) in [(3, "absent"), (4, "test")] {
+            inject(
+                FrameKind::SelectDatabase,
+                request,
+                Binding::Session(session),
+                SelectDatabase { name: name.into() }.encode().unwrap(),
+            );
+            advance(connection.as_mut());
+        }
+        let sent = frames(&wire.bytes());
+        assert_eq!(sent.len(), 4, "READY must not wait behind the writer");
+        assert_eq!(sent[2].header().kind(), FrameKind::Error);
+        assert_eq!(
+            ErrorBody::decode(sent[2].payload()).unwrap().code,
+            ErrorCode::NotFoundOrUnauthorized
+        );
+        assert_eq!(sent[3].header().kind(), FrameKind::Ready);
+        let ready = Ready::decode(sent[3].payload()).unwrap();
+        assert_eq!(ready.frontier, 1);
+        assert_eq!(ready.namespace, db.namespace);
+        let binding = Binding::Ready(ready.binding(session));
+
+        let read = Execute {
+            mode: ExecuteMode::Read,
+            statement: "MATCH (n) RETURN 7 AS value".into(),
+            parameters: vec![],
+        };
+        inject(FrameKind::Execute, 5, binding, read.encode().unwrap());
+        advance(connection.as_mut());
+        let sent = frames(&wire.bytes());
+        assert_eq!(sent.len(), 6, "the first read must also bypass the writer");
+        assert_eq!(
+            ResultChunk::decode(sent[4].payload()).unwrap().rows,
+            vec![vec![WireValue::Int(7)]]
+        );
+        assert_eq!(
+            ResultEnd::decode(sent[5].payload()).unwrap().outcome,
+            Outcome::Rows { seq: 1 }
+        );
+        drop(held);
+
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), vertex(2))
+            .await
+            .unwrap();
+        inject(FrameKind::Execute, 6, binding, read.encode().unwrap());
+        advance(connection.as_mut());
+        let sent = frames(&wire.bytes());
+        assert_eq!(sent.len(), 8);
+        assert_eq!(
+            ResultChunk::decode(sent[6].payload()).unwrap().rows,
+            vec![vec![WireValue::Int(7)], vec![WireValue::Int(7)]]
+        );
+        assert_eq!(
+            ResultEnd::decode(sent[7].payload()).unwrap().outcome,
+            Outcome::Rows { seq: 2 },
+            "selection must not pin subsequent reads to its old frontier"
+        );
+        drop(connection);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn recovery_resets_credit_blocked_subscriptions_at_the_last_complete_batch() {
     let ((), report) = run_async_under_lab(0x79a0_0101, |root| async move {
