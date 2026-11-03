@@ -379,35 +379,63 @@ fn query_refuses_a_write_statement_without_mutating_or_echoing_it() {
     assert!(rows(&count)[0].contains("\"type\":\"count\",\"value\":\"0\""));
 }
 
-/// fgdb-694ga: in a write RETURN, `[x IN collect(n) | x.q]` names post-write
-/// values that no element reader there serves. It is a typed query error
-/// that publishes nothing, never the pre-write snapshot's NULL. The same
-/// write returning `collect(n.q)` sees its own assignments, and a read
-/// answers the element form.
+/// fgdb-694ga / fgdb-mf7og: deferred collection element reads see the write's
+/// completed assignments. A later expression failure preserves every database
+/// byte and the committed values, including beneath an empty output page.
 #[test]
-fn a_write_return_reads_collected_element_properties_only_as_a_typed_refusal() {
+fn a_write_return_reads_collected_element_properties_at_the_post_write_cut() {
     let fixture = Fixture::new("write-collect");
     succeeded(&fixture.robot("create", &[]), "created");
     let run = |operation: &str, text: &str| fixture.robot(operation, &["--property", "q=2", text]);
-    succeeded(
+    let collected_values = |output: &Output| {
+        let values = rows(output);
+        assert_eq!(values.len(), 1);
+        assert!(values[0].contains("\"type\":\"list\""));
+        assert_eq!(values[0].matches("\"type\":\"int\"").count(), 2);
+        let mut qs: Vec<_> = values[0]
+            .split("\"value\":\"")
+            .skip(1)
+            .map(|cell| cell[..cell.find('"').unwrap()].to_owned())
+            .collect();
+        qs.sort();
+        qs
+    };
+    let seeded = succeeded(
         &run("write", "CREATE (:Person {id: 1}), (:Person {id: 2})"),
         "written",
     );
-    let before = directory_bytes(&fixture.db());
-    refused(
-        &run(
-            "write",
-            "MATCH (n:Person) SET n.q = n.id * 3 RETURN [x IN collect(n) | x.q] AS qs",
-        ),
-        3,
-        "query",
+    let initial = run("query", "MATCH (n:Person) RETURN n.q AS q");
+    succeeded(&initial, "rows");
+    assert_eq!(
+        rows(&initial),
+        [r#"{"v":1,"event":"row","cells":[{"type":"null"}]}"#; 2]
     );
+    let collected = run(
+        "write",
+        "MATCH (n:Person) SET n.q = n.id * 3 RETURN [x IN collect(n) | x.q] AS qs",
+    );
+    assert_eq!(succeeded(&collected, "written"), seeded + 1);
+    assert_eq!(collected_values(&collected), ["3", "6"]);
+
+    let before = directory_bytes(&fixture.db());
+    let failed = run(
+        "write",
+        "MATCH (n:Person) SET n.q = n.id * 7 \
+         RETURN [x IN collect(n) | 1 / (x.q - 7)] AS qs LIMIT 0",
+    );
+    refused(&failed, 3, "query");
+    assert!(terminal(&failed).contains("\"code\":\"invalid_value\""));
+    assert!(String::from_utf8_lossy(&failed.stdout).contains("DivisionByZero"));
+    assert!(rows(&failed).is_empty());
     assert_eq!(directory_bytes(&fixture.db()), before);
-    let unchanged = run("query", "MATCH (n:Person) RETURN n.q AS q");
+    let unchanged = run("query", "MATCH (n:Person) RETURN n.q AS q ORDER BY n.id");
     succeeded(&unchanged, "rows");
     assert_eq!(
         rows(&unchanged),
-        [r#"{"v":1,"event":"row","cells":[{"type":"null"}]}"#; 2]
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"3"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"6"}]}"#,
+        ]
     );
     let read = run(
         "query",
@@ -425,13 +453,7 @@ fn a_write_return_reads_collected_element_properties_only_as_a_typed_refusal() {
         "MATCH (n:Person) SET n.q = n.id * 3 RETURN collect(n.q) AS qs",
     );
     succeeded(&written, "written");
-    let mut qs: Vec<_> = rows(&written)[0]
-        .split("\"value\":\"")
-        .skip(1)
-        .map(|cell| cell[..cell.find('"').unwrap()].to_owned())
-        .collect();
-    qs.sort();
-    assert_eq!(qs, ["3", "6"]);
+    assert_eq!(collected_values(&written), ["3", "6"]);
 }
 
 /// fgdb-dn9q3: `WHERE n.id IN $ids` with a list argument selects exactly
