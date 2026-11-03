@@ -612,6 +612,94 @@ fn bind_native_admitted<Clock: FnMut() -> u64>(
     })
 }
 
+/// Definition admission depends on authenticated namespace identity, not on
+/// mutable graph state. Keep one compiler, authority check and work meter for
+/// both the writer handle and a published immutable view.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+fn prepare_for_namespace(
+    namespace: fgdb_types::DatabaseSecurityNamespaceId,
+    query_cx: &QueryCx,
+    commit_cx: &CommitCx,
+    authority: &Authority,
+    token: &CapabilityToken,
+    branch: &str,
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    relation: RelationId,
+    max_statements: usize,
+    mut clock: impl FnMut() -> u64,
+) -> Result<PreparedGraphWriteScript, Fault> {
+    let refusal = |error| admission(WriteTxnError::Authorization(error));
+    if authority.namespace() != namespace {
+        return Err(refusal(Error::WrongAuthority));
+    }
+    let now = clock();
+    let verified = authority.verify_at(token, branch, now).map_err(refusal)?;
+    let permit = verified.begin_write_at(branch, now).map_err(refusal)?;
+    let mut execution = Execution {
+        cx: commit_cx,
+        permit,
+        clock,
+    };
+    let script = prepare(query_cx, &mut execution, text, params, relation, resolver)?;
+    statement_limit(&script, max_statements)?;
+    let sample = preparation_parameters(
+        params,
+        script
+            .parameter_schema()
+            .iter()
+            .any(fgdb_gql::GqlParameterSpec::is_statement_time),
+    )?;
+    let bound =
+        Input::Script(&script, &sample).bind(query_cx, verified.predicates(), &mut execution);
+    checkpoint(query_cx, &mut execution).map_err(admission)?;
+    drop(bound?);
+    Ok(script)
+}
+
+impl crate::EmbeddedReadView {
+    /// Admit a write-script definition using this authenticated view's namespace.
+    ///
+    /// Hosts can prepare while a writer owns the mutable database. Preparation
+    /// reads no graph state and the returned definition retains neither this
+    /// view nor representative argument values. It grants no execution rights:
+    /// every invocation still needs the ordinary authorized writer and a fresh
+    /// live permit. The supplied catalog, invalidation rules and statement
+    /// ceiling have the same contract as
+    /// [`Database::prepare_graph_write_script_authorized`].
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    pub fn prepare_graph_write_script_authorized(
+        &self,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        text: &str,
+        params: &GqlParameters,
+        resolver: impl GraphSymbolResolver,
+        relation: RelationId,
+        max_statements: usize,
+        clock: impl FnMut() -> u64,
+    ) -> Result<PreparedGraphWriteScript, Fault> {
+        prepare_for_namespace(
+            self.namespace,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            text,
+            params,
+            resolver,
+            relation,
+            max_statements,
+            clock,
+        )
+    }
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Admit immutable native write-script metadata for a trusted host cache.
     ///
@@ -644,34 +732,22 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl GraphSymbolResolver,
         relation: RelationId,
         max_statements: usize,
-        mut clock: impl FnMut() -> u64,
+        clock: impl FnMut() -> u64,
     ) -> Result<PreparedGraphWriteScript, Fault> {
-        let refusal = |error| admission(WriteTxnError::Authorization(error));
-        if authority.namespace() != self.keys.namespace {
-            return Err(refusal(Error::WrongAuthority));
-        }
-        let now = clock();
-        let verified = authority.verify_at(token, branch, now).map_err(refusal)?;
-        let permit = verified.begin_write_at(branch, now).map_err(refusal)?;
-        let mut execution = Execution {
-            cx: commit_cx,
-            permit,
-            clock,
-        };
-        let script = prepare(query_cx, &mut execution, text, params, relation, resolver)?;
-        statement_limit(&script, max_statements)?;
-        let sample = preparation_parameters(
+        prepare_for_namespace(
+            self.keys.namespace,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            text,
             params,
-            script
-                .parameter_schema()
-                .iter()
-                .any(fgdb_gql::GqlParameterSpec::is_statement_time),
-        )?;
-        let bound =
-            Input::Script(&script, &sample).bind(query_cx, verified.predicates(), &mut execution);
-        checkpoint(query_cx, &mut execution).map_err(admission)?;
-        drop(bound?);
-        Ok(script)
+            resolver,
+            relation,
+            max_statements,
+            clock,
+        )
     }
 
     /// Parse, bind and atomically execute native write text under one capability.

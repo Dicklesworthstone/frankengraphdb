@@ -9,6 +9,9 @@
 //! cargo run --release -p fgdb-bench --example gapbs_compare -- \
 //!   --gapbs ../gapbs --graph email-Eu-core.txt --vertices 1005 \
 //!   --source 0 --trials 6 --sealed --output /tmp/fgdb-gapbs-email
+//! cargo run --release -p fgdb-bench --example gapbs_compare -- \
+//!   --gapbs ../gapbs --graph roads.wel --vertices 10000 --weighted \
+//!   --delta 16 --trials 6 --sealed --output /tmp/fgdb-gapbs-weighted
 //! ```
 //!
 //! Pass `--build-note 'profile and per-package --config overrides'` when using
@@ -37,6 +40,13 @@
 //! identical-output-cost claim. The database's independent fnx/brute-force
 //! triangle tests cover each vertex. Duplicate/reciprocal edges collapse and
 //! self-loops are dropped before either triangle kernel.
+//! `--weighted` accepts three-column integer-weight edge lists (or assigns
+//! deterministic fixture weights) and adds SSSP against upstream DeltaStep and
+//! SSSPVerifier. Parallel weights reduce by minimum, including zero. Every
+//! distance/unreachable vertex is compared exactly. The accepted domain proves
+//! all simple-path costs below GAPBS's int32 infinity sentinel; arbitrary f64
+//! weights are outside this comparison. The unchanged BFS/WCC/TC series ignore
+//! these stored weights. `--delta` pins GAPBS's positive bucket width.
 //! PageRank is intentionally absent: GAPBS's sink and float32 semantics differ
 //! from the registered normalized float64 procedure.
 //!
@@ -45,7 +55,9 @@
 //! `execute_and_certify_ns` includes the production API's internal typed-row
 //! conversion and certificate construction; it is NOT a bare-kernel timer.
 //! GAPBS reports input/CSR/kernel/encoding/verification separately. Verification
-//! is outside its kernel timer, and no loading time is hidden in a kernel
+//! is separate from execution; weighted SSSP uses upstream's complete loader
+//! and reports input+CSR together, followed by numeric-domain admission.
+//! No loading time is hidden in a kernel
 //! comparison. Subsequent database samples may use the ordinary projection
 //! cache; `projection_reused` observes that fact rather than assuming it.
 //! BFS samples retain the certificate's per-level pull decisions and actual
@@ -81,12 +93,13 @@
 use asupersync::Budget;
 use fgdb::{Database, WriteBatch};
 use fgdb_bench::{KNOWS, keys};
-use fgdb_delta_types::LabelId;
+use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_prism::{
-    FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions, FnxResult, FnxValue, GraphView,
-    ParallelEdgePolicy, SelfLoopPolicy, SnapshotGraphView,
+    FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions, FnxResult, FnxValue,
+    FnxWeightSpec, GraphView, MissingWeightPolicy, ParallelEdgePolicy, SelfLoopPolicy,
+    SnapshotGraphView,
 };
-use fgdb_types::{CommitCx, EId, PurposeContexts, QueryCx, VId};
+use fgdb_types::{CanonicalScalar, CommitCx, EId, PurposeContexts, QueryCx, VId};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -98,10 +111,13 @@ use std::time::Instant;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type Edge = (usize, usize);
 type Metrics = BTreeMap<String, u128>;
+const WEIGHT: PropertyKeyId = PropertyKeyId(1);
+const GAPBS_DISTANCE_INFINITY: i64 = i32::MAX as i64 / 2;
 
 const USAGE: &str = "gapbs_compare --gapbs CHECKOUT --output NEW_DIRECTORY \
     (--graph FILE --vertices N | --fixture smoke|sparse|hub [--vertices N]) \
-    [--source 0] [--trials 5] [--threads 1] [--build-note TEXT] [--sealed]";
+    [--source 0] [--trials 5] [--threads 1] [--build-note TEXT] [--sealed] \
+    [--weighted [--delta 16]]";
 
 #[derive(Debug)]
 struct Config {
@@ -115,6 +131,8 @@ struct Config {
     threads: usize,
     build_note: String,
     sealed: bool,
+    weighted: bool,
+    delta: usize,
 }
 
 impl Config {
@@ -122,12 +140,18 @@ impl Config {
         let mut arguments = arguments;
         let mut values = BTreeMap::new();
         let mut sealed = false;
+        let mut weighted = false;
         while let Some(key) = arguments.next() {
-            if key == "--sealed" {
-                if sealed {
-                    return Err("repeated --sealed option".into());
+            if key == "--sealed" || key == "--weighted" {
+                let flag = if key == "--sealed" {
+                    &mut sealed
+                } else {
+                    &mut weighted
+                };
+                if *flag {
+                    return Err(format!("repeated {key} option").into());
                 }
-                sealed = true;
+                *flag = true;
                 continue;
             }
             if ![
@@ -140,6 +164,7 @@ impl Config {
                 "--trials",
                 "--threads",
                 "--build-note",
+                "--delta",
             ]
             .contains(&key.as_str())
             {
@@ -163,6 +188,9 @@ impl Config {
             None if fixture.is_some() => 4096,
             None => return Err("--graph requires an explicit --vertices population".into()),
         };
+        if !weighted && values.contains_key("--delta") {
+            return Err("--delta requires --weighted".into());
+        }
         let mut number = |key: &str, fallback: usize| -> Result<usize> {
             values
                 .remove(key)
@@ -171,6 +199,7 @@ impl Config {
         let source = number("--source", 0)?;
         let trials = number("--trials", 5)?;
         let threads = number("--threads", 1)?;
+        let delta = number("--delta", 16)?;
         let build_note = values
             .remove("--build-note")
             .unwrap_or_else(|| "not supplied".to_owned());
@@ -179,6 +208,9 @@ impl Config {
         }
         if trials == 0 || threads == 0 {
             return Err("trials and threads must be positive".into());
+        }
+        if delta == 0 || delta >= GAPBS_DISTANCE_INFINITY as usize {
+            return Err("delta must be positive and below GAPBS's distance infinity".into());
         }
         Ok(Self {
             gapbs,
@@ -191,7 +223,17 @@ impl Config {
             threads,
             build_note,
             sealed,
+            weighted,
+            delta,
         })
+    }
+
+    fn algorithms(&self) -> &'static [&'static str] {
+        if self.weighted {
+            &["bfs", "wcc", "tc", "sssp"]
+        } else {
+            &["bfs", "wcc", "tc"]
+        }
     }
 }
 
@@ -216,6 +258,72 @@ fn input(reader: impl BufRead, vertices: usize) -> Result<Vec<Edge>> {
         edges.push((source, target));
     }
     Ok(edges)
+}
+
+fn weighted_input(reader: impl BufRead, vertices: usize) -> Result<(Vec<Edge>, Vec<i32>)> {
+    let mut edges = Vec::new();
+    let mut weights = Vec::new();
+    for (line_number, line) in reader.lines().enumerate() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('%') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let source: usize = fields.next().ok_or("missing source")?.parse()?;
+        let target: usize = fields.next().ok_or("missing target")?.parse()?;
+        let weight: i32 = fields.next().ok_or("missing integer weight")?.parse()?;
+        if fields.next().is_some() || source >= vertices || target >= vertices || weight < 0 {
+            return Err(format!(
+                "line {}: expected two IDs in [0, {vertices}) and a nonnegative int32 weight",
+                line_number + 1
+            )
+            .into());
+        }
+        edges.push((source, target));
+        weights.push(weight);
+    }
+    validate_weighted_input(&edges, &weights, vertices)?;
+    Ok((edges, weights))
+}
+
+fn validate_weighted_input(edges: &[Edge], weights: &[i32], vertices: usize) -> Result<()> {
+    if vertices == 0 || edges.len() != weights.len() {
+        return Err("weighted input has an invalid population or weight count".into());
+    }
+    let maximum = i64::from(weights.iter().copied().max().unwrap_or(0));
+    if weights.iter().any(|&weight| weight < 0)
+        || maximum >= GAPBS_DISTANCE_INFINITY
+        || (vertices.saturating_sub(1) as u128) * (maximum as u128)
+            >= GAPBS_DISTANCE_INFINITY as u128
+    {
+        return Err(
+            "weighted input cannot prove every simple path below GAPBS's int32 infinity".into(),
+        );
+    }
+    // Upstream DeltaStep allocates its frontier by arc count and writes the
+    // source to slot zero, including for an isolated source. Do not invoke it
+    // on a zero-arc graph or modify its kernel to manufacture an oracle result.
+    if !edges.iter().any(|&(source, target)| source != target) {
+        return Err("upstream GAPBS DeltaStep requires at least one non-loop edge".into());
+    }
+    Ok(())
+}
+
+fn read_options(call: &FnxCallSpec, algorithm: &str) -> FnxReadOptions {
+    let mut options = FnxReadOptions::whole_graph_for(call, None);
+    options.selection.relation = Some(KNOWS);
+    options.projection.self_loops = SelfLoopPolicy::Drop;
+    options.projection.parallel_edges = if algorithm == "sssp" {
+        options.selection.weight = FnxWeightSpec::Property {
+            key: WEIGHT,
+            missing: MissingWeightPolicy::Reject,
+        };
+        ParallelEdgePolicy::Minimum
+    } else {
+        ParallelEdgePolicy::CollapseUnit
+    };
+    options
 }
 
 fn fixture(name: &str, vertices: usize) -> Result<Vec<Edge>> {
@@ -339,8 +447,6 @@ fn oracle_metrics(stdout: &str, success: bool) -> Result<Metrics> {
         }
     }
     for key in [
-        "input_ns",
-        "csr_ns",
         "kernel_ns",
         "verification_ns",
         "encoding_ns",
@@ -351,7 +457,28 @@ fn oracle_metrics(stdout: &str, success: bool) -> Result<Metrics> {
             return Err(format!("missing GAPBS metric {key}").into());
         }
     }
+    match (
+        metrics.contains_key("input_ns"),
+        metrics.contains_key("csr_ns"),
+        metrics.contains_key("input_csr_ns"),
+        metrics.contains_key("domain_validation_ns"),
+    ) {
+        (true, true, false, false) | (false, false, true, true) => {}
+        _ => return Err("missing or ambiguous GAPBS loading phase metrics".into()),
+    }
     Ok(metrics)
+}
+
+fn oracle_total_ns(metrics: &Metrics) -> Result<u128> {
+    let loading = if let Some(combined) = metrics.get("input_csr_ns") {
+        combined.checked_add(metrics["domain_validation_ns"])
+    } else {
+        metrics["input_ns"].checked_add(metrics["csr_ns"])
+    };
+    loading
+        .and_then(|value| value.checked_add(metrics["kernel_ns"]))
+        .and_then(|value| value.checked_add(metrics["encoding_ns"]))
+        .ok_or("oracle elapsed time overflow".into())
 }
 
 fn verification_tokens(stdout: &str) -> Vec<&str> {
@@ -372,19 +499,27 @@ fn run_oracle(
     if output_path.exists() {
         return Err("refusing to overwrite oracle output".into());
     }
-    let mut command = Command::new(config.output.join(if algorithm == "tc" {
-        "gapbs-tc-adapter"
-    } else {
-        "gapbs-adapter"
+    let mut command = Command::new(config.output.join(match algorithm {
+        "tc" => "gapbs-tc-adapter",
+        "sssp" => "gapbs-sssp-adapter",
+        "bfs" | "wcc" => "gapbs-adapter",
+        _ => return Err("unsupported GAPBS algorithm".into()),
     }));
     command
         .arg(algorithm)
-        .arg(config.output.join("graph.el"))
+        .arg(config.output.join(if algorithm == "sssp" {
+            "graph.wel"
+        } else {
+            "graph.el"
+        }))
         .arg(config.vertices.to_string())
         .arg(config.source.to_string())
         .arg(&output_path)
         .env("OMP_NUM_THREADS", config.threads.to_string())
         .env("OMP_DYNAMIC", "FALSE");
+    if algorithm == "sssp" {
+        command.arg(config.delta.to_string());
+    }
     if corrupt {
         command.arg("corrupt");
     }
@@ -402,7 +537,7 @@ fn run_oracle(
 
 fn canonical_rows(result: &FnxResult, algorithm: &str, vertices: usize) -> Result<Vec<i64>> {
     let expected_columns = match algorithm {
-        "bfs" => ["vertex", "distance"],
+        "bfs" | "sssp" => ["vertex", "distance"],
         "wcc" => ["vertex", "component"],
         "tc" => ["vertex", "triangles"],
         _ => return Err("unknown result algorithm".into()),
@@ -428,16 +563,28 @@ fn canonical_rows(result: &FnxResult, algorithm: &str, vertices: usize) -> Resul
         previous = Some(vertex);
         values[vertex] = match (algorithm, value) {
             ("bfs" | "tc", FnxValue::Integer(value)) => i64::try_from(*value)?,
+            ("sssp", FnxValue::Float(value)) => integer_distance(*value)?,
             ("wcc", FnxValue::Vertex(component)) if component.0 < vertices as u128 => {
                 i64::try_from(component.0)?
             }
             _ => return Err("production result has the wrong value type".into()),
         };
     }
-    if algorithm != "bfs" && result.rows.len() != vertices {
+    if !matches!(algorithm, "bfs" | "sssp") && result.rows.len() != vertices {
         return Err("analytics result omitted vertices".into());
     }
     Ok(values)
+}
+
+fn integer_distance(value: f64) -> Result<i64> {
+    if !value.is_finite()
+        || value < 0.0
+        || value >= GAPBS_DISTANCE_INFINITY as f64
+        || value.fract() != 0.0
+    {
+        return Err("SSSP returned a distance outside the admitted exact integer domain".into());
+    }
+    Ok(value as i64)
 }
 
 /// Normalize the actual public GQL rows, without an alternate graph evaluator.
@@ -454,7 +601,7 @@ fn canonical_query_rows(
         return Err("composed query did not produce native rows".into());
     };
     let value_column = match algorithm {
-        "bfs" => "distance",
+        "bfs" | "sssp" => "distance",
         "wcc" => "component",
         "tc" => "triangles",
         _ => return Err("unknown composed result algorithm".into()),
@@ -482,6 +629,10 @@ fn canonical_query_rows(
                 "bfs" | "tc",
                 fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value))),
             ) if *value >= 0 => *value,
+            (
+                "sssp",
+                fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(value))),
+            ) => integer_distance(value.get())?,
             ("wcc", fgdb::QueryValue::Value(GraphValue::Vertex(component)))
                 if component.0 < vertices as u128 =>
             {
@@ -490,7 +641,7 @@ fn canonical_query_rows(
             _ => return Err("composed result has the wrong value type".into()),
         };
     }
-    if algorithm != "bfs" && rows.len() != vertices {
+    if !matches!(algorithm, "bfs" | "sssp") && rows.len() != vertices {
         return Err("composed analytics result omitted vertices".into());
     }
     Ok(values)
@@ -558,6 +709,9 @@ fn statement(algorithm: &str, source: usize) -> String {
         "bfs" => {
             format!("CALL fnx.single_source_shortest_path_length({source}) YIELD vertex,distance")
         }
+        "sssp" => {
+            format!("CALL fnx.single_source_dijkstra_path_length({source}) YIELD vertex,distance")
+        }
         "wcc" => "CALL fnx.weakly_connected_components() YIELD vertex,component".to_owned(),
         "tc" => "CALL fnx.triangles() YIELD vertex,triangles".to_owned(),
         _ => unreachable!("the runner's algorithm set is closed"),
@@ -575,10 +729,7 @@ fn database_sample(
 ) -> Result<(Vec<i64>, u128, usize)> {
     let text = statement(algorithm, config.source);
     let call = FnxCallSpec::bind(&text, &FnxParameters::new())?;
-    let mut options = FnxReadOptions::whole_graph_for(&call, None);
-    options.selection.relation = Some(KNOWS);
-    options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
-    options.projection.self_loops = SelfLoopPolicy::Drop;
+    let options = read_options(&call, algorithm);
 
     let started = Instant::now();
     let view = database.read_session()?;
@@ -770,10 +921,7 @@ async fn sealed_sample(
     log: &mut impl Write,
 ) -> Result<SealedSample> {
     let call = FnxCallSpec::bind(&statement(algorithm, config.source), &FnxParameters::new())?;
-    let mut options = FnxReadOptions::whole_graph_for(&call, None);
-    options.selection.relation = Some(KNOWS);
-    options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
-    options.projection.self_loops = SelfLoopPolicy::Drop;
+    let options = read_options(&call, algorithm);
     let memory = FnxMemoryLimits {
         max_kernel_workspace_bytes: 64 * 1024 * 1024,
         max_result_bytes: 64 * 1024 * 1024,
@@ -907,6 +1055,15 @@ async fn composed_sample(
             format!("args => [{}], ", config.source),
             "directed",
         ),
+        "sssp" => (
+            "single_source_dijkstra_path_length",
+            "distance",
+            format!(
+                "args => [{}], weight => 'gap_weight', missing => 'reject', ",
+                config.source
+            ),
+            "directed",
+        ),
         "wcc" => (
             "weakly_connected_components",
             "component",
@@ -916,16 +1073,27 @@ async fn composed_sample(
         "tc" => ("triangles", "triangles", String::new(), "undirected"),
         _ => return Err("unknown composed algorithm".into()),
     };
+    let parallel = if algorithm == "sssp" {
+        "min"
+    } else {
+        "collapse"
+    };
     let text = format!(
         "CALL fnx.{name}({arguments}relation => 'R', direction => '{direction}', \
-         parallel => 'collapse', self_loops => 'drop') YIELD vertex,{field} \
+         parallel => '{parallel}', self_loops => 'drop') YIELD vertex,{field} \
          MATCH (vertex) RETURN vertex,{field} ORDER BY vertex"
     );
     let params = fgdb_gql::GqlParameters::new();
-    let prepared = fgdb::PreparedNativeRead::prepare(&text, &params, |kind, name: &str| {
-        (kind == fgdb_gql::GraphSymbolKind::Relation && name == "R")
-            .then_some(fgdb_gql::GraphSymbol::Relation(KNOWS))
-    })?;
+    let prepared =
+        fgdb::PreparedNativeRead::prepare(&text, &params, |kind, name: &str| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                Some(fgdb_gql::GraphSymbol::Relation(KNOWS))
+            }
+            (fgdb_gql::GraphSymbolKind::Property, "gap_weight") => {
+                Some(fgdb_gql::GraphSymbol::Property(WEIGHT))
+            }
+            _ => None,
+        })?;
     let statement_ns = started.elapsed().as_nanos();
     let started = Instant::now();
     let view = Database::open_sealed_read(
@@ -1009,7 +1177,7 @@ async fn sealed_trials(
         [2, 0, 1],
         [2, 1, 0],
     ];
-    for algorithm in ["bfs", "wcc", "tc"] {
+    for &algorithm in config.algorithms() {
         let mut read_only_times = Vec::new();
         let mut writable_times = Vec::new();
         let mut gapbs_times = Vec::new();
@@ -1099,10 +1267,7 @@ async fn sealed_trials(
                 &oracle_rows(&composed_values, algorithm)?,
                 BufReader::new(File::open(&rows)?),
             )?;
-            let gapbs_ns = metrics["input_ns"]
-                + metrics["csr_ns"]
-                + metrics["kernel_ns"]
-                + metrics["encoding_ns"];
+            let gapbs_ns = oracle_total_ns(&metrics)?;
             emit(
                 log,
                 "sealed_triplet_verification",
@@ -1284,18 +1449,55 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
                 .arg(config.output.join(binary)),
         )?;
     }
+    if config.weighted {
+        save(
+            &config.output.join("gapbs-sssp-adapter.cc"),
+            GAPBS_SSSP_ADAPTER.as_bytes(),
+        )?;
+        command_output(
+            Command::new(&compiler)
+                .args(["-std=c++11", "-O3", "-Wall", "-fopenmp"])
+                .arg("-I")
+                .arg(config.gapbs.join("src"))
+                .arg(config.output.join("gapbs-sssp-adapter.cc"))
+                .arg("-o")
+                .arg(config.output.join("gapbs-sssp-adapter")),
+        )?;
+    }
     let started = Instant::now();
-    let mut edges = if let Some(path) = &config.graph {
-        input(BufReader::new(File::open(path)?), config.vertices)?
+    let (mut edges, mut weights) = if let Some(path) = &config.graph {
+        if config.weighted {
+            let (edges, weights) =
+                weighted_input(BufReader::new(File::open(path)?), config.vertices)?;
+            (edges, Some(weights))
+        } else {
+            (
+                input(BufReader::new(File::open(path)?), config.vertices)?,
+                None,
+            )
+        }
     } else {
-        fixture(
+        let edges = fixture(
             config.fixture.as_deref().ok_or("missing fixture")?,
             config.vertices,
-        )?
+        )?;
+        let weights = if config.weighted {
+            let weights: Vec<i32> = (0..edges.len())
+                .map(|index| ((index % 17 * 7 + 3) % 17) as i32)
+                .collect();
+            validate_weighted_input(&edges, &weights, config.vertices)?;
+            Some(weights)
+        } else {
+            None
+        };
+        (edges, weights)
     };
     let input_ns = started.elapsed().as_nanos();
     let raw_edges = edges.len();
     edges.push((config.vertices - 1, config.vertices - 1));
+    if let Some(weights) = &mut weights {
+        weights.push(0);
+    }
     let started = Instant::now();
     let graph_path = config.output.join("graph.el");
     let mut graph_output = new_file(&graph_path)?;
@@ -1303,13 +1505,27 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
         writeln!(graph_output, "{source} {target}")?;
     }
     graph_output.flush()?;
+    let weighted_path = if let Some(weights) = &weights {
+        let path = config.output.join("graph.wel");
+        let mut output = new_file(&path)?;
+        for (&(source, target), &weight) in edges.iter().zip(weights) {
+            writeln!(output, "{source} {target} {weight}")?;
+        }
+        output.flush()?;
+        Some(path)
+    } else {
+        None
+    };
     let shared_input_encoding_ns = started.elapsed().as_nanos();
+    let weighted_blob = weighted_path
+        .map(|path| command_output(Command::new("git").arg("hash-object").arg(path)))
+        .transpose()?;
     let graph_blob = command_output(Command::new("git").arg("hash-object").arg(&graph_path))?;
     emit(
         &mut log,
         "comparison_header",
         &[
-            ("schema", "fgdb-gapbs-comparison-v1".to_owned()),
+            ("schema", "fgdb-gapbs-comparison-v2".to_owned()),
             ("gapbs_revision", gapbs_revision),
             (
                 "gapbs_compiler",
@@ -1334,6 +1550,10 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
             ),
             ("cpu_model", cpu_model),
             ("input_git_blob", graph_blob),
+            ("weighted_input_git_blob", weighted_blob.unwrap_or_else(|| "disabled".to_owned())),
+            ("weighted_sssp_enabled", config.weighted.to_string()),
+            ("gapbs_sssp_delta", config.delta.to_string()),
+            ("sssp_numeric_domain", "nonnegative int32 weights; every simple path < INT_MAX/2; exact integral f64 distances".to_owned()),
             (
                 "input_path",
                 config.graph.as_ref().map_or_else(
@@ -1367,7 +1587,7 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
             ),
             (
                 "graph_policy",
-                "BFS/WCC directed; TC undirected; unit weights; collapse parallel; drop self-loops".to_owned(),
+                "BFS/WCC directed; TC undirected; unit weights/collapse parallel; optional SSSP directed/stored weights/minimum parallel; drop self-loops".to_owned(),
             ),
             (
                 "durability",
@@ -1379,7 +1599,11 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
     // This is a real negative control against the upstream verifier, not a
     // fabricated passing log: corrupt the source parent or triangle total and require
     // both the nonzero exit and the explicit FAIL, with no result published.
-    for algorithm in ["bfs", "tc"] {
+    for &algorithm in config
+        .algorithms()
+        .iter()
+        .filter(|&&algorithm| algorithm != "wcc")
+    {
         let (control, rows) = run_oracle(
             &config,
             algorithm,
@@ -1425,7 +1649,12 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
                 EId((chunk * 256 + offset) as u128),
                 VId(*source as u128),
                 VId(*target as u128),
-                vec![],
+                weights.as_ref().map_or_else(Vec::new, |weights| {
+                    vec![(
+                        WEIGHT,
+                        CanonicalScalar::Int(i64::from(weights[chunk * 256 + offset])),
+                    )]
+                }),
             );
         }
         database.write(&commit, batch).await?;
@@ -1433,6 +1662,7 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
     }
     let ingest_ns = started.elapsed().as_nanos();
     drop(edges);
+    drop(weights);
     drop(database);
     let started = Instant::now();
     let database = Database::open(&commit, &database_path, keys()).await?;
@@ -1448,7 +1678,7 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
         ],
     )?;
     let mut previous = None;
-    for algorithm in ["bfs", "wcc", "tc"] {
+    for &algorithm in config.algorithms() {
         let mut database_samples = Vec::new();
         let mut gapbs_samples = Vec::new();
         for trial in 0..config.trials {
@@ -1484,10 +1714,7 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
                 &oracle_rows(&values, algorithm)?,
                 BufReader::new(File::open(path)?),
             )?;
-            let gapbs_ns = metrics["input_ns"]
-                + metrics["csr_ns"]
-                + metrics["kernel_ns"]
-                + metrics["encoding_ns"];
+            let gapbs_ns = oracle_total_ns(&metrics)?;
             let mut fields = vec![
                 ("sample", gapbs_prefix),
                 ("algorithm", algorithm.to_owned()),
@@ -1563,6 +1790,97 @@ fn main() {
 // Keep the optional external oracle with its only consumer. Normal Cargo
 // builds do not need a C++ compiler or an installed GAPBS checkout. The driver
 // compiles this adapter before any measurement, retaining the exact source.
+const GAPBS_SSSP_ADAPTER: &str = r#"
+#define main upstream_sssp_main
+#include "sssp.cc"
+#undef main
+#include <chrono>
+#include <fstream>
+#include <stdexcept>
+
+using Clock = std::chrono::steady_clock;
+static uint64_t ns(Clock::time_point start) {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-start).count();
+}
+static void metric(const char* key, uint64_t value) {
+  std::cout << "FGDB_GAPBS_METRIC " << key << " " << value << std::endl;
+}
+
+int main(int argc, char** argv) {
+  try {
+    if ((argc != 7 && argc != 8) || std::string(argv[1]) != "sssp")
+      throw std::runtime_error("invalid SSSP adapter arguments");
+    const NodeID population = std::stoi(argv[3]);
+    const NodeID source = std::stoi(argv[4]);
+    const WeightT delta = std::stoi(argv[6]);
+    if (population <= 0 || source < 0 || source >= population || delta <= 0 || delta >= kDistInf)
+      throw std::runtime_error("invalid source/population/delta");
+    if (std::ifstream(argv[5]).good()) throw std::runtime_error("output already exists");
+    char program[] = "gapbs-sssp-adapter", flag[] = "-f";
+    char* builder_args[] = {program, flag, argv[2], nullptr};
+    CLApp cli(3, builder_args, "live GAPBS weighted comparison");
+    if (!cli.ParseArgs()) throw std::runtime_error("builder arguments failed");
+    WeightedBuilder builder(cli);
+    auto start = Clock::now();
+    // MakeGraph owns the needs_weights flag passed to Reader. Calling
+    // MakeGraphFromEL on a newly constructed WeightedBuilder would overwrite
+    // the supplied weights with generated ones. Keep the exact public loader
+    // and report its input/CSR work as one honestly combined phase.
+    WGraph graph = builder.MakeGraph();
+    const uint64_t input_csr_ns = ns(start);
+    if (graph.num_nodes() != population || graph.num_edges_directed() == 0)
+      throw std::runtime_error("invalid population or zero-arc graph for upstream DeltaStep");
+    start = Clock::now();
+    WeightT maximum = 0;
+    for (NodeID vertex = 0; vertex < population; ++vertex) {
+      for (WNode neighbor : graph.out_neigh(vertex)) {
+        if (neighbor.v < 0 || neighbor.v >= population || neighbor.w < 0)
+          throw std::runtime_error("invalid weighted edge");
+        maximum = std::max(maximum, neighbor.w);
+      }
+    }
+    if (maximum >= kDistInf || int64_t(population-1)*maximum >= kDistInf)
+      throw std::runtime_error("simple-path costs exceed GAPBS's exact finite domain");
+    const uint64_t domain_validation_ns = ns(start);
+    start = Clock::now();
+    auto result = DeltaStep(graph, source, delta);
+    const uint64_t kernel_ns = ns(start);
+    if (argc == 8) {
+      if (std::string(argv[7]) != "corrupt") throw std::runtime_error("invalid negative control");
+      result[source] = 1;
+    }
+    start = Clock::now();
+    const bool verified = SSSPVerifier(graph, source, result);
+    const uint64_t verification_ns = ns(start);
+    PrintLabel("Verification", verified ? "PASS" : "FAIL");
+    if (!verified) return 3;
+    start = Clock::now();
+    std::ofstream output(argv[5]);
+    if (!output) throw std::runtime_error("cannot create result file");
+    for (NodeID vertex = 0; vertex < population; ++vertex) {
+      if (result[vertex] < 0 || result[vertex] > kDistInf)
+        throw std::runtime_error("invalid upstream distance");
+      output << vertex << " " << (result[vertex] == kDistInf ? -1 : result[vertex]) << '\n';
+    }
+    output.close();
+    if (!output) throw std::runtime_error("result write failed");
+    const uint64_t encoding_ns = ns(start);
+    metric("input_csr_ns", input_csr_ns);
+    metric("domain_validation_ns", domain_validation_ns);
+    metric("kernel_ns", kernel_ns);
+    metric("verification_ns", verification_ns);
+    metric("encoding_ns", encoding_ns);
+    metric("vertices", graph.num_nodes());
+    metric("arcs", graph.num_edges_directed());
+    metric("delta", delta);
+    return 0;
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << std::endl;
+    return 2;
+  }
+}
+"#;
+
 const GAPBS_ADAPTER: &str = r#"
 #ifdef FGDB_TC_ORACLE
 #define main upstream_tc_main
@@ -1843,6 +2161,33 @@ mod tests {
     }
 
     #[test]
+    fn official_weighted_loader_keeps_one_combined_phase_without_double_counting() {
+        let common = "Verification: PASS\nFGDB_GAPBS_METRIC kernel_ns 7\n\
+            FGDB_GAPBS_METRIC verification_ns 100\nFGDB_GAPBS_METRIC encoding_ns 11\n\
+            FGDB_GAPBS_METRIC vertices 8\nFGDB_GAPBS_METRIC arcs 7\n";
+        for (loading, total) in [
+            (
+                "FGDB_GAPBS_METRIC input_ns 2\nFGDB_GAPBS_METRIC csr_ns 3\n",
+                23,
+            ),
+            (
+                "FGDB_GAPBS_METRIC input_csr_ns 5\nFGDB_GAPBS_METRIC domain_validation_ns 13\n",
+                36,
+            ),
+        ] {
+            let metrics = oracle_metrics(&format!("{common}{loading}"), true).unwrap();
+            assert_eq!(oracle_total_ns(&metrics).unwrap(), total);
+        }
+        for loading in [
+            "FGDB_GAPBS_METRIC input_csr_ns 5\n",
+            "FGDB_GAPBS_METRIC input_ns 2\n",
+            "FGDB_GAPBS_METRIC input_ns 2\nFGDB_GAPBS_METRIC csr_ns 3\nFGDB_GAPBS_METRIC input_csr_ns 5\nFGDB_GAPBS_METRIC domain_validation_ns 13\n",
+        ] {
+            assert!(oracle_metrics(&format!("{common}{loading}"), true).is_err());
+        }
+    }
+
+    #[test]
     fn full_row_comparison_rejects_wrong_missing_duplicate_and_extra_vertices() {
         let expected = [0, 1, -1];
         assert!(compare_rows(&expected, "0 0\n1 1\n2 -1\n".as_bytes()).is_ok());
@@ -1864,6 +2209,146 @@ mod tests {
         );
         for text in ["0 1 3\n", "0 3\n", "-1 0\n", "0\n"] {
             assert!(input(text.as_bytes(), 3).is_err());
+        }
+    }
+
+    #[test]
+    fn weighted_input_preserves_zero_parallel_and_loop_weights_and_proves_numeric_domain() {
+        let text = "# weighted road graph\n0 1 9\n0 1 3\n1 2 0\n2 2 7\n";
+        let (edges, weights) = weighted_input(text.as_bytes(), 4).unwrap();
+        assert_eq!(edges, [(0, 1), (0, 1), (1, 2), (2, 2)]);
+        assert_eq!(weights, [9, 3, 0, 7]);
+        for invalid in [
+            "0 1\n",
+            "0 1 -1\n",
+            "0 1 0.5\n",
+            "0 1 3 extra\n",
+            "0 4 1\n",
+            "0 1 2147483648\n",
+            "0 1 1073741823\n",
+            "0 1 536870912\n",
+            "0 0 1\n",
+            "",
+        ] {
+            assert!(weighted_input(invalid.as_bytes(), 4).is_err(), "{invalid}");
+        }
+        // The upper bound is strict: an otherwise reachable path must never
+        // collide with GAPBS's unreachable sentinel.
+        assert!(validate_weighted_input(&[(0, 1)], &[357_913_940], 4).is_ok());
+        assert!(validate_weighted_input(&[(0, 1)], &[357_913_941], 4).is_err());
+        assert!(validate_weighted_input(&[(0, 1)], &[], 4).is_err());
+    }
+
+    #[test]
+    fn weighted_complete_results_match_independent_integral_shortest_paths() {
+        let text = "0 1 9\n0 2 2\n1 3 3\n2 3 10\n3 1 0\n0 1 4\n3 3 1\n4 5 5\n5 4 1\n";
+        let (edges, weights) = weighted_input(text.as_bytes(), 8).unwrap();
+        let call = FnxCallSpec::bind(&statement("sssp", 0), &FnxParameters::new()).unwrap();
+        let options = read_options(&call, "sssp");
+        assert_eq!(
+            options.selection.weight,
+            FnxWeightSpec::Property {
+                key: WEIGHT,
+                missing: MissingWeightPolicy::Reject,
+            }
+        );
+        assert_eq!(
+            options.projection.parallel_edges,
+            ParallelEdgePolicy::Minimum
+        );
+        let vertices: Vec<_> = (0..8).map(VId).collect();
+        let projected: Vec<_> = edges
+            .iter()
+            .zip(&weights)
+            .enumerate()
+            .map(|(index, (&(source, target), &weight))| ProjectionEdge {
+                eid: EId(index as u128),
+                source: VId(source as u128),
+                target: VId(target as u128),
+                weight: f64::from(weight),
+            })
+            .collect();
+        let graph = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([7; 32]),
+                as_of: CommitSeq(1),
+            },
+            &vertices,
+            &projected,
+            options.projection,
+            options.projection_limits,
+        )
+        .unwrap();
+        // Independent integer Bellman-Ford over raw input, with neither the
+        // projection's reduction nor the production queue implementation.
+        for source in 0..8 {
+            let mut expected = vec![GAPBS_DISTANCE_INFINITY; 8];
+            expected[source] = 0;
+            for _ in 1..8 {
+                for (&(from, to), &weight) in edges.iter().zip(&weights) {
+                    if expected[from] != GAPBS_DISTANCE_INFINITY {
+                        expected[to] = expected[to].min(expected[from] + i64::from(weight));
+                    }
+                }
+            }
+            for value in &mut expected {
+                if *value == GAPBS_DISTANCE_INFINITY {
+                    *value = -1;
+                }
+            }
+            let call =
+                FnxCallSpec::bind(&statement("sssp", source), &FnxParameters::new()).unwrap();
+            let result = call
+                .execute(
+                    &graph,
+                    options.execution_limits,
+                    || Ok::<(), Infallible>(()),
+                )
+                .unwrap();
+            let actual = canonical_rows(&result, "sssp", 8).unwrap();
+            assert_eq!(actual, expected);
+            if source == 0 {
+                assert_eq!(actual, [0, 4, 2, 7, -1, -1, -1, -1]);
+            }
+        }
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            -1.0,
+            0.5,
+            GAPBS_DISTANCE_INFINITY as f64,
+        ] {
+            assert!(integer_distance(value).is_err());
+        }
+        assert_eq!(integer_distance(0.0).unwrap(), 0);
+        assert_eq!(
+            integer_distance((GAPBS_DISTANCE_INFINITY - 1) as f64).unwrap(),
+            GAPBS_DISTANCE_INFINITY - 1
+        );
+    }
+
+    #[test]
+    fn weighted_cli_is_explicit_and_delta_is_a_positive_bounded_integer() {
+        let parse = |flags: &str| {
+            Config::parse(
+                format!("--gapbs ../gapbs --output unused --fixture smoke {flags}")
+                    .split_whitespace()
+                    .map(str::to_owned),
+            )
+        };
+        assert_eq!(parse("").unwrap().algorithms(), ["bfs", "wcc", "tc"]);
+        let weighted = parse("--weighted --delta 3 --sealed").unwrap();
+        assert_eq!(weighted.algorithms(), ["bfs", "wcc", "tc", "sssp"]);
+        assert_eq!(weighted.delta, 3);
+        assert!(weighted.sealed);
+        for flags in [
+            "--delta 3",
+            "--weighted --weighted",
+            "--weighted --delta 0",
+            "--weighted --delta 1073741823",
+            "--weighted --delta -1",
+        ] {
+            assert!(parse(flags).is_err(), "{flags}");
         }
     }
 }

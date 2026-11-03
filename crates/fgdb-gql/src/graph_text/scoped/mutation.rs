@@ -1316,6 +1316,16 @@ impl PreparedGraphMutationText {
                 returning,
             ));
         }
+        // The direct pattern input bypasses the read-pipeline resolver.
+        // Bind computed element reads before actions and RETURN freeze them.
+        for (key, slot) in &parser.syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
+        }
         let syntax = parser.syntax;
         let at = syntax.return_at;
         let mut cache = BTreeMap::new();

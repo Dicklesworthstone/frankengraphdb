@@ -12,6 +12,77 @@ fn ok<T>(result: Result<T, Refusal>) -> T {
 }
 
 #[test]
+fn prepared_write_definition_does_not_wait_for_the_writer_or_retain_its_view() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let ((), report) = run_async_under_lab(0x79a0_0442, |root| async move {
+        let (mut server, token, _) = served(&root, "prepare-write-overlap").await;
+        let db = std::sync::Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+        db.symbols
+            .bind(fgdb_gql::GraphSymbolKind::Property, "p", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut held = db.db.write(&root).await.unwrap();
+        let request = Prepare {
+            mode: PrepareMode::Write,
+            statement: "CREATE ({p:$value})".into(),
+            parameters: vec![("value".into(), WireValue::Int(99))],
+        };
+        let mut preparation = Box::pin(prepare_statement(&root, db, &token, &request));
+        let definition = ok(match preparation
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(result) => Some(result),
+            Poll::Pending => None,
+        }
+        .expect("definition-only PREPARE waited behind the writer"));
+        drop(preparation);
+        assert_eq!(held.frontier().unwrap(), CommitSeq(0));
+        let view = held.pinned_read_view().unwrap();
+        let weak = view.downgrade();
+        drop(view);
+        held.write(&contexts.commit(), vertex(1)).await.unwrap();
+        assert!(weak.upgrade().is_none(), "PREPARE cached a snapshot pin");
+        drop(held);
+
+        // Preparation saw the previous publication but its invocation binds
+        // fresh operands and commits against the current writer state.
+        let answer = ok(run_prepared(
+            &root,
+            db,
+            &token,
+            &definition,
+            PreparedExecutionMode::Write,
+            &[("value".into(), WireValue::Int(11))],
+        )
+        .await);
+        assert!(matches!(
+            answer.outcome,
+            Outcome::WriteCommitted { seq: 2, .. }
+        ));
+        let guard = db.db.read(&root).await.unwrap();
+        let vertices = guard.vertices().unwrap();
+        assert_eq!(vertices.len(), 2);
+        assert_eq!(
+            vertices
+                .iter()
+                .flat_map(|row| &row.props)
+                .collect::<Vec<_>>(),
+            [&(
+                fgdb_delta_types::PropertyKeyId(1),
+                fgdb_types::CanonicalScalar::Int(11).into()
+            )]
+        );
+        drop(guard);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn prepared_map_fields_rebind_across_native_delivery_modes_and_recovery() {
     let ((), report) = run_async_under_lab(0x79a0_0441, |root| async move {
         let (mut server, token, path) = served(&root, "prepared-map-fields").await;

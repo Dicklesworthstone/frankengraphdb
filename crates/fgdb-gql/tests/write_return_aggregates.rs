@@ -342,6 +342,25 @@ fn computed_ordering_binds_each_write_return_front_end_and_its_parameters() {
 fn computed_write_ordering_reads_returned_elements_at_the_final_statement_cut() {
     use fgdb_gql::insertion::GraphInsertIntent;
 
+    let vertices = [VId(1), VId(2)];
+    let properties = Props::from([
+        ((vertices[0], P), CanonicalScalar::Int(5).into()),
+        ((vertices[1], P), CanonicalScalar::Int(10).into()),
+    ]);
+    for text in [
+        "MATCH (n) SET n.p=-n.p RETURN DISTINCT n AS saved ORDER BY -saved.p LIMIT 1",
+        "MATCH (n) SET n.p=-n.p RETURN DISTINCT n AS saved \
+         ORDER BY coalesce(saved.missing,0)-saved.p LIMIT 1",
+    ] {
+        let batch = mutate(text, &vertices, &[], &properties).unwrap();
+        assert_eq!(
+            rows(batch.returning()),
+            vec![vec![GraphValue::Vertex(vertices[0])]],
+            "{text}"
+        );
+        assert_eq!(batch.mutation().stats().effects, 2, "{text}");
+    }
+
     for text in [
         "UNWIND [3,1,2] AS x CREATE (n {p:x}) RETURN n ORDER BY -n.p",
         "UNWIND [3,1,2] AS x CREATE (n {p:x}) RETURN DISTINCT n AS saved ORDER BY -saved.p",
@@ -356,7 +375,7 @@ fn computed_write_ordering_reads_returned_elements_at_the_final_statement_cut() 
                 |_: &fgdb_gql::algebra::PreparedGraphPattern<GraphValueRow>,
                  _: GqlQueryPolicy|
                  -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), usize>> {
-                    panic!("source-free CREATE must not invent a graph scan")
+                    Err(GqlQueryError::Source(()))
                 },
                 identity,
                 || Ok(()),
@@ -364,18 +383,23 @@ fn computed_write_ordering_reads_returned_elements_at_the_final_statement_cut() 
             .unwrap();
         let (insertion, output) = collection.into_parts();
         assert_eq!(insertion.stats().created_vertices, 3);
+        assert!(
+            insertion
+                .intents()
+                .iter()
+                .all(|intent| matches!(intent, GraphInsertIntent::Vertex { .. }))
+        );
         let mut properties = Props::new();
         for intent in insertion.intents() {
-            let GraphInsertIntent::Vertex {
+            if let GraphInsertIntent::Vertex {
                 vertex,
                 properties: values,
                 ..
             } = intent
-            else {
-                panic!("only vertex creation in this fixture");
-            };
-            for (key, value) in values {
-                properties.insert((*vertex, *key), value.clone());
+            {
+                for (key, value) in values {
+                    properties.insert((*vertex, *key), value.clone());
+                }
             }
         }
         // The real host stages this complete native intent bag before the
@@ -383,10 +407,14 @@ fn computed_write_ordering_reads_returned_elements_at_the_final_statement_cut() 
         let returned = output
             .finish_governed_reading::<(), usize>(
                 |element, key| {
-                    let ElementId::Vertex(vertex) = element else {
-                        panic!("only vertex property reads in this fixture");
-                    };
-                    Ok(properties.get(&(vertex, key)).cloned())
+                    assert!(
+                        matches!(element, ElementId::Vertex(_)),
+                        "only vertex property reads in this fixture"
+                    );
+                    Ok(match element {
+                        ElementId::Vertex(vertex) => properties.get(&(vertex, key)).cloned(),
+                        ElementId::Edge(_) => None,
+                    })
                 },
                 || Ok(()),
             )

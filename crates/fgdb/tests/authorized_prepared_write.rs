@@ -85,6 +85,126 @@ fn arguments(value: i64) -> GqlParameters {
 }
 
 #[test]
+fn published_view_preparation_keeps_namespace_checks_without_retaining_the_snapshot() {
+    let ((), report) = run_async_under_lab(0xaa66, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let view = db.pinned_read_view().unwrap();
+        let weak = view.downgrade();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let prepared = view
+            .prepare_graph_write_script_authorized(
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                "CREATE (:Visible {p:$value})",
+                &arguments(99),
+                symbols,
+                RelationId(1),
+                64,
+                || 100,
+            )
+            .unwrap();
+        assert!(view.vertices().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+
+        let foreign = Authority::new(
+            AuthKey::from_seed(8612),
+            DatabaseSecurityNamespaceId([0x81; 32]),
+            "graph",
+            SchemaEpoch(1),
+            1,
+        )
+        .unwrap();
+        let foreign_token = foreign.issue_at(&grant(), 100).unwrap();
+        let read_token = issuer
+            .issue_at(
+                &Grant {
+                    rights: Rights::Read,
+                    ..grant()
+                },
+                100,
+            )
+            .unwrap();
+        for (authority, token, expected) in [
+            (&foreign, &foreign_token, Error::WrongAuthority),
+            (&issuer, &read_token, Error::PermissionDenied),
+        ] {
+            let catalog_reads = std::cell::Cell::new(0);
+            let error = view
+                .prepare_graph_write_script_authorized(
+                    &query,
+                    &commit,
+                    authority,
+                    token,
+                    "main",
+                    "CREATE (:Visible {p:$value})",
+                    &arguments(99),
+                    |_, _: &str| {
+                        catalog_reads.set(catalog_reads.get() + 1);
+                        None
+                    },
+                    RelationId(1),
+                    64,
+                    || 100,
+                )
+                .unwrap_err();
+            assert_eq!(authorization(&error), Some(expected));
+            assert_eq!(
+                catalog_reads.get(),
+                0,
+                "authorization precedes catalog access"
+            );
+        }
+        drop(view);
+
+        // A cache containing only the prepared definition must not force the
+        // writer to preserve its old snapshot allocation at publication.
+        let mut first = fgdb::WriteBatch::new(RelationId(1));
+        first.create_vertex(fgdb_types::VId(1), vec![LabelId(1)], vec![]);
+        db.write(&commit, first).await.unwrap();
+        assert!(
+            weak.upgrade().is_none(),
+            "the template retained a graph pin"
+        );
+        let (stats, completion) = db
+            .execute_graph_write_script_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &prepared,
+                &arguments(11),
+                policy(),
+                || 100,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.created_vertices, 1);
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: fgdb_types::CommitSeq(2),
+            }
+        );
+        let rows = db.vertices().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter().flat_map(|row| &row.props).collect::<Vec<_>>(),
+            [&(PropertyKeyId(1), CanonicalScalar::Int(11).into())]
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn host_prepared_write_discards_representative_values_and_rechecks_effect_authority() {
     let ((), report) = run_async_under_lab(0xaa61, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

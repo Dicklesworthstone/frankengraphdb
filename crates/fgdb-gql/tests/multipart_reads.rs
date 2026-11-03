@@ -169,6 +169,130 @@ fn scalar_vertex(value: i64, vid: u128) -> GraphValueRow {
 }
 
 #[test]
+fn known_map_bindings_cannot_become_nodes_after_with_aliases() {
+    for statement in [
+        "WITH {x:1} AS n WITH n MATCH (n) RETURN n",
+        "WITH {x:[]} AS n WITH n AS renamed WITH renamed AS final \
+         MATCH (final) RETURN final",
+        "WITH {x:1} AS m MATCH (a) WITH m AS n MATCH (n) RETURN n",
+        "WITH {x:1} AS n WITH * UNWIND [0,0] AS occurrence \
+         WITH n AS renamed MATCH (renamed) RETURN renamed",
+        "WITH {x:1} AS n WITH n AS renamed OPTIONAL MATCH (renamed) RETURN renamed",
+        "MATCH (a) WITH a{p:1} AS m WITH m AS n MATCH (n) RETURN n",
+    ] {
+        let mut resolutions = 0;
+        let error = PreparedGraphSetText::prepare(statement, |kind, name| {
+            resolutions += 1;
+            symbols(kind, name)
+        })
+        .expect_err(statement);
+        assert!(
+            matches!(
+                error.kind,
+                fgdb_gql::GraphSetTextErrorKind::Expected("a vertex-valued imported binding")
+            ),
+            "{statement}: {error}"
+        );
+        assert_eq!(resolutions, 0, "scope check before catalog: {statement}");
+    }
+}
+
+#[test]
+fn declared_map_parameters_cannot_bind_match_nodes() {
+    for statement in [
+        "WITH $input AS n MATCH (n) RETURN n",
+        "WITH $input AS n WITH n AS renamed MATCH (renamed) RETURN renamed",
+        "WITH $input AS n MATCH (a) WITH n AS renamed MATCH (renamed) RETURN renamed",
+        "MATCH (a) WITH $input AS n MATCH (n) RETURN n",
+    ] {
+        let mut resolutions = 0;
+        let error = PreparedGraphSetText::prepare_with_parameter_types(
+            statement,
+            &[("input", GqlParameterType::Map)],
+            |kind, name| {
+                resolutions += 1;
+                symbols(kind, name)
+            },
+        )
+        .expect_err(statement);
+        assert!(
+            matches!(
+                error.kind,
+                fgdb_gql::GraphSetTextErrorKind::Expected("a vertex-valued imported binding")
+            ),
+            "{statement}: {error}"
+        );
+        assert_eq!(resolutions, 0, "declared type before catalog: {statement}");
+    }
+}
+
+#[test]
+fn map_provenance_preserves_maps_shadowed_names_and_open_element_columns() {
+    let integer = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    assert_eq!(
+        execute("WITH {x:1} AS n WITH n AS renamed RETURN renamed.x AS value"),
+        vec![GraphValueRow::from_owned_values(vec![integer(1)])]
+    );
+    assert_eq!(
+        execute(
+            "WITH CASE WHEN true THEN {x:1} ELSE null END AS n \
+             WITH n AS renamed RETURN renamed.x AS value"
+        ),
+        vec![GraphValueRow::from_owned_values(vec![integer(1)])]
+    );
+    let template = PreparedGraphSetText::prepare_with_parameter_types(
+        "WITH $input AS n WITH n AS renamed RETURN renamed.x AS value",
+        &[("input", GqlParameterType::Map)],
+        symbols,
+    )
+    .unwrap();
+    let identity = template.canonical_template_bytes();
+    for value in [1, 9] {
+        let parameters = GqlParameters::new()
+            .with_map("input", vec![("x".into(), integer(value))])
+            .unwrap();
+        let query = template.bind_parameters(&parameters).unwrap();
+        assert_eq!(
+            run(&query, wide(), &mut || Ok(())).unwrap().value,
+            vec![GraphValueRow::from_owned_values(vec![integer(value)])]
+        );
+    }
+    assert_eq!(template.canonical_template_bytes(), identity);
+    // Provenance belongs to one binding, not its spelling: a later WITH
+    // may legally reuse the map's old name for a graph identity.
+    assert_eq!(
+        execute(
+            "WITH {x:1} AS n MATCH (a) WITH n AS saved,a \
+             WITH a AS n MATCH (n) RETURN n ORDER BY n"
+        ),
+        (1..=4).map(|id| vertices(&[id])).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        execute(
+            "MATCH (a) WITH CASE WHEN a.p = 2 THEN a ELSE null END AS n \
+             WITH n AS renamed MATCH (renamed) RETURN renamed ORDER BY renamed"
+        ),
+        vec![vertices(&[2]), vertices(&[3])]
+    );
+    // An UNWIND member remains open. A list carrying graph identities must
+    // not inherit the map restriction simply because both domains use Any.
+    let template = prepare_items(
+        "UNWIND $items AS n WITH n AS renamed MATCH (renamed) RETURN renamed ORDER BY renamed",
+    );
+    let parameters = GqlParameters::new()
+        .with_list(
+            "items",
+            vec![GraphValue::Vertex(VId(3)), GraphValue::Vertex(VId(1))],
+        )
+        .unwrap();
+    let query = template.bind_parameters(&parameters).unwrap();
+    assert_eq!(
+        run(&query, wide(), &mut || Ok(())).unwrap().value,
+        vec![vertices(&[1]), vertices(&[3])]
+    );
+}
+
+#[test]
 fn inline_call_imports_preserve_bags_nulls_and_local_pages() {
     let row = |cells: &[Option<i64>]| {
         GraphValueRow::from_owned_values(

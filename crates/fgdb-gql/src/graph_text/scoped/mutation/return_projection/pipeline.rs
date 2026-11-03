@@ -2514,7 +2514,14 @@ impl<'a> Parser<'a> {
                 }
                 let types: Vec<_> = schema.iter().map(|(_, kind)| *kind).collect();
                 let kind = value.column_type(&types, &self.syntax.parameters);
-                if value.is_map_constructor() {
+                if value.is_map_value(
+                    |column| {
+                        schema
+                            .get(column)
+                            .is_some_and(|(name, _)| self.map_aliases.contains(&name.at))
+                    },
+                    &self.syntax.parameters,
+                ) {
                     self.map_aliases.push(alias.at);
                 }
                 projection.push(ReadProjectionTemplate {
