@@ -20,6 +20,9 @@
 use super::*;
 use std::collections::BTreeMap;
 
+mod all;
+pub(super) use all::AllBreadth;
+
 pub(super) struct Prefix<Record, Guard> {
     path: GraphPath,
     record: Option<Record>,
@@ -379,30 +382,50 @@ fn output<S: AsyncGraphWalkSource, F: FnMut() -> Result<(), C>, C>(
     seq: CommitSeq,
     meter: &mut Meter<F>,
 ) -> ScanResult<Option<AsyncGraphWalkOutput<S::OutputGuard>>, S::Error, C> {
-    let endpoint = prefix.endpoint();
-    let records = prefix.record.as_slice();
+    output_path(
+        source,
+        &frame.root,
+        &prefix.path,
+        prefix.record.as_ref(),
+        plan,
+        seq,
+        meter,
+    )
+}
+
+/// The two shortest selectors share projection, endpoint filtering and output
+/// admission. Borrowing the final record lets ALL retain shared DAG edges
+/// without imposing Clone or Sync on a source's independently guarded records.
+fn output_path<S: AsyncGraphWalkSource, F: FnMut() -> Result<(), C>, C>(
+    source: &S,
+    root: &S::RootRecord,
+    path: &GraphPath,
+    record: Option<&S::Record>,
+    plan: &AsyncGraphWalkPlan,
+    seq: CommitSeq,
+    meter: &mut Meter<F>,
+) -> ScanResult<Option<AsyncGraphWalkOutput<S::OutputGuard>>, S::Error, C> {
+    let start = path.start();
+    let endpoint = path.steps().last().map_or(start, |step| step.1);
+    let records = record.map_or(&[][..], core::slice::from_ref);
     // This retained record corresponds to the final step. Captures below use
     // the complete path, while scalar edge access is admitted only at one hop.
-    let last = prefix
-        .path
-        .steps()
-        .last()
-        .map_or(&[][..], core::slice::from_ref);
+    let last = path.steps().last().map_or(&[][..], core::slice::from_ref);
     let local = FrameSource::<_, _, S::Error> {
-        root: &frame.root,
-        start: frame.start,
+        root,
+        start,
         records,
         steps: last,
         seq,
         error: core::marker::PhantomData,
     };
-    let ids = [Some(frame.start), Some(endpoint)];
+    let ids = [Some(start), Some(endpoint)];
     let mut paths = Vec::new();
     let observe = |meter: &mut Meter<F>, event| {
         meter.event(event)?;
-        let result = match prefix.record.as_ref() {
+        let result = match record {
             Some(record) => source.evaluation_event(record, event),
-            None => source.root_evaluation_event(&frame.root, event),
+            None => source.root_evaluation_event(root, event),
         };
         result.map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
     };
@@ -412,11 +435,11 @@ fn output<S: AsyncGraphWalkSource, F: FnMut() -> Result<(), C>, C>(
         match op {
             GlaOperator::CapturePath { .. } => {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                for _ in prefix.path.steps() {
+                for _ in path.steps() {
                     control(GlaExecutionEvent::ScratchEntry)?;
                     control(GlaExecutionEvent::ScratchEntry)?;
                 }
-                paths.push(Some(prefix.path.clone()));
+                paths.push(Some(path.clone()));
             }
             // Compilation proves this redundant for minimum-zero shortest.
             GlaOperator::DifferentEdges { .. } => {}
@@ -448,9 +471,9 @@ fn output<S: AsyncGraphWalkSource, F: FnMut() -> Result<(), C>, C>(
     }
     let count = meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?;
     let guard = flatten(source.reserve_shortest_output(
-        &frame.root,
+        root,
         records,
-        prefix.path.len(),
+        path.len(),
         plan.columns,
         &mut |event| meter.event(event),
     ))?;

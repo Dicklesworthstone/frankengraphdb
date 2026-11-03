@@ -3,6 +3,9 @@
 //! Bounded occurrence modes retain one route and its admitted records. ANY
 //! SHORTEST instead retains a canonical breadth frontier, preserving real path
 //! IDs and terminating by endpoint settlement even without an upper hop bound.
+//! ALL SHORTEST shares reachable layers and lazily enumerates every tied route,
+//! retaining real edge identities without a frontier entry per path. Endpoint
+//! settlement also terminates this search without an upper hop bound.
 //! Complete rows enter the ordinary external sort before DISTINCT or paging.
 
 use super::*;
@@ -53,7 +56,8 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
 
     /// Admit retained breadth-first state before allocating its path, map or
     /// vector backing. Each guard follows its entry across frontier moves and
-    /// survives every await; replacing a canonical prefix releases its guard.
+    /// survives every await. ANY owns canonical prefixes; ALL owns shared
+    /// reachable layers and one reusable path-enumeration stack.
     fn reserve_shortest_state<C>(
         &self,
         bytes: usize,
@@ -71,6 +75,14 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
         columns: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Self::OutputGuard, EdgeScanSourceError<Self::Error, C>>;
+
+    /// Release evaluator temporaries after a shared shortest-path projection
+    /// has returned. Its local captures and expression values have been dropped;
+    /// any returned row owns an independent OutputGuard. Retain the root and
+    /// edge payload reservations, and never reset cumulative logical budgets.
+    /// This lets ALL reuse a DAG record without retaining every past output's
+    /// conservative temporary charge until the whole layer graph is dropped.
+    fn release_shortest_temporaries(&self, root: &Self::RootRecord, records: &[Self::Record]);
 }
 
 /// A single variable-length atom rooted at an admitted vertex scan.
@@ -88,8 +100,12 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
 /// canonical prefix per depth/endpoint survives, and afterward each complete
 /// layer settles its endpoints before expansion. Finite snapshot input thus
 /// exhausts the frontier; resource exhaustion remains an error, never a page.
-/// Other unbounded modes, ALL SHORTEST, further atoms, OPTIONAL/probes and
-/// collection-valued edge predicates refuse during preparation, before any
+/// ALL SHORTEST retains shared reachable layers and enumerates tied routes
+/// lazily, preserving parallel-edge identity and multiplicity. It may also
+/// omit its upper bound: after the finite minimum, each nonempty layer settles
+/// new endpoints. Its DIFFERENT EDGES restriction is the same as ANY's: only a
+/// zero lower bound proves it redundant. Other unbounded modes, further atoms, OPTIONAL/probes
+/// and collection-valued edge predicates refuse during preparation, before any
 /// source or budget is observed.
 #[derive(Clone)]
 pub struct AsyncGraphWalkPlan {
@@ -137,7 +153,11 @@ impl AsyncGraphWalkPlan {
             return Err(EdgeScanBuildError { operator: at });
         };
         if source.ordinal() != 0
-            || (!bounds.is_bounded() && *search != GraphWalkSearch::AnyShortest)
+            || (!bounds.is_bounded()
+                && !matches!(
+                    search,
+                    GraphWalkSearch::AnyShortest | GraphWalkSearch::AllShortest
+                ))
             // Native collection comparison can raise StoredValueBounds even
             // for an edge unreachable from the selected roots: its incidence
             // filtering precedes root selection. Scalar operands cannot raise
@@ -152,6 +172,7 @@ impl AsyncGraphWalkPlan {
                     | GraphWalkSearch::Acyclic
                     | GraphWalkSearch::Simple
                     | GraphWalkSearch::AnyShortest
+                    | GraphWalkSearch::AllShortest
             )
         {
             return Err(EdgeScanBuildError { operator: at });
@@ -236,7 +257,12 @@ impl AsyncGraphWalkPlan {
         let projection = at;
         // With a positive lower bound, a shortest WALK may repeat an edge.
         // Coalescing those histories would lose the shortest valid TRAIL.
-        if *search == GraphWalkSearch::AnyShortest && different_edges && bounds.minimum() != 0 {
+        if matches!(
+            search,
+            GraphWalkSearch::AnyShortest | GraphWalkSearch::AllShortest
+        ) && different_edges
+            && bounds.minimum() != 0
+        {
             return Err(EdgeScanBuildError {
                 operator: expansion,
             });
@@ -366,9 +392,10 @@ impl<Root, Record, Guard> Frame<Root, Record, Guard> {
 /// Source, evaluator, candidates and emitted input occurrences share one
 /// cumulative policy. Occurrence modes retain one root and at most maximum_hops
 /// edge records. ANY SHORTEST retains two breadth layers with at most one
-/// incoming record per endpoint in each layer. One candidate may coexist while
-/// it is checked or rejected. Source payloads, frontier state and output guards
-/// have independent host-owned admissions.
+/// incoming record per endpoint in each layer. ALL SHORTEST retains shared
+/// reachable layers and one traversal stack, not every tied route.
+/// One candidate may coexist while it is checked or rejected. Source payloads,
+/// traversal state and output guards have independent host-owned admissions.
 ///
 /// A polled pending pull owns the entire source and route. Cancellation, error,
 /// close or drop releases them without draining; subsequent pulls are inert.
@@ -377,6 +404,7 @@ pub struct AsyncGraphWalkCursor<S: AsyncGraphWalkSource, F> {
     source: Option<S>,
     frame: Option<Frame<S::RootRecord, S::Record, S::TraversalGuard>>,
     shortest: Option<shortest::Breadth<S::RootRecord, S::Record, S::TraversalGuard>>,
+    all_shortest: Option<shortest::AllBreadth<S::RootRecord, S::Record, S::TraversalGuard>>,
     plan: AsyncGraphWalkPlan,
     meter: Meter<F>,
     seq: CommitSeq,
@@ -391,6 +419,7 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
             source: Some(source),
             frame: None,
             shortest: None,
+            all_shortest: None,
             plan,
             meter: Meter {
                 checkpoint,
@@ -423,6 +452,7 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
         }
         self.frame = None;
         self.shortest = None;
+        self.all_shortest = None;
         self.source = None;
     }
 
@@ -440,16 +470,23 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
         let mut source = self.source.take().expect("open cursor owns source");
         let mut frame = self.frame.take();
         let mut shortest = self.shortest.take();
-        let result = if self.plan.search == GraphWalkSearch::AnyShortest {
-            self.advance_shortest(&mut source, &mut shortest).await
-        } else {
-            self.advance(&mut source, &mut frame).await
+        let mut all_shortest = self.all_shortest.take();
+        let result = match self.plan.search {
+            GraphWalkSearch::AnyShortest => {
+                self.advance_shortest(&mut source, &mut shortest).await
+            }
+            GraphWalkSearch::AllShortest => {
+                self.advance_all_shortest(&mut source, &mut all_shortest)
+                    .await
+            }
+            _ => self.advance(&mut source, &mut frame).await,
         };
         match result {
             Ok(Some(output)) => {
                 self.source = Some(source);
                 self.frame = frame;
                 self.shortest = shortest;
+                self.all_shortest = all_shortest;
                 self.state = EdgeScanState::Open;
                 Some(Ok(output))
             }
