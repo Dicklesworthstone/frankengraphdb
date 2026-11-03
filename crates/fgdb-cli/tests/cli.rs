@@ -868,6 +868,12 @@ fn spilled_carried_properties_match_resident_rows_and_keep_pinned_history() {
             assert!(rows(&actual).is_empty());
         } else {
             refused(&actual, 3, "query");
+            let error = terminal(&actual);
+            assert!(error.contains("\"code\":\"budget\""), "{error}");
+            assert!(
+                error.contains("GQL ResultRows budget exceeded: observed 2, limit 1 (raise with --max-spill-rows)"),
+                "{error}"
+            );
             for event in ["columns", "row", "result"] {
                 assert!(
                     !String::from_utf8_lossy(&actual.stdout)
@@ -878,6 +884,69 @@ fn spilled_carried_properties_match_resident_rows_and_keep_pinned_history() {
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
         assert_eq!(directory_bytes(&fixture.db()), before);
     }
+    // The same typed ResultRows refusal can name private intake or final
+    // delivery. Keep both real spill sources, zero final allowance, equal
+    // limits and ordinary non-spilled delivery in this durable regression.
+    let fixed = "MATCH (a:Person {id:1})-[:KNOWS]->(b:Person {id:2}) RETURN b.id AS id";
+    for buffered in [false, true] {
+        for (input_cap, output_cap, zero_page, hint) in [
+            ("1", "1000000", true, Some("--max-spill-rows")),
+            ("2", "0", true, None),
+            ("10", "1", false, Some("--max-result-rows")),
+            (
+                "1",
+                "1",
+                true,
+                Some("--max-spill-rows for input or --max-result-rows for final output"),
+            ),
+        ] {
+            let mut options = vec![
+                "--spill-dir",
+                spill,
+                "--spill-memory-bytes",
+                "2097152",
+                "--max-spill-rows",
+                input_cap,
+                "--max-result-rows",
+                output_cap,
+            ];
+            if buffered {
+                options.extend_from_slice(&["--buffered", "--buffer-memory-bytes", "8388608"]);
+            }
+            let text = format!("{fixed}{}", if zero_page { " LIMIT 0" } else { "" });
+            let actual = command("query", &options, &text);
+            if let Some(hint) = hint {
+                refused(&actual, 3, "query");
+                let error = terminal(&actual);
+                assert!(error.contains("\"code\":\"budget\""), "{error}");
+                assert!(
+                    error.contains(&format!(
+                        "GQL ResultRows budget exceeded: observed 2, limit 1 (raise with {hint})"
+                    )),
+                    "buffered={buffered}: {error}"
+                );
+                for event in ["columns", "row", "result"] {
+                    assert!(
+                        !String::from_utf8_lossy(&actual.stdout)
+                            .contains(&format!("\"event\":\"{event}\""))
+                    );
+                }
+            } else {
+                assert_eq!(succeeded(&actual, "rows"), parallel);
+                assert!(rows(&actual).is_empty());
+            }
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+            assert_eq!(directory_bytes(&fixture.db()), before);
+        }
+    }
+    let ordinary = command("query", &["--max-result-rows", "1"], fixed);
+    refused(&ordinary, 3, "query");
+    assert!(terminal(&ordinary).contains("\"code\":\"budget\""));
+    assert!(terminal(&ordinary).contains(" (raise with --max-result-rows)"));
+    assert!(!terminal(&ordinary).contains("--max-spill-rows"));
+    assert_eq!(directory_bytes(&fixture.db()), before);
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+
     // In either source profile, LIMIT cannot hide a bad property expression
     // in a later row. No columns, rows, result handle or scratch may escape.
     for limit in ["0", "1"] {

@@ -525,6 +525,8 @@ struct Failure {
     refusal: refusal::Code,
     /// The statement byte the refusal points at, when it names one.
     offset: Option<usize>,
+    /// Retain the typed row limit before the error chain becomes display text.
+    result_row_limit: Option<u64>,
     message: String,
 }
 impl Failure {
@@ -540,6 +542,7 @@ impl Failure {
             class,
             refusal,
             offset: None,
+            result_row_limit: None,
             message: message.to_string(),
         }
     }
@@ -575,10 +578,29 @@ impl Failure {
     /// command that accepts those flags (`query`, `replay`, `diff`): the
     /// others run under fixed limits, and a `remote` refusal may be the
     /// server's limit or the capability's, neither a client flag.
-    fn with_budget_hint(mut self) -> Self {
+    fn with_budget_hint(mut self, spill_input_rows: Option<u64>, final_rows: u64) -> Self {
         if self.class == "query"
             && let Some(flag) = budget_flag(&self.message)
         {
+            // Spooling uses ResultRows for private intake and final delivery.
+            // Different typed bounds identify the flag; equal or residual
+            // bounds do not establish an origin, so name both roles explicitly.
+            let flag = match (flag, spill_input_rows, self.result_row_limit) {
+                ("--max-result-rows", Some(input), Some(limit))
+                    if limit == input && limit != final_rows =>
+                {
+                    "--max-spill-rows"
+                }
+                ("--max-result-rows", Some(input), Some(limit))
+                    if limit == final_rows && limit != input =>
+                {
+                    flag
+                }
+                ("--max-result-rows", Some(_), _) => {
+                    "--max-spill-rows for input or --max-result-rows for final output"
+                }
+                _ => flag,
+            };
             self.message.push_str(&format!(" (raise with {flag})"));
         }
         self
@@ -1719,7 +1741,13 @@ fn open_failure(error: fgdb::OpenError) -> Failure {
 }
 fn execution_failure(error: impl std::error::Error + 'static) -> Failure {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    let mut result_row_limit = None;
     while let Some(current) = source {
+        if let Some(budget) = current.downcast_ref::<fgdb_gql::GqlBudgetExceeded>()
+            && budget.dimension == fgdb_gql::GqlBudgetDimension::ResultRows
+        {
+            result_row_limit = Some(budget.limit);
+        }
         if current.is::<std::io::Error>()
             || current.is::<fgdb::RebuildError>()
             || current.is::<fgdb_chronicle::CommitError>()
@@ -1747,6 +1775,7 @@ fn execution_failure(error: impl std::error::Error + 'static) -> Failure {
     Failure {
         refusal,
         offset,
+        result_row_limit,
         ..Failure::query(error)
     }
 }
@@ -1914,6 +1943,16 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             let root = runtime.request_cx_with_budget(Budget::INFINITE);
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let tunable = matches!(command, "query" | "replay" | "diff");
+            let spill_input_rows = options
+                .spill
+                .enabled()
+                .then(|| options.spill.max_input_rows());
+            let final_rows = options
+                .budget
+                .policy()
+                .rows
+                .max_result_rows()
+                .unwrap_or(u64::MAX);
             let outcome = runtime.block_on(async {
                 parameter_file::load_local(&mut options, &contexts.query()).await?;
                 read_bindings_file(&mut options, &contexts.query()).await?;
@@ -2147,7 +2186,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             });
             outcome.map_err(|failure| {
                 if tunable {
-                    failure.with_budget_hint()
+                    failure.with_budget_hint(spill_input_rows, final_rows)
                 } else {
                     failure
                 }
@@ -2743,7 +2782,9 @@ mod budget_hint_tests {
         ];
         for (message, flag) in refusals {
             assert_eq!(budget_flag(&message), Some(flag), "{message}");
-            let rendered = super::Failure::query(&message).with_budget_hint().message;
+            let rendered = super::Failure::query(&message)
+                .with_budget_hint(None, 100_000)
+                .message;
             assert!(
                 rendered.ends_with(&format!(" (raise with {flag})")),
                 "{rendered}"
@@ -2753,14 +2794,16 @@ mod budget_hint_tests {
             assert_eq!(super::Failure::query(&message).message, message);
             // Nor is a failure that is not a query refusal.
             assert_eq!(
-                super::Failure::io(&message).with_budget_hint().message,
+                super::Failure::io(&message)
+                    .with_budget_hint(None, 100_000)
+                    .message,
                 message
             );
         }
         assert_eq!(budget_flag("unknown label Person"), None);
         assert_eq!(
             super::Failure::query("unknown label Person")
-                .with_budget_hint()
+                .with_budget_hint(None, 100_000)
                 .message,
             "unknown label Person"
         );

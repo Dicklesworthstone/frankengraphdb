@@ -1163,10 +1163,11 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             no_scratch(&directory);
         }
         // Preserve the formerly refused profiles as preparation positives:
-        // graph EXISTS and direct COLLECT now use their native spill owners.
+        // graph EXISTS, direct COLLECT and ALL SHORTEST use native spill owners.
         for text in [
             "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n.p LIMIT 0",
             "MATCH (n) RETURN collect(n.p) LIMIT 0",
+            "MATCH p = ALL SHORTEST (a)-[:R*1..3]->(b) RETURN p LIMIT 0",
         ] {
             assert!(
                 prepare_query(&spill_options(&directory, text)).is_ok(),
@@ -1174,16 +1175,12 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             );
             no_scratch(&directory);
         }
-        for text in [
-            "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN r.p LIMIT 0",
-            "MATCH p = ALL SHORTEST (a)-[:R*1..3]->(b) RETURN p LIMIT 0",
-        ] {
-            assert!(
-                prepare_query(&spill_options(&directory, text)).is_err(),
-                "{text}"
-            );
-            no_scratch(&directory);
-        }
+        let text = "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN r.p LIMIT 0";
+        assert!(
+            prepare_query(&spill_options(&directory, text)).is_err(),
+            "{text}"
+        );
+        no_scratch(&directory);
         let (vfs, _resident) = fixture(&commit).await;
         for (text, limit) in [
             (

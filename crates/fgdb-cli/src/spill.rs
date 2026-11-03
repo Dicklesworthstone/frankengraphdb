@@ -46,6 +46,10 @@ impl SpillOptions {
         self.directory.is_some()
     }
 
+    pub(super) fn max_input_rows(&self) -> u64 {
+        self.rows.unwrap_or(DEFAULT_INPUT_ROWS)
+    }
+
     pub(super) fn set(&mut self, flag: &str, raw: &str) -> Result<(), Failure> {
         let target = match flag {
             "--spill-dir" if self.directory.is_none() && !raw.is_empty() => {
@@ -201,7 +205,7 @@ impl Scratch {
             ));
         }
         let pool = MemoryPool::new(memory, 0).map_err(execution_failure)?;
-        let input_rows = limits.rows.unwrap_or(DEFAULT_INPUT_ROWS);
+        let input_rows = limits.max_input_rows();
         let run_rows = (memory / (4 * MAX_ROW_BYTES)).clamp(1, 256);
         let max_runs = usize::try_from(input_rows.div_ceil(run_rows as u64).max(1))
             .map_err(|_| Failure::usage("spill run count exceeds this platform"))?;
