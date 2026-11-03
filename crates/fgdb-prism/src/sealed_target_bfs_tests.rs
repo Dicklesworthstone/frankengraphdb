@@ -5,6 +5,7 @@ use std::cell::{Cell, RefCell};
 
 struct Fixture {
     rows: Vec<Vec<usize>>,
+    population: usize,
     source_steps: Cell<usize>,
     fail_at: Cell<usize>,
     opened: RefCell<Vec<usize>>,
@@ -13,6 +14,7 @@ struct Fixture {
 impl Fixture {
     fn new(rows: Vec<Vec<usize>>) -> Self {
         Self {
+            population: rows.len(),
             rows,
             source_steps: Cell::new(0),
             fail_at: Cell::new(usize::MAX),
@@ -52,7 +54,7 @@ impl Rows for Fixture {
     type Cursor<'a> = Row<'a>;
 
     fn node_count(&self) -> usize {
-        self.rows.len()
+        self.population
     }
     fn degree(&self, source: usize) -> Option<usize> {
         self.rows.get(source).map(Vec::len)
@@ -79,31 +81,102 @@ fn distance(output: &KernelOutput) -> Option<usize> {
 #[test]
 fn target_in_the_first_cell_never_hides_later_neighbors_or_fallible_eof() {
     let fixture = Fixture::new(vec![vec![1, 2, 3], vec![4], vec![], vec![], vec![]]);
+    for cutoff in [None, Some(1)] {
+        fixture.reset(usize::MAX);
+        let target = Target {
+            source: 0,
+            target: 1,
+            cutoff,
+        };
+        let (result, _) = run(&fixture, target, usize::MAX, &mut || Ok(())).unwrap();
+        assert_eq!(distance(&result), Some(1));
+        assert_eq!(result.row_count, 1);
+        assert_eq!(result.witness.edges_scanned, 3);
+        assert_eq!(*fixture.opened.borrow(), vec![0]);
+        assert_eq!(fixture.source_steps.get(), 5, "open, three neighbors, EOF");
+        for stop in 1..=5 {
+            fixture.reset(stop);
+            assert!(matches!(run(&fixture, target, usize::MAX, &mut || Ok(())),
+                Err(super::super::Error::Source(SealedProjectionError::UnknownOrdinal(at))) if at == stop));
+            assert_eq!(fixture.source_steps.get(), stop);
+        }
+
+        // Ordinals beyond the population are invalid even when they still fit
+        // inside the bitmap's last word, and after the target was discovered.
+        let malformed = Fixture::new(vec![vec![1, 7], vec![]]);
+        assert!(matches!(
+            run(&malformed, target, usize::MAX, &mut || Ok(())),
+            Err(super::super::Error::Execution(
+                FnxExecutionError::InvalidUpstreamResult
+            ))
+        ));
+    }
+}
+
+#[test]
+fn one_hop_scan_keeps_constant_workspace_and_work_on_large_populations() {
+    let mut expected_checks = None;
+    for n in [3, 65, 1 << 30, usize::MAX] {
+        let mut fixture = Fixture::new(vec![vec![0, 1, 1, 0]]);
+        fixture.population = n;
+        for target in [1, n - 1] {
+            fixture.reset(usize::MAX);
+            let selected = Target {
+                source: 0,
+                target,
+                cutoff: Some(1),
+            };
+            let mut checks = 0;
+            let (result, bytes) = run(&fixture, selected, 0, &mut || {
+                checks += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(bytes, 0);
+            assert_eq!(result.row_count, usize::from(target == 1));
+            assert!(matches!(result.values, KernelValues::TargetHopDistance {
+                target: actual, distance,
+            } if actual == target && distance == (target == 1).then_some(1)));
+            assert_eq!(result.witness.nodes_touched, 1);
+            assert_eq!(result.witness.edges_scanned, 4);
+            assert_eq!(result.witness.queue_peak, 0);
+            assert_eq!(*fixture.opened.borrow(), vec![0]);
+            assert_eq!(fixture.source_steps.get(), 6);
+            assert_eq!(*expected_checks.get_or_insert(checks), checks);
+            for stop in 1..=checks {
+                fixture.reset(usize::MAX);
+                let mut seen = 0;
+                assert!(matches!(run(&fixture, selected, 0, &mut || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(SealedProjectionError::UnknownOrdinal(stop).into())
+                    } else { Ok(()) }
+                }), Err(super::super::Error::Source(SealedProjectionError::UnknownOrdinal(at)))
+                    if at == stop));
+                assert_eq!(seen, stop);
+            }
+        }
+    }
+}
+
+#[test]
+fn an_empty_one_hop_source_still_exposes_its_fallible_eof() {
+    let fixture = Fixture::new(vec![vec![], vec![]]);
     let target = Target {
         source: 0,
         target: 1,
-        cutoff: None,
+        cutoff: Some(1),
     };
-    let (result, _) = run(&fixture, target, usize::MAX, &mut || Ok(())).unwrap();
-    assert_eq!(distance(&result), Some(1));
-    assert_eq!(result.row_count, 1);
-    assert_eq!(result.witness.edges_scanned, 3);
+    let (result, bytes) = run(&fixture, target, 0, &mut || Ok(())).unwrap();
+    assert_eq!(distance(&result), None);
+    assert_eq!(bytes, 0);
     assert_eq!(*fixture.opened.borrow(), vec![0]);
-    assert_eq!(fixture.source_steps.get(), 5, "open, three neighbors, EOF");
-    for stop in 1..=5 {
-        fixture.reset(stop);
-        assert!(matches!(run(&fixture, target, usize::MAX, &mut || Ok(())),
-            Err(super::super::Error::Source(SealedProjectionError::UnknownOrdinal(at))) if at == stop));
-        assert_eq!(fixture.source_steps.get(), stop);
-    }
-
-    // Ordinals beyond the population are invalid even when they still fit
-    // inside the bitmap's last word, and even after the target was discovered.
-    let malformed = Fixture::new(vec![vec![1, 7], vec![]]);
+    assert_eq!(fixture.source_steps.get(), 2, "open and EOF");
+    fixture.reset(2);
     assert!(matches!(
-        run(&malformed, target, usize::MAX, &mut || Ok(())),
-        Err(super::super::Error::Execution(
-            FnxExecutionError::InvalidUpstreamResult
+        run(&fixture, target, 0, &mut || Ok(())),
+        Err(super::super::Error::Source(
+            SealedProjectionError::UnknownOrdinal(2)
         ))
     ));
 }

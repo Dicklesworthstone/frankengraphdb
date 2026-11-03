@@ -1724,6 +1724,8 @@ fn source_digest() -> Digest {
             include_str!("execute.rs"),
             include_str!("sealed_execute.rs"),
             include_str!("sealed_bfs.rs"),
+            include_str!("target_bfs.rs"),
+            include_str!("sealed_target_bfs.rs"),
             include_str!("sealed_cooperative.rs"),
             include_str!("sealed_betweenness.rs"),
             include_str!("sealed_betweenness_cooperative.rs"),

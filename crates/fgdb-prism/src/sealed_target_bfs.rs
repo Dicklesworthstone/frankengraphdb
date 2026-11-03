@@ -1,5 +1,7 @@
 //! Target-only integer hop distance over admitted, fallible compressed rows.
 //! Both drivers drain each opened row through EOF before settling a target.
+//! A one-hop cutoff uses the shared allocation-free source-row scan, retaining
+//! the same bounded raw-history pulls and live checks as the FIFO driver.
 
 use super::{
     Cursor, Delivery, Finished, FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, KernelOutput,
@@ -7,7 +9,7 @@ use super::{
     directional_pass_work, finish, finish_encoded,
 };
 use crate::sealed_control::{Control, Guard};
-use crate::target_bfs::{Search, Step, estimated_work, workspace};
+use crate::target_bfs::{OneHop, Search, Step, estimated_work, one_hop, workspace};
 use crate::{FnxAlgorithm, FnxExecutionError};
 use std::convert::Infallible;
 use std::future::Future;
@@ -66,6 +68,19 @@ fn run(
     control: &mut impl FnMut() -> Result<()>,
 ) -> Result<(KernelOutput, usize)> {
     control()?;
+    if one_hop(target.source, target.target, target.cutoff) {
+        let mut state =
+            OneHop::new::<Infallible>(graph.node_count(), target.source, target.target)?;
+        control()?;
+        let mut row = graph.open(target.source)?;
+        while let Some((neighbor, _)) = row.next()? {
+            control()?;
+            state.visit::<Infallible>(neighbor)?;
+        }
+        control()?;
+        control()?;
+        return Ok((state.finish(), 0));
+    }
     let mut state = Search::new::<Infallible>(
         graph.node_count(),
         target.source,
@@ -144,30 +159,43 @@ where
     let admission = ResultAdmission::for_delivery(call, limits, memory, delivery)?;
     let (target, estimated) = prepare(call, graph, limits, memory)?;
     control.tick().await?;
-    let mut state = Search::new::<Infallible>(
-        graph.node_count(),
-        target.source,
-        target.target,
-        target.cutoff,
-        memory.max_kernel_workspace_bytes,
-    )?;
-    loop {
+    let (mut output, peak) = if one_hop(target.source, target.target, target.cutoff) {
+        let mut state =
+            OneHop::new::<Infallible>(graph.node_count(), target.source, target.target)?;
         control.tick().await?;
-        match state.step::<Infallible>()? {
-            Step::Scalar => {}
-            Step::Complete => break,
-            Step::Open(vertex) => {
-                let mut row = graph.neighbor_cursor_controlled(control.cx, vertex, None)?;
-                while let Some((neighbor, _)) = control.next(&mut row).await? {
-                    control.tick().await?;
-                    state.visit::<Infallible>(neighbor)?;
+        let mut row = graph.neighbor_cursor_controlled(control.cx, target.source, None)?;
+        while let Some((neighbor, _)) = control.next(&mut row).await? {
+            control.tick().await?;
+            state.visit::<Infallible>(neighbor)?;
+        }
+        control.tick().await?;
+        (state.finish(), 0)
+    } else {
+        let mut state = Search::new::<Infallible>(
+            graph.node_count(),
+            target.source,
+            target.target,
+            target.cutoff,
+            memory.max_kernel_workspace_bytes,
+        )?;
+        loop {
+            control.tick().await?;
+            match state.step::<Infallible>()? {
+                Step::Scalar => {}
+                Step::Complete => break,
+                Step::Open(vertex) => {
+                    let mut row = graph.neighbor_cursor_controlled(control.cx, vertex, None)?;
+                    while let Some((neighbor, _)) = control.next(&mut row).await? {
+                        control.tick().await?;
+                        state.visit::<Infallible>(neighbor)?;
+                    }
+                    state.end_row::<Infallible>()?;
                 }
-                state.end_row::<Infallible>()?;
             }
         }
-    }
+        state.finish()
+    };
     control.tick().await?;
-    let (mut output, peak) = state.finish();
     admission.rows(output.row_count)?;
     compressed_witness(&mut output);
     let mut encoded = super::EncodedRows::new(call, output.row_count, &admission)?;

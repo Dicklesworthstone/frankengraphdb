@@ -88,14 +88,19 @@ fn target_hops_admit_exact_workspace_result_caps_and_zero_allocation_trivial_que
             let db = small_database(&contexts.commit(), n, true).await;
             let opt = options(Directedness::Directed);
             let graph = projection(&db, &cx, opt).await;
-            for (target, cutoff) in [(VId((n - 1) as u128), None), (VId(0), None), (VId((n - 1) as u128), Some(0))] {
+            for (target, cutoff) in [
+                (VId((n - 1) as u128), None),
+                (VId(0), None),
+                (VId((n - 1) as u128), Some(0)),
+                (VId((n - 1) as u128), Some(1)),
+            ] {
                 let call = FnxCallSpec::shortest_path_length(VId(0), target, cutoff);
                 let expected = call.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
                 let rows = expected.rows.len();
                 let columns = call.outputs().len() * size_of::<String>()
                     + call.outputs().iter().map(|column| column.name.len()).sum::<usize>();
                 let bytes = columns + rows * (size_of::<Vec<FnxValue>>() + call.outputs().len() * size_of::<FnxValue>());
-                let workspace = if target == VId(0) || cutoff == Some(0) { 0 }
+                let workspace = if target == VId(0) || matches!(cutoff, Some(0 | 1)) { 0 }
                     else { n * size_of::<usize>() + n.div_ceil(64) * size_of::<u64>() };
                 assert_eq!(expected.certificate.kernel_workspace_bytes, workspace);
                 let limits = FnxExecutionLimits { max_iterations: 0, max_result_rows: rows,
@@ -142,31 +147,15 @@ fn target_hops_preserve_every_live_cut_and_require_full_projection_admission() {
         let mut db = small_database(&commit, 3, true).await;
         let opt = options(Directedness::Directed);
         let graph = projection(&db, &cx, opt).await;
-        let call = FnxCallSpec::shortest_path_length(VId(0), VId(2), None);
-        let checks = Cell::new(0);
-        let completed = call
-            .execute_sealed_cooperative_with_checkpoint(
-                &cx,
-                &graph,
-                opt.execution_limits,
-                memory(),
-                quantum(3),
-                yield_now,
-                || {
-                    checks.set(checks.get() + 1);
-                    Ok(())
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            completed.rows,
-            vec![vec![FnxValue::Vertex(VId(2)), FnxValue::Integer(2)]]
-        );
-        for stop in 1..=checks.get() {
-            let seen = Cell::new(0);
-            let result = call
-                .execute_sealed_cooperative_rows_with_checkpoint(
+        for (target, cutoff, distance) in [
+            (VId(2), None, Some(2)),
+            (VId(1), Some(1), Some(1)),
+            (VId(2), Some(1), None),
+        ] {
+            let call = FnxCallSpec::shortest_path_length(VId(0), target, cutoff);
+            let checks = Cell::new(0);
+            let completed = call
+                .execute_sealed_cooperative_with_checkpoint(
                     &cx,
                     &graph,
                     opt.execution_limits,
@@ -174,18 +163,41 @@ fn target_hops_preserve_every_live_cut_and_require_full_projection_admission() {
                     quantum(3),
                     yield_now,
                     || {
-                        seen.set(seen.get() + 1);
-                        if seen.get() == stop {
-                            Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
-                        } else {
-                            Ok(())
-                        }
+                        checks.set(checks.get() + 1);
+                        Ok(())
                     },
                 )
                 .await
-                .unwrap_err();
-            live_refusal(result, stop);
-            assert_eq!(seen.get(), stop);
+                .unwrap();
+            let expected: Vec<_> = distance
+                .into_iter()
+                .map(|distance| vec![FnxValue::Vertex(target), FnxValue::Integer(distance)])
+                .collect();
+            assert_eq!(completed.rows, expected);
+            for stop in 1..=checks.get() {
+                let seen = Cell::new(0);
+                let result = call
+                    .execute_sealed_cooperative_rows_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(3),
+                        yield_now,
+                        || {
+                            seen.set(seen.get() + 1);
+                            if seen.get() == stop {
+                                Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                live_refusal(result, stop);
+                assert_eq!(seen.get(), stop);
+            }
         }
         for call in [
             FnxCallSpec::shortest_path_length(VId(u128::MAX), VId(0), Some(0)),
