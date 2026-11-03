@@ -1104,9 +1104,10 @@ struct Parser<'a> {
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
     elements: Vec<&'a str>,
-    /// The byte offsets of the WITH aliases bound to a map literal or map
-    /// projection. Such a binding is a map, never a node, although its column
-    /// type is the open `Any` (TCK Match1 [11], VariableTypeConflict).
+    /// The byte offsets of WITH aliases known to hold maps: literals, map
+    /// projections, declared map parameters and aliases of those bindings.
+    /// Such a binding is a map, never a node, although its column type is the
+    /// open `Any` (TCK Match1 [11], VariableTypeConflict).
     map_aliases: Vec<usize>,
     /// The composite operands of the scalar expression being parsed, when
     /// its caller can carry them as a `ReadValueTemplate::Let` (fgdb-o5o9t).

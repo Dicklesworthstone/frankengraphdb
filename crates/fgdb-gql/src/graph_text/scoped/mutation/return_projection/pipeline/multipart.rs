@@ -3466,8 +3466,9 @@ impl<'a> Parser<'a> {
                 if right >= self.syntax.root_variables {
                     return Err(expected(name.at, "imported vertices in the root MATCH"));
                 }
-                // A map literal's open `Any` type is still a map: openCypher
-                // refuses it as a node (VariableTypeConflict, Match1 [11]).
+                // A known map's open `Any` type is still a map, including
+                // aliases and declared map parameters: openCypher refuses it
+                // as a node (VariableTypeConflict, Match1 [11]).
                 if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any)
                     || self.map_aliases.contains(&name.at)
                 {
@@ -3910,7 +3911,14 @@ impl<'a> Parser<'a> {
                     )
                     .into());
                 }
-                if value.is_map_constructor() {
+                if value.is_map_value(
+                    |column| {
+                        incoming
+                            .get(column)
+                            .is_some_and(|(name, _)| self.map_aliases.contains(&name.at))
+                    },
+                    &self.syntax.parameters,
+                ) {
                     self.map_aliases.push(alias.at);
                 }
                 outputs.push((alias, value));

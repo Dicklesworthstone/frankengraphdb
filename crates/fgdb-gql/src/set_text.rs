@@ -555,10 +555,23 @@ impl ReadValueTemplate {
         }
     }
 
-    /// A map literal or map projection: a map or NULL, never a graph element,
-    /// although its column type is the open `Any`.
-    pub(crate) fn is_map_constructor(&self) -> bool {
-        matches!(self, Self::MapLiteral { .. } | Self::MapOverlay { .. })
+    /// A value known to be a map or NULL, never a graph element, even though
+    /// its column type is the open `Any`. Preserve that fact through a WITH
+    /// alias and through declared map parameters without inspecting a bound
+    /// value or narrowing a genuinely open input column.
+    pub(crate) fn is_map_value(
+        &self,
+        map_column: impl Fn(usize) -> bool,
+        parameters: &[crate::GqlParameterSpec],
+    ) -> bool {
+        match self {
+            Self::MapLiteral { .. } | Self::MapOverlay { .. } => true,
+            Self::Column(column) => map_column(*column),
+            Self::Parameter { index, .. } => parameters
+                .get(*index)
+                .is_some_and(|parameter| parameter.parameter_type == crate::GqlParameterType::Map),
+            _ => false,
+        }
     }
 }
 #[derive(Clone)]
