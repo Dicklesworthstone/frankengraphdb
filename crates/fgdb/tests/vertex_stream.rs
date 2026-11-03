@@ -9,8 +9,8 @@ use fgdb_gql::algebra::{
 };
 use fgdb_gql::stream::{VertexScanError, VertexScanState};
 use fgdb_gql::{
-    GqlBudgetDimension, GqlExecutionStats, GqlQueryError, GqlQueryPolicy, PreparedGqlQuery,
-    RelationBind,
+    GlaLimitDimension, GqlBudgetDimension, GqlExecutionStats, GqlQueryError, GqlQueryPolicy,
+    PreparedGqlQuery, RelationBind,
 };
 use fgdb_types::{
     CanonicalF64, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId,
@@ -123,11 +123,14 @@ fn equality_streams_seek_exact_numeric_domains_and_match_the_storage_oracle() {
             assert_eq!(eager.value, expected, "literal={literal:?}");
             // A full scan exceeds this allowance. Only historical index
             // candidates may reach MVCC resolution and row admission.
+            // Each typed-value posting in this fresh fixture is a singleton:
+            // its owned traversal spine needs exactly one admitted slot.
+            let scratch = expected.len() as u64;
             let mut cursor = db
                 .stream_graph_vertices_governed(
                     &cx,
                     &query,
-                    GqlQueryPolicy::new(expected.len() as u64, u64::MAX, u64::MAX, 0),
+                    GqlQueryPolicy::new(expected.len() as u64, u64::MAX, u64::MAX, scratch),
                 )
                 .unwrap();
             assert_eq!(cursor.row_stats().snapshot_records, 0);
@@ -138,8 +141,29 @@ fn equality_streams_seek_exact_numeric_domains_and_match_the_storage_oracle() {
                 "literal={literal:?}"
             );
             assert_eq!(cursor.row_stats().snapshot_records, expected.len() as u64);
-            assert_eq!(cursor.evaluator_stats().scratch_entries, 0);
+            assert_eq!(cursor.evaluator_stats().scratch_entries, scratch);
             assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            // Include the formerly sufficient zero allowance. Refusal must
+            // precede admission of even the first candidate or result row.
+            for cap in 0..scratch {
+                let mut refused = db
+                    .stream_graph_vertices_governed(
+                        &cx,
+                        &query,
+                        GqlQueryPolicy::new(expected.len() as u64, u64::MAX, u64::MAX, cap),
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    refused.next(),
+                    Some(Err(GqlQueryError::Evaluator(error)))
+                        if error.dimension == GlaLimitDimension::ScratchEntries
+                            && error.limit == cap && error.observed == u128::from(cap) + 1
+                ));
+                assert_eq!(refused.row_stats().snapshot_records, 0);
+                assert_eq!(refused.row_stats().result_rows, 0);
+                assert_eq!(refused.state(), VertexScanState::Failed);
+                assert!(refused.next().is_none());
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -184,6 +208,9 @@ fn equality_streams_keep_historical_candidates_lazy_and_recheck_the_pinned_winne
         change.delete_vertex(VId(u128::MAX));
         change.create_vertex(VId(2), vec![], vec![(KEY, CanonicalScalar::Int(7))]);
         let latest = db.write(&commit, change).await.unwrap();
+        // Integer postings {0,2,MAX} and float postings {0,3} each have
+        // height two. Both complete spines are admitted before the first row.
+        let scratch = 4;
         for compact in [false, true] {
             if compact {
                 db.compact(&commit).await.unwrap();
@@ -198,7 +225,7 @@ fn equality_streams_keep_historical_candidates_lazy_and_recheck_the_pinned_winne
                         &cx,
                         &query,
                         at,
-                        GqlQueryPolicy::new(4, 4, 10_000, 0),
+                        GqlQueryPolicy::new(4, 4, 10_000, scratch),
                     )
                     .unwrap();
                 assert_eq!(
@@ -206,6 +233,7 @@ fn equality_streams_keep_historical_candidates_lazy_and_recheck_the_pinned_winne
                     expected
                 );
                 assert_eq!(cursor.row_stats().snapshot_records, 4);
+                assert_eq!(cursor.evaluator_stats().scratch_entries, scratch);
                 assert_eq!(
                     db.execute_graph_pattern_governed_at(&cx, &query, at, wide())
                         .unwrap()
@@ -224,25 +252,48 @@ fn equality_streams_keep_historical_candidates_lazy_and_recheck_the_pinned_winne
         // A zero page drives no source or evaluator work (30b917aa); it only
         // observes cancellation before exhausting.
         assert_eq!(empty.evaluator_stats().work_units, 0);
+        assert_eq!(empty.evaluator_stats().scratch_entries, 0);
         // Each pull consumes only its selected candidate; close never drains.
         let one = equality(CanonicalScalar::Int(7), 0, Some(1));
         let mut limited = db
-            .stream_graph_vertices_governed(&cx, &one, GqlQueryPolicy::new(1, 1, 10_000, 0))
+            .stream_graph_vertices_governed(&cx, &one, GqlQueryPolicy::new(1, 1, 10_000, scratch))
             .unwrap();
         assert_eq!(limited.next().unwrap().unwrap(), VId(0));
         assert!(limited.next().is_none());
         assert_eq!(limited.row_stats().snapshot_records, 1);
+        assert_eq!(limited.evaluator_stats().scratch_entries, scratch);
+        for cap in 0..scratch {
+            let mut refused = db
+                .stream_graph_vertices_governed(&cx, &one, GqlQueryPolicy::new(1, 1, 10_000, cap))
+                .unwrap();
+            assert!(matches!(
+                refused.next(),
+                Some(Err(GqlQueryError::Evaluator(error)))
+                    if error.dimension == GlaLimitDimension::ScratchEntries
+                        && error.limit == cap && error.observed == u128::from(cap) + 1
+            ));
+            assert_eq!(refused.row_stats().snapshot_records, 0);
+            assert_eq!(refused.row_stats().result_rows, 0);
+            assert_eq!(refused.state(), VertexScanState::Failed);
+            assert!(refused.next().is_none());
+        }
         let mut cursor = db
             .stream_graph_vertices_governed(&cx, &query, wide())
             .unwrap();
         cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
         let work = cursor.evaluator_stats().work_units;
         let mut refused = db
-            .stream_graph_vertices_governed(&cx, &query, GqlQueryPolicy::new(4, 4, work - 1, 0))
+            .stream_graph_vertices_governed(
+                &cx,
+                &query,
+                GqlQueryPolicy::new(4, 4, work - 1, scratch),
+            )
             .unwrap();
         assert!(matches!(
             refused.by_ref().collect::<Result<Vec<_>, _>>(),
-            Err(GqlQueryError::Evaluator(_))
+            Err(GqlQueryError::Evaluator(error))
+                if error.dimension == GlaLimitDimension::WorkUnits
+                    && error.limit == work - 1 && error.observed == u128::from(work)
         ));
         assert_eq!(refused.state(), VertexScanState::Failed);
         assert!(refused.next().is_none());
