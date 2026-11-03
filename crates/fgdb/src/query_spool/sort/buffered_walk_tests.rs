@@ -453,7 +453,11 @@ fn cold_returned_paths_keep_complete_intake_errors_and_input_quota_before_zero_p
         let mut view = view(&contexts.commit(), &vfs, &source_pool).await;
         let baseline = source_pool.used();
         for run_rows in [1, 3] {
-            for (mode, total_inputs) in [("WALK", 7), ("ANY SHORTEST", 3)] {
+            for (mode, total_inputs) in [
+                ("WALK", 7),
+                ("ANY SHORTEST", 3),
+                ("ALL SHORTEST", 5),
+            ] {
                 for (limit, inputs, success) in [
                     (1, total_inputs, true),
                     (1, total_inputs - 1, false),
@@ -572,6 +576,8 @@ fn pending_returned_path_spill_releases_zero_hop_roots_routes_and_output_guards(
             ("WALK", "", 1, "2..2"),
             ("ANY SHORTEST", "", 4, "0..0"),
             ("ANY SHORTEST", "REPEATABLE ELEMENTS ", 1, "2..2"),
+            ("ALL SHORTEST", "", 4, "0..0"),
+            ("ALL SHORTEST", "REPEATABLE ELEMENTS ", 1, "2..2"),
         ] {
             let prepared = prepare(&format!(
                 "MATCH {match_mode}p = {mode} (a {{p:{root_value}}})-[:R*{bounds}]->(b) {CAPTURE}"
@@ -786,7 +792,8 @@ fn cold_shortest_paths_choose_real_routes_across_history_edge_filters_and_pinned
         }
         for text in [
             "MATCH p = ANY SHORTEST (a)-[:R*2..3]->(b) RETURN p LIMIT 0",
-            "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a)-[:R*0..3]->(b) RETURN p LIMIT 0",
+            "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a)-[:R*0..]->(b) RETURN p LIMIT 0",
+            "MATCH p = ALL SHORTEST (a)-[:R*2..3]->(b) RETURN p LIMIT 0",
             "MATCH p = ANY SHORTEST (a)-[:R*1..]-(b) RETURN p LIMIT 0",
         ] {
             let parameters = GqlParameters::new();
@@ -1062,6 +1069,340 @@ fn cold_edge_filtered_paths_charge_accepted_occurrences_and_keep_reached_errors(
         drop(latest);
         assert_eq!(source_pool.used(), 0);
         assert_eq!(spill_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_all_shortest_diamonds_preserve_parallel_routes_and_external_row_semantics() {
+    let ((), report) = run_async_under_lab(0xc01d_4101, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (mut db, vfs) = graph_with_edge_filters(&contexts.commit()).await;
+        let ac = EId(17);
+        let bd = EId(18);
+        let cd = EId(19);
+        let mut diamond = WriteBatch::new(RelationId(1));
+        for (eid, from, to) in [(ac, A, C), (bd, B, ISOLATE), (cd, C, ISOLATE)] {
+            diamond.add_edge(
+                eid,
+                from,
+                to,
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+            );
+        }
+        assert_eq!(
+            db.write(&contexts.commit(), diamond).await.unwrap(),
+            CommitSeq(4)
+        );
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut cold = view(&contexts.commit(), &vfs, &pool).await;
+        let routes = paths(&[
+            (A, &[(AB, B), (bd, ISOLATE)]),
+            (A, &[(PARALLEL, B), (bd, ISOLATE)]),
+            (A, &[(ac, C), (cd, ISOLATE)]),
+        ]);
+        for match_mode in ["", "REPEATABLE ELEMENTS "] {
+            let text = format!(
+                "MATCH {match_mode}p = ALL SHORTEST (a {{p:1}})-[:R*0..4 {{p:7}}]->(b {{p:4}}) {CAPTURE}"
+            );
+            // B and C are transit vertices even though the endpoint predicate
+            // selects only the former isolate. Both physical A-to-B edges
+            // contribute to the predecessor diamond and survive as real paths.
+            case(&db, &mut cold, &cx, &text, routes.clone(), 4).await;
+        }
+        case(
+            &db,
+            &mut cold,
+            &cx,
+            &format!(
+                "MATCH p = allShortestPaths((a {{p:1}})-[:R*0..4 {{p:7}}]->(b {{p:4}})) {CAPTURE}"
+            ),
+            routes,
+            4,
+        )
+        .await;
+        for atom in [
+            "(a {p:4})<-[:R*0..4 {p:7}]-(b {p:1})",
+            "(a {p:4})-[:R*0..4 {p:7}]-(b {p:1})",
+        ] {
+            case(
+                &db,
+                &mut cold,
+                &cx,
+                &format!("MATCH p = ALL SHORTEST {atom} {CAPTURE}"),
+                paths(&[
+                    (ISOLATE, &[(bd, B), (AB, A)]),
+                    (ISOLATE, &[(bd, B), (PARALLEL, A)]),
+                    (ISOLATE, &[(cd, C), (ac, A)]),
+                ]),
+                4,
+            )
+            .await;
+        }
+
+        let head = "MATCH p = ALL SHORTEST (a {p:1})-[:R*0..4 {p:7}]->(b)";
+        case(
+            &db,
+            &mut cold,
+            &cx,
+            &format!("{head} {CAPTURE}"),
+            paths(&[
+                (A, &[]),
+                (A, &[(AB, B)]),
+                (A, &[(PARALLEL, B)]),
+                (A, &[(ac, C)]),
+                (A, &[(AB, B), (bd, ISOLATE)]),
+                (A, &[(PARALLEL, B), (bd, ISOLATE)]),
+                (A, &[(ac, C), (cd, ISOLATE)]),
+            ]),
+            4,
+        )
+        .await;
+        for (tail, expected) in [
+            (
+                "RETURN b.p AS value ORDER BY length(p) DESC,b.p DESC SKIP 1 LIMIT 4",
+                frames(vec![scalar(4), scalar(4), scalar(3), scalar(2)]),
+            ),
+            (
+                "RETURN DISTINCT b.p AS value ORDER BY value DESC SKIP 1 LIMIT 2",
+                frames(vec![scalar(3), scalar(2)]),
+            ),
+            (
+                "WITH length(p) AS hops,b.p AS value ORDER BY hops DESC,value DESC SKIP 1 LIMIT 4 RETURN hops*10+value AS value ORDER BY value DESC",
+                frames(vec![scalar(24), scalar(24), scalar(13), scalar(12)]),
+            ),
+        ] {
+            case(
+                &db,
+                &mut cold,
+                &cx,
+                &format!("{head} {tail}"),
+                expected,
+                4,
+            )
+            .await;
+        }
+        case(
+            &db,
+            &mut cold,
+            &cx,
+            "MATCH p = ALL SHORTEST (a {p:1})-[:R*0..4 {p:7}]->(b {p:4}) RETURN p ORDER BY p SKIP 1 LIMIT 1",
+            row_bytes(vec![vec![GraphValue::Path(GraphPath::new(
+                A,
+                vec![(ac, C), (cd, ISOLATE)].into(),
+            ))]]),
+            4,
+        )
+        .await;
+        // The R2 edge contributes a fourth route only when relation admission
+        // is unconstrained; it is a physical edge, not a duplicate endpoint.
+        case(
+            &db,
+            &mut cold,
+            &cx,
+            &format!(
+                "MATCH p = ALL SHORTEST (a {{p:1}})-[*0..4 {{p:7}}]->(b {{p:4}}) {CAPTURE}"
+            ),
+            paths(&[
+                (A, &[(AB, B), (bd, ISOLATE)]),
+                (A, &[(PARALLEL, B), (bd, ISOLATE)]),
+                (A, &[(ac, C), (cd, ISOLATE)]),
+                (A, &[(OTHER, C), (cd, ISOLATE)]),
+            ]),
+            4,
+        )
+        .await;
+        for (atom, expected) in [
+            (
+                "(a)-[:R*0..0]->(b)",
+                paths(&[(A, &[]), (B, &[]), (C, &[]), (ISOLATE, &[])]),
+            ),
+            (
+                "(a {p:4})-[:R*0..4]->(b)",
+                paths(&[(ISOLATE, &[])]),
+            ),
+            ("(a {p:4})-[:R*0..4]->(b {p:1})", vec![]),
+        ] {
+            case(
+                &db,
+                &mut cold,
+                &cx,
+                &format!("MATCH p = ALL SHORTEST {atom} {CAPTURE}"),
+                expected,
+                4,
+            )
+            .await;
+        }
+        drop(cold);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_all_shortest_paths_keep_filtered_ties_at_pinned_and_reopened_historical_cuts() {
+    let ((), report) = run_async_under_lab(0xc01d_4102, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (mut db, vfs) = graph_with_edge_filters(&contexts.commit()).await;
+        let pinned_pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut pinned = view(&contexts.commit(), &vfs, &pinned_pool).await;
+        assert_eq!(pinned.frontier(), CommitSeq(3));
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_edge_property(AB, PropertyKeyId(1), Some(CanonicalScalar::Int(8)));
+        update.set_vertex_property(C, PropertyKeyId(1), Some(CanonicalScalar::Int(30)));
+        update.add_edge(
+            EId(17),
+            C,
+            ISOLATE,
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        assert_eq!(
+            db.write(&contexts.commit(), update).await.unwrap(),
+            CommitSeq(4)
+        );
+        drop(db);
+        let db = Database::open_with_vfs(
+            &contexts.commit(),
+            vfs.clone(),
+            vfs.database_dir(),
+            keys(),
+        )
+        .await
+        .unwrap();
+        let latest_pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut latest = view(&contexts.commit(), &vfs, &latest_pool).await;
+        assert_eq!(latest.frontier(), CommitSeq(4));
+        let before = paths(&[
+            (A, &[]),
+            (A, &[(AB, B)]),
+            (A, &[(PARALLEL, B)]),
+            (A, &[(AB, B), (BC, C)]),
+            (A, &[(PARALLEL, B), (BC, C)]),
+        ]);
+        let after = paths(&[
+            (A, &[]),
+            (A, &[(PARALLEL, B)]),
+            (A, &[(PARALLEL, B), (BC, C)]),
+            (A, &[(PARALLEL, B), (BC, C), (EId(17), ISOLATE)]),
+        ]);
+        for match_mode in ["", "REPEATABLE ELEMENTS "] {
+            for wanted in ["7", "7.0"] {
+                for (cut, expected) in [(3, &before), (4, &after)] {
+                    let text = format!(
+                        "MATCH {match_mode}p = ALL SHORTEST (a {{p:1}})-[:R*0..4 {{p:{wanted}}}]->(b) \
+                         FOR SYSTEM_TIME AS OF SEQ {cut} {CAPTURE}"
+                    );
+                    case(&db, &mut latest, &cx, &text, expected.clone(), cut).await;
+                }
+            }
+            let text = format!(
+                "MATCH {match_mode}p = ALL SHORTEST (a {{p:1}})-[:R*0..4 {{p:7}}]->(b) {CAPTURE}"
+            );
+            for run_rows in [1, 3] {
+                spooled(&mut pinned, &cx, &text, &before, 3, run_rows).await;
+            }
+        }
+        for (cut, end_value, edges) in [
+            (3, 3, vec![AB, PARALLEL]),
+            (4, 30, vec![PARALLEL]),
+        ] {
+            let mut rows = Vec::new();
+            for edge in edges {
+                let mut row = capture(A, &[(edge, B), (BC, C)]);
+                row.extend([scalar(1), scalar(end_value)]);
+                rows.push(row);
+            }
+            rows.sort();
+            let text = format!(
+                "MATCH p = ALL SHORTEST (a {{p:1}})-[:R*0..4 {{p:7}}]->(b {{p:{end_value}}}) \
+                 FOR SYSTEM_TIME AS OF SEQ {cut} WHERE length(p)>=2 {CAPTURE}, \
+                 a.p AS start_value,b.p AS end_value"
+            );
+            case(&db, &mut latest, &cx, &text, row_bytes(rows), cut).await;
+        }
+        drop(pinned);
+        drop(latest);
+        assert_eq!(pinned_pool.used(), 0);
+        assert_eq!(latest_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_all_shortest_memory_refusal_precedes_empty_pages_and_refunds_source_ownership() {
+    let ((), report) = run_async_under_lab(0xc01d_4103, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (db, vfs) = graph(&contexts.commit()).await;
+        let source_pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let spill_pool = MemoryPool::new(2_000_000, 0).unwrap();
+        let mut cold = view(&contexts.commit(), &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        for limit in [0, 1] {
+            let text = format!(
+                "MATCH p = ALL SHORTEST (a {{p:1}})-[:R*0..2]->(b) \
+                 RETURN b.p AS value ORDER BY value DESC LIMIT {limit}"
+            );
+            let expected = if limit == 0 {
+                vec![]
+            } else {
+                frames(vec![scalar(3)])
+            };
+            assert_eq!(native(&db, &cx, &text), expected);
+            let prepared = prepare(&text);
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+            let occupied = source_pool.reserve(&cx, source_pool.available()).unwrap();
+            let result = prepared
+                .spool_in_view(
+                    &mut cold,
+                    &cx,
+                    policy(limit),
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    2,
+                    32,
+                    1,
+                    256,
+                    31,
+                    8192,
+                    100,
+                    WORK,
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(NativeSpoolError::BufferedExecute(error))
+                    if matches!(
+                        *error,
+                        GqlQueryError::Source(ScanError::Edge(
+                            fgdb_gql::edge_stream::EdgeScanError::Source(
+                                crate::BufferedReadError::Memory(
+                                    fgdb_strata::tiered::memory::MemoryError::ResourceExhausted {
+                                        available: 0,
+                                        ..
+                                    }
+                                )
+                            )
+                        ))
+                    )
+            ));
+            assert_eq!(destination.stats().published_runs, 0);
+            assert_eq!(source_pool.used(), baseline + occupied.bytes());
+            assert_eq!(spill_pool.used(), 0);
+            drop(occupied);
+            assert_eq!(source_pool.used(), baseline);
+            // The same cold source remains usable after the failed admission.
+            for run_rows in [1, 3] {
+                spooled(&mut cold, &cx, &text, &expected, 2, run_rows).await;
+            }
+        }
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

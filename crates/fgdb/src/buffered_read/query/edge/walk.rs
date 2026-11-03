@@ -120,6 +120,22 @@ impl<V: Vfs + Clone> AsyncGraphWalkSource for Source<'_, '_, V> {
         Ok(guard)
     }
 
+    fn release_shortest_temporaries(&self, root: &Self::RootRecord, records: &[Self::Record]) {
+        // Only evaluator workspace lives in these scratch charges. Source
+        // payloads and any returned row retain their independent reservations.
+        // Projection locals have already dropped when this hook is invoked.
+        {
+            let mut scratch = root.scratch.borrow_mut();
+            let bytes = scratch.bytes();
+            drop(scratch.split_off(bytes));
+        }
+        for record in records {
+            let mut scratch = record.scratch.borrow_mut();
+            let bytes = scratch.bytes();
+            drop(scratch.split_off(bytes));
+        }
+    }
+
     fn reserve_shortest_state<C>(
         &self,
         bytes: usize,
@@ -141,7 +157,7 @@ impl<V: Vfs + Clone> AsyncGraphWalkSource for Source<'_, '_, V> {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<MemoryCharge, EdgeScanSourceError<Self::Error, C>> {
         let mut guard = self.reserve_walk_output(root, records, columns, control)?;
-        // ANY retains one final record, not one source record per path hop.
+        // Shortest projection borrows one final record, not one per path hop.
         // Reserve complete path/node-list/edge-list cells and encoding backing
         // independently of the breadth layer and every source record.
         let bytes = hops
