@@ -8,6 +8,215 @@ use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
 use std::sync::Arc;
 
 #[test]
+fn equality_posting_enumeration_visits_each_node_once_instead_of_reseeking() {
+    for count in [0, 1, 64, 4096, 16384_usize] {
+        let expected: Vec<_> = (0..count)
+            .map(|id| {
+                VId(if id + 1 == count {
+                    u128::MAX
+                } else {
+                    id as u128
+                })
+            })
+            .collect();
+        let index = IndexMap::from_sorted(expected.iter().map(|&vid| (vid, ())).collect(), &mut 0);
+        let mut incumbent = Vec::new();
+        let mut old_work = 0;
+        let mut after = None;
+        while let Some(vid) = index_successor(&index, after, &mut |event| {
+            assert!(matches!(event, VertexScanEvent::Work));
+            old_work += 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        {
+            incumbent.push(vid);
+            after = Some(vid);
+        }
+        assert_eq!(incumbent, expected);
+
+        let mut scan = VertexPostingScanCursor::default();
+        let (mut work, mut scratch) = (0, 0);
+        let mut actual = Vec::new();
+        after = None;
+        while let Some(vid) = scan
+            .successor(&index, after, &mut |event| {
+                match event {
+                    SourceEvent::Work => work += 1,
+                    SourceEvent::ScratchEntry => scratch += 1,
+                    SourceEvent::SnapshotRecord => panic!("enumeration does not admit a row"),
+                }
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+        {
+            actual.push(vid);
+            // Another posting may refuse after this one advanced. Retained
+            // lookahead must survive a retry with the unchanged global cut.
+            assert_eq!(
+                scan.successor(&index, after, &mut |_| Err(())),
+                Ok(Some(vid))
+            );
+            after = Some(vid);
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(work, 2 * count + 1, "one descent and advance per identity");
+        assert_eq!(
+            scratch,
+            usize::from(index.height()),
+            "the complete spine is charged once"
+        );
+        if count >= 64 {
+            assert!(
+                old_work > 2 * work,
+                "incumbent={old_work}, candidate={work}"
+            );
+        }
+    }
+}
+
+#[test]
+fn merged_equality_postings_retry_every_refusal_without_losing_a_numeric_peer() {
+    let sets = [
+        vec![VId(0), VId(17), VId(1_u128 << 100), VId(u128::MAX)],
+        vec![VId(0), VId(3), VId(17), VId(21), VId(u128::MAX)],
+    ];
+    let expected: Vec<_> = sets
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let roots = sets
+        .map(|ids| IndexMap::from_sorted(ids.into_iter().map(|vid| (vid, ())).collect(), &mut 0));
+    fn drain(
+        roots: &[IndexMap<VId, ()>; 2],
+        scans: &mut [VertexPostingScanCursor; 2],
+        after: &mut Option<VId>,
+        output: &mut Vec<VId>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), usize>,
+    ) -> Result<(), usize> {
+        loop {
+            let mut next = None;
+            for (root, scan) in roots.iter().zip(scans.iter_mut()) {
+                if let Some(vid) = scan.successor(root, *after, control)? {
+                    next = Some(next.map_or(vid, |current: VId| current.min(vid)));
+                }
+            }
+            let Some(vid) = next else { return Ok(()) };
+            assert!(after.is_none_or(|previous| previous < vid));
+            output.push(vid);
+            *after = Some(vid);
+        }
+    }
+    let mut total = 0;
+    let mut output = Vec::new();
+    drain(
+        &roots,
+        &mut core::array::from_fn(|_| VertexPostingScanCursor::default()),
+        &mut None,
+        &mut output,
+        &mut |_| {
+            total += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(output, expected);
+    for stop in 1..=total {
+        let mut scans = core::array::from_fn(|_| VertexPostingScanCursor::default());
+        let mut after = None;
+        let mut output = Vec::new();
+        let mut seen = 0;
+        let refused = drain(&roots, &mut scans, &mut after, &mut output, &mut |_| {
+            seen += 1;
+            if seen == stop { Err(stop) } else { Ok(()) }
+        });
+        assert_eq!(refused, Err(stop));
+        assert_eq!(seen, stop);
+        assert!(expected.starts_with(&output));
+        drain(&roots, &mut scans, &mut after, &mut output, &mut |_| Ok(())).unwrap();
+        assert_eq!(output, expected, "refused event {stop}");
+    }
+}
+
+#[test]
+fn equality_postings_preserve_numeric_peers_tombstones_and_historical_cuts() {
+    let ((), report) = run_async_under_lab(0x696e_6406, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let keys = crate::DatabaseKeys::new(
+            [0x81; 32],
+            DatabaseSecurityNamespaceId([0x82; 32]),
+            [0x83; 32],
+        );
+        let key = PropertyKeyId(1);
+        let int = CanonicalScalar::Int(7);
+        let float = CanonicalScalar::Float(fgdb_types::CanonicalF64::new(7.0));
+        let wide_id = VId(1_u128 << 100);
+        let last_id = VId(u128::MAX);
+        let mut db = Database::open_memory(&commit, keys).await.unwrap();
+        let mut seed = crate::WriteBatch::new(RelationId(1));
+        for (vid, value) in [
+            (VId(0), int.clone()),
+            (VId(17), float.clone()),
+            (wide_id, int.clone()),
+            (last_id, CanonicalScalar::Int(9)),
+        ] {
+            seed.create_vertex(vid, vec![], vec![(key, value)]);
+        }
+        let first = db.write(&commit, seed).await.unwrap();
+        let mut update = crate::WriteBatch::new(RelationId(1));
+        update.set_vertex_property(VId(0), key, Some(CanonicalScalar::Int(9)));
+        update.set_vertex_property(VId(17), key, Some(int));
+        update.set_vertex_property(last_id, key, Some(float));
+        update.delete_vertex(wide_id);
+        let second = db.write(&commit, update).await.unwrap();
+        let mut update = crate::WriteBatch::new(RelationId(1));
+        update.set_vertex_property(last_id, key, Some(CanonicalScalar::Int(9)));
+        let third = db.write(&commit, update).await.unwrap();
+        let view = db.read_session().unwrap();
+        let mut builder = fgdb_gql::algebra::GraphPatternBuilder::new();
+        builder.vertex("n").unwrap();
+        builder
+            .filter(
+                "n",
+                VertexPredicate::IntegerProperty {
+                    key,
+                    comparison: IntegerComparison::Equal,
+                    value: 7,
+                },
+            )
+            .unwrap();
+        let pattern = builder.prepare("n", 0, None).unwrap();
+        let policy = GqlQueryPolicy::new(100, 100, 100_000, 100_000);
+        for (cut, expected) in [
+            (CommitSeq(0), vec![]),
+            (first, vec![VId(0), VId(17), wide_id]),
+            (second, vec![VId(17), last_id]),
+            (third, vec![VId(17)]),
+        ] {
+            let actual = view
+                .stream_graph_vertices_governed_at(&cx, &pattern, cut, policy)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(actual, expected, "cut={cut:?}");
+            assert_eq!(
+                db.execute_graph_pattern_governed_at(&cx, &pattern, cut, policy)
+                    .unwrap()
+                    .value,
+                expected,
+                "eager cut={cut:?}",
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn local_successors_preserve_root_position_and_every_lookup_refusal_retries() {
     let ((), report) = run_async_under_lab(0x696e_6404, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

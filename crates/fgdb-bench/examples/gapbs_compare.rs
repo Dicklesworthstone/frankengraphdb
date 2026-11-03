@@ -65,6 +65,11 @@
 //! Both engines run in every paired trial, with alternating order. Raw samples
 //! and empirical quantiles describe this machine, not an activated §17 gate,
 //! a fitted tail, a server/authorization benchmark, or external-memory parity.
+//! After each verified BFS pair, selected point-to-point public CALLs check
+//! reachable, unreachable and cutoff-boundary answers against that same live
+//! GAPBS result. Their warm request timings and scan counts are separate:
+//! GAPBS computes all destinations, so these are correctness comparisons,
+//! not point-to-point competitor speedups.
 //!
 //! Optional `--sealed` adds a separate end-to-end series that cycles through six
 //! orders of read-only checkpoint preparation, the previous writable-open/seal
@@ -574,6 +579,160 @@ fn canonical_rows(result: &FnxResult, algorithm: &str, vertices: usize) -> Resul
         return Err("analytics result omitted vertices".into());
     }
     Ok(values)
+}
+
+/// A target query must return exactly its requested vertex, or no row when
+/// unreachable. Do not allocate a population-sized comparison vector for a
+/// single-row request: that would conceal the public path's actual cost.
+fn target_distance(result: &FnxResult, target: usize) -> Result<i64> {
+    if result
+        .columns
+        .iter()
+        .map(String::as_str)
+        .ne(["vertex", "distance"])
+    {
+        return Err("target result has the wrong column schema".into());
+    }
+    match result.rows.as_slice() {
+        [] => Ok(-1),
+        [row] => match row.as_slice() {
+            [FnxValue::Vertex(vertex), FnxValue::Integer(distance)]
+                if vertex.0 == target as u128 =>
+            {
+                Ok(i64::try_from(*distance)?)
+            }
+            _ => Err("target result has the wrong identity or row schema".into()),
+        },
+        _ => Err("target query returned multiple rows".into()),
+    }
+}
+
+/// Cover fixed identities plus a farthest reachable and an unreachable
+/// destination when present. Input distances have already matched every row
+/// from the current trial's live GAPBS verifier, not an in-house BFS oracle.
+fn target_cases(source: usize, distances: &[i64]) -> Result<Vec<(usize, Option<usize>)>> {
+    if source >= distances.len()
+        || distances[source] != 0
+        || distances.iter().any(|&distance| distance < -1)
+    {
+        return Err("invalid verified BFS population".into());
+    }
+    let mut targets = vec![source, 0, distances.len() / 2, distances.len() - 1];
+    if let Some((target, _)) = distances
+        .iter()
+        .enumerate()
+        .filter(|&(_, &distance)| distance >= 0)
+        .max_by_key(|&(_, &distance)| distance)
+    {
+        targets.push(target);
+    }
+    if let Some(target) = distances.iter().position(|&distance| distance == -1) {
+        targets.push(target);
+    }
+    targets.sort_unstable();
+    targets.dedup();
+    let mut cases = Vec::new();
+    for target in targets {
+        cases.push((target, None));
+        if distances[target] >= 0 {
+            let distance = usize::try_from(distances[target])?;
+            cases.push((target, Some(distance)));
+            if let Some(short) = distance.checked_sub(1) {
+                cases.push((target, Some(short)));
+            }
+        } else {
+            cases.push((target, Some(distances.len() / 2)));
+        }
+    }
+    Ok(cases)
+}
+
+fn target_samples(
+    config: &Config,
+    database: &Database,
+    query: &QueryCx,
+    trial: usize,
+    verified_distances: &[i64],
+    log: &mut impl Write,
+) -> Result<()> {
+    for (target, cutoff) in target_cases(config.source, verified_distances)? {
+        let suffix = cutoff.map_or_else(String::new, |cutoff| format!(",{cutoff}"));
+        let text = format!(
+            "CALL fnx.shortest_path_length({},{target}{suffix}) YIELD vertex,distance",
+            config.source
+        );
+        let call = FnxCallSpec::bind(&text, &FnxParameters::new())?;
+        let options = read_options(&call, "bfs");
+        let started = Instant::now();
+        let result = database.call_fnx(query, &text, &FnxParameters::new(), options)?;
+        let actual = target_distance(&result.analytics, target)?;
+        let public_call_ns = started.elapsed().as_nanos();
+        let distance = verified_distances[target];
+        let expected =
+            if distance >= 0 && cutoff.is_none_or(|limit| distance as u128 <= limit as u128) {
+                distance
+            } else {
+                -1
+            };
+        if actual != expected {
+            return Err(format!(
+                "target mismatch: source={}, target={target}, cutoff={cutoff:?}, database={actual}, GAPBS={expected}",
+                config.source
+            )
+            .into());
+        }
+        let cutoff_label = cutoff.map_or_else(|| "none".to_owned(), |value| value.to_string());
+        let sample = format!("bfs-{trial}-target-{target}-cutoff-{cutoff_label}");
+        let started = Instant::now();
+        let mut output = new_file(&config.output.join(format!("{sample}.rows")))?;
+        writeln!(output, "{target} {actual}")?;
+        output.flush()?;
+        let encoding_ns = started.elapsed().as_nanos();
+        let certificate = &result.analytics.certificate;
+        emit(
+            log,
+            "target_query_verification",
+            &[
+                ("sample", sample),
+                ("source", config.source.to_string()),
+                ("target", target.to_string()),
+                ("cutoff", cutoff_label),
+                ("distance", actual.to_string()),
+                (
+                    "warm_public_call_and_consume_ns",
+                    public_call_ns.to_string(),
+                ),
+                ("result_encoding_ns", encoding_ns.to_string()),
+                ("kernel", certificate.execution_kernel.to_owned()),
+                (
+                    "kernel_workspace_bytes",
+                    certificate.kernel_workspace_bytes.to_string(),
+                ),
+                (
+                    "edges_scanned",
+                    certificate.witness.edges_scanned.to_string(),
+                ),
+                (
+                    "nodes_touched",
+                    certificate.witness.nodes_touched.to_string(),
+                ),
+                ("result_digest", format!("{:?}", certificate.result_digest)),
+                (
+                    "projection_cache_state",
+                    "preceded by complete BFS; reuse not assumed".to_owned(),
+                ),
+                (
+                    "correctness",
+                    "target and cutoff match the same trial's verified live GAPBS BFS".to_owned(),
+                ),
+                (
+                    "comparison_scope",
+                    "point-to-point correctness only; GAPBS computes all destinations".to_owned(),
+                ),
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn integer_distance(value: f64) -> Result<i64> {
@@ -1736,6 +1895,9 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
                     .map(|(key, value)| (key.as_str(), value.to_string())),
             );
             emit(&mut log, "paired_verification", &fields)?;
+            if algorithm == "bfs" {
+                target_samples(&config, &database, &query, trial, &values, &mut log)?;
+            }
             database_samples.push(database_ns);
             gapbs_samples.push(gapbs_ns);
         }
@@ -2075,6 +2237,53 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn target_comparison_checks_identity_schema_cardinality_and_cutoff_boundaries() {
+        let graph = fixture_projection("smoke", Directedness::Directed);
+        let limits = FnxExecutionLimits {
+            max_iterations: 0,
+            max_result_rows: 8,
+            max_estimated_work: 1000,
+        };
+        let expected = [0, 1, 1, 2, -1, -1, -1, -1];
+        let cases = target_cases(0, &expected).unwrap();
+        assert!(cases.contains(&(3, None)));
+        assert!(cases.contains(&(3, Some(2))));
+        assert!(cases.contains(&(3, Some(1))));
+        assert!(cases.contains(&(4, None)));
+        assert!(cases.contains(&(0, Some(0))));
+        for (target, cutoff) in cases {
+            let result = FnxCallSpec::shortest_path_length(VId(0), VId(target as u128), cutoff)
+                .execute(&graph, limits, || Ok::<_, Infallible>(()))
+                .unwrap();
+            let distance = expected[target];
+            let wanted = if distance >= 0 && cutoff.is_none_or(|cutoff| distance as usize <= cutoff)
+            {
+                distance
+            } else {
+                -1
+            };
+            assert_eq!(target_distance(&result, target).unwrap(), wanted);
+        }
+        assert!(target_cases(0, &[]).is_err());
+        assert!(target_cases(2, &[0, 1]).is_err());
+        assert!(target_cases(0, &[0, -2]).is_err());
+        assert!(target_cases(0, &[1, 2]).is_err());
+
+        let mut result = FnxCallSpec::shortest_path_length(VId(0), VId(3), None)
+            .execute(&graph, limits, || Ok::<_, Infallible>(()))
+            .unwrap();
+        assert!(target_distance(&result, 2).is_err());
+        result.rows.push(result.rows[0].clone());
+        assert!(target_distance(&result, 3).is_err());
+        result.rows.pop();
+        result.rows[0][1] = FnxValue::Float(2.0);
+        assert!(target_distance(&result, 3).is_err());
+        result.rows.clear();
+        result.columns.swap(0, 1);
+        assert!(target_distance(&result, 3).is_err());
     }
 
     #[test]
