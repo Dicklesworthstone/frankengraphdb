@@ -408,8 +408,8 @@ fn computed_write_with_pages_keep_effects_front_ends_and_atomic_late_errors() {
     assert_eq!(
         rows(&matched),
         [
-            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"3"},{"type":"int","value":"9"}]}"#,
             r#"{"v":1,"event":"row","cells":[{"type":"int","value":"2"},{"type":"int","value":"6"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"3"},{"type":"int","value":"9"}]}"#,
         ]
     );
     let merged = run(

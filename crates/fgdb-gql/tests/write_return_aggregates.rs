@@ -125,6 +125,12 @@ fn computed_write_with_ordering_preserves_pages_groups_and_frozen_property_colum
         ),
         (
             "UNWIND [3,1,2] AS x CREATE (n {p:x}) \
+             WITH n.p AS p ORDER BY p%2 LIMIT 2 RETURN p",
+            3,
+            vec![vec![int(1)], vec![int(2)]],
+        ),
+        (
+            "UNWIND [3,1,2] AS x CREATE (n {p:x}) \
              WITH n.p AS p ORDER BY n.p * -1 LIMIT 1 RETURN p",
             3,
             vec![vec![int(3)]],
@@ -145,12 +151,19 @@ fn computed_write_with_ordering_preserves_pages_groups_and_frozen_property_colum
             "UNWIND [3,1,1,2] AS x CREATE (n {p:x}) \
              WITH DISTINCT n.p AS p ORDER BY n.p * -1 RETURN p",
             4,
-            vec![vec![int(3)], vec![int(2)], vec![int(1)]],
+            vec![vec![int(1)], vec![int(2)], vec![int(3)]],
         ),
         (
             "UNWIND [3,1,1,2] AS x CREATE (n {p:x}) \
              WITH n.p AS p,count(*) AS copies \
              ORDER BY p+copies DESC,-p LIMIT 2 RETURN p,copies",
+            4,
+            vec![vec![int(2), int(1)], vec![int(3), int(1)]],
+        ),
+        (
+            "UNWIND [3,1,1,2] AS x CREATE (n {p:x}) \
+             WITH n.p AS p,count(*) AS copies \
+             ORDER BY p+copies DESC,-p LIMIT 2 RETURN p,copies ORDER BY p DESC",
             4,
             vec![vec![int(3), int(1)], vec![int(2), int(1)]],
         ),
@@ -213,15 +226,15 @@ fn computed_write_with_ordering_rebinds_parameters_and_reaches_each_write_front_
     };
 
     let statement = "UNWIND [3,1,2] AS x CREATE (n {p:x}) \
-                     WITH n.p AS p ORDER BY p*$direction RETURN p";
+                     WITH n.p AS p ORDER BY p*$direction LIMIT 2 RETURN p";
     let template = PreparedGraphInsertQueryText::prepare(statement, R, symbols).unwrap();
     let descending = GqlParameters::new().with_int64("direction", -1).unwrap();
     let ascending = GqlParameters::new().with_int64("direction", 1).unwrap();
     let down = template.bind_parameters(&descending).unwrap();
     let up = template.bind_parameters(&ascending).unwrap();
     assert_ne!(down.canonical_bytes(), up.canonical_bytes());
-    for (query, expected) in [(&down, [3, 2, 1]), (&up, [1, 2, 3])] {
-        let batch = create(query, policy(3), || Ok(())).unwrap();
+    for (query, expected) in [(&down, [2, 3]), (&up, [1, 2])] {
+        let batch = create(query, policy(2), || Ok(())).unwrap();
         assert_eq!(
             rows(batch.returning()),
             expected
