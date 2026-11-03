@@ -1,7 +1,8 @@
 //! Deterministic semi-synchronous label propagation on borrowed graph rows.
 //!
-//! The pinned FNX procedure colors vertices greedily in canonical node order,
-//! then visits each color class in that same order. Retaining a current label
+//! The pinned FNX procedure colors vertices greedily in stored node order.
+//! This projection pins that order to canonical VIds, then visits each color
+//! class in that same order. Retaining a current label
 //! on maximal ties prevents oscillation; other ties choose the smallest label.
 //! One scalar state machine preserves those rules across decoded, compressed,
 //! and cooperative execution without retaining adjacency or color-class lists.

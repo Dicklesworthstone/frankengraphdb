@@ -258,9 +258,13 @@ mod tests {
     fn reference(graph: &SnapshotGraphView) -> BTreeMap<String, String> {
         let names = graph.nodes_ordered();
         let mut oracle = fnx_classes::Graph::strict();
-        for &name in names.iter().rev() {
+        // FNX colors in its insertion order. Pin the independent oracle to
+        // the procedure's declared VId order; reversed edge insertion below
+        // still checks that neighbor enumeration cannot change the result.
+        for &name in &names {
             oracle.add_node(name);
         }
+        assert_eq!(oracle.nodes_ordered(), names);
         for (source, &name) in names.iter().enumerate().rev() {
             for &target in graph.neighbors_indices(source).unwrap().iter().rev() {
                 if source < target {
@@ -294,24 +298,65 @@ mod tests {
         assert_eq!(actual.certificate.witness, cursor.witness);
         assert_eq!(actual.certificate.kernel_workspace_bytes, peak);
         assert_eq!(peak, workspace::<Infallible>(graph.node_count()).unwrap());
-        let KernelValues::Components(labels) = cursor.values else {
-            panic!("community labels");
-        };
+        assert!(
+            matches!(&cursor.values, KernelValues::Components(_)),
+            "community labels"
+        );
         assert_eq!(actual.columns, ["vertex", "component"]);
         assert_eq!(actual.rows.len(), graph.node_count());
         let names = graph.nodes_ordered();
-        for (index, name) in names.iter().enumerate() {
-            assert_eq!(
-                actual.rows[index],
-                [
-                    FnxValue::Vertex(graph.vertex_id(index).unwrap()),
-                    FnxValue::Vertex(graph.vertex_id(labels[index]).unwrap())
-                ]
-            );
-            assert_eq!(names[labels[index]], expected[*name]);
-            assert!(labels[index] <= index);
+        if let KernelValues::Components(labels) = cursor.values {
+            for (index, name) in names.iter().enumerate() {
+                assert_eq!(
+                    actual.rows[index],
+                    [
+                        FnxValue::Vertex(graph.vertex_id(index).unwrap()),
+                        FnxValue::Vertex(graph.vertex_id(labels[index]).unwrap())
+                    ]
+                );
+                assert_eq!(
+                    names[labels[index]],
+                    expected[*name],
+                    "node {name}; adjacency {:?}",
+                    (0..graph.node_count())
+                        .map(|vertex| graph.neighbors_indices(vertex))
+                        .collect::<Vec<_>>()
+                );
+                assert!(labels[index] <= index);
+            }
         }
         actual
+    }
+
+    #[test]
+    fn label_propagation_pins_the_order_sensitive_path_to_canonical_vids() {
+        let fixture = Fixture::new(4, &[(0, 3), (0, 1), (1, 2)], Directedness::Undirected);
+        let actual = compare(&fixture);
+        let ids = fixture.graph.vertex_ids();
+        for (row, representative) in actual.rows.iter().zip([0, 1, 1, 0]) {
+            assert_eq!(row[1], FnxValue::Vertex(ids[representative]));
+        }
+
+        // The same path under a different FNX node order has one community.
+        // That is a different policy, not a reference answer for this call.
+        let names = fixture.graph.nodes_ordered();
+        let mut reversed = fnx_classes::Graph::strict();
+        for &name in names.iter().rev() {
+            reversed.add_node(name);
+        }
+        for (source, target) in [(0, 3), (1, 2), (2, 3)] {
+            reversed.add_edge(names[source], names[target]).unwrap();
+        }
+        assert_ne!(reversed.nodes_ordered(), names);
+        assert_eq!(
+            fnx_algorithms::label_propagation_communities(&reversed),
+            vec![
+                names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>()
+            ]
+        );
     }
 
     #[test]
@@ -479,6 +524,7 @@ mod tests {
         units: usize,
         stop: usize,
         largest: usize,
+        uncharged_polls: usize,
     }
 
     impl FnxMeter<usize> for &mut Meter {
@@ -492,7 +538,8 @@ mod tests {
         }
 
         fn poll(&mut self) -> std::result::Result<(), usize> {
-            panic!("label propagation charges each bounded phase directly");
+            self.uncharged_polls += 1;
+            Err(self.units)
         }
 
         fn units(&mut self, n: usize) -> std::result::Result<(), usize> {
@@ -512,8 +559,10 @@ mod tests {
             units: 0,
             stop: usize::MAX,
             largest: 0,
+            uncharged_polls: 0,
         };
         let baseline = call.execute(&fixture.graph, limits(), &mut meter).unwrap();
+        assert_eq!(meter.uncharged_polls, 0);
         assert!(meter.units <= baseline.certificate.estimated_work);
         assert!(meter.largest <= FNX_METER_RUN);
         for stop in 1..=meter.units {
@@ -521,12 +570,14 @@ mod tests {
                 units: 0,
                 stop,
                 largest: 0,
+                uncharged_polls: 0,
             };
             assert!(matches!(
                 call.execute(&fixture.graph, limits(), &mut stopped),
                 Err(FnxExecutionError::Cancelled(at)) if at == stop
             ));
             assert_eq!(stopped.units, stop);
+            assert_eq!(stopped.uncharged_polls, 0);
         }
         let mut controls = 0;
         run(&fixture, usize::MAX, &mut || {
@@ -568,8 +619,10 @@ mod tests {
             units: 0,
             stop: usize::MAX,
             largest: 0,
+            uncharged_polls: 0,
         };
         let result = call.execute(&hub.graph, limits(), &mut meter).unwrap();
+        assert_eq!(meter.uncharged_polls, 0);
         assert_eq!(meter.largest, FNX_METER_RUN);
         assert!(meter.units <= result.certificate.estimated_work);
     }
