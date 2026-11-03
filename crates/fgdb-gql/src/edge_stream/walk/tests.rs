@@ -581,7 +581,6 @@ fn oracle(
                         GraphWalkSearch::Trail => edge_unique,
                         GraphWalkSearch::Acyclic => vertex_unique,
                         GraphWalkSearch::Simple => simple,
-                        _ => unreachable!(),
                     };
                 if depth >= minimum && valid {
                     let endpoint = *vertices.last().unwrap();
@@ -656,9 +655,7 @@ fn oracle(
                 *depth = row[3].clone();
             }
         }
-        rows.retain(|row| {
-            row[3] == minimum[&(row[0].clone(), row[1].clone())]
-        });
+        rows.retain(|row| row[3] == minimum[&(row[0].clone(), row[1].clone())]);
     }
     rows.sort();
     rows
@@ -1856,8 +1853,7 @@ fn shortest_diamond() -> Source {
 
 #[test]
 fn all_shortest_keeps_parallel_routes_in_complete_edge_prefix_order() {
-    let logical =
-        prepared("MATCH p = ALL SHORTEST (a {p:1})-[:R*0..4]->(b {p:4}) RETURN p");
+    let logical = prepared("MATCH p = ALL SHORTEST (a {p:1})-[:R*0..4]->(b {p:4}) RETURN p");
     let expected: Vec<Vec<GraphValue>> = [
         vec![(EId(1), IDS[1]), (EId(u128::MAX), IDS[3])],
         vec![(EId(2), IDS[2]), (EId(0), IDS[3])],
@@ -1944,8 +1940,7 @@ fn all_shortest_lower_bounds_retain_repeated_edges_and_zero_hop_isolates() {
     );
     assert!(AsyncGraphWalkPlan::compile_sort_input(&restricted).is_err());
 
-    let logical =
-        prepared("MATCH p = ALL SHORTEST (a)-[:R*0..3]->(b) RETURN a, b, p");
+    let logical = prepared("MATCH p = ALL SHORTEST (a)-[:R*0..3]->(b) RETURN a, b, p");
     let rows = drain(logical.plan().clone(), Source::new(0));
     let expected: Vec<Vec<GraphValue>> = IDS
         .iter()
@@ -1964,8 +1959,7 @@ fn all_shortest_lower_bounds_retain_repeated_edges_and_zero_hop_isolates() {
 fn all_shortest_input_completes_before_limit_distinct_and_hidden_ordering() {
     // This is the original refused bounded ALL SHORTEST definition. Its
     // LIMIT 0 remains a final window, not permission to skip source input.
-    let logical =
-        prepared("MATCH p = ALL SHORTEST (a)-[:R*0..3]->(b) RETURN p LIMIT 0");
+    let logical = prepared("MATCH p = ALL SHORTEST (a)-[:R*0..3]->(b) RETURN p LIMIT 0");
     let (plan, tail) = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap();
     assert_eq!(plan.search, GraphWalkSearch::AllShortest);
     assert_eq!(tail.count(), Some(0));
@@ -1980,8 +1974,7 @@ fn all_shortest_input_completes_before_limit_distinct_and_hidden_ordering() {
     assert_eq!(rows, 6); // four zero-hop routes and two parallel one-hop routes
     assert_eq!(counts.roots.load(Ordering::SeqCst), IDS.len() + 1);
 
-    let logical =
-        prepared("MATCH ALL SHORTEST (a)-[:R*0..2]->(b) RETURN DISTINCT b LIMIT 1");
+    let logical = prepared("MATCH ALL SHORTEST (a)-[:R*0..2]->(b) RETURN DISTINCT b LIMIT 1");
     let (plan, tail) = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap();
     assert!(tail.distinct());
     assert_eq!(tail.count(), Some(1));
@@ -2052,8 +2045,7 @@ fn all_shortest_scalar_edge_filters_precede_path_selection() {
         }
     }
     // A masked first candidate cannot erase the visible parallel route.
-    let logical =
-        prepared("MATCH p = ALL SHORTEST (a {p:1})-[:R*0..2]->(b {p:2}) RETURN p");
+    let logical = prepared("MATCH p = ALL SHORTEST (a {p:1})-[:R*0..2]->(b {p:2}) RETURN p");
     let mut source = Source::new(3);
     source.hidden = Some(EId(0));
     assert_eq!(
@@ -2195,8 +2187,7 @@ fn all_shortest_failures_release_shared_layers_and_independent_outputs() {
 
 #[test]
 fn all_shortest_shared_state_admits_the_exact_peak_and_refuses_one_byte_less() {
-    let logical =
-        prepared("MATCH p = ALL SHORTEST (a {p:1})-[:R*0..4]->(b {p:4}) RETURN p");
+    let logical = prepared("MATCH p = ALL SHORTEST (a {p:1})-[:R*0..4]->(b {p:4}) RETURN p");
     let plan = AsyncGraphWalkPlan::compile_sort_input(logical.plan())
         .unwrap()
         .0;
@@ -2286,10 +2277,7 @@ fn all_shortest_exponential_ties_are_pulled_lazily_from_bounded_shared_layers() 
         );
     }
     assert_eq!(cursor.row_stats().result_rows, 4);
-    assert_eq!(
-        counts.seeks.load(Ordering::SeqCst),
-        (PARALLEL + 1) * HOPS
-    );
+    assert_eq!(counts.seeks.load(Ordering::SeqCst), (PARALLEL + 1) * HOPS);
     assert_eq!(counts.traversal_reservations.load(Ordering::SeqCst), 0);
     assert!(counts.state_bytes.load(Ordering::SeqCst) > 0);
     assert!(counts.state_peak.load(Ordering::SeqCst) <= STATE_LIMIT);
@@ -2349,9 +2337,7 @@ fn all_shortest_releases_record_temporaries_between_tied_output_paths() {
     // Every two-hop route shares the same final record. This allowance fits
     // one complete capture and projection but not all 32 accumulated copies.
     source.scratch_limit = 64;
-    let logical = prepared(
-        "MATCH p = ALL SHORTEST (a {p:1})-[:R*0..2]->(b {p:3}) RETURN p",
-    );
+    let logical = prepared("MATCH p = ALL SHORTEST (a {p:1})-[:R*0..2]->(b {p:3}) RETURN p");
     let expected: Vec<Vec<GraphValue>> = (0..TIES)
         .map(|at| {
             vec![GraphValue::Path(GraphPath::new(
@@ -2447,8 +2433,7 @@ fn unbounded_all_shortest_matches_finite_routes_on_every_three_vertex_topology()
 fn unbounded_all_shortest_keeps_zero_pages_parallel_ties_and_lower_bound_cycles() {
     // Preserve the exact former unsupported definition as a complete-input
     // positive. Neither its omitted upper bound nor LIMIT 0 skips intake.
-    let logical =
-        prepared("MATCH p = ALL SHORTEST (a)-[:R*0..]->(b) RETURN p LIMIT 0");
+    let logical = prepared("MATCH p = ALL SHORTEST (a)-[:R*0..]->(b) RETURN p LIMIT 0");
     let (plan, tail) = AsyncGraphWalkPlan::compile_sort_input(logical.plan()).unwrap();
     assert!(!plan.bounds.is_bounded());
     assert_eq!(tail.count(), Some(0));
@@ -2468,26 +2453,21 @@ fn unbounded_all_shortest_keeps_zero_pages_parallel_ties_and_lower_bound_cycles(
     assert_eq!(counts.state_bytes.load(Ordering::SeqCst), 0);
 
     let source = shortest_diamond();
-    let bounded =
-        prepared("MATCH p = ALL SHORTEST (a {p:1})-[:R*0..4]->(b {p:4}) RETURN p");
+    let bounded = prepared("MATCH p = ALL SHORTEST (a {p:1})-[:R*0..4]->(b {p:4}) RETURN p");
     let expected = native_with_edge_properties(bounded.plan(), &source.data);
     assert_eq!(expected.len(), 3);
-    let logical =
-        prepared("MATCH p = allShortestPaths((a {p:1})-[:R*0..]->(b {p:4})) RETURN p");
+    let logical = prepared("MATCH p = allShortestPaths((a {p:1})-[:R*0..]->(b {p:4})) RETURN p");
     assert_eq!(
         native_with_edge_properties(logical.plan(), &source.data),
         expected
     );
     assert_eq!(drain(logical.plan().clone(), source), expected);
 
-    let text =
-        "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a {p:1})-[:R*3..]->(b) RETURN p";
+    let text = "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a {p:1})-[:R*3..]->(b) RETURN p";
     let logical = prepared(text);
     let mut source = Source::new(0);
-    Arc::get_mut(&mut source.data).unwrap().edges = vec![
-        (EId(0), IDS[0], IDS[0]),
-        (EId(u128::MAX), IDS[0], IDS[0]),
-    ];
+    Arc::get_mut(&mut source.data).unwrap().edges =
+        vec![(EId(0), IDS[0], IDS[0]), (EId(u128::MAX), IDS[0], IDS[0])];
     let mut expected = Vec::new();
     for first in [EId(0), EId(u128::MAX)] {
         for second in [EId(0), EId(u128::MAX)] {
@@ -2550,8 +2530,7 @@ fn unbounded_all_shortest_keeps_tied_routes_beyond_the_finite_definition_hop_lim
         );
         data.edges.push((EId(at as u128), VId(at as u128 - 1), vid));
     }
-    let logical =
-        prepared("MATCH p = allShortestPaths((a {p:1})-[:R*]->(b {p:99})) RETURN p");
+    let logical = prepared("MATCH p = allShortestPaths((a {p:1})-[:R*]->(b {p:99})) RETURN p");
     let expected: Vec<Vec<GraphValue>> = [EId(0), EId(1)]
         .into_iter()
         .map(|first| {

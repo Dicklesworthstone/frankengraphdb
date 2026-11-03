@@ -472,9 +472,7 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
         let mut shortest = self.shortest.take();
         let mut all_shortest = self.all_shortest.take();
         let result = match self.plan.search {
-            GraphWalkSearch::AnyShortest => {
-                self.advance_shortest(&mut source, &mut shortest).await
-            }
+            GraphWalkSearch::AnyShortest => self.advance_shortest(&mut source, &mut shortest).await,
             GraphWalkSearch::AllShortest => {
                 self.advance_all_shortest(&mut source, &mut all_shortest)
                     .await

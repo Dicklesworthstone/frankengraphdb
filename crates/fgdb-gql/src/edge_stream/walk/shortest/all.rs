@@ -118,8 +118,7 @@ where
         let bytes = core::mem::size_of::<T>()
             .checked_mul(capacity)
             .ok_or_else(overflow)?;
-        let guard =
-            flatten(source.reserve_shortest_state(bytes, &mut |event| meter.event(event)))?;
+        let guard = flatten(source.reserve_shortest_state(bytes, &mut |event| meter.event(event)))?;
         let mut extra_guard = None;
         let mut replacement = Vec::with_capacity(capacity);
         // Allocators may expose more backing than requested. Cover that
@@ -131,10 +130,9 @@ where
             .and_then(|extra| extra.checked_mul(core::mem::size_of::<T>()))
             .ok_or_else(overflow)?;
         if extra != 0 {
-            extra_guard = Some(flatten(source.reserve_shortest_state(
-                extra,
-                &mut |event| meter.event(event),
-            ))?);
+            extra_guard = Some(flatten(
+                source.reserve_shortest_state(extra, &mut |event| meter.event(event)),
+            )?);
         }
         for previous in retained.values.drain(..) {
             meter.event(GlaExecutionEvent::Work)?;
@@ -437,9 +435,8 @@ where
             if let std::collections::btree_map::Entry::Vacant(entry) = next.entry(target) {
                 entry.insert(admit_node(source, meter)?);
             }
-            let guard = entry_guard::<S, (EId, Hop<S::Record, S::TraversalGuard>), _, _>(
-                source, meter,
-            )?;
+            let guard =
+                entry_guard::<S, (EId, Hop<S::Record, S::TraversalGuard>), _, _>(source, meter)?;
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             node.edges.insert(
                 candidate.eid,
@@ -480,8 +477,7 @@ where
         .and_then(|bytes| bytes.checked_mul(2))
         .and_then(|bytes| bytes.checked_add(core::mem::size_of::<GraphPath>() + 128))
         .ok_or_else(overflow)?;
-    let _guard =
-        flatten(source.reserve_shortest_state(bytes, &mut |event| meter.event(event)))?;
+    let _guard = flatten(source.reserve_shortest_state(bytes, &mut |event| meter.event(event)))?;
     for _ in &frame.steps.values {
         meter.event(GlaExecutionEvent::Work)?;
         meter.event(GlaExecutionEvent::ScratchEntry)?;
@@ -504,9 +500,6 @@ where
     // Evaluation temporaries have dropped inside output_path. The row owns
     // its independent output guard, and this local path still has _guard.
     // Reused DAG records must not retain one temporary reservation per tie.
-    source.release_shortest_temporaries(
-        &frame.root,
-        record.map_or(&[][..], core::slice::from_ref),
-    );
+    source.release_shortest_temporaries(&frame.root, record.map_or(&[][..], core::slice::from_ref));
     result
 }

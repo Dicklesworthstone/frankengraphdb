@@ -453,11 +453,7 @@ fn cold_returned_paths_keep_complete_intake_errors_and_input_quota_before_zero_p
         let mut view = view(&contexts.commit(), &vfs, &source_pool).await;
         let baseline = source_pool.used();
         for run_rows in [1, 3] {
-            for (mode, total_inputs) in [
-                ("WALK", 7),
-                ("ANY SHORTEST", 3),
-                ("ALL SHORTEST", 5),
-            ] {
+            for (mode, total_inputs) in [("WALK", 7), ("ANY SHORTEST", 3), ("ALL SHORTEST", 5)] {
                 for (limit, inputs, success) in [
                     (1, total_inputs, true),
                     (1, total_inputs - 1, false),
@@ -1173,15 +1169,7 @@ fn cold_all_shortest_diamonds_preserve_parallel_routes_and_external_row_semantic
                 frames(vec![scalar(24), scalar(24), scalar(13), scalar(12)]),
             ),
         ] {
-            case(
-                &db,
-                &mut cold,
-                &cx,
-                &format!("{head} {tail}"),
-                expected,
-                4,
-            )
-            .await;
+            case(&db, &mut cold, &cx, &format!("{head} {tail}"), expected, 4).await;
         }
         case(
             &db,
@@ -1201,9 +1189,7 @@ fn cold_all_shortest_diamonds_preserve_parallel_routes_and_external_row_semantic
             &db,
             &mut cold,
             &cx,
-            &format!(
-                "MATCH p = ALL SHORTEST (a {{p:1}})-[*0..4 {{p:7}}]->(b {{p:4}}) {CAPTURE}"
-            ),
+            &format!("MATCH p = ALL SHORTEST (a {{p:1}})-[*0..4 {{p:7}}]->(b {{p:4}}) {CAPTURE}"),
             paths(&[
                 (A, &[(AB, B), (bd, ISOLATE)]),
                 (A, &[(PARALLEL, B), (bd, ISOLATE)]),
@@ -1218,10 +1204,7 @@ fn cold_all_shortest_diamonds_preserve_parallel_routes_and_external_row_semantic
                 "(a)-[:R*0..0]->(b)",
                 paths(&[(A, &[]), (B, &[]), (C, &[]), (ISOLATE, &[])]),
             ),
-            (
-                "(a {p:4})-[:R*0..4]->(b)",
-                paths(&[(ISOLATE, &[])]),
-            ),
+            ("(a {p:4})-[:R*0..4]->(b)", paths(&[(ISOLATE, &[])])),
             ("(a {p:4})-[:R*0..4]->(b {p:1})", vec![]),
         ] {
             case(
@@ -1263,14 +1246,10 @@ fn cold_all_shortest_paths_keep_filtered_ties_at_pinned_and_reopened_historical_
             CommitSeq(4)
         );
         drop(db);
-        let db = Database::open_with_vfs(
-            &contexts.commit(),
-            vfs.clone(),
-            vfs.database_dir(),
-            keys(),
-        )
-        .await
-        .unwrap();
+        let db =
+            Database::open_with_vfs(&contexts.commit(), vfs.clone(), vfs.database_dir(), keys())
+                .await
+                .unwrap();
         let latest_pool = MemoryPool::new(32_000_000, 0).unwrap();
         let mut latest = view(&contexts.commit(), &vfs, &latest_pool).await;
         assert_eq!(latest.frontier(), CommitSeq(4));
@@ -1313,15 +1292,11 @@ fn cold_all_shortest_paths_keep_filtered_ties_at_pinned_and_reopened_historical_
             );
             case(&db, &mut latest, &cx, &text, expected.clone(), cut).await;
         }
-        let text =
-            format!("MATCH p = ALL SHORTEST (a {{p:1}})-[:R*0.. {{p:7}}]->(b) {CAPTURE}");
+        let text = format!("MATCH p = ALL SHORTEST (a {{p:1}})-[:R*0.. {{p:7}}]->(b) {CAPTURE}");
         for run_rows in [1, 3] {
             spooled(&mut pinned, &cx, &text, &before, 3, run_rows).await;
         }
-        for (cut, end_value, edges) in [
-            (3, 3, vec![AB, PARALLEL]),
-            (4, 30, vec![PARALLEL]),
-        ] {
+        for (cut, end_value, edges) in [(3, 3, vec![AB, PARALLEL]), (4, 30, vec![PARALLEL])] {
             let mut rows = Vec::new();
             for edge in edges {
                 let mut row = capture(A, &[(edge, B), (BC, C)]);
@@ -1438,9 +1413,7 @@ fn cold_unbounded_all_shortest_terminates_cycles_and_preserves_eligible_lower_bo
         ]);
         for text in [
             format!("MATCH p = ALL SHORTEST (a {{p:1}})-[:R*0..]->(b) {CAPTURE}"),
-            format!(
-                "MATCH p = allShortestPaths((a {{p:1}})-[:R*0..]->(b)) {CAPTURE}"
-            ),
+            format!("MATCH p = allShortestPaths((a {{p:1}})-[:R*0..]->(b)) {CAPTURE}"),
         ] {
             case(&db, &mut cold, &cx, &text, zero_minimum.clone(), 2).await;
         }

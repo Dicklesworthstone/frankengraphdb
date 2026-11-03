@@ -776,6 +776,108 @@ fn spilled_carried_properties_match_resident_rows_and_keep_pinned_history() {
             }
         }
     }
+    // A parallel physical edge must survive both shortest spellings and the
+    // cold path source. Keep literal rows as well as the resident differential:
+    // an ANY-only fallback would lose the second identical projected row.
+    let parallel = succeeded(
+        &command(
+            "write",
+            &[],
+            "MATCH (a:Person {id:1}),(b:Person {id:2}) \
+             CREATE (a)-[:KNOWS {score:7}]->(b)",
+        ),
+        "written",
+    );
+    let tied = vec![
+        r#"{"v":1,"event":"row","cells":[{"type":"int","value":"2"},{"type":"int","value":"1"}]}"#.to_owned();
+        2
+    ];
+    let shortest = [
+        (
+            "MATCH p = ALL SHORTEST (a:Person {id:1})-[:KNOWS*0..3]->(b:Person {id:2}) RETURN b.id AS id,length(p) AS hops ORDER BY id,hops".to_owned(),
+            tied.clone(),
+            parallel,
+        ),
+        (
+            "MATCH p = ALL SHORTEST (a:Person {id:1})-[:KNOWS*0..]->(b:Person {id:2}) RETURN b.id AS id,length(p) AS hops ORDER BY id,hops".to_owned(),
+            tied.clone(),
+            parallel,
+        ),
+        (
+            "MATCH p = allShortestPaths((a:Person {id:1})-[:KNOWS*0..]->(b:Person {id:2})) RETURN b.id AS id,length(p) AS hops ORDER BY id,hops".to_owned(),
+            tied.clone(),
+            parallel,
+        ),
+        (
+            "MATCH p = ALL SHORTEST (a:Person {id:1})-[:KNOWS*0..]->(b) RETURN DISTINCT b.id AS id ORDER BY id DESC SKIP 1 LIMIT 1".to_owned(),
+            vec![r#"{"v":1,"event":"row","cells":[{"type":"int","value":"2"}]}"#.to_owned()],
+            parallel,
+        ),
+        (
+            "MATCH p = ALL SHORTEST (a:Person {id:1})-[:KNOWS*0..]->(b) WITH b.id AS id,length(p) AS hops ORDER BY hops DESC,id DESC SKIP 1 LIMIT 2 RETURN id,hops ORDER BY id,hops".to_owned(),
+            tied.clone(),
+            parallel,
+        ),
+        (
+            format!("MATCH p = ALL SHORTEST (a:Person {{id:1}})-[:KNOWS*0..]->(b:Person {{id:2}}) FOR SYSTEM_TIME AS OF SEQ {basis} RETURN b.id AS id,length(p) AS hops ORDER BY id,hops"),
+            vec![tied[0].clone()],
+            basis,
+        ),
+    ];
+    for phase in ["before shortest compaction", "after shortest compaction"] {
+        if phase == "after shortest compaction" {
+            succeeded(&fixture.robot("compact", &[]), "compacted");
+        }
+        let before = directory_bytes(&fixture.db());
+        for (text, expected, seq) in &shortest {
+            let resident = command("query", &[], text);
+            assert_eq!(succeeded(&resident, "rows"), *seq, "{phase}: {text}");
+            assert_eq!(rows(&resident), *expected, "{phase}: {text}");
+            let options = [
+                "--buffered",
+                "--buffer-memory-bytes",
+                "8388608",
+                "--spill-dir",
+                spill,
+                "--spill-memory-bytes",
+                "2097152",
+            ];
+            let actual = command("query", &options, text);
+            assert_eq!(succeeded(&actual, "rows"), *seq, "{phase}: {text}");
+            assert_eq!(rows(&actual), *expected, "{phase}: {text}");
+            assert!(terminal(&actual).contains("\"stream\":true"));
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+            assert_eq!(directory_bytes(&fixture.db()), before);
+        }
+    }
+    let empty = "MATCH p = ALL SHORTEST (a:Person {id:1})-[:KNOWS*0..]->(b:Person {id:2}) RETURN b.id AS id LIMIT 0";
+    let before = directory_bytes(&fixture.db());
+    for (cap, accepts) in [("2", true), ("1", false)] {
+        let options = [
+            "--buffered",
+            "--buffer-memory-bytes",
+            "8388608",
+            "--spill-dir",
+            spill,
+            "--max-spill-rows",
+            cap,
+        ];
+        let actual = command("query", &options, empty);
+        if accepts {
+            assert_eq!(succeeded(&actual, "rows"), parallel);
+            assert!(rows(&actual).is_empty());
+        } else {
+            refused(&actual, 3, "query");
+            for event in ["columns", "row", "result"] {
+                assert!(
+                    !String::from_utf8_lossy(&actual.stdout)
+                        .contains(&format!("\"event\":\"{event}\""))
+                );
+            }
+        }
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        assert_eq!(directory_bytes(&fixture.db()), before);
+    }
     // In either source profile, LIMIT cannot hide a bad property expression
     // in a later row. No columns, rows, result handle or scratch may escape.
     for limit in ["0", "1"] {
