@@ -2504,6 +2504,165 @@ fn strata_block_publication_crashes_fence_and_recover_the_integrated_spine() {
 }
 
 #[test]
+fn strata_existing_pack_sync_lie_cannot_mint_publication_receipts() {
+    under_lab(0x9_112, move |cx| async move {
+        use asupersync::io::AsyncWriteExt;
+        use fgdb_strata::store::{
+            BLOCK_DIR, BlockStore, PACK_DIR, PACK_MIN_OBJECTS, PublishReceipts,
+        };
+        use fgdb_strata::{AdjacencyEntry, DeltaBlockVersion, block_id, encode_block};
+
+        let source = scratch("existing-pack-source");
+        let destination = scratch("existing-pack-sync-lie");
+        std::fs::create_dir_all(&source).expect("source directory");
+        std::fs::create_dir_all(&destination).expect("destination directory");
+        let mut objects = Vec::new();
+        for index in 1..=PACK_MIN_OBJECTS {
+            let id = index as u128;
+            let bytes = encode_block(
+                0,
+                None,
+                &[AdjacencyEntry {
+                    src: VId(id),
+                    relation: KNOWS,
+                    dst: VId(id + 1),
+                    eid: EId(id),
+                    created_at: CommitSeq::FIRST,
+                    retired_at: None,
+                }],
+            )
+            .expect("canonical block");
+            objects.push((
+                DeltaBlockVersion(block_id(&K_OID, NAMESPACE, &bytes)),
+                bytes,
+            ));
+        }
+
+        // Obtain the exact pack from the real publication path, without
+        // duplicating its encoder or naming rules in this regression.
+        let source_store = BlockStore::open(&cx, &source, K_OID, NAMESPACE)
+            .await
+            .expect("source store");
+        let mut source_receipts = PublishReceipts::new();
+        let mut source_batch = source_store
+            .publication_batch(&cx, &mut source_receipts, None)
+            .expect("source batch");
+        for (id, bytes) in &objects {
+            assert_eq!(
+                source_batch
+                    .put_verified(&cx, bytes, None)
+                    .await
+                    .expect("source object"),
+                *id,
+            );
+        }
+        source_batch.finish(&cx).await.expect("source pack");
+        let packs: Vec<_> = std::fs::read_dir(source.join(BLOCK_DIR).join(PACK_DIR))
+            .expect("source packs")
+            .map(|entry| entry.expect("source pack entry").path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "pack")
+            })
+            .collect();
+        assert_eq!(packs.len(), 1, "one batch must produce one pack");
+        let packed = std::fs::read(&packs[0]).expect("source pack bytes");
+
+        let vfs = FaultVfs::unix(FaultPlan {
+            fsync_lie: Trigger::At(1),
+            dirent_loss: Trigger::Always,
+            ..FaultPlan::faultless()
+        });
+        let store = BlockStore::open_with_vfs(&cx, vfs.clone(), &destination, K_OID, NAMESPACE)
+            .await
+            .expect("destination store");
+        let pack_dir = destination.join(BLOCK_DIR).join(PACK_DIR);
+        vfs.create_dir(&pack_dir).await.expect("pack directory");
+        let canonical = pack_dir.join(packs[0].file_name().expect("pack filename"));
+
+        // An unreceipted copied pack can have authentic, complete bytes in
+        // the page cache under its canonical name without any durable bytes.
+        // The existing-pack retry must earn the same evidence as a new pack.
+        let mut copy = vfs
+            .open(
+                &canonical,
+                &OpenOptions::new().read(true).write(true).create_new(true),
+            )
+            .await
+            .expect("unreceipted canonical pack");
+        copy.write_all(&packed).await.expect("volatile pack bytes");
+        drop(copy);
+        assert!(
+            vfs.read(&canonical)
+                .await
+                .expect("durable backing")
+                .is_empty()
+        );
+
+        let mut receipts = PublishReceipts::new();
+        let mut batch = store
+            .publication_batch(&cx, &mut receipts, None)
+            .expect("retry batch");
+        for (id, bytes) in &objects {
+            assert_eq!(
+                batch.put_verified(&cx, bytes, None).await.expect("stage"),
+                *id,
+            );
+        }
+        let error = batch
+            .finish(&cx)
+            .await
+            .expect_err("same-cache equality and a lying sync cannot prove durability");
+        assert!(matches!(
+            error,
+            BlockStoreError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert!(objects.iter().all(|(id, _)| !receipts.holds(*id)));
+        assert!(
+            vfs.read(&canonical)
+                .await
+                .expect("still not durable")
+                .is_empty()
+        );
+        let events = vfs.events();
+        assert_eq!(events.len(), 1, "only the existing pack's sync must lie");
+        assert!(matches!(events[0].kind, FaultKind::FsyncLie { .. }));
+        assert_eq!(events[0].path, canonical);
+
+        // A fresh batch re-syncs the same inode honestly, then admits its
+        // objects only after durable read-back and both directory barriers.
+        let mut retry = store
+            .publication_batch(&cx, &mut receipts, None)
+            .expect("honest retry batch");
+        for (id, bytes) in &objects {
+            assert_eq!(
+                retry.put_verified(&cx, bytes, None).await.expect("restage"),
+                *id,
+            );
+        }
+        retry.finish(&cx).await.expect("honest retry");
+        assert!(objects.iter().all(|(id, _)| receipts.holds(*id)));
+        assert_eq!(vfs.read(&canonical).await.expect("durable pack"), packed);
+        drop(store);
+        vfs.crash()
+            .await
+            .expect("discard every volatile inode and name");
+        let reopened = BlockStore::open_with_vfs(&cx, vfs, &destination, K_OID, NAMESPACE)
+            .await
+            .expect("cold store");
+        for (id, bytes) in objects {
+            assert_eq!(
+                reopened
+                    .get_bytes(&cx, id)
+                    .await
+                    .expect("durable packed object"),
+                bytes,
+            );
+        }
+    });
+}
+
+#[test]
 fn strata_batch_directory_barrier_is_required_for_receipts_and_names() {
     under_lab(0x9_110, move |cx| async move {
         use fgdb_strata::store::{BlockStore, PublishReceipts};

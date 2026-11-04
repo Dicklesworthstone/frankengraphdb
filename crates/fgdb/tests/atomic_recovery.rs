@@ -240,7 +240,7 @@ mod capsule_recovery {
     use super::*;
     use fgdb::{
         CAPSULE_OBJECT_KIND, CapsuleRecoveryError, DatabaseState, DerivedPublicationStage,
-        OpenError,
+        OpenError, RebuildError,
     };
     use fgdb_chronicle::commit::restore::CapsuleRestoreError;
     use fgdb_chronicle::commit::{CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator};
@@ -472,6 +472,128 @@ mod capsule_recovery {
     }
 
     #[test]
+    fn capsule_recovery_refuses_unrepaired_history_behind_a_complete_checkpoint() {
+        let ((), report) = run_async_under_lab(0xa703_0104, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for missing in [false, true] {
+                let path = directory(if missing {
+                    "checkpoint-missing-history"
+                } else {
+                    "checkpoint-corrupt-history"
+                });
+                let db = seeded(&cx, &path).await;
+                let basis = db.frontier().unwrap();
+                let before = db.vertices().unwrap();
+                drop(db);
+                let historical = last_capsule(&cx, &path).await;
+
+                let mut db = Database::open(&cx, &path, keys()).await.unwrap();
+                let mut write = WriteBatch::new(R);
+                write.create_vertex(VId(4), vec![], vec![(P, CanonicalScalar::Int(44))]);
+                write.add_edge(EId(40), VId(3), VId(4), vec![]);
+                let committed = db.write(&cx, write).await.unwrap();
+                let vertices = db.vertices().unwrap();
+                let edges = db.edges().unwrap();
+                let versions = db.element_versions().unwrap().clone();
+                drop(db);
+                let latest = last_capsule(&cx, &path).await;
+                let old_capsule = capsule_path(&path, historical.object_id());
+                let recent_capsule = capsule_path(&path, latest.object_id());
+                let old_bytes = std::fs::read(&old_capsule).unwrap();
+                let markers = std::fs::read(path.join(COMMIT_LOG_NAME)).unwrap();
+                let root_slot = std::fs::read(path.join("manifest.root")).unwrap();
+                let damaged = b"no surviving historical capsule symbols";
+                if missing {
+                    std::fs::rename(&old_capsule, old_capsule.with_extension("lost-fixture"))
+                        .unwrap();
+                } else {
+                    std::fs::write(&old_capsule, damaged).unwrap();
+                }
+                std::fs::write(&recent_capsule, b"no surviving recent capsule symbols").unwrap();
+
+                // The current materialized graph is still valid. Ordinary
+                // checkpoint open does not read either source capsule, so it
+                // cannot discharge explicit authoritative recovery.
+                let checkpoint = Database::open(&cx, &path, keys()).await.unwrap();
+                assert_eq!(checkpoint.frontier().unwrap(), committed);
+                assert_eq!(checkpoint.vertices().unwrap(), vertices);
+                assert_eq!(checkpoint.edges().unwrap(), edges);
+                drop(checkpoint);
+
+                let error = Database::open_restoring_capsules(
+                    &cx,
+                    &path,
+                    keys(),
+                    std::slice::from_ref(&latest),
+                )
+                .await
+                .expect_err("a repaired latest capsule cannot hide another retained loss");
+                match error {
+                    CapsuleRecoveryError::Open(OpenError::Rebuild(
+                        RebuildError::MissingCapsule {
+                            commit_seq,
+                            capsule_oid,
+                        },
+                    )) if missing => {
+                        assert_eq!(commit_seq, basis.0);
+                        assert_eq!(capsule_oid, historical.object_id());
+                    }
+                    CapsuleRecoveryError::Open(OpenError::Rebuild(RebuildError::Commit(_)))
+                        if !missing => {}
+                    other => panic!("historical loss returned the wrong error: {other:?}"),
+                }
+                assert_eq!(std::fs::read(path.join(COMMIT_LOG_NAME)).unwrap(), markers);
+                assert_eq!(
+                    std::fs::read(path.join("manifest.root")).unwrap(),
+                    root_slot
+                );
+                if missing {
+                    assert!(!old_capsule.exists());
+                    assert_eq!(
+                        std::fs::read(old_capsule.with_extension("lost-fixture")).unwrap(),
+                        old_bytes,
+                    );
+                } else {
+                    assert_eq!(std::fs::read(&old_capsule).unwrap(), damaged);
+                }
+
+                // Retry with the complete donated closure. The already
+                // repaired latest object is idempotent, and the same lease
+                // now spans restoration, full replay and serving admission.
+                let mut restored = Database::open_restoring_capsules_with_vfs(
+                    &cx,
+                    asupersync::fs::UnixVfs::new(),
+                    &path,
+                    keys(),
+                    &[historical, latest],
+                )
+                .await
+                .unwrap();
+                assert_eq!(restored.frontier().unwrap(), committed);
+                assert_eq!(restored.vertices_at(basis).unwrap(), before);
+                assert_eq!(restored.vertices().unwrap(), vertices);
+                assert_eq!(restored.edges().unwrap(), edges);
+                assert_eq!(restored.element_versions().unwrap(), &versions);
+                assert_eq!(restored.delta_since(CommitSeq::ORIGIN).unwrap().count(), 2);
+                assert_eq!(std::fs::read(path.join(COMMIT_LOG_NAME)).unwrap(), markers);
+                let mut next = WriteBatch::new(R);
+                next.create_vertex(VId(5), vec![], vec![]);
+                let next_seq = restored.write(&cx, next).await.unwrap();
+                assert_eq!(next_seq, CommitSeq(committed.0 + 1));
+                let after = restored.vertices().unwrap();
+                drop(restored);
+                let reopened = Database::open(&cx, &path, keys()).await.unwrap();
+                assert_eq!(reopened.frontier().unwrap(), next_seq);
+                assert_eq!(reopened.vertices().unwrap(), after);
+                assert_eq!(reopened.vertices_at(basis).unwrap(), before);
+                assert_eq!(reopened.edges().unwrap(), edges);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
     fn capsule_recovery_preflights_the_whole_batch_and_excludes_other_writers() {
         let ((), report) = run_async_under_lab(0xa703_0102, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -551,10 +673,11 @@ mod capsule_recovery {
             .unwrap();
             assert_eq!(repaired.frontier().unwrap(), CommitSeq::FIRST);
             assert_eq!(repaired.vertices().unwrap().len(), 3);
-            // This root already covers the marker, so ordinary checkpoint
-            // replay reads zero capsules. Restoration's verification evidence
-            // still belongs to the returned database handle.
-            assert!(!repaired.crypto_verification_events().is_empty());
+            // Retain restoration's verification evidence in addition to the
+            // authoritative replay's events, which the no-donation retry
+            // below independently reproduces.
+            let verification = repaired.crypto_verification_events().to_vec();
+            assert!(!verification.is_empty());
             assert_ne!(std::fs::read(&capsule).unwrap(), damaged);
             assert_eq!(std::fs::read(path.join(COMMIT_LOG_NAME)).unwrap(), markers);
             drop(repaired);
@@ -562,6 +685,9 @@ mod capsule_recovery {
                 .await
                 .unwrap();
             assert_eq!(reopened.vertices().unwrap().len(), 3);
+            let replay_verification = reopened.crypto_verification_events();
+            assert!(verification.len() > replay_verification.len());
+            assert!(verification.ends_with(replay_verification));
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

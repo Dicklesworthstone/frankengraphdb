@@ -1124,7 +1124,7 @@ fn authorized_graph_calls_reuse_lanes_but_retain_graph_admission_and_masking() {
             1,
         )
         .unwrap();
-        let grant = Grant::read_only(
+        let mut grant = Grant::read_only(
             "main",
             1000,
             QueryLimits {
@@ -1133,6 +1133,9 @@ fn authorized_graph_calls_reuse_lanes_but_retain_graph_admission_and_masking() {
                 max_rows: 10,
             },
         );
+        grant.labels = Scope::All;
+        grant.relations = Scope::All;
+        grant.properties = Scope::All;
         let parameters = params(&[3]);
         let call = |modalities: &str| {
             format!(

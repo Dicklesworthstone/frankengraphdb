@@ -4264,6 +4264,11 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                     });
                 }
                 cx.with_restriction_async(existing.sync_all()).await?;
+                // A prior pathname and same-cache equality are not receipts.
+                // Re-establish the same durable-byte proof as a new pack.
+                store
+                    .verify_durable_bytes(cx, &path, &bytes, pack::MAX_PACK_BYTES)
+                    .await?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let staging_path = dir.join(pack::PACK_STAGING_FILE);
