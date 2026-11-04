@@ -463,22 +463,26 @@ fn carries_own(head: &GraphProjectionHead<'_>, offset: usize, name: &str) -> boo
     })
 }
 
-/// The outputs that carry a MATCH element whole under another name
-/// (`WITH n AS x`). The head's graph scope has no binding by that name, so a
-/// pattern over the alias gathered there would bind it afresh, uncorrelated
-/// with the row's element.
-fn renamed_elements<'a>(head: &GraphProjectionHead<'a>, offset: usize) -> Vec<&'a str> {
+/// Outputs whose pattern bindings belong to the projected row: renamed
+/// MATCH elements and known maps. Hoisting a pattern over either alias can
+/// bind a fresh vertex instead of preserving the row's identity or map type.
+fn row_owned_aliases<'a>(
+    head: &GraphProjectionHead<'a>,
+    offset: usize,
+    known_maps: &[usize],
+) -> Vec<&'a str> {
     (head.outputs.iter())
         .filter(|(output, value)| {
-            matches!(value, ReadValueTemplate::Column(column)
-            if column.checked_sub(offset)
-                .and_then(|input| head.inputs.get(input))
-                .is_some_and(|input| {
-                    input.variable.text != output.text
-                        && input.property.is_none()
-                        && matches!(input.path, None | Some(GraphPathFunction::Edge))
-                        && input.collect.is_none()
-                }))
+            known_maps.contains(&output.at)
+                || matches!(value, ReadValueTemplate::Column(column)
+                if column.checked_sub(offset)
+                    .and_then(|input| head.inputs.get(input))
+                    .is_some_and(|input| {
+                        input.variable.text != output.text
+                            && input.property.is_none()
+                            && matches!(input.path, None | Some(GraphPathFunction::Edge))
+                            && input.collect.is_none()
+                    }))
         })
         .map(|(output, _)| output.text)
         .collect()
@@ -804,12 +808,11 @@ impl<'a> Parser<'a> {
         let mut shadowed: Vec<&'a str> = (uncarried.iter().copied())
             .filter(|name| head.outputs.iter().any(|(output, _)| output.text == *name))
             .collect();
-        // An element carried under another name (`WITH n AS x`) is no binding
-        // of this graph scope: a pattern over `x` stays with its row's
-        // identity-correlated owner, as a shadowing alias does.
-        let renamed = renamed_elements(head, offset);
-        uncarried.extend(&renamed);
-        shadowed.extend(&renamed);
+        // Renamed elements and known maps stay with the correlated row owner.
+        // A map alias must never become a fresh vertex in a hoisted pattern.
+        let row_owned = row_owned_aliases(head, offset, &self.map_aliases);
+        uncarried.extend(&row_owned);
+        shadowed.extend(&row_owned);
         let mut lexer = self.lexer.clone();
         // The three tokens before the current one, oldest first.
         let mut window: [Option<TokenKind<'a>>; 3] = [None; 3];
@@ -1482,19 +1485,19 @@ impl<'a> Parser<'a> {
                 .any(|variable| variable.text == name.text)
                 || self.syntax.visible_edge(name.text).is_some()
         };
-        // A renamed element's new alias (`WITH n AS x`) is no binding of this
-        // graph scope either: the predicate would bind it afresh.
-        let renamed = renamed_elements(head, offset);
+        // Renamed elements and projected maps have no independent vertex
+        // binding in this graph scope; their row owner checks the real value.
+        let row_owned = row_owned_aliases(head, offset, &self.map_aliases);
         let body = &self.syntax.scopes[scope];
         if let Some(name) = body.find_name(&|name| {
-            outer(name) && !carries_own(head, offset, name.text) && !renamed.contains(&name.text)
+            outer(name) && !carries_own(head, offset, name.text) && !row_owned.contains(&name.text)
         }) {
             return Err(expected(
                 name.at.max(at),
                 "an existence predicate over bindings its WITH carries under their own names",
             ));
         }
-        if let Some(name) = body.find_name(&|name| renamed.contains(&name.text)) {
+        if let Some(name) = body.find_name(&|name| row_owned.contains(&name.text)) {
             return if self.read_elements {
                 Ok(false)
             } else {

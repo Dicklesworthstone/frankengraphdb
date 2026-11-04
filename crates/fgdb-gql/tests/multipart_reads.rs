@@ -205,6 +205,9 @@ fn known_maps_cannot_anchor_row_pattern_comprehensions() {
         "WITH {x:1} AS n WITH * UNWIND [0,0] AS occurrence \
          RETURN [(n)-[:R]->() | 1] AS values",
         "MATCH (a) WITH a{p:1} AS n RETURN [(n)-[:R]->() | 1] AS values",
+        "MATCH (a) WITH {x:1} AS n RETURN [(n)-[:R]->() | 1] AS values",
+        "MATCH (n) WITH n{p:1} AS n RETURN [(n)-[:R]->() | 1] AS values",
+        "MATCH (a) WITH a{p:1} AS n WITH * RETURN [(n)-[:R]->() | 1] AS values",
     ] {
         let mut resolutions = 0;
         let error = PreparedGraphSetText::prepare(statement, |kind, name| {
@@ -231,6 +234,10 @@ fn known_maps_cannot_anchor_row_scope_existence_or_counts() {
         "WITH {x:1} AS n WITH n WHERE EXISTS { (n)-[:R]->() } RETURN n",
         "WITH {x:1} AS n RETURN COUNT { (n)-[:R]->() } AS degree",
         "MATCH (a) WITH a{p:1} AS n RETURN COUNT { MATCH (n)-[:R]->() } AS degree",
+        "MATCH (a) WITH a{p:1} AS n RETURN EXISTS { MATCH (n)-[:R]->() } AS present",
+        "MATCH (a) WITH a{p:1} AS n WHERE EXISTS { MATCH (n)-[:R]->() } RETURN n",
+        "MATCH (n) WITH n{p:1} AS n RETURN COUNT { MATCH (n)-[:R]->() } AS degree",
+        "MATCH (a) WITH {p:1} AS n RETURN EXISTS { MATCH (n)-[:R]->() } AS present",
         "WITH {x:1} AS n \
          RETURN EXISTS { MATCH (n)-[:R]->() RETURN n } AS present",
     ] {
