@@ -92,6 +92,42 @@ fn rows(execution: &GqlQueryExecution<GraphValueRow>) -> Vec<Vec<GraphValue>> {
 }
 
 #[test]
+fn write_aggregates_evaluate_all_predicates_without_consuming_the_function_name() {
+    let predicate = "ALL(value IN [n.p] WHERE value > 1)";
+    for tail in [
+        format!(
+            "RETURN count({predicate}) AS known, collect({predicate}) AS flags, \
+             sum(ALL n.p) AS total"
+        ),
+        format!(
+            "RETURN count({predicate}) + 0 AS known, collect({predicate}) + [] AS flags, \
+             sum(ALL n.p) + 0 AS total"
+        ),
+        format!(
+            "WITH count({predicate}) AS known, collect({predicate}) AS flags, \
+             sum(ALL n.p) AS total RETURN known,flags,total"
+        ),
+    ] {
+        let text = format!("UNWIND [1,2,3] AS x CREATE (n:Item {{p:x}}) {tail}");
+        let batch = create(&prepare(&text), policy(100), || Ok(())).unwrap();
+        assert_eq!(batch.insertion().stats().created_vertices, 3, "{text}");
+        assert_eq!(
+            rows(batch.returning()),
+            vec![vec![
+                int(3),
+                list(
+                    [false, true, true]
+                        .map(|value| GraphValue::Scalar(CanonicalScalar::Bool(value)))
+                        .to_vec()
+                ),
+                int(6),
+            ]],
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn computed_write_return_pages_never_limit_the_statements_effects() {
     let query = prepare(
         "UNWIND [1,2,3] AS x CREATE (n:Item {p:x}) \

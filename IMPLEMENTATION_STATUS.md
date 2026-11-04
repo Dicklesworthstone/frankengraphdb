@@ -58,6 +58,10 @@ Seven statement parsers still probe the input; UNION schema and quantifier error
 
 Typed statement parameters have landed in `crates/fgdb-gql/src/parameters.rs` as structural parser operands, and the engine execution spine consumes them (see the 2026-09-08 → 2026-09-22 reality check below).
 
+### List predicates inside aggregates
+
+`COUNT(ALL(x IN values WHERE predicate))` and `COLLECT(ALL(...))` retain the list predicate through native read pipelines, aggregating `WITH`, and simple or computed write `RETURN` expressions (`fgdb-xv0sy`). All aggregate argument owners use the shared lexical lookahead that distinguishes the list predicate from an explicit set quantifier such as `COUNT(ALL n.p)`. Both forms compose, including `COUNT(ALL ALL(...))`; comments and keyword case follow the ordinary lexer. NULL predicates remain absent from COUNT/COLLECT, false remains a value, and an empty list retains ALL's vacuous truth. Regression sources are `fgdb-gql/tests/multipart_aggregates.rs` and `fgdb-gql/tests/write_return_aggregates.rs`.
+
 ### Computed ordering of write results
 
 Added 2026-11-02 for `fgdb-mf7og`. Terminal `RETURN` after `CREATE`/`INSERT`, matched mutations, vertex `MERGE` and relationship `MERGE` compiles computed `ORDER BY` expressions through the existing native scalar compiler. Returned aliases, repeated source spellings and returned element identities are available; unreturned bindings refuse. Plain column ordering keeps its original fast path. Computed ordering uses the write owner's existing governed relational tail after final-state projection and `DISTINCT`, then removes its private keys before delivery. Grouped outputs follow the same path. Final paging governs result rows without limiting effects; expression, budget and cancellation failures restore the unpublished statement, including under `LIMIT 0`. Write `WITH` heads retain column-based ordering because their later hidden-property columns have a separate scope.
