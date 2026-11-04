@@ -7101,8 +7101,16 @@ fn consolidated_writer(
 
     cx.checkpoint().map_err(RebuildError::Interrupted)?;
     let (compacted_patches, _) =
-        fgdb_strata::compact::compact_vertex_patches(patches, CommitSeq::ORIGIN)
-            .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
+        fgdb_strata::compact::compact_vertex_patches(patches, CommitSeq::ORIGIN).map_err(
+            |error| match error {
+                fgdb_strata::compact::VertexCompactionError::History(error) => {
+                    RebuildError::Store(StoreError::MalformedRoot(error))
+                }
+                fgdb_strata::compact::VertexCompactionError::Patch(error) => {
+                    RebuildError::Store(StoreError::MalformedPatch(error))
+                }
+            },
+        )?;
     let mut sealed_patches = Vec::with_capacity(compacted_patches.len());
     for rows in &compacted_patches {
         cx.checkpoint().map_err(RebuildError::Interrupted)?;

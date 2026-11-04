@@ -356,21 +356,60 @@ fn compact_with_limit(
     })
 }
 
+/// Vertex consolidation refused the source history or its replacement encoding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VertexCompactionError {
+    History(RootError),
+    Patch(crate::vertex::VertexPatchError),
+}
+
+impl core::fmt::Display for VertexCompactionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::History(error) => error.fmt(f),
+            Self::Patch(error) => error.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for VertexCompactionError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::History(error) => Some(error),
+            Self::Patch(error) => Some(error),
+        }
+    }
+}
+
+impl From<RootError> for VertexCompactionError {
+    fn from(error: RootError) -> Self {
+        Self::History(error)
+    }
+}
+
+impl From<crate::vertex::VertexPatchError> for VertexCompactionError {
+    fn from(error: crate::vertex::VertexPatchError) -> Self {
+        Self::Patch(error)
+    }
+}
+
 /// Consolidate a vertex patch publication history: fewer patches, the same
 /// answer at every sequence (fgdb-ge6a, the vertex half of [`compact`]).
 ///
 /// Later patches restate a statement `(vid, created_at)` to add its
-/// retirement, and the later statement wins — exactly the block model, per
-/// statement. The floor licenses dropping nothing here until the transaction
-/// layer owns snapshot tracking, so this collapses RESTATEMENTS only; the
-/// result repacks in canonical `(vid, created_at)` order under both the
-/// format's row ceiling and store byte admission, which
-/// [`crate::vertex::validate_succession`]'s chain laws
-/// admit because collapse preserves every surviving statement byte-for-byte.
+/// retirement, and the later statement wins only after the same immutable-birth,
+/// retirement and contiguous-successor laws as root admission have accepted it.
+/// Every source statement is validated before applying the floor: an invisible
+/// or superseded contradiction cannot be rewritten into a valid history.
+/// The immutable `VertexPatchRows` owner already proves each patch's row shape,
+/// lifetimes, labels, property-key order and within-patch succession.
+/// The result repacks in canonical `(vid, created_at)` order under both the
+/// format's row ceiling and store byte admission. The caller owns the floor's
+/// provenance, exactly as for edge compaction.
 pub fn compact_vertex_patches(
     patches: &[crate::vertex::VertexPatchRows],
     floor: CommitSeq,
-) -> Result<(Vec<crate::vertex::VertexPatchRows>, usize), crate::vertex::VertexPatchError> {
+) -> Result<(Vec<crate::vertex::VertexPatchRows>, usize), VertexCompactionError> {
     // Borrow publication rows until restatements and the visibility floor
     // have selected the retained winners. Cloning large property payloads only
     // to replace or discard them needlessly amplifies maintenance work.
@@ -379,8 +418,29 @@ pub fn compact_vertex_patches(
     let mut seen = 0usize;
     for rows in patches {
         for row in rows {
+            let key = (row.vid, row.created_at);
+            if let Some(existing) = statements.get(&key) {
+                crate::root::validate_vertex_restatement(existing, row)?;
+            } else {
+                let predecessor = statements
+                    .range(..key)
+                    .next_back()
+                    .filter(|((vid, _), _)| *vid == row.vid)
+                    .map(|(_, previous)| *previous);
+                if let Some(predecessor) = predecessor {
+                    crate::root::validate_vertex_successor(predecessor, row)?;
+                }
+                let successor = statements
+                    .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+                    .next()
+                    .filter(|((vid, _), _)| *vid == row.vid)
+                    .map(|(_, next)| *next);
+                if let Some(successor) = successor {
+                    crate::root::validate_vertex_successor(row, successor)?;
+                }
+            }
             seen += 1;
-            statements.insert((row.vid, row.created_at), row);
+            statements.insert(key, row);
         }
     }
     let retained: Vec<crate::vertex::VertexRow> = statements
