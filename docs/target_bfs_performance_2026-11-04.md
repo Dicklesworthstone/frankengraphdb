@@ -1,5 +1,45 @@
 # Target BFS performance work — 2026-11-04
 
+## Integrated qualification follow-up — 2026-11-04
+
+The integrated source cut `c65ed09a5e955a34a5f85fd99099273b12b96393`
+(tree `010aa47e398bd3df11dae4b63abb201bad6743d6`) now passes all 50 mandatory
+repository gates with native producer and repository verifier exits of zero.
+The all-feature workspace and both full default-feature runs each report
+13,976 passed, zero failed, 38 ignored and zero filtered across 1,095 summaries.
+All 155 selected acceptance functions, including the eight incoming target BFS
+functions, execute successfully. The default runs have byte-identical normalized
+results, test inventories and binary inventories; no prior test occurrence was
+removed. The single actual Miri invocation passes nine tests. The scanner ratchet
+conserves 277 existing critical identities; it is not a clean security scan.
+Two new manual target-CALL benchmarks remain among the 38 ignored tests.
+
+This executes the final selector-floor, full native CALL/cursor/integration,
+compressed source-error and cancellation tests that were unrun in the original
+report below. Integration repairs preserve their expected results and refusal
+boundaries. Recovery build composition adds one cold-open ownership allocation
+and one pointer word per bounded ordered-read slot; no extra per-read allocation
+or recursion-limit relaxation was introduced. These costs are not measured RSS.
+
+Fresh ordinary CLI/server artifacts on that cut also pass the unchanged
+58-command public campaign, preserving 72 database files and empty spill storage;
+all three servers drain with native exit zero. This is functional surface evidence.
+The separate ordinary release/live-GAPBS BFS smoke was executed on source
+`7a02946ad0eb5dce80bceacae2f3103160f02d6e`: two trials on eight vertices,
+12 complete checked vectors, 51 checked target answers and one rejecting corrupt
+upstream-result control. Every empirical gate remains false. All timings and
+losses remain retained with their preparation, reopen and result-encoding scopes.
+Neither this smoke nor the native tests establish representative performance,
+p99, larger-than-memory behavior or a competitive win. `fgdb-xohc8` and
+`fgdb-62mzm` remain in progress.
+
+Retained local evidence: `/data/ssd/tmp/fgdb-local-proof-integrated-peer-source-20261104-v32/manifest.txt`
+(SHA-256 `ca72afb76e3824dfcaad66db3f88867a54bd901b3db7be8260efbf1fae34cfc5`),
+`/data/ssd/build/fgdb-integrated-acceptance-20261104-v32/qualification-c32-readback-ack.json`,
+and `/data/ssd/build/fgdb-integrated-acceptance-20261104-v30/gapbs-smoke-readback.json`.
+The original report, source hashes and pre-floor measurements below are retained
+as historical evidence. This follow-up does not retroactively qualify those timings.
+
 ## Qualification status
 
 **Native Cargo, complete public-CALL execution, database/GQL composition, live GAPBS comparison, and exact-tree qualification remain UNRUN. This record is not a passing gate or a competitive benchmark claim.** Existing work under `fgdb-xohc8` and `fgdb-62mzm` remains open.
