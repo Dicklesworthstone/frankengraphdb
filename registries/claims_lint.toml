@@ -94,6 +94,7 @@ scan = [
   "docs/STUDIO.md",
   "docs/VECTOR_COORDINATE_PROJECTION.md",
   "docs/cli_graph_only_search.md",
+  "docs/target_bfs_performance_2026-11-04.md",
   # Landed 2026-10-20 in 7db8ffaa without registration; zero FG-<NS>-<NN>
   # markers when admitted, so scanning it changes no verdict
   # (fgdb-rc1017-bridge-wvze5.20).

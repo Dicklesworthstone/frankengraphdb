@@ -504,6 +504,10 @@ coverage_of() {
     docs/VECTOR_COORDINATE_PROJECTION.md|\
     docs/cli_graph_only_search.md|\
     crates/fgdb-cli/QUERY_FED_WRITES.md) echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;
+    # Mutation-proven 2026-11-04: registration fixes unclaimed_prose; an
+    # appended FG-ZZZ-99 in a data-only fixture fails at this exact path.
+    # This inspects marker membership, not the recorded benchmark results.
+    docs/target_bfs_performance_2026-11-04.md) echo "registry-check lint (prose-closure membership + claim markers resolve; NOT performance content)" ;;
     # Mutation-proven 2026-09-13: registered prose passes; appending an
     # unregistered claim marker in an isolated copy fails at this exact path.
     scratchpad/agent-bootstrap-downloads.md) echo "registry-check lint (prose-closure membership + claim markers resolve; NOT download availability)" ;;
