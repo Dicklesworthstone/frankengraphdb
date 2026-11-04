@@ -263,6 +263,7 @@ fn distances(n: usize, pairs: &[(usize, usize)], direction: Directedness) -> Vec
 
 #[test]
 fn every_small_target_and_cutoff_matches_independent_min_plus_closure() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     for direction in [
         Directedness::Directed,
         Directedness::Reversed,
@@ -322,6 +323,7 @@ fn every_small_target_and_cutoff_matches_independent_min_plus_closure() {
 
 #[test]
 fn bitmap_word_boundaries_charge_exact_capacity_and_never_open_a_target_row() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     for n in [2, 63, 64, 65, 127, 128, 129] {
         let pairs: Vec<_> = (0..n - 1).map(|source| (source, source + 1)).collect();
         let view = graph(n, &pairs, Directedness::Directed);
@@ -378,6 +380,7 @@ fn one_hop_state_does_not_allocate_population_sized_buffers() {
 
 #[test]
 fn one_hop_decoded_kernel_work_depends_only_on_the_source_row() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     let mut expected_checks = None;
     for n in [3, 65, 8193] {
         let view = graph(n, &[(0, 0), (0, 1), (0, 2)], Directedness::Directed);
@@ -404,6 +407,7 @@ fn one_hop_decoded_kernel_work_depends_only_on_the_source_row() {
 
 #[test]
 fn one_hop_public_calls_match_the_fifo_predecessor_and_leave_other_cutoffs_unchanged() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     for direction in [
         Directedness::Directed,
         Directedness::Reversed,
@@ -456,6 +460,7 @@ fn one_hop_public_calls_match_the_fifo_predecessor_and_leave_other_cutoffs_uncha
 #[test]
 #[ignore = "manual paired public-CALL measurement; run with --release --nocapture"]
 fn one_hop_public_call_paired_measurement() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     use std::hint::black_box;
     use std::time::Instant;
 
@@ -566,6 +571,7 @@ fn one_hop_public_call_paired_measurement() {
 
 #[test]
 fn target_only_result_admission_endpoint_errors_and_trivial_workspace_are_exact() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     let view = graph(
         5,
         &[(0, 1), (1, 2), (2, 3), (0, 0), (0, 1)],
@@ -613,6 +619,7 @@ fn target_only_result_admission_endpoint_errors_and_trivial_workspace_are_exact(
 
 #[test]
 fn an_early_target_avoids_the_rest_of_the_reachable_component() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     let n = 257;
     let pairs: Vec<_> = (0..n - 1).map(|source| (source, source + 1)).collect();
     let view = graph(n, &pairs, Directedness::Directed);
@@ -633,6 +640,7 @@ fn an_early_target_avoids_the_rest_of_the_reachable_component() {
 
 #[test]
 fn every_decoded_checkpoint_refuses_without_a_partial_result() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     let view = graph(
         7,
         &[(0, 1), (0, 2), (1, 3), (2, 4), (3, 5), (4, 6)],
@@ -757,6 +765,7 @@ fn decoded_runs_keep_scalar_results_and_every_refusal_ordinal() {
 
 #[test]
 fn decoded_metering_keeps_complete_call_certificates_and_scalar_callbacks() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     let n = 2 * FNX_METER_RUN + 5;
     let pairs: Vec<_> = (0..n - 1)
         .flat_map(|target| [(0, target), (target, (target + 1) % (n - 1))])
@@ -823,6 +832,7 @@ fn decoded_metering_keeps_complete_call_certificates_and_scalar_callbacks() {
 #[test]
 #[ignore = "manual paired target-metering public-CALL measurement; release, one test thread"]
 fn decoded_metering_public_call_paired_measurement() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     use std::hint::black_box;
     use std::time::Instant;
 

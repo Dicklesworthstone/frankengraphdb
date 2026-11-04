@@ -39,8 +39,22 @@ fn target_hops_preserve_history_masks_directions_and_all_source_bfs_answers() {
                         assert_eq!(expected.rows, filtered);
                         assert_eq!(expected.rows, native.rows);
                         assert_eq!(expected.certificate.result_digest, native.certificate.result_digest);
-                        assert_eq!(expected.certificate.witness.nodes_touched, native.certificate.witness.nodes_touched);
-                        assert_eq!(expected.certificate.witness.edges_scanned, native.certificate.witness.edges_scanned);
+                        // Compressed providers retain the stronger FIFO source-error
+                        // order. Keep its exact counter comparison by exercising
+                        // the decoded fallback as well as the default routed call.
+                        let fifo = if native.certificate.target_bfs_decision_card.is_some() {
+                            let fallback_limits = FnxExecutionLimits {
+                                max_estimated_work: native.certificate.estimated_work - 1,
+                                ..limits
+                            };
+                            let fallback = call.execute(&decoded, fallback_limits, || cx.checkpoint()).unwrap();
+                            assert!(fallback.certificate.target_bfs_decision_card.is_none());
+                            assert_eq!(fallback.rows, native.rows);
+                            assert_eq!(fallback.certificate.result_digest, native.certificate.result_digest);
+                            fallback
+                        } else { native };
+                        assert_eq!(expected.certificate.witness.nodes_touched, fifo.certificate.witness.nodes_touched);
+                        assert_eq!(expected.certificate.witness.edges_scanned, fifo.certificate.witness.edges_scanned);
                         for q in [1, 7, 257] {
                             let probe = Arc::new(SimulationCheckpointProbe::new(None));
                             let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));

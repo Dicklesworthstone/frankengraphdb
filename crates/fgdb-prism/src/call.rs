@@ -515,8 +515,8 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_kind: FnxGraphKind::Any,
         numeric_profile: FNX_DISCRETE_PROFILE,
         rng_policy: "none",
-        graph_laws: "explicit projection; known source and target; finite projected weights ignored; exact integer hop distance; inclusive hop cutoff; only the target row, or no row when unreachable/beyond cutoff; stop when the target leaves the FIFO between completely drained rows; isolates retained",
-        complexity: "O(|V| + |E|) worst-case traversal, stopping at the target; O(|V|) FIFO plus visited bits, with no distance vector; O(1) retained result",
+        graph_laws: "explicit projection; known source and target; finite projected weights ignored; exact integer hop distance; inclusive hop cutoff; only the target row, or no row when unreachable/beyond cutoff; decoded degree policy may select complete-layer bidirectional search with a drained discovering row; otherwise target FIFO stops between completely drained rows; compressed providers preserve FIFO source-error order; isolates retained",
+        complexity: "O(|V| + |E|) worst-case traversal; visited bits plus FIFO or live bidirectional frontiers, with no distance vector; bounded direction evidence; O(1) retained result",
         execution_kernel: "fgdb-prism/target-bfs-bitmap-fifo-v1",
     },
     foundation(
