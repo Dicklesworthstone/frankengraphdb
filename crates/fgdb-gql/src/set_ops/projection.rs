@@ -1848,7 +1848,7 @@ mod property_copy_tests {
 /// One evaluated UNWIND input, shared by resident, folded and external rows.
 /// Evaluation owns the list once; each step moves one element and copies only
 /// its original prefix. Consuming a step makes a control refusal terminal.
-pub(super) struct UnwindRows {
+pub(crate) struct UnwindRows {
     prefix: GraphValueRow,
     members: UnwindMembers,
 }
@@ -1874,7 +1874,7 @@ impl UnwindRows {
     /// `read` is the host's element reader, as for a projection: an UNWIND
     /// list such as `[x IN items | x.p]` reads the properties of carried
     /// vertices and edges at the source's cut.
-    pub(super) fn new<E>(
+    pub(crate) fn new<E>(
         row: GraphValueRow,
         value: &GraphSetValue,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -1996,7 +1996,7 @@ impl UnwindRows {
     /// State allocations remain owned by the caller through the last emitted
     /// row's use. This control charges only the next output's new allocations;
     /// the moved element keeps the reservation made during list evaluation.
-    pub(super) fn next_with_control<E>(
+    pub(crate) fn next_with_control<E>(
         mut self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Option<(GraphValueRow, Self)>, E> {

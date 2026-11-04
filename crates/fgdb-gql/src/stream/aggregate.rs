@@ -20,7 +20,7 @@ pub use spill::{VertexSpillAggregateCursor, VertexSpillAggregatePlan};
 
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow, ValueProjection};
-use crate::edge_stream::aggregate::pipeline::InputPipeline;
+use crate::edge_stream::aggregate::pipeline::{InputPipeline, InputRows};
 use crate::{
     GraphAggregateError, GraphAggregateFunction, GraphAggregateRow, GraphAggregateValue,
     GraphExactAverage, PreparedGraphAggregate,
@@ -61,10 +61,11 @@ impl core::error::Error for VertexAggregateBuildError {
 /// Computed collection inputs must also satisfy the ordinary row-stream order
 /// proof: their batch child sorts rows before evaluating expressions. A child
 /// with a different order refuses rather than silently reordering a list.
-/// Single-source WITH chains of ALL scalar projections, scopes and filters run
-/// on one admitted source record at a time, before grouping. The same checked
-/// pipeline as edge aggregation refuses intermediate DISTINCT, order, pages,
-/// fanout, additional graph readers, ordinal-dependent expressions and COLLECT.
+/// Single-source WITH chains of ALL scan-local projections, scopes, filters and
+/// UNWIND run on one admitted source record at a time, before grouping. Nested
+/// expansions retain their evaluated lists or range spines, not the output bag.
+/// The same checked pipeline as edge aggregation refuses intermediate DISTINCT,
+/// order, pages, additional graph readers, ordinal-dependent expressions and COLLECT.
 /// Group keys and arguments address its final schema, not the source columns.
 /// Argument DISTINCT and output DISTINCT remain
 /// separate stages on opposite sides of aggregation. Collections are metered
@@ -83,7 +84,7 @@ impl VertexAggregatePlan {
         }) {
             return Err(VertexAggregateBuildError::RequiresPlainGlobalAggregate);
         }
-        let (aggregate, pipeline) = InputPipeline::prepare(aggregate)
+        let (aggregate, pipeline) = InputPipeline::prepare_expanding(aggregate)
             .ok_or(VertexAggregateBuildError::RequiresPlainGlobalAggregate)?;
         let collects = aggregate
             .aggregates()
@@ -170,6 +171,7 @@ struct Accumulation {
     groups: Groups,
     last: Option<VId>,
     largest_computed_key: usize,
+    expanding: Option<InputRows>,
 }
 
 /// The first demand consumes the source; subsequent demands move completed
@@ -283,12 +285,14 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 groups,
                 last: None,
                 largest_computed_key: 0,
+                expanding: None,
             });
         }
         let Accumulation {
             groups,
             last,
             largest_computed_key,
+            expanding,
         } = self
             .accumulating
             .as_mut()
@@ -302,6 +306,27 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             .expect("uninitialized cursor owns a source");
         if !self.plan.input.empty {
             loop {
+                if let Some(rows) = expanding {
+                    match rows.advance_bounded(
+                        self.plan
+                            .pipeline
+                            .as_ref()
+                            .expect("expansion has a checked pipeline"),
+                        remaining,
+                        &mut |event| meter.event(input_event(event)).map_err(lift),
+                    )? {
+                        core::task::Poll::Ready(Some(row)) => accumulate_row(
+                            &self.plan.aggregate,
+                            ProjectedInput::Computed(&row),
+                            groups,
+                            largest_computed_key,
+                            meter,
+                        )?,
+                        core::task::Poll::Ready(None) => *expanding = None,
+                        core::task::Poll::Pending => return Ok(None),
+                    }
+                    continue;
+                }
                 if *remaining == 0 {
                     return Ok(None);
                 }
@@ -362,6 +387,10 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                         &mut |event| meter.event(event).map_err(lift),
                     )?;
                     let projected = if let Some(pipeline) = &self.plan.pipeline {
+                        if pipeline.expands() {
+                            *expanding = Some(pipeline.start(input));
+                            continue;
+                        }
                         let Some(projected) = pipeline.evaluate(input, &mut |event| {
                             meter.event(input_event(event)).map_err(lift)
                         })?
@@ -383,115 +412,17 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 } else {
                     None
                 };
-                let state = if global {
-                    groups
-                        .get_mut(&Vec::<GraphValue>::new())
-                        .expect("global group was installed")
-                } else {
-                    meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
-                    let mut key = Vec::new();
-                    for &column in self.plan.aggregate.group_key_columns() {
-                        meter.event(VertexScanEvent::Work).map_err(lift)?;
-                        let mut stored = None;
-                        let value = match projected_argument(
-                            column,
-                            computed.as_ref(),
-                            columns,
-                            vid,
-                            row,
-                            meter,
-                            &mut stored,
-                        )? {
-                            Input::Vertex(vid) => GraphValue::Vertex(vid),
-                            Input::Identity => unreachable!("a key has a checked input column"),
-                            Input::Value(value) => value.copy_with_control(&mut |event| {
-                                meter.event(input_event(event)).map_err(lift)
-                            })?,
-                            Input::Scalar(value) => {
-                                let value = value.unwrap_or(&CanonicalScalar::Null);
-                                // Charge the actual borrowed payload before cloning it.
-                                // Copies are temporary on an existing group and retained
-                                // only for a new one; no input row is saved.
-                                let units = scalar_payload_units(value);
-                                for _ in 0..units {
-                                    meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
-                                }
-                                GraphValue::Scalar(value.clone())
-                            }
-                        };
-                        meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
-                        key.push(value);
-                    }
-                    if computed.is_some() {
-                        // Computed keys may own recursive native values. Reserve
-                        // comparison work for this logical lookup/insertion;
-                        // this is not std::BTreeMap allocator accounting.
-                        let units = key.iter().fold(0_usize, |total, value| {
-                            total
-                                .saturating_add(value.payload_units())
-                                .saturating_add(1)
-                        });
-                        *largest_computed_key = (*largest_computed_key).max(units);
-                        let levels = groups.len().saturating_add(1).ilog2() as usize + 1;
-                        for _ in 0..levels
-                            .saturating_mul(24)
-                            .saturating_mul(largest_computed_key.saturating_add(1))
-                        {
-                            meter.event(VertexScanEvent::Work).map_err(lift)?;
-                        }
-                    }
-                    // Only a plain reduction emits every group. Result clauses
-                    // may reject, collapse or skip groups, so their quota is
-                    // checked after selection, not on private support counts.
-                    let next = groups
-                        .len()
-                        .checked_add(1)
-                        .and_then(|n| u64::try_from(n).ok())
-                        .ok_or(GqlQueryError::Source(
-                            GraphAggregateError::ResultCountOverflow,
-                        ))?;
-                    meter.event(VertexScanEvent::Work).map_err(lift)?;
-                    match groups.entry(key) {
-                        btree_map::Entry::Occupied(entry) => entry.into_mut(),
-                        btree_map::Entry::Vacant(entry) => {
-                            if !self.plan.aggregate.has_streamed_output_stage() {
-                                meter
-                                    .policy
-                                    .rows
-                                    .check(GqlBudgetDimension::ResultRows, next)
-                                    .map_err(GqlQueryError::Rows)?;
-                            }
-                            meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
-                            entry.insert(states(&self.plan.aggregate, meter)?)
-                        }
-                    }
+                let input = match &computed {
+                    Some(values) => ProjectedInput::Computed(values),
+                    None => ProjectedInput::Vertex { columns, vid, row },
                 };
-                for (aggregate, (spec, state)) in self
-                    .plan
-                    .aggregate
-                    .aggregates()
-                    .iter()
-                    .zip(state.iter_mut())
-                    .enumerate()
-                {
-                    meter.event(VertexScanEvent::Work).map_err(lift)?;
-                    let mut stored = None;
-                    let input = match spec.argument_column() {
-                        None => Input::Identity,
-                        Some(column) => projected_argument(
-                            column,
-                            computed.as_ref(),
-                            columns,
-                            vid,
-                            row,
-                            meter,
-                            &mut stored,
-                        )?,
-                    };
-                    state.update_governed(input, aggregate, &mut |event| {
-                        meter.event(event).map_err(lift)
-                    })?;
-                }
+                accumulate_row(
+                    &self.plan.aggregate,
+                    input,
+                    groups,
+                    largest_computed_key,
+                    meter,
+                )?;
             }
         }
         // Empty grouped results have no emit() call to provide this checkpoint.
@@ -504,11 +435,11 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         ))
     }
 
-    /// Cooperatively complete at most 64 source examinations per poll before
+    /// Cooperatively complete at most 64 source or UNWIND pipeline transitions per poll before
     /// moving one finished group. Hidden and predicate-rejected candidates
     /// also yield; no private group or input row is emitted during accumulation.
     /// The synchronous iterator uses this same resumable accumulator. Groups,
-    /// DISTINCT support, collections and all meters survive Pending unchanged.
+    /// DISTINCT support, expansion spines, collections and all meters survive Pending unchanged.
     /// Individual source callbacks, probes and completed-group selection remain
     /// synchronous governed operations, not a wall-clock duration guarantee.
     pub fn poll_next<C>(
@@ -690,22 +621,139 @@ pub(super) fn input_event(event: GlaExecutionEvent) -> VertexScanEvent {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ProjectedInput<'a> {
+    Computed(&'a GraphValueRow),
+    Vertex {
+        columns: &'a [ValueProjection],
+        vid: VId,
+        row: VertexScanRow<'a>,
+    },
+}
+
 fn projected_argument<'a, F, E, C>(
     column: usize,
-    computed: Option<&'a GraphValueRow>,
-    columns: &[ValueProjection],
-    vid: VId,
-    row: VertexScanRow<'a>,
+    input: ProjectedInput<'a>,
     meter: &mut Meter<F>,
     stored: &'a mut Option<GraphValue>,
 ) -> Result<Input<'a>, VertexAggregateError<E, C>>
 where
     F: FnMut() -> Result<(), C>,
 {
-    match computed {
-        Some(values) => Ok(Input::from_value(&values.values()[column])),
-        None => argument(&columns[column], vid, row, meter, stored),
+    match input {
+        ProjectedInput::Computed(values) => Ok(Input::from_value(&values.values()[column])),
+        ProjectedInput::Vertex { columns, vid, row } => {
+            argument(&columns[column], vid, row, meter, stored)
+        }
     }
+}
+
+/// The same group owner consumes borrowed plain projections and complete owned
+/// occurrences from computed/expanding inputs. A suspended UNWIND never keeps
+/// a borrowed source image, and no generated occurrence is admitted as another
+/// snapshot record or public result row.
+fn accumulate_row<F, E, C>(
+    definition: &PreparedGraphAggregate,
+    input: ProjectedInput<'_>,
+    groups: &mut Groups,
+    largest_computed_key: &mut usize,
+    meter: &mut Meter<F>,
+) -> Result<(), VertexAggregateError<E, C>>
+where
+    F: FnMut() -> Result<(), C>,
+{
+    let state = if definition.group_key_columns().is_empty() {
+        groups
+            .get_mut(&Vec::<GraphValue>::new())
+            .expect("global group was installed")
+    } else {
+        meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
+        let mut key = Vec::new();
+        for &column in definition.group_key_columns() {
+            meter.event(VertexScanEvent::Work).map_err(lift)?;
+            let mut stored = None;
+            let value = match projected_argument(column, input, meter, &mut stored)? {
+                Input::Vertex(vid) => GraphValue::Vertex(vid),
+                Input::Identity => unreachable!("a key has a checked input column"),
+                Input::Value(value) => value.copy_with_control(&mut |event| {
+                    meter.event(input_event(event)).map_err(lift)
+                })?,
+                Input::Scalar(value) => {
+                    let value = value.unwrap_or(&CanonicalScalar::Null);
+                    // Charge the actual borrowed payload before cloning it.
+                    // Copies are temporary on an existing group and retained
+                    // only for a new one; no input row is saved.
+                    let units = scalar_payload_units(value);
+                    for _ in 0..units {
+                        meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
+                    }
+                    GraphValue::Scalar(value.clone())
+                }
+            };
+            meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
+            key.push(value);
+        }
+        if matches!(input, ProjectedInput::Computed(_)) {
+            // Computed keys may own recursive native values. Reserve
+            // comparison work for this logical lookup/insertion;
+            // this is not std::BTreeMap allocator accounting.
+            let units = key.iter().fold(0_usize, |total, value| {
+                total
+                    .saturating_add(value.payload_units())
+                    .saturating_add(1)
+            });
+            *largest_computed_key = (*largest_computed_key).max(units);
+            let levels = groups.len().saturating_add(1).ilog2() as usize + 1;
+            for _ in 0..levels
+                .saturating_mul(24)
+                .saturating_mul(largest_computed_key.saturating_add(1))
+            {
+                meter.event(VertexScanEvent::Work).map_err(lift)?;
+            }
+        }
+        // Only a plain reduction emits every group. Result clauses
+        // may reject, collapse or skip groups, so their quota is
+        // checked after selection, not on private support counts.
+        let next = groups
+            .len()
+            .checked_add(1)
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or(GqlQueryError::Source(
+                GraphAggregateError::ResultCountOverflow,
+            ))?;
+        meter.event(VertexScanEvent::Work).map_err(lift)?;
+        match groups.entry(key) {
+            btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            btree_map::Entry::Vacant(entry) => {
+                if !definition.has_streamed_output_stage() {
+                    meter
+                        .policy
+                        .rows
+                        .check(GqlBudgetDimension::ResultRows, next)
+                        .map_err(GqlQueryError::Rows)?;
+                }
+                meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
+                entry.insert(states(definition, meter)?)
+            }
+        }
+    };
+    for (aggregate, (spec, state)) in definition
+        .aggregates()
+        .iter()
+        .zip(state.iter_mut())
+        .enumerate()
+    {
+        meter.event(VertexScanEvent::Work).map_err(lift)?;
+        let mut stored = None;
+        let value = match spec.argument_column() {
+            None => Input::Identity,
+            Some(column) => projected_argument(column, input, meter, &mut stored)?,
+        };
+        state.update_governed(value, aggregate, &mut |event| {
+            meter.event(event).map_err(lift)
+        })?;
+    }
+    Ok(())
 }
 
 fn scalar_payload_units(value: &CanonicalScalar) -> usize {

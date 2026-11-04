@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, btree_map};
 mod spill;
 pub use spill::{EdgeSpillAggregateCursor, EdgeSpillAggregatePlan};
 pub(crate) mod pipeline;
-use pipeline::InputPipeline;
+use pipeline::{InputPipeline, InputRows};
 mod ordered_collection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,11 +79,13 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// arguments. Their lists are populated in that key order, not by sorting
 /// each argument independently. This resident support is work/scratch governed
 /// and can grow with matched occurrences even under a small result LIMIT.
-/// Single-source WITH chains of ALL column/constant/scalar-VM projections,
-/// scopes and filters execute row by row before numeric grouping. Ordinal-
+/// Single-source WITH chains of ALL scan-local projections, scopes, filters
+/// and UNWIND execute occurrence by occurrence before numeric grouping. Nested
+/// UNWIND retains one evaluated list or range spine per level, not its output
+/// bag. Ordinal-
 /// dependent or additional graph-reading expressions remain outside this path.
 /// Intermediate DISTINCT, ORDER BY, pages,
-/// expansion, multi-source operators and COLLECT consumers are not admitted:
+/// multi-source operators and COLLECT consumers are not admitted:
 /// their positional or support semantics cannot be erased by this fusion.
 /// Numeric-only and already ordered paths collect no intermediate match
 /// relation. Collection payloads and any required source-order support remain
@@ -111,7 +113,7 @@ impl EdgeAggregatePlan {
             .aggregates()
             .iter()
             .any(|spec| NumericState::collects(spec.function()));
-        let (aggregate, pipeline) = InputPipeline::prepare(aggregate)
+        let (aggregate, pipeline) = InputPipeline::prepare_expanding(aggregate)
             .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?;
         let mut ordered_collections = None;
         let canonical_collections = if collects {
@@ -192,6 +194,7 @@ struct Group {
 struct Accumulation {
     groups: Groups,
     largest_key: usize,
+    expanding: Option<InputRows>,
 }
 
 /// Global empty input yields one zero/null row; grouped empty input yields none.
@@ -307,38 +310,63 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
             self.accumulating = Some(Accumulation {
                 groups,
                 largest_key: 0,
+                expanding: None,
             });
         }
         let Accumulation {
             groups,
             largest_key,
+            expanding,
         } = self
             .accumulating
             .as_mut()
             .expect("initialized accumulation");
         loop {
-            let row = match self.input.advance_bounded(remaining).map_err(lift)? {
-                core::task::Poll::Ready(Some(row)) => row,
-                core::task::Poll::Ready(None) => break,
-                core::task::Poll::Pending => return Ok(None),
+            let row = if let Some(rows) = expanding {
+                let meter = &mut self.input.meter;
+                match rows.advance_bounded(
+                    self.pipeline
+                        .as_ref()
+                        .expect("expansion has a checked pipeline"),
+                    remaining,
+                    &mut |event| meter.event(event).map_err(lift),
+                )? {
+                    core::task::Poll::Ready(Some(row)) => row,
+                    core::task::Poll::Ready(None) => {
+                        *expanding = None;
+                        continue;
+                    }
+                    core::task::Poll::Pending => return Ok(None),
+                }
+            } else {
+                let row = match self.input.advance_bounded(remaining).map_err(lift)? {
+                    core::task::Poll::Ready(Some(row)) => row,
+                    core::task::Poll::Ready(None) => break,
+                    core::task::Poll::Pending => return Ok(None),
+                };
+                let meter = &mut self.input.meter;
+                // The graph compiler owns matching and source projection.
+                // Expanded occurrences retain the same source admission and
+                // meter, and each reaches grouping only after all its stages.
+                if let Some(pipeline) = &self.pipeline {
+                    if pipeline.expands() {
+                        *expanding = Some(pipeline.start(row));
+                        continue;
+                    }
+                    let Some(row) =
+                        pipeline.evaluate(row, &mut |event| meter.event(event).map_err(lift))?
+                    else {
+                        // A rejected binding is not source exhaustion.
+                        continue;
+                    };
+                    row
+                } else {
+                    self.aggregate.evaluate_streamed_input(row, &mut |event| {
+                        meter.event(event).map_err(lift)
+                    })?
+                }
             };
             let meter = &mut self.input.meter;
-            // The graph compiler still owns source matching/projection. This
-            // single-row transformation completes before any group is changed;
-            // a refusal discards accumulation and releases no partial summary.
-            let row = if let Some(pipeline) = &self.pipeline {
-                let Some(row) =
-                    pipeline.evaluate(row, &mut |event| meter.event(event).map_err(lift))?
-                else {
-                    // A rejected binding is not source exhaustion. Continue
-                    // within the same cooperative quantum and shared meter.
-                    continue;
-                };
-                row
-            } else {
-                self.aggregate
-                    .evaluate_streamed_input(row, &mut |event| meter.event(event).map_err(lift))?
-            };
             let state = if global {
                 groups
                     .get_mut(&Vec::<GraphValue>::new())
@@ -428,11 +456,12 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
         ))
     }
 
-    /// Drive at most 64 root/incidence examinations or join transitions before
+    /// Drive at most 64 root/incidence, join or UNWIND pipeline transitions before
     /// yielding Pending. No partial aggregate or private matched row escapes.
     /// Empty matches and hidden candidates still yield; indexed positions and
     /// native group/DISTINCT/COLLECT state and any required collection-order
-    /// keys are retained. Numeric input never becomes an intermediate bag.
+    /// keys are retained. Expanded input retains its governed spine too;
+    /// numeric input never becomes an intermediate bag.
     /// Single source callbacks, probes and final group selection are synchronous
     /// governed sections; the quantum is not a wall-clock duration guarantee.
     pub fn poll_next<C>(
