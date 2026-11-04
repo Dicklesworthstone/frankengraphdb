@@ -285,7 +285,7 @@ pub(crate) fn run<C>(
             (forward_cost, reverse_cost)
         };
         if more_than_twice(active_cost, other_cost) {
-            if decision.switches.len() >= usize::BITS as usize + 1 {
+            if decision.switches.len() > usize::BITS as usize {
                 return Err(FnxExecutionError::InvalidUpstreamResult);
             }
             if decision.switches.len() == decision.switches.capacity() {
