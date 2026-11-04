@@ -486,9 +486,11 @@ impl<V: Vfs + Clone> Database<V> {
         }
         drop(resolved);
         drop(selection_charge);
-        let partition = store
-            .open_buffered_root(cx, checkpoint.root_id, pool, limits)
-            .await?;
+        // Keep the cold admission's Send proof at its owner, as for ordinary
+        // open; callers need not recursively prove every recovery future.
+        let admission: crate::SendFuture<'_, _> =
+            Box::pin(store.open_buffered_root(cx, checkpoint.root_id, pool, limits));
+        let partition = admission.await?;
         // The owned reader contains the authenticated immutable root and store.
         Ok(BufferedReadView {
             partition,
