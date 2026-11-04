@@ -122,9 +122,10 @@ fn assert_streams_the_eager_outcome(
     match eager {
         Ok(QueryResult::Rows { columns, rows }) => {
             assert_eq!(cursor.columns(), columns, "{text}");
+            let slots = cursor.output_slots().to_vec();
             let streamed: Vec<_> = cursor
                 .by_ref()
-                .map(|row| row.unwrap().values().to_vec())
+                .map(|row| visible(&row.unwrap(), &slots))
                 .collect();
             assert_eq!(streamed, rows, "{text}");
         }
