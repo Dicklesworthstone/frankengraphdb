@@ -80,10 +80,10 @@ fn limits(rows: usize) -> FnxExecutionLimits {
     }
 }
 
-fn distance(output: &KernelOutput) -> Option<usize> {
+fn distance(output: &KernelOutput) -> Result<Option<usize>, &'static str> {
     match output.values {
-        KernelValues::TargetHopDistance { distance, .. } => distance,
-        _ => panic!("target hop-distance output"),
+        KernelValues::TargetHopDistance { distance, .. } => Ok(distance),
+        _ => Err("target hop-distance output"),
     }
 }
 
@@ -158,8 +158,8 @@ fn every_small_direction_target_and_cutoff_matches_independent_closure() {
                             .unwrap();
                             assert_eq!(
                                 distance(&primitive.output),
-                                (hops < n && cutoff.is_none_or(|limit| hops <= limit))
-                                    .then_some(hops)
+                                Ok((hops < n && cutoff.is_none_or(|limit| hops <= limit))
+                                    .then_some(hops))
                             );
                             let wanted = (hops < n && cutoff.is_none_or(|limit| hops <= limit))
                                 .then(|| {
@@ -243,7 +243,7 @@ fn asymmetric_layers_switch_directions_without_accepting_a_longer_intersection()
                             (hops < n && cutoff.is_none_or(|limit| hops <= limit)).then_some(hops);
                         assert_eq!(
                             distance(&result.output),
-                            wanted,
+                            Ok(wanted),
                             "seed={seed} direction={direction:?} {source}->{target} cutoff={cutoff:?}"
                         );
                         assert!(result.output.witness.edges_scanned <= view.outgoing_offsets()[n]);
@@ -408,7 +408,7 @@ fn long_skinny_search_retains_only_live_frontiers_and_bounded_decision_evidence(
         Ok::<_, Infallible>(())
     })
     .unwrap();
-    assert_eq!(distance(&result.output), Some(n - 1));
+    assert_eq!(distance(&result.output), Ok(Some(n - 1)));
     assert_eq!(result.output.witness.edges_scanned, n - 1);
     assert!(result.decision.switches.is_empty());
     assert!(result.workspace <= 2 * n.div_ceil(64) * size_of::<u64>() + 16 * size_of::<usize>());

@@ -210,23 +210,34 @@ fn same_kernel(
     actual: Result<(KernelOutput, usize), FnxExecutionError<usize>>,
     expected: Result<(KernelOutput, usize), FnxExecutionError<usize>>,
 ) {
-    match (actual, expected) {
-        (Ok((actual, actual_workspace)), Ok((expected, expected_workspace))) => {
-            let distance = |values| match values {
-                KernelValues::TargetHopDistance { target, distance } => (target, distance),
-                _ => panic!("expected a one-target integer distance"),
-            };
-            assert_eq!(distance(actual.values), distance(expected.values));
-            assert_eq!(actual.row_count, expected.row_count);
-            assert_eq!(actual.witness, expected.witness);
-            assert_eq!(actual_workspace, expected_workspace);
-        }
-        (Err(actual), Err(expected)) => assert_eq!(format!("{actual:?}"), format!("{expected:?}")),
-        (actual, expected) => panic!(
-            "different success/refusal: actual={} expected={}",
-            actual.is_ok(),
-            expected.is_ok()
-        ),
+    assert_eq!(
+        actual.is_ok(),
+        expected.is_ok(),
+        "different success/refusal"
+    );
+    if let (Ok((actual, actual_workspace)), Ok((expected, expected_workspace))) =
+        (&actual, &expected)
+    {
+        let distance = |values: &KernelValues| match values {
+            KernelValues::TargetHopDistance { target, distance } => Some((*target, *distance)),
+            _ => None,
+        };
+        let actual_distance = distance(&actual.values);
+        let expected_distance = distance(&expected.values);
+        assert!(
+            actual_distance.is_some(),
+            "expected a one-target integer distance"
+        );
+        assert!(
+            expected_distance.is_some(),
+            "expected a one-target integer distance"
+        );
+        assert_eq!(actual_distance, expected_distance);
+        assert_eq!(actual.row_count, expected.row_count);
+        assert_eq!(actual.witness, expected.witness);
+        assert_eq!(actual_workspace, expected_workspace);
+    } else if let (Err(actual), Err(expected)) = (actual, expected) {
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
     }
 }
 
