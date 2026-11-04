@@ -25,9 +25,9 @@ SECOND="$EVIDENCE_DIR/second.ndjson"
 EVIDENCE_ONLY="$EVIDENCE_DIR/evidence-only.ndjson"
 
 echo "==> verify direct dependencies stay inside fgdb and the pinned foundations"
-grep -Fqx 'asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "78b64636e99fea4ea2d868096576021dd3b8e519", version = "=0.5.0", default-features = false }' crates/fgdb-codec/Cargo.toml
+grep -Fqx 'asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "3d0151aecae2443a735388e6ae4fbd387e78db2c", version = "=0.6.0", default-features = false }' crates/fgdb-codec/Cargo.toml
 grep -Fqx 'fnx-generators = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f" }' crates/fgdb-codec/Cargo.toml
-grep -Fq 'git+https://github.com/Dicklesworthstone/asupersync?rev=78b64636e99fea4ea2d868096576021dd3b8e519#78b64636e99fea4ea2d868096576021dd3b8e519' Cargo.lock
+grep -Fq 'git+https://github.com/Dicklesworthstone/asupersync?rev=3d0151aecae2443a735388e6ae4fbd387e78db2c#3d0151aecae2443a735388e6ae4fbd387e78db2c' Cargo.lock
 grep -Fq 'git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=9d710b1c33e99412c94de7fa4de2f7ce4954110f#9d710b1c33e99412c94de7fa4de2f7ce4954110f' Cargo.lock
 DIRECT_METADATA="$(cargo metadata --locked --offline --no-deps --format-version 1 | jq -r '
   .packages[]
@@ -38,7 +38,7 @@ DIRECT_METADATA="$(cargo metadata --locked --offline --no-deps --format-version 
 ' | LC_ALL=C sort)"
 EXPECTED_DIRECT="$(
   printf '%s\t%s\t%s\t%s\n' \
-    'asupersync' 'normal' 'git+https://github.com/Dicklesworthstone/asupersync?rev=78b64636e99fea4ea2d868096576021dd3b8e519' '' \
+    'asupersync' 'normal' 'git+https://github.com/Dicklesworthstone/asupersync?rev=3d0151aecae2443a735388e6ae4fbd387e78db2c' '' \
     'fgdb-types' 'normal' 'path' "$ROOT/crates/fgdb-types" \
     'fnx-generators' 'dev' 'git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=9d710b1c33e99412c94de7fa4de2f7ce4954110f' '' \
     | LC_ALL=C sort

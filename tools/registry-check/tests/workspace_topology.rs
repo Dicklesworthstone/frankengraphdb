@@ -69,8 +69,10 @@ const ID_TABLE_PIN: &str = "fnv1a64:038e596f60f3489a";
 // activations moved only the registry-side pin, each verified by
 // topology-check: 492f280d activated fgdb-server and made the server posture
 // live (9fcb6c08eb39d100 -> 714ca6dea8bd6d6b), and 9bea2ebe activated
-// fgdb-bolt (714ca6dea8bd6d6b -> fcb90ac21a190481). This constant follows.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:fcb90ac21a190481";
+// fgdb-bolt (714ca6dea8bd6d6b -> fcb90ac21a190481). fgdb-bccws then changes
+// only the Asupersync pin to its reactor-succession repair in 0.6.0
+// (fcb90ac21a190481 -> 6ee5f6696b1fd10a). This constant follows.
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:6ee5f6696b1fd10a";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -595,7 +597,7 @@ fn topology_neg_live_crate_declared_planned() {
 #[test]
 fn topology_neg_foundation_revision_drift() {
     let codes = codes_after(
-        "pinned_rev = \"78b64636e99fea4ea2d868096576021dd3b8e519\"",
+        "pinned_rev = \"3d0151aecae2443a735388e6ae4fbd387e78db2c\"",
         "pinned_rev = \"0000000000000000000000000000000000000000\"",
     );
     assert_reports(&codes, "foundation_rev_drift");

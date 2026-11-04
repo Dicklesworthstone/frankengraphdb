@@ -11,8 +11,8 @@ publish = false
 # injected filesystem. Production is `UnixVfs`.
 [dependencies.asupersync]
 git = "https://github.com/Dicklesworthstone/asupersync"
-rev = "78b64636e99fea4ea2d868096576021dd3b8e519"
-version = "=0.5.0"
+rev = "3d0151aecae2443a735388e6ae4fbd387e78db2c"
+version = "=0.6.0"
 default-features = false
 
 # §5.1's keyed logical object identity, so a block is content-addressed the same
