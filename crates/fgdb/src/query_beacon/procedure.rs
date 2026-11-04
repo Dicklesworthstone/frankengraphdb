@@ -72,10 +72,11 @@
 //!
 //! Privileged text/vector calls reuse a compatible healthy maintained
 //! generation at the database or read view's exact cut with fresh accounting.
-//! Fully visible authorized text/exact-vector calls without graph expansion
-//! also reuse, while admitting the complete population to their original signed
-//! node and native source limits. Older historical selectors, approximate,
-//! masked and transaction reads retain their source build. Endpoint eligibility
+//! Fully visible authorized indexed calls also reuse compatible text and exact
+//! vector lanes, while admitting the complete population to their original
+//! signed node and native source limits. Graph expansion retains its selected
+//! vertex directory and incidence admission. Older historical selectors,
+//! approximate, masked and transaction reads retain their source build. Endpoint eligibility
 //! never changes the reused BM25 corpus.
 //! This is exact fusion of selected candidates, not an exhaustive hybrid
 //! top-k; `ann` remains approximate. It is not a durable index definition.
@@ -827,6 +828,8 @@ impl HybridSearch {
     /// Both immutable hosts use this body, including the bool-predicate
     /// refusal latch. Eligibility and the requested physical profile cannot be
     /// lost between binding and execution. Neither source is a fallback.
+    /// Registry pins require the caller's complete visibility and exact-cut
+    /// checks; indexed graph execution still admits its full vertex directory.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_filtered(
         &self,
@@ -835,6 +838,7 @@ impl HybridSearch {
         snapshot: &Snapshot,
         at: CommitSeq,
         work: &RefCell<impl WorkControl>,
+        registry: Option<&super::BeaconQueryIndexes>,
         scan: Scan<'_>,
         admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
         label_allowed: impl FnMut(LabelId) -> bool,
@@ -864,13 +868,14 @@ impl HybridSearch {
                 || Ok(()),
                 |id| filter.admits(id, work),
             ),
-            GraphAccess::Indexed => indexed::evaluate_filtered(
+            GraphAccess::Indexed => indexed::evaluate_with_registry(
                 snapshot,
                 at,
                 &self.options,
                 self.query(),
                 self.expansion(),
                 work,
+                registry,
                 scan,
                 admit,
                 label_allowed,
@@ -1089,6 +1094,7 @@ pub(crate) fn privileged_with_registry(
             snapshot,
             at,
             &work,
+            None,
             Scan::Metered,
             admit,
             |_| true,

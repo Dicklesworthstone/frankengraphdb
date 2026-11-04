@@ -29,8 +29,25 @@ fn control_error(error: QueryError) -> Error {
 /// A maintained pin is usable only when its whole corpus is visible and its
 /// exact generation is the selected snapshot. Never inspect a global registry
 /// under a masked scope: even a lookup's work/refusal could disclose its shape.
-/// The live vertex population is mandatory for signed node admission, including
-/// vertices outside the requested label and vertices without indexed fields.
+fn maintained_indexes<Clock: FnMut() -> u64>(
+    snapshot: &crate::Snapshot,
+    at: fgdb_types::CommitSeq,
+    scope: &super::PlannerPredicates,
+    execution: &RefCell<super::Execution<'_, '_, Clock>>,
+) -> Option<beacon::BeaconQueryIndexes> {
+    if at != snapshot.frontier || !scope.sees_all_incidence() || !scope.sees_all_fields() {
+        return None;
+    }
+    // Release the Execution borrow before lookup checkpoints spend its permit.
+    execution
+        .borrow()
+        .beacon_indexes
+        .clone()
+        .filter(|indexes| !indexes.is_empty())
+}
+
+/// Index-only execution still admits the complete live vertex population,
+/// including vertices outside the requested label or without indexed fields.
 fn maintained_index<Clock: FnMut() -> u64>(
     snapshot: &crate::Snapshot,
     at: fgdb_types::CommitSeq,
@@ -40,12 +57,7 @@ fn maintained_index<Clock: FnMut() -> u64>(
     query: Search<'_>,
     work: &RefCell<impl WorkControl>,
 ) -> Result<Option<(IndexSnapshot, u64)>, BeaconError> {
-    if at != snapshot.frontier || !scope.sees_all_incidence() || !scope.sees_all_fields() {
-        return Ok(None);
-    }
-    // Release the Execution borrow before lookup checkpoints spend its permit.
-    let indexes = execution.borrow().beacon_indexes.clone();
-    let Some(indexes) = indexes.filter(|indexes| !indexes.is_empty()) else {
+    let Some(indexes) = maintained_indexes(snapshot, at, scope, execution) else {
         return Ok(None);
     };
     let config = options.config_for(query)?;
@@ -407,12 +419,18 @@ pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
                 Ok(())
             });
         }
+        let registry = if search.uses_indexed_graph() && query.graph_enabled() {
+            maintained_indexes(snapshot, at, scope, execution)
+        } else {
+            None
+        };
         search.execute_filtered(
             eligible,
             remaining,
             snapshot,
             at,
             &work,
+            registry.as_ref(),
             beacon::Scan::Unmetered(&mut poll),
             |row| {
                 if !scope.allows_vertex(&row.labels) {

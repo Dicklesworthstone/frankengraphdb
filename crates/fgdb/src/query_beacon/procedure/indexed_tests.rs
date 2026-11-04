@@ -2,7 +2,7 @@
 //! and capability-scoped execution. Whole-graph work is a negative control.
 
 use super::*;
-use crate::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
+use crate::{Database, DatabaseKeys, MemVfs, QueryError, QueryResult, QueryValue, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb_beacon::WorkBudget;
@@ -112,6 +112,7 @@ fn execute(
         &db.snapshot,
         db.frontier().unwrap(),
         work,
+        None,
         Scan::Metered,
         |_| Ok(true),
         |_| true,
@@ -1071,6 +1072,204 @@ const MAINTAINED_GRAPH_CALL: &str = "CALL hybrid.search(text => 'graph', text_pr
      candidates => 1, graph_candidates => 1, graph_weight => 100, k => 1) \
      YIELD node, score, vector_rank, text_rank, graph_rank, graph_hops, vector_distance, text_score \
      RETURN node.x AS x, score, vector_rank, text_rank, graph_rank, graph_hops, vector_distance, text_score";
+
+#[test]
+fn authorized_graph_calls_reuse_lanes_but_retain_graph_admission_and_masking() {
+    let ((), report) = run_async_under_lab(0xbeac_3714, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let query = c.query();
+        let mut db =
+            Database::open_memory(&c.commit(), DatabaseKeys::new([0x73; 32], NS, [0x75; 32]))
+                .await
+                .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 1..=128_i64 {
+            batch.create_vertex(
+                VId(id as u128),
+                vec![LabelId(if id == 128 { 99 } else { 1 })],
+                vec![
+                    (
+                        TEXT,
+                        CanonicalScalar::ucs_basic_text(if id == 128 {
+                            "graph graph secret"
+                        } else {
+                            "graph"
+                        })
+                        .unwrap(),
+                    ),
+                    (X, CanonicalScalar::Int(id)),
+                ],
+            );
+        }
+        batch.add_edge(EId(1), VId(1), VId(2), vec![]);
+        batch.add_edge(EId(2), VId(2), VId(3), vec![]);
+        db.write(&c.commit(), batch).await.unwrap();
+        let mut definition = Options::text(TEXT);
+        definition.projection.vector = vec![X];
+        definition.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
+        let handle = db
+            .register_beacon_index(
+                &query,
+                &definition,
+                fgdb_beacon::read::ReadPolicy::default(),
+            )
+            .unwrap();
+        let retained_cold = cold_view(&db);
+        let retained_warm = db.read_session().unwrap();
+        let authority = Authority::new(
+            AuthKey::from_seed(3714),
+            NS,
+            "maintained-graph-call",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 1000,
+                max_work: 10_000_000,
+                max_rows: 10,
+            },
+        );
+        let parameters = params(&[3]);
+        let call = |modalities: &str| {
+            format!(
+                "CALL hybrid.search({modalities} seeds => [1], max_hops => 2, \
+                 eligible => $eligible, k => 1, candidates => 1, graph_candidates => 1, \
+                 graph_weight => 100) \
+                 YIELD node, graph_hops, vector_rank, text_rank, score, text_score \
+                 RETURN node.x AS x, graph_hops, vector_rank, text_rank, score, text_score"
+            )
+        };
+        let run = |view: &crate::EmbeddedReadView, grant: &Grant, text: &str| {
+            // Deterministic live-clock checkpoints, not elapsed time or a
+            // benchmark's operation-count/performance metric.
+            let samples = Cell::new(0_usize);
+            let token = authority.issue_at(grant, 100).unwrap();
+            let mut session = view.authorized_read_session(
+                &query,
+                &authority,
+                &token,
+                "main",
+                symbols,
+                policy(),
+                || {
+                    samples.set(samples.get() + 1);
+                    100
+                },
+            )?;
+            let prepared = session.prepare(&query, text, &parameters)?;
+            let result = session.execute(&query, &prepared, &parameters)?;
+            Ok::<_, QueryError>((rows(result), samples.get()))
+        };
+        for hops in [2_i64, 1] {
+            let cold = cold_view(&db);
+            let warm = db.read_session().unwrap();
+            // Preserve the original default-Demand positive case as well as
+            // the explicit Indexed control below; neither profile may lose
+            // the requested endpoint when the current topology changes.
+            let default_demand = call("");
+            let (default_cold, _) = run(&cold, &grant, &default_demand).unwrap();
+            let (default_warm, _) = run(&warm, &grant, &default_demand).unwrap();
+            assert_eq!(default_warm, default_cold);
+            let mut default_prefix = expected(false, false);
+            default_prefix[0][1] =
+                QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(hops)));
+            assert_eq!(
+                default_warm
+                    .iter()
+                    .map(|row| row[..4].to_vec())
+                    .collect::<Vec<_>>(),
+                default_prefix,
+                "default Demand: current hops={hops}, statement={default_demand}",
+            );
+            for (modalities, vector, text) in [
+                // Mixed retrieval retains its real indexed default. Graph-
+                // only defaults to Demand, so select Indexed explicitly when
+                // checking this profile's complete-population admission.
+                ("graph_access => 'indexed',", false, false),
+                ("text => 'graph', text_property => 'body',", false, true),
+                ("vector => [0], vector_properties => ['x'],", true, false),
+                (
+                    "text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x'],",
+                    true,
+                    true,
+                ),
+            ] {
+                let statement = call(modalities);
+                let (incumbent, cold_samples) = run(&cold, &grant, &statement).unwrap();
+                let (actual, warm_samples) = run(&warm, &grant, &statement).unwrap();
+                assert_eq!(actual, incumbent, "complete scores and ranks: {statement}");
+                let mut prefix = expected(vector, text);
+                prefix[0][1] = QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(hops)));
+                assert_eq!(
+                    actual
+                        .iter()
+                        .map(|row| row[..4].to_vec())
+                        .collect::<Vec<_>>(),
+                    prefix,
+                    "current hops={hops}, statement={statement}",
+                );
+                if vector || text {
+                    assert!(
+                        warm_samples < cold_samples,
+                        "maintained lanes must avoid rebuilding: warm checkpoints={warm_samples}, cold={cold_samples}"
+                    );
+                } else {
+                    assert_eq!(
+                        warm_samples, cold_samples,
+                        "graph-only execution has no index to reuse"
+                    );
+                }
+                for mask_property in [false, true] {
+                    let mut restricted = grant.clone();
+                    if mask_property {
+                        restricted.properties = Scope::only([X]);
+                    } else {
+                        restricted.labels = Scope::only([LabelId(1)]);
+                    }
+                    assert_eq!(
+                        run(&warm, &restricted, &statement).unwrap(),
+                        run(&cold, &restricted, &statement).unwrap(),
+                        "masked execution must not inspect the global registry",
+                    );
+                }
+                let mut short = grant.clone();
+                short.limits.max_nodes = 127;
+                assert!(run(&cold, &short, &statement).is_err());
+                assert!(
+                    run(&warm, &short, &statement).is_err(),
+                    "registration does not bypass the complete graph population",
+                );
+            }
+            if hops == 2 {
+                let mut shortcut = WriteBatch::new(R);
+                shortcut.add_edge(EId(3), VId(1), VId(3), vec![]);
+                db.write(&c.commit(), shortcut).await.unwrap();
+                let status = db.beacon_index_status(&query, &handle).unwrap();
+                assert_eq!(status.source_sequence, db.frontier().unwrap());
+                assert_eq!(status.last_refresh.touched_vertices, 0);
+                assert!(status.failure.is_none());
+            }
+        }
+        let statement = call(
+            "text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x'],",
+        );
+        let (historical, _) = run(&retained_warm, &grant, &statement).unwrap();
+        assert_eq!(
+            historical,
+            run(&retained_cold, &grant, &statement).unwrap().0
+        );
+        assert_eq!(
+            historical[0][1],
+            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2))),
+        );
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
 
 #[test]
 fn maintained_indexed_graph_and_call_keep_exact_cut_and_expansion_semantics() {

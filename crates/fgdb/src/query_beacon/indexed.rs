@@ -326,7 +326,7 @@ pub(crate) fn evaluate_privileged(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_with_registry(
+pub(crate) fn evaluate_with_registry(
     snapshot: &Snapshot,
     at: CommitSeq,
     options: &Options,
