@@ -84,16 +84,14 @@ fn paths(routes: &[(VId, &[(EId, VId)])]) -> Vec<Vec<u8>> {
 
 fn unbounded_exhaustive_walk_refuses_during_parsing() {
     let parameters = GqlParameters::new();
-    let Err(error) = PreparedNativeRead::prepare(
+    let prepared = PreparedNativeRead::prepare(
         "MATCH REPEATABLE ELEMENTS p = WALK (a)-[:R*0..]->(b) RETURN p LIMIT 0",
         &parameters,
         resolve,
-    ) else {
-        panic!("unbounded exhaustive WALK was admitted");
-    };
+    );
     assert!(matches!(
-        error,
-        QueryError::Refused { facade: NativeReadClass::Pattern, source }
+        prepared,
+        Err(QueryError::Refused { facade: NativeReadClass::Pattern, source })
             if matches!(source.as_ref(), QueryError::PatternText(error)
                 if error.offset == 47 && error.kind == GraphPatternTextErrorKind::Expected(
                     "an upper hop bound, or TRAIL, ACYCLIC, SIMPLE, a shortest selector or DIFFERENT EDGES for an unbounded quantifier"
