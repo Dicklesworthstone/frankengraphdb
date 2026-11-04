@@ -13,8 +13,8 @@ pub use fgdb_chronicle::scrub::{LostCapsule, ScrubCrashPoint};
 #[cfg(not(target_arch = "wasm32"))]
 use fgdb_chronicle::{commit::restore::CapsuleRestoreError, transfer::VerifiedObject};
 
-/// A recovered capsule failed admission/restoration, or ordinary database
-/// admission still refused the repaired storage. Neither error returns a
+/// A recovered capsule failed admission/restoration, or authoritative database
+/// recovery still refused the repaired storage. Neither error returns a
 /// database handle that could serve retained, unauthenticated graph state.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
@@ -129,8 +129,9 @@ impl Database<asupersync::fs::UnixVfs> {
     /// capsule is replaced, and the selected root opener authenticates first.
     ///
     /// The exclusive writer lease stays held from chain recovery through
-    /// capsule replacement and ordinary root admission/replay. A successful
-    /// result is the same healthy database that [`Database::open`] produces.
+    /// capsule replacement and authoritative replay. Every retained source
+    /// capsule is authenticated and folded before a serving handle returns;
+    /// a selected checkpoint cannot hide another missing or damaged capsule.
     /// Repair appends no markers and does not advance the committed frontier.
     /// Missing or damaged derived objects can still make admission fail.
     ///
@@ -159,7 +160,7 @@ impl Database<asupersync::fs::UnixVfs> {
 impl<V: Vfs + Clone> Database<V> {
     /// The caller-selected filesystem form of
     /// [`Database::open_restoring_capsules`], with identical admission and
-    /// writer-lease rules. The supplied VFS owns both repairs and normal reopen.
+    /// writer-lease rules. The supplied VFS owns both repairs and recovery replay.
     pub async fn open_restoring_capsules_with_vfs(
         cx: &CommitCx,
         vfs: V,
@@ -196,16 +197,18 @@ impl<V: Vfs + Clone> Database<V> {
                 .await
                 .map_err(|source| CapsuleRecoveryError::Capsule { object_id, source })?;
         }
-        // Move the lease-owning coordinator into the ordinary binder. Dropping
-        // it and calling open would admit an intervening writer between repair
-        // and replay. Keep the same erased Send boundary as ordinary open.
+        // Move the lease-owning coordinator into the authoritative binder.
+        // Checkpoint selection could hide an unrepaired retained capsule;
+        // force the same full fold as recover_authoritatively. Dropping the
+        // coordinator and reopening would admit an intervening writer between
+        // repair and replay. Keep ordinary open's erased Send boundary.
         let admission: crate::SendFuture<'_, Result<Self, crate::OpenError>> =
             Box::pin(Self::bind_with_coordinator(
                 cx,
                 vfs,
                 path,
                 keys,
-                false,
+                true,
                 crate::ReplayRootCapacity::DURABLE,
                 coordinator,
             ));
