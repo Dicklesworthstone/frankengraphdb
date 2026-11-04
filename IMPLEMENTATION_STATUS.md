@@ -86,6 +86,12 @@ One bounded integer state machine drives decoded, compressed and cooperative exe
 
 This is a real embedded read-view subset. It is not authorization negotiation, lease/reattach, cursor ownership, server transport, or the synchronous facade.
 
+### Recovery through intact physical copies
+
+Packed-object readers now recover from a missing, truncated or identity-invalid cached copy through intact older packs, loose objects, or packs published after the reader opened (`fgdb-0qjmf`). The caller's exact object-family identity or decoder proves each candidate; a valid transcript from another family cannot satisfy the read. Discovery runs at most once per failed read and can retain a repair discovered before an unrelated non-interruption error. If every candidate fails, the original refusal remains authoritative. `Interrupted` stops copy recovery immediately.
+
+The same recovery applies to bounded roots and segments, batched block/hosted-property proofs, and buffered payload extents. Every candidate retains the original byte ceiling; admitted buffered extents also retain their length and checksum. Healthy reads keep their existing proof path, including batched hashing. Regressions in `fgdb-strata/src/store/pack_tests.rs` cover live-handle repair discovery, damaged/missing/truncated packs, wrong-family candidates, limits, interruptions, partial discovery, and block-window/hosted-patch fallback. Runtime qualification remains open until the pinned Cargo and exact-tree gates complete.
+
 ### Selective cold point and adjacency reads
 
 Source added on 2026-10-12 (`fgdb-w3-buffer-g2v`): `BufferedPartition::vertex_at`, `edge_at` and `adjacency_at` now select possible payload extents from bounded routing summaries retained during the mandatory authenticated root open. Vertex reads use patch identity ranges; edge reads use EId minima/maxima computed independently of adjacency order; adjacency reads use the admitted source, relation and destination bounds. All potentially matching histories remain in publication order, including later retirement restatements. Descriptor visits and the complete bounded decode are admitted before payload I/O. Point-edge reads resolve the winning topology first and fetch only its property's containing patch; adjacency, missing edges and propertyless winners do not read property sidecars.

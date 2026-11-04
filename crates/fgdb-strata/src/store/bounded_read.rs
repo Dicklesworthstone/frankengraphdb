@@ -219,16 +219,17 @@ impl<V: Vfs> BlockStore<V> {
         limits: &RootReadLimits,
     ) -> Result<Vec<(crate::manifest::ManifestRecord, crate::root::PartitionRoot)>, StoreError>
     {
-        let bytes = self
-            .read_object_bytes(
+        let records = self
+            .read_object_proven(
                 cx,
                 id.0,
                 (limits.max_root_bytes as u64).min(super::MANIFEST_HEADER_AND_RECORDS_CEILING),
+                |bytes| async move {
+                    crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
+                        .map_err(StoreError::MalformedManifest)
+                },
             )
             .await?;
-        let records =
-            crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
-                .map_err(StoreError::MalformedManifest)?;
         if records.len() > 1 {
             return Err(StoreError::RootReferenceLimit {
                 resource: "native manifest roots",
@@ -305,21 +306,24 @@ impl<V: Vfs> BlockStore<V> {
         };
         let maximum = maximum.min(crate::root::MAX_ROOT_READ_BYTES) as u64;
         let bytes = self
-            .read_object_bytes(
+            .read_object_proven(
                 cx,
                 id.0,
                 maximum.min(crate::root::MAX_ENCODED_ROOT_BYTES as u64),
+                |bytes| async move {
+                    let actual = crate::root::root_id(self.k_oid.expose(), self.namespace, &bytes);
+                    if actual != id.0 {
+                        return Err(StoreError::MalformedRoot(
+                            crate::root::RootError::IdentityMismatch {
+                                expected: id.0,
+                                actual,
+                            },
+                        ));
+                    }
+                    Ok(bytes)
+                },
             )
             .await?;
-        let actual = crate::root::root_id(self.k_oid.expose(), self.namespace, &bytes);
-        if actual != id.0 {
-            return Err(StoreError::MalformedRoot(
-                crate::root::RootError::IdentityMismatch {
-                    expected: id.0,
-                    actual,
-                },
-            ));
-        }
         // A segmented root's index segments and segments share the caller's
         // byte ceiling with the root itself.
         let mut remaining = maximum.saturating_sub(bytes.len() as u64);
@@ -396,24 +400,32 @@ impl<V: Vfs> BlockStore<V> {
                 {
                     for (at, reference) in named.iter().enumerate() {
                         let limit = remaining.min(crate::root_segment::INDEX_BYTES as u64);
-                        let index = self
-                            .read_object_bytes(cx, reference.segment_id, limit)
-                            .await?;
-                        remaining = remaining.saturating_sub(index.len() as u64);
-                        list.push(
-                            crate::root_segment::read_index(
-                                self.k_oid.expose(),
-                                self.namespace,
-                                &index,
-                                reference,
-                                at,
-                                coordinate,
-                                class,
+                        let (size, index) = self
+                            .read_object_proven(
+                                cx,
+                                reference.segment_id,
+                                limit,
+                                |bytes| async move {
+                                    let index = crate::root_segment::read_index(
+                                        self.k_oid.expose(),
+                                        self.namespace,
+                                        &bytes,
+                                        reference,
+                                        at,
+                                        coordinate,
+                                        class,
+                                    )
+                                    .map_err(|error| {
+                                        StoreError::MalformedRoot(crate::root::RootError::Segment(
+                                            error,
+                                        ))
+                                    })?;
+                                    Ok((bytes.len(), index))
+                                },
                             )
-                            .map_err(|error| {
-                                StoreError::MalformedRoot(crate::root::RootError::Segment(error))
-                            })?,
-                        );
+                            .await?;
+                        remaining = remaining.saturating_sub(size as u64);
+                        list.push(index);
                     }
                 }
                 let (block_index, patch_index) =
@@ -441,24 +453,25 @@ impl<V: Vfs> BlockStore<V> {
         {
             for (at, reference) in named.iter().enumerate() {
                 let limit = remaining.min(crate::root_segment::MAX_SEGMENT_BYTES as u64);
-                let segment = self
-                    .read_object_bytes(cx, reference.segment_id, limit)
+                let (segment, references) = self
+                    .read_object_proven(cx, reference.segment_id, limit, |bytes| async move {
+                        let references = crate::root_segment::read_segment(
+                            self.k_oid.expose(),
+                            self.namespace,
+                            &bytes,
+                            reference,
+                            at,
+                            coordinate,
+                            class,
+                        )
+                        .map_err(|error| {
+                            StoreError::MalformedRoot(crate::root::RootError::Segment(error))
+                        })?;
+                        Ok((bytes, references))
+                    })
                     .await?;
                 remaining = remaining.saturating_sub(segment.len() as u64);
-                list.push(
-                    crate::root_segment::read_segment(
-                        self.k_oid.expose(),
-                        self.namespace,
-                        &segment,
-                        reference,
-                        at,
-                        coordinate,
-                        class,
-                    )
-                    .map_err(|error| {
-                        StoreError::MalformedRoot(crate::root::RootError::Segment(error))
-                    })?,
-                );
+                list.push(references);
                 if tails.is_some() {
                     let (_, _, admitted) = crate::root_segment::decode_described_segment(&segment)
                         .map_err(|error| {
