@@ -324,12 +324,17 @@ pub const OPEN_READS_IN_FLIGHT: usize = 32;
 /// serial walk's. A read has no effects, so one started early and dropped
 /// unconsumed changes nothing. Under the lab runtime each read completes
 /// inline on its first poll, in order, as `sync_files_together`'s syncs do.
-struct OrderedReads<F: Future> {
-    reads: std::collections::VecDeque<InFlightRead<F>>,
+// The reads already need pinning; erase their concrete future types at this
+// owner so callers' Send proofs stop before the recovery pipeline.
+struct OrderedReads<'a, T> {
+    reads: std::collections::VecDeque<InFlightRead<'a, T>>,
 }
 
 /// A read in flight, with its result once it completes.
-type InFlightRead<F> = (std::pin::Pin<Box<F>>, Option<<F as Future>::Output>);
+type InFlightRead<'a, T> = (
+    std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>,
+    Option<T>,
+);
 
 /// A root-named block's identity-verified bytes, beside the result of decoding
 /// them (entries plus the hosted property-patch reference and locators).
@@ -493,7 +498,7 @@ fn prove_block_patch(
     Ok(rows)
 }
 
-impl<F: Future> OrderedReads<F> {
+impl<'a, T> OrderedReads<'a, T> {
     fn new() -> Self {
         Self {
             reads: std::collections::VecDeque::new(),
@@ -504,13 +509,13 @@ impl<F: Future> OrderedReads<F> {
         self.reads.len()
     }
 
-    fn push(&mut self, read: F) {
+    fn push(&mut self, read: impl Future<Output = T> + Send + 'a) {
         self.reads.push_back((Box::pin(read), None));
     }
 
     /// The oldest read's result, polling every read still in flight meanwhile;
     /// `None` when nothing was issued.
-    async fn next(&mut self) -> Option<F::Output> {
+    async fn next(&mut self) -> Option<T> {
         let reads = &mut self.reads;
         std::future::poll_fn(|task| {
             for (read, outcome) in reads.iter_mut() {
@@ -5160,7 +5165,7 @@ mod ordered_reads_tests {
         }
     }
 
-    fn next(reads: &mut OrderedReads<Countdown>) -> Option<usize> {
+    fn next(reads: &mut OrderedReads<'_, usize>) -> Option<usize> {
         let mut task = Context::from_waker(Waker::noop());
         let mut next = std::pin::pin!(reads.next());
         loop {
