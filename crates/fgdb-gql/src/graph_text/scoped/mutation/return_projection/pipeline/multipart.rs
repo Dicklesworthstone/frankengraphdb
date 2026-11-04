@@ -2170,7 +2170,11 @@ impl<'a> Parser<'a> {
                 .find(|variable| variable.text == name.text)
                 .copied();
             if let Some(variable) = variable {
-                if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any) {
+                // Known map expressions also use Any; their anchors are type
+                // conflicts, not a pattern comprehension with no witnesses.
+                if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any)
+                    || self.map_aliases.contains(&name.at)
+                {
                     return Err(expected(name.at, "a vertex-valued imported binding"));
                 }
                 self.capacity(
@@ -2354,7 +2358,9 @@ impl<'a> Parser<'a> {
                 .find(|variable| variable.text == name.text)
                 .copied()
             {
-                if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any) {
+                if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any)
+                    || self.map_aliases.contains(&name.at)
+                {
                     return Err(expected(name.at, "a vertex-valued imported binding"));
                 }
                 let right = self.mutation_projection(&mut inputs, variable, None)?;

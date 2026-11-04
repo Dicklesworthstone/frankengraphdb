@@ -198,12 +198,72 @@ fn known_map_bindings_cannot_become_nodes_after_with_aliases() {
 }
 
 #[test]
+fn known_maps_cannot_anchor_row_pattern_comprehensions() {
+    for statement in [
+        "WITH {x:1} AS n RETURN [(n)-[:R]->(m) | m] AS values",
+        "WITH {x:1} AS m WITH m AS n RETURN [(n)-[:R]->() | 1] AS values",
+        "WITH {x:1} AS n WITH * UNWIND [0,0] AS occurrence \
+         RETURN [(n)-[:R]->() | 1] AS values",
+        "MATCH (a) WITH a{p:1} AS n RETURN [(n)-[:R]->() | 1] AS values",
+    ] {
+        let mut resolutions = 0;
+        let error = PreparedGraphSetText::prepare(statement, |kind, name| {
+            resolutions += 1;
+            symbols(kind, name)
+        })
+        .expect_err(statement);
+        assert!(
+            matches!(
+                error.kind,
+                fgdb_gql::GraphSetTextErrorKind::Expected("a vertex-valued imported binding")
+            ),
+            "{statement}: {error}"
+        );
+        assert_eq!(resolutions, 0, "scope check before catalog: {statement}");
+    }
+}
+
+#[test]
+fn known_maps_cannot_anchor_row_scope_existence_or_counts() {
+    for statement in [
+        "WITH {x:1} AS n RETURN EXISTS { MATCH (n)-[:R]->() } AS present",
+        "WITH {x:1} AS m WITH m AS n RETURN EXISTS((n)-[:R]->()) AS present",
+        "WITH {x:1} AS n WITH n WHERE EXISTS { (n)-[:R]->() } RETURN n",
+        "WITH {x:1} AS n RETURN COUNT { (n)-[:R]->() } AS degree",
+        "MATCH (a) WITH a{p:1} AS n RETURN COUNT { MATCH (n)-[:R]->() } AS degree",
+        "WITH {x:1} AS n \
+         RETURN EXISTS { MATCH (n)-[:R]->() RETURN n } AS present",
+    ] {
+        let mut resolutions = 0;
+        let error = PreparedGraphSetText::prepare(statement, |kind, name| {
+            resolutions += 1;
+            symbols(kind, name)
+        })
+        .expect_err(statement);
+        assert!(
+            matches!(
+                error.kind,
+                fgdb_gql::GraphSetTextErrorKind::Expected("a vertex-valued imported binding")
+            ),
+            "{statement}: {error}"
+        );
+        assert_eq!(resolutions, 0, "scope check before catalog: {statement}");
+    }
+}
+
+#[test]
 fn declared_map_parameters_cannot_bind_match_nodes() {
     for statement in [
         "WITH $input AS n MATCH (n) RETURN n",
         "WITH $input AS n WITH n AS renamed MATCH (renamed) RETURN renamed",
         "WITH $input AS n MATCH (a) WITH n AS renamed MATCH (renamed) RETURN renamed",
         "MATCH (a) WITH $input AS n MATCH (n) RETURN n",
+        "WITH $input AS n RETURN [(n)-[:R]->(m) | m] AS values",
+        "WITH $input AS m WITH m AS n RETURN [(n)-[:R]->() | 1] AS values",
+        "WITH $input AS n RETURN EXISTS { MATCH (n)-[:R]->() } AS present",
+        "WITH $input AS m WITH m AS n RETURN EXISTS((n)-[:R]->()) AS present",
+        "WITH $input AS n WITH n WHERE EXISTS { (n)-[:R]->() } RETURN n",
+        "WITH $input AS n RETURN COUNT { (n)-[:R]->() } AS degree",
     ] {
         let mut resolutions = 0;
         let error = PreparedGraphSetText::prepare_with_parameter_types(
@@ -3586,6 +3646,7 @@ fn row_scope_existence_values_rebind_dynamic_anchors_without_losing_occurrences(
             GraphValue::Scalar(CanonicalScalar::Int(1)),
             GraphValue::Edge(fgdb_types::EId(1)),
             GraphValue::List(vec![].into()),
+            GraphValue::map(vec![("x".into(), GraphValue::Vertex(VId(1)))]).unwrap(),
         ],
         vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(3))],
         vec![],
@@ -3950,6 +4011,7 @@ fn row_scope_pattern_lists_rebind_anchors_and_keep_null_witnesses() {
             GraphValue::Scalar(CanonicalScalar::Int(1)),
             GraphValue::Edge(fgdb_types::EId(1)),
             GraphValue::List(Vec::new().into()),
+            GraphValue::map(vec![("x".into(), GraphValue::Vertex(VId(1)))]).unwrap(),
         ],
         vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(3))],
         Vec::new(),
