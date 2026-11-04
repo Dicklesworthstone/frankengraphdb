@@ -1,4 +1,4 @@
-# Atomic remote write batches
+# Atomic remote write batches and consistent reads
 
 `fgdb remote write --rows-file <path> <statement>` submits one finite set of
 parameter maps to the server's existing native `EXECUTE_BATCH` owner. All sets
@@ -29,7 +29,7 @@ fgdb --robot remote write \
 
 Existing `--tls-server-name` and `--tls-ca-file` flags select the same verified
 TLS path used by other remote commands. Omitting them retains the existing
-plaintext behavior; use TLS for an untrusted network. `--rows-file` is write-only
+plaintext behavior; use TLS for an untrusted network. `--rows-file` also supports remote reads, described below,
 and cannot be combined with `--param`. Named regular UTF-8 files are supported,
 not stdin. Every argument map is independent; there are no inherited defaults.
 
@@ -120,3 +120,48 @@ A stdout failure after a validated completion reports that sequence and warns
 against replay. Some output bytes may already have escaped. Require successful
 process exit and a complete terminal together; neither a missing terminal nor
 an error implies that a submitted write rolled back.
+
+## Consistent remote read batches
+
+Use the same typed JSON or CSV input with an explicit `--consistent-batch`:
+
+```sh
+fgdb --robot remote query \
+  --addr 127.0.0.1:7688 --database social --token-file reader.hex \
+  --consistent-batch --rows-file people.json \
+  'MATCH (n:Person) WHERE n.name=$name AND n.age=$age RETURN n.name, n.age'
+```
+
+Every argument set binds in one authorized read session. Ordinary current reads
+therefore use one pinned snapshot even if another client commits while the batch
+is executing. An explicit temporal selector can select an earlier cut; each
+result reports its exact selected sequence. One signed execution allowance
+covers all statements, so splitting a query into parameter sets does not multiply
+the available work or result budget. Native batch-count limits still apply.
+
+This mode uses the buffered native executor. Every statement completes before
+the first schema or row is sent; a late bind, authorization or execution refusal
+therefore emits no successful prefix. The CLI then flushes each schema and row
+without collecting the response. A transport, authority, recovery or output
+failure during delivery can leave provisional bytes, but the invocation fails.
+Even terminal bytes may already be visible if the final output flush fails;
+successful completion requires the terminal and a successful process exit.
+
+Each `columns` event carries `statement` (one-based), `stream:true`, and
+the exact `seq`; every `row` event carries the same `statement`. Empty
+results still emit their columns. There is exactly one successful terminal:
+
+```json
+{"v":1,"event":"result","kind":"read_batch","statements":2,"count":2}
+```
+
+Its `count` is the total number of fully flushed rows. There is no single
+terminal `seq`, since explicit historical selectors can choose distinct cuts.
+Require that terminal and a successful process exit to accept the batch.
+The client never retries after a refusal or delivery failure.
+
+`--consistent-batch` requires `remote query --rows-file`; optional
+`--csv-types` uses the existing explicit CSV decoder. Source and ordered
+read modes refuse because this API selects one buffered batch owner.
+Without the flag, `remote query --rows-file` retains its existing behavior:
+one prepared template, separately executed reads, and one terminal per set.

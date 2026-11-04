@@ -2674,6 +2674,60 @@ pub(crate) struct VertexHistoryValidator {
     rows: std::collections::BTreeMap<(VId, CommitSeq), crate::vertex::VertexRow>,
 }
 
+/// One exact statement may be repeated, or gain its one retirement. Reuse this
+/// law when compaction borrows winners instead of retaining owned history rows.
+pub(crate) fn validate_vertex_restatement(
+    existing: &crate::vertex::VertexRow,
+    row: &crate::vertex::VertexRow,
+) -> Result<(), RootError> {
+    // Exhaustive destructuring makes a new birth field require an explicit
+    // decision here. Compare payloads by reference; clone only for a refusal.
+    let crate::vertex::VertexRow {
+        vid,
+        birth_ordinal,
+        created_at,
+        retired_at: _,
+        labels,
+        props,
+    } = row;
+    if existing.vid != *vid
+        || existing.birth_ordinal != *birth_ordinal
+        || existing.created_at != *created_at
+        || existing.labels != *labels
+        || existing.props != *props
+    {
+        return Err(RootError::VertexIdentityMismatch {
+            vid: row.vid,
+            conflict: Box::new((existing.clone(), row.clone())),
+        });
+    }
+    if existing.retired_at.is_some() && row.retired_at != existing.retired_at {
+        return Err(RootError::VertexRetirementMismatch {
+            vid: row.vid,
+            expected: existing.retired_at,
+            found: row.retired_at,
+        });
+    }
+    Ok(())
+}
+
+/// Adjacent statements of one identity must meet at one sequence and retain
+/// its birth ordinal, whether the predecessor or successor was seen first.
+pub(crate) fn validate_vertex_successor(
+    predecessor: &crate::vertex::VertexRow,
+    successor: &crate::vertex::VertexRow,
+) -> Result<(), RootError> {
+    if predecessor.retired_at != Some(successor.created_at)
+        || predecessor.birth_ordinal != successor.birth_ordinal
+    {
+        return Err(RootError::VertexIdentityMismatch {
+            vid: successor.vid,
+            conflict: Box::new((predecessor.clone(), successor.clone())),
+        });
+    }
+    Ok(())
+}
+
 impl VertexHistoryValidator {
     /// Borrow every collapsed statement without cloning labels or properties.
     /// A governed caller can poll before testing each row's visibility.
@@ -2713,37 +2767,7 @@ impl VertexHistoryValidator {
         for row in rows {
             let key = (row.vid, row.created_at);
             if let Some(existing) = self.rows.get_mut(&key) {
-                // A restatement may only add retirement. Compare the complete
-                // birth by reference: cloning both property trees merely to
-                // clear retirement copies large nested values during open.
-                // Exhaustive destructuring makes any new row field require an
-                // explicit decision here instead of silently skipping it.
-                let crate::vertex::VertexRow {
-                    vid,
-                    birth_ordinal,
-                    created_at,
-                    retired_at: _,
-                    labels,
-                    props,
-                } = row;
-                if existing.vid != *vid
-                    || existing.birth_ordinal != *birth_ordinal
-                    || existing.created_at != *created_at
-                    || existing.labels != *labels
-                    || existing.props != *props
-                {
-                    return Err(RootError::VertexIdentityMismatch {
-                        vid: row.vid,
-                        conflict: Box::new((existing.clone(), row.clone())),
-                    });
-                }
-                if existing.retired_at.is_some() && row.retired_at != existing.retired_at {
-                    return Err(RootError::VertexRetirementMismatch {
-                        vid: row.vid,
-                        expected: existing.retired_at,
-                        found: row.retired_at,
-                    });
-                }
+                validate_vertex_restatement(existing, row)?;
                 // Keep the already admitted birth allocations. Replacing the
                 // entire row would deep-clone the same immutable values again.
                 existing.retired_at = row.retired_at;
@@ -2760,14 +2784,8 @@ impl VertexHistoryValidator {
                     .next_back()
                     .filter(|((vid, _), _)| *vid == row.vid)
                     .map(|(_, existing)| existing);
-                if let Some(predecessor) = predecessor
-                    && (predecessor.retired_at != Some(row.created_at)
-                        || predecessor.birth_ordinal != row.birth_ordinal)
-                {
-                    return Err(RootError::VertexIdentityMismatch {
-                        vid: row.vid,
-                        conflict: Box::new((predecessor.clone(), row.clone())),
-                    });
+                if let Some(predecessor) = predecessor {
+                    validate_vertex_successor(predecessor, row)?;
                 }
                 let successor = self
                     .rows
@@ -2775,14 +2793,8 @@ impl VertexHistoryValidator {
                     .next()
                     .filter(|((vid, _), _)| *vid == row.vid)
                     .map(|(_, existing)| existing);
-                if let Some(successor) = successor
-                    && (row.retired_at != Some(successor.created_at)
-                        || successor.birth_ordinal != row.birth_ordinal)
-                {
-                    return Err(RootError::VertexIdentityMismatch {
-                        vid: row.vid,
-                        conflict: Box::new((row.clone(), successor.clone())),
-                    });
+                if let Some(successor) = successor {
+                    validate_vertex_successor(row, successor)?;
                 }
             }
             self.rows.insert(key, row.clone());

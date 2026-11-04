@@ -35,6 +35,9 @@ pub struct FnxExecutionLimits {
     /// scalar recurrence/convergence passes and final L2 normalization.
     /// Cut vertices and bridges include iterative lowlink traversal and linear
     /// canonical pair ordering; sparse cutsets spend only actual result rows.
+    /// Target BFS admits its selected decoded kernel's bitmap/frontier work,
+    /// result conversion and bounded direction evidence. A tighter allowance
+    /// retains the original target FIFO when its existing work bound fits.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -224,6 +227,8 @@ pub struct FnxCertificate {
     /// projection, output rows and allocator overhead. Includes temporary
     /// kernel indexes, normalized weights and traversal decision evidence;
     /// adaptive traversals record reserved capacities at the allocation peak.
+    /// Target bidirectional BFS conservatively includes a replaced backing
+    /// allocation during growth; this is a bound, not allocator RSS.
     pub kernel_workspace_bytes: usize,
     /// Replayable physical direction choices when decoded BFS completes a
     /// pull level. Absent when no pull was executed, including other kernels
@@ -232,6 +237,9 @@ pub struct FnxCertificate {
     /// Replayable physical choices when decoded CC/WCC completes a pull.
     /// Absent for ordinary component BFS and compressed-row execution.
     pub component_decision_card: Option<ComponentDecisionCard>,
+    /// Decoded point-to-point BFS direction policy and ordered switches.
+    /// Absent when the original target FIFO or a compressed provider executes.
+    pub target_bfs_decision_card: Option<crate::TargetBfsDecisionCard>,
     /// The foundation schema, populated from actual completed kernel passes.
     /// Admission, projection and result-conversion work are not loop counters.
     pub witness: ComplexityWitness,
@@ -1538,6 +1546,21 @@ impl FnxCallSpec {
             .outgoing_offsets()
             .last()
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        let bidirectional_target = match algorithm {
+            FnxAlgorithm::ShortestPathLength {
+                source,
+                target,
+                cutoff,
+            } => crate::target_bidirectional::eligible(
+                graph,
+                source,
+                target,
+                cutoff,
+                self.outputs().len(),
+                limits.max_estimated_work,
+            ),
+            _ => false,
+        };
         let estimated_work = match algorithm {
             FnxAlgorithm::PageRank(options) => n.checked_add(arcs).and_then(|step| {
                 options
@@ -1555,9 +1578,18 @@ impl FnxCallSpec {
             | FnxAlgorithm::DijkstraPathLength { .. } => {
                 Some(crate::shortest_path::decoded_work::<C>(graph, arcs)?)
             }
-            FnxAlgorithm::ShortestPathLength { .. } => Some(
-                crate::target_bfs::estimated_work::<C>(n, arcs, n, self.outputs().len())?,
-            ),
+            FnxAlgorithm::ShortestPathLength { .. } => {
+                if bidirectional_target {
+                    crate::target_bidirectional::estimated_work(n, arcs, self.outputs().len())
+                } else {
+                    Some(crate::target_bfs::estimated_work::<C>(
+                        n,
+                        arcs,
+                        n,
+                        self.outputs().len(),
+                    )?)
+                }
+            }
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 Some(crate::clustering::estimated_work(graph, &mut checkpoint)?)
             }
@@ -1631,22 +1663,38 @@ impl FnxCallSpec {
         };
         let mut bfs_decision_card = None;
         let mut component_decision_card = None;
+        let mut target_bfs_decision_card = None;
         let output = match algorithm {
             FnxAlgorithm::ShortestPathLength {
                 source,
                 target,
                 cutoff,
             } => {
-                let (output, workspace_bytes) = crate::target_bfs::run(
-                    graph,
-                    source,
-                    target,
-                    cutoff,
-                    limits.max_result_rows,
-                    &mut checkpoint,
-                )?;
-                kernel_workspace_bytes = workspace_bytes;
-                output
+                if bidirectional_target {
+                    let run = crate::target_bidirectional::run(
+                        graph,
+                        source,
+                        target,
+                        cutoff,
+                        limits.max_result_rows,
+                        &mut checkpoint,
+                    )?;
+                    kernel_workspace_bytes = run.workspace;
+                    execution_kernel = crate::target_bidirectional::KERNEL;
+                    target_bfs_decision_card = Some(run.decision);
+                    run.output
+                } else {
+                    let (output, workspace_bytes) = crate::target_bfs::run(
+                        graph,
+                        source,
+                        target,
+                        cutoff,
+                        limits.max_result_rows,
+                        &mut checkpoint,
+                    )?;
+                    kernel_workspace_bytes = workspace_bytes;
+                    output
+                }
             }
             FnxAlgorithm::PageRank(options) => {
                 let (scores, witness, workspace_bytes) =
@@ -1884,6 +1932,15 @@ impl FnxCallSpec {
             checkpoint.unit()
         })
         .map_err(FnxExecutionError::Cancelled)?;
+        // Preserve the v5 transcript for callers retaining the original path.
+        // The extension binds every physical choice of the new kernel.
+        if let Some(card) = &target_bfs_decision_card {
+            hash.update(b"fgdb:prism:target-bfs-policy:v1");
+            crate::target_bidirectional::hash_decision(&mut hash, Some(card), &mut || {
+                checkpoint.unit()
+            })
+            .map_err(FnxExecutionError::Cancelled)?;
+        }
         let certificate = FnxCertificate {
             registry_version: FNX_SIGNATURE_REGISTRY_VERSION,
             implementation_revision: FNX_IMPLEMENTATION_REVISION,
@@ -1902,6 +1959,7 @@ impl FnxCallSpec {
             kernel_workspace_bytes,
             bfs_decision_card,
             component_decision_card,
+            target_bfs_decision_card,
             witness,
             digest: hash.finalize(),
         };
@@ -2009,6 +2067,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("projection.rs"));
         hash_text(&mut hash, include_str!("traversal.rs"));
         hash_text(&mut hash, include_str!("target_bfs.rs"));
+        hash_text(&mut hash, include_str!("target_bidirectional.rs"));
         hash_text(&mut hash, include_str!("call.rs"));
         hash_text(&mut hash, include_str!("shortest_path.rs"));
         hash_text(&mut hash, include_str!("clustering.rs"));

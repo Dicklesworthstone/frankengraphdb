@@ -49,6 +49,192 @@ fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> 
     }
 }
 
+mod vertex_history_integrity {
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_strata::compact::{VertexCompactionError, compact_vertex_patches};
+    use fgdb_strata::root::RootError;
+    use fgdb_strata::vertex::{
+        VertexPatchRows, VertexRow, decode_patch, encode_patch, merge_all_vertices,
+    };
+    use fgdb_types::{CanonicalList, CanonicalPropertyValue, CanonicalScalar, CommitSeq, VId};
+
+    fn vertex(created: u64, retired: Option<u64>, value: i64) -> VertexRow {
+        VertexRow {
+            vid: VId(9),
+            birth_ordinal: 11,
+            created_at: CommitSeq(created),
+            retired_at: retired.map(CommitSeq),
+            labels: vec![LabelId(1), LabelId(7)],
+            props: vec![(
+                PropertyKeyId(2),
+                CanonicalPropertyValue::List(
+                    CanonicalList::try_new(vec![
+                        CanonicalScalar::Int(value).into(),
+                        CanonicalScalar::bytes(vec![0x5a; 257]).unwrap().into(),
+                    ])
+                    .unwrap(),
+                ),
+            )],
+        }
+    }
+
+    // Every input patch independently passes the public encoder and decoder.
+    // The contradiction exists only between publications, never within a patch.
+    fn patches(rows: &[VertexRow]) -> Vec<VertexPatchRows> {
+        rows.iter()
+            .map(|row| decode_patch(&encode_patch(core::slice::from_ref(row)).unwrap()).unwrap())
+            .collect()
+    }
+
+    fn identity_error(previous: &VertexRow, next: &VertexRow) -> VertexCompactionError {
+        VertexCompactionError::History(RootError::VertexIdentityMismatch {
+            vid: next.vid,
+            conflict: Box::new((previous.clone(), next.clone())),
+        })
+    }
+
+    #[test]
+    fn contradictory_births_refuse_before_supersede_and_floor_can_hide_them() {
+        let original = vertex(1, None, 7);
+        let retired = vertex(1, Some(4), 7);
+        let mut ordinal_drift = retired.clone();
+        ordinal_drift.birth_ordinal += 1;
+        let mut label_drift = retired.clone();
+        label_drift.labels = vec![LabelId(1), LabelId(8)];
+        let property_drift = vertex(1, Some(4), 99);
+
+        for changed in [ordinal_drift, label_drift, property_drift] {
+            for restore_original in [false, true] {
+                let mut rows = vec![original.clone(), changed.clone()];
+                if restore_original {
+                    rows.push(retired.clone());
+                }
+                let history = patches(&rows);
+                for floor in [0, 4, 100] {
+                    assert_eq!(
+                        compact_vertex_patches(&history, CommitSeq(floor)),
+                        Err(identity_error(&original, &changed)),
+                        "floor={floor}, restore_original={restore_original}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn undone_and_retimed_retirements_refuse_even_if_later_restored() {
+        let original = vertex(1, Some(4), 7);
+        for changed in [vertex(1, None, 7), vertex(1, Some(5), 7)] {
+            for restore_original in [false, true] {
+                let mut rows = vec![original.clone(), changed.clone()];
+                if restore_original {
+                    rows.push(original.clone());
+                }
+                let history = patches(&rows);
+                for floor in [0, 4, 100] {
+                    assert_eq!(
+                        compact_vertex_patches(&history, CommitSeq(floor)),
+                        Err(VertexCompactionError::History(
+                            RootError::VertexRetirementMismatch {
+                                vid: original.vid,
+                                expected: original.retired_at,
+                                found: changed.retired_at,
+                            }
+                        )),
+                        "floor={floor}, restore_original={restore_original}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gaps_overlaps_and_birth_ordinal_changes_refuse_in_both_arrival_orders() {
+        let predecessor = vertex(1, Some(4), 7);
+        let mut ordinal_drift = vertex(4, Some(8), 9);
+        ordinal_drift.birth_ordinal += 1;
+        for successor in [vertex(3, Some(8), 9), vertex(5, Some(8), 9), ordinal_drift] {
+            for reverse in [false, true] {
+                let rows = if reverse {
+                    vec![successor.clone(), predecessor.clone()]
+                } else {
+                    vec![predecessor.clone(), successor.clone()]
+                };
+                let history = patches(&rows);
+                for floor in [0, 4, 100] {
+                    assert_eq!(
+                        compact_vertex_patches(&history, CommitSeq(floor)),
+                        Err(identity_error(&predecessor, &successor)),
+                        "floor={floor}, reverse={reverse}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lawful_restatements_and_successors_preserve_every_retained_cut() {
+        let birth = vertex(1, None, 7);
+        let retired = vertex(1, Some(4), 7);
+        let successor = vertex(4, None, 9);
+        let successor_retired = vertex(4, Some(7), 9);
+        let mut unrelated = vertex(3, None, 13);
+        unrelated.vid = VId(12);
+        unrelated.birth_ordinal = 22;
+
+        let histories = [
+            vec![
+                birth.clone(),
+                birth,
+                unrelated.clone(),
+                retired.clone(),
+                successor.clone(),
+                successor_retired.clone(),
+                successor_retired.clone(),
+            ],
+            // A retired predecessor may arrive after its successor: both
+            // mention frontier 4, and their common boundary is exact.
+            vec![
+                unrelated.clone(),
+                successor,
+                retired.clone(),
+                retired.clone(),
+                successor_retired.clone(),
+            ],
+        ];
+        for rows in histories {
+            let history = patches(&rows);
+            for floor in [0, 2, 4, 7, 9] {
+                let (packed, removed) = compact_vertex_patches(&history, CommitSeq(floor)).unwrap();
+                let kept: usize = packed.iter().map(|patch| patch.len()).sum();
+                assert_eq!(removed, rows.len() - kept);
+                for cut in floor..=9 {
+                    let mut expected = Vec::new();
+                    if (1..4).contains(&cut) {
+                        expected.push(retired.clone());
+                    } else if (4..7).contains(&cut) {
+                        expected.push(successor_retired.clone());
+                    }
+                    if cut >= 3 {
+                        expected.push(unrelated.clone());
+                    }
+                    assert_eq!(
+                        merge_all_vertices(&packed, CommitSeq(cut)),
+                        expected,
+                        "floor={floor}, cut={cut}"
+                    );
+                }
+                for patch in &packed {
+                    assert_eq!(decode_patch(&encode_patch(patch).unwrap()).unwrap(), *patch);
+                }
+                let twice = compact_vertex_patches(&packed, CommitSeq(floor)).unwrap();
+                assert_eq!(twice.0, packed);
+                assert_eq!(twice.1, 0);
+            }
+        }
+    }
+}
+
 fn identity_mismatch(expected: AdjacencyEntry, found: AdjacencyEntry) -> RootError {
     let birth = |entry: AdjacencyEntry| EdgeBirth {
         src: entry.src,

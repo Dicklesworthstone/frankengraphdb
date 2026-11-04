@@ -519,16 +519,17 @@ impl<V: Vfs + Clone> BlockStore<V> {
         id: crate::manifest::ManifestVersion,
         limits: &BufferedReadLimits,
     ) -> Result<Vec<(crate::manifest::ManifestRecord, PartitionRoot)>, BufferedReadError> {
-        let bytes = self
-            .read_object_bytes(
+        let records = self
+            .read_object_proven(
                 cx,
                 id.0,
                 (limits.max_root_bytes as u64).min(super::MANIFEST_HEADER_AND_RECORDS_CEILING),
+                |bytes| async move {
+                    crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
+                        .map_err(StoreError::MalformedManifest)
+                },
             )
             .await?;
-        let records =
-            crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
-                .map_err(StoreError::MalformedManifest)?;
         limit("native manifest roots", records.len(), 1)?;
         let mut resolved = Vec::with_capacity(records.len());
         for record in records {
@@ -970,7 +971,7 @@ impl<V: Vfs> BufferedPartition<V> {
             PreparedExtent::Resident(handle) => Ok(handle),
             PreparedExtent::Load(mut pending) => {
                 self.store
-                    .read_object_exact(cx, key.object(), pending.as_mut())
+                    .read_object_exact(cx, key.object(), key.checksum(), pending.as_mut())
                     .await?;
                 Ok(self.buffer.complete(cx, pending)?)
             }

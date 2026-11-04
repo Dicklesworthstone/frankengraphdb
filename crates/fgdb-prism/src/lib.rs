@@ -41,6 +41,7 @@ mod sealed_control;
 mod sealed_execute;
 mod shortest_path;
 mod target_bfs;
+mod target_bidirectional;
 mod traversal;
 
 pub use call::{
@@ -67,6 +68,7 @@ pub use sealed_execute::{FnxMemoryLimits, FnxSealedExecutionError};
 pub use shortest_path::{
     DijkstraComparison, DijkstraOptions, DijkstraOutput, FNX_DIJKSTRA_EPSILON, dijkstra,
 };
+pub use target_bidirectional::{TargetBfsDecisionCard, TargetBfsSwitch};
 pub use traversal::{
     BfsDecisionCard, BfsPullDecision, ComponentDecisionCard, ComponentPullDecision,
 };

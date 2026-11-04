@@ -999,6 +999,56 @@ fn carried_pattern_counts_feed_exact_aggregates_and_group_by_witness_multiplicit
 }
 
 #[test]
+fn aggregate_all_arguments_preserve_list_quantifiers_and_set_quantifiers() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    for argument in [
+        "ALL(local IN [x] WHERE EXISTS((local)-[:R]->()))",
+        "aLl /* predicate */ (local IN [x] WHERE EXISTS((local)-[:R]->()))",
+        "ALL ALL(local IN [x] WHERE EXISTS((local)-[:R]->()))",
+    ] {
+        let rows = execute(&format!(
+            "{prefix} RETURN count({argument}) AS predicates, \
+             collect({argument}) AS flags, count(ALL x) AS inputs, sum(ALL x.p) AS scores"
+        ));
+        assert_eq!(rows.len(), 1, "{argument}");
+        assert_eq!(rows[0].values()[0].as_count(), Some(4), "{argument}");
+        assert_eq!(
+            rows[0].values()[1].as_value().unwrap().as_list().unwrap(),
+            &[true, true, true, false]
+                .map(|value| GraphValue::Scalar(CanonicalScalar::Bool(value))),
+            "{argument}"
+        );
+        assert_eq!(rows[0].values()[2].as_count(), Some(4), "{argument}");
+        assert_eq!(rows[0].values()[3].as_integer(), Some(8), "{argument}");
+    }
+
+    // A WITH summary and a computed terminal use different aggregate owners.
+    // Both must evaluate the predicate, retaining false and omitting UNKNOWN
+    // from COUNT/COLLECT, including the vacuous truth of an empty list.
+    let rows = execute(
+        "UNWIND [[1,2],[2,null],[0,2],[],null] AS xs \
+         WITH count(ALL(x IN xs WHERE x > 0)) AS known, \
+              collect(ALL(x IN xs WHERE x > 0)) AS flags, count(ALL xs) AS lists \
+         RETURN sum(known) AS known, collect(flags) AS flags, sum(lists) AS lists, \
+                count(ALL(x IN flags WHERE x)) + 1 AS computed",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values()[0].as_integer(), Some(3));
+    let flags = GraphValue::List(
+        [true, false, true]
+            .map(|value| GraphValue::Scalar(CanonicalScalar::Bool(value)))
+            .to_vec()
+            .into(),
+    );
+    assert_eq!(
+        rows[0].values()[1].as_value().unwrap().as_list().unwrap(),
+        &[flags]
+    );
+    assert_eq!(rows[0].values()[2].as_integer(), Some(4));
+    assert_eq!(rows[0].values()[3].as_integer(), Some(2));
+}
+
+#[test]
 fn carried_existence_aggregate_scopes_refuse_private_and_local_bindings_before_catalog() {
     let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
     for tail in [

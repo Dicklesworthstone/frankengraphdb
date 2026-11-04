@@ -576,3 +576,181 @@ fn computed_vertex_empty_results_quotas_late_errors_and_with_pipelines_keep_the_
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn unwind_aggregate_streams_preserve_occurrences_nulls_and_nested_expansion() {
+    let ((), report) = run_async_under_lab(0xa66e_c011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        for (head, value) in [("MATCH (n:L)", "n"), ("MATCH (a)-[r:R]->(b)", "r")] {
+            for (tail, count, nonnull, total) in [
+                (
+                    format!("UNWIND [{value}.price, {value}.qty] AS amount"),
+                    8,
+                    7,
+                    Some(17),
+                ),
+                (
+                    format!(
+                        "WITH {value}.qty AS q UNWIND [q,q] AS qty UNWIND range(1,2) AS factor WITH qty*factor AS amount"
+                    ),
+                    16,
+                    16,
+                    Some(78),
+                ),
+                (
+                    format!(
+                        "UNWIND CASE WHEN {value}.price IS NULL THEN [] ELSE [{value}.price] END AS amount"
+                    ),
+                    3,
+                    3,
+                    Some(4),
+                ),
+                ("UNWIND [] AS amount".to_owned(), 0, 0, None),
+                ("UNWIND null AS amount".to_owned(), 0, 0, None),
+            ] {
+                let text = format!(
+                    "{head} {tail} RETURN COUNT(*) AS occurrences, COUNT(amount) AS nonnull, SUM(amount) AS total"
+                );
+                let prepared = PreparedNativeRead::prepare(&text, &args, symbols()).unwrap();
+                let QueryResult::Rows { columns, rows } =
+                    prepared.execute(&db, &cx, &args, wide()).unwrap()
+                else {
+                    panic!("expected rows for {text}")
+                };
+                let mut cursor = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+                assert_eq!(cursor.columns(), columns, "{text}");
+                assert_eq!(cursor.row_stats().snapshot_records, 0, "lazy preparation");
+                let row = cursor.next().unwrap().unwrap();
+                assert_eq!(row.values()[0].as_count(), Some(count), "{text}");
+                assert_eq!(row.values()[1].as_count(), Some(nonnull), "{text}");
+                match total {
+                    Some(total) => assert_eq!(row.values()[2].as_integer(), Some(total), "{text}"),
+                    None => assert!(row.values()[2].is_null(), "{text}"),
+                }
+                assert_eq!(rows, vec![row.values().to_vec()], "{text}");
+                assert!(cursor.next().is_none());
+                assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            }
+            let grouped = format!(
+                "{head} WITH {value}.kind AS k, {value}.qty AS q UNWIND [k,k] AS bucket RETURN bucket, COUNT(*) AS copies, SUM(q) AS total ORDER BY bucket"
+            );
+            assert_streams_the_eager_outcome(&db, &cx, &grouped, true);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn unwind_aggregate_streams_pin_parameters_and_the_selected_generation() {
+    let ((), report) = run_async_under_lab(0xa66e_c012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let view = db.read_session().unwrap();
+        let text = "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $cut WITH n.qty AS q UNWIND range(1,$last) AS factor RETURN SUM(q*factor) AS total";
+        let args = GqlParameters::new()
+            .with_uint64("cut", 1)
+            .unwrap()
+            .with_int64("last", 2)
+            .unwrap();
+        let prepared = PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
+        let mut pinned = prepared
+            .stream_aggregate_in_view(&view, &cx, &args, wide())
+            .unwrap();
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(VId(0), QTY, Some(CanonicalScalar::Int(10)));
+        db.write(&commit, edit).await.unwrap();
+        let current_args = GqlParameters::new()
+            .with_uint64("cut", 2)
+            .unwrap()
+            .with_int64("last", 3)
+            .unwrap();
+        let mut current = prepared
+            .stream_aggregate(&db, &cx, &current_args, wide())
+            .unwrap();
+        drop(args);
+        drop(current_args);
+        drop(prepared);
+        drop(view);
+        drop(db);
+        assert_eq!(pinned.snapshot_seq(), CommitSeq(1));
+        assert_eq!(current.snapshot_seq(), CommitSeq(2));
+        assert_eq!(
+            pinned.next().unwrap().unwrap().values()[0].as_integer(),
+            Some(39)
+        );
+        assert_eq!(
+            current.next().unwrap().unwrap().values()[0].as_integer(),
+            Some(120)
+        );
+        assert!(pinned.next().is_none() && current.next().is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn unwind_aggregate_streams_enforce_exact_allowances_and_do_not_hide_late_errors() {
+    let ((), report) = run_async_under_lab(0xa66e_c013, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        for (head, value) in [("MATCH (n:L)", "n"), ("MATCH (a)-[r:R]->(b)", "r")] {
+            let text = format!(
+                "{head} WITH {value}.qty AS q UNWIND range(1,32) AS x RETURN SUM(q*x) AS total"
+            );
+            let prepared = PreparedNativeRead::prepare(&text, &args, symbols()).unwrap();
+            let mut full = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+            let expected = full.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(expected[0].values()[0].as_integer(), Some(13 * 528));
+            let rows = full.row_stats();
+            let eval = full.evaluator_stats();
+            assert!(eval.work_units > 0 && eval.scratch_entries > 0);
+            let exact = GqlQueryPolicy::new(
+                rows.snapshot_records,
+                rows.result_rows,
+                eval.work_units,
+                eval.scratch_entries,
+            );
+            assert_eq!(
+                prepared
+                    .stream_aggregate(&db, &cx, &args, exact)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                expected
+            );
+            for quota in [
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, eval.work_units - 1, u64::MAX),
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, eval.scratch_entries - 1),
+            ] {
+                let mut refused = prepared.stream_aggregate(&db, &cx, &args, quota).unwrap();
+                assert!(refused.by_ref().collect::<Result<Vec<_>, _>>().is_err());
+                assert_eq!(refused.state(), VertexScanState::Failed);
+                assert_eq!(refused.row_stats().result_rows, 0);
+                assert!(refused.next().is_none());
+            }
+            for limit in [0, 1] {
+                let bad = format!(
+                    "{head} WITH {value}.qty AS q UNWIND [q,'late bad value'] AS amount RETURN SUM(amount) AS total LIMIT {limit}"
+                );
+                let prepared = PreparedNativeRead::prepare(&bad, &args, symbols()).unwrap();
+                assert!(prepared.execute(&db, &cx, &args, wide()).is_err());
+                let mut refused = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+                assert!(matches!(refused.next(), Some(Err(_))), "{bad}");
+                assert_eq!(refused.row_stats().result_rows, 0);
+                assert!(refused.next().is_none());
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

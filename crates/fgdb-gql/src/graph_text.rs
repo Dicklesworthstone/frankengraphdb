@@ -1421,7 +1421,7 @@ impl<'a> Parser<'a> {
         self.advance()?;
         Ok(true)
     }
-    /// The RETURN/WITH set quantifier `ALL`, unless this `ALL` opens the
+    /// The RETURN/WITH or aggregate-argument set quantifier `ALL`, unless it opens the
     /// openCypher list quantifier `all(x IN list WHERE p)` (fgdb-20foe).
     fn take_all_quantifier(&mut self) -> Result<bool, GraphPatternTextError> {
         if self.starts_list_quantifier()? {

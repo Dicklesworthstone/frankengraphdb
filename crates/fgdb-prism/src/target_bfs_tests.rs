@@ -9,10 +9,26 @@ use std::convert::Infallible;
 
 thread_local! {
     static FORCE_FIFO: Cell<bool> = const { Cell::new(false) };
+    static FORCE_SCALAR_METERING: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(super) fn force_fifo() -> bool {
     FORCE_FIFO.get()
+}
+
+pub(super) fn force_scalar_metering() -> bool {
+    FORCE_SCALAR_METERING.get()
+}
+
+fn with_scalar_metering<T>(forced: bool, run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_SCALAR_METERING.set(self.0);
+        }
+    }
+    let _restore = Restore(FORCE_SCALAR_METERING.replace(forced));
+    run()
 }
 
 fn with_fifo<T>(forced: bool, run: impl FnOnce() -> T) -> T {
@@ -81,6 +97,139 @@ fn limits(rows: usize) -> FnxExecutionLimits {
     }
 }
 
+/// Literal decoded predecessor, retained only for cancellation/error-order
+/// differentials and same-invocation complete-CALL measurement. It deliberately
+/// does not use the production bitmap initialization or row-batching loops.
+pub(super) fn scalar_run<C>(
+    graph: &SnapshotGraphView,
+    source: VId,
+    target: VId,
+    cutoff: Option<usize>,
+    row_limit: usize,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
+    let source = graph
+        .vertex_ordinal(source)
+        .ok_or(FnxExecutionError::UnknownSource(source))?;
+    let target = graph
+        .vertex_ordinal(target)
+        .ok_or(FnxExecutionError::UnknownTarget(target))?;
+    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+    if one_hop(source, target, cutoff) {
+        let mut state = OneHop::new(graph.node_count(), source, target)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+        let row = graph
+            .neighbors_indices(source)
+            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        for &neighbor in row {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            state.visit(neighbor)?;
+        }
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+        admit("result rows", state.row_count(), row_limit)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+        Ok((state.finish(), 0))
+    } else {
+        let mut state = Search::new(graph.node_count(), source, target, cutoff, usize::MAX)?;
+        loop {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            match state.step()? {
+                Step::Scalar => {}
+                Step::Complete => break,
+                Step::Open(vertex) => {
+                    let row = graph
+                        .neighbors_indices(vertex)
+                        .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                    for &neighbor in row {
+                        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+                        state.visit(neighbor)?;
+                    }
+                    state.end_row()?;
+                }
+            }
+        }
+        admit("result rows", state.row_count(), row_limit)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+        Ok(state.finish())
+    }
+}
+
+#[derive(Default)]
+struct Meter {
+    units: usize,
+    calls: usize,
+    largest_run: usize,
+    polls: usize,
+    stop: Option<usize>,
+    stopped: bool,
+}
+
+impl FnxMeter<usize> for Meter {
+    fn unit(&mut self) -> Result<(), usize> {
+        self.units(1)
+    }
+
+    fn units(&mut self, count: usize) -> Result<(), usize> {
+        assert!(!self.stopped, "no work after refusal");
+        assert!((1..=FNX_METER_RUN).contains(&count));
+        self.calls += 1;
+        self.largest_run = self.largest_run.max(count);
+        if let Some(stop) = self.stop
+            && self.units + count >= stop
+        {
+            self.units = stop;
+            self.stopped = true;
+            return Err(stop);
+        }
+        self.units += count;
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Result<(), usize> {
+        assert!(!self.stopped, "no poll after refusal");
+        self.polls += 1;
+        Ok(())
+    }
+}
+
+impl FnxMeter<usize> for &mut Meter {
+    fn unit(&mut self) -> Result<(), usize> {
+        (**self).unit()
+    }
+
+    fn units(&mut self, count: usize) -> Result<(), usize> {
+        (**self).units(count)
+    }
+
+    fn poll(&mut self) -> Result<(), usize> {
+        (**self).poll()
+    }
+}
+
+fn same_kernel(
+    actual: Result<(KernelOutput, usize), FnxExecutionError<usize>>,
+    expected: Result<(KernelOutput, usize), FnxExecutionError<usize>>,
+) {
+    match (actual, expected) {
+        (Ok((actual, actual_workspace)), Ok((expected, expected_workspace))) => {
+            let distance = |values| match values {
+                KernelValues::TargetHopDistance { target, distance } => (target, distance),
+                _ => panic!("expected a one-target integer distance"),
+            };
+            assert_eq!(distance(actual.values), distance(expected.values));
+            assert_eq!(actual.row_count, expected.row_count);
+            assert_eq!(actual.witness, expected.witness);
+            assert_eq!(actual_workspace, expected_workspace);
+        }
+        (Err(actual), Err(expected)) => assert_eq!(format!("{actual:?}"), format!("{expected:?}")),
+        (actual, expected) => panic!(
+            "different success/refusal: actual={} expected={}",
+            actual.is_ok(),
+            expected.is_ok()
+        ),
+    }
+}
+
 /// Independent min-plus transitive closure over input edges, not the
 /// production frontier, bitset, row driver, or all-source implementation.
 fn distances(n: usize, pairs: &[(usize, usize)], direction: Directedness) -> Vec<Vec<usize>> {
@@ -114,6 +263,7 @@ fn distances(n: usize, pairs: &[(usize, usize)], direction: Directedness) -> Vec
 
 #[test]
 fn every_small_target_and_cutoff_matches_independent_min_plus_closure() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     for direction in [
         Directedness::Directed,
         Directedness::Reversed,
@@ -173,6 +323,7 @@ fn every_small_target_and_cutoff_matches_independent_min_plus_closure() {
 
 #[test]
 fn bitmap_word_boundaries_charge_exact_capacity_and_never_open_a_target_row() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     for n in [2, 63, 64, 65, 127, 128, 129] {
         let pairs: Vec<_> = (0..n - 1).map(|source| (source, source + 1)).collect();
         let view = graph(n, &pairs, Directedness::Directed);
@@ -229,6 +380,7 @@ fn one_hop_state_does_not_allocate_population_sized_buffers() {
 
 #[test]
 fn one_hop_decoded_kernel_work_depends_only_on_the_source_row() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     let mut expected_checks = None;
     for n in [3, 65, 8193] {
         let view = graph(n, &[(0, 0), (0, 1), (0, 2)], Directedness::Directed);
@@ -255,6 +407,7 @@ fn one_hop_decoded_kernel_work_depends_only_on_the_source_row() {
 
 #[test]
 fn one_hop_public_calls_match_the_fifo_predecessor_and_leave_other_cutoffs_unchanged() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     for direction in [
         Directedness::Directed,
         Directedness::Reversed,
@@ -307,6 +460,7 @@ fn one_hop_public_calls_match_the_fifo_predecessor_and_leave_other_cutoffs_uncha
 #[test]
 #[ignore = "manual paired public-CALL measurement; run with --release --nocapture"]
 fn one_hop_public_call_paired_measurement() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     use std::hint::black_box;
     use std::time::Instant;
 
@@ -417,6 +571,7 @@ fn one_hop_public_call_paired_measurement() {
 
 #[test]
 fn target_only_result_admission_endpoint_errors_and_trivial_workspace_are_exact() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     let view = graph(
         5,
         &[(0, 1), (1, 2), (2, 3), (0, 0), (0, 1)],
@@ -464,6 +619,7 @@ fn target_only_result_admission_endpoint_errors_and_trivial_workspace_are_exact(
 
 #[test]
 fn an_early_target_avoids_the_rest_of_the_reachable_component() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     let n = 257;
     let pairs: Vec<_> = (0..n - 1).map(|source| (source, source + 1)).collect();
     let view = graph(n, &pairs, Directedness::Directed);
@@ -484,6 +640,7 @@ fn an_early_target_avoids_the_rest_of_the_reachable_component() {
 
 #[test]
 fn every_decoded_checkpoint_refuses_without_a_partial_result() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
     let view = graph(
         7,
         &[(0, 1), (0, 2), (1, 3), (2, 4), (3, 5), (4, 6)],
@@ -504,6 +661,267 @@ fn every_decoded_checkpoint_refuses_without_a_partial_result() {
                 if seen == stop { Err(stop) } else { Ok(()) }
             }), Err(FnxExecutionError::Cancelled(at)) if at == stop));
             assert_eq!(seen, stop);
+        }
+    }
+}
+
+#[test]
+fn decoded_runs_keep_scalar_results_and_every_refusal_ordinal() {
+    // Cross both the 64-word bitmap initialization boundary and multiple
+    // 64-edge runs. The final population vertex is deliberately isolated.
+    let n = 64 * FNX_METER_RUN + 5;
+    let width = 2 * FNX_METER_RUN + 3;
+    let mut pairs = vec![(0, 0), (0, 1), (0, 1)];
+    for target in 1..=width {
+        pairs.push((0, target));
+        pairs.push((target, width + 1));
+    }
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        let view = graph(n, &pairs, direction);
+        for (source, target, cutoff) in [
+            (0, 0, None),
+            (0, 1, Some(0)),
+            (0, 1, None),
+            (0, width, Some(1)),
+            (0, width + 1, Some(1)),
+            (0, width + 1, Some(2)),
+            (0, n - 1, None),
+            (1, 0, None),
+            (n - 1, 0, None),
+            (n, n, Some(0)),
+            (0, n, None),
+        ] {
+            for row_limit in [0, 1] {
+                let mut scalar = Meter::default();
+                let expected = scalar_run(
+                    &view,
+                    vertex(source),
+                    vertex(target),
+                    cutoff,
+                    row_limit,
+                    &mut scalar,
+                );
+                let mut batched = Meter::default();
+                let actual = run(
+                    &view,
+                    vertex(source),
+                    vertex(target),
+                    cutoff,
+                    row_limit,
+                    &mut batched,
+                );
+                same_kernel(actual, expected);
+                assert_eq!(batched.units, scalar.units);
+                assert_eq!(batched.polls, scalar.polls);
+                if source < n && target < n && !trivial(source, target, cutoff) {
+                    let full_run = !one_hop(source, target, cutoff)
+                        || view.neighbors_indices(source).unwrap().len() >= FNX_METER_RUN;
+                    if full_run {
+                        assert_eq!(batched.largest_run, FNX_METER_RUN);
+                        assert!(batched.calls < scalar.calls);
+                    }
+                }
+                // The next unit after a result-row or endpoint refusal must
+                // not replace that earlier error with cancellation. Include
+                // that cut as well as every successful scalar work unit.
+                for stop in 1..=scalar.units + 1 {
+                    let mut scalar = Meter {
+                        stop: Some(stop),
+                        ..Meter::default()
+                    };
+                    let expected = scalar_run(
+                        &view,
+                        vertex(source),
+                        vertex(target),
+                        cutoff,
+                        row_limit,
+                        &mut scalar,
+                    );
+                    let mut batched = Meter {
+                        stop: Some(stop),
+                        ..Meter::default()
+                    };
+                    let actual = run(
+                        &view,
+                        vertex(source),
+                        vertex(target),
+                        cutoff,
+                        row_limit,
+                        &mut batched,
+                    );
+                    same_kernel(actual, expected);
+                    assert_eq!(batched.units, scalar.units);
+                    assert_eq!(batched.stopped, scalar.stopped);
+                    assert_eq!(batched.polls, scalar.polls);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn decoded_metering_keeps_complete_call_certificates_and_scalar_callbacks() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
+    let n = 2 * FNX_METER_RUN + 5;
+    let pairs: Vec<_> = (0..n - 1)
+        .flat_map(|target| [(0, target), (target, (target + 1) % (n - 1))])
+        .collect();
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        let view = graph(n, &pairs, direction);
+        for target in [0, 1, n - 2, n - 1] {
+            for cutoff in [None, Some(0), Some(1), Some(2)] {
+                let call = FnxCallSpec::shortest_path_length(vertex(0), vertex(target), cutoff);
+                let mut scalar = Meter::default();
+                let expected = with_scalar_metering(true, || {
+                    call.execute(&view, limits(1), &mut scalar).unwrap()
+                });
+                let mut batched = Meter::default();
+                let actual = call.execute(&view, limits(1), &mut batched).unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(batched.units, scalar.units);
+                assert_eq!(batched.polls, scalar.polls);
+                let mut callback_units = 0;
+                let callback = call
+                    .execute(&view, limits(1), || {
+                        callback_units += 1;
+                        Ok::<_, usize>(())
+                    })
+                    .unwrap();
+                assert_eq!(callback, expected);
+                assert_eq!(callback_units, scalar.units + scalar.polls);
+                // Exercise actual public-call cancellation inside and across
+                // the row runs, alongside the final certified result boundary.
+                for stop in [
+                    1,
+                    FNX_METER_RUN,
+                    n + FNX_METER_RUN,
+                    scalar.units,
+                    scalar.units + 1,
+                ] {
+                    let execute = |forced| {
+                        let mut observed = 0;
+                        let output = with_scalar_metering(forced, || {
+                            call.execute(&view, limits(1), || {
+                                observed += 1;
+                                if observed == stop { Err(stop) } else { Ok(()) }
+                            })
+                        });
+                        (output.map_err(|error| format!("{error:?}")), observed)
+                    };
+                    assert_eq!(execute(false), execute(true));
+                }
+            }
+        }
+    }
+}
+
+/// Same-invocation maintenance comparison of complete public calls against
+/// the literal scalar-metered predecessor. Both use the same target algorithm
+/// and include admission, allocation, certified execution, typed-result
+/// consumption and kernel cleanup. Projection construction, durable I/O, wire
+/// encoding and real host authority/clock checks are outside this measurement;
+/// the opaque meter only makes each host call observable. No GAPBS win claim.
+#[test]
+#[ignore = "manual paired target-metering public-CALL measurement; release, one test thread"]
+fn decoded_metering_public_call_paired_measurement() {
+    let _forward = crate::target_bidirectional::tests::force_forward();
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    #[derive(Default)]
+    struct OpaqueMeter {
+        units: usize,
+        calls: usize,
+    }
+    impl FnxMeter<Infallible> for &mut OpaqueMeter {
+        fn unit(&mut self) -> Result<(), Infallible> {
+            self.units(1)
+        }
+
+        #[inline(never)]
+        fn units(&mut self, count: usize) -> Result<(), Infallible> {
+            self.units = black_box(self.units + count);
+            self.calls = black_box(self.calls + 1);
+            Ok(())
+        }
+
+        #[inline(never)]
+        fn poll(&mut self) -> Result<(), Infallible> {
+            self.calls = black_box(self.calls + 1);
+            Ok(())
+        }
+    }
+
+    for n in [4096, 65_536] {
+        let hub: Vec<_> = (0..n - 1).map(|target| (0, target)).collect();
+        let chain: Vec<_> = (0..n - 1).map(|source| (source, source + 1)).collect();
+        for (shape, pairs, target, cutoff) in [
+            ("hub_reachable_fifo", &hub, n - 2, None),
+            ("hub_unreachable_fifo", &hub, n - 1, None),
+            ("hub_reachable_one_hop", &hub, n - 2, Some(1)),
+            ("hub_unreachable_one_hop", &hub, n - 1, Some(1)),
+            ("chain_early_fifo", &chain, 1, None),
+            ("chain_full_fifo", &chain, n - 1, None),
+            ("chain_one_hop", &chain, 1, Some(1)),
+        ] {
+            let view = graph_with_workspace(n, pairs, Directedness::Directed, 1 << 29);
+            let call = FnxCallSpec::shortest_path_length(vertex(0), vertex(target), cutoff);
+            let mut samples = [Vec::new(), Vec::new()];
+            let mut accounting = [(0, 0); 2];
+            let mut expected = None;
+            // Warm both participants before recording, then alternate order
+            // so source-hash caching and machine drift do not favor one side.
+            for trial in 0..22 {
+                for turn in 0..2 {
+                    let participant = (trial + turn) % 2;
+                    let mut meter = OpaqueMeter::default();
+                    let (result, elapsed) = with_scalar_metering(participant == 0, || {
+                        let start = Instant::now();
+                        let result = call
+                            .execute(black_box(&view), limits(1), &mut meter)
+                            .unwrap();
+                        let consumed = result.rows.iter().flatten().fold(0u128, |sum, value| {
+                            sum ^ match value {
+                                FnxValue::Vertex(vertex) => vertex.0,
+                                FnxValue::Integer(distance) => u128::from(*distance),
+                                _ => panic!("expected a one-target integer distance"),
+                            }
+                        });
+                        black_box((consumed, &result.certificate));
+                        (result, start.elapsed().as_nanos())
+                    });
+                    assert_eq!(expected.get_or_insert_with(|| result.clone()), &result);
+                    accounting[participant] = (meter.units, meter.calls);
+                    if trial != 0 {
+                        samples[participant].push(elapsed);
+                    }
+                }
+            }
+            assert_eq!(accounting[0].0, accounting[1].0);
+            assert!(accounting[1].1 <= accounting[0].1);
+            for values in &mut samples {
+                values.sort_unstable();
+            }
+            eprintln!(
+                "target_metering_public_call shape={shape} n={n} arcs={} pairs=21 scalar_p50_ns={} batched_p50_ns={} scalar_p95_ns={} batched_p95_ns={} scalar_units={} batched_units={} scalar_meter_calls={} batched_meter_calls={} parity=exact_full_result_and_certificate scope=prebuilt_projection_call_maintenance",
+                pairs.len(),
+                samples[0][10],
+                samples[1][10],
+                samples[0][19],
+                samples[1][19],
+                accounting[0].0,
+                accounting[1].0,
+                accounting[0].1,
+                accounting[1].1,
+            );
         }
     }
 }

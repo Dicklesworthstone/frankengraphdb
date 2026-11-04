@@ -3,7 +3,7 @@ use crate::recovery::tests::{
     WakeCounter, WireIo, WireState, fail_after_marker, served, settled, vertex,
 };
 use asupersync::lab::run_async_under_lab;
-use fgdb_protocol::body::{SubscriptionBatch, SubscriptionReset};
+use fgdb_protocol::body::{ReadBatchResultChunk, SubscriptionBatch, SubscriptionReset};
 use fgdb_types::{CommitSeq, PurposeContexts};
 use std::future::Future;
 use std::sync::atomic::Ordering;
@@ -369,6 +369,99 @@ fn recovery_resets_credit_blocked_subscriptions_at_the_last_complete_batch() {
                 settled(db).await,
                 crate::DatabaseStatus::Ready { generation: 2 }
             ));
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn recovery_refuses_consistent_read_batches_before_send_and_while_credit_blocked() {
+    let ((), report) = run_async_under_lab(0x79a0_0109, |root| async move {
+        for before_first_byte in [true, false] {
+            let (server, token, _) = served(
+                &root,
+                if before_first_byte {
+                    "read-batch-unwritten"
+                } else {
+                    "read-batch-credit"
+                },
+            )
+            .await;
+            let db = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), vertex(1))
+                .await
+                .unwrap();
+            let (mut lane, wire) = lane(
+                &root,
+                db,
+                &token,
+                if before_first_byte { vec![0] } else { vec![] },
+                false,
+            );
+            let waiter = server.shutdown.waiter();
+            let mut execution = Box::pin(lane.execute_statement(
+                &root,
+                &waiter,
+                db,
+                &token,
+                1,
+                Statement::ReadBatch(ExecuteBatch {
+                    statement: "MATCH (n) RETURN 7 AS value".into(),
+                    argument_sets: vec![vec![], vec![]],
+                }),
+            ));
+            poll_fn(|task| {
+                assert!(execution.as_mut().poll(task).is_pending());
+                if wire.writes.load(Ordering::Acquire) > 0 {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            let before = frames(&wire.bytes());
+            if before_first_byte {
+                assert!(before.is_empty());
+            } else {
+                assert!(!before.is_empty());
+                assert!(
+                    before
+                        .iter()
+                        .all(|frame| frame.header().kind() == FrameKind::ReadBatchResultChunk)
+                );
+                assert!(before.iter().all(|frame| {
+                    ReadBatchResultChunk::decode(frame.payload()).unwrap().seq == 1
+                }));
+            }
+            // The batch released its execution locks after complete native
+            // admission. A failed concurrent write can therefore retire its
+            // generation even while delivery waits for I/O or row credit.
+            fail_after_marker(&root, db, 99).await;
+            assert!(execution.await.is_ok());
+            let sent = frames(&wire.bytes());
+            assert_eq!(sent.len(), before.len() + 1);
+            let terminal = sent.last().unwrap();
+            assert_eq!(terminal.header().kind(), FrameKind::Error);
+            assert_eq!(terminal.header().request_id(), 1);
+            assert!(!terminal.header().stream_id().is_control());
+            assert!(matches!(
+                ErrorBody::decode(terminal.payload()).unwrap().code,
+                ErrorCode::DatabaseRecovering | ErrorCode::DatabaseUnavailable,
+            ));
+            assert!(
+                !sent
+                    .iter()
+                    .any(|frame| frame.header().kind() == FrameKind::ReadBatchResultEnd)
+            );
+            assert_eq!(lane.conn.children_in_flight(), 0);
+            assert_eq!(lane.conn.sends_in_flight(), 0);
+            settled(db).await;
             server.join_database_workers(&root).await;
         }
     });

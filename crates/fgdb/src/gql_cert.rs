@@ -633,6 +633,7 @@ pub struct NativeProcedureEvidence {
     /// What that code produced and at what cost: Prism's result digest, the
     /// adapter path, projection and work sizes, complexity witness and typed
     /// traversal direction decisions. The v3 evidence domain excludes root identity.
+    /// Target BFS appends a versioned extension only when its decision card is present.
     pub evidence_digest: Digest,
 }
 
@@ -726,6 +727,36 @@ impl NativeProcedureEvidence {
         } else {
             evidence.update(&[0]);
         }
+        // No absent-card tag: calls without this extension retain their exact
+        // v3 evidence bytes. The decisions bind directly, without importing
+        // Prism's projection, snapshot or whole-certificate identity.
+        if let Some(card) = &certificate.target_bfs_decision_card {
+            evidence.update(NATIVE_PROCEDURE_TARGET_BFS_DECISION_DOMAIN_V1);
+            evidence.update(&card.policy_version.to_be_bytes());
+            update_string(&mut evidence, card.fallback);
+            for number in [
+                card.dwell_layers,
+                card.switch_cost_multiplier,
+                card.switches.len(),
+            ] {
+                evidence.update(&(number as u64).to_be_bytes());
+            }
+            for decision in &card.switches {
+                evidence.update(&[u8::from(decision.reverse)]);
+                for number in [
+                    decision.forward_depth,
+                    decision.reverse_depth,
+                    decision.forward_vertices,
+                    decision.reverse_vertices,
+                    decision.forward_arcs,
+                    decision.reverse_arcs,
+                    decision.benefit_lower,
+                    decision.benefit_upper,
+                ] {
+                    evidence.update(&(number as u64).to_be_bytes());
+                }
+            }
+        }
         Self {
             call_digest: certificate.call_digest,
             kernel_digest: kernel.finalize(),
@@ -790,6 +821,8 @@ const NATIVE_RESULT_CERTIFICATE_VERSION_V3: u8 = 3;
 const MAX_CERTIFICATE_STATEMENT_TIME_BYTES: usize = 512;
 const NATIVE_PROCEDURE_KERNEL_DOMAIN_V1: &[u8] = b"fgdb:native-procedure-kernel:v1";
 const NATIVE_PROCEDURE_EVIDENCE_DOMAIN_V3: &[u8] = b"fgdb:native-procedure-evidence:v3";
+const NATIVE_PROCEDURE_TARGET_BFS_DECISION_DOMAIN_V1: &[u8] =
+    b"fgdb:native-procedure-target-bfs-decision:v1";
 
 /// Decode error for the versioned portable certificate envelope. Every
 /// refusal is explicit: version, length, magic, or trailing bytes.
@@ -1276,6 +1309,7 @@ mod tests {
         use fgdb_prism::{
             AdapterPath, BfsDecisionCard, BfsPullDecision, ComplexityWitness,
             ComponentDecisionCard, ComponentPullDecision, FnxCertificate, SnapshotBinding,
+            TargetBfsDecisionCard, TargetBfsSwitch,
         };
         use fgdb_types::ids::ObjectId;
 
@@ -1332,6 +1366,7 @@ mod tests {
                     incidence_visits: 11,
                 }],
             }),
+            target_bfs_decision_card: None,
             witness: ComplexityWitness {
                 algorithm: "bfs".to_owned(),
                 complexity_claim: "O(n + m)".to_owned(),
@@ -1435,6 +1470,118 @@ mod tests {
                 "component field={at}"
             );
         }
+        let mut target = certificate.clone();
+        target.target_bfs_decision_card = Some(TargetBfsDecisionCard {
+            policy_version: 1,
+            fallback: "forward_fifo",
+            dwell_layers: 1,
+            switch_cost_multiplier: 2,
+            switches: vec![
+                TargetBfsSwitch {
+                    reverse: true,
+                    forward_depth: 0,
+                    reverse_depth: 1,
+                    forward_vertices: 12,
+                    reverse_vertices: 2,
+                    forward_arcs: 120,
+                    reverse_arcs: 8,
+                    benefit_lower: 112,
+                    benefit_upper: 122,
+                },
+                TargetBfsSwitch {
+                    reverse: false,
+                    forward_depth: 1,
+                    reverse_depth: 2,
+                    forward_vertices: 3,
+                    reverse_vertices: 14,
+                    forward_arcs: 9,
+                    reverse_arcs: 180,
+                    benefit_lower: 170,
+                    benefit_upper: 182,
+                },
+            ],
+        });
+        // Independently specify the extension, including the ordered bool
+        // tags and fixed-width integers. None above emitted no extra bytes.
+        let mut target_transcript = transcript.clone();
+        target_transcript.extend_from_slice(b"fgdb:native-procedure-target-bfs-decision:v1");
+        target_transcript.extend_from_slice(&1_u16.to_be_bytes());
+        text(&mut target_transcript, "forward_fifo");
+        for number in [1_u64, 2, 2] {
+            target_transcript.extend_from_slice(&number.to_be_bytes());
+        }
+        target_transcript.push(1);
+        for number in [0_u64, 1, 12, 2, 120, 8, 112, 122] {
+            target_transcript.extend_from_slice(&number.to_be_bytes());
+        }
+        target_transcript.push(0);
+        for number in [1_u64, 2, 3, 14, 9, 180, 170, 182] {
+            target_transcript.extend_from_slice(&number.to_be_bytes());
+        }
+        let target_evidence = super::NativeProcedureEvidence::from_fnx(&target);
+        assert_eq!(target_evidence.evidence_digest, hash(&target_transcript));
+        assert_eq!(target_evidence.call_digest, actual.call_digest);
+        assert_eq!(target_evidence.kernel_digest, actual.kernel_digest);
+        assert_ne!(target_evidence.evidence_digest, actual.evidence_digest);
+
+        let mutations: [fn(&mut TargetBfsDecisionCard); 15] = [
+            |card| card.policy_version += 1,
+            |card| card.fallback = "different_fallback",
+            |card| card.dwell_layers += 1,
+            |card| card.switch_cost_multiplier += 1,
+            |card| card.switches[0].reverse = !card.switches[0].reverse,
+            |card| card.switches[0].forward_depth += 1,
+            |card| card.switches[0].reverse_depth += 1,
+            |card| card.switches[0].forward_vertices += 1,
+            |card| card.switches[0].reverse_vertices += 1,
+            |card| card.switches[0].forward_arcs += 1,
+            |card| card.switches[0].reverse_arcs += 1,
+            |card| card.switches[0].benefit_lower += 1,
+            |card| card.switches[0].benefit_upper += 1,
+            |card| card.switches.push(card.switches[0].clone()),
+            |card| card.switches.swap(0, 1),
+        ];
+        for (at, mutate) in mutations.into_iter().enumerate() {
+            let mut changed = target.clone();
+            mutate(changed.target_bfs_decision_card.as_mut().unwrap());
+            let changed = super::NativeProcedureEvidence::from_fnx(&changed);
+            assert_eq!(target_evidence.call_digest, changed.call_digest);
+            assert_eq!(target_evidence.kernel_digest, changed.kernel_digest);
+            assert_ne!(
+                target_evidence.evidence_digest, changed.evidence_digest,
+                "target field={at}"
+            );
+        }
+        let mutations: [fn(&mut FnxCertificate); 4] = [
+            |certificate| certificate.snapshot.root = ObjectId([7; 32]),
+            |certificate| certificate.snapshot.as_of = CommitSeq(18),
+            |certificate| certificate.projection_digest = Digest([8; 32]),
+            |certificate| certificate.digest = Digest([9; 32]),
+        ];
+        for (at, mutate) in mutations.into_iter().enumerate() {
+            let mut changed = target.clone();
+            mutate(&mut changed);
+            assert_eq!(
+                target_evidence,
+                super::NativeProcedureEvidence::from_fnx(&changed),
+                "root-bound field={at} must remain outside native procedure evidence"
+            );
+        }
+        target
+            .target_bfs_decision_card
+            .as_mut()
+            .unwrap()
+            .switches
+            .clear();
+        let empty_target = super::NativeProcedureEvidence::from_fnx(&target);
+        assert_ne!(
+            empty_target.evidence_digest,
+            target_evidence.evidence_digest
+        );
+        assert_ne!(empty_target.evidence_digest, actual.evidence_digest);
+        target.target_bfs_decision_card = None;
+        assert_eq!(super::NativeProcedureEvidence::from_fnx(&target), actual);
+
         let mut absent = certificate;
         absent.bfs_decision_card = None;
         absent.component_decision_card = None;

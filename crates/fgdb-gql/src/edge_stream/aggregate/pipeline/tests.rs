@@ -815,3 +815,410 @@ fn vertex_with_all_filtered_inputs_yield_and_resume_without_a_new_budget() {
     assert_eq!(closed.row_stats().snapshot_records, 0);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn nested_unwind_groups_keep_duplicate_occurrences_and_match_batch_on_both_sources() {
+    let values = [Some(2), None, Some(-1), Some(2)];
+    for (vertex, text) in [
+        (true, "MATCH (n) WITH n.p AS p"),
+        (false, "MATCH (a)-[r:R]->(b) WITH r.p AS p"),
+    ] {
+        let query = prepare(&format!(
+            "{text} UNWIND [p,p+1,NULL] AS x UNWIND [x,x] AS y \
+             WITH y WHERE y IS NOT NULL RETURN y,COUNT(*) AS n,SUM(y) AS total,\
+             COUNT(DISTINCT y) AS support GROUP BY y"
+        ));
+        let source = Source::new(&values);
+        let (expected, actual, records) = if vertex {
+            let expected = eager_vertex(&query, &source);
+            let mut stream = vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()));
+            let actual = stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            (expected, actual, stream.row_stats().snapshot_records)
+        } else {
+            let expected = eager(&query, &source);
+            let mut stream = cursor(&query, source, wide(), || Ok::<_, ()>(()));
+            let actual = stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            (expected, actual, stream.row_stats().snapshot_records)
+        };
+        assert_eq!(actual, expected);
+        assert_eq!(records, 4, "generated rows are not new source records");
+        // Independent occurrence oracle: every nonnull p contributes twice
+        // to p and twice to p+1, independently of the source identity/order.
+        let mut groups = BTreeMap::<i64, u64>::new();
+        for p in values.into_iter().flatten() {
+            *groups.entry(p).or_default() += 2;
+            *groups.entry(p + 1).or_default() += 2;
+        }
+        assert_eq!(actual.len(), groups.len());
+        for (row, (key, count)) in actual.iter().zip(groups) {
+            assert_eq!(row.keys(), &[GraphValue::Scalar(CanonicalScalar::Int(key))]);
+            assert_eq!(row.values()[0].as_count(), Some(count));
+            assert_eq!(
+                row.values()[1].as_integer(),
+                Some(i128::from(key) * i128::from(count))
+            );
+            assert_eq!(row.values()[2].as_count(), Some(1));
+        }
+    }
+}
+
+#[test]
+fn unwind_null_and_empty_lists_drop_only_their_own_source_occurrence() {
+    for text in [
+        "MATCH (n) WITH n.p AS p",
+        "MATCH (a)-[r:R]->(b) WITH r.p AS p",
+    ] {
+        let query = prepare(&format!(
+            "{text} UNWIND CASE WHEN p IS NULL THEN NULL WHEN p=0 THEN [] \
+             ELSE [p,p] END AS x RETURN COUNT(*) AS n,SUM(x) AS total"
+        ));
+        let values = [None, Some(0), Some(2), Some(1)];
+        let source = Source::new(&values);
+        let (expected, actual) = if text.starts_with("MATCH (n)") {
+            (
+                eager_vertex(&query, &source),
+                vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+            )
+        } else {
+            (
+                eager(&query, &source),
+                cursor(&query, source, wide(), || Ok::<_, ()>(()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].values()[0].as_count(), Some(4));
+        assert_eq!(actual[0].values()[1].as_integer(), Some(6));
+    }
+    let query =
+        prepare("MATCH (n) WITH n.p AS p UNWIND [] AS x RETURN COUNT(*) AS n,SUM(x) AS total");
+    let rows = vertex_cursor(&query, Source::new(&[Some(7), None]), wide(), || {
+        Ok::<_, ()>(())
+    })
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values()[0].as_count(), Some(0));
+    assert!(rows[0].values()[1].is_null());
+    let query = prepare("MATCH (n) WITH n.p AS p UNWIND [] AS x RETURN x,COUNT(*) AS n GROUP BY x");
+    assert!(
+        vertex_cursor(&query, Source::new(&[Some(7)]), wide(), || Ok::<_, ()>(()))
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn expanded_late_errors_precede_results_and_filters_do_not_execute_rejected_suffixes() {
+    for suffix in [
+        "UNWIND [2,0] AS x WITH 12/x AS unused RETURN COUNT(*) AS n LIMIT 0",
+        "UNWIND [1,0] AS x UNWIND [12/x] AS y RETURN COUNT(*) AS n LIMIT 1",
+        "UNWIND [[],[1],5] AS xs UNWIND xs AS x RETURN COUNT(*) AS n LIMIT 1",
+    ] {
+        let edge = prepare(&format!("MATCH (a)-[r:R]->(b) WITH r.p AS p {suffix}"));
+        let mut stream = cursor(&edge, Source::new(&[Some(1)]), wide(), || Ok::<_, ()>(()));
+        assert!(
+            matches!(
+                stream.next(),
+                Some(Err(GqlQueryError::Source(
+                    GraphAggregateError::InputRelation(GraphSetExecutionError::Projection {
+                        row: 0,
+                        ..
+                    })
+                )))
+            ),
+            "{suffix}"
+        );
+        assert_eq!(stream.row_stats().result_rows, 0);
+        assert_eq!(stream.state(), EdgeScanState::Failed);
+        assert!(stream.next().is_none());
+        let vertex = prepare(&format!("MATCH (n) WITH n.p AS p {suffix}"));
+        let mut stream =
+            vertex_cursor(&vertex, Source::new(&[Some(1)]), wide(), || Ok::<_, ()>(()));
+        assert!(
+            matches!(
+                stream.next(),
+                Some(Err(GqlQueryError::Source(
+                    GraphAggregateError::InputRelation(GraphSetExecutionError::Projection {
+                        row: 0,
+                        ..
+                    })
+                )))
+            ),
+            "{suffix}"
+        );
+        assert_eq!(stream.row_stats().result_rows, 0);
+        assert_eq!(stream.state(), VertexScanState::Failed);
+        assert!(stream.next().is_none());
+    }
+    let query = prepare(
+        "MATCH (n) WITH n.p AS p UNWIND [0,3,4] AS x WITH x WHERE x>0 \
+        UNWIND [12/x] AS y RETURN COUNT(*) AS n,SUM(y) AS total",
+    );
+    let row = vertex_cursor(&query, Source::new(&[Some(1)]), wide(), || Ok::<_, ()>(()))
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.values()[0].as_count(), Some(2));
+    assert_eq!(row.values()[1].as_integer(), Some(7));
+    let query = prepare("MATCH (n) WITH n.p AS p UNWIND [] AS x RETURN COUNT(*) AS n LIMIT 0");
+    let mut source = Source::new(&[Some(1), Some(2)]);
+    source.fault = Some(EId(1));
+    let mut stream = vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()));
+    assert!(matches!(
+        stream.next(),
+        Some(Err(GqlQueryError::Source(GraphAggregateError::Source(_))))
+    ));
+    assert_eq!(stream.row_stats().result_rows, 0);
+}
+
+#[test]
+fn expanding_admission_keeps_order_barriers_and_reader_or_ordinal_effects() {
+    for prefix in [
+        "MATCH (n) WITH n.p AS p",
+        "MATCH (a)-[r:R]->(b) WITH r.p AS p",
+    ] {
+        for suffix in [
+            "UNWIND [p] AS x WITH DISTINCT x RETURN COUNT(*) AS n",
+            "UNWIND [p] AS x WITH x ORDER BY x RETURN COUNT(*) AS n",
+            "UNWIND [p] AS x WITH x LIMIT 0 RETURN COUNT(*) AS n",
+            "UNWIND [p] AS x RETURN COLLECT(x) AS xs",
+            "UNWIND CASE WHEN TRUE THEN [p] ELSE [rand()] END AS x RETURN COUNT(*) AS n",
+        ] {
+            let query = prepare(&format!("{prefix} {suffix}"));
+            if prefix.starts_with("MATCH (n)") {
+                assert!(VertexAggregatePlan::compile(&query).is_err(), "{suffix}");
+            } else {
+                assert!(EdgeAggregatePlan::compile(&query).is_err(), "{suffix}");
+            }
+        }
+    }
+    let query = prepare("MATCH (n) WITH n AS v UNWIND [v] AS x WITH x.p AS p RETURN COUNT(*) AS n");
+    assert!(
+        VertexAggregatePlan::compile(&query).is_err(),
+        "carried element read was erased"
+    );
+    let query = prepare("MATCH (n) WITH n.p AS p UNWIND [p,p] AS x RETURN COUNT(*) AS n");
+    assert!(InputPipeline::prepare_expanding(&query).is_some());
+    assert!(
+        InputPipeline::prepare(&query).is_none(),
+        "one-row spill adapter admitted fanout"
+    );
+    assert!(InputPipeline::prepare_with_element_reads(&query).is_none());
+}
+
+#[test]
+fn unwind_edge_checkpoint_cuts_and_exact_limits_cover_the_complete_expansion() {
+    let query = prepare(
+        "MATCH (a)-[r:R]->(b) WITH r.p AS p UNWIND range(1,p) AS x \
+        UNWIND [x,x+1] AS y RETURN COUNT(*) AS n,SUM(y) AS total",
+    );
+    let values = [Some(2)];
+    let mut calls = 0;
+    let mut full = cursor(&query, Source::new(&values), wide(), || {
+        calls += 1;
+        Ok::<_, usize>(())
+    });
+    let expected = full.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    let rows = full.row_stats();
+    let stats = full.evaluator_stats();
+    drop(full);
+    assert_eq!(expected[0].values()[0].as_count(), Some(4));
+    assert_eq!(expected[0].values()[1].as_integer(), Some(8));
+    assert_eq!(rows.snapshot_records, 1);
+    for stop in 1..=calls {
+        let source = Source::new(&values);
+        let drops = source.drops.clone();
+        let mut at = 0;
+        let mut stream = cursor(&query, source, wide(), || {
+            at += 1;
+            if at == stop { Err(stop) } else { Ok(()) }
+        });
+        let mut delivered = Vec::new();
+        loop {
+            match stream.next() {
+                Some(Ok(row)) => delivered.push(row),
+                Some(Err(GqlQueryError::Interrupted(value))) => {
+                    assert_eq!(value, stop);
+                    break;
+                }
+                other => panic!("missed expanding edge cancellation {stop}: {other:?}"),
+            }
+        }
+        assert!(expected.starts_with(&delivered));
+        assert_eq!(stream.state(), EdgeScanState::Failed);
+        assert!(stream.next().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(stream);
+        assert_eq!(at, stop);
+    }
+    let exact = GqlQueryPolicy::new(
+        rows.snapshot_records,
+        rows.result_rows,
+        stats.work_units,
+        stats.scratch_entries,
+    );
+    assert_eq!(
+        cursor(&query, Source::new(&values), exact, || Ok::<_, ()>(()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        expected
+    );
+    for policy in [
+        GqlQueryPolicy::new(0, u64::MAX, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, 0, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, u64::MAX, stats.work_units - 1, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, stats.scratch_entries - 1),
+    ] {
+        assert!(
+            cursor(&query, Source::new(&values), policy, || Ok::<_, ()>(()))
+                .collect::<Result<Vec<_>, _>>()
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn unwind_vertex_checkpoint_cuts_and_exact_limits_cover_the_complete_expansion() {
+    let query = prepare(
+        "MATCH (n) WITH n.p AS p UNWIND range(1,p) AS x \
+        UNWIND [x,x+1] AS y RETURN COUNT(*) AS n,SUM(y) AS total",
+    );
+    let values = [Some(2)];
+    let mut calls = 0;
+    let mut full = vertex_cursor(&query, Source::new(&values), wide(), || {
+        calls += 1;
+        Ok::<_, usize>(())
+    });
+    let expected = full.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    let rows = full.row_stats();
+    let stats = full.evaluator_stats();
+    drop(full);
+    assert_eq!(expected[0].values()[0].as_count(), Some(4));
+    assert_eq!(expected[0].values()[1].as_integer(), Some(8));
+    assert_eq!(rows.snapshot_records, 1);
+    for stop in 1..=calls {
+        let source = Source::new(&values);
+        let drops = source.drops.clone();
+        let mut at = 0;
+        let mut stream = vertex_cursor(&query, source, wide(), || {
+            at += 1;
+            if at == stop { Err(stop) } else { Ok(()) }
+        });
+        let mut delivered = Vec::new();
+        loop {
+            match stream.next() {
+                Some(Ok(row)) => delivered.push(row),
+                Some(Err(GqlQueryError::Interrupted(value))) => {
+                    assert_eq!(value, stop);
+                    break;
+                }
+                other => panic!("missed expanding vertex cancellation {stop}: {other:?}"),
+            }
+        }
+        assert!(expected.starts_with(&delivered));
+        assert_eq!(stream.state(), VertexScanState::Failed);
+        assert!(stream.next().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(stream);
+        assert_eq!(at, stop);
+    }
+    let exact = GqlQueryPolicy::new(
+        rows.snapshot_records,
+        rows.result_rows,
+        stats.work_units,
+        stats.scratch_entries,
+    );
+    assert_eq!(
+        vertex_cursor(&query, Source::new(&values), exact, || Ok::<_, ()>(()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        expected
+    );
+    for policy in [
+        GqlQueryPolicy::new(0, u64::MAX, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, 0, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, u64::MAX, stats.work_units - 1, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, stats.scratch_entries - 1),
+    ] {
+        assert!(
+            vertex_cursor(&query, Source::new(&values), policy, || Ok::<_, ()>(()))
+                .collect::<Result<Vec<_>, _>>()
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn a_single_source_expansion_yields_resumes_and_releases_without_materializing_its_bag() {
+    let query = prepare(
+        "MATCH (n) WITH n.p AS p UNWIND range(1,p) AS x \
+        RETURN COUNT(*) AS n,SUM(x) AS total",
+    );
+    let values = [Some(128)];
+    let mut sync = vertex_cursor(&query, Source::new(&values), wide(), || Ok::<_, ()>(()));
+    let expected = sync.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    let source = Source::new(&values);
+    let drops = source.drops.clone();
+    let mut stream = vertex_cursor(&query, source, wide(), || Ok::<_, ()>(()));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(stream.poll_next(&mut context).is_pending());
+    assert_eq!(stream.row_stats().snapshot_records, 1);
+    assert_eq!(stream.row_stats().result_rows, 0);
+    let row = loop {
+        if let std::task::Poll::Ready(row) = stream.poll_next(&mut context) {
+            break row.unwrap().unwrap();
+        }
+    };
+    assert_eq!(row.values()[0].as_count(), Some(128));
+    assert_eq!(row.values()[1].as_integer(), Some(8256));
+    assert_eq!(vec![row], expected);
+    assert_eq!(stream.row_stats(), sync.row_stats());
+    assert_eq!(stream.evaluator_stats(), sync.evaluator_stats());
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(stream.next().is_none());
+
+    let source = Source::new(&[Some(1_000_000)]);
+    let drops = source.drops.clone();
+    let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let signal = interrupted.clone();
+    let mut stream = vertex_cursor(&query, source, wide(), move || {
+        if signal.load(Ordering::SeqCst) {
+            Err("cancelled")
+        } else {
+            Ok(())
+        }
+    });
+    assert!(stream.poll_next(&mut context).is_pending());
+    assert!(
+        stream.evaluator_stats().scratch_entries < 10_000,
+        "a range must not allocate a million-member input/output list"
+    );
+    interrupted.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        stream.poll_next(&mut context),
+        std::task::Poll::Ready(Some(Err(GqlQueryError::Interrupted("cancelled"))))
+    ));
+    assert_eq!(stream.state(), VertexScanState::Failed);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(stream.next().is_none());
+
+    let query = prepare(
+        "MATCH (a)-[r:R]->(b) WITH r.p AS p UNWIND range(1,p) AS x \
+        UNWIND [x,x] AS y WITH y WHERE y<0 RETURN COUNT(*) AS n",
+    );
+    let source = Source::new(&[Some(1_000_000)]);
+    let drops = source.drops.clone();
+    let mut stream = cursor(&query, source, wide(), || Ok::<_, ()>(()));
+    assert!(stream.poll_next(&mut context).is_pending());
+    assert_eq!(stream.row_stats().snapshot_records, 1);
+    assert_eq!(stream.row_stats().result_rows, 0);
+    assert!(stream.evaluator_stats().scratch_entries < 10_000);
+    stream.close();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(stream.next().is_none());
+}

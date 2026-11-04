@@ -30,6 +30,9 @@ mod conditional_write;
 #[path = "client/diff.rs"]
 mod diff;
 pub use diff::DiffAnswer;
+#[path = "client/read_batch.rs"]
+mod read_batch;
+pub use read_batch::{ReadBatchAnswer, ReadBatchResult};
 
 /// What a client can fail with. Server refusals keep their public class.
 #[derive(Debug)]
@@ -1230,6 +1233,8 @@ fn server_header(header: &Header, expected: Binding) -> Result<(), ProtocolError
         | FrameKind::SnapshotResultEnd
         | FrameKind::DiffResultChunk
         | FrameKind::DiffResultEnd
+        | FrameKind::ReadBatchResultChunk
+        | FrameKind::ReadBatchResultEnd
         | FrameKind::SubscriptionBatch
         | FrameKind::SubscriptionReset => header.binding() == expected,
         _ => return Err(ProtocolError::InvalidState),
@@ -1387,7 +1392,7 @@ mod tests {
     use super::*;
     use crate::body::{
         DiffMode, DiffResultChunk, DiffResultEnd, ErrorBody, ExecuteConditionalWrite, ExecuteDiff,
-        ExecutePreparedDiff, SubscriptionReset,
+        ExecutePreparedDiff, ReadBatchResultChunk, ReadBatchResultEnd, SubscriptionReset,
     };
     use crate::{Posture, SessionBinding};
     use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -1656,11 +1661,339 @@ mod tests {
         )
     }
 
+    fn read_batch_part(index: u32, seq: u64, first: bool, last: bool, values: &[i64]) -> Frame {
+        output(
+            FrameKind::ReadBatchResultChunk,
+            &ReadBatchResultChunk {
+                index,
+                seq,
+                last,
+                chunk: ResultChunk {
+                    columns: first.then(|| vec!["value".into()]),
+                    rows: values
+                        .iter()
+                        .map(|value| vec![WireValue::Int(*value)])
+                        .collect(),
+                },
+            },
+        )
+    }
+
+    fn read_batch_end(results: u32, rows: u64) -> Frame {
+        output(
+            FrameKind::ReadBatchResultEnd,
+            &ReadBatchResultEnd { results, rows },
+        )
+    }
+
+    #[test]
+    fn consistent_read_batches_preserve_order_empty_results_exact_cuts_and_shared_credit() {
+        let ((), report) = run_async_under_lab(0x79a0_04b0, |root| async move {
+            let io = script_with_window(
+                vec![
+                    read_batch_part(0, u64::MAX, true, false, &[10]),
+                    read_batch_part(0, u64::MAX, false, true, &[20]),
+                    read_batch_part(1, 7, true, true, &[]),
+                    read_batch_part(2, 11, true, true, &[30]),
+                    read_batch_end(3, 3),
+                ],
+                8192,
+                1,
+            );
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            let arguments = vec![
+                ("z".into(), WireValue::Int(2)),
+                ("a".into(), WireValue::Int(1)),
+            ];
+            let answer = client
+                .execute_read_batch(&root, "RETURN $a AS value", vec![arguments; 3])
+                .await
+                .unwrap();
+            assert_eq!(
+                answer.end,
+                ReadBatchResultEnd {
+                    results: 3,
+                    rows: 3
+                }
+            );
+            assert_eq!(answer.results.len(), 3);
+            assert_eq!(answer.results[0].seq, u64::MAX);
+            assert_eq!(answer.results[1].seq, 7);
+            assert_eq!(answer.results[2].seq, 11);
+            assert!(
+                answer
+                    .results
+                    .iter()
+                    .all(|result| result.columns == ["value"])
+            );
+            assert_eq!(
+                answer.results[0].rows,
+                vec![vec![WireValue::Int(10)], vec![WireValue::Int(20)]]
+            );
+            assert!(answer.results[1].rows.is_empty());
+            assert_eq!(answer.results[2].rows, vec![vec![WireValue::Int(30)]]);
+            let sent = sent_frames(&written.lock().unwrap());
+            assert_eq!(sent[3].header().kind(), FrameKind::ExecuteReadBatch);
+            let request = ExecuteBatch::decode(sent[3].payload()).unwrap();
+            assert_eq!(request.argument_sets.len(), 3);
+            assert!(
+                request
+                    .argument_sets
+                    .iter()
+                    .all(|set| set[0].0 == "a" && set[1].0 == "z")
+            );
+            let updates = sent[4..]
+                .iter()
+                .map(|frame| {
+                    assert_eq!(frame.header().kind(), FrameKind::WindowUpdate);
+                    WindowUpdate::decode(frame.payload()).unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(updates.len(), 3);
+            for (index, update) in updates.iter().enumerate() {
+                assert_eq!(update.sequence, index as u64 + 1);
+                assert_eq!(update.rows, 1);
+                assert!(update.bytes > 0 && update.bytes <= 8192);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn read_batch_callback_errors_cancel_once_suppress_later_schemas_and_allow_reuse() {
+        let ((), report) = run_async_under_lab(0x79a0_04b1, |root| async move {
+            for stage in 0..3 {
+                for cancelled in [false, true] {
+                    let mut responses = vec![read_batch_part(0, 5, true, true, &[1])];
+                    if cancelled {
+                        responses.push(output(
+                            FrameKind::Error,
+                            &ErrorBody {
+                                code: ErrorCode::Cancelled,
+                                message: "cancelled".into(),
+                            },
+                        ));
+                    } else {
+                        responses.extend([
+                            read_batch_part(1, 6, true, true, &[2]),
+                            read_batch_end(2, 2),
+                        ]);
+                    }
+                    // Cancellation takes request 5. The original terminal is
+                    // drained before the unrelated request 6 can be sent.
+                    responses.extend([result_chunk(6, &[7]), result_end(6, 1)]);
+                    let io = script(responses);
+                    let written = std::sync::Arc::clone(&io.written);
+                    let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                    client.select(&root, "test").await.unwrap();
+                    let mut columns = 0;
+                    let mut rows = 0;
+                    let mut ends = 0;
+                    let result = client
+                        .execute_read_batch_streaming(
+                            &root,
+                            "RETURN 1 AS value",
+                            vec![vec![], vec![]],
+                            |index, seq, names| {
+                                assert_eq!((index, seq), (0, 5));
+                                assert_eq!(names, ["value"]);
+                                columns += 1;
+                                if stage == 0 {
+                                    Err(ClientError::Protocol("sink stopped"))
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                            |index, row| {
+                                assert_eq!(index, 0);
+                                assert_eq!(row, vec![WireValue::Int(1)]);
+                                rows += 1;
+                                if stage == 1 {
+                                    Err(ClientError::Protocol("sink stopped"))
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                            |index, seq, count| {
+                                assert_eq!((index, seq, count), (0, 5, 1));
+                                ends += 1;
+                                Err(ClientError::Protocol("sink stopped"))
+                            },
+                        )
+                        .await;
+                    assert!(matches!(result, Err(ClientError::Protocol("sink stopped"))));
+                    assert_eq!(
+                        (columns, rows, ends),
+                        (1, usize::from(stage > 0), usize::from(stage > 1))
+                    );
+                    let next = client
+                        .execute(&root, ExecuteMode::Read, "RETURN 7 AS value", vec![])
+                        .await
+                        .unwrap();
+                    assert_eq!(next.rows, vec![vec![WireValue::Int(7)]]);
+                    let sent = sent_frames(&written.lock().unwrap());
+                    assert_eq!(
+                        sent.iter()
+                            .map(|frame| frame.header().kind())
+                            .collect::<Vec<_>>(),
+                        vec![
+                            FrameKind::Hello,
+                            FrameKind::Auth,
+                            FrameKind::SelectDatabase,
+                            FrameKind::ExecuteReadBatch,
+                            FrameKind::QueryCancel,
+                            FrameKind::Execute
+                        ]
+                    );
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn malformed_read_batch_delivery_fences_connection_without_fallback_or_retry() {
+        let ((), report) = run_async_under_lab(0x79a0_04b2, |root| async move {
+            let wrong_width = output(
+                FrameKind::ReadBatchResultChunk,
+                &ReadBatchResultChunk {
+                    index: 0,
+                    seq: 1,
+                    last: true,
+                    chunk: ResultChunk {
+                        columns: Some(vec!["value".into()]),
+                        rows: vec![vec![]],
+                    },
+                },
+            );
+            let mut traces = vec![
+                vec![read_batch_end(2, 0)],
+                vec![read_batch_part(1, 1, true, true, &[])],
+                vec![read_batch_part(0, 1, false, true, &[])],
+                vec![wrong_width],
+                vec![
+                    read_batch_part(0, 1, true, false, &[1]),
+                    read_batch_part(0, 2, false, true, &[2]),
+                ],
+                vec![
+                    read_batch_part(0, 1, true, true, &[1]),
+                    read_batch_part(0, 1, true, true, &[2]),
+                ],
+                vec![
+                    read_batch_part(0, 1, true, false, &[1]),
+                    read_batch_end(2, 1),
+                ],
+                vec![
+                    read_batch_part(0, 1, true, true, &[1]),
+                    read_batch_part(1, 1, true, true, &[]),
+                    read_batch_end(1, 1),
+                ],
+                vec![
+                    read_batch_part(0, 1, true, true, &[1]),
+                    read_batch_part(1, 1, true, true, &[]),
+                    read_batch_end(2, 2),
+                ],
+            ];
+            let valid =
+                ReadBatchResultChunk::decode(read_batch_part(0, 1, true, true, &[1]).payload())
+                    .unwrap();
+            for (request, stream) in [(5, StreamId([5; 16])), (4, StreamId::CONTROL)] {
+                traces.push(vec![rpc(
+                    FrameKind::ReadBatchResultChunk,
+                    request,
+                    stream,
+                    &valid,
+                )]);
+            }
+            for responses in traces {
+                let io = script(responses);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                assert!(matches!(
+                    client
+                        .execute_read_batch(&root, "RETURN 1 AS value", vec![vec![], vec![]])
+                        .await,
+                    Err(ClientError::Protocol(_))
+                ));
+                let before = written.lock().unwrap().len();
+                requires_reconnect(client.ping(&root, 1).await);
+                assert_eq!(written.lock().unwrap().len(), before);
+                let sent = sent_frames(&written.lock().unwrap());
+                assert_eq!(sent.len(), 4, "no fallback, retry or unexpected credit");
+                assert_eq!(sent[3].header().kind(), FrameKind::ExecuteReadBatch);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn read_batch_credit_overruns_refuse_before_callbacks_and_late_eof_is_incomplete() {
+        let ((), report) = run_async_under_lab(0x79a0_04b3, |root| async move {
+            for row_credit in [false, true] {
+                let first = read_batch_part(0, 1, true, true, &[1, 2]);
+                let bytes = if row_credit {
+                    8192
+                } else {
+                    first.header().frame_len() as u64 - 1
+                };
+                let io = script_with_window(vec![first], bytes, if row_credit { 1 } else { 4 });
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let seen = AtomicUsize::new(0);
+                let result = client
+                    .execute_read_batch_streaming(
+                        &root,
+                        "RETURN 1",
+                        vec![vec![]],
+                        |_, _, _| {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        },
+                        |_, _| {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        },
+                        |_, _, _| {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
+                    .await;
+                assert!(matches!(
+                    result,
+                    Err(ClientError::Protocol("server exceeded its flow credit"))
+                ));
+                assert_eq!(seen.load(Ordering::SeqCst), 0);
+            }
+            let io = script(vec![read_batch_part(0, 1, true, true, &[1])]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            assert!(matches!(
+                client
+                    .execute_read_batch(&root, "RETURN 1", vec![vec![]])
+                    .await,
+                Err(ClientError::Closed)
+            ));
+            let before = written.lock().unwrap().len();
+            requires_reconnect(
+                client
+                    .execute_read_batch(&root, "RETURN 1", vec![vec![]])
+                    .await,
+            );
+            assert_eq!(written.lock().unwrap().len(), before);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
     #[test]
     fn dropped_requests_fence_every_new_operation_before_any_more_bytes() {
         let ((), report) = run_async_under_lab(0x79a0_0460, |root| async move {
             for partial_write in [false, true] {
-                for operation in 0..7 {
+                for operation in 0..8 {
                     let inner = script(vec![]);
                     let written = std::sync::Arc::clone(&inner.written);
                     let write_budget = std::sync::Arc::new(AtomicUsize::new(usize::MAX));
@@ -1708,8 +2041,12 @@ mod tests {
                                     .await
                                     .map(|_| ()),
                                 5 => client.ping(&root, 1).await,
-                                _ => client
+                                6 => client
                                     .execute_write_if_current(&root, 0, "CREATE ()", vec![])
+                                    .await
+                                    .map(|_| ()),
+                                _ => client
+                                    .execute_read_batch(&root, "RETURN 1", vec![vec![]])
                                     .await
                                     .map(|_| ()),
                             }
@@ -1736,6 +2073,11 @@ mod tests {
                     );
                     requires_reconnect(
                         client.execute_batch(&root, "CREATE ()", vec![vec![]]).await,
+                    );
+                    requires_reconnect(
+                        client
+                            .execute_read_batch(&root, "RETURN 1", vec![vec![]])
+                            .await,
                     );
                     requires_reconnect(client.prepare_read(&root, "RETURN 1", vec![]).await);
                     requires_reconnect(client.release_prepared(&root, handle).await);

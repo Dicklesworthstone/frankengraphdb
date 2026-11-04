@@ -354,6 +354,202 @@ impl PreparedBatch {
         // No extra release round trip is needed after the final flushed answer.
         Ok(())
     }
+    /// All statements share one native session and one execution allowance.
+    /// A successful per-result boundary is provisional until the batch END.
+    pub(super) async fn execute_consistent_reads(
+        self,
+        cx: &Cx,
+        client: &mut Client,
+        robot: bool,
+        out: &mut impl Write,
+    ) -> Result<(), Failure> {
+        let sink = std::sync::Mutex::new(BatchReadOutput {
+            out,
+            robot,
+            active: None,
+            completed: 0,
+            sent: 0,
+            failed: None,
+        });
+        let lock = || {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let result = client
+            .execute_read_batch_streaming(
+                cx,
+                &self.body.statement,
+                self.body.argument_sets,
+                |index, seq, columns| lock().columns(cx, index, seq, columns),
+                |index, row| lock().row(cx, index, &row),
+                |index, seq, rows| lock().result_end(index, seq, rows),
+            )
+            .await;
+        sink.into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish(result)
+    }
+}
+
+/// Holds only one result's shape and counters, never its answer bag.
+/// The active tuple is (zero-based index, selected sequence, width, flushed rows).
+struct BatchReadOutput<'a, W> {
+    out: &'a mut W,
+    robot: bool,
+    active: Option<(u32, u64, usize, u64)>,
+    completed: u32,
+    sent: u64,
+    failed: Option<Failure>,
+}
+
+impl<W: Write> BatchReadOutput<'_, W> {
+    fn capture(&mut self, result: Result<(), Failure>) -> Result<(), ClientError> {
+        if let Err(error) = result {
+            self.failed.get_or_insert(error);
+            // Retain the original diagnostic while asking the client to cancel
+            // and drain, exactly as ordinary remote stream delivery does.
+            Err(ClientError::Io(std::io::ErrorKind::BrokenPipe))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn columns(
+        &mut self,
+        cx: &Cx,
+        index: u32,
+        seq: u64,
+        columns: &[String],
+    ) -> Result<(), ClientError> {
+        let result = (|| {
+            cx.checkpoint().map_err(Failure::query)?;
+            if self.active.is_some() || index != self.completed {
+                return Err(Failure::io("remote batch result order is invalid"));
+            }
+            let statement = u64::from(index) + 1;
+            let line = if self.robot {
+                format!(
+                    r#"{{"v":1,"event":"columns","statement":{statement},"stream":true,"seq":{seq},"columns":[{}]}}"#,
+                    columns
+                        .iter()
+                        .map(|name| fgdb_protocol::json::quote(name))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            } else {
+                format!(
+                    "argument set {statement} at seq {seq}\n{}",
+                    columns
+                        .iter()
+                        .map(|name| name
+                            .chars()
+                            .flat_map(char::escape_default)
+                            .collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join("\t")
+                )
+            };
+            emit(self.out, &line)?;
+            self.out.flush().map_err(Failure::io)?;
+            self.active = Some((index, seq, columns.len(), 0));
+            Ok(())
+        })();
+        self.capture(result)
+    }
+
+    fn row(&mut self, cx: &Cx, index: u32, row: &[WireValue]) -> Result<(), ClientError> {
+        let result = (|| {
+            cx.checkpoint().map_err(Failure::query)?;
+            let Some((active, seq, width, rows)) = self.active else {
+                return Err(Failure::io("remote batch row has no columns"));
+            };
+            if active != index || width != row.len() {
+                return Err(Failure::io("remote batch row does not match its result"));
+            }
+            let rows = rows
+                .checked_add(1)
+                .ok_or_else(|| Failure::io("batch row counter overflow"))?;
+            let sent = self
+                .sent
+                .checked_add(1)
+                .ok_or_else(|| Failure::io("batch delivery counter overflow"))?;
+            let mut cells = Vec::with_capacity(row.len());
+            for value in row {
+                cx.checkpoint().map_err(Failure::query)?;
+                cells.push(if self.robot {
+                    fgdb_protocol::json::cell(value)
+                } else {
+                    super::human(value)
+                });
+            }
+            let statement = u64::from(index) + 1;
+            let line = if self.robot {
+                format!(
+                    r#"{{"v":1,"event":"row","statement":{statement},"cells":[{}]}}"#,
+                    cells.join(",")
+                )
+            } else {
+                cells.join("\t")
+            };
+            emit(self.out, &line)?;
+            self.out.flush().map_err(Failure::io)?;
+            self.active = Some((index, seq, width, rows));
+            self.sent = sent;
+            Ok(())
+        })();
+        self.capture(result)
+    }
+
+    fn result_end(&mut self, index: u32, seq: u64, rows: u64) -> Result<(), ClientError> {
+        let result = (|| {
+            if !self
+                .active
+                .is_some_and(|(at, cut, _, sent)| at == index && cut == seq && sent == rows)
+            {
+                return Err(Failure::io(
+                    "remote batch result count or snapshot is invalid",
+                ));
+            }
+            self.completed = self
+                .completed
+                .checked_add(1)
+                .ok_or_else(|| Failure::io("batch result counter overflow"))?;
+            self.active = None;
+            Ok(())
+        })();
+        self.capture(result)
+    }
+
+    fn finish(
+        self,
+        result: Result<fgdb_protocol::body::ReadBatchResultEnd, ClientError>,
+    ) -> Result<(), Failure> {
+        if let Some(error) = self.failed {
+            return Err(super::super::stream::incomplete(error, self.sent));
+        }
+        let result = (|| {
+            let end = result.map_err(failure)?;
+            if self.active.is_some() || end.results != self.completed || end.rows != self.sent {
+                return Err(Failure::io(
+                    "remote batch completion does not match delivered results",
+                ));
+            }
+            let line = if self.robot {
+                format!(
+                    r#"{{"v":1,"event":"result","kind":"read_batch","statements":{},"count":{}}}"#,
+                    end.results, end.rows
+                )
+            } else {
+                format!(
+                    "completed {} argument set(s), {} row(s)",
+                    end.results, end.rows
+                )
+            };
+            emit(self.out, &line)?;
+            self.out.flush().map_err(Failure::io)
+        })();
+        result.map_err(|error| super::super::stream::incomplete(error, self.sent))
+    }
 }
 
 /// The array and streaming JSONL adapters share exactly the typed operand

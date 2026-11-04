@@ -47,6 +47,9 @@ pub enum FrameKind {
     DiffResultChunk = 0x0026,
     DiffResultEnd = 0x0027,
     ExecuteConditionalWrite = 0x0028,
+    ExecuteReadBatch = 0x0029,
+    ReadBatchResultChunk = 0x002a,
+    ReadBatchResultEnd = 0x002b,
 }
 
 impl TryFrom<u16> for FrameKind {
@@ -89,6 +92,9 @@ impl TryFrom<u16> for FrameKind {
             0x0026 => Self::DiffResultChunk,
             0x0027 => Self::DiffResultEnd,
             0x0028 => Self::ExecuteConditionalWrite,
+            0x0029 => Self::ExecuteReadBatch,
+            0x002a => Self::ReadBatchResultChunk,
+            0x002b => Self::ReadBatchResultEnd,
             _ => return Err(ProtocolError::UnknownFrameKind),
         })
     }

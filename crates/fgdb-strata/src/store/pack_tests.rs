@@ -6,14 +6,141 @@ use super::{
     BLOCK_DIR, BlockStore, BlockStoreCrashPoint, PublishReceipts, StoreError, StoredObjectKind,
 };
 use crate::{DeltaBlockVersion, block_id};
+use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, UnixVfs, Vfs};
 use asupersync::lab::run_async_under_lab;
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::SeqCst};
 
 const K_OID: [u8; 32] = [0x6b; 32];
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x29; 32]);
+
+const INTERRUPT_OPEN: u8 = 1;
+const INTERRUPT_REFRESH: u8 = 2;
+const FAIL_SECOND_NEW_PACK: u8 = 3;
+
+#[derive(Default)]
+struct ReadFaults {
+    mode: AtomicU8,
+    opens: AtomicUsize,
+    pack_opens: AtomicUsize,
+    directories: AtomicUsize,
+    failures: AtomicUsize,
+}
+
+impl ReadFaults {
+    fn arm(&self, mode: u8) {
+        self.opens.store(0, SeqCst);
+        self.pack_opens.store(0, SeqCst);
+        self.directories.store(0, SeqCst);
+        self.failures.store(0, SeqCst);
+        self.mode.store(mode, SeqCst);
+    }
+}
+
+// Fault the physical read/open or discovery boundary, keeping file contents,
+// copy selection, proof, and recovery on the production path.
+struct ReadFaultVfs(Arc<ReadFaults>);
+
+impl Vfs for ReadFaultVfs {
+    type File = <UnixVfs as Vfs>::File;
+
+    async fn open(&self, path: &Path, opts: &OpenOptions) -> io::Result<Self::File> {
+        self.0.opens.fetch_add(1, SeqCst);
+        if self
+            .0
+            .mode
+            .compare_exchange(INTERRUPT_OPEN, 0, SeqCst, SeqCst)
+            .is_ok()
+        {
+            self.0.failures.fetch_add(1, SeqCst);
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "interrupted copy read",
+            ));
+        }
+        if self.0.mode.load(SeqCst) == FAIL_SECOND_NEW_PACK
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "pack")
+            && self.0.pack_opens.fetch_add(1, SeqCst) == 1
+        {
+            self.0.mode.store(0, SeqCst);
+            self.0.failures.fetch_add(1, SeqCst);
+            return Err(io::Error::other("unrelated new pack is unreadable"));
+        }
+        UnixVfs.open(path, opts).await
+    }
+
+    async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
+        UnixVfs.metadata(path).await
+    }
+    async fn symlink_metadata(&self, path: &Path) -> io::Result<Metadata> {
+        UnixVfs.symlink_metadata(path).await
+    }
+    async fn set_permissions(&self, path: &Path, perm: Permissions) -> io::Result<()> {
+        UnixVfs.set_permissions(path, perm).await
+    }
+    async fn create_dir(&self, path: &Path) -> io::Result<()> {
+        UnixVfs.create_dir(path).await
+    }
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        UnixVfs.create_dir_all(path).await
+    }
+    async fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        UnixVfs.remove_dir(path).await
+    }
+    async fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        UnixVfs.remove_dir_all(path).await
+    }
+    async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
+        self.0.directories.fetch_add(1, SeqCst);
+        if self
+            .0
+            .mode
+            .compare_exchange(INTERRUPT_REFRESH, 0, SeqCst, SeqCst)
+            .is_ok()
+        {
+            self.0.failures.fetch_add(1, SeqCst);
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "interrupted pack discovery",
+            ));
+        }
+        UnixVfs.read_dir(path).await
+    }
+    async fn remove_file(&self, path: &Path) -> io::Result<()> {
+        UnixVfs.remove_file(path).await
+    }
+    async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        UnixVfs.rename(from, to).await
+    }
+    async fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+        UnixVfs.copy(from, to).await
+    }
+    async fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()> {
+        UnixVfs.hard_link(from, to).await
+    }
+    async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        UnixVfs.canonicalize(path).await
+    }
+    async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+        UnixVfs.read_link(path).await
+    }
+    async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        UnixVfs.read(path).await
+    }
+    async fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        UnixVfs.read_to_string(path).await
+    }
+    async fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        UnixVfs.write(path, bytes).await
+    }
+}
 
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fgdb-packs-{}-{name}", std::process::id()));
@@ -467,13 +594,18 @@ fn a_newer_intact_copy_is_read_instead_of_a_damaged_older_one() {
             let after = open(&cx, &dir).await;
             (
                 after.get_bytes(&cx, DeltaBlockVersion(id)).await,
+                // No unrelated object miss may be needed to discover this
+                // repair. The same live handle has already cached the bad
+                // original pack above.
+                before.get_bytes(&cx, DeltaBlockVersion(id)).await,
                 read_all(&cx, &before, &second[1..]).await,
             )
         }
     });
     assert_eq!(reread.0.expect("intact copy"), first[7].1);
+    assert_eq!(reread.1.expect("live handle discovers repair"), first[7].1);
     // The store opened before the second pack finds its objects on a miss.
-    assert!(reread.1.into_iter().all(|read| read.is_ok()));
+    assert!(reread.2.into_iter().all(|read| read.is_ok()));
     assert_eq!(packs_in(&dir).len(), 2);
 }
 
@@ -520,6 +652,341 @@ fn a_damaged_newest_copy_falls_back_to_an_intact_older_one() {
         verified.expect("physically verified intact copy"),
         first[3].1
     );
+}
+
+#[test]
+fn live_reads_use_a_loose_repair_of_a_damaged_missing_or_truncated_pack() {
+    for (case, seed) in [("damaged", 21), ("missing", 22), ("truncated", 23)] {
+        let dir = scratch_dir(&format!("loose-repair-{case}"));
+        let objects = objects(seed, PACK_MIN_OBJECTS);
+        under_lab(0x9c00 + u64::from(seed), move |cx| async move {
+            let publisher = open(&cx, &dir).await;
+            publish(&cx, &publisher, &objects, None)
+                .await
+                .expect("original pack");
+            let reader = open(&cx, &dir).await;
+            let physical = reader
+                .verification_reader(&cx)
+                .await
+                .expect("physical reader");
+            let pack = packs_in(&dir).pop().expect("one pack");
+            let original = std::fs::read(&pack).expect("pack bytes");
+            match case {
+                "damaged" => {
+                    let mut damaged = original.clone();
+                    damaged[offset_in_pack(&objects, 5)] ^= 0x40;
+                    std::fs::write(&pack, damaged).expect("damage payload");
+                }
+                "missing" => {
+                    std::fs::rename(&pack, pack.with_extension("kept")).expect("retain lost pack");
+                }
+                "truncated" => {
+                    std::fs::write(&pack, &original[..12]).expect("truncate fixture");
+                }
+                _ => unreachable!(),
+            }
+            let (id, bytes) = &objects[5];
+            assert!(reader.get_bytes(&cx, DeltaBlockVersion(*id)).await.is_err());
+            assert_eq!(
+                publisher
+                    .put(&cx, bytes)
+                    .await
+                    .expect("publish loose repair"),
+                DeltaBlockVersion(*id)
+            );
+            for store in [&reader, &physical] {
+                assert_eq!(
+                    store
+                        .get_bytes(&cx, DeltaBlockVersion(*id))
+                        .await
+                        .expect("repaired read"),
+                    *bytes,
+                    "{case}"
+                );
+                let mut exact = vec![0; bytes.len()];
+                store
+                    .read_object_exact(
+                        &cx,
+                        *id,
+                        crate::tiered::buffer::extent_checksum(bytes),
+                        &mut exact,
+                    )
+                    .await
+                    .expect("admitted extent uses the same repair");
+                assert_eq!(exact, *bytes);
+                let limit = bytes.len() as u64 - 1;
+                assert!(
+                    store
+                        .read_metadata_bytes(&cx, *id, StoredObjectKind::Block, limit)
+                        .await
+                        .is_err(),
+                    "{case}: an intact repair cannot bypass the original byte ceiling"
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn failed_repairs_preserve_the_first_error_and_the_requested_identity_family() {
+    let dir = scratch_dir("repair-family");
+    under_lab(0x9c30, move |cx| async move {
+        let value = b"a legitimate vertex-patch transcript, not a block".to_vec();
+        let id = crate::vertex::vertex_patch_id(&K_OID, NAMESPACE, &value);
+        let mut first = objects(24, PACK_MIN_OBJECTS);
+        let bad = b"the original damaged copy".to_vec();
+        first.push((id, bad.clone()));
+        let publisher = open(&cx, &dir).await;
+        publish(&cx, &publisher, &first, None)
+            .await
+            .expect("damaged pack fixture");
+        let reader = open(&cx, &dir).await;
+        let original_actual = block_id(&K_OID, NAMESPACE, &bad);
+        assert!(matches!(
+            reader.get_bytes(&cx, DeltaBlockVersion(id)).await,
+            Err(StoreError::IdentityMismatch { expected, actual })
+                if expected == id && actual == original_actual
+        ));
+        // This copy really has the requested identity, but only under the
+        // vertex-patch family. A generic any-family predicate must not let
+        // it satisfy a block reader or replace that reader's original error.
+        publisher
+            .put_patch(&cx, &value)
+            .await
+            .expect("loose patch copy");
+        let mut second = objects(25, PACK_MIN_OBJECTS);
+        second.push((id, value.clone()));
+        publish(&cx, &publisher, &second, None)
+            .await
+            .expect("packed patch copy");
+        assert!(matches!(
+            reader.get_bytes(&cx, DeltaBlockVersion(id)).await,
+            Err(StoreError::IdentityMismatch { expected, actual })
+                if expected == id && actual == original_actual
+        ));
+        assert_eq!(
+            reader
+                .get_patch_bytes(&cx, crate::vertex::VertexPatchVersion(id))
+                .await
+                .expect("exact-family read"),
+            value
+        );
+    });
+}
+
+#[test]
+fn an_interrupted_preferred_copy_never_falls_through_to_another_intact_copy() {
+    let dir = scratch_dir("interrupted-copy");
+    under_lab(0x9c31, move |cx| async move {
+        let first = objects(26, PACK_MIN_OBJECTS);
+        let mut second = objects(27, PACK_MIN_OBJECTS);
+        second.push(first[7].clone());
+        let publisher = open(&cx, &dir).await;
+        publish(&cx, &publisher, &first, None)
+            .await
+            .expect("first pack");
+        publish(&cx, &publisher, &second, None)
+            .await
+            .expect("second pack");
+        let faults = Arc::new(ReadFaults::default());
+        let reader = BlockStore::open_existing_for_read_with_vfs(
+            &cx,
+            ReadFaultVfs(Arc::clone(&faults)),
+            &dir,
+            K_OID,
+            NAMESPACE,
+        )
+        .await
+        .expect("faultable reader");
+        assert!(matches!(
+            reader.packs.locate(first[7].0),
+            pack::Located::Several(_)
+        ));
+        faults.arm(INTERRUPT_OPEN);
+        assert!(matches!(
+            reader.get_bytes(&cx, DeltaBlockVersion(first[7].0)).await,
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::Interrupted
+        ));
+        assert_eq!(faults.failures.load(SeqCst), 1);
+        assert_eq!(
+            faults.opens.load(SeqCst),
+            1,
+            "no second physical read after interruption"
+        );
+        assert_eq!(
+            faults.directories.load(SeqCst),
+            0,
+            "no discovery after interruption"
+        );
+        assert_eq!(
+            reader
+                .get_bytes(&cx, DeltaBlockVersion(first[7].0))
+                .await
+                .expect("later read"),
+            first[7].1
+        );
+    });
+}
+
+#[test]
+fn recovery_obeys_interrupted_discovery_and_uses_a_partially_refreshed_index() {
+    for mode in [INTERRUPT_REFRESH, FAIL_SECOND_NEW_PACK] {
+        let dir = scratch_dir(&format!("discovery-fault-{mode}"));
+        under_lab(0x9c40 + u64::from(mode), move |cx| async move {
+            let first = objects(28, PACK_MIN_OBJECTS);
+            let publisher = open(&cx, &dir).await;
+            publish(&cx, &publisher, &first, None)
+                .await
+                .expect("first pack");
+            let path = packs_in(&dir).pop().expect("one pack");
+            let mut damaged = std::fs::read(&path).expect("pack");
+            damaged[offset_in_pack(&first, 7)] ^= 0x20;
+            std::fs::write(&path, damaged).expect("damage preferred payload");
+            let faults = Arc::new(ReadFaults::default());
+            let reader = BlockStore::open_existing_for_read_with_vfs(
+                &cx,
+                ReadFaultVfs(Arc::clone(&faults)),
+                &dir,
+                K_OID,
+                NAMESPACE,
+            )
+            .await
+            .expect("faultable reader");
+            assert!(matches!(
+                reader.get_bytes(&cx, DeltaBlockVersion(first[7].0)).await,
+                Err(StoreError::IdentityMismatch { .. })
+            ));
+            // Both new packs carry the repair. Whichever directory entry
+            // comes first is admitted before the next entry faults, so the
+            // partial-refresh law does not depend on filesystem ordering.
+            for seed in [29, 30] {
+                let mut repair = objects(seed, PACK_MIN_OBJECTS);
+                repair.push(first[7].clone());
+                publish(&cx, &publisher, &repair, None)
+                    .await
+                    .expect("new repair pack");
+            }
+            faults.arm(mode);
+            let result = reader.get_bytes(&cx, DeltaBlockVersion(first[7].0)).await;
+            assert_eq!(faults.failures.load(SeqCst), 1, "the requested fault ran");
+            if mode == INTERRUPT_REFRESH {
+                assert!(
+                    matches!(result, Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::Interrupted)
+                );
+                assert_eq!(faults.directories.load(SeqCst), 1);
+            } else {
+                assert_eq!(
+                    result.expect("repair admitted before unrelated failure"),
+                    first[7].1
+                );
+                assert_eq!(faults.pack_opens.load(SeqCst), 2);
+            }
+            assert_eq!(
+                reader
+                    .get_bytes(&cx, DeltaBlockVersion(first[7].0))
+                    .await
+                    .expect("subsequent read"),
+                first[7].1
+            );
+        });
+    }
+}
+
+#[test]
+fn root_windows_recover_block_and_hosted_patch_proofs_from_older_copies() {
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
+    use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+
+    for (case, patch_target, missing) in [
+        (0, false, false),
+        (1, true, false),
+        (2, false, true),
+        (3, true, true),
+    ] {
+        let dir = scratch_dir(&format!("window-repair-{case}"));
+        under_lab(0x9c50 + case, move |cx| async move {
+            let edge = crate::AdjacencyEntry {
+                src: VId(1),
+                relation: RelationId(1),
+                dst: VId(2),
+                eid: EId(1),
+                created_at: CommitSeq(1),
+                retired_at: None,
+            };
+            let plain = crate::encode_block(0, None, &[edge]).expect("plain block");
+            let plain_id = block_id(&K_OID, NAMESPACE, &plain);
+            let rows = vec![vec![(PropertyKeyId(1), CanonicalScalar::Int(42).into())]];
+            let patch = crate::edge_props::encode_property_patch(&rows).expect("patch");
+            let patch_id = crate::edge_props::property_patch_id(&K_OID, NAMESPACE, &patch);
+            let hosted =
+                crate::encode_block_with_properties(0, None, &[edge], patch_id, &[1], &rows)
+                    .expect("hosted block");
+            let hosted_id = block_id(&K_OID, NAMESPACE, &hosted);
+            let mut first = objects(31, PACK_MIN_OBJECTS);
+            first.extend([
+                (plain_id, plain),
+                (hosted_id, hosted.clone()),
+                (patch_id, patch.clone()),
+            ]);
+            let publisher = open(&cx, &dir).await;
+            publish(&cx, &publisher, &first, None)
+                .await
+                .expect("original objects");
+            let original_pack = packs_in(&dir).pop().expect("original pack");
+            let reader = open(&cx, &dir).await;
+            let (id, mut bytes) = if patch_target {
+                (patch_id, patch)
+            } else {
+                (hosted_id, hosted)
+            };
+            if !missing {
+                bytes[0] ^= 0x20;
+            }
+            let mut second = objects(32, PACK_MIN_OBJECTS);
+            second.push((id, bytes));
+            publish(&cx, &publisher, &second, None)
+                .await
+                .expect("newer copy");
+            assert!(
+                reader
+                    .packs
+                    .refresh(&cx, &reader.vfs)
+                    .await
+                    .expect("index newer copy")
+            );
+            if missing {
+                let newer = packs_in(&dir)
+                    .into_iter()
+                    .find(|path| *path != original_pack)
+                    .expect("newer pack");
+                std::fs::rename(&newer, newer.with_extension("kept")).expect("retain lost pack");
+            }
+            let mut window = reader
+                .read_block_window(&cx, vec![plain_id, hosted_id])
+                .await;
+            assert_eq!(window.len(), 2);
+            let ((_, decoded), prefetched) = window.remove(0).expect("plain block in window");
+            assert_eq!(decoded.expect("plain decoded"), (vec![edge], None));
+            assert!(prefetched.is_none());
+            let ((_, decoded), prefetched) = window.remove(0).expect("hosted block in window");
+            assert_eq!(
+                decoded.expect("hosted decoded"),
+                (vec![edge], Some((patch_id, vec![1])))
+            );
+            let Some(super::PrefetchedPatch::Read(_, proof)) = prefetched else {
+                panic!("the window must retain its hosted patch proof");
+            };
+            assert_eq!(proof.expect("recovered window patch"), rows);
+            let (_, prefetched) = reader
+                .read_block_decoded(&cx, hosted_id, true)
+                .await
+                .expect("single-block recovery path");
+            let Some(super::PrefetchedPatch::Read(_, proof)) = prefetched else {
+                panic!("the single read must retain its hosted patch proof");
+            };
+            assert_eq!(proof.expect("recovered single-read patch"), rows);
+        });
+    }
 }
 
 #[test]

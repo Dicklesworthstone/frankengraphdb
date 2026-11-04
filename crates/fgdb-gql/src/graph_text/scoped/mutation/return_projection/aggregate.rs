@@ -231,7 +231,7 @@ impl<'a> Parser<'a> {
         self.punct(b'(', "(")?;
         let distinct = self.take_word("DISTINCT")?;
         if !distinct {
-            self.take_word("ALL")?;
+            self.take_all_quantifier()?;
         }
         if self.take(b'*')? {
             if function != F::Count || distinct {

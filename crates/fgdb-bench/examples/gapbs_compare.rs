@@ -4,6 +4,9 @@
 //! cargo run --release -p fgdb-bench --example gapbs_compare -- \
 //!   --gapbs ../gapbs --fixture smoke --output /tmp/fgdb-gapbs-smoke
 //! cargo run --release -p fgdb-bench --example gapbs_compare -- \
+//!   --gapbs ../gapbs --fixture smoke --algorithm bfs --trials 1 --sealed \
+//!   --output /tmp/fgdb-gapbs-bfs-targets
+//! cargo run --release -p fgdb-bench --example gapbs_compare -- \
 //!   --gapbs ../gapbs --fixture hub --vertices 4096 --trials 5 \
 //!   --output /tmp/fgdb-gapbs-hub
 //! cargo run --release -p fgdb-bench --example gapbs_compare -- \
@@ -24,6 +27,11 @@
 //! plus Git and `rustc` must be available. The checkout's revision, compiler, input blob,
 //! arguments, full results, verification transcripts and samples are retained
 //! in a NEW output directory. Nothing is deleted and nothing is downloaded.
+//! `--algorithm bfs|wcc|tc|sssp` selects one complete comparison, including its
+//! verifier and any negative control. Omit it to retain the BFS/WCC/TC suite
+//! plus SSSP when `--weighted` is present. Selecting SSSP requires `--weighted`;
+//! weighted inputs remain legal for BFS/WCC/TC, which ignore stored weights.
+//! Only adapters needed by the selected algorithms are compiled and executed.
 //! The real-data example uses the uncompressed edge list from
 //! https://snap.stanford.edu/data/email-Eu-core.html (1,005 explicit vertices).
 //!
@@ -40,13 +48,19 @@
 //! identical-output-cost claim. The database's independent fnx/brute-force
 //! triangle tests cover each vertex. Duplicate/reciprocal edges collapse and
 //! self-loops are dropped before either triangle kernel.
+//! At GAPBS revision 941462c7c42e786e4e006a9211b0576ef78d23f7, TCVerifier
+//! writes through an empty vector's iterator after reserve, which a checked
+//! iterator build rejects. That existing TC lane is not qualified by a printed
+//! PASS. `--algorithm bfs` isolates BFS evidence without invoking or changing
+//! the defective upstream TC verifier; the default suite remains unchanged.
 //! `--weighted` accepts three-column integer-weight edge lists (or assigns
 //! deterministic fixture weights) and adds SSSP against upstream DeltaStep and
 //! SSSPVerifier. Parallel weights reduce by minimum, including zero. Every
-//! distance/unreachable vertex is compared exactly. The accepted domain proves
-//! all simple-path costs below GAPBS's int32 infinity sentinel; arbitrary f64
-//! weights are outside this comparison. The unchanged BFS/WCC/TC series ignore
-//! these stored weights. `--delta` pins GAPBS's positive bucket width.
+//! distance/unreachable vertex is compared exactly. When SSSP is selected,
+//! admission proves all simple-path costs below GAPBS's int32 infinity sentinel
+//! and requires a non-loop edge for upstream DeltaStep. BFS/WCC/TC accept any
+//! nonnegative int32 input weights and ignore them; arbitrary f64 weights are
+//! outside this comparison. `--delta` pins GAPBS's positive bucket width.
 //! PageRank is intentionally absent: GAPBS's sink and float32 semantics differ
 //! from the registered normalized float64 procedure.
 //!
@@ -92,6 +106,20 @@
 //! separately. Every emitted value matches both the direct sealed result and
 //! the same trial's live GAPBS output. This is a distinct GQL request workload,
 //! not a before/after speedup, bare-kernel comparison, or authorization benchmark.
+//!
+//! After each sealed BFS trial has matched live GAPBS, selected target/cutoff
+//! cases also run through fresh read-only direct and cooperative projections
+//! and the public compressed CALL+MATCH query owner. The first trial covers all
+//! cases; later trials cover a deterministic rotating pair, bounding the added
+//! source preparation to six opens per later trial. Sampling scope and case
+//! indices are recorded. Each selected case still runs all three modes against
+//! that trial's verified distances. Their source root/cut,
+//! complete scalar answers and direct/cooperative projection/result digests
+//! are checked. Each request includes its own preparation, execution, complete
+//! answer encoding and release; no graph owner survives outside its timer.
+//! Cooperative construction/execution uses the real runtime yield primitive
+//! with 4096-step fuel. These are separate point-to-point request measurements,
+//! never speedup ratios against GAPBS's all-destination traversal.
 
 #![forbid(unsafe_code)]
 
@@ -109,6 +137,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Instant;
@@ -122,7 +151,7 @@ const GAPBS_DISTANCE_INFINITY: i64 = i32::MAX as i64 / 2;
 const USAGE: &str = "gapbs_compare --gapbs CHECKOUT --output NEW_DIRECTORY \
     (--graph FILE --vertices N | --fixture smoke|sparse|hub [--vertices N]) \
     [--source 0] [--trials 5] [--threads 1] [--build-note TEXT] [--sealed] \
-    [--weighted [--delta 16]]";
+    [--algorithm bfs|wcc|tc|sssp] [--weighted [--delta 16]]";
 
 #[derive(Debug)]
 struct Config {
@@ -136,6 +165,7 @@ struct Config {
     threads: usize,
     build_note: String,
     sealed: bool,
+    algorithm: Option<&'static str>,
     weighted: bool,
     delta: usize,
 }
@@ -169,6 +199,7 @@ impl Config {
                 "--trials",
                 "--threads",
                 "--build-note",
+                "--algorithm",
                 "--delta",
             ]
             .contains(&key.as_str())
@@ -193,8 +224,20 @@ impl Config {
             None if fixture.is_some() => 4096,
             None => return Err("--graph requires an explicit --vertices population".into()),
         };
+        let algorithm = match values.remove("--algorithm").as_deref() {
+            None => None,
+            Some("bfs") => Some("bfs"),
+            Some("wcc") => Some("wcc"),
+            Some("tc") => Some("tc"),
+            Some("sssp") if weighted => Some("sssp"),
+            Some("sssp") => return Err("--algorithm sssp requires --weighted".into()),
+            Some(_) => return Err("--algorithm must be bfs, wcc, tc, or sssp".into()),
+        };
         if !weighted && values.contains_key("--delta") {
             return Err("--delta requires --weighted".into());
+        }
+        if values.contains_key("--delta") && algorithm.is_some_and(|name| name != "sssp") {
+            return Err("--delta requires the SSSP series".into());
         }
         let mut number = |key: &str, fallback: usize| -> Result<usize> {
             values
@@ -228,16 +271,21 @@ impl Config {
             threads,
             build_note,
             sealed,
+            algorithm,
             weighted,
             delta,
         })
     }
 
     fn algorithms(&self) -> &'static [&'static str] {
-        if self.weighted {
-            &["bfs", "wcc", "tc", "sssp"]
-        } else {
-            &["bfs", "wcc", "tc"]
+        match self.algorithm {
+            Some("bfs") => &["bfs"],
+            Some("wcc") => &["wcc"],
+            Some("tc") => &["tc"],
+            Some("sssp") => &["sssp"],
+            None if self.weighted => &["bfs", "wcc", "tc", "sssp"],
+            None => &["bfs", "wcc", "tc"],
+            Some(_) => unreachable!("algorithm was validated by Config::parse"),
         }
     }
 }
@@ -265,7 +313,11 @@ fn input(reader: impl BufRead, vertices: usize) -> Result<Vec<Edge>> {
     Ok(edges)
 }
 
-fn weighted_input(reader: impl BufRead, vertices: usize) -> Result<(Vec<Edge>, Vec<i32>)> {
+fn weighted_input(
+    reader: impl BufRead,
+    vertices: usize,
+    includes_sssp: bool,
+) -> Result<(Vec<Edge>, Vec<i32>)> {
     let mut edges = Vec::new();
     let mut weights = Vec::new();
     for (line_number, line) in reader.lines().enumerate() {
@@ -288,17 +340,27 @@ fn weighted_input(reader: impl BufRead, vertices: usize) -> Result<(Vec<Edge>, V
         edges.push((source, target));
         weights.push(weight);
     }
-    validate_weighted_input(&edges, &weights, vertices)?;
+    validate_weighted_input(&edges, &weights, vertices, includes_sssp)?;
     Ok((edges, weights))
 }
 
-fn validate_weighted_input(edges: &[Edge], weights: &[i32], vertices: usize) -> Result<()> {
+fn validate_weighted_input(
+    edges: &[Edge],
+    weights: &[i32],
+    vertices: usize,
+    includes_sssp: bool,
+) -> Result<()> {
     if vertices == 0 || edges.len() != weights.len() {
         return Err("weighted input has an invalid population or weight count".into());
     }
+    if weights.iter().any(|&weight| weight < 0) {
+        return Err("weighted input requires nonnegative int32 weights".into());
+    }
+    if !includes_sssp {
+        return Ok(());
+    }
     let maximum = i64::from(weights.iter().copied().max().unwrap_or(0));
-    if weights.iter().any(|&weight| weight < 0)
-        || maximum >= GAPBS_DISTANCE_INFINITY
+    if maximum >= GAPBS_DISTANCE_INFINITY
         || (vertices.saturating_sub(1) as u128) * (maximum as u128)
             >= GAPBS_DISTANCE_INFINITY as u128
     {
@@ -607,6 +669,67 @@ fn target_distance(result: &FnxResult, target: usize) -> Result<i64> {
     }
 }
 
+/// Consume the complete native query result without allocating per-vertex
+/// comparison state. An unreachable target is an empty result, not a returned
+/// negative sentinel, NULL, or a differently named/typed scalar.
+fn target_query_distance(result: &fgdb::QueryResult, target: usize) -> Result<i64> {
+    use fgdb_gql::algebra::GraphValue;
+
+    let fgdb::QueryResult::Rows { columns, rows } = result else {
+        return Err("target composed query did not produce native rows".into());
+    };
+    if columns
+        .iter()
+        .map(String::as_str)
+        .ne(["vertex", "distance"])
+    {
+        return Err("target composed result has the wrong column schema".into());
+    }
+    match rows.as_slice() {
+        [] => Ok(-1),
+        [row] => match row.as_slice() {
+            [
+                fgdb::QueryValue::Value(GraphValue::Vertex(vertex)),
+                fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(distance))),
+            ] if vertex.0 == target as u128 && *distance >= 0 => Ok(*distance),
+            _ => Err("target composed result has the wrong identity or row schema".into()),
+        },
+        _ => Err("target composed query returned multiple rows".into()),
+    }
+}
+
+fn target_statement(source: usize, target: usize, cutoff: Option<usize>) -> String {
+    let suffix = cutoff.map_or_else(String::new, |cutoff| format!(",{cutoff}"));
+    format!("CALL fnx.shortest_path_length({source},{target}{suffix}) YIELD vertex,distance")
+}
+
+fn expected_target_distance(
+    distances: &[i64],
+    target: usize,
+    cutoff: Option<usize>,
+) -> Result<i64> {
+    let distance = *distances
+        .get(target)
+        .ok_or("target outside verified population")?;
+    if distance < -1 {
+        return Err("invalid verified target distance".into());
+    }
+    Ok(
+        if distance >= 0 && cutoff.is_none_or(|limit| distance as u128 <= limit as u128) {
+            distance
+        } else {
+            -1
+        },
+    )
+}
+
+fn write_target_row(path: &Path, target: usize, distance: i64) -> Result<()> {
+    let mut output = new_file(path)?;
+    writeln!(output, "{target} {distance}")?;
+    output.flush()?;
+    Ok(())
+}
+
 /// Cover fixed identities plus a farthest reachable and an unreachable
 /// destination when present. Input distances have already matched every row
 /// from the current trial's live GAPBS verifier, not an in-house BFS oracle.
@@ -647,6 +770,18 @@ fn target_cases(source: usize, distances: &[i64]) -> Result<Vec<(usize, Option<u
     Ok(cases)
 }
 
+/// Preserve full first-trial coverage without repeatedly authenticating and
+/// sealing a large graph for every correctness case on every later trial.
+/// Adjacent pairs wrap and advance by one case; the choice depends only on
+/// trial number and the already verified case population, never on timings.
+fn sealed_target_case_indices(trial: usize, total: usize) -> Vec<usize> {
+    if trial == 0 || total <= 2 {
+        return (0..total).collect();
+    }
+    let first = (trial - 1) % total;
+    vec![first, (first + 1) % total]
+}
+
 fn target_samples(
     config: &Config,
     database: &Database,
@@ -656,24 +791,14 @@ fn target_samples(
     log: &mut impl Write,
 ) -> Result<()> {
     for (target, cutoff) in target_cases(config.source, verified_distances)? {
-        let suffix = cutoff.map_or_else(String::new, |cutoff| format!(",{cutoff}"));
-        let text = format!(
-            "CALL fnx.shortest_path_length({},{target}{suffix}) YIELD vertex,distance",
-            config.source
-        );
+        let text = target_statement(config.source, target, cutoff);
         let call = FnxCallSpec::bind(&text, &FnxParameters::new())?;
         let options = read_options(&call, "bfs");
         let started = Instant::now();
         let result = database.call_fnx(query, &text, &FnxParameters::new(), options)?;
         let actual = target_distance(&result.analytics, target)?;
         let public_call_ns = started.elapsed().as_nanos();
-        let distance = verified_distances[target];
-        let expected =
-            if distance >= 0 && cutoff.is_none_or(|limit| distance as u128 <= limit as u128) {
-                distance
-            } else {
-                -1
-            };
+        let expected = expected_target_distance(verified_distances, target, cutoff)?;
         if actual != expected {
             return Err(format!(
                 "target mismatch: source={}, target={target}, cutoff={cutoff:?}, database={actual}, GAPBS={expected}",
@@ -684,9 +809,11 @@ fn target_samples(
         let cutoff_label = cutoff.map_or_else(|| "none".to_owned(), |value| value.to_string());
         let sample = format!("bfs-{trial}-target-{target}-cutoff-{cutoff_label}");
         let started = Instant::now();
-        let mut output = new_file(&config.output.join(format!("{sample}.rows")))?;
-        writeln!(output, "{target} {actual}")?;
-        output.flush()?;
+        write_target_row(
+            &config.output.join(format!("{sample}.rows")),
+            target,
+            actual,
+        )?;
         let encoding_ns = started.elapsed().as_nanos();
         let certificate = &result.analytics.certificate;
         emit(
@@ -1320,6 +1447,442 @@ async fn composed_sample(
     Ok((values, total_ns))
 }
 
+struct SealedTargetSample {
+    distance: i64,
+    total_ns: u128,
+    result_digest: String,
+}
+
+/// Each target request owns its read-only preparation. The direct/cooperative
+/// distinction changes scheduling only; both authenticate the same source and
+/// execute the public bound call without a decoded analytics fallback.
+#[allow(clippy::too_many_arguments)]
+async fn sealed_target_sample(
+    config: &Config,
+    commit: &CommitCx,
+    query: &QueryCx,
+    database_path: &Path,
+    prefix: &str,
+    case: (usize, Option<usize>),
+    cooperative: bool,
+    expected: (fgdb_types::ids::ObjectId, fgdb_types::CommitSeq),
+    reference: &SealedSample,
+    log: &mut impl Write,
+) -> Result<SealedTargetSample> {
+    let (target, cutoff) = case;
+    let all_started = Instant::now();
+    let started = Instant::now();
+    let text = target_statement(config.source, target, cutoff);
+    let parameters = FnxParameters::new();
+    let call = FnxCallSpec::bind(&text, &parameters)?;
+    let mut options = read_options(&call, "bfs");
+    options.as_of = Some(expected.1);
+    let memory = FnxMemoryLimits {
+        max_kernel_workspace_bytes: 64 * 1024 * 1024,
+        max_result_bytes: 64 * 1024 * 1024,
+    };
+    let quantum = NonZeroUsize::new(4096).ok_or("zero cooperative quantum")?;
+    let statement_ns = started.elapsed().as_nanos();
+    let started = Instant::now();
+    let graph = if cooperative {
+        Database::open_prism_sealed_projection_cooperative(
+            commit,
+            query,
+            database_path,
+            keys(),
+            options,
+            Default::default(),
+            Default::default(),
+            quantum,
+        )
+        .await?
+    } else {
+        Database::open_prism_sealed_projection(
+            commit,
+            query,
+            database_path,
+            keys(),
+            options,
+            Default::default(),
+            Default::default(),
+        )
+        .await?
+    };
+    let prepare_ns = started.elapsed().as_nanos();
+    if graph.node_count() != config.vertices
+        || graph.adjacency_entry_count() != reference.arcs
+        || graph.binding().root != expected.0
+        || graph.binding().as_of != expected.1
+    {
+        return Err("sealed target preparation changed the verified source or population".into());
+    }
+    let started = Instant::now();
+    let result = if cooperative {
+        call.execute_sealed_cooperative(
+            query,
+            &graph,
+            options.execution_limits,
+            memory,
+            quantum,
+            asupersync::runtime::yield_now::yield_now,
+        )
+        .await?
+    } else {
+        call.execute_sealed(query, &graph, options.execution_limits, memory)?
+    };
+    let execute_ns = started.elapsed().as_nanos();
+    let started = Instant::now();
+    let distance = target_distance(&result, target)?;
+    write_target_row(
+        &config.output.join(format!("{prefix}.rows")),
+        target,
+        distance,
+    )?;
+    let encoding_ns = started.elapsed().as_nanos();
+    let certificate = &result.certificate;
+    let projection_digest = format!("{:?}", certificate.projection_digest);
+    if certificate.snapshot != graph.binding()
+        || certificate.vertices != config.vertices
+        || projection_digest != reference.projection_digest
+    {
+        return Err("sealed target certificate changed the verified source or projection".into());
+    }
+    let result_digest = format!("{:?}", certificate.result_digest);
+    let kernel = certificate.execution_kernel;
+    let kernel_bytes = certificate.kernel_workspace_bytes;
+    let nodes = certificate.witness.nodes_touched;
+    let arcs = certificate.witness.edges_scanned;
+    let rows = result.rows.len();
+    let started = Instant::now();
+    drop(result);
+    drop(graph);
+    drop(call);
+    drop(parameters);
+    let release_ns = started.elapsed().as_nanos();
+    let total_ns = all_started.elapsed().as_nanos();
+    emit(
+        log,
+        "sealed_target_query_sample",
+        &[
+            ("sample", prefix.to_owned()),
+            ("source", config.source.to_string()),
+            ("target", target.to_string()),
+            (
+                "cutoff",
+                cutoff.map_or_else(|| "none".to_owned(), |value| value.to_string()),
+            ),
+            ("distance", distance.to_string()),
+            ("preparation", "fresh-read-only-checkpoint-seal".to_owned()),
+            (
+                "scheduling",
+                if cooperative {
+                    "cooperative"
+                } else {
+                    "immediate"
+                }
+                .to_owned(),
+            ),
+            (
+                "cooperative_quantum",
+                if cooperative {
+                    quantum.to_string()
+                } else {
+                    "none".to_owned()
+                },
+            ),
+            ("statement_prepare_ns", statement_ns.to_string()),
+            ("open_and_prepare_ns", prepare_ns.to_string()),
+            ("execute_and_certify_ns", execute_ns.to_string()),
+            ("complete_result_encoding_ns", encoding_ns.to_string()),
+            ("release_ns", release_ns.to_string()),
+            ("prepare_through_release_ns", total_ns.to_string()),
+            ("source_root", format!("{:?}", expected.0)),
+            ("as_of", expected.1.0.to_string()),
+            ("projected_arcs", reference.arcs.to_string()),
+            ("result_rows", rows.to_string()),
+            ("kernel", kernel.to_owned()),
+            ("kernel_workspace_bytes", kernel_bytes.to_string()),
+            ("nodes_touched", nodes.to_string()),
+            ("edges_scanned", arcs.to_string()),
+            ("projection_digest", projection_digest),
+            ("result_digest", result_digest.clone()),
+            (
+                "budgets",
+                "production default source/image/projection; 64 MiB kernel and result each"
+                    .to_owned(),
+            ),
+            (
+                "release_scope",
+                "native result, projection and bound call; scalar verification answer retained"
+                    .to_owned(),
+            ),
+            (
+                "correctness",
+                "pending same-trial live-GAPBS target/cutoff comparison".to_owned(),
+            ),
+            (
+                "comparison_scope",
+                "point-to-point request; no ratio against all-destination GAPBS".to_owned(),
+            ),
+        ],
+    )?;
+    Ok(SealedTargetSample {
+        distance,
+        total_ns,
+        result_digest,
+    })
+}
+
+fn composed_target_statement(source: usize, target: usize, cutoff: Option<usize>) -> String {
+    let suffix = cutoff.map_or_else(String::new, |cutoff| format!(",{cutoff}"));
+    format!(
+        "CALL fnx.shortest_path_length(args => [{source},{target}{suffix}], \
+         relation => 'R', direction => 'directed', parallel => 'collapse', \
+         self_loops => 'drop') YIELD vertex,distance \
+         MATCH (vertex) RETURN vertex,distance ORDER BY vertex"
+    )
+}
+
+/// The public GQL owner retains its ordinary pattern source as well as the
+/// compressed analytics image. Account for that preparation on every request.
+#[allow(clippy::too_many_arguments)]
+async fn composed_target_sample(
+    config: &Config,
+    commit: &CommitCx,
+    query: &QueryCx,
+    database_path: &Path,
+    prefix: &str,
+    case: (usize, Option<usize>),
+    expected: (fgdb_types::ids::ObjectId, fgdb_types::CommitSeq),
+    log: &mut impl Write,
+) -> Result<(i64, u128)> {
+    let (target, cutoff) = case;
+    let all_started = Instant::now();
+    let started = Instant::now();
+    let text = composed_target_statement(config.source, target, cutoff);
+    let params = fgdb_gql::GqlParameters::new();
+    let prepared =
+        fgdb::PreparedNativeRead::prepare(&text, &params, |kind, name: &str| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                Some(fgdb_gql::GraphSymbol::Relation(KNOWS))
+            }
+            _ => None,
+        })?;
+    let statement_ns = started.elapsed().as_nanos();
+    let started = Instant::now();
+    let view = Database::open_sealed_read(
+        commit,
+        query,
+        database_path,
+        keys(),
+        Some(expected.1),
+        KNOWS,
+        Default::default(),
+        Default::default(),
+    )
+    .await?;
+    let prepare_ns = started.elapsed().as_nanos();
+    if view.partition_root().0 != expected.0
+        || view.snapshot_seq() != expected.1
+        || view.frontier() != expected.1
+        || view.relation() != KNOWS
+    {
+        return Err("composed target changed the verified source generation or relation".into());
+    }
+    let policy = fgdb_gql::GqlQueryPolicy::new(100_000_000, 10_000_000, 1 << 40, 10_000_000);
+    let memory = FnxMemoryLimits {
+        max_kernel_workspace_bytes: 64 * 1024 * 1024,
+        max_result_bytes: 64 * 1024 * 1024,
+    };
+    let started = Instant::now();
+    let result = view.execute_prepared(query, &prepared, &params, policy, memory)?;
+    let execute_ns = started.elapsed().as_nanos();
+    let started = Instant::now();
+    let distance = target_query_distance(&result, target)?;
+    write_target_row(
+        &config.output.join(format!("{prefix}.rows")),
+        target,
+        distance,
+    )?;
+    let encoding_ns = started.elapsed().as_nanos();
+    let started = Instant::now();
+    drop(result);
+    drop(view);
+    drop(prepared);
+    drop(params);
+    let release_ns = started.elapsed().as_nanos();
+    let total_ns = all_started.elapsed().as_nanos();
+    save(
+        &config.output.join(format!("{prefix}.gql")),
+        text.as_bytes(),
+    )?;
+    emit(
+        log,
+        "composed_sealed_target_query_sample",
+        &[
+            ("sample", prefix.to_owned()),
+            ("source", config.source.to_string()),
+            ("target", target.to_string()),
+            ("cutoff", cutoff.map_or_else(|| "none".to_owned(), |value| value.to_string())),
+            ("distance", distance.to_string()),
+            ("result_rows", usize::from(distance >= 0).to_string()),
+            ("scope", "trusted-embedded-compressed-target-CALL-plus-native-MATCH-and-order".to_owned()),
+            ("statement_prepare_ns", statement_ns.to_string()),
+            ("open_and_prepare_ns", prepare_ns.to_string()),
+            ("execute_query_ns", execute_ns.to_string()),
+            ("complete_result_encoding_ns", encoding_ns.to_string()),
+            ("release_ns", release_ns.to_string()),
+            ("prepare_through_release_ns", total_ns.to_string()),
+            ("source_root", format!("{:?}", expected.0)),
+            ("as_of", expected.1.0.to_string()),
+            ("budgets", "production default source/image/projection; GQL 100M records, 10M rows, 2^40 work, 10M scratch entries; 64 MiB kernel and result each".to_owned()),
+            ("release_scope", "native result, decoded+compressed owner and prepared statement; scalar verification answer retained".to_owned()),
+            ("correctness", "pending same-trial live-GAPBS target/cutoff comparison".to_owned()),
+            ("comparison_scope", "point-to-point composed request; no ratio against all-destination GAPBS".to_owned()),
+        ],
+    )?;
+    Ok((distance, total_ns))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sealed_target_samples(
+    config: &Config,
+    commit: &CommitCx,
+    query: &QueryCx,
+    database_path: &Path,
+    trial: usize,
+    expected: (fgdb_types::ids::ObjectId, fgdb_types::CommitSeq),
+    reference: &SealedSample,
+    log: &mut impl Write,
+) -> Result<()> {
+    const ORDERS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let cases = target_cases(config.source, &reference.values)?;
+    let selected = sealed_target_case_indices(trial, cases.len());
+    let sampling_scope = if trial == 0 {
+        "complete target/cutoff case population"
+    } else {
+        "deterministic rotating adjacent pair; first index = (trial-1) modulo case count"
+    };
+    emit(
+        log,
+        "sealed_target_sampling",
+        &[
+            ("trial", trial.to_string()),
+            ("sampling_scope", sampling_scope.to_owned()),
+            ("available_cases", cases.len().to_string()),
+            ("selected_cases", selected.len().to_string()),
+            (
+                "selected_case_indices",
+                selected
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            ("fresh_owner_preparations", (3 * selected.len()).to_string()),
+            (
+                "oracle_scope",
+                "each selected case uses this trial's complete verified live GAPBS BFS".to_owned(),
+            ),
+        ],
+    )?;
+    for index in selected {
+        let case @ (target, cutoff) = cases[index];
+        let wanted = expected_target_distance(&reference.values, target, cutoff)?;
+        let cutoff_label = cutoff.map_or_else(|| "none".to_owned(), |value| value.to_string());
+        let prefix = format!("bfs-{trial}-sealed-target-{target}-cutoff-{cutoff_label}");
+        let order = ORDERS[(trial % ORDERS.len() + index % ORDERS.len()) % ORDERS.len()];
+        let mut immediate = None;
+        let mut cooperative = None;
+        let mut composed = None;
+        for mode in order {
+            let sample = format!(
+                "{prefix}-{}",
+                ["immediate", "cooperative", "composed"][mode]
+            );
+            if mode == 2 {
+                composed = Some(
+                    composed_target_sample(
+                        config,
+                        commit,
+                        query,
+                        database_path,
+                        &sample,
+                        case,
+                        expected,
+                        log,
+                    )
+                    .await?,
+                );
+            } else {
+                let result = sealed_target_sample(
+                    config,
+                    commit,
+                    query,
+                    database_path,
+                    &sample,
+                    case,
+                    mode == 1,
+                    expected,
+                    reference,
+                    log,
+                )
+                .await?;
+                if mode == 1 {
+                    cooperative = Some(result);
+                } else {
+                    immediate = Some(result);
+                }
+            }
+        }
+        let immediate = immediate.ok_or("immediate sealed target sample missing")?;
+        let cooperative = cooperative.ok_or("cooperative sealed target sample missing")?;
+        let (composed, composed_ns) = composed.ok_or("composed sealed target sample missing")?;
+        if immediate.distance != wanted
+            || cooperative.distance != wanted
+            || composed != wanted
+            || immediate.result_digest != cooperative.result_digest
+        {
+            return Err(format!(
+                "sealed target mismatch: source={}, target={target}, cutoff={cutoff:?}, \
+                 immediate={}, cooperative={}, composed={composed}, GAPBS={wanted}",
+                config.source, immediate.distance, cooperative.distance,
+            )
+            .into());
+        }
+        emit(
+            log,
+            "sealed_target_query_verification",
+            &[
+                ("sample", prefix),
+                ("trial", trial.to_string()),
+                ("sampling_scope", sampling_scope.to_owned()),
+                ("case_index", index.to_string()),
+                ("source", config.source.to_string()),
+                ("target", target.to_string()),
+                ("cutoff", cutoff_label),
+                ("distance", wanted.to_string()),
+                ("order", order.map(|mode| ["immediate", "cooperative", "composed"][mode]).join(",")),
+                ("source_root", format!("{:?}", expected.0)),
+                ("as_of", expected.1.0.to_string()),
+                ("immediate_prepare_through_release_ns", immediate.total_ns.to_string()),
+                ("cooperative_prepare_through_release_ns", cooperative.total_ns.to_string()),
+                ("composed_prepare_through_release_ns", composed_ns.to_string()),
+                ("correctness", "complete scalar target/cutoff answers match the same trial's verified live GAPBS BFS; pinned source identities and direct/cooperative digests match".to_owned()),
+                ("comparison_scope", "separate point-to-point request modes; GAPBS computes all destinations; no competitor speedup ratio".to_owned()),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 async fn sealed_trials(
     config: &Config,
     commit: &CommitCx,
@@ -1455,6 +2018,22 @@ async fn sealed_trials(
                     ("comparison_scope", "composed GQL request and live GAPBS have separate workload scopes; no before/after speedup claim".to_owned()),
                 ],
             )?;
+            if algorithm == "bfs" {
+                // Only use this distance vector after every row has matched
+                // the same trial's live upstream BFS and verifier. Target
+                // requests do not enter the all-destination timing series.
+                sealed_target_samples(
+                    config,
+                    commit,
+                    query,
+                    database_path,
+                    trial,
+                    expected,
+                    &read_only,
+                    log,
+                )
+                .await?;
+            }
             read_only_times.push(read_only.total_ns);
             writable_times.push(writable.total_ns);
             gapbs_times.push(gapbs_ns);
@@ -1591,6 +2170,17 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
         GAPBS_ADAPTER.as_bytes(),
     )?;
     for (binary, triangle) in [("gapbs-adapter", false), ("gapbs-tc-adapter", true)] {
+        let selected = if triangle {
+            config.algorithms().contains(&"tc")
+        } else {
+            config
+                .algorithms()
+                .iter()
+                .any(|name| matches!(*name, "bfs" | "wcc"))
+        };
+        if !selected {
+            continue;
+        }
         let mut build = Command::new(&compiler);
         build.args(["-std=c++11", "-O3", "-Wall", "-fopenmp"]);
         if triangle {
@@ -1608,7 +2198,7 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
                 .arg(config.output.join(binary)),
         )?;
     }
-    if config.weighted {
+    if config.algorithms().contains(&"sssp") {
         save(
             &config.output.join("gapbs-sssp-adapter.cc"),
             GAPBS_SSSP_ADAPTER.as_bytes(),
@@ -1626,8 +2216,11 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
     let started = Instant::now();
     let (mut edges, mut weights) = if let Some(path) = &config.graph {
         if config.weighted {
-            let (edges, weights) =
-                weighted_input(BufReader::new(File::open(path)?), config.vertices)?;
+            let (edges, weights) = weighted_input(
+                BufReader::new(File::open(path)?),
+                config.vertices,
+                config.algorithms().contains(&"sssp"),
+            )?;
             (edges, Some(weights))
         } else {
             (
@@ -1644,7 +2237,12 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
             let weights: Vec<i32> = (0..edges.len())
                 .map(|index| ((index % 17 * 7 + 3) % 17) as i32)
                 .collect();
-            validate_weighted_input(&edges, &weights, config.vertices)?;
+            validate_weighted_input(
+                &edges,
+                &weights,
+                config.vertices,
+                config.algorithms().contains(&"sssp"),
+            )?;
             Some(weights)
         } else {
             None
@@ -1703,6 +2301,8 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
             ("executable_git_blob", executable_blob),
             ("build_environment_at_invocation", build_environment),
             ("operator_supplied_build_note", config.build_note.clone()),
+            ("algorithm_selection", config.algorithm.unwrap_or("default-suite").to_owned()),
+            ("algorithms", config.algorithms().join(",")),
             (
                 "build_identity_scope",
                 "HEAD/tree describe the invocation checkout; dirty code and compiler overrides require source digests, binary blob and explicit build note".to_owned(),
@@ -1710,7 +2310,8 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
             ("cpu_model", cpu_model),
             ("input_git_blob", graph_blob),
             ("weighted_input_git_blob", weighted_blob.unwrap_or_else(|| "disabled".to_owned())),
-            ("weighted_sssp_enabled", config.weighted.to_string()),
+            ("weighted_input", config.weighted.to_string()),
+            ("weighted_sssp_enabled", config.algorithms().contains(&"sssp").to_string()),
             ("gapbs_sssp_delta", config.delta.to_string()),
             ("sssp_numeric_domain", "nonnegative int32 weights; every simple path < INT_MAX/2; exact integral f64 distances".to_owned()),
             (
@@ -2281,9 +2882,132 @@ mod tests {
         result.rows.pop();
         result.rows[0][1] = FnxValue::Float(2.0);
         assert!(target_distance(&result, 3).is_err());
+        result.rows[0][1] = FnxValue::Integer(u64::MAX);
+        assert!(target_distance(&result, 3).is_err());
         result.rows.clear();
         result.columns.swap(0, 1);
         assert!(target_distance(&result, 3).is_err());
+    }
+
+    #[test]
+    fn composed_target_comparison_rejects_identity_schema_cardinality_and_numeric_changes() {
+        use fgdb_gql::algebra::GraphValue;
+
+        let vertex = fgdb::QueryValue::Value(GraphValue::Vertex(VId(3)));
+        let distance = fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2)));
+        let query = |columns: &[&str], rows: Vec<Vec<fgdb::QueryValue>>| fgdb::QueryResult::Rows {
+            columns: columns.iter().map(|column| (*column).to_owned()).collect(),
+            rows,
+        };
+        let good_row = vec![vertex.clone(), distance.clone()];
+        assert_eq!(
+            target_query_distance(&query(&["vertex", "distance"], vec![good_row.clone()]), 3)
+                .unwrap(),
+            2,
+        );
+        assert_eq!(
+            target_query_distance(&query(&["vertex", "distance"], vec![]), 3).unwrap(),
+            -1,
+        );
+        for columns in [
+            vec!["distance", "vertex"],
+            vec!["vertex"],
+            vec!["vertex", "distance", "extra"],
+            vec!["vertex", "score"],
+        ] {
+            assert!(target_query_distance(&query(&columns, vec![good_row.clone()]), 3).is_err());
+            assert!(target_query_distance(&query(&columns, vec![]), 3).is_err());
+        }
+        for rows in [
+            vec![good_row.clone(), good_row.clone()],
+            vec![vec![vertex.clone()]],
+            vec![vec![vertex.clone(), distance.clone(), distance.clone()]],
+            vec![vec![
+                fgdb::QueryValue::Value(GraphValue::Vertex(VId(2))),
+                distance.clone(),
+            ]],
+            vec![vec![
+                fgdb::QueryValue::Value(GraphValue::Vertex(VId((1u128 << 96) | 3))),
+                distance.clone(),
+            ]],
+            vec![vec![vertex.clone(), vertex.clone()]],
+            vec![vec![
+                vertex.clone(),
+                fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(-1))),
+            ]],
+            vec![vec![
+                vertex.clone(),
+                fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+            ]],
+        ] {
+            assert!(target_query_distance(&query(&["vertex", "distance"], rows), 3).is_err());
+        }
+        let verified = [0, 1, 1, 2, -1];
+        assert_eq!(expected_target_distance(&verified, 3, None).unwrap(), 2);
+        assert_eq!(expected_target_distance(&verified, 3, Some(2)).unwrap(), 2);
+        assert_eq!(expected_target_distance(&verified, 3, Some(1)).unwrap(), -1);
+        assert_eq!(expected_target_distance(&verified, 0, Some(0)).unwrap(), 0);
+        assert_eq!(
+            expected_target_distance(&verified, 4, Some(10)).unwrap(),
+            -1
+        );
+        assert!(expected_target_distance(&verified, 5, None).is_err());
+        assert!(expected_target_distance(&[-2], 0, None).is_err());
+    }
+
+    #[test]
+    fn target_statements_bind_both_public_call_and_composed_query_forms() {
+        let parameters = FnxParameters::new();
+        let gql = fgdb_gql::GqlParameters::new();
+        for (source, target, cutoff) in [
+            (0, 3, None),
+            (0, 3, Some(1)),
+            (0, 3, Some(2)),
+            (0, 0, Some(0)),
+            (0, 7, None),
+        ] {
+            let bound =
+                FnxCallSpec::bind(&target_statement(source, target, cutoff), &parameters).unwrap();
+            assert_eq!(
+                bound.algorithm(),
+                FnxCallSpec::shortest_path_length(VId(source as u128), VId(target as u128), cutoff)
+                    .algorithm(),
+            );
+            assert!(bound.supports_cooperative_sealed_execution());
+            fgdb::PreparedNativeRead::prepare(
+                &composed_target_statement(source, target, cutoff),
+                &gql,
+                |kind, name: &str| match (kind, name) {
+                    (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                        Some(fgdb_gql::GraphSymbol::Relation(KNOWS))
+                    }
+                    _ => None,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn sealed_target_followups_rotate_without_reopening_every_case() {
+        let cases = target_cases(0, &[0, 1, 1, 2, -1, -1, -1, -1]).unwrap();
+        assert_eq!(cases.len(), 9);
+        assert_eq!(
+            sealed_target_case_indices(0, cases.len()),
+            (0..9).collect::<Vec<_>>()
+        );
+        for (trial, expected) in [(1, [0, 1]), (2, [1, 2]), (9, [8, 0]), (10, [0, 1])] {
+            assert_eq!(sealed_target_case_indices(trial, cases.len()), expected);
+        }
+        for trial in [0, 1, usize::MAX] {
+            assert!(sealed_target_case_indices(trial, 0).is_empty());
+            assert_eq!(sealed_target_case_indices(trial, 1), [0]);
+            assert_eq!(sealed_target_case_indices(trial, 2), [0, 1]);
+        }
+        let last = sealed_target_case_indices(usize::MAX, cases.len());
+        assert_eq!(last.len(), 2);
+        assert!(last.iter().all(|&index| index < cases.len()));
+        assert_ne!(last[0], last[1]);
     }
 
     #[test]
@@ -2424,7 +3148,7 @@ mod tests {
     #[test]
     fn weighted_input_preserves_zero_parallel_and_loop_weights_and_proves_numeric_domain() {
         let text = "# weighted road graph\n0 1 9\n0 1 3\n1 2 0\n2 2 7\n";
-        let (edges, weights) = weighted_input(text.as_bytes(), 4).unwrap();
+        let (edges, weights) = weighted_input(text.as_bytes(), 4, true).unwrap();
         assert_eq!(edges, [(0, 1), (0, 1), (1, 2), (2, 2)]);
         assert_eq!(weights, [9, 3, 0, 7]);
         for invalid in [
@@ -2434,24 +3158,79 @@ mod tests {
             "0 1 3 extra\n",
             "0 4 1\n",
             "0 1 2147483648\n",
-            "0 1 1073741823\n",
-            "0 1 536870912\n",
-            "0 0 1\n",
-            "",
         ] {
-            assert!(weighted_input(invalid.as_bytes(), 4).is_err(), "{invalid}");
+            for includes_sssp in [false, true] {
+                assert!(
+                    weighted_input(invalid.as_bytes(), 4, includes_sssp).is_err(),
+                    "{invalid}; includes_sssp={includes_sssp}"
+                );
+            }
+        }
+        for sssp_only_invalid in ["0 1 1073741823\n", "0 1 536870912\n", "0 0 1\n", ""] {
+            assert!(
+                weighted_input(sssp_only_invalid.as_bytes(), 4, true).is_err(),
+                "{sssp_only_invalid}"
+            );
+            assert!(
+                weighted_input(sssp_only_invalid.as_bytes(), 4, false).is_ok(),
+                "{sssp_only_invalid}"
+            );
         }
         // The upper bound is strict: an otherwise reachable path must never
         // collide with GAPBS's unreachable sentinel.
-        assert!(validate_weighted_input(&[(0, 1)], &[357_913_940], 4).is_ok());
-        assert!(validate_weighted_input(&[(0, 1)], &[357_913_941], 4).is_err());
-        assert!(validate_weighted_input(&[(0, 1)], &[], 4).is_err());
+        assert!(validate_weighted_input(&[(0, 1)], &[357_913_940], 4, true).is_ok());
+        assert!(validate_weighted_input(&[(0, 1)], &[357_913_941], 4, true).is_err());
+        for includes_sssp in [false, true] {
+            assert!(validate_weighted_input(&[(0, 1)], &[], 4, includes_sssp).is_err());
+            assert!(validate_weighted_input(&[(0, 1)], &[-1], 4, includes_sssp).is_err());
+            assert!(validate_weighted_input(&[], &[], 0, includes_sssp).is_err());
+        }
+    }
+
+    #[test]
+    fn weighted_selector_applies_delta_step_bounds_only_to_sssp() {
+        for (vertices, text, edge, weight) in [
+            (1, "0 0 0\n", (0, 0), 0),
+            (2, "0 1 2000000000\n", (0, 1), 2_000_000_000),
+        ] {
+            for selection in [
+                "--algorithm bfs",
+                "--algorithm wcc",
+                "--algorithm tc",
+                "--algorithm sssp",
+                "",
+            ] {
+                let config = Config::parse(
+                    format!(
+                        "--gapbs ../gapbs --output unused --graph unused.wel \
+                         --vertices {vertices} --weighted {selection}"
+                    )
+                    .split_whitespace()
+                    .map(str::to_owned),
+                )
+                .unwrap();
+                let includes_sssp = config.algorithms().contains(&"sssp");
+                let result = weighted_input(text.as_bytes(), config.vertices, includes_sssp);
+                if includes_sssp {
+                    assert!(result.is_err(), "{selection}; {text}");
+                } else {
+                    assert_eq!(result.unwrap(), (vec![edge], vec![weight]));
+                }
+                // Fixture weights pass through the same admission helper.
+                assert_eq!(
+                    validate_weighted_input(&[edge], &[weight], config.vertices, includes_sssp)
+                        .is_ok(),
+                    !includes_sssp,
+                    "fixture admission: {selection}; {text}"
+                );
+            }
+        }
     }
 
     #[test]
     fn weighted_complete_results_match_independent_integral_shortest_paths() {
         let text = "0 1 9\n0 2 2\n1 3 3\n2 3 10\n3 1 0\n0 1 4\n3 3 1\n4 5 5\n5 4 1\n";
-        let (edges, weights) = weighted_input(text.as_bytes(), 8).unwrap();
+        let (edges, weights) = weighted_input(text.as_bytes(), 8, true).unwrap();
         let call = FnxCallSpec::bind(&statement("sssp", 0), &FnxParameters::new()).unwrap();
         let options = read_options(&call, "sssp");
         assert_eq!(
@@ -2556,6 +3335,54 @@ mod tests {
             "--weighted --delta 0",
             "--weighted --delta 1073741823",
             "--weighted --delta -1",
+        ] {
+            assert!(parse(flags).is_err(), "{flags}");
+        }
+    }
+
+    #[test]
+    fn algorithm_selector_is_exact_and_preserves_default_and_weighted_domains() {
+        let parse = |flags: &str| {
+            Config::parse(
+                format!("--gapbs ../gapbs --output unused --fixture smoke {flags}")
+                    .split_whitespace()
+                    .map(str::to_owned),
+            )
+        };
+        assert_eq!(parse("").unwrap().algorithms(), ["bfs", "wcc", "tc"]);
+        assert_eq!(
+            parse("--weighted").unwrap().algorithms(),
+            ["bfs", "wcc", "tc", "sssp"]
+        );
+        for algorithm in ["bfs", "wcc", "tc"] {
+            let selected = parse(&format!("--algorithm {algorithm}")).unwrap();
+            assert_eq!(selected.algorithms(), [algorithm]);
+            assert!(!selected.weighted);
+            let weighted = parse(&format!("--algorithm {algorithm} --weighted --sealed")).unwrap();
+            assert_eq!(weighted.algorithms(), [algorithm]);
+            assert!(weighted.weighted);
+            assert!(weighted.sealed);
+        }
+        for flags in [
+            "--weighted --algorithm sssp --delta 3",
+            "--algorithm sssp --weighted",
+        ] {
+            let selected = parse(flags).unwrap();
+            assert_eq!(selected.algorithms(), ["sssp"]);
+            assert!(selected.weighted);
+        }
+        for flags in [
+            "--algorithm",
+            "--algorithm unknown",
+            "--algorithm BFS",
+            "--algorithm bfs,wcc",
+            "--algorithm bfs --algorithm tc",
+            "--algorithm --weighted",
+            "--algorithm sssp",
+            "--algorithm sssp --delta 3",
+            "--algorithm bfs --weighted --delta 3",
+            "--algorithm tc --weighted --delta 3",
+            "--algorithm sssp --weighted --delta 0",
         ] {
             assert!(parse(flags).is_err(), "{flags}");
         }

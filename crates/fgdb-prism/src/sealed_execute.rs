@@ -1692,6 +1692,7 @@ fn finish_encoded_bfs(
         kernel_workspace_bytes: workspace,
         bfs_decision_card,
         component_decision_card: None,
+        target_bfs_decision_card: None,
         witness,
         digest: hash.finalize(),
     };

@@ -625,7 +625,7 @@ impl<'a> Parser<'a> {
         self.punct(b'(', "(")?;
         let unique = self.take_word("DISTINCT")?;
         if !unique {
-            self.take_word("ALL")?;
+            self.take_all_quantifier()?;
         }
         let (column, input_kind) = if self.take(b'*')? {
             if function != Function::Count || unique {

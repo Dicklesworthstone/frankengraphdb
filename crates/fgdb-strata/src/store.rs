@@ -343,6 +343,13 @@ type DecodedBlockRead = (
 /// block hosts no patch, or admission reads it).
 type BlockRead = (DecodedBlockRead, Option<PrefetchedPatch>);
 
+/// Keep a patch's I/O outcome separate from its identity/format proof, so
+/// physical-copy recovery preserves the root walk's existing error attribution.
+type HostedPatchRead = (
+    Vec<u8>,
+    Result<Vec<crate::edge_props::EdgePropertyRow>, StoreError>,
+);
+
 /// A block's hosted property patch, read ahead of the block's admission, with
 /// [`prove_block_patch`] already run on its bytes. Admission replays both
 /// outcomes in the serial order, so a prefetched patch is accepted or refused,
@@ -748,6 +755,17 @@ impl core::error::Error for StoreError {
 impl From<std::io::Error> for StoreError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+fn read_interrupted(error: &StoreError) -> bool {
+    match error {
+        StoreError::Io(error) => error.kind() == std::io::ErrorKind::Interrupted,
+        StoreError::RootBlockLoad { error, .. }
+        | StoreError::RootPatchLoad { error, .. }
+        | StoreError::ManifestRootLoad { error, .. }
+        | StoreError::BlockPatchLoad { error, .. } => read_interrupted(error),
+        _ => false,
     }
 }
 
@@ -1501,10 +1519,10 @@ impl<V: Vfs> BlockStore<V> {
         decode_block(&bytes).map_err(StoreError::Malformed)
     }
 
-    /// The stored bytes of `id`, wherever they are: a pack this store knows,
-    /// else the object's loose file, else a pack published since this store
-    /// last looked (another process may have committed). The caller verifies
-    /// identity, as it always has; the location is only where to look.
+    /// The first candidate bytes of `id`: a known pack or a loose file.
+    /// The location never proves identity. Ordinary
+    /// readers use `read_object_proven`; batched root proofs use this seam
+    /// directly and retry failed proofs through that same verified reader.
     async fn read_object_bytes(
         &self,
         cx: &impl StorageReadCx,
@@ -1514,77 +1532,131 @@ impl<V: Vfs> BlockStore<V> {
         if let Some(bytes) = self.read_packed(cx, id, limit).await? {
             return Ok(bytes);
         }
-        let loose = async {
-            let file = cx
-                .with_restriction_async(self.vfs.open_read(&self.path(id)))
-                .await?;
-            read_bounded(cx, file, limit).await
-        };
-        match loose.await {
-            Err(StoreError::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound
-                    && self.packs.refresh(cx, &self.vfs).await? =>
-            {
-                match self.read_packed(cx, id, limit).await? {
-                    Some(bytes) => Ok(bytes),
-                    None => Err(StoreError::Io(error)),
-                }
-            }
-            result => result,
-        }
+        self.read_loose(cx, id, limit).await
     }
 
-    /// The bytes of a packed copy of `id`, or `None` when no known pack has
-    /// one. With several copies (a recovery republished an object whose
-    /// older copy is damaged), the newest copy whose bytes derive `id` wins;
-    /// when none does, the newest copy is returned for the caller to refuse.
+    async fn read_loose(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+        limit: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        let file = cx
+            .with_restriction_async(self.vfs.open_read(&self.path(id)))
+            .await?;
+        read_bounded(cx, file, limit).await
+    }
+
+    /// Prove a candidate using the caller's exact family/decoder, then try
+    /// other locations only if that candidate fails. A repair can be loose,
+    /// in an older pack, or in a pack published since this handle opened;
+    /// none depends on an unrelated cache miss to become readable (fgdb-0qjmf).
+    ///
+    /// The healthy path performs the original proof exactly once. Failed
+    /// candidates keep the original error when no sound copy exists. Every
+    /// retry retains the caller's byte ceiling, and Interrupted is terminal:
+    /// cancellation is never repaired by finding a different physical copy.
+    async fn read_object_proven<T, Proof, Proven>(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+        limit: u64,
+        proof: Proof,
+    ) -> Result<T, StoreError>
+    where
+        Proof: FnMut(Vec<u8>) -> Proven,
+        Proven: Future<Output = Result<T, StoreError>>,
+    {
+        self.read_object_selected(cx, id, limit, proof, |_| true)
+            .await
+    }
+
+    // Buffered extents use the already-admitted checksum as their selector.
+    // If every candidate fails that check, return the original bytes so the
+    // buffer's own completion reports its existing ChecksumMismatch class.
+    async fn read_object_selected<T, Proof, Proven>(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+        limit: u64,
+        mut proof: Proof,
+        accepts: impl Fn(&T) -> bool,
+    ) -> Result<T, StoreError>
+    where
+        Proof: FnMut(Vec<u8>) -> Proven,
+        Proven: Future<Output = Result<T, StoreError>>,
+    {
+        let first = match self.read_object_bytes(cx, id, limit).await {
+            Ok(bytes) => proof(bytes).await,
+            Err(error) => Err(error),
+        };
+        let original = match first {
+            Ok(value) if accepts(&value) => return Ok(value),
+            Err(error) if read_interrupted(&error) => return Err(error),
+            original => original,
+        };
+        for refreshed in [false, true] {
+            if refreshed {
+                match self.packs.refresh(cx, &self.vfs).await {
+                    Ok(true) => {}
+                    Err(error) if read_interrupted(&error) => return Err(error),
+                    Ok(false) => break,
+                    // Refresh can admit the repair before encountering an
+                    // unrelated damaged/unreadable pack. Recheck the index
+                    // it did extend, while retaining the original refusal if
+                    // that partial discovery supplied no sound copy.
+                    Err(_) => {}
+                }
+            }
+            let copies = match self.packs.locate(id) {
+                pack::Located::None => Vec::new(),
+                pack::Located::One(location) => vec![location],
+                pack::Located::Several(copies) => copies,
+            };
+            for location in copies {
+                let candidate = match self.packs.read(cx, &self.vfs, location, limit).await {
+                    Ok(bytes) => proof(bytes).await,
+                    Err(error) => Err(error),
+                };
+                match candidate {
+                    Ok(value) if accepts(&value) => return Ok(value),
+                    Err(error) if read_interrupted(&error) => return Err(error),
+                    _ => {}
+                }
+            }
+            if !refreshed {
+                let loose = match self.read_loose(cx, id, limit).await {
+                    Ok(bytes) => proof(bytes).await,
+                    Err(error) => Err(error),
+                };
+                match loose {
+                    Ok(value) if accepts(&value) => return Ok(value),
+                    Err(error) if read_interrupted(&error) => return Err(error),
+                    _ => {}
+                }
+            }
+        }
+        original
+    }
+
+    /// One location candidate, without guessing which family its bytes could
+    /// belong to. Verification and copy fallback are owned by the caller's
+    /// actual transcript in `read_object_proven`.
     async fn read_packed(
         &self,
         cx: &impl StorageReadCx,
         id: ObjectId,
         limit: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let copies = match self.packs.locate(id) {
+        let location = match self.packs.locate(id) {
             pack::Located::None => return Ok(None),
-            pack::Located::One(location) => {
-                return self
-                    .packs
-                    .read(cx, &self.vfs, location, limit)
-                    .await
-                    .map(Some);
-            }
-            pack::Located::Several(copies) => copies,
+            pack::Located::One(location) => location,
+            pack::Located::Several(copies) => copies[0],
         };
-        let mut newest = None;
-        for location in copies {
-            let read = self.packs.read(cx, &self.vfs, location, limit).await;
-            if let Ok(bytes) = &read
-                && self.derives(id, bytes)
-            {
-                return read.map(Some);
-            }
-            newest.get_or_insert(read);
-        }
-        newest.expect("several copies").map(Some)
-    }
-
-    /// Whether `bytes` derive `id` under some stored family's transcript.
-    /// The transcripts are domain-separated, so at most one family can.
-    fn derives(&self, id: ObjectId, bytes: &[u8]) -> bool {
-        use StoredObjectKind::{
-            Block, EdgePropertyPatch, IndexSegment, Manifest, Root, Segment, VertexPatch,
-        };
-        [
-            Block,
-            Root,
-            Segment,
-            IndexSegment,
-            VertexPatch,
-            EdgePropertyPatch,
-            Manifest,
-        ]
-        .into_iter()
-        .any(|kind| kind.identity(self.k_oid.expose(), self.namespace, bytes) == id)
+        self.packs
+            .read(cx, &self.vfs, location, limit)
+            .await
+            .map(Some)
     }
 
     /// Fill `out` with the object `id`, whose admitted length is `out.len()`.
@@ -1593,6 +1665,7 @@ impl<V: Vfs> BlockStore<V> {
         &self,
         cx: &impl StorageReadCx,
         id: ObjectId,
+        checksum: [u8; 32],
         out: &mut [u8],
     ) -> Result<(), StoreError> {
         let changed = || {
@@ -1602,7 +1675,16 @@ impl<V: Vfs> BlockStore<V> {
             ))
         };
         let bytes = self
-            .read_object_bytes(cx, id, out.len() as u64)
+            .read_object_selected(
+                cx,
+                id,
+                out.len() as u64,
+                |bytes| async { Ok(bytes) },
+                |bytes| {
+                    bytes.len() == out.len()
+                        && crate::tiered::buffer::extent_checksum(bytes) == checksum
+                },
+            )
             .await
             .map_err(|error| match error {
                 StoreError::ObjectTooLarge { .. } => changed(),
@@ -1624,17 +1706,8 @@ impl<V: Vfs> BlockStore<V> {
         cx: &impl StorageReadCx,
         id: DeltaBlockVersion,
     ) -> Result<Vec<u8>, StoreError> {
-        let bytes = self
-            .read_object_bytes(cx, id.0, MAX_STORED_OBJECT_BYTES)
-            .await?;
-        let actual = block_id(self.k_oid.expose(), self.namespace, &bytes);
-        if actual != id.0 {
-            return Err(StoreError::IdentityMismatch {
-                expected: id.0,
-                actual,
-            });
-        }
-        Ok(bytes)
+        self.read_metadata_bytes(cx, id.0, StoredObjectKind::Block, MAX_STORED_OBJECT_BYTES)
+            .await
     }
 
     /// Read one immutable publication-metadata object independently of its
@@ -1647,15 +1720,17 @@ impl<V: Vfs> BlockStore<V> {
         kind: StoredObjectKind,
         limit: u64,
     ) -> Result<Vec<u8>, StoreError> {
-        let bytes = self.read_object_bytes(cx, id, limit).await?;
-        let actual = kind.identity(self.k_oid.expose(), self.namespace, &bytes);
-        if actual != id {
-            return Err(StoreError::IdentityMismatch {
-                expected: id,
-                actual,
-            });
-        }
-        Ok(bytes)
+        self.read_object_proven(cx, id, limit, |bytes| async move {
+            let actual = kind.identity(self.k_oid.expose(), self.namespace, &bytes);
+            if actual != id {
+                return Err(StoreError::IdentityMismatch {
+                    expected: id,
+                    actual,
+                });
+            }
+            Ok(bytes)
+        })
+        .await
     }
 
     /// Re-read an admitted manifest without following its root references.
@@ -1744,23 +1819,23 @@ impl<V: Vfs> BlockStore<V> {
         id: ObjectId,
         prefetch_patch: bool,
     ) -> Result<BlockRead, StoreError> {
-        let bytes = self
-            .read_object_bytes(cx, id, MAX_STORED_OBJECT_BYTES)
-            .await?;
-        let k_oid = self.k_oid.clone();
         let namespace = self.namespace;
-        let (bytes, decoded) = prove_off_task(bytes.len(), move || {
-            let actual = block_id(k_oid.expose(), namespace, &bytes);
-            if actual != id {
-                return Err(StoreError::IdentityMismatch {
-                    expected: id,
-                    actual,
-                });
-            }
-            let decoded = crate::decode_block_with_properties(&bytes);
-            Ok((bytes, decoded))
-        })
-        .await?;
+        let (bytes, decoded) = self
+            .read_object_proven(cx, id, MAX_STORED_OBJECT_BYTES, |bytes| {
+                let k_oid = self.k_oid.clone();
+                prove_off_task(bytes.len(), move || {
+                    let actual = block_id(k_oid.expose(), namespace, &bytes);
+                    if actual != id {
+                        return Err(StoreError::IdentityMismatch {
+                            expected: id,
+                            actual,
+                        });
+                    }
+                    let decoded = crate::decode_block_with_properties(&bytes);
+                    Ok((bytes, decoded))
+                })
+            })
+            .await?;
         let (entries, patch_id, locators) = match decoded {
             Ok((entries, Some((patch_id, locators)))) if prefetch_patch => {
                 (entries, patch_id, locators)
@@ -1774,12 +1849,13 @@ impl<V: Vfs> BlockStore<V> {
             Ok(patch_bytes) => patch_bytes,
             Err(error) => {
                 let decoded = Ok((entries, Some((patch_id, locators))));
-                return Ok(((bytes, decoded), Some(PrefetchedPatch::Unread(error))));
+                let read = ((bytes, decoded), Some(PrefetchedPatch::Unread(error)));
+                return self.recover_prefetched_patch(cx, read).await;
             }
         };
         let k_oid = self.k_oid.clone();
         let resolver = self.scalar_resolver.clone();
-        Ok(prove_off_task(bytes.len() + patch_bytes.len(), move || {
+        let read = prove_off_task(bytes.len() + patch_bytes.len(), move || {
             let (_, declared_digest) = crate::header_partition_and_digest(&bytes);
             let proof = prove_block_patch(
                 k_oid.expose(),
@@ -1799,7 +1875,76 @@ impl<V: Vfs> BlockStore<V> {
                 Some(PrefetchedPatch::Read(patch_bytes, proof)),
             )
         })
-        .await)
+        .await;
+        self.recover_prefetched_patch(cx, read).await
+    }
+
+    /// A failed prefetched patch can have another sound physical copy. Healthy
+    /// prefetched proofs stay on the original batched/pool path, with no extra
+    /// hash or decode. Only failures enter this recovery reader.
+    async fn recover_prefetched_patch(
+        &self,
+        cx: &impl StorageReadCx,
+        mut read: BlockRead,
+    ) -> Result<BlockRead, StoreError> {
+        let original = match &read.1 {
+            Some(PrefetchedPatch::Unread(error) | PrefetchedPatch::Read(_, Err(error))) => error,
+            _ => return Ok(read),
+        };
+        if read_interrupted(original) {
+            // Keep the original attribution at the block's patch seam; no
+            // other physical read is attempted after an interruption.
+            return Ok(read);
+        }
+        let (bytes, decoded) = &read.0;
+        let Ok((entries, Some((patch_id, locators)))) = decoded else {
+            return Ok(read);
+        };
+        let (_, digest) = crate::header_partition_and_digest(bytes);
+        match self
+            .read_hosted_patch(cx, *patch_id, locators, entries, digest)
+            .await
+        {
+            Ok((bytes, Ok(rows))) => read.1 = Some(PrefetchedPatch::Read(bytes, Ok(rows))),
+            Ok((_, Err(error))) if read_interrupted(&error) => {
+                read.1 = Some(PrefetchedPatch::Unread(error));
+            }
+            Err(error) if read_interrupted(&error) => {
+                read.1 = Some(PrefetchedPatch::Unread(error));
+            }
+            _ => {}
+        }
+        Ok(read)
+    }
+
+    async fn read_hosted_patch(
+        &self,
+        cx: &impl StorageReadCx,
+        patch_id: ObjectId,
+        locators: &[u8],
+        entries: &[crate::AdjacencyEntry],
+        declared_digest: [u8; 32],
+    ) -> Result<HostedPatchRead, StoreError> {
+        self.read_object_selected(
+            cx,
+            patch_id,
+            MAX_STORED_OBJECT_BYTES,
+            |bytes| async move {
+                let rows = prove_block_patch(
+                    self.k_oid.expose(),
+                    self.namespace,
+                    self.decode_resolver(),
+                    patch_id,
+                    &bytes,
+                    locators,
+                    entries,
+                    declared_digest,
+                );
+                Ok((bytes, rows))
+            },
+            |(_, rows)| rows.is_ok(),
+        )
+        .await
     }
 
     /// [`Self::read_block_decoded`] with the hosted patch prefetched, for
@@ -1848,7 +1993,18 @@ impl<V: Vfs> BlockStore<V> {
                     done.push(None);
                 }
                 Ok(read) => done.push(Some(Ok((read, None)))),
-                Err(error) => done.push(Some(Err(error))),
+                Err(error) if read_interrupted(&error) => done.push(Some(Err(error))),
+                Err(original) => {
+                    // The window's common path hashes once, on the pool.
+                    // Only a failed candidate needs location discovery and
+                    // the single-object verified recovery path.
+                    let recovered = self.read_block_decoded(cx, ids[at], true).await;
+                    done.push(Some(match recovered {
+                        Ok(read) => Ok(read),
+                        Err(error) if read_interrupted(&error) => Err(error),
+                        Err(_) => Err(original),
+                    }));
+                }
             }
         }
         let mut patches = Vec::with_capacity(hosting.len());
@@ -1912,9 +2068,14 @@ impl<V: Vfs> BlockStore<V> {
         for (at, read) in proven {
             done[at] = Some(Ok(read));
         }
-        done.into_iter()
-            .map(|read| read.expect("every block in the window was read"))
-            .collect()
+        let mut resolved = Vec::with_capacity(done.len());
+        for read in done {
+            resolved.push(match read.expect("every block in the window was read") {
+                Ok(read) => self.recover_prefetched_patch(cx, read).await,
+                Err(error) => Err(error),
+            });
+        }
+        resolved
     }
 
     /// Store a vertex patch's bytes — the same derived-identity discipline and
@@ -1976,10 +2137,12 @@ impl<V: Vfs> BlockStore<V> {
     ) -> Result<Vec<(crate::manifest::ManifestRecord, crate::root::PartitionRoot)>, StoreError>
     {
         let limit = MANIFEST_HEADER_AND_RECORDS_CEILING;
-        let bytes = self.read_object_bytes(cx, id.0, limit).await?;
-        let records =
-            crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
-                .map_err(StoreError::MalformedManifest)?;
+        let records = self
+            .read_object_proven(cx, id.0, limit, |bytes| async move {
+                crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
+                    .map_err(StoreError::MalformedManifest)
+            })
+            .await?;
         let mut resolved = Vec::with_capacity(records.len());
         for (at, record) in records.into_iter().enumerate() {
             let root = self.get_root(cx, record.root).await.map_err(|error| {
@@ -2003,18 +2166,13 @@ impl<V: Vfs> BlockStore<V> {
         cx: &impl StorageReadCx,
         id: ObjectId,
     ) -> Result<Vec<u8>, StoreError> {
-        let bytes = self
-            .read_object_bytes(cx, id, MAX_STORED_OBJECT_BYTES)
-            .await?;
-        let actual =
-            crate::edge_props::property_patch_id(self.k_oid.expose(), self.namespace, &bytes);
-        if actual != id {
-            return Err(StoreError::IdentityMismatch {
-                expected: id,
-                actual,
-            });
-        }
-        Ok(bytes)
+        self.read_metadata_bytes(
+            cx,
+            id,
+            StoredObjectKind::EdgePropertyPatch,
+            MAX_STORED_OBJECT_BYTES,
+        )
+        .await
     }
 
     /// Load the raw bytes of a vertex patch, verifying identity but not
@@ -2024,17 +2182,13 @@ impl<V: Vfs> BlockStore<V> {
         cx: &impl StorageReadCx,
         id: VertexPatchVersion,
     ) -> Result<Vec<u8>, StoreError> {
-        let bytes = self
-            .read_object_bytes(cx, id.0, MAX_STORED_OBJECT_BYTES)
-            .await?;
-        let actual = vertex_patch_id(self.k_oid.expose(), self.namespace, &bytes);
-        if actual != id.0 {
-            return Err(StoreError::IdentityMismatch {
-                expected: id.0,
-                actual,
-            });
-        }
-        Ok(bytes)
+        self.read_metadata_bytes(
+            cx,
+            id.0,
+            StoredObjectKind::VertexPatch,
+            MAX_STORED_OBJECT_BYTES,
+        )
+        .await
     }
 
     /// Load and decode the vertex patch named by `id`, re-deriving the
@@ -2129,11 +2283,13 @@ impl<V: Vfs> BlockStore<V> {
             let (patch_bytes, proof) = match prefetched {
                 Some(PrefetchedPatch::Read(patch_bytes, proof)) => (Ok(patch_bytes), Some(proof)),
                 Some(PrefetchedPatch::Unread(error)) => (Err(error), None),
-                None => (
-                    self.read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
-                        .await,
-                    None,
-                ),
+                None => match self
+                    .read_hosted_patch(cx, patch_id, &locators, &entries, declared_digest)
+                    .await
+                {
+                    Ok((bytes, rows)) => (Ok(bytes), Some(rows)),
+                    Err(error) => (Err(error), None),
+                },
             };
             let patch_bytes = patch_bytes.map_err(|error| StoreError::BlockPatchLoad {
                 at,
@@ -2670,17 +2826,32 @@ impl<V: Vfs> BlockStore<V> {
             // Prove the declared patch from the bytes in hand, or from disk
             // when the caller supplied none — either way the receipt is
             // earned only after the joint bijection law holds.
+            let (_, declared_digest) = crate::header_partition_and_digest(bytes);
             let owned;
             let proof_bytes: &[u8] = match patch_bytes {
-                Some(bytes) => bytes,
+                Some(bytes) => {
+                    prove_block_patch(
+                        self.k_oid.expose(),
+                        self.namespace,
+                        self.decode_resolver(),
+                        patch_id,
+                        bytes,
+                        &locators,
+                        &entries,
+                        declared_digest,
+                    )?;
+                    bytes
+                }
                 None => {
-                    owned = self
-                        .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+                    let (bytes, proof) = self
+                        .read_hosted_patch(cx, patch_id, &locators, &entries, declared_digest)
                         .await
                         .map_err(|error| StoreError::BlockPatchLoad {
                             at,
                             error: Box::new(error),
                         })?;
+                    proof?;
+                    owned = bytes;
                     &owned
                 }
             };
@@ -2688,17 +2859,6 @@ impl<V: Vfs> BlockStore<V> {
             // the receipt must not be earned by a block whose declared digest
             // disowns the rows it hosts. Partition agreement is a root-side
             // law — no root is in hand here.
-            let (_, declared_digest) = crate::header_partition_and_digest(bytes);
-            prove_block_patch(
-                self.k_oid.expose(),
-                self.namespace,
-                self.decode_resolver(),
-                patch_id,
-                proof_bytes,
-                &locators,
-                &entries,
-                declared_digest,
-            )?;
             descriptor.properties = Some(
                 crate::root::descriptor::extent(patch_id, proof_bytes)
                     .map_err(StoreError::MalformedRoot)?,
@@ -4216,7 +4376,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                     Some(bytes) => bytes,
                     None => {
                         self.store
-                            .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+                            .get_edge_property_patch_bytes(cx, patch_id)
                             .await?
                     }
                 };
