@@ -9,7 +9,9 @@
 //! discovering the target does not hide a later source failure.
 
 use crate::execute::{KernelOutput, KernelValues, admit, reserve};
-use crate::{ComplexityWitness, FnxExecutionError, FnxMeter, GraphView, SnapshotGraphView};
+use crate::{
+    ComplexityWitness, FNX_METER_RUN, FnxExecutionError, FnxMeter, GraphView, SnapshotGraphView,
+};
 use fgdb_types::VId;
 use std::mem::size_of;
 
@@ -354,6 +356,10 @@ pub(crate) fn run<C>(
     row_limit: usize,
     checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
+    #[cfg(test)]
+    if tests::force_scalar_metering() {
+        return tests::scalar_run(graph, source, target, cutoff, row_limit, checkpoint);
+    }
     if one_hop(source, target, cutoff) {
         run_one_hop(graph, source, target, row_limit, checkpoint)
     } else {
@@ -380,9 +386,29 @@ fn run_one_hop<C>(
     let row = graph
         .neighbors_indices(source)
         .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-    for &neighbor in row {
-        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-        state.visit(neighbor)?;
+    if row.len() <= 1 {
+        // A singleton has no host calls to combine. Keep sparse paths on the
+        // scalar scan instead of paying the bounded-run bookkeeping per hop.
+        for &neighbor in row {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            state.visit(neighbor)?;
+        }
+    } else {
+        let mut first = 0;
+        while first < row.len() {
+            // The immutable decoded projection has already validated every
+            // ordinal. There is no allocation or result admission in this scan;
+            // bounding the witness increment makes the whole run infallible.
+            // Compressed rows retain their scalar fallible-cursor driver.
+            let count = decoded_row_run(row.len() - first, state.witness.edges_scanned);
+            checkpoint
+                .units(count)
+                .map_err(FnxExecutionError::Cancelled)?;
+            for &neighbor in &row[first..first + count] {
+                state.visit(neighbor)?;
+            }
+            first += count;
+        }
     }
     checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
     admit("result rows", state.row_count(), row_limit)?;
@@ -406,6 +432,19 @@ fn run_fifo<C>(
         .ok_or(FnxExecutionError::UnknownTarget(target))?;
     checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
     let mut state = Search::new(graph.node_count(), source, target, cutoff, usize::MAX)?;
+    if matches!(state.phase, Phase::Initialize) {
+        let words = state.nodes.div_ceil(u64::BITS as usize);
+        while state.visited.len() < words {
+            let count = (words - state.visited.len()).min(FNX_METER_RUN);
+            checkpoint
+                .units(count)
+                .map_err(FnxExecutionError::Cancelled)?;
+            // Search::new already reserved every word, so this cannot
+            // allocate or refuse within a run. Leave the phase unchanged:
+            // the Initialize -> Seed transition keeps its own scalar unit.
+            state.visited.resize(state.visited.len() + count, 0);
+        }
+    }
     loop {
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         match state.step()? {
@@ -415,9 +454,27 @@ fn run_fifo<C>(
                 let row = graph
                     .neighbors_indices(vertex)
                     .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-                for &neighbor in row {
-                    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-                    state.visit(neighbor)?;
+                if row.len() <= 1 {
+                    for &neighbor in row {
+                        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+                        state.visit(neighbor)?;
+                    }
+                } else {
+                    let mut first = 0;
+                    while first < row.len() {
+                        // Valid immutable ordinals and the initialized bitmap
+                        // make marking infallible. Each vertex enters the FIFO
+                        // once and its full capacity was reserved before this
+                        // scan; row admission occurs only after traversal.
+                        let count = decoded_row_run(row.len() - first, state.witness.edges_scanned);
+                        checkpoint
+                            .units(count)
+                            .map_err(FnxExecutionError::Cancelled)?;
+                        for &neighbor in &row[first..first + count] {
+                            state.visit(neighbor)?;
+                        }
+                        first += count;
+                    }
                 }
                 state.end_row()?;
             }
@@ -426,6 +483,18 @@ fn run_fifo<C>(
     admit("result rows", state.row_count(), row_limit)?;
     checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
     Ok(state.finish())
+}
+
+/// A counter overflow must still refuse on its original scalar unit, before
+/// any later cancellation. The normal traversal visits each immutable row at
+/// most once, so its total fits the projection's addressable adjacency slice.
+fn decoded_row_run(remaining: usize, edges_scanned: usize) -> usize {
+    let proposed = remaining.min(FNX_METER_RUN);
+    if edges_scanned.checked_add(proposed).is_some() {
+        proposed
+    } else {
+        1
+    }
 }
 
 #[cfg(test)]
