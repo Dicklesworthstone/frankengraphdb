@@ -4,6 +4,7 @@ use super::super::batch::{CsvSchema, PreparedBatch};
 use super::*;
 use fgdb_protocol::body::{
     ExecuteBatch, ExecutePrepared, Prepare, Prepared, PreparedHandle, PreparedReadMode,
+    ReadBatchResultChunk, ReadBatchResultEnd,
 };
 
 const BATCH_QUERY: &str = "CREATE (:Person {name:$name})";
@@ -41,6 +42,208 @@ fn prepared_reads(csv: bool) -> PreparedBatch {
         )
     };
     result.unwrap_or_else(|error| panic!("{}", error.message))
+}
+
+fn consistent_chunk(
+    index: u32,
+    seq: u64,
+    last: bool,
+    columns: Option<Vec<String>>,
+    rows: Vec<Vec<WireValue>>,
+) -> Frame {
+    result(
+        FrameKind::ReadBatchResultChunk,
+        4,
+        &ReadBatchResultChunk {
+            index,
+            seq,
+            last,
+            chunk: ResultChunk { columns, rows },
+        },
+    )
+}
+
+fn consistent_end(results: u32, rows: u64) -> Frame {
+    result(
+        FrameKind::ReadBatchResultEnd,
+        4,
+        &ReadBatchResultEnd { results, rows },
+    )
+}
+
+#[test]
+fn consistent_read_files_deliver_exact_cuts_and_only_one_batch_terminal() {
+    let ((), report) = run_async_under_lab(0x79a0_0711, |root| async move {
+        for csv in [false, true] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let io = script(
+                vec![
+                    (
+                        consistent_chunk(0, 7, false, Some(vec!["name".into()]), vec![]),
+                        0,
+                    ),
+                    (
+                        consistent_chunk(
+                            0,
+                            7,
+                            true,
+                            None,
+                            vec![vec![WireValue::Text("Ada".into())]],
+                        ),
+                        1,
+                    ),
+                    // Explicit historical operands can select a distinct cut.
+                    // An empty result still has its own exact schema and cut.
+                    (
+                        consistent_chunk(1, 3, true, Some(vec!["name".into()]), vec![]),
+                        2,
+                    ),
+                    (consistent_end(2, 1), 3),
+                ],
+                Arc::clone(&flushes),
+            );
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: None,
+            };
+            prepared_reads(csv)
+                .execute_consistent_reads(&root, &mut client, true, &mut out)
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(out.flushes.load(Ordering::SeqCst), 4);
+            let output = String::from_utf8(out.bytes).unwrap();
+            assert_eq!(
+                output.lines().collect::<Vec<_>>(),
+                [
+                    r#"{"v":1,"event":"columns","statement":1,"stream":true,"seq":7,"columns":["name"]}"#,
+                    r#"{"v":1,"event":"row","statement":1,"cells":[{"type":"text","value":"Ada"}]}"#,
+                    r#"{"v":1,"event":"columns","statement":2,"stream":true,"seq":3,"columns":["name"]}"#,
+                    r#"{"v":1,"event":"result","kind":"read_batch","statements":2,"count":1}"#,
+                ]
+            );
+            let frames = sent_frames(&written.lock().unwrap());
+            let requests: Vec<_> = frames
+                .iter()
+                .filter(|frame| frame.header().kind() == FrameKind::ExecuteReadBatch)
+                .collect();
+            assert_eq!(requests.len(), 1);
+            let request = ExecuteBatch::decode(requests[0].payload()).unwrap();
+            assert_eq!(request.statement, READ_QUERY);
+            assert_eq!(request.argument_sets.len(), 2);
+            assert_eq!(request.argument_sets[0][0].1, WireValue::Count(u64::MAX));
+            assert!(!frames.iter().any(|frame| matches!(
+                frame.header().kind(),
+                FrameKind::Prepare | FrameKind::ExecutePrepared | FrameKind::ExecuteBatch
+            )));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn consistent_read_refusal_or_missing_terminal_never_completes_a_prefix() {
+    let ((), report) = run_async_under_lab(0x79a0_0712, |root| async move {
+        for terminal in [
+            Some(refusal(4, ErrorCode::Budget)),
+            Some(consistent_end(1, 1)),
+            None,
+        ] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let mut replies = vec![
+                (
+                    consistent_chunk(
+                        0,
+                        7,
+                        true,
+                        Some(vec!["name".into()]),
+                        vec![vec![WireValue::Text("Ada".into())]],
+                    ),
+                    0,
+                ),
+                (
+                    consistent_chunk(1, 7, true, Some(vec!["name".into()]), vec![]),
+                    2,
+                ),
+            ];
+            replies.extend(terminal.map(|frame| (frame, 3)));
+            let io = script(replies, Arc::clone(&flushes));
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: None,
+            };
+            let error = prepared_reads(false)
+                .execute_consistent_reads(&root, &mut client, true, &mut out)
+                .await
+                .expect_err("one terminal must confirm all results");
+            assert!(matches!(error.code, 3 | 5));
+            assert!(
+                !String::from_utf8(out.bytes)
+                    .unwrap()
+                    .contains(r#""event":"result""#)
+            );
+            assert_eq!(
+                sent_frames(&written.lock().unwrap())
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::ExecuteReadBatch)
+                    .count(),
+                1
+            );
+        }
+        for fail_on in [1, 2] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let io = script(
+                vec![
+                    (
+                        consistent_chunk(
+                            0,
+                            7,
+                            true,
+                            Some(vec!["name".into()]),
+                            vec![vec![WireValue::Text("Ada".into())]],
+                        ),
+                        0,
+                    ),
+                    (refusal(4, ErrorCode::Cancelled), fail_on),
+                ],
+                Arc::clone(&flushes),
+            );
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: Some(fail_on),
+            };
+            let error = prepared_reads(false)
+                .execute_consistent_reads(&root, &mut client, true, &mut out)
+                .await
+                .expect_err("stdout failure must cancel the batch");
+            assert_eq!(error.code, 5);
+            assert_eq!(out.flushes.load(Ordering::SeqCst), fail_on);
+            assert!(
+                !String::from_utf8(out.bytes)
+                    .unwrap()
+                    .contains(r#""event":"result""#)
+            );
+            assert_eq!(
+                sent_frames(&written.lock().unwrap())
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                    .count(),
+                1
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 fn prepared_reply() -> Frame {

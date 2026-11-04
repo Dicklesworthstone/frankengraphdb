@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 mod difference;
 mod ordered_stream;
+mod read_batch;
 mod source_stream;
 
 /// Finished child streams whose late WINDOW_UPDATE/QUERY_CANCEL is benign: a
@@ -121,6 +122,7 @@ impl PreparedStatements {
 enum Statement {
     Native(Execute),
     Batch(ExecuteBatch),
+    ReadBatch(ExecuteBatch),
     ConditionalWrite(ExecuteConditionalWrite),
     Difference(ExecuteDiff),
     PreparedDifference {
@@ -782,6 +784,39 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     }
                 }
             }
+            FrameKind::ExecuteReadBatch => {
+                let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                let Ok(statement) = ExecuteBatch::decode(frame.payload()) else {
+                    return lane
+                        .fatal(
+                            cx,
+                            request,
+                            ErrorCode::Protocol,
+                            "malformed EXECUTE_READ_BATCH",
+                        )
+                        .await;
+                };
+                match lane
+                    .execute_statement(
+                        cx,
+                        &waiter,
+                        db,
+                        token,
+                        request,
+                        Statement::ReadBatch(statement),
+                    )
+                    .await
+                {
+                    Ok(()) | Err(Stop::Cancelled) => {}
+                    Err(Stop::Transport | Stop::Recovery(_)) => return,
+                    Err(Stop::Drain) => {
+                        lane.goodbye(cx).await;
+                        return;
+                    }
+                }
+            }
             FrameKind::ExecuteBatch => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
@@ -1138,6 +1173,24 @@ impl Lane {
             self.send_generation = None;
             return delivered;
         }
+        if let Statement::ReadBatch(statement) = &statement {
+            let delivered = self
+                .read_batch(cx, waiter, db, token, request, stream, binding, statement)
+                .await;
+            let delivered = match delivered {
+                Err(Stop::Recovery(error)) => {
+                    self.refuse(cx, request, stream, binding, error.code(), error.message())
+                        .await
+                }
+                other => other,
+            };
+            let _ = self
+                .conn
+                .child_terminal(stream, generation, ChildTerminus::EphemeralCompleted);
+            self.finish(stream);
+            self.send_generation = None;
+            return delivered;
+        }
         let difference = match &statement {
             Statement::Difference(request) => Some((
                 Ok(source_stream::SourceStatement::Text(
@@ -1285,6 +1338,7 @@ impl Lane {
                 }
             },
             Statement::Batch(statement) => write_batch(cx, db, token, &statement).await,
+            Statement::ReadBatch(_) => unreachable!("read batch dispatched above"),
             Statement::ConditionalWrite(statement) => {
                 write_if_current(cx, db, token, &statement).await
             }
@@ -1764,6 +1818,7 @@ impl Lane {
             }
             FrameKind::Execute
             | FrameKind::ExecuteBatch
+            | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
@@ -2124,6 +2179,7 @@ impl Lane {
             }
             FrameKind::Execute
             | FrameKind::ExecuteBatch
+            | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
@@ -2449,6 +2505,8 @@ mod output_guard_tests {
                 FrameKind::Ready,
                 FrameKind::SnapshotResultChunk,
                 FrameKind::SnapshotResultEnd,
+                FrameKind::ReadBatchResultChunk,
+                FrameKind::ReadBatchResultEnd,
                 FrameKind::SubscriptionBatch,
                 FrameKind::Error,
             ] {
@@ -2484,6 +2542,8 @@ mod output_guard_tests {
             for kind in [
                 FrameKind::SnapshotResultChunk,
                 FrameKind::SnapshotResultEnd,
+                FrameKind::ReadBatchResultChunk,
+                FrameKind::ReadBatchResultEnd,
                 FrameKind::SubscriptionBatch,
             ] {
                 let frame = frame(kind);

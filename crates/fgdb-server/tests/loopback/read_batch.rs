@@ -1,7 +1,254 @@
-//! HTTP batches retain exact historical cuts, one signed budget and atomic
-//! delivery over the same native read session as individual queries.
+//! HTTP and FGP batches retain exact historical cuts, one signed budget and
+//! complete admission over the same native read session as individual queries.
 
 use super::*;
+
+#[test]
+fn fgp_consistent_read_batches_preserve_masking_history_and_cumulative_limits() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "consistent-read-batch-fgp").await;
+        let mut writer = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        for statement in [
+            "CREATE (:Person {name:'Ann',age:10}), (:Person {name:'Bob',age:20}), (:Company {name:'Hidden',age:999})",
+            "MATCH (n:Person {name:'Ann'}) SET n.age=30",
+        ] {
+            writer
+                .execute(cx, ExecuteMode::Write, statement, vec![])
+                .await
+                .unwrap();
+        }
+        let mut permitted = grant(Rights::Read);
+        permitted.labels = Scope::only([LabelId(1)]);
+        permitted.limits.max_rows = 4;
+        permitted.limits.max_nodes = 4;
+        let statement = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $cut RETURN n.name AS name,n.age AS age ORDER BY name";
+        let arguments = || {
+            [1, 2]
+                .into_iter()
+                .map(|cut| vec![("cut".into(), WireValue::Count(cut))])
+                .collect()
+        };
+        let mut reader = Client::connect(cx, addr, token(&permitted)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let answer = reader
+            .execute_read_batch(cx, statement, arguments())
+            .await
+            .unwrap();
+        assert_eq!((answer.end.results, answer.end.rows), (2, 4));
+        assert_eq!(answer.results.len(), 2);
+        for (result, seq, age) in [(&answer.results[0], 1, 10), (&answer.results[1], 2, 30)] {
+            assert_eq!(result.seq, seq);
+            assert_eq!(result.columns, ["name", "age"]);
+            assert_eq!(
+                result.rows,
+                vec![
+                    vec![text("Ann"), WireValue::Int(age)],
+                    vec![text("Bob"), WireValue::Int(20)],
+                ]
+            );
+        }
+        let current = reader
+            .execute_read_batch(
+                cx,
+                "MATCH (n) RETURN n.age AS age ORDER BY age",
+                vec![vec![], vec![]],
+            )
+            .await
+            .unwrap();
+        assert_eq!(current.results[0], current.results[1]);
+        assert_eq!(current.results[0].seq, 2);
+        for dimension in ["rows", "nodes"] {
+            let mut limited = permitted.clone();
+            if dimension == "rows" {
+                limited.limits.max_rows = 3;
+            } else {
+                limited.limits.max_nodes = 3;
+            }
+            let mut client = Client::connect(cx, addr, token(&limited)).await.unwrap();
+            client.select(cx, "social").await.unwrap();
+            let seen = std::sync::atomic::AtomicUsize::new(0);
+            let failure = client
+                .execute_read_batch_streaming(
+                    cx,
+                    statement,
+                    arguments(),
+                    |_, _, _| {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                    |_, _| {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                    |_, _, _| {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(server_code(failure), ErrorCode::Budget, "{dimension}");
+            assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+            // Each read fits by itself; the failed batch does not poison the
+            // connection or manufacture a fresh allowance for every result.
+            let one = client
+                .execute_read_batch(
+                    cx,
+                    statement,
+                    vec![vec![("cut".into(), WireValue::Count(2))]],
+                )
+                .await
+                .unwrap();
+            assert_eq!(one.end.rows, 2);
+            client.close(cx).await.unwrap();
+        }
+        for count in [32, 33] {
+            let result = writer
+                .execute_read_batch(cx, "RETURN 1 AS value", vec![vec![]; count])
+                .await;
+            if count == 32 {
+                let result = result.unwrap();
+                assert_eq!((result.end.results, result.end.rows), (32, 32));
+                assert!(result.results.iter().all(|result| result.seq == 2));
+            } else {
+                assert_eq!(server_code(result.unwrap_err()), ErrorCode::Statement);
+            }
+        }
+        reader.close(cx).await.unwrap();
+        writer.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn fgp_late_native_and_wire_refusals_release_no_batch_prefix_or_write_effects() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "consistent-read-batch-refusals").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        for (statement, arguments) in [
+            (
+                "RETURN 12/$divisor AS value",
+                vec![
+                    vec![("divisor".into(), WireValue::Int(3))],
+                    vec![("divisor".into(), WireValue::Int(0))],
+                ],
+            ),
+            (
+                "RETURN $value AS value",
+                vec![vec![("value".into(), WireValue::Int(7))], vec![]],
+            ),
+            ("CREATE (:Person)", vec![vec![]]),
+            // The request fits the negotiated frame. Only the later result
+            // contains an oversized single cell; the first result must not
+            // escape before the complete batch's wire preflight rejects it.
+            (
+                "RETURN range(1,$end) AS values",
+                vec![
+                    vec![("end".into(), WireValue::Int(1))],
+                    vec![("end".into(), WireValue::Int(2000))],
+                ],
+            ),
+        ] {
+            let seen = std::sync::atomic::AtomicUsize::new(0);
+            let result = client
+                .execute_read_batch_streaming(
+                    cx,
+                    statement,
+                    arguments,
+                    |_, _, _| {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                    |_, _| {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                    |_, _, _| {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .await;
+            assert!(
+                matches!(result, Err(ClientError::Server { .. })),
+                "{statement}: {result:?}"
+            );
+            if statement == "RETURN range(1,$end) AS values" {
+                let Err(ClientError::Server { code, message }) = &result else {
+                    unreachable!()
+                };
+                assert_eq!(*code, ErrorCode::Execution);
+                assert!(message.contains("negotiated frame limit"), "{message}");
+            }
+            assert_eq!(
+                seen.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{statement}"
+            );
+            let unchanged = client
+                .execute(cx, ExecuteMode::Read, "MATCH (n) RETURN n", vec![])
+                .await
+                .unwrap();
+            assert!(unchanged.rows.is_empty());
+            assert_eq!(unchanged.outcome, Outcome::Rows { seq: 0 });
+        }
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn fgp_consistent_read_batch_callback_cancellation_drains_and_reuses_the_connection() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "consistent-read-batch-cancellation").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        for stage in 0..3 {
+            let result = client
+                .execute_read_batch_streaming(
+                    cx,
+                    "UNWIND range(1,20) AS value RETURN value",
+                    vec![vec![], vec![]],
+                    |_, _, _| {
+                        if stage == 0 {
+                            Err(ClientError::Protocol("sink stopped"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |_, _| {
+                        if stage == 1 {
+                            Err(ClientError::Protocol("sink stopped"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |_, _, _| Err(ClientError::Protocol("sink stopped")),
+                )
+                .await;
+            assert!(matches!(result, Err(ClientError::Protocol("sink stopped"))));
+            let next = client
+                .execute_read_batch(cx, "RETURN 7 AS value", vec![vec![]])
+                .await
+                .unwrap();
+            assert_eq!((next.end.results, next.end.rows), (1, 1));
+            assert_eq!(next.results[0].rows, vec![vec![WireValue::Int(7)]]);
+        }
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
 
 #[test]
 fn heterogeneous_http_batches_share_one_budget_and_keep_independent_schemas() {

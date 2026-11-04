@@ -19,6 +19,8 @@ mod connection;
 mod flow;
 mod frame;
 pub mod json;
+#[cfg(any(feature = "transport", test))]
+mod read_batch;
 
 /// Asupersync-backed, cancellation-resumable stream I/O. The pure codec and
 /// state machines remain usable without enabling a runtime dependency.

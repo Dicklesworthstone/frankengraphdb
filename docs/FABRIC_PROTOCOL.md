@@ -62,6 +62,8 @@ these values; callers cannot authenticate merely by constructing the structs.
 | EXECUTE_PREPARED_DIFF | 0x0025 | client |
 | DIFF_RESULT_CHUNK / DIFF_RESULT_END | 0x0026 / 0x0027 | server |
 | EXECUTE_CONDITIONAL_WRITE | 0x0028 | client |
+| EXECUTE_READ_BATCH | 0x0029 | client |
+| READ_BATCH_RESULT_CHUNK / READ_BATCH_RESULT_END | 0x002a / 0x002b | server |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -88,8 +90,8 @@ there is no resynchronization by scanning untrusted payload bytes.
 
 `Connection::validate_client_header` enforces direction, phase, complete binding,
 nonzero request IDs and control/child-stream distinction. EXECUTE, EXECUTE_BATCH, PREPARE,
-EXECUTE_PREPARED, EXECUTE_PREPARED_BATCH, EXECUTE_DIFF, EXECUTE_PREPARED_DIFF
-and RELEASE_PREPARED use the control stream; child stream IDs
+EXECUTE_PREPARED, EXECUTE_PREPARED_BATCH, EXECUTE_DIFF, EXECUTE_PREPARED_DIFF,
+EXECUTE_CONDITIONAL_WRITE, EXECUTE_READ_BATCH and RELEASE_PREPARED use the control stream; child stream IDs
 are minted by the server. Cancellation
 and credit address admitted streams. ACK/release may address independent durable
 owners, which the owning service must authenticate and validate separately.
@@ -172,6 +174,7 @@ redacted from `Debug`.
 | EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe, 3 native source read stream, 4 external ordered read), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_CONDITIONAL_WRITE | `expected_seq u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending); native text writes only, including RETURN |
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
+| EXECUTE_READ_BATCH | the same body as EXECUTE_BATCH, under an explicit read-only request tag; one read statement and its ordered argument sets |
 | EXECUTE_PREPARED_BATCH | nonzero connection-owned `handle [16]`, `argument_sets u32`, then that many parameter maps with the same canonical encoding and shared bounds as EXECUTE_BATCH; the handle must name a write template |
 | EXECUTE_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_PREPARED_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, nonzero connection-owned `handle [16]`, execution `parameters [(name text, value)]`; the handle must name a read template |
@@ -183,6 +186,8 @@ redacted from `Debug`.
 | SNAPSHOT_RESULT_END | `outcome` (`Rows{seq}`, `WriteCommitted{seq,statements}`, `ReadClosed{seq,statements}`), `rows u64` |
 | DIFF_RESULT_CHUNK | `columns: none \| [text]` (first chunk only), `entries u32`, then `(weight i128 ≠ 0, row-width u32, [value])` for each changed tuple |
 | DIFF_RESULT_END | exact requested `before u64`, `after u64`, `rows u64` (changed tuples delivered, not occurrence totals) |
+| READ_BATCH_RESULT_CHUNK | `index u32`, `seq u64`, `last bool`, followed by a RESULT_CHUNK body: `columns: none \| [text]`, `rows [[value]]` |
+| READ_BATCH_RESULT_END | `results u32`, `rows u64` (complete result and row counts across the batch) |
 | SUBSCRIPTION_BATCH | `frontier u64`, `snapshot bool`, `last bool`, `columns: none \| [text]` (first frame only), `entries [(weight i128 ≠ 0, [value])]` |
 | SUBSCRIPTION_RESET | `has_checkpoint bool`, then `last_delivered_seq u64` only when true |
 | ERROR | `code u16`, `message text` (structural diagnostics only) |
@@ -208,6 +213,61 @@ exactly the canonical text a server emits — vertex, edge
 (tag 14) and `database_unavailable` (tag 15).
 
 ## fgdbd: the served subset
+
+### Consistent parameterized read batches
+
+`EXECUTE_READ_BATCH` evaluates one read statement for every supplied argument
+set through one authorized native read session. Ordinary current reads share
+that session's pinned snapshot. Explicit temporal selectors may choose
+different committed cuts for different arguments; each result reports its own
+exact `seq`. Selection alone does not pin later requests. Read rights, branch
+and label/property scope remain identical to individual authorized reads, and
+all results share one signed execution allowance. A later read cannot reset
+the batch's row, node or work budget. Writes refuse without effects.
+
+The body reuses `ExecuteBatch` without adding a mode byte. Parameter names in
+each set are strictly ascending and unique. The wire codec allows 1–1024 sets;
+the current native served owner admits at most 32 reads. The entire request,
+its argument values and every result are admitted before the first result
+frame is released. Wire preflight also verifies every schema, cell and row
+against the negotiated frame bounds. An individually unrepresentable later
+result therefore refuses the complete batch without releasing earlier results.
+Fragment packing respects the body-wide value-node ceiling as well as byte
+and row bounds, including when a peer negotiates a large frame.
+
+Delivery uses one server-minted child, the initiating request ID and complete
+Ready binding, and one byte-and-row flow window shared by all results. Result
+indexes are zero-based and contiguous in request order. The first chunk of
+**each result** includes its columns, including for a result with zero rows;
+continuations omit columns. Every row has that result's declared width. Its
+selected `seq` stays constant through every fragment, and `last=true` closes
+that result. A schema-only non-final first chunk is allowed when row credit
+is exhausted. An empty continuation is not. No fragment interleaves results.
+
+There is exactly one successful `READ_BATCH_RESULT_END`, after every requested
+result has closed. Its result count must equal the request count and its row
+count must equal all delivered rows. An individual result's `last` flag does
+not accept the whole batch. EOF, a refusal or cancellation before the matching
+terminal cannot be presented as a successful complete answer. Every physical
+write and resumed flush rechecks live Warden authority and the admitted
+database generation; recovery during credit or socket waits prevents a stale
+successful terminal.
+
+The Rust client offers `execute_read_batch` for a fully buffered answer and
+`execute_read_batch_streaming` for callbacks during delivery. The latter
+reports columns as `(index, seq, names)`, rows as `(index, values)`, and each
+result end as `(index, seq, rows)`. These callbacks remain provisional until
+the single successful batch terminal returns. A callback error sends one
+cancellation, suppresses all later callbacks and credit grants, drains the
+request's terminal and returns the original callback error. A valid terminal
+or server refusal permits connection reuse; a dropped future, malformed
+response or incomplete stream requires reconnecting. Neither API retries an
+argument set or falls back to independent reads.
+
+Native execution remains buffered before delivery. This explicit operation
+does not change ordinary queries or existing repeated rows-file reads, and
+does not select native source streaming, ordered spilling, subscription or
+difference execution. No prepared read-batch tag is claimed by this profile.
 
 ### Finite historical NET differences
 

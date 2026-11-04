@@ -31,8 +31,8 @@ pub const MAX_CREDENTIAL_BYTES: usize = 32 * 1024;
 /// Largest human-readable ERROR message.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_PARAMETERS: usize = 1024;
-/// Argument sets in one atomic write-batch request. The served database also
-/// bounds the number of expanded native statements across all sets.
+/// Argument sets in one batch request. The served database also bounds
+/// expanded write statements and the number of reads in a consistent batch.
 pub const MAX_BATCH_ARGUMENT_SETS: usize = 1024;
 pub const MAX_COLUMNS: usize = 4096;
 pub const MAX_ROWS_PER_CHUNK: usize = 1 << 20;
@@ -1090,6 +1090,11 @@ fn get_parameters(input: &mut In<'_>) -> Result<Vec<(String, WireValue)>, BodyEr
 /// completion are shared by the whole batch. Native RETURN is unsupported,
 /// never discarded. Repeating a request is a new write, not an idempotent
 /// retry, a durable transaction handle or a sequence of autocommits.
+///
+/// EXECUTE_READ_BATCH reuses this exact payload under its distinct frame tag.
+/// It admits all reads in one authorized, pinned session with shared limits,
+/// then returns ordered READ_BATCH_RESULT_CHUNK frames and one terminal. It
+/// never interprets the statement as a write or retries individual arguments.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecuteBatch {
     pub statement: String,
@@ -1463,6 +1468,81 @@ body!(
             rows.push(row);
         }
         ResultChunk { columns, rows }
+    }
+);
+
+/// One fragment of one result in a consistent read batch. Results are numbered
+/// from zero in request order. Every result starts with its own columns and
+/// keeps its selected sequence until `last`; explicit temporal selectors may
+/// choose different sequences. Ordinary current reads share the batch's pin.
+/// Neither `last` nor any callback accepts the whole answer: only the matching
+/// ReadBatchResultEnd confirms complete delivery of every requested result.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReadBatchResultChunk {
+    pub index: u32,
+    pub seq: u64,
+    pub last: bool,
+    pub chunk: ResultChunk,
+}
+
+body!(
+    ReadBatchResultChunk,
+    |s, out| {
+        if s.index as usize >= MAX_BATCH_ARGUMENT_SETS {
+            return Err(BodyError::TooLarge);
+        }
+        out.u32(s.index);
+        out.u64(s.seq);
+        out.u8(u8::from(s.last));
+        out.0.extend(s.chunk.encode()?);
+    },
+    |input| {
+        let index = input.u32()?;
+        if index as usize >= MAX_BATCH_ARGUMENT_SETS {
+            return Err(BodyError::TooLarge);
+        }
+        let seq = input.u64()?;
+        let last = input.bool()?;
+        // The remainder is exactly one ResultChunk. Its single decoder owns
+        // the complete body-wide value allowance; metadata contains no values.
+        let remaining = input.bytes.len() - input.at;
+        let chunk = ResultChunk::decode(input.take(remaining)?)?;
+        ReadBatchResultChunk {
+            index,
+            seq,
+            last,
+            chunk,
+        }
+    }
+);
+
+/// The sole successful terminal of a read batch. Counts cover every result and
+/// row actually delivered, including empty results. It carries no write outcome
+/// and is not a durable result/transaction capability or resume checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadBatchResultEnd {
+    pub results: u32,
+    pub rows: u64,
+}
+
+body!(
+    ReadBatchResultEnd,
+    |s, out| {
+        if s.results == 0 || s.results as usize > MAX_BATCH_ARGUMENT_SETS {
+            return Err(BodyError::Noncanonical);
+        }
+        out.u32(s.results);
+        out.u64(s.rows);
+    },
+    |input| {
+        let results = input.u32()?;
+        if results == 0 || results as usize > MAX_BATCH_ARGUMENT_SETS {
+            return Err(BodyError::Noncanonical);
+        }
+        ReadBatchResultEnd {
+            results,
+            rows: input.u64()?,
+        }
     }
 );
 

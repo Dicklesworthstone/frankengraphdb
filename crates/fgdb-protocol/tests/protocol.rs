@@ -485,6 +485,7 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
     for kind in [
         FrameKind::Prepare,
         FrameKind::ExecuteBatch,
+        FrameKind::ExecuteReadBatch,
         FrameKind::ExecutePrepared,
         FrameKind::ExecutePreparedBatch,
         FrameKind::ExecuteDiff,
@@ -526,6 +527,8 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::PreparedReleased,
         FrameKind::DiffResultChunk,
         FrameKind::DiffResultEnd,
+        FrameKind::ReadBatchResultChunk,
+        FrameKind::ReadBatchResultEnd,
     ] {
         let response = frame(kind, Binding::Ready(ready()), StreamId::CONTROL, &[]);
         assert_eq!(
@@ -557,8 +560,17 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::try_from(0x0028),
         Ok(FrameKind::ExecuteConditionalWrite)
     );
+    assert_eq!(FrameKind::try_from(0x0029), Ok(FrameKind::ExecuteReadBatch));
     assert_eq!(
-        FrameKind::try_from(0x0029),
+        FrameKind::try_from(0x002a),
+        Ok(FrameKind::ReadBatchResultChunk)
+    );
+    assert_eq!(
+        FrameKind::try_from(0x002b),
+        Ok(FrameKind::ReadBatchResultEnd)
+    );
+    assert_eq!(
+        FrameKind::try_from(0x002c),
         Err(ProtocolError::UnknownFrameKind)
     );
 }
