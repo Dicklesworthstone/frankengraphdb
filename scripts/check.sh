@@ -122,6 +122,10 @@ scope_run_tmpdir() {
   printf '%s\n' \
     'fgdb-8pj3: run-owned test evidence; retire after qualified handoff; no automatic deletion' \
     >"$run_tmp/.sbh-protect" || return 1
+  # Keep gate_init's landing token in its original namespace. token.sh is a
+  # child process and otherwise resolves both release and nested holds through
+  # the changed TMPDIR, leaving the original parent hold behind.
+  export FGDB_TOKEN_DIR="${FGDB_TOKEN_DIR:-${TMPDIR:-/tmp}/fgdb_swarm/tokens}"
   export TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp"
   echo "run temporary directory: $run_tmp (retained)"
 }
@@ -3690,6 +3694,7 @@ run_mutation_self_test() {
   local failing_log
   local unrun_log
   local child_state_log
+  local run_token_dir="${FGDB_TOKEN_DIR:-${TMPDIR:-/tmp}/fgdb_swarm/tokens}"
 
   work="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-self-test.XXXXXX")" || return 1
   fixture_root="$work/root"
@@ -3703,6 +3708,10 @@ run_mutation_self_test() {
     echo "SELF-TEST RED: cannot reserve the run temporary directory" >&2
     return 1
   fi
+  if ! bash -c '[ "${FGDB_TOKEN_DIR:-}" = "$1" ]' -- "$run_token_dir"; then
+    echo "SELF-TEST RED: child temporary scoping changed the landing token namespace" >&2
+    return 1
+  fi
   local run_tmp="$TMPDIR"
   printf '%s\n' 'retained fixture' >"$run_tmp/reuse-control" || return 1
   if scope_run_tmpdir >"$work/tmp-reuse.stdout" 2>"$work/tmp-reuse.stderr"; then
@@ -3711,6 +3720,7 @@ run_mutation_self_test() {
   fi
   if [ "$TMPDIR" != "$run_tmp" ] || [ "$TMP" != "$run_tmp" ] \
     || [ "$TEMP" != "$run_tmp" ] \
+    || [ "${FGDB_TOKEN_DIR:-}" != "$run_token_dir" ] \
     || [ "$(cat "$run_tmp/reuse-control")" != 'retained fixture' ]; then
     echo "SELF-TEST RED: refused temporary-directory reuse changed fixture custody" >&2
     return 1
