@@ -110,6 +110,22 @@ COV_TRACKED=0
 COV_INSPECTED=0
 COV_EXEMPT=0
 
+# fgdb-8pj3: PID-only test paths can collide with retained databases after PID
+# reuse. Every child uses one freshly reserved namespace, including nested gates
+# and both full determinism runs. Retain it with the gate evidence; deletion
+# requires the owner's permission, so this runner installs no cleanup trap.
+scope_run_tmpdir() {
+  local run_tmp
+  run_tmp="$(cd "$GATE_LOG_DIR" && pwd -P)" || return 1
+  run_tmp="$run_tmp/tmp"
+  mkdir -m 700 -- "$run_tmp" || return 1
+  printf '%s\n' \
+    'fgdb-8pj3: run-owned test evidence; retire after qualified handoff; no automatic deletion' \
+    >"$run_tmp/.sbh-protect" || return 1
+  export TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp"
+  echo "run temporary directory: $run_tmp (retained)"
+}
+
 CORE_GATE_FILE_COVERAGE="file-coverage closure (every tracked file inspected or declared)"
 CORE_GATE_SHELL_LINT="shell lint (bash -n + shellcheck) over tracked shell deliverables"
 CORE_GATE_STUDIO_NODE="Studio Node tests (executed modules and committed Wasm behavior)"
@@ -3675,7 +3691,7 @@ run_mutation_self_test() {
   local unrun_log
   local child_state_log
 
-  work="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-self-test.XXXXXX")"
+  work="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-self-test.XXXXXX")" || return 1
   fixture_root="$work/root"
   mkdir -p "$fixture_root/registries" "$fixture_root/scripts/lib" \
     "$fixture_root/tools"
@@ -3683,6 +3699,22 @@ run_mutation_self_test() {
     || return 1
   GATE_LOG_DIR="$work/gate-logs"
   mkdir -p "$GATE_LOG_DIR"
+  if ! scope_run_tmpdir; then
+    echo "SELF-TEST RED: cannot reserve the run temporary directory" >&2
+    return 1
+  fi
+  local run_tmp="$TMPDIR"
+  printf '%s\n' 'retained fixture' >"$run_tmp/reuse-control" || return 1
+  if scope_run_tmpdir >"$work/tmp-reuse.stdout" 2>"$work/tmp-reuse.stderr"; then
+    echo "SELF-TEST RED: an existing run temporary directory was reused" >&2
+    return 1
+  fi
+  if [ "$TMPDIR" != "$run_tmp" ] || [ "$TMP" != "$run_tmp" ] \
+    || [ "$TEMP" != "$run_tmp" ] \
+    || [ "$(cat "$run_tmp/reuse-control")" != 'retained fixture' ]; then
+    echo "SELF-TEST RED: refused temporary-directory reuse changed fixture custody" >&2
+    return 1
+  fi
   if ! ubs_ratchet_transcript_fixture "$work"; then
     echo "SELF-TEST RED: UBS transcript presentation changed the exact ratchet verdict" >&2
     return 1
@@ -4094,6 +4126,8 @@ EOF
   echo "    unavailable Node, empty roster and zero tests are UNRUN without retry"
   echo "  evidence retained at $work"
   echo "  include enumeration: nonempty source retained; an early resolver failure stays red"
+  echo "  run temporary directory: fresh child namespace retained; reuse refuses without"
+  echo "    changing its fixture or the inherited child environment"
 }
 
 case "${1:-}" in
@@ -4141,6 +4175,10 @@ export FGDB_LANDING_NAME="${FGDB_LANDING_NAME:-check.sh-$$}"
 # bash subshell inherits and fires the parent's EXIT trap.
 gate_init "check.sh"
 GATE_SCOPE_TRACKING=1
+if ! scope_run_tmpdir; then
+  echo "QUALITY GATE RED: cannot reserve the run temporary directory" >&2
+  exit 1
+fi
 
 run_core_gate "$CORE_GATE_FILE_COVERAGE" run_file_coverage
 gate_scope_abort_if_tree_moved "$CORE_GATE_FILE_COVERAGE"
