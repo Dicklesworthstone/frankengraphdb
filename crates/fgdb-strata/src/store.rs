@@ -30,7 +30,7 @@
 //! the live host, never durability I/O, and every lab `Vfs` writes back
 //! through the real filesystem, so both stay truthful under fault injection.
 //!
-//! **AN EXISTING BLOCK IS NOT REWRITTEN.** Blocks are immutable and
+//! **ORDINARY PUBLICATION NEVER REWRITES AN EXISTING BLOCK.** Blocks are immutable and
 //! content-addressed, so a second write of the same identity is either the same
 //! bytes (no content rewrite), damage whose bytes derive a different identity, or
 //! a true identity collision (both refusals). Truncating and rewriting would take
@@ -38,6 +38,15 @@
 //! replace it with what it already contained — the hazard
 //! `fgdb-capsule-no-overwrite-pysi` names for capsules, avoided here for the same
 //! reason.
+//!
+//! Explicit authoritative recovery can use
+//! [`BlockStore::repair_data_publication_batch`] after authenticating the root
+//! authority and replaying the complete committed history. That batch restores
+//! regenerated data as loose copies; it replaces only physically invalid loose
+//! data through a synced, verified staging inode and atomic rename. It preserves
+//! packs, metadata, collision evidence and nonregular paths. Ordinary writes
+//! retain their refusal behavior, and no repair receipt escapes before the
+//! replacement names are durable.
 //!
 //! **A PARTIAL FILE IS NEVER CANONICAL.** Publication is serialized by a
 //! process-death-released filesystem lease represented inside this module by a
@@ -301,6 +310,13 @@ impl StoredObjectKind {
             _ => MAX_STORED_OBJECT_BYTES,
         }
     }
+
+    fn is_data(self) -> bool {
+        matches!(
+            self,
+            Self::Block | Self::VertexPatch | Self::EdgePropertyPatch
+        )
+    }
 }
 
 /// Objects a publication batch stages before it flushes them. It bounds the
@@ -547,6 +563,8 @@ struct StagedObject<F> {
     path: PathBuf,
     bytes: Vec<u8>,
     limit: u64,
+    kind: StoredObjectKind,
+    id: ObjectId,
 }
 
 /// Sync every file with all of the syncs in flight at once. Under a runtime
@@ -618,7 +636,8 @@ pub enum StoreError {
     ///
     /// This is damage or a nonconforming writer, not a hash collision: a true
     /// collision requires two different byte strings that both derive the same
-    /// identity. The existing inode is preserved for diagnosis.
+    /// identity. Ordinary publication preserves the existing inode for diagnosis;
+    /// only explicit derived-data repair may replace this invalid realization.
     DamagedExisting {
         expected: ObjectId,
         actual: ObjectId,
@@ -780,6 +799,12 @@ fn ensure_size_within_limit(observed: u64, limit: u64) -> Result<(), StoreError>
         return Err(StoreError::ObjectTooLarge { limit, observed });
     }
     Ok(())
+}
+
+fn repair_checkpoint(cx: &CommitCx) -> Result<(), StoreError> {
+    cx.checkpoint().map_err(|error| {
+        StoreError::Io(std::io::Error::new(std::io::ErrorKind::Interrupted, error))
+    })
 }
 
 /// The most bytes one read asks for: asupersync's file reads cap one blocking
@@ -1325,6 +1350,7 @@ impl<V: Vfs> BlockStore<V> {
     /// new inode its canonical name. `slot` picks this object's noncanonical
     /// staging name.
     /// `id` is `bytes`' identity under `kind`, which the batch already derived.
+    #[allow(clippy::too_many_arguments)]
     async fn stage_object_under_permit(
         &self,
         kind: StoredObjectKind,
@@ -1332,6 +1358,7 @@ impl<V: Vfs> BlockStore<V> {
         id: ObjectId,
         bytes: &[u8],
         slot: usize,
+        repair_data: bool,
         _permit: &ObjectPublicationPermit,
     ) -> Result<StagedObject<V::File>, StoreError> {
         let limit = kind.stored_limit();
@@ -1343,7 +1370,7 @@ impl<V: Vfs> BlockStore<V> {
         let path = self.path(id);
 
         if let Some(file) = self
-            .existing_canonical(kind, cx, id, &path, bytes, limit)
+            .existing_batch_object(kind, cx, id, &path, bytes, limit, repair_data)
             .await?
         {
             return Ok(StagedObject {
@@ -1352,6 +1379,8 @@ impl<V: Vfs> BlockStore<V> {
                 path,
                 bytes: bytes.to_vec(),
                 limit,
+                kind,
+                id,
             });
         }
 
@@ -1364,7 +1393,37 @@ impl<V: Vfs> BlockStore<V> {
             path,
             bytes: bytes.to_vec(),
             limit,
+            kind,
+            id,
         })
+    }
+
+    /// Recovery may replace only an unusable data realization. The offered
+    /// bytes have already passed the batch's ordinary identity and payload
+    /// admission. Equal-identity unequal bytes remain collision evidence;
+    /// filesystem errors and nonregular paths never become repair permission.
+    #[allow(clippy::too_many_arguments)]
+    async fn existing_batch_object(
+        &self,
+        kind: StoredObjectKind,
+        cx: &CommitCx,
+        id: ObjectId,
+        path: &Path,
+        bytes: &[u8],
+        limit: u64,
+        repair_data: bool,
+    ) -> Result<Option<V::File>, StoreError> {
+        let existing = self
+            .existing_canonical(kind, cx, id, path, bytes, limit)
+            .await;
+        match existing {
+            Err(StoreError::DamagedExisting { .. } | StoreError::ObjectTooLarge { .. })
+                if repair_data && kind.is_data() =>
+            {
+                Ok(None)
+            }
+            result => result,
+        }
     }
 
     /// The canonical inode already holding exactly `bytes`, opened on a handle
@@ -1507,7 +1566,58 @@ impl<V: Vfs> BlockStore<V> {
             pending: Vec::new(),
             crash_at,
             failed: false,
+            repair_data: false,
         })
+    }
+
+    /// Restore derived data regenerated by a complete authenticated replay.
+    ///
+    /// The caller must hold the database writer lease, authenticate its
+    /// selected manifest/root against the committed chain, and authenticate
+    /// and fold every retained source capsule before offering any bytes. This
+    /// constructor supplies physical publication authority, not that recovery
+    /// proof. It refuses nonempty receipts so a proof from before corruption
+    /// cannot skip a repair or its durability checks.
+    ///
+    /// Only blocks and their hosted edge-property patches, and vertex patches,
+    /// are repairable. Root and manifest publication remain ordinary writes.
+    /// Data is published as loose copies: a damaged pack and its other members
+    /// are never rewritten, and verified reads can use the replacement copy.
+    /// A damaged loose data file is replaced atomically only after the offered
+    /// bytes are synced and durably reread; healthy equal bytes are re-synced.
+    /// Collisions, nonregular paths and I/O failures still refuse. All receipts
+    /// remain pending until the directory durability barrier succeeds.
+    ///
+    /// Failure or cancellation may leave a verified subset restored. The
+    /// caller must return no serving handle until full recovery and normal
+    /// root publication succeed. Retrying with fresh receipts is safe.
+    pub fn repair_data_publication_batch<'a>(
+        &'a self,
+        cx: &CommitCx,
+        receipts: &'a mut PublishReceipts,
+        crash_at: Option<BlockStoreCrashPoint>,
+    ) -> Result<BlockPublicationBatch<'a, V>, StoreError> {
+        repair_checkpoint(cx)?;
+        if !receipts.spans.is_empty()
+            || !receipts.chains.is_empty()
+            || !receipts.patch_spans.is_empty()
+            || !receipts.block_descriptors.is_empty()
+            || !receipts.patch_descriptors.is_empty()
+            || !receipts.property_patches.is_empty()
+            || receipts.root_memo.is_some()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "derived-data repair requires fresh publication receipts",
+            )
+            .into());
+        }
+        // Even an empty history admission must not carry validator state
+        // from an earlier publication into authoritative replay.
+        *receipts = PublishReceipts::new();
+        let mut batch = self.publication_batch(cx, receipts, crash_at)?;
+        batch.repair_data = true;
+        Ok(batch)
     }
 
     /// Load and decode the block named by `id`.
@@ -4123,6 +4233,9 @@ pub struct BlockPublicationBatch<'a, V: Vfs> {
     pending: Vec<PendingAdmission>,
     crash_at: Option<BlockStoreCrashPoint>,
     failed: bool,
+    /// Explicit, batch-local repair authority. It cannot escape into a
+    /// subsequent ordinary publication or a cloned store.
+    repair_data: bool,
 }
 
 impl<V: Vfs> BlockPublicationBatch<'_, V> {
@@ -4134,6 +4247,16 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         id: ObjectId,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
+        if self.repair_data {
+            repair_checkpoint(cx)?;
+            if !kind.is_data() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "derived-data repair cannot publish metadata",
+                )
+                .into());
+            }
+        }
         if !self.objects.contains(&id) {
             let limit = kind.stored_limit();
             ensure_size_within_limit(u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit)?;
@@ -4173,6 +4296,9 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     /// Publish everything staged so far as one pack, however few objects
     /// it is; the root publication packs a bulk commit's segments this way.
     async fn flush_as_pack(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
+        if self.repair_data {
+            return self.flush(cx).await;
+        }
         self.check_live()?;
         self.failed = true;
         let objects = std::mem::take(&mut self.unflushed);
@@ -4187,7 +4313,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     async fn flush_staged(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
         let objects = std::mem::take(&mut self.unflushed);
         self.unflushed_bytes = 0;
-        if objects.len() >= PACK_MIN_OBJECTS {
+        if !self.repair_data && objects.len() >= PACK_MIN_OBJECTS {
             return self.flush_pack(cx, &objects).await;
         }
         for chunk in objects.chunks(BATCH_SYNCS_IN_FLIGHT) {
@@ -4195,7 +4321,15 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
             for (slot, (kind, id, bytes)) in chunk.iter().enumerate() {
                 staged.push(
                     self.store
-                        .stage_object_under_permit(*kind, cx, *id, bytes, slot, &self.permit)
+                        .stage_object_under_permit(
+                            *kind,
+                            cx,
+                            *id,
+                            bytes,
+                            slot,
+                            self.repair_data,
+                            &self.permit,
+                        )
                         .await?,
                 );
             }
@@ -4348,7 +4482,33 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
             // write, and the move.
             drop(object.file);
             if let Some(staging) = object.staging {
-                self.store.vfs.rename(&staging, &object.path).await?;
+                if self.repair_data {
+                    repair_checkpoint(cx)?;
+                    // Recheck the canonical path after the staging barrier.
+                    // A path substituted with a symlink/nonregular inode, or
+                    // genuine collision evidence, must not be overwritten.
+                    if let Some(existing) = self
+                        .store
+                        .existing_batch_object(
+                            object.kind,
+                            cx,
+                            object.id,
+                            &object.path,
+                            &object.bytes,
+                            object.limit,
+                            true,
+                        )
+                        .await?
+                    {
+                        cx.with_restriction_async(existing.sync_all()).await?;
+                        self.store
+                            .verify_durable_bytes(cx, &object.path, &object.bytes, object.limit)
+                            .await?;
+                        continue;
+                    }
+                }
+                cx.with_restriction_async(self.store.vfs.rename(&staging, &object.path))
+                    .await?;
             }
         }
         if creates
@@ -4462,6 +4622,9 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     /// a partially advanced validator for a caller to reuse.
     pub async fn finish(mut self, cx: &CommitCx) -> Result<(), StoreError> {
         self.check_live()?;
+        if self.repair_data {
+            repair_checkpoint(cx)?;
+        }
         self.flush_staged(cx).await?;
         if !self.objects.is_empty() {
             if matches!(
@@ -4480,6 +4643,9 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                 // The packs' names, then (below) the pack directory's own
                 // entry, which this batch may have created.
                 sync_directory(cx, &self.store.vfs, self.store.packs.dir()).await?;
+            }
+            if self.repair_data {
+                repair_checkpoint(cx)?;
             }
             sync_directory(cx, &self.store.vfs, &self.store.dir).await?;
             if self.crash_at == Some(BlockStoreCrashPoint::AfterBatchDirectorySync) {

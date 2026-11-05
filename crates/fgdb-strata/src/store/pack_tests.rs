@@ -22,6 +22,7 @@ const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x29
 const INTERRUPT_OPEN: u8 = 1;
 const INTERRUPT_REFRESH: u8 = 2;
 const FAIL_SECOND_NEW_PACK: u8 = 3;
+const DAMAGE_DURABLE_READ: u8 = 4;
 
 #[derive(Default)]
 struct ReadFaults {
@@ -132,7 +133,19 @@ impl Vfs for ReadFaultVfs {
         UnixVfs.read_link(path).await
     }
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        UnixVfs.read(path).await
+        let mut bytes = UnixVfs.read(path).await?;
+        if self
+            .0
+            .mode
+            .compare_exchange(DAMAGE_DURABLE_READ, 0, SeqCst, SeqCst)
+            .is_ok()
+        {
+            self.0.failures.fetch_add(1, SeqCst);
+            if let Some(byte) = bytes.first_mut() {
+                *byte ^= 1;
+            }
+        }
+        Ok(bytes)
     }
     async fn read_to_string(&self, path: &Path) -> io::Result<String> {
         UnixVfs.read_to_string(path).await
@@ -232,6 +245,317 @@ fn offset_in_pack(objects: &[(ObjectId, Vec<u8>)], at: usize) -> usize {
             .iter()
             .map(|(_, bytes)| bytes.len())
             .sum::<usize>()
+}
+
+fn repair_blocks(count: usize) -> Vec<(ObjectId, Vec<u8>)> {
+    (0..count)
+        .map(|at| {
+            let at = at as u128 + 1;
+            let bytes = crate::encode_block(
+                0,
+                None,
+                &[crate::AdjacencyEntry {
+                    src: fgdb_types::VId(at),
+                    relation: fgdb_delta_types::RelationId(1),
+                    dst: fgdb_types::VId(at + 1),
+                    eid: fgdb_types::EId(at),
+                    created_at: fgdb_types::CommitSeq(1),
+                    retired_at: None,
+                }],
+            )
+            .expect("regenerated block");
+            (block_id(&K_OID, NAMESPACE, &bytes), bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn repair_data_rejects_stale_receipts_and_metadata_publication() {
+    let dir = scratch_dir("repair-fresh-proof");
+    under_lab(0x9d01, move |cx| async move {
+        let store = open(&cx, &dir).await;
+        let (id, bytes) = repair_blocks(1).pop().expect("one block");
+        let mut receipts = PublishReceipts::new();
+        store
+            .put_verified(&cx, &bytes, None, &mut receipts)
+            .await
+            .expect("original receipt");
+        std::fs::write(store.path(id), b"damaged").expect("damage canonical data");
+        assert!(matches!(
+            store.repair_data_publication_batch(&cx, &mut receipts, None),
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert_eq!(std::fs::read(store.path(id)).unwrap(), b"damaged");
+        assert!(receipts.holds(DeltaBlockVersion(id)));
+
+        let mut fresh = PublishReceipts::new();
+        let mut batch = store
+            .repair_data_publication_batch(&cx, &mut fresh, None)
+            .expect("fresh repair batch");
+        let metadata = b"unpublished metadata";
+        let metadata_id = StoredObjectKind::Root.identity(&K_OID, NAMESPACE, metadata);
+        assert!(matches!(
+            batch
+                .put_object(&cx, StoredObjectKind::Root, metadata_id, metadata)
+                .await,
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        drop(batch);
+        assert!(!store.path(metadata_id).exists());
+        assert!(!fresh.holds(DeltaBlockVersion(id)));
+    });
+}
+
+#[test]
+fn repair_data_crash_boundaries_leave_old_damage_or_complete_replacement() {
+    for (at, (crash, replaced)) in [
+        (BlockStoreCrashPoint::AfterBatchStagingWrite, false),
+        (
+            BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication,
+            false,
+        ),
+        (
+            BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync,
+            true,
+        ),
+        (BlockStoreCrashPoint::AfterBatchRenames, true),
+        (BlockStoreCrashPoint::AfterBatchFileSyncs, true),
+        (BlockStoreCrashPoint::AfterBatchDirectorySync, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = scratch_dir(&format!("repair-crash-{at}"));
+        under_lab(0x9d10 + at as u64, move |cx| async move {
+            let store = open(&cx, &dir).await;
+            let (id, bytes) = repair_blocks(1).pop().expect("one block");
+            store.put(&cx, &bytes).await.expect("original data");
+            std::fs::write(store.path(id), b"damaged").expect("damage canonical data");
+            let mut receipts = PublishReceipts::new();
+            let mut batch = store
+                .repair_data_publication_batch(&cx, &mut receipts, Some(crash))
+                .expect("repair batch");
+            batch
+                .put_verified(&cx, &bytes, None)
+                .await
+                .expect("regenerated data admitted");
+            assert!(batch.finish(&cx).await.is_err(), "{crash:?}");
+            assert!(!receipts.holds(DeltaBlockVersion(id)), "{crash:?}");
+            assert_eq!(
+                std::fs::read(store.path(id)).expect("canonical remains present"),
+                if replaced {
+                    bytes.as_slice()
+                } else {
+                    b"damaged"
+                },
+                "{crash:?}: replacement is atomic"
+            );
+
+            let mut retry = store
+                .repair_data_publication_batch(&cx, &mut receipts, None)
+                .expect("retry with no escaped receipt");
+            retry
+                .put_verified(&cx, &bytes, None)
+                .await
+                .expect("retry data");
+            retry.finish(&cx).await.expect("durable repair");
+            assert!(receipts.holds(DeltaBlockVersion(id)));
+            let reopened = open(&cx, &dir).await;
+            assert_eq!(
+                reopened
+                    .get_bytes(&cx, DeltaBlockVersion(id))
+                    .await
+                    .unwrap(),
+                bytes
+            );
+        });
+    }
+}
+
+#[test]
+fn repair_data_preserves_damaged_packs_and_cold_reads_verify_loose_copies() {
+    let dir = scratch_dir("repair-packed-data");
+    under_lab(0x9d20, move |cx| async move {
+        let objects = repair_blocks(PACK_MIN_OBJECTS);
+        let store = open(&cx, &dir).await;
+        publish(&cx, &store, &objects, None)
+            .await
+            .expect("original pack");
+        let path = packs_in(&dir).pop().expect("one original pack");
+        let mut damaged = std::fs::read(&path).expect("pack bytes");
+        damaged[offset_in_pack(&objects, 0)] ^= 1;
+        std::fs::write(&path, &damaged).expect("damage only object payload");
+        drop(store);
+
+        let store = open(&cx, &dir).await;
+        assert!(
+            store
+                .get_bytes(&cx, DeltaBlockVersion(objects[0].0))
+                .await
+                .is_err()
+        );
+        let mut receipts = PublishReceipts::new();
+        let mut batch = store
+            .repair_data_publication_batch(&cx, &mut receipts, None)
+            .expect("repair batch over admitted pack table");
+        for (_, bytes) in &objects {
+            batch
+                .put_verified(&cx, bytes, None)
+                .await
+                .expect("regenerated block");
+        }
+        batch.finish(&cx).await.expect("repair publication");
+        assert_eq!(packs_in(&dir), vec![path.clone()]);
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+        for (id, _) in &objects {
+            assert!(
+                store.path(*id).is_file(),
+                "repair does not repack damaged storage"
+            );
+            assert!(receipts.holds(DeltaBlockVersion(*id)));
+        }
+        drop(store);
+
+        for _ in 0..2 {
+            let reopened = open(&cx, &dir).await;
+            let verification = reopened
+                .verification_reader(&cx)
+                .await
+                .expect("uncached reader");
+            for (id, bytes) in &objects {
+                assert_eq!(
+                    reopened
+                        .get_bytes(&cx, DeltaBlockVersion(*id))
+                        .await
+                        .unwrap(),
+                    *bytes
+                );
+                assert_eq!(
+                    verification
+                        .get_bytes(&cx, DeltaBlockVersion(*id))
+                        .await
+                        .unwrap(),
+                    *bytes
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn repair_data_refuses_failed_durable_readback_before_replacing_any_data() {
+    let dir = scratch_dir("repair-durable-readback");
+    under_lab(0x9d21, move |cx| async move {
+        let faults = Arc::new(ReadFaults::default());
+        let store = BlockStore::open_with_vfs(
+            &cx,
+            ReadFaultVfs(Arc::clone(&faults)),
+            &dir,
+            K_OID,
+            NAMESPACE,
+        )
+        .await
+        .expect("faulting store");
+        let (id, bytes) = repair_blocks(1).pop().expect("one block");
+        std::fs::write(store.path(id), b"damaged").expect("damage fixture");
+        let mut receipts = PublishReceipts::new();
+        let mut batch = store
+            .repair_data_publication_batch(&cx, &mut receipts, None)
+            .expect("repair batch");
+        batch
+            .put_verified(&cx, &bytes, None)
+            .await
+            .expect("regenerated block");
+        faults.arm(DAMAGE_DURABLE_READ);
+        assert!(batch.finish(&cx).await.is_err());
+        assert_eq!(faults.failures.load(SeqCst), 1);
+        assert_eq!(std::fs::read(store.path(id)).unwrap(), b"damaged");
+        assert!(!receipts.holds(DeltaBlockVersion(id)));
+    });
+}
+
+#[test]
+fn repair_data_refuses_collision_evidence_and_oversized_data_is_bounded() {
+    let dir = scratch_dir("repair-collision-and-size");
+    under_lab(0x9d22, move |cx| async move {
+        let store = open(&cx, &dir).await;
+        let (id, bytes) = repair_blocks(1).pop().expect("one block");
+        store.put(&cx, &bytes).await.expect("original data");
+        // Exercise the collision branch with a deliberately inconsistent
+        // offered identity; producing a real keyed hash collision is not a
+        // test fixture. Public repair derives the offered identity itself.
+        assert!(matches!(
+            store
+                .existing_batch_object(
+                    StoredObjectKind::Block,
+                    &cx,
+                    id,
+                    &store.path(id),
+                    b"different offered bytes",
+                    super::MAX_STORED_OBJECT_BYTES,
+                    true,
+                )
+                .await,
+            Err(StoreError::Collision { object_id }) if object_id == id
+        ));
+        assert_eq!(std::fs::read(store.path(id)).unwrap(), bytes);
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(store.path(id))
+            .unwrap()
+            .set_len(super::MAX_STORED_OBJECT_BYTES + 1)
+            .expect("oversized data fixture");
+        assert!(matches!(
+            store.put(&cx, &bytes).await,
+            Err(StoreError::ObjectTooLarge { .. })
+        ));
+        let mut receipts = PublishReceipts::new();
+        let mut batch = store
+            .repair_data_publication_batch(&cx, &mut receipts, None)
+            .expect("repair batch");
+        batch
+            .put_verified(&cx, &bytes, None)
+            .await
+            .expect("regenerated block");
+        batch.finish(&cx).await.expect("bounded replacement");
+        assert_eq!(std::fs::read(store.path(id)).unwrap(), bytes);
+        assert!(receipts.holds(DeltaBlockVersion(id)));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn repair_data_refuses_symlink_and_directory_canonical_names() {
+    for directory in [false, true] {
+        let dir = scratch_dir(&format!("repair-nonregular-{directory}"));
+        under_lab(0x9d23, move |cx| async move {
+            let store = open(&cx, &dir).await;
+            let (id, bytes) = repair_blocks(1).pop().expect("one block");
+            let other = dir.join("unrelated-data");
+            std::fs::write(&other, b"preserve unrelated data").expect("outside object namespace");
+            if directory {
+                std::fs::create_dir(store.path(id)).expect("nonregular canonical path");
+            } else {
+                std::os::unix::fs::symlink(&other, store.path(id)).expect("symlink canonical path");
+            }
+            let mut receipts = PublishReceipts::new();
+            let mut batch = store
+                .repair_data_publication_batch(&cx, &mut receipts, None)
+                .expect("repair batch");
+            batch
+                .put_verified(&cx, &bytes, None)
+                .await
+                .expect("regenerated block");
+            assert!(matches!(batch.finish(&cx).await, Err(StoreError::Io(error))
+                if error.kind() == io::ErrorKind::InvalidData));
+            assert!(!receipts.holds(DeltaBlockVersion(id)));
+            let metadata = std::fs::symlink_metadata(store.path(id)).expect("name preserved");
+            assert_eq!(metadata.file_type().is_dir(), directory);
+            assert_eq!(metadata.file_type().is_symlink(), !directory);
+            assert_eq!(std::fs::read(&other).unwrap(), b"preserve unrelated data");
+        });
+    }
 }
 
 #[test]
