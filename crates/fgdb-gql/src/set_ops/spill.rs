@@ -468,11 +468,13 @@ impl AsyncSpillSetPlan {
         Self::compile_at(query, 0, &mut SourceAdmission::default(), false)
     }
 
-    /// Admit bounded variable-length graph leaves for a host with a vertex
+    /// Admit native variable-length graph leaves for a host with a vertex
     /// root and independently positioned incidence reads at the same cut.
     /// Every route occurrence is retained until the ordinary external tail
-    /// applies canonical ordering, DISTINCT and paging. This does not enable
-    /// shortest selectors, unbounded paths, or unsupported local instructions.
+    /// applies canonical ordering, DISTINCT and paging. The asynchronous walk
+    /// compiler admits finite bounds, supported shortest selectors and open
+    /// TRAIL/ACYCLIC/SIMPLE or DIFFERENT EDGES routes. Unbounded repeatable WALK
+    /// and unsupported local instructions still refuse.
     /// Ordinary resident and authorized hosts keep their own source profile.
     pub fn compile_with_bounded_walks(
         query: &PreparedGraphSet,
@@ -520,7 +522,7 @@ impl AsyncSpillSetPlan {
         Self::compile_with_procedure_limit(query, usize::MAX, false, false)
     }
 
-    /// Combine independent procedures with the buffered host's bounded path
+    /// Combine independent procedures with the buffered host's admitted path
     /// leaves. Every procedure still requires complete host admission before
     /// I/O, and calls inside Apply bodies still refuse. The host must support
     /// both source capabilities at the same cut with cumulative allowances.
@@ -547,7 +549,7 @@ impl AsyncSpillSetPlan {
         Self::compile_with_procedure_limit(query, usize::MAX, false, true)
     }
 
-    /// Combine repeated procedures with bounded path leaves for a host that
+    /// Combine repeated procedures with admitted path leaves for a host that
     /// implements both capabilities under one snapshot and cumulative policy.
     pub fn compile_with_repeated_procedures_and_bounded_walks(
         query: &PreparedGraphSet,

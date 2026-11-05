@@ -7,6 +7,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+mod unbounded;
 mod vertex_probe;
 
 const R: RelationId = RelationId(7);
@@ -89,6 +90,8 @@ struct Counts {
     state_peak: AtomicUsize,
     state_charges: std::sync::Mutex<BTreeMap<usize, usize>>,
     traversal_reservations: AtomicUsize,
+    traversal_hops: AtomicUsize,
+    traversal_peak_hops: AtomicUsize,
 }
 struct Data {
     edges: Vec<(EId, VId, VId)>,
@@ -158,7 +161,7 @@ impl Drop for Record {
         self.counts.records.fetch_sub(1, Ordering::SeqCst);
     }
 }
-struct Guard(Arc<Counts>, usize);
+struct Guard(Arc<Counts>, usize, usize);
 impl Drop for Guard {
     fn drop(&mut self) {
         if self.1 != 0 {
@@ -170,6 +173,7 @@ impl Drop for Guard {
                 charges.remove(&self.1);
             }
         }
+        self.0.traversal_hops.fetch_sub(self.2, Ordering::SeqCst);
         self.0.guards.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -198,6 +202,7 @@ struct Source {
     refuse_evaluation: bool,
     scratch_limit: usize,
     state_limit: usize,
+    traversal_limit: usize,
     pending_after: usize,
 }
 impl Source {
@@ -227,6 +232,7 @@ impl Source {
             refuse_evaluation: false,
             scratch_limit: usize::MAX,
             state_limit: usize::MAX,
+            traversal_limit: usize::MAX,
             pending_after: usize::MAX,
         }
     }
@@ -247,7 +253,7 @@ impl Source {
     ) -> Result<Guard, EdgeScanSourceError<&'static str, C>> {
         control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
         self.counts.guards.fetch_add(1, Ordering::SeqCst);
-        Ok(Guard(self.counts.clone(), 0))
+        Ok(Guard(self.counts.clone(), 0, 0))
     }
     fn scratch(&self, scratch: &Cell<usize>, event: GlaExecutionEvent) -> Result<(), &'static str> {
         if event == GlaExecutionEvent::ScratchEntry {
@@ -369,7 +375,7 @@ impl AsyncEdgeJoinSource for Source {
     }
     fn reserve_traversal<C>(
         &self,
-        _: usize,
+        hops: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Guard, EdgeScanSourceError<Self::Error, C>> {
         self.counts
@@ -378,7 +384,20 @@ impl AsyncEdgeJoinSource for Source {
         if self.refuse_backing {
             return Err(EdgeScanSourceError::Source("route backing refused"));
         }
-        self.guard(control)
+        let next = self
+            .counts
+            .traversal_hops
+            .load(Ordering::SeqCst)
+            .checked_add(hops)
+            .filter(|next| *next <= self.traversal_limit)
+            .ok_or(EdgeScanSourceError::Source("route backing limit"))?;
+        let mut guard = self.guard(control)?;
+        guard.2 = hops;
+        self.counts.traversal_hops.fetch_add(hops, Ordering::SeqCst);
+        self.counts
+            .traversal_peak_hops
+            .fetch_max(next, Ordering::SeqCst);
+        Ok(guard)
     }
     fn reserve_join_output<C>(
         &self,
@@ -525,7 +544,12 @@ fn drain(plan: GlaPlan<GraphValueRow>, source: Source) -> Vec<Vec<GraphValue>> {
         };
         2 * source.data.edges.len() * layers + 2
     } else {
-        physical.maximum_hops() + 2
+        let hops = if physical.bounds.is_bounded() {
+            physical.maximum_hops()
+        } else {
+            source.data.edges.len().max(source.data.vertices.len())
+        };
+        hops + 2
     };
     let mut cursor = AsyncGraphWalkCursor::new(source, physical, wide(), ok);
     let mut rows = Vec::new();
@@ -538,6 +562,7 @@ fn drain(plan: GlaPlan<GraphValueRow>, source: Source) -> Vec<Vec<GraphValue>> {
     assert!(counts.peak.load(Ordering::SeqCst) <= record_bound);
     assert_eq!(counts.records.load(Ordering::SeqCst), 0);
     assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.traversal_hops.load(Ordering::SeqCst), 0);
     assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
     assert!(run(cursor.next()).is_none());
     rows.sort();
@@ -808,7 +833,6 @@ fn unsupported_definitions_refuse_before_a_zero_limit_or_source() {
     assert_eq!(counts.roots.load(Ordering::SeqCst), IDS.len() + 1);
     assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
     for text in [
-        "MATCH p = (a)-[:R*]->(b) RETURN p LIMIT 0",
         "MATCH p = (a)-[:R*1..2]->(b)-[:R]->(c) RETURN p LIMIT 0",
         "MATCH (a)-[:R*0..2 {p:[]}]->(b) RETURN b LIMIT 0",
         "MATCH (a)-[:R*0..2 {p:{nested:1}}]->(b) RETURN b LIMIT 0",
@@ -1418,16 +1442,8 @@ fn unbounded_shortest_keeps_positive_lower_bounds_and_repetition_refusals() {
         let restricted = prepared(&text.replacen("REPEATABLE ELEMENTS ", "", 1));
         assert!(AsyncGraphWalkPlan::compile_sort_input(restricted.plan()).is_err());
     }
-    for text in [
-        "MATCH p = ANY SHORTEST (a)-[:R*2..]->(b) RETURN p LIMIT 0",
-        "MATCH p = (a)-[:R*]->(b) RETURN p LIMIT 0",
-    ] {
-        let logical = prepared(text);
-        assert!(
-            AsyncGraphWalkPlan::compile_sort_input(logical.plan()).is_err(),
-            "{text}"
-        );
-    }
+    let logical = prepared("MATCH p = ANY SHORTEST (a)-[:R*2..]->(b) RETURN p LIMIT 0");
+    assert!(AsyncGraphWalkPlan::compile_sort_input(logical.plan()).is_err());
 }
 
 #[test]
