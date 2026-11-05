@@ -889,7 +889,7 @@ fn cooperative_bfs_and_pagerank_preserve_rows_scalar_bits_and_certificates_acros
                     }
                 }
                 for source in [VId(0), VId(u128::MAX)] {
-                    for cutoff in [None, Some(0), Some(1)] {
+                    for cutoff in [None, Some(0), Some(1), Some(2)] {
                         calls.push(FnxCallSpec::single_source_shortest_path_length(
                             source, cutoff,
                         ));
@@ -926,7 +926,19 @@ fn cooperative_bfs_and_pagerank_preserve_rows_scalar_bits_and_certificates_acros
                         let actual = actual.unwrap();
                         compare_execution(&actual, &expected);
                         if q == 1 {
-                            assert!(pending > graph.node_count());
+                            if matches!(
+                                call.algorithm(),
+                                FnxAlgorithm::SingleSourceShortestPathLength {
+                                    cutoff: Some(0 | 1),
+                                    ..
+                                }
+                            ) {
+                                // Shallow BFS initializes only its sparse output.
+                                // Every encoded row must still cooperate.
+                                assert!(pending > expected.rows.len());
+                            } else {
+                                assert!(pending > graph.node_count());
+                            }
                         }
                         if let Some(previous) = &previous {
                             assert_eq!(&actual, previous);
@@ -1916,26 +1928,68 @@ fn cooperative_numeric_refusal_nonconvergence_and_empty_or_isolated_populations_
                 // convergence and result conversion must themselves cooperate.
                 assert!(yields >= n * 5);
                 let call = FnxCallSpec::single_source_shortest_path_length(VId(0), Some(0));
+                let limits = FnxExecutionLimits {
+                    max_result_rows: 1,
+                    ..opt.execution_limits
+                };
+                let no_workspace = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: 0,
+                    ..memory()
+                };
+                let expected = call
+                    .execute_sealed(&cx, &graph, limits, no_workspace)
+                    .unwrap();
                 let (result, yields) = drive(
                     call.execute_sealed_cooperative(
                         &controlled,
                         &graph,
-                        FnxExecutionLimits {
-                            max_result_rows: 1,
-                            ..opt.execution_limits
-                        },
-                        memory(),
+                        limits,
+                        no_workspace,
                         quantum(1),
                         yield_now,
                     ),
                     &probe,
                     1,
                 );
-                assert_eq!(result.unwrap().rows.len(), 1);
-                assert!(
-                    yields >= n * 2,
-                    "initialization AND sparse result encoding must yield"
+                let result = result.unwrap();
+                compare_execution(&result, &expected);
+                assert_eq!(
+                    result.rows,
+                    vec![vec![FnxValue::Vertex(VId(0)), FnxValue::Integer(0)]]
                 );
+                assert_eq!(result.certificate.kernel_workspace_bytes, 0);
+                assert!(
+                    yields > result.rows.len(),
+                    "source-only execution and result encoding must cooperate"
+                );
+                assert!(yields < n, "zero-hop BFS must not walk the population");
+                for cutoff in [None, Some(2)] {
+                    let dense = FnxCallSpec::single_source_shortest_path_length(VId(0), cutoff);
+                    for error in [
+                        dense
+                            .execute_sealed(&cx, &graph, limits, no_workspace)
+                            .unwrap_err(),
+                        dense
+                            .execute_sealed_cooperative(
+                                &cx,
+                                &graph,
+                                limits,
+                                no_workspace,
+                                quantum(1),
+                                yield_now,
+                            )
+                            .await
+                            .unwrap_err(),
+                    ] {
+                        assert!(matches!(
+                            error,
+                            FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded {
+                                resource: "kernel workspace bytes",
+                                ..
+                            })
+                        ));
+                    }
+                }
             }
         }
     });
