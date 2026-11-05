@@ -48,10 +48,10 @@ impl CapabilityToken {
         }
         let token = MacaroonToken::from_binary(bytes).ok_or(Error::Malformed)?;
         validate_shape(&token)?;
-        // The pinned foundation reader accepts a decoded predicate even when
-        // its enclosing predicate packet contains unused bytes. Reject that
-        // alternate wire spelling; those bytes are not in the HMAC chain.
-        // This also detects a declared caveat count that the reader clamped.
+        // Enforce the canonical wire spelling at this boundary as well as in
+        // the foundation decoder. Unused predicate bytes are not in the HMAC
+        // chain; malformed packet lengths and caveat counts must be rejected.
+        // Re-encoding also checks that every accepted field was canonical.
         if token.to_binary() != bytes {
             return Err(Error::Malformed);
         }

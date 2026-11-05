@@ -1052,27 +1052,51 @@ fn trailing_and_truncated_wire_data_fail() {
 
 #[test]
 fn unused_bytes_inside_predicate_packet_are_rejected() {
-    let token = authority().issue_at(&grant(), START).unwrap();
-    let mut bytes = token.encode();
+    let issuer = authority();
+    let token = issuer.issue_at(&grant(), START).unwrap();
+    let canonical = token.encode();
+    let decoded = MacaroonToken::from_binary(&canonical).expect("canonical signed token");
+    assert!(decoded.verify_signature(&key()));
+    assert!(CapabilityToken::decode(&canonical).is_ok());
+    assert!(issuer.verify_at(&token, BRANCH, START).is_ok());
+
     let read_len =
         |bytes: &[u8], at: usize| usize::from(u16::from_le_bytes([bytes[at], bytes[at + 1]]));
     let mut pos = 1;
-    pos += 2 + read_len(&bytes, pos); // identifier
-    pos += 2 + read_len(&bytes, pos); // location
+    pos += 2 + read_len(&canonical, pos); // identifier
+    pos += 2 + read_len(&canonical, pos); // location
+    let caveat_count = read_len(&canonical, pos);
+    assert_eq!(caveat_count, decoded.caveat_count());
+    assert!(caveat_count > 0);
     pos += 2; // caveat count
-    assert_eq!(bytes[pos], 0); // first-party packet
-    let length_at = pos + 1;
-    let length = read_len(&bytes, length_at);
-    bytes.insert(length_at + 2 + length, 0);
-    let enlarged = u16::try_from(length + 1).unwrap().to_le_bytes();
-    bytes[length_at..length_at + 2].copy_from_slice(&enlarged);
-    // Prove this witness reaches the foundation's lenient packet decoder.
-    let decoded = MacaroonToken::from_binary(&bytes).unwrap();
-    assert!(decoded.verify_signature(&key()));
-    assert!(matches!(
-        CapabilityToken::decode(&bytes),
-        Err(Error::Malformed)
-    ));
+    let paddings: [&[u8]; 3] = [&[0], &[0xff], &[0, 0xff]];
+    for packet in 0..caveat_count {
+        assert_eq!(canonical[pos], 0); // first-party packet
+        let length_at = pos + 1;
+        let length = read_len(&canonical, length_at);
+        let packet_end = length_at + 2 + length;
+        for padding in paddings {
+            let mut bytes = Vec::with_capacity(canonical.len() + padding.len());
+            bytes.extend_from_slice(&canonical[..packet_end]);
+            bytes.extend_from_slice(padding);
+            bytes.extend_from_slice(&canonical[packet_end..]);
+            let enlarged = u16::try_from(length + padding.len())
+                .expect("bounded fixture packet")
+                .to_le_bytes();
+            bytes[length_at..length_at + 2].copy_from_slice(&enlarged);
+            // The foundation now rejects unused bytes before Warden's own
+            // canonical round-trip guard. Both ingress boundaries must refuse.
+            assert!(
+                MacaroonToken::from_binary(&bytes).is_none(),
+                "packet {packet}, padding {padding:?}"
+            );
+            assert!(matches!(
+                CapabilityToken::decode(&bytes),
+                Err(Error::Malformed)
+            ));
+        }
+        pos = packet_end;
+    }
 }
 
 #[test]
