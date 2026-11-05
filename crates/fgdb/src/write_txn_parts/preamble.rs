@@ -804,6 +804,12 @@ pub struct WriteTxn {
     // Program guards and savepoints retain this exact immutable prefix. Staging
     // replaces the handle; it never copies the accumulated delta to save it.
     prepared: Option<std::sync::Arc<PreparedWrite>>,
+    /// The prepared effects are proved equivalent to the raw source order.
+    /// Independent relation groups can normalize away intermediate writes
+    /// that another group's CAS would observe in source order. Their first
+    /// ordered continuation must therefore re-evaluate the complete prefix.
+    /// This proof travels with saved effects, independently of replay authority.
+    prepared_source_ordered: bool,
     /// Successful retirements proved by the currently executing chain only.
     /// Its workspace clears this ledger on success, refusal and unwinding;
     /// it is not an inference from absence or raw staged instructions.

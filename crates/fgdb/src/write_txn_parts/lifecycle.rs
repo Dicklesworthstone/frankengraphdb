@@ -11,6 +11,7 @@ impl WriteTxn {
             basis,
             staged: Vec::new(),
             prepared: None,
+            prepared_source_ordered: true,
             chain_retirements: None,
             savepoints: Vec::new(),
             program_multi_relation: false,
@@ -106,12 +107,12 @@ impl WriteTxn {
         let previous_len = self.staged.len();
         self.staged.push(batch);
         let incremental = match self.prepared.as_deref() {
-            Some(previous) => database.try_extend_prepared_write(
+            Some(previous) if self.prepared_source_ordered => database.try_extend_prepared_write(
                 previous,
                 &self.staged[..previous_len],
                 self.staged.last().expect("a batch was just staged"),
             ),
-            None => Ok(None),
+            _ => Ok(None),
         };
         let prepared = match incremental.and_then(|incremental| {
             if let Some(prepared) = incremental {
@@ -132,6 +133,7 @@ impl WriteTxn {
         };
         debug_assert_eq!(prepared.basis(), self.basis);
         self.prepared = Some(std::sync::Arc::new(prepared));
+        self.prepared_source_ordered = true;
         Ok(())
     }
 
@@ -167,6 +169,9 @@ impl WriteTxn {
     /// prefixes reuse already admitted effects through the same native relation
     /// slices as `Database::prepare_ordered_writes`; other intent families retain
     /// full preparation. Overlay readers immediately see the new net effects.
+    /// A prefix staged by `write_atomic` is first re-evaluated in source order,
+    /// which can change a conditional outcome or refuse. Birth ordinals already
+    /// exposed by that prefix are retained.
     ///
     /// A refusal preserves the previous overlay and all observations; savepoints
     /// retain the exact prepared prefix without introducing another mode or pin.
@@ -209,12 +214,16 @@ impl WriteTxn {
         self.staged.extend(batches);
         let result = if ordered {
             let incremental = match self.prepared.as_deref() {
-                Some(previous) => database.try_extend_prepared_ordered_writes(
-                    previous,
-                    &self.staged[..previous_len],
-                    &self.staged[previous_len..],
-                ),
-                None => Ok(None),
+                Some(previous) if self.prepared_source_ordered => database
+                    .try_extend_prepared_ordered_writes(
+                        previous,
+                        &self.staged[..previous_len],
+                        &self.staged[previous_len..],
+                    ),
+                // An atomic prefix's normalized effects do not prove the
+                // result of replaying its interleaved raw groups. Establish
+                // that result once through the ordinary ordered evaluator.
+                _ => Ok(None),
             };
             // An ordered suffix must not renumber births the prefix already
             // exposed. Atomic groups stay canonical instead: relation order
@@ -238,6 +247,14 @@ impl WriteTxn {
         };
         debug_assert_eq!(prepared.basis(), self.basis);
         self.prepared = Some(std::sync::Arc::new(prepared));
+        // One atomic relation uses the ordinary source-ordered evaluator too.
+        // Mixed atomic groups need a fresh proof even if their net is empty.
+        self.prepared_source_ordered = ordered
+            || self.staged.first().is_some_and(|first| {
+                self.staged
+                    .iter()
+                    .all(|batch| batch.relation == first.relation)
+            });
         Ok(())
     }
 
@@ -311,6 +328,33 @@ mod ordered_staging_tests {
         );
         last.add_edge(EId(70), VId(6), VId(2), vec![]);
         [first, second, last]
+    }
+
+    fn atomic_cancelled_cas_prefix(abort: bool) -> Vec<WriteBatch> {
+        let int = CanonicalScalar::Int;
+        let mut first = WriteBatch::new(RelationId(9));
+        first.set_vertex_property(VId(1), P, Some(int(1)));
+        let mut middle = WriteBatch::new(RelationId(2));
+        middle.compare_and_set_vertex_property(
+            VId(1),
+            P,
+            Some(int(if abort { 0 } else { 1 })),
+            int(if abort { 0 } else { 2 }),
+            if abort {
+                WriteMismatchPolicy::AbortWrite
+            } else {
+                WriteMismatchPolicy::NoOp
+            },
+        );
+        let mut last = WriteBatch::new(RelationId(9));
+        last.compare_and_set_vertex_property(
+            VId(1),
+            P,
+            Some(int(1)),
+            int(0),
+            WriteMismatchPolicy::NoOp,
+        );
+        vec![first, middle, last]
     }
 
     #[test]
@@ -707,6 +751,226 @@ mod ordered_staging_tests {
         assert!(report.lab_test_passed(), "{report:?}");
     }
 
+    #[test]
+    fn atomic_cancelled_cas_prefix_matches_full_ordered_continuation() {
+        let ((), report) = run_async_under_lab(0x6972_0201, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for explicit_ordered in [false, true] {
+                let mut db = seeded(&cx).await;
+                let basis = db.frontier().unwrap();
+                let prefix = atomic_cancelled_cas_prefix(false);
+                let mut txn = db.begin(&contexts.txn()).unwrap();
+                txn.write_atomic(&mut db, prefix.clone()).unwrap();
+                assert!(!txn.prepared_source_ordered);
+                assert!(
+                    txn.prepared
+                        .as_ref()
+                        .unwrap()
+                        .template
+                        .rows()
+                        .next()
+                        .is_none()
+                );
+                assert_eq!(
+                    txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(0).into())]
+                );
+                let mut suffix = WriteBatch::new(RelationId(3));
+                suffix.create_vertex(VId(5), vec![], vec![]);
+                let mut raw = prefix;
+                raw.push(suffix.clone());
+                let full = db.prepare_ordered_writes(raw.clone()).unwrap();
+                if explicit_ordered {
+                    txn.write_ordered(&mut db, vec![suffix]).unwrap();
+                } else {
+                    // Ordinary write auto-routes an existing mixed prefix.
+                    txn.write(&mut db, suffix).unwrap();
+                }
+                assert!(txn.prepared_source_ordered);
+                let actual = txn.prepared.as_ref().unwrap();
+                assert_eq!(
+                    actual.template.canonical_bytes(),
+                    full.template.canonical_bytes()
+                );
+                assert_eq!(
+                    actual.dependencies.observations().collect::<Vec<_>>(),
+                    full.dependencies.observations().collect::<Vec<_>>()
+                );
+                assert!(actual.template.rows().any(|row| row
+                    == &fgdb_delta_types::DeltaRow::Property {
+                        elem: ElementId::Vertex(VId(1)),
+                        property: P,
+                        before: Some(CanonicalScalar::Int(0).into()),
+                        after: Some(CanonicalScalar::Int(2).into()),
+                    }));
+                assert_eq!(
+                    txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(2).into())]
+                );
+                // Ordered provenance is independent of replay authority. A
+                // later supported suffix reuses this proved prefix, retaining
+                // a deliberately withheld allowance rather than re-granting it.
+                std::sync::Arc::make_mut(txn.prepared.as_mut().unwrap()).replay_row_allowance =
+                    None;
+                let mut next = WriteBatch::new(RelationId(4));
+                next.compare_and_set_vertex_property(
+                    VId(1),
+                    P,
+                    Some(CanonicalScalar::Int(2)),
+                    CanonicalScalar::Int(3),
+                    WriteMismatchPolicy::AbortWrite,
+                );
+                raw.push(next.clone());
+                txn.write(&mut db, next).unwrap();
+                let full = db.prepare_ordered_writes(raw).unwrap();
+                assert_eq!(
+                    txn.prepared.as_ref().unwrap().template.canonical_bytes(),
+                    full.template.canonical_bytes()
+                );
+                assert_eq!(txn.prepared.as_ref().unwrap().replay_row_allowance, None);
+                assert_eq!(db.frontier().unwrap(), basis);
+                assert!(db.vertex(VId(5)).unwrap().is_none());
+                assert_eq!(
+                    txn.commit(&mut db, &cx).await.unwrap(),
+                    CommitSeq(basis.0 + 1)
+                );
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(3).into())]
+                );
+                assert!(db.vertex(VId(5)).unwrap().is_some());
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn atomic_cancelled_cas_refusal_preserves_the_original_prepared_prefix() {
+        let ((), report) = run_async_under_lab(0x6972_0202, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for explicit_ordered in [false, true] {
+                let mut db = seeded(&cx).await;
+                let basis = db.frontier().unwrap();
+                let prefix = atomic_cancelled_cas_prefix(true);
+                let mut txn = db.begin(&contexts.txn()).unwrap();
+                txn.write_atomic(&mut db, prefix.clone()).unwrap();
+                let previous = std::sync::Arc::clone(txn.prepared.as_ref().unwrap());
+                assert!(previous.template.rows().next().is_none());
+                let mut suffix = WriteBatch::new(RelationId(3));
+                suffix.create_vertex(VId(5), vec![], vec![]);
+                let expected = db
+                    .prepare_ordered_writes(prefix.into_iter().chain([suffix.clone()]).collect())
+                    .unwrap_err();
+                assert!(matches!(
+                    &expected,
+                    WriteTxnError::Write(WriteError::CompareAndSetMismatch(_))
+                ));
+                let actual = if explicit_ordered {
+                    txn.write_ordered(&mut db, vec![suffix])
+                } else {
+                    txn.write(&mut db, suffix)
+                }
+                .unwrap_err();
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                assert!(std::sync::Arc::ptr_eq(
+                    txn.prepared.as_ref().unwrap(),
+                    &previous
+                ));
+                assert!(!txn.prepared_source_ordered);
+                assert_eq!(txn.staged.len(), 3);
+                assert_eq!(
+                    txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(0).into())]
+                );
+                assert!(txn.vertex(&db, VId(5)).unwrap().is_none());
+                assert_eq!(db.frontier().unwrap(), basis);
+                txn.abort();
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn atomic_ordered_provenance_restores_with_savepoints_and_workspaces() {
+        let ((), report) = run_async_under_lab(0x6972_0203, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let mut db = seeded(&cx).await;
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            txn.write_atomic(&mut db, atomic_cancelled_cas_prefix(false))
+                .unwrap();
+            txn.savepoint(&db, "atomic").unwrap();
+            let previous = std::sync::Arc::clone(txn.prepared.as_ref().unwrap());
+            let mut suffix = WriteBatch::new(RelationId(3));
+            suffix.create_vertex(VId(5), vec![], vec![]);
+            let mut atomic_suffix = WriteBatch::new(RelationId(4));
+            atomic_suffix.create_vertex(VId(6), vec![], vec![]);
+            for unwind in [false, true] {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let outer = MutationProgramWorkspace::new(&mut txn);
+                    outer
+                        .txn
+                        .write_ordered(&mut db, vec![suffix.clone()])
+                        .unwrap();
+                    assert!(outer.txn.prepared_source_ordered);
+                    {
+                        let inner = MutationProgramWorkspace::new(outer.txn);
+                        inner
+                            .txn
+                            .write_atomic(&mut db, vec![atomic_suffix.clone()])
+                            .unwrap();
+                        assert!(!inner.txn.prepared_source_ordered);
+                    }
+                    assert!(outer.txn.prepared_source_ordered);
+                    assert_eq!(
+                        outer.txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+                        vec![(P, CanonicalScalar::Int(2).into())]
+                    );
+                    if unwind {
+                        std::panic::resume_unwind(Box::new("atomic-to-ordered workspace unwind"));
+                    }
+                    // Unaccepted normal return and unwinding restore the same proof.
+                }));
+                assert_eq!(outcome.is_err(), unwind);
+                assert!(!txn.prepared_source_ordered);
+                assert!(std::sync::Arc::ptr_eq(
+                    txn.prepared.as_ref().unwrap(),
+                    &previous
+                ));
+                assert!(txn.vertex(&db, VId(5)).unwrap().is_none());
+            }
+            txn.write_ordered(&mut db, vec![suffix.clone()]).unwrap();
+            txn.savepoint(&db, "ordered").unwrap();
+            txn.write_atomic(&mut db, vec![atomic_suffix]).unwrap();
+            assert!(!txn.prepared_source_ordered);
+            txn.rollback_to_savepoint(&db, "ordered").unwrap();
+            assert!(txn.prepared_source_ordered);
+            assert_eq!(
+                txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(2).into())]
+            );
+            assert!(txn.vertex(&db, VId(6)).unwrap().is_none());
+            txn.rollback_to_savepoint(&db, "atomic").unwrap();
+            assert!(!txn.prepared_source_ordered);
+            assert!(std::sync::Arc::ptr_eq(
+                txn.prepared.as_ref().unwrap(),
+                &previous
+            ));
+            txn.write(&mut db, suffix).unwrap();
+            assert!(txn.prepared_source_ordered);
+            assert_eq!(
+                txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(2).into())]
+            );
+            txn.commit(&mut db, &cx).await.unwrap();
+            assert!(db.vertex(VId(5)).unwrap().is_some());
+            assert!(db.vertex(VId(6)).unwrap().is_none());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
     /// Ported from ebabc3ae's `switching_from_independent_groups_never_renumbers_observed_births`
     /// (lost in d8ce9e90, fgdb-write-ordered-silent-revert-2d80i). Ordinals are now
     /// database-global, so the observed values are captured, not hard-coded.
@@ -723,6 +987,7 @@ mod ordered_staging_tests {
             let mut second = WriteBatch::new(RelationId(2));
             second.create_vertex(VId(6), vec![], vec![(P, CanonicalScalar::Int(2))]);
             txn.write_atomic(&mut db, vec![first, second]).unwrap();
+            assert!(!txn.prepared_source_ordered);
             let birth = |txn: &WriteTxn, db: &Database<MemVfs>, id| {
                 txn.vertex(db, VId(id)).unwrap().unwrap().birth_ordinal
             };
@@ -737,8 +1002,10 @@ mod ordered_staging_tests {
             suffix.set_vertex_property(VId(5), P, Some(CanonicalScalar::Int(3)));
             suffix.add_edge(EId(50), VId(5), VId(6), vec![]);
             txn.write_ordered(&mut db, vec![suffix.clone()]).unwrap();
+            assert!(txn.prepared_source_ordered);
             assert_eq!([birth(&txn, &db, 5), birth(&txn, &db, 6)], births);
             txn.rollback_to_savepoint(&db, "independent").unwrap();
+            assert!(!txn.prepared_source_ordered);
             assert_eq!(txn.staged_effect_digest().unwrap(), saved);
             assert_eq!([birth(&txn, &db, 5), birth(&txn, &db, 6)], births);
             txn.write_ordered(&mut db, vec![suffix]).unwrap();

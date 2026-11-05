@@ -8,6 +8,7 @@ struct MutationProgramWorkspace<'txn> {
     txn: &'txn mut WriteTxn,
     staged_len: usize,
     prepared: Option<std::sync::Arc<PreparedWrite>>,
+    prepared_source_ordered: bool,
     independent_creates: Option<IndependentCreateWrites>,
     program_multi_relation: bool,
     owns_chain_retirements: bool,
@@ -21,6 +22,7 @@ impl<'txn> MutationProgramWorkspace<'txn> {
         // re-prepared against a different basis on failure. Sharing this immutable
         // value keeps nested row/action guards independent of the prefix's size.
         let prepared = txn.prepared.clone();
+        let prepared_source_ordered = txn.prepared_source_ordered;
         let program_multi_relation = txn.program_multi_relation;
         let chain_retirements_len = txn
             .chain_retirements
@@ -30,6 +32,7 @@ impl<'txn> MutationProgramWorkspace<'txn> {
             txn,
             staged_len,
             prepared,
+            prepared_source_ordered,
             independent_creates: None,
             program_multi_relation,
             owns_chain_retirements: false,
@@ -70,6 +73,7 @@ impl Drop for MutationProgramWorkspace<'_> {
         }
         let appended = self.txn.staged.len() > self.staged_len;
         let discarded = core::mem::replace(&mut self.txn.prepared, self.prepared.take());
+        self.txn.prepared_source_ordered = self.prepared_source_ordered;
         self.txn.staged.truncate(self.staged_len);
         // Restore effects FIRST. Do not rewind query/scan observations: even an
         // error, conditional no-op or discarded program can expose its basis.
