@@ -95,6 +95,7 @@ pub(crate) use bounded_read::ReopenedSealingAdjacency;
 use bounded_read::RootReadEvent;
 pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
 mod pack;
+mod runs;
 pub use pack::{PACK_DIR, PACK_MIN_OBJECTS};
 
 /// The fewest new root segments (with index segments) a root publication
@@ -263,6 +264,7 @@ struct ObjectPublicationPermit {
 #[derive(Clone, Copy, Debug)]
 enum StoredObjectKind {
     Block,
+    AdjRun,
     Root,
     /// A V4 or V5 root's full reference segment (fgdb-d5vo4).
     Segment,
@@ -282,6 +284,7 @@ impl StoredObjectKind {
     ) -> ObjectId {
         match self {
             Self::Block => block_id(k_oid, namespace, bytes),
+            Self::AdjRun => crate::tiered::sealed::adj_run_id(k_oid, namespace, bytes),
             Self::Root => crate::root::root_id(k_oid, namespace, bytes),
             Self::Segment => crate::root_segment::segment_id(k_oid, namespace, bytes),
             Self::IndexSegment => crate::root_segment::index_id(k_oid, namespace, bytes),
@@ -304,6 +307,7 @@ impl StoredObjectKind {
     /// root forever: the directory admitted no recovery.
     fn stored_limit(self) -> u64 {
         match self {
+            Self::AdjRun => crate::tiered::sealed::MAX_ADJ_RUN_BYTES as u64,
             Self::Root => crate::root::MAX_ENCODED_ROOT_BYTES as u64,
             Self::Segment => crate::root_segment::MAX_SEGMENT_BYTES as u64,
             Self::IndexSegment => crate::root_segment::INDEX_BYTES as u64,
@@ -611,6 +615,8 @@ async fn sync_files_together<'f, F: VfsFile + 'f>(
 #[derive(Debug)]
 pub enum StoreError {
     Io(std::io::Error),
+    /// An attached registered run failed identity, scope or column admission.
+    MalformedAdjRun(Box<crate::tiered::sealed::AdjRunError>),
     /// A persisted object exceeds the finite byte ceiling this store can read.
     ObjectTooLarge {
         limit: u64,
@@ -705,6 +711,7 @@ impl core::fmt::Display for StoreError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(error) => write!(f, "block store io: {error}"),
+            Self::MalformedAdjRun(error) => write!(f, "stored adjacency run is malformed: {error}"),
             Self::ObjectTooLarge { limit, observed } => write!(
                 f,
                 "stored object has at least {observed} bytes, above the {limit}-byte limit"
@@ -759,6 +766,7 @@ impl core::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
+            Self::MalformedAdjRun(error) => Some(error.as_ref()),
             Self::Malformed(error) => Some(error),
             Self::MalformedRoot(error) => Some(error),
             Self::MalformedPatch(error) => Some(error),
@@ -786,6 +794,12 @@ impl From<std::io::Error> for StoreError {
 fn read_interrupted(error: &StoreError) -> bool {
     match error {
         StoreError::Io(error) => error.kind() == std::io::ErrorKind::Interrupted,
+        StoreError::MalformedAdjRun(error) => matches!(
+            error.as_ref(),
+            crate::tiered::sealed::AdjRunError::Sealed(
+                crate::tiered::sealed::SealedError::Interrupted(_)
+            )
+        ),
         StoreError::RootBlockLoad { error, .. }
         | StoreError::RootPatchLoad { error, .. }
         | StoreError::ManifestRootLoad { error, .. }
@@ -885,6 +899,9 @@ pub struct BlockStore<V: Vfs = UnixVfs> {
     scalar_resolver: Option<Arc<dyn CanonicalScalarResolver + Send + Sync>>,
     /// Where packed objects are, shared by every clone of this store.
     packs: Arc<pack::PackIndex>,
+    /// Bounded metadata hint for one authenticated immutable root. It avoids a
+    /// second read for legacy opens; actual run selection always reauthenticates.
+    root_run_presence: Arc<std::sync::Mutex<Option<(PartitionRootVersion, bool)>>>,
 }
 
 impl<V: Vfs> core::fmt::Debug for BlockStore<V> {
@@ -1108,6 +1125,7 @@ impl<V: Vfs> BlockStore<V> {
             namespace,
             scalar_resolver: None,
             packs,
+            root_run_presence: Arc::default(),
         })
     }
 
@@ -1146,6 +1164,7 @@ impl<V: Vfs> BlockStore<V> {
             namespace,
             scalar_resolver: None,
             packs,
+            root_run_presence: Arc::default(),
         })
     }
 
@@ -1175,6 +1194,7 @@ impl<V: Vfs> BlockStore<V> {
             namespace: self.namespace,
             scalar_resolver: self.scalar_resolver.clone(),
             packs: Arc::new(packs),
+            root_run_presence: Arc::default(),
         })
     }
 
@@ -3383,6 +3403,7 @@ impl<V: Vfs> BlockStore<V> {
             .await?;
         batch.finish(cx).await?;
         receipts.root_memo = Some(memo);
+        self.note_root_run_presence(id, false);
         Ok((
             crate::manifest::ManifestVersion(manifest_id),
             manifest.len(),

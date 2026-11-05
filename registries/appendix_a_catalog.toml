@@ -39,9 +39,9 @@ occurrence_count = 2456
 occurrence_transcript_sha256 = "f797542209a7411cde460324bcfa1d6b9be65c9ee536059c520dccae9844c822"
 
 [target_manifest]
-target_count = 4197
-projection_fallback_count = 469
-target_source_assignment_sha256 = "d47424ade687ffac0f7aafca3a5d6bf7f9a5928d9324cf1b00e76dc21c30fbac"
+target_count = 4221
+projection_fallback_count = 493
+target_source_assignment_sha256 = "4d7a145d86278ab30496525bfe93a01f1cfae17c6541a60e196fca3bee05515b"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 76
+registry_epoch = 77
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 50
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 105
+registry_epoch = 106
 
 [[logical_kind]]
 slice_id = "a03"
@@ -51909,7 +51909,7 @@ symbol = "AdjRunSegment"
 generic_signature = ""
 source_key = "top|AdjRunSegment"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a09:1890"]
 
 
@@ -148424,3 +148424,594 @@ checker_ids = ["w2_identity_pipeline_roundtrip"]
 scenario_ids = ["w2_identity_pipeline_roundtrip"]
 event_ids = ["identity_pipeline_verdict"]
 gate_ids = ["G1"]
+
+# FGRN-v1 is the registered first durable Tier-R profile (fgdb-w3-tier-r-0tj,
+# fgdb-teypc). It preserves a single admitted relation/lineage, embedded scoped
+# dictionaries, multigraph history, properties, and Chronicle-derived origins.
+# Cross-branch imports, external ordinal maps, page-mapped reads and automatic
+# tier selection are outside this profile; their tags are not accepted.
+
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:adj-run-segment"
+object_kind = 0x058d
+name = "AdjRunSegment"
+status = "active"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 268435456
+golden_corpus = "crates/fgdb-strata/src/tiered/sealed/durable/tests.rs"
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-graph"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0001
+stable_name = "graph"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "FGRN-v1 graph coordinate, equal to the authenticated base root embedded in its publishing V7 root; retained with the run. Frame integers are little-endian except the existing identity-column scalar payloads"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-branch-projection"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0002
+stable_name = "branch_projection"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "profile 1 binds exactly one admitted branch lineage; branch imports and attachment to a different source root are refused, even when incidence bytes happen to match"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-source-partition"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0003
+stable_name = "source_partition"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "stable source partition coordinate, equal to the authenticated base root; mutable labels never select this run"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-source-root-digest"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0004
+stable_name = "source_root_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact keyed identity of the non-V7 base frame embedded in the publishing root; comparison only, not a reachability edge or a self-reference. The V7 root retains the base frame and its existing strong membership"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-direction"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0005
+stable_name = "direction"
+exact_wire_type = "u8"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "profile 1 accepts only canonical forward incidence, tag 0; every other tag refuses. Incoming access uses the existing verified transpose of the same source and does not reinterpret another lineage"
+version_status = "active"
+max_size_bytes = 1
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-edge-type"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0006
+stable_name = "edge_type"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact RelationId retained by this run, including empty runs; every descriptor and the publishing root's run reference must agree. Absence proves nothing about another relation"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-seq-range"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0007
+stable_name = "seq_range"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "two little-endian u64 values: retained floor then source publication. floor <= publication; publication equals the embedded base root and scalar visibility is lawful only on this exact lineage within the inclusive retained cut"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-profile"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0008
+stable_name = "profile"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "FGRN format u16=1 accepts only profile u16=1: single-lineage forward relation; FGSI-v1 row codec 0 compact inline or 1 Elias-Fano CSR; embedded stable-VId destination dictionary; existing stable-identity column tags; origin scalar triples are minimal unsigned LEB128. Unknown format/profile/codec tags fail closed"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-source-map-id"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0009
+stable_name = "source_map_id"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "identity of this run's implicit [0, source_rows) projection over its sorted stable source VIds; rows store stable IDs and no source ordinal escapes this map. Recomputed on decode; not an external map reference"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 domain fgdb.strata.adj-run-source-map.v1; source_root_digest raw32, graph u128be, branch u128be, partition u64be, floor u64be, publication u64be, relation u64be, row_count u64be, then each sorted source VId u128be"
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-destination-map-id"
+containing_schema = "AdjRunSegment"
+field_tag = 0x000a
+stable_name = "destination_map_id"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "identity of the single embedded dictionary mapping run-local EF destination positions to complete stable VIds; not an external partition/map-table reference. Every dictionary entry is used and every ordinal is in range; no ordinal may cross this run's scope"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 domain fgdb.strata.adj-run-destination-map.v1; source_root_digest raw32, graph u128be, branch u128be, partition u64be, floor u64be, publication u64be, relation u64be, dictionary_count u64be, then each sorted destination VId u128be"
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-source-rows"
+containing_schema = "AdjRunSegment"
+field_tag = 0x000b
+stable_name = "source_rows"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "number of canonical sorted forward descriptor rows, defining source ordinal range [0,count); bounded by caller max_rows and incidence_count before allocation, and checked against the decoded image"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-incidence-count"
+containing_schema = "AdjRunSegment"
+field_tag = 0x000c
+stable_name = "incidence_count"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "retained raw incidence versions, including invisible history and parallel edges; not a live degree. Bounded before decode and equal to the final Elias-Fano offset and all aligned image columns"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-origin-count"
+containing_schema = "AdjRunSegment"
+field_tag = 0x000d
+stable_name = "origin_count"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact number of distinct retained EIds; bounded by incidence_count before allocation. The origin column must cover every retained identity exactly once, including every historical version"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-codec-table"
+containing_schema = "AdjRunSegment"
+field_tag = 0x000e
+stable_name = "codec_table"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "profile-1 origin identity column framing: representation u8 uses the existing FGSI identity tags, prefix_count u32le, identity_payload_length u32le, origin_scalar_payload_length u32le. Embedded image lists carry their own explicit row codec, EF and identity framing; lengths are exact and trailing bytes refuse"
+version_status = "active"
+max_size_bytes = 13
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-encoded-image"
+containing_schema = "AdjRunSegment"
+field_tag = 0x000f
+stable_name = "encoded_image"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "u32le length followed by the canonical existing FGSI-v1 image: stable destination dictionary, Elias-Fano row offsets, sorted descriptor rows with compact-inline or EF neighbor lists, typed stable-EId columns, lineage-pinned half-open visibility spans, canonical positional property locators, and inline FGSP property values. Contains no strong object references. Image fingerprint is verified before count/payload interpretation; complete image shape, scalar authority, source scope, property bijection and all bounds are independently rechecked"
+version_status = "active"
+max_size_bytes = 268435456
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-image-fingerprint"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0010
+stable_name = "image_fingerprint"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact FGSI payload fingerprint, compared before decoding and retained in the opaque reconstructed source anchor; not a standalone graph authority"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 under domain fgdb.strata.sealed-adjacency-image.v1 followed by every encoded_image byte, excluding its enclosing length"
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-stable-eids"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0011
+stable_name = "stable_eids"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "the origin sidecar's strictly increasing unique EId identity-column payload under codec_table; raw128 or order-preserving shared epoch/partition prefix dictionary with fixed/FOR/delta-FOR slots. Every content version in encoded_image names one of these stable EIds; no row ordinal becomes identity"
+version_status = "active"
+max_size_bytes = 268435456
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-origin-birth-orders"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0012
+stable_name = "origin_birth_orders"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "one canonical unsigned-LEB128 triple (commit_seq,intent_ordinal,merge_ordinal) per sorted stable_eids position. Actual commit sequence and birth ordinal come from authenticated Chronicle creation effects, with merge ordinal zero in the local-only spine. commit_seq must be nonzero and no later than every retained content-version start. Content-version starts never replace immutable origins; missing, repeated or unaligned identities refuse"
+version_status = "active"
+max_size_bytes = 268435456
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-canonical-stable-id-digest"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0013
+stable_name = "canonical_stable_id_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "representation-independent transcript over complete retained logical incidences and true origin order; compared independently after decoding. A legal identity-codec substitution changes physical bytes/object identity and preserves this digest"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 domain fgdb.strata.adj-run-stable-digest.v1; graph u128be, branch u128be, partition u64be, relation u64be, floor u64be, publication u64be, incidence_count u64be; then canonical (src,relation,dst,eid,created_at) order: src u128be, relation u64be, dst u128be, eid u128be, created_at u64be, retired_at-or-zero u64be, exact40-byte canonical-be OriginBirthOrder, property_count u64be, then each ordered property key u64be, canonical-value byte length u64be and exact canonical value bytes"
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:adj-run-segment-checksum"
+containing_schema = "AdjRunSegment"
+field_tag = 0x0014
+stable_name = "checksum"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "final32 bytes of FGRN-v1; verified before interpreting any frame count. Whole run length including checksum is capped at268435456 and the caller byte limit. Keyed AdjRunSegment identity is checked first by the store"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 domain fgdb.strata.adj-run-checksum.v1 followed by every preceding FGRN frame byte; no checksum bytes in its own transcript"
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-partition-root-base-frame"
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x000f
+stable_name = "base_frame"
+exact_wire_type = "bytes"
+cardinality = "optional"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "format V7: exact V3-V6 FGSR base frame preceded by u64be length; nested V7 refuses. The base's already registered blocks, vertex patches, segments, descriptors and strong property refs retain their existing semantics and are decoded normally, not treated as opaque reachability. Its keyed DeltaPartitionRoot identity is the comparison source_root_digest for every attached run; there is no new strong edge back to the outer root"
+version_status = "active"
+max_size_bytes = 134217728
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-partition-root-adjacency-runs"
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0010
+stable_name = "adjacency_runs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AdjRunSegment"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "format V7: 1..4096 unique refs in ascending RelationId order, each relation u64be, run ObjectId32, retained floor u64be. The u32be count follows the u64be base-frame length in the header. Every floor <= base publication and each run authenticates exactly that base root/coordinate/relation/cut. Roots retain run generations immutably; ordinary successor commits omit attachments rather than treating stale runs as current"
+version_status = "active"
+max_size_bytes = 48
+
+[[target]]
+row_id = "a09:target:logical-kind-adj-run-segment"
+target_row_id = "a09:logical-kind:adj-run-segment"
+slice_id = "a09"
+source_key = "projection|logical_object_kinds|AdjRunSegment"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-graph"
+target_row_id = "a09:field:adj-run-segment-graph"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.graph"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-branch-projection"
+target_row_id = "a09:field:adj-run-segment-branch-projection"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.branch_projection"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-source-partition"
+target_row_id = "a09:field:adj-run-segment-source-partition"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.source_partition"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-source-root-digest"
+target_row_id = "a09:field:adj-run-segment-source-root-digest"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.source_root_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-direction"
+target_row_id = "a09:field:adj-run-segment-direction"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.direction"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-edge-type"
+target_row_id = "a09:field:adj-run-segment-edge-type"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.edge_type"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-seq-range"
+target_row_id = "a09:field:adj-run-segment-seq-range"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.seq_range"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-profile"
+target_row_id = "a09:field:adj-run-segment-profile"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.profile"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-source-map-id"
+target_row_id = "a09:field:adj-run-segment-source-map-id"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.source_map_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-destination-map-id"
+target_row_id = "a09:field:adj-run-segment-destination-map-id"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.destination_map_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-source-rows"
+target_row_id = "a09:field:adj-run-segment-source-rows"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.source_rows"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-incidence-count"
+target_row_id = "a09:field:adj-run-segment-incidence-count"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.incidence_count"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-origin-count"
+target_row_id = "a09:field:adj-run-segment-origin-count"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.origin_count"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-codec-table"
+target_row_id = "a09:field:adj-run-segment-codec-table"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.codec_table"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-encoded-image"
+target_row_id = "a09:field:adj-run-segment-encoded-image"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.encoded_image"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-image-fingerprint"
+target_row_id = "a09:field:adj-run-segment-image-fingerprint"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.image_fingerprint"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-stable-eids"
+target_row_id = "a09:field:adj-run-segment-stable-eids"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.stable_eids"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-origin-birth-orders"
+target_row_id = "a09:field:adj-run-segment-origin-birth-orders"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.origin_birth_orders"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-canonical-stable-id-digest"
+target_row_id = "a09:field:adj-run-segment-canonical-stable-id-digest"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.canonical_stable_id_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-adj-run-segment-checksum"
+target_row_id = "a09:field:adj-run-segment-checksum"
+slice_id = "a09"
+source_key = "projection|durable_fields|AdjRunSegment.checksum"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-delta-partition-root-base-frame"
+target_row_id = "a09:field:delta-partition-root-base-frame"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaPartitionRoot.base_frame"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:field-delta-partition-root-adjacency-runs"
+target_row_id = "a09:field:delta-partition-root-adjacency-runs"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaPartitionRoot.adjacency_runs"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-partition-root-run-membership-digest"
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0011
+stable_name = "run_membership_digest"
+exact_wire_type = "digest256"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "format V7 final32 bytes commit to the exact embedded base frame and canonical ordered run refs. Verified before base or run reference admission; the base frame retains its own independently checked canonical_partition_digest. Comparison only, never a reachability edge"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 domain fgdb.strata.root-runs.v7 followed by all preceding frame bytes: magic FGSR, u16be format7, u64be base_frame_length, u32be run_count, exact V3-V6 base frame, then each sorted (relation u64be, run ObjectId32, floor u64be)"
+
+[[target]]
+row_id = "a09:target:field-delta-partition-root-run-membership-digest"
+target_row_id = "a09:field:delta-partition-root-run-membership-digest"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaPartitionRoot.run_membership_digest"
+target_kind = "field"
+definition_status = "declared"

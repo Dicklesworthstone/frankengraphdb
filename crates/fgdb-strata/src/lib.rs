@@ -1,12 +1,14 @@
-//! `fgdb-strata` — B2's graph-structured LSM, currently implementing the Tier-D
-//! delta-block posture.
+//! `fgdb-strata` — B2's graph-structured LSM, with Tier-D history and explicit
+//! durable compressed relation runs selected by immutable roots.
 //!
 //! §2 of the plan puts adjacency in three temperature tiers: versioned delta
 //! blocks, sealed compressed CSR runs, archived anchors. This crate now owns the
 //! first tier's exact block format, ordered writer, partition roots, immutable
-//! block store, cross-block snapshot merge, and compaction. Those pieces make a
-//! durable partition reopenable without replaying the commit stream; they do not
-//! imply that the warmer tiers or adaptive migration controller exist yet.
+//! block store, cross-block snapshot merge, and compaction. Registered FGRN runs
+//! preserve stable edge identities, original creation order and retained content
+//! versions; V7 roots embed their exact Tier-D source membership and name their
+//! run objects. A cold reader can authenticate and reopen compressed adjacency
+//! without sealing it again. The complete Tier-D source remains retained.
 //!
 //! **WHY DURABLE BLOCKS AND NOT A MAP, WHICH IS THE INTERESTING PART.** The obvious
 //! first slice was a `BTreeMap<(VId, RelationId, VId, EId), _>` with the tier's
@@ -23,9 +25,8 @@
 //! those boundaries has a typed refusal and a law below.
 //!
 //! **WHAT IS DELIBERATELY ABSENT**, so the gap is legible rather than implied:
-//! sealed compressed CSR runs, archived anchors, the stable-ID directory, tier
-//! migration and its decision cards, and a read path that skips unopened blocks
-//! without weakening the proof that every authenticated root range is truthful.
+//! archived anchors, cross-branch run attachment, page-authenticated mapped run
+//! I/O, automatic tier migration and retention-authorized physical reclamation.
 //!
 //! **CANONICAL MEANS EXACTLY ONE BYTE STRING PER VALUE** (doctrine 4). Entries are
 //! strictly ascending by `(src, relation, dst, eid)` and the ENCODER refuses input that

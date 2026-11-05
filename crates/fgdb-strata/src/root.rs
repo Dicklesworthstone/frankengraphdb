@@ -25,6 +25,7 @@
 use std::borrow::Borrow;
 
 pub(crate) mod descriptor;
+pub mod runs;
 
 use crate::BlockError;
 use crate::root_segment::{
@@ -94,14 +95,16 @@ pub const MAX_ROOT_PATCHES: u32 = 1 << 24;
 pub const MAX_FLAT_ROOT_BLOCKS: u32 = 1 << 20;
 /// The vertex-patch counterpart of [`MAX_FLAT_ROOT_BLOCKS`].
 pub const MAX_FLAT_ROOT_PATCHES: u32 = 1 << 20;
-/// The largest canonical flat (V3) root byte string.
+/// The largest root byte string: a maximum flat V3 base plus the bounded V7
+/// compressed-run envelope. Segmented base frames fit below the flat ceiling.
 ///
 /// Storage applies this before materializing a root object of any format; a
 /// segmented root's own bytes are far smaller. Keeping the byte ceiling
 /// derived beside the layout prevents the block store from drifting to a much
 /// larger, block-shaped allocation bound when the durable root format changes.
-pub const MAX_ENCODED_ROOT_BYTES: usize =
-    HEADER_LEN + (MAX_FLAT_ROOT_BLOCKS as usize + MAX_FLAT_ROOT_PATCHES as usize) * REF_LEN;
+pub const MAX_ENCODED_ROOT_BYTES: usize = HEADER_LEN
+    + (MAX_FLAT_ROOT_BLOCKS as usize + MAX_FLAT_ROOT_PATCHES as usize) * REF_LEN
+    + runs::MAX_ENVELOPE_BYTES;
 
 /// One block a root names, and the sequence range it covers.
 ///
@@ -207,6 +210,8 @@ pub struct EdgeIdentityConflict {
 /// Why a root could not be encoded, decoded, or resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootError {
+    /// A compressed-run root envelope has invalid membership, bounds or digest.
+    InvalidRunRoot,
     /// Authenticated descriptor metadata has an impossible or mismatched shape.
     InvalidDescriptor,
     NotARoot,
@@ -397,6 +402,7 @@ pub enum RootError {
 impl core::fmt::Display for RootError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidRunRoot => write!(f, "invalid authenticated compressed-run root"),
             Self::InvalidDescriptor => write!(f, "invalid authenticated root descriptor"),
             Self::NotARoot => write!(f, "not a strata partition root"),
             Self::UnsupportedFormat { format } => {
@@ -893,7 +899,8 @@ pub const MAX_ROOT_READ_BYTES: usize = {
             (MAX_ROOT_BLOCKS as usize / INDEX_COVERS + MAX_ROOT_PATCHES as usize / INDEX_COVERS)
                 * INDEX_BYTES,
         );
-    let segmented = if described > v4 { described } else { v4 };
+    let segmented =
+        (if described > v4 { described } else { v4 }).saturating_add(runs::MAX_ENVELOPE_BYTES);
     if segmented > MAX_ENCODED_ROOT_BYTES {
         segmented
     } else {
@@ -1052,8 +1059,10 @@ impl RootFrameV5 {
     }
 }
 
-/// A decoded root frame: a V3 root is complete in itself, a V4 root still
-/// needs its segments, and a V5 root its index segments and then those.
+/// Decoded Tier-D membership: a V3 root is complete in itself, a V4 root still
+/// needs its segments, and a V5 root its index segments and then those. V7
+/// exposes this same base membership; [`runs::decode_root_runs`] separately
+/// exposes the registered compressed-run references it also owns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootFrame {
     V3(PartitionRoot),
@@ -1439,11 +1448,15 @@ fn encode_segmented(
     })
 }
 
-/// Decode a root frame of any live format. A V3 root is fully decoded; a V4
+/// Decode membership from any live format. V7 validates its run envelope and
+/// returns its exact embedded base membership. A V3 root is fully decoded; a V4
 /// or V5 frame is checked against its own digest, and the objects it names
 /// are the caller's to read (a V5 frame's index segments first, then
 /// [`RootFrameV5::flatten`]) and [`assemble_root`].
 pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
+    if let Some(attached) = runs::decode_root_runs(bytes)? {
+        return decode_root_frame(attached.base_frame);
+    }
     if bytes.len() < HEADER_LEN || bytes[..4] != ROOT_MAGIC {
         return Err(RootError::NotARoot);
     }
