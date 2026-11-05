@@ -3247,21 +3247,25 @@ impl<V: Vfs + Clone> Database<V> {
             vfs,
             path,
             keys,
-            force_rebuild,
+            if force_rebuild {
+                OpenReplay::Rebuild
+            } else {
+                OpenReplay::Checkpoint
+            },
             replay_capacity,
             coordinator,
         )
         .await
     }
 
-    // Recovery that restores authenticated capsule storage enters the SAME
-    // admission and replay path without dropping Chronicle's writer lease.
+    // Explicit storage recovery enters the same admission and replay path
+    // without dropping Chronicle's writer lease.
     async fn bind_with_coordinator(
         cx: &CommitCx,
         vfs: V,
         path: &Path,
         keys: DatabaseKeys,
-        force_rebuild: bool,
+        replay: OpenReplay,
         replay_capacity: ReplayRootCapacity,
         mut coordinator: CommitCoordinator<V>,
     ) -> Result<Self, OpenError> {
@@ -3287,10 +3291,25 @@ impl<V: Vfs + Clone> Database<V> {
         // reopen_from_verified_checkpoint then reopens that partition and
         // folds only the suffix. A missing slot falls back to a full rebuild
         // (and the reconciliation below creates it).
-        let selected = if force_rebuild {
-            None
-        } else {
-            select_checkpoint(cx, coordinator.chain(), &store, &probe, &keys, path).await?
+        let selected = match replay {
+            OpenReplay::Checkpoint => {
+                select_checkpoint(cx, coordinator.chain(), &store, &probe, &keys, path).await?
+            }
+            OpenReplay::Rebuild => None,
+            OpenReplay::RepairDerived => {
+                // Validate the selected metadata and its independent chain
+                // binding BEFORE replacing any data. This does not admit
+                // damaged payloads or let a foreign root authorize repair.
+                select_checkpoint(cx, coordinator.chain(), &store, &probe, &keys, path)
+                    .await?
+                    .ok_or_else(|| {
+                        OpenError::Slot(SlotStoreError::Io(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "derived-data repair requires an authenticated selected root",
+                        )))
+                    })?;
+                None
+            }
         };
         let checkpoint_selected = selected.is_some();
         let (mut snapshot, writer, heads, receipts, published_root) = match selected {
@@ -3314,6 +3333,10 @@ impl<V: Vfs + Clone> Database<V> {
                     &keys,
                     &mut crypto_verification_events,
                     replay_capacity,
+                    match replay {
+                        OpenReplay::RepairDerived => DataPublication::RepairFromHistory,
+                        OpenReplay::Checkpoint | OpenReplay::Rebuild => DataPublication::Ordinary,
+                    },
                 )
                 .await?
             }
@@ -5718,6 +5741,7 @@ impl<V: Vfs + Clone> Database<V> {
             std::mem::take(&mut self.receipts),
             self.snapshot.adjacency.get().is_some(),
             self.snapshot.property_index.get().is_some(),
+            DataPublication::Ordinary,
         )
         .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
@@ -6391,6 +6415,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             PublishReceipts::default(),
             true,
             true,
+            DataPublication::Ordinary,
         )
         .await?;
         return Ok((snapshot, writer, heads, receipts, published_root));
@@ -6565,6 +6590,22 @@ struct SelectedCheckpoint {
     /// The stored manifest the root slot named, whose one record selected
     /// `root_id`. A current checkpoint keeps this identity as its own.
     manifest: ManifestVersion,
+}
+
+/// Repair is an explicit full-history admission path, never a property of an
+/// ordinary store or a checkpoint-selected open. Only the complete fold may
+/// authorize replacing a damaged physical realization of derived data.
+#[derive(Clone, Copy)]
+enum OpenReplay {
+    Checkpoint,
+    Rebuild,
+    RepairDerived,
+}
+
+#[derive(Clone, Copy)]
+enum DataPublication {
+    Ordinary,
+    RepairFromHistory,
 }
 
 /// Select the checkpoint the root slot names, accepting it only when the
@@ -6834,6 +6875,7 @@ async fn rebuild<V: Vfs>(
     keys: &DatabaseKeys,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
     replay_capacity: ReplayRootCapacity,
+    data_publication: DataPublication,
 ) -> Result<OpenedGeneration, RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut exact_counts = ExactCounts::new(true);
@@ -6867,6 +6909,7 @@ async fn rebuild<V: Vfs>(
         PublishReceipts::default(),
         true,
         true,
+        data_publication,
     )
     .await?;
     Ok((
@@ -7414,6 +7457,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
     receipts: PublishReceipts,
     build_adjacency: bool,
     build_property_index: bool,
+    data_publication: DataPublication,
 ) -> SendFuture<'a, Result<PublishedGeneration, RebuildError>> {
     Box::pin(publish_and_snapshot_inner(
         cx,
@@ -7426,6 +7470,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
         receipts,
         build_adjacency,
         build_property_index,
+        data_publication,
     ))
 }
 
@@ -7441,6 +7486,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     receipts: PublishReceipts,
     build_adjacency: bool,
     build_property_index: bool,
+    data_publication: DataPublication,
 ) -> Result<PublishedGeneration, RebuildError> {
     // This replacement writer is owned by the publication, so sealing it in
     // place needs no copy of its complete live maps. Return the sealed fold
@@ -7461,7 +7507,12 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     // was 798 s of wall for 108 s of CPU. Nothing is reachable until the
     // root slot names the manifest, which the caller publishes after this.
     let mut receipts = receipts;
-    let mut batch = store.publication_batch(cx, &mut receipts, None)?;
+    let mut batch = match data_publication {
+        DataPublication::Ordinary => store.publication_batch(cx, &mut receipts, None)?,
+        DataPublication::RepairFromHistory => {
+            store.repair_data_publication_batch(cx, &mut receipts, None)?
+        }
+    };
     for block in writer.sealed() {
         batch
             .put_verified(

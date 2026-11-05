@@ -1,6 +1,8 @@
 //! Awaitable, occurrence-preserving paths for a blocking consumer.
 //!
-//! Bounded occurrence modes retain one route and its admitted records. ANY
+//! Occurrence modes retain one route and its admitted records. An open-ended
+//! route needs a repetition rule that terminates on the finite source, and
+//! grows its admitted backing only as new depths are reached. ANY
 //! SHORTEST instead retains a canonical breadth frontier, preserving real path
 //! IDs and terminating by endpoint settlement even without an upper hop bound.
 //! ALL SHORTEST shares reachable layers and lazily enumerates every tied route,
@@ -104,8 +106,12 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
 /// lazily, preserving parallel-edge identity and multiplicity. It may also
 /// omit its upper bound: after the finite minimum, each nonempty layer settles
 /// new endpoints. Its DIFFERENT EDGES restriction is the same as ANY's: only a
-/// zero lower bound proves it redundant. Other unbounded modes, further atoms, OPTIONAL/probes
-/// and collection-valued edge predicates refuse during preparation, before any
+/// zero lower bound proves it redundant. TRAIL, ACYCLIC, SIMPLE and an ALL atom
+/// under DIFFERENT EDGES may also omit their upper bound: their path-local
+/// repetition rule terminates traversal without a graph census or a hop cap.
+/// Their route backing grows under admission before any new depth is retained.
+/// An unbounded repeatable WALK, further atoms, OPTIONAL/probes and
+/// collection-valued edge predicates refuse during preparation, before any
 /// source or budget is observed.
 #[derive(Clone)]
 pub struct AsyncGraphWalkPlan {
@@ -153,11 +159,6 @@ impl AsyncGraphWalkPlan {
             return Err(EdgeScanBuildError { operator: at });
         };
         if source.ordinal() != 0
-            || (!bounds.is_bounded()
-                && !matches!(
-                    search,
-                    GraphWalkSearch::AnyShortest | GraphWalkSearch::AllShortest
-                ))
             // Native collection comparison can raise StoredValueBounds even
             // for an edge unreachable from the selected roots: its incidence
             // filtering precedes root selection. Scalar operands cannot raise
@@ -255,6 +256,16 @@ impl AsyncGraphWalkPlan {
             at += 1;
         }
         let projection = at;
+        let match_mode = if different_edges {
+            crate::algebra::GraphMatchMode::DifferentEdges
+        } else {
+            crate::algebra::GraphMatchMode::RepeatableElements
+        };
+        if !bounds.is_bounded() && !search.ends_unbounded(match_mode) {
+            return Err(EdgeScanBuildError {
+                operator: expansion,
+            });
+        }
         // With a positive lower bound, a shortest WALK may repeat an edge.
         // Coalescing those histories would lose the shortest valid TRAIL.
         if matches!(
@@ -374,11 +385,59 @@ struct Position {
 struct Frame<Root, Record, Guard> {
     root: Root,
     start: VId,
+    hop_capacity: usize,
     records: Vec<Record>,
     steps: Vec<(EId, VId)>,
     positions: Vec<Position>,
     // Root, records and all vectors drop before their backing reservation.
     _guard: Guard,
+}
+
+fn grow_frame<S: AsyncGraphWalkSource, F: FnMut() -> Result<(), C>, C>(
+    source: &S,
+    frame: &mut Frame<S::RootRecord, S::Record, S::TraversalGuard>,
+    meter: &mut Meter<F>,
+) -> ScanResult<(), S::Error, C> {
+    let overflow = || GqlQueryError::Source(EdgeScanError::CounterExhausted);
+    let hops = frame
+        .hop_capacity
+        .checked_mul(2)
+        .map(|hops| hops.max(1))
+        .ok_or_else(overflow)?;
+    let positions = hops.checked_add(1).ok_or_else(overflow)?;
+    let slots = hops
+        .checked_mul(4)
+        .and_then(|slots| slots.checked_add(1))
+        .ok_or_else(overflow)?;
+    // The old vectors and their guard stay live while replacements allocate
+    // and move their records. Reserve the complete new backing, not merely
+    // its size delta, before any allocation. No source payload is cloned.
+    let guard = flatten(source.reserve_traversal(positions, &mut |event| meter.event(event)))?;
+    for _ in 0..slots {
+        meter.event(GlaExecutionEvent::ScratchEntry)?;
+    }
+    for _ in 0..frame.records.len() {
+        meter.event(GlaExecutionEvent::Work)?;
+    }
+    for _ in 0..frame.steps.len() {
+        meter.event(GlaExecutionEvent::Work)?;
+    }
+    for _ in 0..frame.positions.len() {
+        meter.event(GlaExecutionEvent::Work)?;
+    }
+    let mut records = Vec::with_capacity(hops);
+    let mut steps = Vec::with_capacity(hops);
+    let mut positions = Vec::with_capacity(positions);
+    records.append(&mut frame.records);
+    steps.append(&mut frame.steps);
+    positions.append(&mut frame.positions);
+    frame.records = records;
+    frame.steps = steps;
+    frame.positions = positions;
+    frame.hop_capacity = hops;
+    // All old allocations have been released; only now refund their guard.
+    frame._guard = guard;
+    Ok(())
 }
 impl<Root, Record, Guard> Frame<Root, Record, Guard> {
     fn pop(&mut self) {
@@ -388,10 +447,12 @@ impl<Root, Record, Guard> Frame<Root, Record, Guard> {
     }
 }
 
-/// Awaitable bounded path occurrences, never a complete ordered query result.
+/// Awaitable path occurrences, never a complete ordered query result.
 /// Source, evaluator, candidates and emitted input occurrences share one
-/// cumulative policy. Occurrence modes retain one root and at most maximum_hops
-/// edge records. ANY SHORTEST retains two breadth layers with at most one
+/// cumulative policy. Occurrence modes retain one root and the current route's
+/// edge records. A finite upper bound pre-admits its backing; open-ended modes
+/// grow it only at a reached depth under their terminating repetition rule.
+/// ANY SHORTEST retains two breadth layers with at most one
 /// incoming record per endpoint in each layer. ALL SHORTEST retains shared
 /// reachable layers and one traversal stack, not every tied route.
 /// One candidate may coexist while it is checked or rejected. Source payloads,
@@ -554,11 +615,16 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
                 if !keep || self.plan.bounds.minimum() > self.plan.bounds.maximum() {
                     continue;
                 }
-                let hops = self.plan.maximum_hops();
+                let hops = if self.plan.bounds.is_bounded() {
+                    self.plan.maximum_hops()
+                } else {
+                    0
+                };
                 let guard =
                     flatten(source.reserve_traversal(hops + 1, &mut |event| meter.event(event)))?;
-                // Pre-admit all vector backing. Later pushes cannot grow past
-                // these capacities and are still logically charged before use.
+                // Bounded paths pre-admit their complete vector backing.
+                // Open-ended paths start with only the root position and
+                // replace these vectors under admission as depths are reached.
                 for _ in 0..hops * 4 + 1 {
                     meter.event(GlaExecutionEvent::ScratchEntry)?;
                 }
@@ -571,6 +637,7 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
                 *frame = Some(Frame {
                     root,
                     start,
+                    hop_capacity: hops,
                     records: Vec::with_capacity(hops),
                     steps: Vec::with_capacity(hops),
                     positions,
@@ -669,7 +736,7 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
                     // longer path. Do not pop or prune this route here.
                 }
             }
-            if depth == self.plan.maximum_hops()
+            if (self.plan.bounds.is_bounded() && depth == self.plan.maximum_hops())
                 || (self.plan.search == GraphWalkSearch::Simple
                     && depth > 0
                     && endpoint == active.start)
@@ -745,6 +812,9 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
             }
             if !keep {
                 continue;
+            }
+            if active.steps.len() == active.hop_capacity {
+                grow_frame(source, active, meter)?;
             }
             for _ in 0..3 {
                 meter.event(GlaExecutionEvent::ScratchEntry)?;

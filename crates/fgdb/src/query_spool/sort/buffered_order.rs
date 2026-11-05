@@ -45,8 +45,9 @@ impl core::fmt::Debug for PreparedBufferedOrder {
 
 impl PreparedNativeRead {
     /// Bind once and admit a native singleton, vertex, single-edge, fixed-hop
-    /// or bounded-path source for external ordering. Source-free expressions/UNWIND open no
-    /// graph cursor. Property-only output, local predicates, hidden ordering keys,
+    /// or variable-length path source for external ordering. Source-free
+    /// expressions/UNWIND open no graph cursor. Property-only output, local
+    /// predicates, hidden ordering keys,
     /// edge orientation and row DISTINCT use their existing GLA semantics.
     /// Native unary Project/Filter/Scope/UNWIND relations preserve every
     /// expansion, canonicalization, DISTINCT, order and window through external
@@ -76,17 +77,20 @@ impl PreparedNativeRead {
     /// its body; an empty input produces an empty list. The completed list is
     /// a resident value with cumulative evaluator and memory admission even
     /// when its body spills. Empty outer input skips the body, while a final
-    /// LIMIT zero cannot hide a reached body error. One bounded variable-length
+    /// LIMIT zero cannot hide a reached body error. One variable-length
     /// graph atom streams every WALK/TRAIL/ACYCLIC/SIMPLE route, including
     /// zero-hop isolates and captured paths, into the same complete external
-    /// ordering. ANY SHORTEST uses canonical breadth-first prefixes and may
-    /// omit its upper hop bound where its repetition constraints are proved
+    /// ordering. TRAIL, ACYCLIC, SIMPLE and WALK under DIFFERENT EDGES may
+    /// omit the upper bound; their terminating repetition rules retain one
+    /// active route whose backing grows under admission. ANY SHORTEST uses
+    /// canonical breadth-first prefixes and may omit its upper hop bound where
+    /// its repetition constraints are proved
     /// redundant. ALL SHORTEST shares reachable layers and lazily enumerates
     /// every tied route, including parallel-edge alternatives, before the same
     /// external ordering and windows. It also accepts an omitted upper bound:
     /// complete eligible layers settle new endpoints until the finite source
-    /// is exhausted. Other unbounded modes, unsupported combinations, procedures
-    /// and unlowered optional instructions still refuse.
+    /// is exhausted. Unbounded repeatable WALK, unsupported combinations,
+    /// procedures and unlowered optional instructions still refuse.
     /// Terminal exact aggregate results have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));

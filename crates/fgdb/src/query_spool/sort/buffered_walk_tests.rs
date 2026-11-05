@@ -281,6 +281,76 @@ fn cold_returned_paths_preserve_modes_real_edge_identity_and_zero_hop_isolates()
 }
 
 #[test]
+fn cold_open_routes_terminate_cycles_preserve_parallel_paths_and_match_finite_controls() {
+    let ((), report) = run_async_under_lab(0xc01d_4301, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (db, vfs) = graph(&contexts.commit()).await;
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut cold = view(&contexts.commit(), &vfs, &pool).await;
+        // Every trail of at least three hops from A, listed by real EId.
+        // Closing the cycle can continue through the unused parallel edge;
+        // a SIMPLE closure is terminal, and ACYCLIC cannot close at all.
+        let trail = paths(&[
+            (A, &[(AB, B), (BC, C), (CA, A)]),
+            (A, &[(AB, B), (BC, C), (CA, A), (PARALLEL, B)]),
+            (A, &[(AB, B), (BC, C), (CA, A), (PARALLEL, B), (LOOP, B)]),
+            (A, &[(AB, B), (LOOP, B), (BC, C)]),
+            (A, &[(AB, B), (LOOP, B), (BC, C), (CA, A)]),
+            (A, &[(AB, B), (LOOP, B), (BC, C), (CA, A), (PARALLEL, B)]),
+            (A, &[(PARALLEL, B), (BC, C), (CA, A)]),
+            (A, &[(PARALLEL, B), (BC, C), (CA, A), (AB, B)]),
+            (A, &[(PARALLEL, B), (BC, C), (CA, A), (AB, B), (LOOP, B)]),
+            (A, &[(PARALLEL, B), (LOOP, B), (BC, C)]),
+            (A, &[(PARALLEL, B), (LOOP, B), (BC, C), (CA, A)]),
+            (A, &[(PARALLEL, B), (LOOP, B), (BC, C), (CA, A), (AB, B)]),
+        ]);
+        let simple = paths(&[
+            (A, &[(AB, B), (BC, C), (CA, A)]),
+            (A, &[(PARALLEL, B), (BC, C), (CA, A)]),
+        ]);
+        for (match_mode, mode, expected) in [
+            ("", "WALK", trail.clone()),
+            ("", "TRAIL", trail.clone()),
+            ("REPEATABLE ELEMENTS ", "TRAIL", trail.clone()),
+            ("", "ACYCLIC", vec![]),
+            ("REPEATABLE ELEMENTS ", "ACYCLIC", vec![]),
+            ("", "SIMPLE", simple.clone()),
+            ("REPEATABLE ELEMENTS ", "SIMPLE", simple),
+        ] {
+            for bounds in ["3..", "3..5"] {
+                let text = format!(
+                    "MATCH {match_mode}p = {mode} (a {{p:1}})-[:R*{bounds}]->(b) {CAPTURE}"
+                );
+                case(&db, &mut cold, &cx, &text, expected.clone(), 2).await;
+            }
+            let isolated =
+                format!("MATCH {match_mode}p = {mode} (a {{p:4}})-[:R*0..]->(b) {CAPTURE}");
+            case(&db, &mut cold, &cx, &isolated, paths(&[(ISOLATE, &[])]), 2).await;
+        }
+        case(
+            &db,
+            &mut cold,
+            &cx,
+            &format!("MATCH p = (a {{p:1}})-[:R*]->(b) WHERE length(p)>=3 {CAPTURE}"),
+            trail,
+            2,
+        )
+        .await;
+        for text in [
+            "MATCH p = (a {p:1})-[:R*6..]->(b) RETURN p",
+            "MATCH p = (a {p:1})-[:R*]->(b) RETURN p LIMIT 0",
+        ] {
+            case(&db, &mut cold, &cx, text, Vec::new(), 2).await;
+        }
+        unbounded_exhaustive_walk_refuses_during_parsing();
+        drop(cold);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn cold_captured_directions_and_any_relation_keep_parallel_routes_and_one_self_loop() {
     let ((), report) = run_async_under_lab(0xc01d_3802, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -1346,9 +1416,14 @@ fn cold_all_shortest_memory_refusal_precedes_empty_pages_and_refunds_source_owne
         let spill_pool = MemoryPool::new(2_000_000, 0).unwrap();
         let mut cold = view(&contexts.commit(), &vfs, &source_pool).await;
         let baseline = source_pool.used();
-        for limit in [0, 1] {
+        for (mode, bounds, limit) in [
+            ("ALL SHORTEST", "0..2", 0),
+            ("ALL SHORTEST", "0..2", 1),
+            ("TRAIL", "0..", 0),
+            ("TRAIL", "0..", 1),
+        ] {
             let text = format!(
-                "MATCH p = ALL SHORTEST (a {{p:1}})-[:R*0..2]->(b) \
+                "MATCH p = {mode} (a {{p:1}})-[:R*{bounds}]->(b) \
                  RETURN b.p AS value ORDER BY value DESC LIMIT {limit}"
             );
             let expected = if limit == 0 {

@@ -1,5 +1,6 @@
-//! Bounded variable-length routes over one authenticated vertex/incidence
-//! source. The native walk cursor owns path semantics; the external sorter
+//! Variable-length routes over one authenticated vertex/incidence source.
+//! Open-ended terminating routes grow their backing under the same pool
+//! admission. The native walk cursor owns path semantics; the external sorter
 //! owns complete-row ordering, DISTINCT and the final window.
 
 use super::super::BufferedQueryRecord;

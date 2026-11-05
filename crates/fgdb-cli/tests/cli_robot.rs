@@ -4087,6 +4087,57 @@ fn scrub_verifies_repairs_in_place_and_never_overwrites_damage_beyond_repair() {
     );
 }
 
+#[test]
+fn scrub_rebuilds_derived_data_only_after_authenticating_the_retained_history() {
+    let db = TestDb::new("scrub-rebuild-derived");
+    db.create();
+    let seq = db.write(&["INSERT (:Person {name:'Ada'})"]);
+    let query = "MATCH (p:Person) RETURN p.name AS name";
+    let before = db.command("query", &[query]);
+    before.success();
+    let data_dir = PathBuf::from(&db.db).join("strata-blocks");
+    let (target, original) = std::fs::read_dir(data_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "block")
+        })
+        .find_map(|path| {
+            let bytes = std::fs::read(&path).unwrap();
+            bytes.starts_with(b"FGVP").then_some((path, bytes))
+        })
+        .expect("a single vertex write publishes one loose patch");
+    let mut damaged = original.clone();
+    damaged[0] ^= 1;
+    std::fs::write(&target, &damaged).unwrap();
+    let root_path = PathBuf::from(&db.db).join("manifest.root");
+    let root_before = std::fs::read(&root_path).unwrap();
+
+    let refused = db.command("scrub", &[]);
+    assert!(matches!(refused.code, 4 | 5), "{}", refused.stdout);
+    assert_eq!(std::fs::read(&target).unwrap(), damaged);
+    let repaired = db.command("scrub", &["--rebuild-derived"]);
+    assert_eq!(repaired.sequence("scrubbed"), seq);
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert_eq!(std::fs::read(&root_path).unwrap(), root_before);
+    assert_eq!(db.command("query", &[query]).stdout, before.stdout);
+    assert_eq!(db.command("scrub", &[]).sequence("scrubbed"), seq);
+
+    // A valid checkpoint cannot hide an unusable retained source capsule.
+    // Full replay must fail before the damaged derived bytes are replaced.
+    std::fs::write(&target, &damaged).unwrap();
+    let capsule = capsule_files(&db).into_iter().next().unwrap();
+    let truncated = &std::fs::read(&capsule).unwrap()[..16];
+    std::fs::write(&capsule, truncated).unwrap();
+    let refused = db.command("scrub", &["--rebuild-derived"]);
+    assert!(matches!(refused.code, 4 | 5), "{}", refused.stdout);
+    assert_eq!(refused.terminal().get("event").string(), "error");
+    assert_eq!(std::fs::read(&target).unwrap(), damaged);
+    assert_eq!(std::fs::read(&root_path).unwrap(), root_before);
+    assert_eq!(std::fs::read(&capsule).unwrap(), truncated);
+}
+
 /// (seq, column names, rows as (type, value) pairs; value is empty for null)
 /// of a successful `search`.
 type SearchRows = Vec<Vec<(String, String)>>;
