@@ -111,8 +111,8 @@ MATCH REPEATABLE ELEMENTS (a)-[:KNOWS*1..4]-(b) RETURN a, b
 
 `DIFFERENT EDGES` and `DIFFERENT RELATIONSHIPS` explicitly name the default.
 Path modes such as `TRAIL` and `ACYCLIC` apply their own restrictions inside
-that match mode. Every quantified path still requires the supported finite
-upper bound.
+that match mode. Open-ended routes require a supported termination rule;
+the cold-query profile below lists the admitted combinations.
 
 ## The six bets
 

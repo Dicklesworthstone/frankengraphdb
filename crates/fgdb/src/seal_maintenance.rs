@@ -7,6 +7,7 @@ use fgdb_strata::store::RootReadLimits;
 use fgdb_strata::tiered::sealed::{
     AdjRunError, AdjRunSegment, AdjRunSegmentVersion, SealedError, SealedLimits,
 };
+use fgdb_types::QueryCx;
 
 /// A seal never publishes a partial origin proof, source admission or run.
 #[derive(Debug)]
