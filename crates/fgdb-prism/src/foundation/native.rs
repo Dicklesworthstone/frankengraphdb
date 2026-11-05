@@ -5,7 +5,7 @@
 //! logical charge sequence; arithmetic checks live control without charging
 //! those units again.
 
-use crate::execute::{FnxMeter, KernelOutput, KernelValues, reserve};
+use crate::execute::{FNX_METER_RUN, FnxMeter, KernelOutput, KernelValues, reserve};
 use crate::{FnxExecutionError, SnapshotGraphView};
 use fnx_algorithms::{ComplexityWitness, GraphView};
 
@@ -715,12 +715,35 @@ fn drive_load<C>(
             LoadStep::Scalar => {}
             LoadStep::Complete => break,
             LoadStep::Row(vertex) => {
-                for &neighbor in graph
+                let row = graph
                     .neighbors_indices(vertex)
-                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?
-                {
-                    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-                    state.visit(neighbor)?;
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                // Decoded rows are immutable, sorted, unique, valid ordinals.
+                // Distances and predecessor counts are bounded by the vertex
+                // population; visits cannot refuse except on a self-loop or
+                // witness overflow. End the last run at a possible loop so
+                // no later quota refusal can hide its original error.
+                let end = row.binary_search(&vertex).map_or(row.len(), |at| at + 1);
+                let mut start = 0;
+                while start < end {
+                    let proposed = (end - start).min(FNX_METER_RUN);
+                    let count = if state.witness.edges_scanned.checked_add(proposed).is_some() {
+                        proposed
+                    } else {
+                        // Keep a possible overflow behind its exact original
+                        // one-unit charge, before asking for any later units.
+                        1
+                    };
+                    if count == 1 {
+                        checkpoint.unit()
+                    } else {
+                        checkpoint.units(count)
+                    }
+                    .map_err(FnxExecutionError::Cancelled)?;
+                    for &neighbor in &row[start..start + count] {
+                        state.visit(neighbor)?;
+                    }
+                    start += count;
                 }
                 state.end_row()?;
             }
