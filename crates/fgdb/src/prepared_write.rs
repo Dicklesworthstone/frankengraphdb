@@ -114,11 +114,11 @@ impl PreparedDependencies {
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Standalone creations read no earlier chunk and create their own edge
-    /// endpoints. Retain both identity sets for ordinary duplicate refusals,
-    /// while admitting each statement's values and storage content once.
-    /// Earlier vertices are collision witnesses, never candidate endpoints.
-    pub(super) fn prepare_independent_standalone_chunk(
+    /// Independent creations read no earlier chunk. Endpoints are either
+    /// created in this chunk or unchanged basis vertices. Retain both identity
+    /// sets for ordinary duplicate refusals while admitting values and storage
+    /// content once. Earlier vertices are never candidate endpoints.
+    pub(super) fn prepare_independent_create_chunk(
         &mut self,
         batch: WriteBatch,
         earlier_vertices: &fgdb_gql::id_hash::IdSet<VId>,
@@ -165,7 +165,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// One ordinary canonical authority for already-admitted independent
     /// chunks. No row is re-derived from storage, and no earlier prefix is
     /// cloned or sorted while another program statement is being evaluated.
-    /// A fixed relation allows complete standalone creations. Without one,
+    /// A fixed relation allows independent vertex and edge creations. Without one,
     /// every chunk must contain only fresh edges over unchanged basis vertices.
     pub(super) fn compose_independent_create_chunks(
         &self,

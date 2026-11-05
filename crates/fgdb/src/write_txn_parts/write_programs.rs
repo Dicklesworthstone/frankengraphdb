@@ -5,19 +5,19 @@ include!("frozen_update_program.rs");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IndependentCreateKind {
-    Standalone,
+    Subgraphs,
     Edges,
 }
 
 /// Admitted creation chunks remain private until the program's last stage.
-/// Standalone subgraph creations read no graph; edge-only selections read only
-/// the unchanged vertex domain. Every statement therefore sees the same
-/// inputs as the ordinary canonical prefix overlay.
+/// Subgraph creations either read no graph or scan a label absent from all
+/// created vertices. Edge-only programs read an unchanged vertex domain.
+/// Every statement sees the ordinary canonical prefix overlay's same inputs.
 struct IndependentCreateWrites {
     kind: IndependentCreateKind,
-    /// None admits edge-only statements in different relations. Standalone
-    /// subgraphs still require one coordinate: their vertices are shared by
-    /// their own statement's edges, not by another independently checked chunk.
+    /// None admits edge-only statements in different relations. Programs that
+    /// create vertices require one coordinate; no chunk can read another
+    /// chunk's new vertices.
     relation: Option<RelationId>,
     batches: Vec<WriteBatch>,
     chunks: Vec<crate::LogicalDeltaTemplate>,
@@ -34,20 +34,32 @@ impl IndependentCreateWrites {
         if !txn.staged.is_empty() || txn.prepared.is_some() || program.statements().len() < 2 {
             return None;
         }
+        let mut created_labels = std::collections::BTreeSet::new();
+        let mut creates_vertices = false;
+        for statement in program.statements() {
+            let fgdb_gql::GraphWriteStatement::Insert(insertion) = statement else {
+                return None;
+            };
+            creates_vertices |= insertion.vertices_per_row() != 0;
+            created_labels.extend(insertion.created_vertex_labels());
+        }
+        let kind = if creates_vertices {
+            IndependentCreateKind::Subgraphs
+        } else {
+            IndependentCreateKind::Edges
+        };
         let mut profile: Option<(IndependentCreateKind, Option<RelationId>)> = None;
         for statement in program.statements() {
             let fgdb_gql::GraphWriteStatement::Insert(insertion) = statement else {
                 return None;
             };
-            let current = if let Some(relation) = insertion.independent_standalone_create_relation()
-            {
-                (IndependentCreateKind::Standalone, relation)
-            } else {
-                (
-                    IndependentCreateKind::Edges,
-                    insertion.independent_edge_append_relation()?,
-                )
+            let relation = match kind {
+                IndependentCreateKind::Subgraphs => insertion
+                    .independent_standalone_create_relation()
+                    .or_else(|| insertion.independent_selection_create_relation(&created_labels))?,
+                IndependentCreateKind::Edges => insertion.independent_edge_append_relation()?,
             };
+            let current = (kind, relation);
             profile = Some(match profile {
                 None => (current.0, Some(current.1)),
                 Some((kind, relation))
@@ -69,7 +81,7 @@ impl IndependentCreateWrites {
             return None;
         }
         Some(Self::new(
-            IndependentCreateKind::Standalone,
+            IndependentCreateKind::Subgraphs,
             Some(chain.independent_create_relation()?),
         ))
     }
@@ -103,7 +115,7 @@ impl IndependentCreateWrites {
                 !matches!(
                     (self.kind, row),
                     (
-                        IndependentCreateKind::Standalone,
+                        IndependentCreateKind::Subgraphs,
                         PendingRow::Vertex { ensure: false, .. }
                             | PendingRow::Edge { ensure: false, .. }
                     ) | (
@@ -156,7 +168,7 @@ impl IndependentCreateWrites {
             }
         }
         let chunk = match self.kind {
-            IndependentCreateKind::Standalone => database.prepare_independent_standalone_chunk(
+            IndependentCreateKind::Subgraphs => database.prepare_independent_create_chunk(
                 batch.clone(),
                 &self.created_vertices,
                 &self.created_edges,
@@ -167,7 +179,7 @@ impl IndependentCreateWrites {
         };
         for row in chunk.rows() {
             match (self.kind, row) {
-                (IndependentCreateKind::Standalone, crate::DeltaRow::CreateVertex { vid, .. }) => {
+                (IndependentCreateKind::Subgraphs, crate::DeltaRow::CreateVertex { vid, .. }) => {
                     self.created_vertices.insert(*vid);
                 }
                 (_, crate::DeltaRow::CreateEdge { eid, .. }) => {
@@ -212,7 +224,7 @@ impl<'txn> MutationProgramWorkspace<'txn> {
         // relations have no repeated vertex backbone, so ordinary ordered
         // preparation visits each raw row once too. Preserve its replay budget;
         // the existing same-relation edge profile keeps its no-replay contract.
-        let replay_row_allowance = if independent.kind == IndependentCreateKind::Standalone
+        let replay_row_allowance = if independent.kind == IndependentCreateKind::Subgraphs
             || independent.relation.is_none()
         {
             Some(

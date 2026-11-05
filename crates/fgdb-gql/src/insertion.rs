@@ -580,6 +580,22 @@ impl PreparedGraphInsert {
         self.edges.len()
     }
 
+    /// Labels carried by newly created vertices, before any graph is read.
+    pub fn created_vertex_labels(&self) -> impl Iterator<Item = LabelId> + '_ {
+        self.vertices
+            .iter()
+            .flat_map(|vertex| vertex.labels.iter().copied())
+    }
+
+    fn properties_read_elements(&self) -> bool {
+        self.vertices
+            .iter()
+            .map(|vertex| &vertex.properties)
+            .chain(self.edges.iter().map(|edge| &edge.properties))
+            .flat_map(|properties| &properties.projection)
+            .any(|column| column.value().may_read_element_properties())
+    }
+
     /// Standalone vertex creations have one implicit input occurrence and no
     /// graph reads. Earlier vertex creations cannot change that occurrence or
     /// its frozen property values. A host may prepare such statements in
@@ -590,8 +606,11 @@ impl PreparedGraphInsert {
     /// are deliberately outside this proof, as are creations containing edges.
     #[must_use]
     pub fn independent_vertex_append_relation(&self) -> Option<RelationId> {
-        (self.is_standalone() && !self.vertices.is_empty() && self.edges.is_empty())
-            .then_some(self.relation)
+        (self.is_standalone()
+            && !self.vertices.is_empty()
+            && self.edges.is_empty()
+            && !self.properties_read_elements())
+        .then_some(self.relation)
     }
 
     /// One source-free creation of a complete fresh subgraph in one coordinate.
@@ -600,14 +619,16 @@ impl PreparedGraphInsert {
     /// Independent chunks must still preserve all issued vertex and edge IDs,
     /// storage admission, declaration order and atomic program publication.
     ///
-    /// A host must not mix this profile with vertex-reading edge appends: those
-    /// reads could observe the vertices created by an earlier statement.
+    /// Without an additional disjoint-label proof, a host must not mix this
+    /// profile with vertex-reading creations: those reads could observe the
+    /// vertices created by an earlier statement.
     /// Pattern and relational inputs are outside this proof, even if a relation
     /// happens to contain no graph operand.
     #[must_use]
     pub fn independent_standalone_create_relation(&self) -> Option<RelationId> {
         (self.is_standalone()
             && !self.vertices.is_empty()
+            && !self.properties_read_elements()
             && self.edges.iter().all(|edge| edge.relation == self.relation))
         .then_some(self.relation)
     }
@@ -629,13 +650,7 @@ impl PreparedGraphInsert {
                     || !matches!(edge.source, GraphInsertEndpoint::CreatedVertex(_))
                     || !matches!(edge.destination, GraphInsertEndpoint::CreatedVertex(_))
             })
-            || self
-                .vertices
-                .iter()
-                .map(|vertex| &vertex.properties)
-                .chain(self.edges.iter().map(|edge| &edge.properties))
-                .flat_map(|properties| &properties.projection)
-                .any(|column| column.value().may_read_element_properties())
+            || self.properties_read_elements()
         {
             return None;
         }
@@ -663,6 +678,53 @@ impl PreparedGraphInsert {
         };
         let relation = self.edges.first()?.relation;
         if !self.vertices.is_empty()
+            || self.properties_read_elements()
+            || self.edges.iter().any(|edge| edge.relation != relation)
+            || selection.plan().reads_edges()
+            || !selection.value_columns().iter().all(|column| {
+                matches!(
+                    column,
+                    ValueProjection::Vertex { .. }
+                        | ValueProjection::Property { .. }
+                        | ValueProjection::Labels { .. }
+                        | ValueProjection::Properties { .. }
+                )
+            })
+        {
+            return None;
+        }
+        Some(relation)
+    }
+
+    /// A vertex-only selection whose required label is absent from every
+    /// vertex created anywhere in the program. Earlier creations cannot enter
+    /// this scan or change its bound vertices' properties. The host must supply
+    /// the complete program's creation-label union, keep all chunks in this
+    /// relation, and admit no intervening mutation or other graph reader.
+    ///
+    /// Only a single positively label-bound root is proved here. Unlabelled,
+    /// disconnected, edge-reading and relational inputs retain ordinary prefix
+    /// evaluation, even when a stronger independence proof might be possible.
+    #[must_use]
+    pub fn independent_selection_create_relation(
+        &self,
+        created_labels: &std::collections::BTreeSet<LabelId>,
+    ) -> Option<RelationId> {
+        use crate::algebra::{ValueProjection, VertexScanDomain};
+
+        let Input::Pattern(selection) = &self.input else {
+            return None;
+        };
+        let VertexScanDomain::Label(required) = selection.plan().vertex_scan_domain() else {
+            return None;
+        };
+        let relation = if self.vertices.is_empty() {
+            self.edges.first()?.relation
+        } else {
+            self.relation
+        };
+        if created_labels.contains(&required)
+            || self.properties_read_elements()
             || self.edges.iter().any(|edge| edge.relation != relation)
             || selection.plan().reads_edges()
             || !selection.value_columns().iter().all(|column| {

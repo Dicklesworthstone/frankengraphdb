@@ -74,6 +74,90 @@ fn pattern() -> PreparedGraphPattern<GraphValueRow> {
         .bind_parameters(&GqlParameters::new())
         .unwrap()
 }
+
+#[test]
+fn independent_creation_profiles_refuse_hidden_element_property_reads() {
+    let property = || {
+        GraphMutationValue::Composite(GraphSetValue::MapGet {
+            map: Box::new(GraphSetValue::Value(GraphValue::Vertex(VId(7)))),
+            key: "p".into(),
+            property: crate::GraphElementKey::Property(P),
+        })
+    };
+    let vertex = || GraphInsertVertex {
+        labels: vec![LabelId(3)],
+        properties: vec![(P, property())],
+    };
+    let standalone = PreparedGraphInsert::prepare_standalone(R, vec![vertex()], vec![]).unwrap();
+    assert_eq!(standalone.independent_vertex_append_relation(), None);
+    assert_eq!(standalone.independent_standalone_create_relation(), None);
+    let edge = PreparedGraphInsert::prepare(
+        pattern(),
+        R,
+        vec![],
+        vec![GraphInsertEdge {
+            source: GraphInsertEndpoint::Column(0),
+            destination: GraphInsertEndpoint::Column(0),
+            relation: R,
+            properties: vec![(P, property())],
+        }],
+    )
+    .unwrap();
+    assert_eq!(edge.independent_edge_append_relation(), None);
+}
+
+#[test]
+fn independent_selected_creation_requires_the_complete_disjoint_label_domain() {
+    let created = std::collections::BTreeSet::from([LabelId(3)]);
+    for (text, eligible) in [
+        ("MATCH (n:Root) RETURN n", true),
+        ("MATCH (n) RETURN n", false),
+        ("MATCH (n:New) RETURN n", false),
+        ("MATCH (n:Root), (m:New) RETURN n", false),
+        ("MATCH (n:Root)-[:R]->(m) RETURN n", false),
+    ] {
+        let selection = PreparedGraphText::prepare(text, |kind, name| {
+            use crate::{GraphSymbol, GraphSymbolKind};
+            match (kind, name) {
+                (GraphSymbolKind::Label, "Root") => Some(GraphSymbol::Label(LabelId(1))),
+                (GraphSymbolKind::Label, "New") => Some(GraphSymbol::Label(LabelId(3))),
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+                _ => None,
+            }
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let insertion = PreparedGraphInsert::prepare(
+            selection,
+            R,
+            vec![GraphInsertVertex {
+                labels: vec![LabelId(3)],
+                properties: vec![],
+            }],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            insertion.created_vertex_labels().collect::<Vec<_>>(),
+            vec![LabelId(3)]
+        );
+        assert_eq!(
+            insertion.independent_selection_create_relation(&created),
+            eligible.then_some(R),
+            "{text}"
+        );
+        assert_eq!(
+            insertion.independent_selection_create_relation(&std::collections::BTreeSet::from([
+                LabelId(1),
+                LabelId(3),
+            ])),
+            None,
+            "a vertex created by another statement must invalidate {text} too"
+        );
+    }
+}
+
 fn graph_source(
     pattern: &PreparedGraphPattern<GraphValueRow>,
     allowance: GqlQueryPolicy,
