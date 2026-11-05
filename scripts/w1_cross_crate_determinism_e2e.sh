@@ -40,9 +40,9 @@
 #   --self-test   prove the comparator can go red     [no cargo, no slot]
 #
 # `--self-test` is not decoration. An oracle that cannot go red is
-# indistinguishable from a pass, so the four mutants below (dropped binary,
-# vanished test under a stale count, flipped outcome, reordered+retimed) are
-# checked on every invocation of the real gate too.
+# indistinguishable from a pass, so the mutants below (dropped binary,
+# vanished test under a stale count, flipped outcome, moved binary/block
+# membership, reordered+retimed) run on every invocation of the real gate too.
 #
 # The evidence directory is intentionally retained. Repository policy forbids
 # automated deletion, and the transcripts are useful for replay.
@@ -79,47 +79,54 @@ fi
 # --- the normalizer ----------------------------------------------------------
 # Splits one raw `cargo test` transcript into three deterministic artifacts:
 #   <out>.tests    sorted (binary#block, test, outcome) triples
-#   <out>.results  aggregate `test result:` lines, timing stripped, emission order
-#   <out>.bins     the sorted set of blocks that actually reported a result
+#   <out>.results  (binary#block, aggregate result), with timing stripped
+#   <out>.bins     normalized target labels for metadata-derived unit coverage
 normalize() {
   local raw="$1" out="$2"
+  : >"$out.tests.raw"; : >"$out.results.raw"; : >"$out.bins.raw"
   awk '
     { gsub(/\x1b\[[0-9;]*[a-zA-Z]/, "") }
     /^[[:space:]]*Running / {
       bin = $0
       sub(/^.*\(/, "", bin)
       sub(/\)[[:space:]]*$/, "", bin)
+      artifact = bin
       sub(/.*\//, "", bin)
       sub(/-[0-9a-f]+$/, "", bin)
       tgt = $0
       sub(/^[[:space:]]*Running[[:space:]]+/, "", tgt)
       sub(/[[:space:]]*\(.*$/, "", tgt)
+      context = "binary " artifact " :: " tgt
       print bin " :: " tgt > BINS
       next
     }
     /^[[:space:]]*Doc-tests / {
       d = $0
       sub(/^[[:space:]]*Doc-tests[[:space:]]+/, "", d)
+      context = "doctest " d
       print d " :: doctest" > BINS
       next
     }
+    /^running [0-9]+ tests?$/ {
+      block = ++blocks[context]
+      next
+    }
     /^test .* \.\.\. / {
-      print $0 > TESTS
+      print context "#" block "\t" $0 > TESTS
       next
     }
     /^test result:/ {
       line = $0
       sub(/;[[:space:]]*finished in [0-9]+(\.[0-9]+)?s[[:space:]]*$/, "", line)
-      print line > RESULTS
+      print context "#" block "\t" line > RESULTS
       next
     }
   ' TESTS="$out.tests.raw" RESULTS="$out.results.raw" BINS="$out.bins.raw" "$raw"
 
-  : >>"$out.tests.raw"; : >>"$out.results.raw"; : >>"$out.bins.raw"
   LC_ALL=C sort "$out.tests.raw" >"$out.tests"
   LC_ALL=C sort "$out.results.raw" >"$out.results"
   LC_ALL=C sort -u "$out.bins.raw" >"$out.bins"
-  rm -f "$out.tests.raw" "$out.results.raw" "$out.bins.raw"
+  # Retain raw records as well as normalized evidence; never delete artifacts.
 }
 
 # Compares two normalized runs. Returns 0 when every artifact matches.
@@ -292,9 +299,8 @@ workspace_test_failed() { # stage log exit-code genuine-failure-diagnostic
 }
 
 # --- the red-proof -----------------------------------------------------------
-# Four mutants over one synthetic transcript. Three MUST go red; the fourth
-# (pure reordering and retiming) MUST stay green, because a gate that reds on
-# thread scheduling would be turned off within a week.
+# Outcome, coverage and context mutants must go red. Pure reordering and
+# retiming must stay green: thread scheduling does not change test identity.
 self_test() {
   local d; d="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-det-selftest.XXXXXX")"
   cat >"$d/A.txt" <<'FIXTURE'
@@ -337,6 +343,64 @@ FIXTURE
     else
       printf '    %-4s expected %-5s got %-5s MUTANT SURVIVED\n' "$m" "$expect" "$rc"
       fails=$((fails + 1))
+    fi
+  done
+
+  # Moving a case must go red even when the global case/count multisets stay
+  # equal. Identical executable basenames still belong to distinct artifacts.
+  cat >"$d/context-A.txt" <<'FIXTURE'
+     Running unittests src/lib.rs (/tmp/alpha/colliding-abcdef)
+running 2 tests
+test alpha ... ok
+test shared ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running unittests src/lib.rs (/tmp/beta/colliding-abcdef)
+running 1 test
+test beta ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+FIXTURE
+  cat >"$d/context-M.txt" <<'FIXTURE'
+     Running unittests src/lib.rs (/tmp/alpha/colliding-abcdef)
+running 1 test
+test alpha ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running unittests src/lib.rs (/tmp/beta/colliding-abcdef)
+running 2 tests
+test beta ... ok
+test shared ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+FIXTURE
+  # Rustdoc can report multiple result blocks under one header. Spaces in a
+  # displayed doctest name are part of its identity, not a field separator.
+  cat >"$d/doctest-A.txt" <<'FIXTURE'
+   Doc-tests fgdb_codec
+running 2 tests
+test src/lib.rs - first (line 1) ... ok
+test src/lib.rs - shared (line 7) ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+running 1 test
+test src/lib.rs - last (line 9) ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+FIXTURE
+  cat >"$d/doctest-M.txt" <<'FIXTURE'
+   Doc-tests fgdb_codec
+running 1 test
+test src/lib.rs - first (line 1) ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+running 2 tests
+test src/lib.rs - shared (line 7) ... ok
+test src/lib.rs - last (line 9) ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+FIXTURE
+  local context_case
+  for context_case in context doctest; do
+    normalize "$d/$context_case-A.txt" "$d/$context_case-a"
+    normalize "$d/$context_case-M.txt" "$d/$context_case-m"
+    if compare_runs "$d/$context_case-a" "$d/$context_case-m" "$context_case" >/dev/null 2>&1; then
+      printf '    %-16s expected red got green CONTEXT MUTANT SURVIVED\n' "$context_case"
+      fails=$((fails + 1))
+    else
+      printf '    %-16s expected red got red OK\n' "$context_case"
     fi
   done
 
@@ -607,11 +671,11 @@ unit_blocks_reported "$EXPECTED_UNITS" "$EVIDENCE_DIR/n1.bins" \
   || { echo "retained evidence: $EVIDENCE_DIR" >&2; exit 1; }
 
 CRATES="$(sed -n 's#^ *"crates/\([a-z0-9-]*\)".*#\1#p' Cargo.toml | wc -l)"
-BLOCKS="$(wc -l <"$EVIDENCE_DIR/n1.bins")"
+BLOCKS="$(wc -l <"$EVIDENCE_DIR/n1.results")"
 TESTS="$(wc -l <"$EVIDENCE_DIR/n1.tests")"
 SET_HASH="$(LC_ALL=C "${SHA256_CMD[@]}" <"$EVIDENCE_DIR/n1.tests" | cut -d' ' -f1)"
 
-echo "==> sorted-set hash over $TESTS tests across $BLOCKS binaries/doctests"
+echo "==> sorted-set hash over $TESTS tests across $BLOCKS result blocks"
 echo "    $SET_HASH"
 gate_pass "cross-crate determinism E2E GREEN: $CRATES engine crates, $BLOCKS result blocks, $TESTS tests"
 echo "  HEAD=$HEAD_BEFORE source=$PIN_BEFORE"
