@@ -429,6 +429,17 @@ fn authorized_dynamic_metadata_masks_unnamed_fields_and_both_edge_endpoints() {
              keys(x) AS keys ORDER BY score",
                 "MATCH ()-[r:R]->() WITH collect(r) AS rs UNWIND rs AS x \
              RETURN type(x) AS kind, properties(x) AS props, keys(x) AS keys",
+                "MATCH (n:Thing) WITH n AS kept OPTIONAL MATCH (kept)-[r:R]->(b) \
+             RETURN kept, labels(kept) AS labels, properties(kept) AS props, \
+             keys(kept) AS keys, b ORDER BY kept,b",
+                "MATCH (a)-[r:R]->(b) WITH a,r AS kept \
+             OPTIONAL MATCH (c)-[kept:R]->(a) \
+             RETURN kept, type(kept) AS kind, properties(kept) AS props, \
+             keys(kept) AS keys,c ORDER BY kept",
+                "MATCH (n:Thing) WITH n OPTIONAL MATCH (n)-[r:R]->(b) \
+             WITH n,r OPTIONAL MATCH (c)-[r:R]->(n) \
+             RETURN n,r,type(r) AS kind,properties(r) AS props,keys(r) AS keys,c \
+             ORDER BY n,r",
             ] {
                 let expected = cells(
                     removed

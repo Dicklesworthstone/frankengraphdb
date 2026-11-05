@@ -1033,6 +1033,7 @@ fn count_subquery_bodies_compose_in_rows_filters_and_nested_subqueries() {
                 GraphValue::Scalar(CanonicalScalar::Int(2)),
                 GraphValue::Scalar(CanonicalScalar::Int(2)),
             ]
+            .into_boxed_slice()
         )])]
     );
 }

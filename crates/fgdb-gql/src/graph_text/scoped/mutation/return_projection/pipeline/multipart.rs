@@ -3866,7 +3866,11 @@ impl<'a> Parser<'a> {
                         && let Some(argument) = super::property_map_source(word, parser.current.at, &parser.lexer)?
                         && parser.visible_graph_bindings().any(|name| name.text == argument.text) {
                         if optional && incoming.iter().any(|(binding, _)| binding.text == argument.text) {
-                            return Err(error(argument.at, GraphPatternTextErrorKind::Expected("project carried graph maps before OPTIONAL MATCH")));
+                            // The preserved left identity owns this map, even
+                            // when the OPTIONAL's copy is NULL. Declining the
+                            // graph column lets the ordinary value reader use
+                            // that identity and its governed metadata source.
+                            return Ok(None);
                         }
                         return parser.property_map_function(&mut inputs).map(|column| Some(width + column));
                     }
@@ -3874,10 +3878,10 @@ impl<'a> Parser<'a> {
                         if ["labels", "type", "length", "path_length", "nodes", "edges", "relationships"]
                             .iter().any(|name| word.eq_ignore_ascii_case(name))
                         {
-                            // A graph-function read of an imported value is
-                            // not a read of the nullable right-hand copy. Until
-                            // that read has its own source, require a saved
-                            // left-hand expression instead of returning NULL.
+                            // Metadata of an imported element belongs to the
+                            // preserved left row, not its nullable right-hand
+                            // copy. Path functions retain their existing
+                            // boundary until they have the same value route.
                             if optional {
                                 let mut lookahead = parser.lexer.clone();
                                 lookahead.next()?; // opening parenthesis
@@ -3885,6 +3889,9 @@ impl<'a> Parser<'a> {
                                 if matches!(argument.kind, TokenKind::Word(name)
                                     if incoming.iter().any(|(binding, _)| binding.text == name))
                                 {
+                                    if word.eq_ignore_ascii_case("labels") || word.eq_ignore_ascii_case("type") {
+                                        return Ok(None);
+                                    }
                                     return Err(error(argument.at, GraphPatternTextErrorKind::Expected(
                                         "project carried graph functions before OPTIONAL MATCH",
                                     )));
