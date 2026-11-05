@@ -98,20 +98,37 @@ fn bfs_compact_workspace_preserves_long_paths_cutoffs_and_public_cursor_values()
         })
         .collect();
     let view = graph(&vertices, &edges, Directedness::Directed);
-    for cutoff in [Some(0), Some(usize::MAX), None] {
+    for cutoff in [Some(0), Some(1), Some(usize::MAX), None] {
         let call = FnxCallSpec::single_source_shortest_path_length(vertices[source], cutoff);
         let mut meter = ComponentMeter::default();
         let mut cursor = call.execute_rows(&view, limits(), &mut meter).unwrap();
-        let reached = if cutoff == Some(0) { 1 } else { n - source };
+        let shallow = cutoff.is_some_and(|limit| limit <= 1);
+        let reached = cutoff.map_or(n - source, |limit| {
+            (n - source).min(limit.saturating_add(1))
+        });
         assert_eq!(cursor.remaining(), reached);
         assert_eq!(
             cursor.certificate().kernel_workspace_bytes,
-            2 * n * size_of::<usize>()
+            if shallow {
+                (reached - 1) * size_of::<usize>()
+            } else {
+                2 * n * size_of::<usize>()
+            }
         );
         assert!(cursor.certificate().bfs_decision_card.is_none());
-        assert_eq!(cursor.certificate().witness.nodes_touched, reached);
+        assert_eq!(
+            cursor.certificate().witness.nodes_touched,
+            if shallow { 1 } else { reached }
+        );
         assert_eq!(cursor.certificate().witness.edges_scanned, reached - 1);
-        assert_eq!(meter.observed, 3 * n + reached + (reached - 1) + 3);
+        assert_eq!(
+            meter.observed,
+            if shallow {
+                reached + (reached - 1) + 5
+            } else {
+                3 * n + reached + (reached - 1) + 3
+            }
+        );
         assert_eq!(cursor.max_integer(), Some((reached - 1) as u64));
         let mut row = Vec::new();
         let mut pulled = 0;
@@ -133,7 +150,7 @@ fn bfs_compact_workspace_preserves_long_paths_cutoffs_and_public_cursor_values()
             pulled += 1;
         }
         assert_eq!(pulled, reached);
-        assert_eq!(checks, n);
+        assert_eq!(checks, if shallow { reached } else { n });
         assert_eq!(cursor.remaining(), 0);
         assert!(row.is_empty());
     }
@@ -394,10 +411,22 @@ fn bfs_runs_preserve_distances_witnesses_and_every_work_refusal() {
             let batched = call.execute(&view, limits(), &mut meter).unwrap();
             assert_eq!(batched, scalar, "{direction:?} {cutoff:?}");
             assert_eq!(meter.observed, scalar_units);
-            assert!(meter.calls < scalar_units);
-            assert_eq!(meter.largest_run, FNX_METER_RUN);
             let reached = batched.rows.len();
             let witness = &batched.certificate.witness;
+            let shallow = cutoff.is_some_and(|limit| limit <= 1);
+            if !shallow || witness.edges_scanned > 1 {
+                assert!(meter.calls < scalar_units);
+            } else {
+                assert_eq!(meter.calls, scalar_units);
+            }
+            assert_eq!(
+                meter.largest_run,
+                if shallow {
+                    witness.edges_scanned.clamp(1, FNX_METER_RUN)
+                } else {
+                    FNX_METER_RUN
+                }
+            );
             // This graph selects pull only at the undirected wide frontier,
             // when the cutoff allows its successor. Pull truthfully includes
             // every candidate vertex visit and one certificate-hash unit per
@@ -414,17 +443,28 @@ fn bfs_runs_preserve_distances_witnesses_and_every_work_refusal() {
                 direction == Directedness::Undirected && (cutoff.is_none() || cutoff == Some(2))
             );
             let candidate_visits: usize = pulls.iter().map(|pull| pull.candidate_visits).sum();
-            assert_eq!(witness.nodes_touched, reached + candidate_visits);
+            assert_eq!(
+                witness.nodes_touched,
+                if shallow {
+                    1
+                } else {
+                    reached + candidate_visits
+                }
+            );
             assert!(
                 witness.nodes_touched + witness.edges_scanned <= batched.certificate.estimated_work
             );
             assert_eq!(
                 scalar_units,
-                3 * vertices.len()
-                    + witness.nodes_touched
-                    + witness.edges_scanned
-                    + 3
-                    + pulls.len()
+                if shallow {
+                    reached + witness.edges_scanned + 5
+                } else {
+                    3 * vertices.len()
+                        + witness.nodes_touched
+                        + witness.edges_scanned
+                        + 3
+                        + pulls.len()
+                }
             );
             for stop in 1..=scalar_units {
                 let mut meter = ComponentMeter {
@@ -800,13 +840,14 @@ fn bfs_runs_preserve_discovery_refusals_and_every_work_prefix() {
             for cap in [0, 1, 2, 63, 64, 65, n - 4, n - 2, n - 1, n, n + 1] {
                 let mut expected = BTreeMap::new();
                 let mut refused = (cap == 0).then_some(1);
-                let mut units = 1 + n; // call entry and degree admission
+                let shallow = cutoff.is_some_and(|limit| limit <= 1);
+                let mut units = 1 + if shallow { 0 } else { n }; // entry and any population admission
                 if refused.is_none() {
-                    units += n; // distance initialization
+                    units += if shallow { 1 } else { n }; // sparse reservation or dense initialization
                     expected.insert(source, 0usize);
                     let mut queue = std::collections::VecDeque::from([source]);
                     'walk: while let Some(vertex) = queue.pop_front() {
-                        units += 1;
+                        units += usize::from(!shallow);
                         let depth = expected[&vertex];
                         if cutoff.is_some_and(|limit| depth >= limit) {
                             continue;
@@ -825,7 +866,7 @@ fn bfs_runs_preserve_discovery_refusals_and_every_work_prefix() {
                         }
                     }
                     if refused.is_none() {
-                        units += n + 2; // result conversion and boundaries
+                        units += if shallow { expected.len() + 3 } else { n + 2 }; // actual result conversion and boundaries
                     }
                 }
                 let call =
@@ -857,7 +898,9 @@ fn bfs_runs_preserve_discovery_refusals_and_every_work_prefix() {
                         .unwrap();
                     assert_eq!(result, scalar); // every certificate field too
                     assert_eq!(scalar_units, units);
-                    assert!(meter.calls < units);
+                    if !shallow {
+                        assert!(meter.calls < units);
+                    }
                     if direction == Directedness::Directed && cutoff.is_none() && cap >= n {
                         assert!(
                             meter.full_runs >= 4,

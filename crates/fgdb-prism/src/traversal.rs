@@ -2,7 +2,9 @@
 //! construct a second Graph/DiGraph, recurse on the process stack, or consult
 //! weights that their registered semantics ignore.
 
-use crate::execute::{ComplexityWitness, HopDistance, KernelOutput, KernelValues, admit, reserve};
+use crate::execute::{
+    ComplexityWitness, HopDistance, KernelOutput, KernelValues, admit, reserve, shallow_bfs,
+};
 use crate::{
     FNX_METER_RUN, FnxAlgorithm, FnxExecutionError, FnxMeter, GraphView, SnapshotGraphView,
 };
@@ -296,7 +298,11 @@ pub(crate) fn run<C>(
             let source = graph
                 .vertex_ordinal(source)
                 .ok_or(FnxExecutionError::UnknownSource(source))?;
-            bounded_bfs(graph, source, cutoff, row_limit, checkpoint)
+            if shallow_bfs::eligible(cutoff) {
+                shallow(graph, source, cutoff, row_limit, checkpoint)
+            } else {
+                bounded_bfs(graph, source, cutoff, row_limit, checkpoint)
+            }
         }
         FnxAlgorithm::ConnectedComponents => bounded_components(graph, false, checkpoint),
         FnxAlgorithm::WeaklyConnectedComponents => bounded_components(graph, true, checkpoint),
@@ -320,6 +326,73 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::Bridges
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
+}
+
+/// A fully admitted decoded row is canonical and unique. Source and one-hop
+/// neighbors can therefore be retained directly in result order, without a
+/// population-sized visited array, initialization pass or queue.
+fn shallow<C>(
+    graph: &SnapshotGraphView,
+    source: usize,
+    cutoff: Option<usize>,
+    row_limit: usize,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<TraversalOutput, FnxExecutionError<C>> {
+    admit("result rows", 1, row_limit)?;
+    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+    let n = graph.node_count();
+    let mut neighbors = if cutoff == Some(0) {
+        &[][..]
+    } else {
+        graph
+            .neighbors_indices(source)
+            .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+    };
+    let maximum = shallow_bfs::capacity(n, neighbors.len(), row_limit)?;
+    // Decoded CALL limits contain work/row allowances, not a kernel-memory
+    // quota. Report actual backing in the certificate; sealed callers pass
+    // their separate FnxMemoryLimits into the same preallocation check.
+    let mut state = shallow_bfs::Search::new(n, source, maximum, usize::MAX)?;
+    let mut witness = ComplexityWitness {
+        algorithm: "single_source_shortest_path_length_shallow_sparse_v1".to_owned(),
+        complexity_claim: "O(1 + degree(source)) traversal, output and workspace".to_owned(),
+        nodes_touched: 1,
+        edges_scanned: 0,
+        queue_peak: 0,
+    };
+    while !neighbors.is_empty() {
+        // At most one new row per incidence. A tight row allowance retains
+        // scalar charging at the refusing discovery, before any later work.
+        let allowed = if row_limit >= n {
+            FNX_METER_RUN
+        } else {
+            row_limit
+                .saturating_sub(state.row_count())
+                .clamp(1, FNX_METER_RUN)
+        };
+        let (run, remaining) = neighbors.split_at(allowed.min(neighbors.len()));
+        checkpoint
+            .units(run.len())
+            .map_err(FnxExecutionError::Cancelled)?;
+        for &neighbor in run {
+            increment(&mut witness.edges_scanned)?;
+            state.visit(neighbor, &mut |rows| admit("result rows", rows, row_limit))?;
+        }
+        neighbors = remaining;
+    }
+    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+    let row_count = state.row_count();
+    let workspace_bytes = state.workspace_bytes();
+    Ok(TraversalOutput {
+        output: KernelOutput {
+            values: KernelValues::ShallowDistances(state.finish()),
+            row_count,
+            witness,
+        },
+        bfs_decision_card: None,
+        component_decision_card: None,
+        workspace_bytes: Some(workspace_bytes),
+    })
 }
 
 /// A pull is paid for by outgoing arcs that this frontier will never scan:

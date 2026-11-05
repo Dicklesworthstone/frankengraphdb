@@ -4,7 +4,7 @@
 
 use crate::execute::{
     HopDistance, KernelOutput, KernelValues, PageRankRestart, hash_bfs_decision_card,
-    hash_component_decision_card, hash_result_value,
+    hash_component_decision_card, hash_result_value, shallow_bfs,
 };
 use crate::sealed_control::{Control, Guard, GuardFn};
 use crate::{
@@ -53,6 +53,9 @@ mod katz;
 mod label_propagation;
 #[path = "sealed_load.rs"]
 mod load;
+#[cfg(test)]
+#[path = "shallow_bfs_tests.rs"]
+mod shallow_tests;
 #[path = "sealed_shortest_path.rs"]
 mod shortest_path;
 #[path = "sealed_target_bfs.rs"]
@@ -129,6 +132,12 @@ type Error = FnxSealedExecutionError;
 type Result<T> = std::result::Result<T, Error>;
 type ExecutionError = FnxExecutionError<Infallible>;
 
+impl From<shallow_bfs::Error> for Error {
+    fn from(error: shallow_bfs::Error) -> Self {
+        ExecutionError::from(error).into()
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Delivery {
     Collected,
@@ -201,6 +210,12 @@ trait Rows {
     fn has_validated_adjacency(&self) -> bool {
         false
     }
+    /// Complete admission also proved strictly increasing, unique target
+    /// ordinals in every row. Bounds/degree evidence alone is insufficient to
+    /// merge a sparse result directly in canonical vertex order.
+    fn has_canonical_adjacency(&self) -> bool {
+        false
+    }
     /// Only an admitted symmetric projection can prove that a zero outgoing
     /// degree is an isolate. Unknown/directed providers must return false.
     fn is_undirected(&self) -> bool {
@@ -249,6 +264,11 @@ impl<G: Guard, S: crate::sealed::SealedRowSource> Rows for SealedRows<'_, G, S> 
     fn has_validated_adjacency(&self) -> bool {
         // Both faces borrow a completely admitted immutable projection. An
         // opposite face carries its exact transposed degree proof as well.
+        true
+    }
+    fn has_canonical_adjacency(&self) -> bool {
+        // Projection reduction emits each selected target once in VId order;
+        // the admitted vertex directory preserves that ordinal order.
         true
     }
     fn is_undirected(&self) -> bool {
@@ -324,6 +344,14 @@ impl ResultAdmission {
             self.max_bytes,
         )
     }
+
+    /// Backing need not exceed the largest deliverable row prefix. The first
+    /// exceeding discovery still goes through rows(), preserving its typed
+    /// row-before-byte refusal before any new ordinal is retained.
+    fn backing_rows(&self) -> usize {
+        self.max_rows
+            .min(self.max_bytes.saturating_sub(self.column_bytes) / self.row_bytes)
+    }
 }
 
 // H is the retained-incidence bound, NOT the reduced edge count. Each row
@@ -371,6 +399,13 @@ fn require_loop_free_degree(edges: usize, adjacency_entries: usize) -> Result<()
 }
 
 fn execution_pass_work(call: &FnxCallSpec, graph: &SealedGraphView) -> Result<usize> {
+    if matches!(call.algorithm(), FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. }
+        if shallow_bfs::eligible(cutoff))
+    {
+        // This path prices its one source row below. Unrelated vertices and
+        // retained rows are not a traversal or initialization allowance.
+        return Ok(0);
+    }
     if matches!(
         call.algorithm(),
         FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
@@ -387,6 +422,141 @@ fn execution_pass_work(call: &FnxCallSpec, graph: &SealedGraphView) -> Result<us
             graph.spec().directedness,
         )
     }
+}
+
+fn shallow_bfs_plan(
+    graph: &SealedGraphView,
+    source: usize,
+    cutoff: Option<usize>,
+    columns: usize,
+    admission: &ResultAdmission,
+) -> Result<(usize, usize)> {
+    let n = graph.node_count();
+    let degree = if cutoff == Some(0) {
+        0
+    } else {
+        graph
+            .degree(source)
+            .ok_or(ExecutionError::InvalidUpstreamResult)?
+    };
+    let maximum = shallow_bfs::capacity(n, degree, admission.backing_rows())?;
+    let neighborhood: Result<usize> = (|| {
+        let vertex_search = (usize::BITS - n.leading_zeros()) as usize;
+        let source_work = if cutoff == Some(0) {
+            vertex_search
+        } else {
+            // Price this source's complete retained history and both faces
+            // when selected. Admitted degree zero uses the existing empty
+            // cursor, whose opening and EOF remain live and fallible.
+            let retained = if degree == 0 {
+                0
+            } else {
+                graph.retained_row_incidence_bound(source)?
+            };
+            let history_search =
+                (usize::BITS - graph.scan_incidence_bound().leading_zeros()) as usize;
+            let opening = add(16, mul(4, history_search)?)?;
+            let incidence = add(32, add(mul(4, history_search)?, mul(2, vertex_search)?)?)?;
+            add(vertex_search, add(opening, mul(retained, incidence)?)?)?
+        };
+        shallow_bfs::work(n, degree, columns, source_work).map_err(Into::into)
+    })();
+    let incumbent =
+        directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness);
+    Ok((
+        shallow_bfs_admission_work(neighborhood, incumbent)?,
+        shallow_bfs::workspace(maximum)?,
+    ))
+}
+
+fn shallow_bfs_admission_work(
+    neighborhood: Result<usize>,
+    incumbent: Result<usize>,
+) -> Result<usize> {
+    fn finite(bound: Result<usize>) -> Result<Option<usize>> {
+        match bound {
+            Ok(work) => Ok(Some(work)),
+            Err(Error::Execution(ExecutionError::SizeOverflow)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    // Sparse execution removes the incumbent's population work. Preserve its
+    // valid quotas if the neighborhood model uses finer operation weights;
+    // these are model units, not CPU counters. A global-history overflow must
+    // not prevent a finite local bound, and the reverse is equally valid.
+    match (finite(neighborhood)?, finite(incumbent)?) {
+        (Some(a), Some(b)) => Ok(a.min(b)),
+        (Some(work), None) | (None, Some(work)) => Ok(work),
+        (None, None) => Err(ExecutionError::SizeOverflow.into()),
+    }
+}
+
+fn shallow_bfs_witness() -> ComplexityWitness {
+    ComplexityWitness {
+        algorithm: "single_source_shortest_path_length_shallow_sparse_v1".to_owned(),
+        complexity_claim: "O(1 + degree(source)) result and workspace; separately bounded compressed source-row history and lookups".to_owned(),
+        nodes_touched: 1,
+        edges_scanned: 0,
+        queue_peak: 0,
+    }
+}
+
+fn shallow_bfs_run(
+    graph: &impl Rows,
+    source: usize,
+    cutoff: Option<usize>,
+    admission: &ResultAdmission,
+    workspace_limit: usize,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<(KernelOutput, usize)> {
+    if !graph.has_canonical_adjacency() {
+        // Generic row providers need not promise canonical unique neighbors.
+        // Keep their original visited state, validation and fallible trace.
+        let workspace = mul(
+            graph.node_count(),
+            size_of::<usize>() + size_of::<Option<HopDistance>>(),
+        )?;
+        admit("kernel workspace bytes", workspace, workspace_limit)?;
+        return Ok((
+            bfs(graph, source, cutoff, admission, checkpoint)?,
+            workspace,
+        ));
+    }
+    admission.rows(1)?;
+    checkpoint()?;
+    let n = graph.node_count();
+    let degree = if cutoff == Some(0) {
+        0
+    } else {
+        graph
+            .degree(source)
+            .ok_or(ExecutionError::InvalidUpstreamResult)?
+    };
+    let maximum = shallow_bfs::capacity(n, degree, admission.backing_rows())?;
+    let mut state = shallow_bfs::Search::new(n, source, maximum, workspace_limit)?;
+    let mut witness = shallow_bfs_witness();
+    if cutoff != Some(0) {
+        checkpoint()?;
+        let mut row = graph.open(source)?;
+        while let Some((neighbor, _)) = row.next()? {
+            checkpoint()?;
+            witness.edges_scanned = add(witness.edges_scanned, 1)?;
+            state.visit(neighbor, &mut |rows| admission.rows(rows))?;
+        }
+        // Never settle a complete one-hop result before the row's fallible
+        // EOF, including after all projected vertices have been discovered.
+    }
+    checkpoint()?;
+    let row_count = state.row_count();
+    let workspace = state.workspace_bytes();
+    Ok((
+        KernelOutput {
+            values: KernelValues::ShallowDistances(state.finish()),
+            row_count,
+            witness,
+        },
+        workspace,
+    ))
 }
 
 // Synchronous and cooperative drivers share the normalization, owned output
@@ -960,8 +1130,9 @@ impl FnxCallSpec {
     /// returning a cursor over its existing value arrays. Logical result rows
     /// and bytes keep the collected API's admission, even though no row table
     /// is allocated. The cursor shares the original immutable projection.
-    /// Pulling rows needs a fresh caller checkpoint for every examined vertex;
-    /// hosts must budget that additional pass, including unreachable gaps.
+    /// Pulling rows needs a fresh caller checkpoint for each examined result
+    /// position. Dense values include unreachable gaps; sparse shallow
+    /// distances examine only the retained neighborhood.
     pub fn execute_sealed_rows(
         &self,
         cx: &QueryCx,
@@ -1137,17 +1308,28 @@ impl FnxCallSpec {
                     source,
                 )
             }
-            FnxAlgorithm::SingleSourceShortestPathLength { source, .. } => {
+            FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff } => {
                 let ordinal = graph
                     .vertex_ordinal(source)
                     .ok_or(ExecutionError::UnknownSource(source))?;
                 admission.rows(1)?;
-                (
-                    "fgdb-prism/sealed-bfs-complete-population-v2",
-                    pass,
-                    mul(n, size_of::<usize>() + size_of::<Option<HopDistance>>())?,
-                    Some(ordinal),
-                )
+                if shallow_bfs::eligible(cutoff) {
+                    let (work, workspace) =
+                        shallow_bfs_plan(graph, ordinal, cutoff, self.outputs().len(), &admission)?;
+                    (
+                        "fgdb-prism/sealed-bfs-shallow-sparse-v1",
+                        work,
+                        workspace,
+                        Some(ordinal),
+                    )
+                } else {
+                    (
+                        "fgdb-prism/sealed-bfs-complete-population-v2",
+                        pass,
+                        mul(n, size_of::<usize>() + size_of::<Option<HopDistance>>())?,
+                        Some(ordinal),
+                    )
+                }
             }
             FnxAlgorithm::SingleSourceDijkstraPathLength(options)
             | FnxAlgorithm::DijkstraPathLength { options, .. } => {
@@ -1227,13 +1409,23 @@ impl FnxCallSpec {
                 degree_centrality(&rows, &mut control)?
             }
             FnxAlgorithm::PageRank(options) => pagerank(&rows, options, source, &mut control)?,
-            FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => bfs(
-                &rows,
-                source.ok_or(ExecutionError::InvalidUpstreamResult)?,
-                cutoff,
-                &admission,
-                &mut control,
-            )?,
+            FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => {
+                let source = source.ok_or(ExecutionError::InvalidUpstreamResult)?;
+                if shallow_bfs::eligible(cutoff) {
+                    let (output, actual) = shallow_bfs_run(
+                        &rows,
+                        source,
+                        cutoff,
+                        &admission,
+                        memory.max_kernel_workspace_bytes,
+                        &mut control,
+                    )?;
+                    workspace = actual;
+                    output
+                } else {
+                    bfs(&rows, source, cutoff, &admission, &mut control)?
+                }
+            }
             FnxAlgorithm::SingleSourceDijkstraPathLength(options) => shortest_path::run(
                 &rows,
                 source.ok_or(ExecutionError::InvalidUpstreamResult)?,
@@ -1447,6 +1639,12 @@ impl EncodedRows {
                 FnxValue::Integer(
                     u64::try_from(distance.hops()).map_err(|_| ExecutionError::SizeOverflow)?,
                 )
+            }
+            KernelValues::ShallowDistances(values) => {
+                let (_, distance) = values
+                    .get(index)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?;
+                FnxValue::Integer(distance as u64)
             }
             #[cfg(test)]
             KernelValues::WideDistances(values) => {
@@ -1725,6 +1923,7 @@ fn source_digest() -> Digest {
             include_str!("execute.rs"),
             include_str!("sealed_execute.rs"),
             include_str!("sealed_bfs.rs"),
+            include_str!("shallow_bfs.rs"),
             include_str!("target_bfs.rs"),
             include_str!("sealed_target_bfs.rs"),
             include_str!("sealed_cooperative.rs"),
@@ -2985,9 +3184,10 @@ mod tests {
                         fail_at: usize::MAX,
                     };
                     let output = bfs(&rows, source, cutoff, &admission, &mut || Ok(())).unwrap();
-                    let expected = call
-                        .execute(&graph, limits(), || Ok::<(), Infallible>(()))
-                        .unwrap();
+                    let expected = shallow_bfs::with_dense(|| {
+                        call.execute(&graph, limits(), || Ok::<(), Infallible>(()))
+                            .unwrap()
+                    });
                     let KernelValues::Distances(distances) = output.values else {
                         panic!("distances");
                     };

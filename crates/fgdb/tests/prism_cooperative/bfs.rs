@@ -272,7 +272,7 @@ fn compressed_bfs_optional_pull_respects_cutoff_and_independent_resource_limits(
             if cutoff.is_some_and(|limit| limit <= 1) {
                 assert_eq!(
                     expected.certificate.execution_kernel,
-                    "fgdb-prism/sealed-bfs-complete-population-v2"
+                    "fgdb-prism/sealed-bfs-shallow-sparse-v1"
                 );
                 assert!(expected.certificate.bfs_decision_card.is_none());
             }
@@ -322,12 +322,16 @@ fn compressed_bfs_optional_pull_respects_cutoff_and_independent_resource_limits(
                 .unwrap();
             assert_eq!(low_memory.rows, expected.rows);
             assert!(low_memory.certificate.bfs_decision_card.is_none());
-            // Compact distances and the queue each need one word per vertex.
-            // Prove both real drivers fit that exact allowance, while keeping
-            // output admission independent and rejecting one byte less.
+            // Shallow calls retain just non-source result ordinals. General
+            // BFS still needs compact distances and a queue for every vertex.
+            // Output admission is independent in both real drivers.
             assert_eq!(
                 queue_memory.max_kernel_workspace_bytes,
-                2 * graph.node_count() * size_of::<usize>()
+                if cutoff.is_some_and(|limit| limit <= 1) {
+                    (expected.rows.len() - 1) * size_of::<usize>()
+                } else {
+                    2 * graph.node_count() * size_of::<usize>()
+                }
             );
             let cooperative = call
                 .execute_sealed_cooperative(
@@ -352,11 +356,18 @@ fn compressed_bfs_optional_pull_respects_cutoff_and_independent_resource_limits(
                 (
                     "kernel workspace bytes",
                     FnxMemoryLimits {
-                        max_kernel_workspace_bytes: queue_memory.max_kernel_workspace_bytes - 1,
+                        max_kernel_workspace_bytes: queue_memory
+                            .max_kernel_workspace_bytes
+                            .saturating_sub(1),
                         ..memory()
                     },
                 ),
             ] {
+                if resource == "kernel workspace bytes"
+                    && queue_memory.max_kernel_workspace_bytes == 0
+                {
+                    continue; // A zero-backing cutoff cannot be made one byte tighter.
+                }
                 for cooperative in [false, true] {
                     let result = if cooperative {
                         call.execute_sealed_cooperative(
@@ -484,7 +495,11 @@ fn compressed_bfs_complete_population_preserves_direction_history_and_retained_r
                         assert_eq!(actual.certificate.projection_digest, graph.digest());
                         assert_eq!(
                             actual.certificate.execution_kernel,
-                            "fgdb-prism/sealed-bfs-complete-population-v2"
+                            if cutoff.is_some_and(|limit| limit <= 1) {
+                                "fgdb-prism/sealed-bfs-shallow-sparse-v1"
+                            } else {
+                                "fgdb-prism/sealed-bfs-complete-population-v2"
+                            }
                         );
                         assert!(actual.certificate.bfs_decision_card.is_none());
                         let expansions = if cutoff == Some(0) {
@@ -579,6 +594,330 @@ fn compressed_bfs_complete_population_preserves_direction_history_and_retained_r
                 &expected,
             );
         }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn shallow_bfs_keeps_history_masks_reductions_and_complete_retained_results() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let (db, original) = database(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        for at in [original, db.frontier().unwrap()] {
+            for direction in [Directedness::Directed, Directedness::Reversed, Directedness::Undirected] {
+                for reduction in [ParallelEdgePolicy::Sum, ParallelEdgePolicy::Minimum, ParallelEdgePolicy::Maximum, ParallelEdgePolicy::CollapseUnit] {
+                    let mut opt = options(direction);
+                    opt.as_of = Some(at);
+                    opt.projection.parallel_edges = reduction;
+                    opt.projection.self_loops = if at == original { SelfLoopPolicy::Keep } else { SelfLoopPolicy::Drop };
+                    let graph = projection(&db, &cx, opt).await;
+                    let decoded = view.prism_projection_at(&cx, at, opt.selection, opt.projection,
+                        opt.projection_limits, opt.source_limits).unwrap();
+                    for source in [VId(0), VId(1), VId(u128::MAX)] {
+                        // The independent full-depth incumbent does not use
+                        // shallow storage or its direct-neighbor algorithm.
+                        let all = FnxCallSpec::single_source_shortest_path_length(source, None)
+                            .execute(&decoded, opt.execution_limits, || cx.checkpoint()).unwrap();
+                        for cutoff in [0, 1] {
+                            let call = FnxCallSpec::single_source_shortest_path_length(source, Some(cutoff));
+                            let expected: Vec<_> = all.rows.iter().filter(|row| matches!(row[1], FnxValue::Integer(distance) if distance <= cutoff as u64)).cloned().collect();
+                            let limits = FnxExecutionLimits { max_iterations: 0, max_result_rows: expected.len(), ..opt.execution_limits };
+                            let actual = call.execute_sealed(&cx, &graph, limits, memory()).unwrap();
+                            assert_eq!(actual.rows, expected);
+                            assert_eq!(actual.certificate.execution_kernel, "fgdb-prism/sealed-bfs-shallow-sparse-v1");
+                            assert_eq!(actual.certificate.snapshot, graph.binding());
+                            assert_eq!(actual.certificate.projection_digest, graph.digest());
+                            assert_eq!(actual.certificate.witness.nodes_touched, 1);
+                            assert_eq!(actual.certificate.witness.queue_peak, 0);
+                            assert_eq!(actual.certificate.kernel_workspace_bytes, (expected.len() - 1) * size_of::<usize>());
+                            let native = call.execute(&decoded, limits, || cx.checkpoint()).unwrap();
+                            assert_eq!(actual.rows, native.rows);
+                            assert_eq!(actual.certificate.result_digest, native.certificate.result_digest);
+                            let columns = call.outputs().len() * size_of::<String>()
+                                + call.outputs().iter().map(|column| column.name.len()).sum::<usize>();
+                            let bytes = columns + expected.len() * (size_of::<Vec<FnxValue>>() + call.outputs().len() * size_of::<FnxValue>());
+                            let exact = FnxMemoryLimits { max_kernel_workspace_bytes: actual.certificate.kernel_workspace_bytes, max_result_bytes: bytes };
+                            let limits = FnxExecutionLimits { max_estimated_work: actual.certificate.estimated_work, ..limits };
+                            assert_eq!(call.execute_sealed(&cx, &graph, limits, exact).unwrap(), actual);
+                            compare_retained(call.execute_sealed_rows(&cx, &graph, limits, exact).unwrap(), &actual, expected.len());
+                            for q in [1, 7, 257] {
+                                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                                let (cooperative, _) = drive(call.execute_sealed_cooperative(&controlled, &graph, limits, exact, quantum(q), yield_now), &probe, q);
+                                let cooperative = cooperative.unwrap();
+                                compare_execution(&cooperative, &actual);
+                                assert_eq!(cooperative.certificate.execution_kernel, "fgdb-prism/sealed-bfs-shallow-sparse-cooperative-v1");
+                                if q == 7 {
+                                    compare_retained(call.execute_sealed_cooperative_rows(&cx, &graph, limits, exact, quantum(q), yield_now).await.unwrap(), &cooperative, expected.len());
+                                }
+                            }
+                            for resource in ["estimated work", "result rows", "result bytes", "kernel workspace bytes"] {
+                                let mut refused = limits;
+                                let mut denied = exact;
+                                match resource {
+                                    "estimated work" => refused.max_estimated_work -= 1,
+                                    "result rows" => refused.max_result_rows -= 1,
+                                    "result bytes" => denied.max_result_bytes -= 1,
+                                    "kernel workspace bytes" if denied.max_kernel_workspace_bytes > 0 => denied.max_kernel_workspace_bytes -= 1,
+                                    _ => continue,
+                                }
+                                for cooperative in [false, true] {
+                                    let refusal = if cooperative {
+                                        call.execute_sealed_cooperative(&cx, &graph, refused, denied, quantum(7), yield_now).await
+                                    } else { call.execute_sealed(&cx, &graph, refused, denied) };
+                                    assert!(matches!(refusal, Err(FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded { resource: observed, .. })) if observed == resource));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn shallow_bfs_isolated_sources_need_no_population_workspace_or_work_allowance() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let mut prior_checks = [None, None];
+        for n in [1, 65, 1000] {
+            let db = small_database(&contexts.commit(), n, false).await;
+            let opt = options(Directedness::Directed);
+            let graph = projection(&db, &cx, opt).await;
+            for cutoff in [0, 1] {
+                let call = FnxCallSpec::single_source_shortest_path_length(
+                    VId((n - 1) as u128),
+                    Some(cutoff),
+                );
+                let limits = FnxExecutionLimits {
+                    max_iterations: 0,
+                    max_result_rows: 1,
+                    max_estimated_work: 128,
+                };
+                let memory = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: 0,
+                    ..memory()
+                };
+                let checks = Cell::new(0);
+                let actual = call
+                    .execute_sealed_with_checkpoint(&cx, &graph, limits, memory, || {
+                        checks.set(checks.get() + 1);
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(
+                    actual.rows,
+                    vec![vec![
+                        FnxValue::Vertex(VId((n - 1) as u128)),
+                        FnxValue::Integer(0)
+                    ]]
+                );
+                assert_eq!(actual.certificate.kernel_workspace_bytes, 0);
+                assert!(actual.certificate.estimated_work <= 128);
+                assert_eq!(
+                    *prior_checks[cutoff].get_or_insert(checks.get()),
+                    checks.get(),
+                    "the CALL has no hidden vertex-population pass"
+                );
+                let cooperative = call
+                    .execute_sealed_cooperative(&cx, &graph, limits, memory, quantum(1), yield_now)
+                    .await
+                    .unwrap();
+                compare_execution(&cooperative, &actual);
+                compare_retained(
+                    call.execute_sealed_rows(&cx, &graph, limits, memory)
+                        .unwrap(),
+                    &actual,
+                    1,
+                );
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn shallow_bfs_real_stars_preserve_the_incumbent_exact_work_budget() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        for n in [1, 129] {
+            let mut db = small_database(&commit, n, false).await;
+            let mut batch = WriteBatch::new(RelationId(1));
+            for target in 0..n {
+                batch.add_edge(EId(100 + target as u128), VId(0), VId(target as u128),
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(-1))]);
+            }
+            db.write(&commit, batch).await.unwrap();
+            let opt = options(Directedness::Directed);
+            let graph = projection(&db, &cx, opt).await;
+            let incumbent = FnxCallSpec::single_source_shortest_path_length(VId(0), None)
+                .execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
+            assert_eq!(incumbent.certificate.execution_kernel, "fgdb-prism/sealed-bfs-complete-population-v2");
+            let limits = FnxExecutionLimits { max_iterations: 0, max_result_rows: n,
+                max_estimated_work: incumbent.certificate.estimated_work };
+            for cutoff in [0, 1] {
+                let call = FnxCallSpec::single_source_shortest_path_length(VId(0), Some(cutoff));
+                let actual = call.execute_sealed(&cx, &graph, limits, memory()).unwrap();
+                let expected: Vec<_> = incumbent.rows.iter().filter(|row| matches!(row[1], FnxValue::Integer(distance) if distance <= cutoff as u64)).cloned().collect();
+                assert_eq!(actual.rows, expected);
+                assert!(actual.certificate.estimated_work <= limits.max_estimated_work);
+                let exact = FnxMemoryLimits { max_kernel_workspace_bytes: if cutoff == 0 { 0 } else { (n - 1) * size_of::<usize>() }, ..memory() };
+                assert_eq!(call.execute_sealed(&cx, &graph, limits, exact).unwrap(), actual);
+                compare_retained(call.execute_sealed_rows(&cx, &graph, limits, exact).unwrap(), &actual, expected.len());
+                let cooperative = call.execute_sealed_cooperative(&cx, &graph, limits, exact, quantum(7), yield_now).await.unwrap();
+                compare_execution(&cooperative, &actual);
+                let denied = FnxExecutionLimits { max_estimated_work: actual.certificate.estimated_work - 1, ..limits };
+                assert!(matches!(call.execute_sealed(&cx, &graph, denied, exact), Err(FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded { resource: "estimated work", .. }))));
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn shallow_bfs_all_live_cuts_and_unknown_sources_keep_complete_admission() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = small_database(&commit, 3, true).await;
+        let opt = options(Directedness::Directed);
+        let graph = projection(&db, &cx, opt).await;
+        for cutoff in [0, 1] {
+            let call = FnxCallSpec::single_source_shortest_path_length(VId(0), Some(cutoff));
+            for cooperative in [false, true] {
+                let checks = Cell::new(0);
+                let count = || {
+                    checks.set(checks.get() + 1);
+                    Ok(())
+                };
+                if cooperative {
+                    call.execute_sealed_cooperative_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(3),
+                        yield_now,
+                        count,
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    call.execute_sealed_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        count,
+                    )
+                    .unwrap();
+                }
+                for stop in 1..=checks.get() {
+                    let seen = Cell::new(0);
+                    let guard = || {
+                        seen.set(seen.get() + 1);
+                        if seen.get() == stop {
+                            Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                        } else {
+                            Ok(())
+                        }
+                    };
+                    let failure = if cooperative {
+                        call.execute_sealed_cooperative_rows_with_checkpoint(
+                            &cx,
+                            &graph,
+                            opt.execution_limits,
+                            memory(),
+                            quantum(3),
+                            yield_now,
+                            guard,
+                        )
+                        .await
+                        .unwrap_err()
+                    } else {
+                        call.execute_sealed_rows_with_checkpoint(
+                            &cx,
+                            &graph,
+                            opt.execution_limits,
+                            memory(),
+                            guard,
+                        )
+                        .unwrap_err()
+                    };
+                    live_refusal(failure, stop);
+                    assert_eq!(seen.get(), stop);
+                }
+            }
+            let missing =
+                FnxCallSpec::single_source_shortest_path_length(VId(u128::MAX), Some(cutoff));
+            assert!(matches!(
+                missing.execute_sealed(&cx, &graph, opt.execution_limits, memory()),
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::UnknownSource(VId(u128::MAX))
+                ))
+            ));
+            assert!(matches!(
+                missing
+                    .execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(1),
+                        || -> std::future::Ready<()> {
+                            panic!("source admission precedes yielding")
+                        }
+                    )
+                    .await,
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::UnknownSource(VId(u128::MAX))
+                ))
+            ));
+        }
+        // A trivial cutoff cannot bypass full projection admission on an
+        // unreachable selected row with a malformed weight.
+        let mut change = WriteBatch::new(RelationId(1));
+        for vertex in [10, 11] {
+            change.create_vertex(VId(vertex), vec![LabelId(1)], vec![]);
+        }
+        change.add_edge(
+            EId(99),
+            VId(10),
+            VId(11),
+            vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+        );
+        db.write(&commit, change).await.unwrap();
+        let call = FnxCallSpec::single_source_shortest_path_length(VId(0), Some(0));
+        assert!(matches!(
+            db.execute_fnx_sealed_cooperative(
+                &cx,
+                &call,
+                opt,
+                memory(),
+                SealedLimits::default(),
+                quantum(1)
+            )
+            .await,
+            Err(FnxSealedReadError::Projection(
+                SealedProjectionError::Weight { edge: EId(99), .. }
+            ))
+        ));
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
@@ -800,9 +1139,9 @@ fn measure_compressed_bfs_database_to_result_against_queue_fallback() {
                 max_kernel_workspace_bytes: 2 * n * size_of::<usize>(),
                 ..memory()
             };
-            // Workspace is the only differing request field. It selects the
-            // unchanged production queue fallback without altering graph,
-            // source, cutoff, result limits, work limits or sealing limits.
+            // Workspace is the only differing request field. General BFS
+            // selects the unchanged queue fallback. The cutoff-one shape is
+            // a negative control: both requests now use sparse shallow BFS.
             let incumbent = sample(&db, &cx, &call, opt, queue_memory).await;
             let candidate = sample(&db, &cx, &call, opt, memory()).await;
             assert_eq!(incumbent.result_digest, candidate.result_digest);

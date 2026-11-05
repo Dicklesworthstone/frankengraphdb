@@ -18,7 +18,9 @@ pub struct FnxExecutionLimits {
     /// Iterative kernels only; traversal kernels have a fixed pass count.
     pub max_iterations: usize,
     pub max_result_rows: usize,
-    /// Admission model: PageRank (n + arcs) * (max_iter + 1), BFS/CC n + arcs,
+    /// Admission model: PageRank (n + arcs) * (max_iter + 1), general BFS/CC n + arcs,
+    /// zero/one-hop BFS its source lookup, source row and possible output,
+    /// capped by the incumbent BFS model whenever that bound is representable,
     /// WCC n + 2*arcs, SCC 2*(n + arcs). Dijkstra includes heap sift height,
     /// or 5*n+2*arcs when proven unit weights permit an exact FIFO traversal.
     /// Triangle kernels include forward-CSR construction and a lower-degree
@@ -393,9 +395,10 @@ impl FnxRowCursor {
         self.max_integer
     }
 
-    /// Fill a reusable row buffer. Every examined vertex checks live control,
-    /// including unreachable gaps; a cancellation leaves the current vertex
-    /// unconsumed. The buffer is empty on exhaustion and provisional on error.
+    /// Fill a reusable row buffer. Every examined result position checks live
+    /// control, including unreachable gaps in dense results; sparse shallow
+    /// distances visit only their retained rows. Cancellation leaves the current
+    /// position unconsumed. The buffer is empty on exhaustion and provisional on error.
     /// No successful call can fail a value-domain validation: the complete
     /// immutable result was already validated and hashed before construction.
     pub fn next_row<C>(
@@ -474,6 +477,35 @@ impl HopDistance {
     }
 }
 
+#[path = "shallow_bfs.rs"]
+pub(crate) mod shallow_bfs;
+
+impl<C> From<shallow_bfs::Error> for FnxExecutionError<C> {
+    fn from(error: shallow_bfs::Error) -> Self {
+        match error {
+            shallow_bfs::Error::InvalidRow => Self::InvalidUpstreamResult,
+            shallow_bfs::Error::SizeOverflow => Self::SizeOverflow,
+            shallow_bfs::Error::AllocationFailed => Self::AllocationFailed,
+            shallow_bfs::Error::Workspace { requested, limit } => Self::LimitExceeded {
+                resource: "kernel workspace bytes",
+                requested,
+                limit,
+            },
+        }
+    }
+}
+
+pub(crate) fn shallow_admission_work<C>(
+    neighborhood: Result<usize, shallow_bfs::Error>,
+    incumbent: Option<usize>,
+) -> Result<usize, FnxExecutionError<C>> {
+    match (neighborhood, incumbent) {
+        (Ok(work), Some(prior)) => Ok(work.min(prior)),
+        (Ok(work), None) | (Err(shallow_bfs::Error::SizeOverflow), Some(work)) => Ok(work),
+        (Err(error), _) => Err(error.into()),
+    }
+}
+
 pub(crate) enum KernelValues {
     Scores(Vec<f64>),
     HubsAndAuthorities {
@@ -481,6 +513,9 @@ pub(crate) enum KernelValues {
         authorities: Vec<f64>,
     },
     Distances(Vec<Option<HopDistance>>),
+    /// Canonical source plus its one-hop neighbors; indexes select sparse
+    /// result positions rather than every projected vertex.
+    ShallowDistances(shallow_bfs::Distances),
     /// The exact pre-compaction scalar BFS control keeps its original array
     /// width for differential and paired measurements. Never a product path.
     #[cfg(test)]
@@ -512,6 +547,7 @@ pub(crate) struct KernelOutput {
 impl KernelValues {
     pub(crate) fn scan_len(&self, population: usize) -> usize {
         match self {
+            Self::ShallowDistances(values) => values.len(),
             Self::TargetDistance { distance, .. } => usize::from(distance.is_some()),
             Self::TargetHopDistance { distance, .. } => usize::from(distance.is_some()),
             _ => population,
@@ -525,6 +561,7 @@ impl KernelValues {
                 index < hubs.len() && index < authorities.len()
             }
             Self::Distances(values) => values.get(index).is_some_and(Option::is_some),
+            Self::ShallowDistances(values) => index < values.len(),
             #[cfg(test)]
             Self::WideDistances(values) => values.get(index).is_some_and(Option::is_some),
             Self::Components(values) => index < values.len(),
@@ -543,6 +580,16 @@ impl KernelValues {
         vertices: &[VId],
     ) -> Result<FnxValue, FnxExecutionError<C>> {
         match (field, self) {
+            (FnxOutput::Vertex, Self::ShallowDistances(values)) => {
+                let (vertex, _) = values
+                    .get(index)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                vertices
+                    .get(vertex)
+                    .copied()
+                    .map(FnxValue::Vertex)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)
+            }
             (FnxOutput::Vertex, Self::TargetDistance { target, .. })
             | (FnxOutput::Vertex, Self::TargetHopDistance { target, .. }) => {
                 if !self.contains(index) {
@@ -603,6 +650,12 @@ impl KernelValues {
                 Ok(FnxValue::Integer(
                     u64::try_from(distance.hops()).map_err(|_| FnxExecutionError::SizeOverflow)?,
                 ))
+            }
+            (FnxOutput::Distance, Self::ShallowDistances(values)) => {
+                let (_, distance) = values
+                    .get(index)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                Ok(FnxValue::Integer(distance as u64))
             }
             #[cfg(test)]
             (FnxOutput::Distance, Self::WideDistances(values)) => {
@@ -1536,12 +1589,37 @@ impl FnxCallSpec {
         ) {
             admit("result rows", n, limits.max_result_rows)?;
         }
+        let shallow_degree = match algorithm {
+            FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff }
+                if shallow_bfs::eligible(cutoff) =>
+            {
+                // Unknown sources retain the ordinary admission/error path.
+                // Valid shallow calls inspect only their admitted source row.
+                graph
+                    .vertex_ordinal(source)
+                    .map(|source| {
+                        if cutoff == Some(0) {
+                            Ok(0)
+                        } else {
+                            graph
+                                .neighbors_indices(source)
+                                .map(<[usize]>::len)
+                                .ok_or(FnxExecutionError::InvalidUpstreamResult)
+                        }
+                    })
+                    .transpose()?
+            }
+            _ => None,
+        };
         // The builder already checked every row boundary, and its final
         // immutable offset is the exact arc count (including both directions of
         // undirected edges, but only one incidence per self-loop). Retain the
         // scan's logical admission units and refusal order without reopening
         // every row on every CALL. A scalar meter still sees every unit.
-        charge_runs(n, &mut checkpoint)?;
+        // Shallow BFS has no population pass to charge.
+        if shallow_degree.is_none() {
+            charge_runs(n, &mut checkpoint)?;
+        }
         let arcs = *graph
             .outgoing_offsets()
             .last()
@@ -1562,6 +1640,23 @@ impl FnxCallSpec {
             _ => false,
         };
         let estimated_work = match algorithm {
+            FnxAlgorithm::SingleSourceShortestPathLength { .. } if shallow_degree.is_some() => {
+                let lookup = 2 * (usize::BITS - n.leading_zeros()) as usize;
+                // Sparse execution removes the incumbent's population work.
+                // Keep its admitted quotas when the finer neighborhood model
+                // counts output columns more heavily: these are model units,
+                // not CPU counters. Either finite bound survives the other's
+                // arithmetic overflow; unrelated errors remain refusals.
+                Some(shallow_admission_work(
+                    shallow_bfs::work(
+                        n,
+                        shallow_degree.ok_or(FnxExecutionError::InvalidUpstreamResult)?,
+                        self.outputs().len(),
+                        lookup,
+                    ),
+                    n.checked_add(arcs),
+                )?)
+            }
             FnxAlgorithm::PageRank(options) => n.checked_add(arcs).and_then(|step| {
                 options
                     .max_iter()
@@ -1626,6 +1721,9 @@ impl FnxCallSpec {
         }
         .ok_or(FnxExecutionError::SizeOverflow)?;
         admit("estimated work", estimated_work, limits.max_estimated_work)?;
+        if shallow_degree.is_some() {
+            execution_kernel = "fgdb-prism/bfs-shallow-sparse-v1";
+        }
         let word = std::mem::size_of::<usize>();
         let mut kernel_workspace_bytes = match algorithm {
             // Successful PageRank returns its measured allocation peak below.
@@ -1634,6 +1732,7 @@ impl FnxCallSpec {
             | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
             | FnxAlgorithm::DijkstraPathLength { .. }
             | FnxAlgorithm::ShortestPathLength { .. } => 0,
+            FnxAlgorithm::SingleSourceShortestPathLength { .. } if shallow_degree.is_some() => 0,
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 crate::clustering::workspace_bytes::<C>(n, graph.edge_count())?
             }
@@ -2066,6 +2165,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("execute.rs"));
         hash_text(&mut hash, include_str!("projection.rs"));
         hash_text(&mut hash, include_str!("traversal.rs"));
+        hash_text(&mut hash, include_str!("shallow_bfs.rs"));
         hash_text(&mut hash, include_str!("target_bfs.rs"));
         hash_text(&mut hash, include_str!("target_bidirectional.rs"));
         hash_text(&mut hash, include_str!("call.rs"));
@@ -2865,8 +2965,10 @@ mod tests {
 
     #[test]
     fn completed_rows_check_sparse_gaps_and_retry_without_losing_a_vertex() {
-        let graph = projection(2, Directedness::Directed);
-        let call = FnxCallSpec::single_source_shortest_path_length(VId(0), Some(0));
+        // General BFS still retains and controls unreachable dense positions;
+        // shallow results separately test that they have no population tail.
+        let graph = projection(0, Directedness::Directed);
+        let call = FnxCallSpec::single_source_shortest_path_length(VId(0), None);
         let limits = FnxExecutionLimits {
             max_iterations: 1,
             max_result_rows: 3,

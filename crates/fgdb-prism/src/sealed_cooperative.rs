@@ -20,6 +20,7 @@ use super::{
     SealedGraphView, SealedNeighborCursor, add, admit, checkpoint, execution_pass_work,
     finish_encoded, mul, require_loop_free_degree, reserve,
 };
+use crate::execute::shallow_bfs;
 use crate::sealed_control::{Control, Guard};
 use crate::shortest_path::{Entry, IndexedHeap};
 use crate::{DijkstraOptions, FoundationAlgorithm, SealedProjectionError};
@@ -667,17 +668,33 @@ impl FnxCallSpec {
                         source,
                     )
                 }
-                FnxAlgorithm::SingleSourceShortestPathLength { source, .. } => {
+                FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff } => {
                     let ordinal = graph
                         .vertex_ordinal(source)
                         .ok_or(ExecutionError::UnknownSource(source))?;
                     admission.rows(1)?;
-                    (
-                        "fgdb-prism/sealed-bfs-complete-population-cooperative-v2",
-                        pass,
-                        mul(n, size_of::<usize>() + size_of::<Option<HopDistance>>())?,
-                        Some(ordinal),
-                    )
+                    if shallow_bfs::eligible(cutoff) {
+                        let (work, workspace) = super::shallow_bfs_plan(
+                            graph,
+                            ordinal,
+                            cutoff,
+                            self.outputs().len(),
+                            &admission,
+                        )?;
+                        (
+                            "fgdb-prism/sealed-bfs-shallow-sparse-cooperative-v1",
+                            work,
+                            workspace,
+                            Some(ordinal),
+                        )
+                    } else {
+                        (
+                            "fgdb-prism/sealed-bfs-complete-population-cooperative-v2",
+                            pass,
+                            mul(n, size_of::<usize>() + size_of::<Option<HopDistance>>())?,
+                            Some(ordinal),
+                        )
+                    }
                 }
                 FnxAlgorithm::SingleSourceDijkstraPathLength(options)
                 | FnxAlgorithm::DijkstraPathLength { options, .. } => {
@@ -771,14 +788,22 @@ impl FnxCallSpec {
                     pagerank(graph, options, source, &mut control).await?
                 }
                 FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => {
-                    bfs(
-                        graph,
-                        source.ok_or(ExecutionError::InvalidUpstreamResult)?,
-                        cutoff,
-                        &admission,
-                        &mut control,
-                    )
-                    .await?
+                    let source = source.ok_or(ExecutionError::InvalidUpstreamResult)?;
+                    if shallow_bfs::eligible(cutoff) {
+                        let (output, actual) = shallow_bfs(
+                            graph,
+                            source,
+                            cutoff,
+                            &admission,
+                            memory.max_kernel_workspace_bytes,
+                            &mut control,
+                        )
+                        .await?;
+                        workspace = actual;
+                        output
+                    } else {
+                        bfs(graph, source, cutoff, &admission, &mut control).await?
+                    }
                 }
                 FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
                     dijkstra(
@@ -1414,6 +1439,55 @@ where
             witness,
         },
         frames.workspace(),
+    ))
+}
+
+async fn shallow_bfs<Yield, YieldFuture>(
+    graph: &SealedGraphView,
+    source: usize,
+    cutoff: Option<usize>,
+    admission: &ResultAdmission,
+    workspace_limit: usize,
+    control: &mut Cooperate<'_, Yield, impl Guard>,
+) -> Result<(KernelOutput, usize)>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    admission.rows(1)?;
+    control.tick().await?;
+    let n = graph.node_count();
+    let degree = if cutoff == Some(0) {
+        0
+    } else {
+        graph
+            .degree(source)
+            .ok_or(ExecutionError::InvalidUpstreamResult)?
+    };
+    let maximum = shallow_bfs::capacity(n, degree, admission.backing_rows())?;
+    let mut state = shallow_bfs::Search::new(n, source, maximum, workspace_limit)?;
+    let mut witness = super::shallow_bfs_witness();
+    if cutoff != Some(0) {
+        control.tick().await?;
+        let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
+        while let Some((neighbor, _)) = control.next(&mut row).await? {
+            control.tick().await?;
+            witness.edges_scanned = add(witness.edges_scanned, 1)?;
+            state.visit(neighbor, &mut |rows| admission.rows(rows))?;
+        }
+    }
+    // Raw history, excluded endpoints and a final fallible EOF all consume
+    // the same cooperative fuel as ordinary scans. No result escapes early.
+    control.tick().await?;
+    let row_count = state.row_count();
+    let workspace = state.workspace_bytes();
+    Ok((
+        KernelOutput {
+            values: KernelValues::ShallowDistances(state.finish()),
+            row_count,
+            witness,
+        },
+        workspace,
     ))
 }
 
