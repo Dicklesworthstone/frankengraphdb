@@ -732,12 +732,22 @@ impl<V: Vfs + Clone> Database<V> {
                 self.prepare_standing_components(cx, query.relation, policy)?,
             )),
             StandingQuery::CoreNumbers(query) => {
-                StandingQuery::CoreNumbers(Box::new(self.prepare_standing_core_numbers(
-                    cx,
-                    query.relation,
-                    policy,
-                    query.has_value_rows(),
-                )?))
+                let state = if let Some(definition) = query.selected {
+                    self.prepare_standing_selected_core_numbers(
+                        cx,
+                        definition,
+                        policy,
+                        query.has_value_rows(),
+                    )?
+                } else {
+                    self.prepare_standing_core_numbers(
+                        cx,
+                        query.relation,
+                        policy,
+                        query.has_value_rows(),
+                    )?
+                };
+                StandingQuery::CoreNumbers(Box::new(state))
             }
             StandingQuery::Set(query) => StandingQuery::Set(Box::new(self.prepare_standing_set(
                 cx,
@@ -1021,7 +1031,9 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Components(query) => {
                 query.maintain_with_sources(cx, batch, prior, &mut meter)
             }
-            StandingQuery::CoreNumbers(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::CoreNumbers(query) => {
+                query.maintain_with_sources(cx, batch, prior, &mut meter)
+            }
             StandingQuery::Set(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Join(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Projection(query) => query.maintain(batch, prior, &mut meter),

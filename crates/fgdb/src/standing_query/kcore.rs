@@ -7,17 +7,25 @@ mod rows;
 use super::*;
 use fgdb_delta_types::zset::committed::CommittedEdgeInput;
 use fgdb_delta_types::zset::components::kcore::{CoreError, IncrementalCoreNumbers};
+use fgdb_delta_types::zset::set::SetOperation;
 use fgdb_delta_types::{LimbLimit, ZWeight};
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 
+#[derive(Debug, PartialEq, Eq)]
+enum Input {
+    Committed(CommittedEdgeInput),
+    Selected(components::relation::VertexSupport),
+}
+
 pub(crate) struct State {
-    input: CommittedEdgeInput,
+    input: Input,
     cores: IncrementalCoreNumbers<VId>,
     rows: ZSet<(VId, u64)>,
     relational: Option<rows::State>,
     // None retains the whole-graph selector, including future relation types.
     pub(super) relation: Option<RelationId>,
+    pub(super) selected: Option<components::relation::Definition>,
     pub(super) policy: GqlQueryPolicy,
     pub(super) frontier: CommitSeq,
     pub(super) stats: StandingQueryStats,
@@ -54,31 +62,110 @@ impl State {
         batch: &LogicalDeltaBatch,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        if self.frontier != self.input.frontier() {
+        let Input::Committed(input) = &mut self.input else {
+            return Err(StandingQueryFailure::InvalidDelta);
+        };
+        if self.selected.is_some() || self.frontier != input.frontier() {
             return Err(StandingQueryFailure::InvalidDelta);
         }
         recursive::observe_batch(batch, meter)?;
-        let input = self
-            .input
+        let input = input
             .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
             .map_err(components::input_error)?;
         // Global vertex membership is projected only after full batch admission.
         let vertices = components::vertex_delta(batch, meter)?;
         let edges = components::project(input.delta(), self.relation, meter)?;
-        let pending = self
-            .cores
-            .prepare(&vertices, &edges, LIMBS, &mut |event| meter.charge(event))
+        Self::apply_topology(
+            &mut self.cores,
+            &mut self.rows,
+            &mut self.relational,
+            &vertices,
+            &edges,
+            meter,
+        )?;
+        let _ = input.commit();
+        Ok(())
+    }
+
+    /// Selected inputs consume the accepted parent derivative at this same
+    /// commit. A failed parent or a rebuilt baseline is never an empty tick.
+    pub(super) fn maintain_with_sources(
+        &mut self,
+        cx: &CommitCx,
+        batch: &LogicalDeltaBatch,
+        sources: &[StandingQuery],
+        meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        let Some(definition) = self.selected else {
+            return self.maintain(cx, batch, meter);
+        };
+        meter.charge(ZSetEvent::Work)?;
+        let at = batch.commit_seq();
+        if self.frontier.checked_successor().ok() != Some(at)
+            || batch.frontier() != at
+            || batch.commit_marker_identity().commit_seq != at
+        {
+            return Err(StandingQueryFailure::InvalidDelta);
+        }
+        let source = sets::input_at(sources, definition.input, at)?;
+        if !definition.matches_schema(source) {
+            return Err(StandingQueryFailure::DependencyUnavailable);
+        }
+        let delta = sets::delta(source).ok_or(StandingQueryFailure::DependencyUnavailable)?;
+        meter.stats.delta_rows =
+            u64::try_from(delta.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
+        self.apply_selected(delta, meter)
+    }
+
+    fn apply_selected(
+        &mut self,
+        delta: &ZSet<GraphValueRow>,
+        meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        let definition = self.selected.ok_or(StandingQueryFailure::InvalidDelta)?;
+        let Input::Selected(support) = &mut self.input else {
+            return Err(StandingQueryFailure::InvalidDelta);
+        };
+        let projection = components::relation::project_rows(delta, definition, meter)?;
+        let vertices = support
+            .prepare(&projection.vertices, &ZSet::new(), LIMBS, &mut |event| {
+                meter.charge(event)
+            })
+            .map_err(components::relation::support_error)?;
+        // Presence derives from integrated witness counts. Keep its guard
+        // pending until the core kernel and both sinks have accepted, so a
+        // shared/duplicate endpoint retires only with its final witness.
+        Self::apply_topology(
+            &mut self.cores,
+            &mut self.rows,
+            &mut self.relational,
+            vertices.delta(),
+            &projection.edges,
+            meter,
+        )?;
+        let _ = vertices.commit();
+        Ok(())
+    }
+
+    fn apply_topology(
+        cores: &mut IncrementalCoreNumbers<VId>,
+        rows: &mut ZSet<(VId, u64)>,
+        relational: &mut Option<rows::State>,
+        vertices: &ZSet<VId>,
+        edges: &ZSet<(VId, VId)>,
+        meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        let pending = cores
+            .prepare(vertices, edges, LIMBS, &mut |event| meter.charge(event))
             .map_err(core_error)?;
         meter.stats.affected_vertices = u64::try_from(pending.affected_vertices())
             .map_err(|_| StandingQueryFailure::Arithmetic)?;
         // A vertex has one final number, irrespective of a changed shell value.
         components::result_bound(pending.vertex_count(), meter.policy)?;
-        let sink = self
-            .rows
+        let sink = rows
             .prepare_update(pending.delta(), LIMBS, &mut |event| meter.charge(event))
             .map_err(zset_error)?;
-        let native = self
-            .relational
+        let native = relational
             .as_mut()
             .map(|rows| rows.prepare(pending.delta(), pending.vertex_count(), meter))
             .transpose()?;
@@ -92,14 +179,60 @@ impl State {
             }
         }
         (meter.checkpoint)()?;
+        // Input guards remain pending until all fallible work above succeeds.
         // No recoverable operation separates the accepted publications.
         let _ = pending.commit();
         sink.commit();
         if let Some(native) = native {
             native.commit();
         }
-        let _ = input.commit();
         Ok(())
+    }
+
+    fn from_selected(
+        source: &ZSet<GraphValueRow>,
+        definition: components::relation::Definition,
+        frontier: CommitSeq,
+        native_rows: bool,
+        meter: &mut Meter<'_>,
+    ) -> Result<Self, StandingQueryFailure> {
+        let projection = components::relation::project_rows(source, definition, meter)?;
+        let mut support = components::relation::VertexSupport::new(SetOperation::UnionDistinct);
+        let vertices = support
+            .prepare(&projection.vertices, &ZSet::new(), LIMBS, &mut |event| {
+                meter.charge(event)
+            })
+            .map_err(components::relation::support_error)?;
+        let mut cores = IncrementalCoreNumbers::new();
+        let pending = cores
+            .prepare(vertices.delta(), &projection.edges, LIMBS, &mut |event| {
+                meter.charge(event)
+            })
+            .map_err(core_error)?;
+        components::result_bound(pending.vertex_count(), meter.policy)?;
+        meter.stats.affected_vertices = u64::try_from(pending.affected_vertices())
+            .map_err(|_| StandingQueryFailure::Arithmetic)?;
+        (meter.checkpoint)()?;
+        let rows = pending.commit();
+        let relational = if native_rows {
+            Some(rows::State::from_numbers(&rows, meter)?)
+        } else {
+            None
+        };
+        // The candidate is private until every native row is also admitted.
+        let _ = vertices.commit();
+        Ok(Self {
+            input: Input::Selected(support),
+            cores,
+            rows,
+            relational,
+            relation: None,
+            selected: Some(definition),
+            policy: meter.policy,
+            frontier,
+            stats: meter.stats,
+            failure: None,
+        })
     }
 
     fn from_snapshot(
@@ -128,11 +261,12 @@ impl State {
             None
         };
         Ok(Self {
-            input,
+            input: Input::Committed(input),
             cores,
             rows,
             relational,
             relation,
+            selected: None,
             policy: meter.policy,
             frontier: snapshot.frontier,
             stats: meter.stats,
@@ -188,6 +322,56 @@ impl<V: Vfs + Clone> Database<V> {
             };
             State::from_snapshot(&self.snapshot, relation, native_rows, &mut meter)
                 .map_err(StandingQueryError::Maintenance)
+        })
+    }
+
+    pub(super) fn prepare_standing_selected_core_numbers(
+        &self,
+        cx: &QueryCx,
+        definition: components::relation::Definition,
+        policy: GqlQueryPolicy,
+        native_rows: bool,
+    ) -> Result<State, StandingQueryError> {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        self.ensure_readable().map_err(StandingQueryError::Read)?;
+        cx.with_restriction(|| {
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            let mut prepare = || {
+                meter.charge(ZSetEvent::Work)?;
+                let parent = sets::input_at(
+                    &self.standing_queries,
+                    definition.input,
+                    self.snapshot.frontier,
+                )?;
+                if !definition.matches_schema(parent) {
+                    return Err(StandingQueryFailure::DependencyUnavailable);
+                }
+                let rows = sets::rows(parent).ok_or(StandingQueryFailure::DependencyUnavailable)?;
+                if meter
+                    .policy
+                    .rows
+                    .max_snapshot_records()
+                    .is_some_and(|limit| rows.len() as u128 > u128::from(limit))
+                {
+                    return Err(StandingQueryFailure::SnapshotBudget);
+                }
+                State::from_selected(
+                    rows,
+                    definition,
+                    self.snapshot.frontier,
+                    native_rows,
+                    &mut meter,
+                )
+            };
+            prepare().map_err(StandingQueryError::Maintenance)
         })
     }
 

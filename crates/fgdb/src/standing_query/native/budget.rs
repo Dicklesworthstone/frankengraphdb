@@ -93,6 +93,7 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
     }
     if let Some((source, _)) = set::analytic_procedure(query)? {
         if let set::AnalyticSource::SelectedComponents { input, .. }
+        | set::AnalyticSource::SelectedCoreNumbers { input }
         | set::AnalyticSource::SelectedTriangleCounts { input, .. } = source
         {
             // The induced graph owns both labelled source leaves and their

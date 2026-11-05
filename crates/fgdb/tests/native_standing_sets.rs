@@ -93,6 +93,7 @@ fn selected_analytic_text(metric: &str, relation: Option<RelationId>) -> String 
     let field = match metric {
         "triangles" => "triangles",
         "clustering_coefficient" => "score",
+        "core_number" => "core",
         _ => unreachable!(),
     };
     format!(
@@ -102,8 +103,46 @@ fn selected_analytic_text(metric: &str, relation: Option<RelationId>) -> String 
     )
 }
 
-// Enumerate unordered triples in the induced simple graph. The oracle uses
-// neither Prism's intersection kernel nor the maintained triangle derivative.
+// Exhaust every induced subset and its minimum degree. A vertex's core is
+// the largest such minimum among subsets containing it; neither Prism nor the
+// maintained peeling kernel supplies this oracle. Fixtures have at most six
+// vertices, so the complete subset space contains at most 64 entries.
+fn selected_core_oracle(
+    vertices: &BTreeSet<VId>,
+    edges: &BTreeSet<(VId, VId)>,
+) -> BTreeMap<VId, i64> {
+    assert!(vertices.len() <= 6);
+    let ordered: Vec<_> = vertices.iter().copied().collect();
+    let mut cores: BTreeMap<_, _> = vertices.iter().map(|&vertex| (vertex, 0)).collect();
+    for mask in 1..(1_u64 << ordered.len()) {
+        let selected: Vec<_> = ordered
+            .iter()
+            .enumerate()
+            .filter_map(|(bit, &vertex)| (mask & (1 << bit) != 0).then_some(vertex))
+            .collect();
+        let degree = selected
+            .iter()
+            .map(|&vertex| {
+                selected
+                    .iter()
+                    .filter(|&&other| {
+                        vertex != other && edges.contains(&(vertex.min(other), vertex.max(other)))
+                    })
+                    .count()
+            })
+            .min()
+            .unwrap();
+        let degree = i64::try_from(degree).unwrap();
+        for vertex in selected {
+            let core = cores.get_mut(&vertex).unwrap();
+            *core = (*core).max(degree);
+        }
+    }
+    cores
+}
+
+// Count unordered triples for triangles/clustering, or induced subsets for
+// core numbers, over the independently reconstructed selected simple graph.
 fn selected_analytic_oracle(
     db: &Database<MemVfs>,
     metric: &str,
@@ -135,25 +174,31 @@ fn selected_analytic_oracle(
         })
         .collect();
     let adjacent = |a: VId, b: VId| edges.contains(&(a.min(b), a.max(b)));
-    let mut counts: BTreeMap<_, i64> = vertices.iter().map(|&vertex| (vertex, 0)).collect();
-    for &a in &vertices {
-        for &b in vertices.range((std::ops::Bound::Excluded(a), std::ops::Bound::Unbounded)) {
-            for &c in vertices.range((std::ops::Bound::Excluded(b), std::ops::Bound::Unbounded)) {
-                if adjacent(a, b) && adjacent(a, c) && adjacent(b, c) {
-                    for vertex in [a, b, c] {
-                        *counts.get_mut(&vertex).unwrap() += 1;
+    let counts = if metric == "core_number" {
+        selected_core_oracle(&vertices, &edges)
+    } else {
+        let mut counts: BTreeMap<_, i64> = vertices.iter().map(|&vertex| (vertex, 0)).collect();
+        for &a in &vertices {
+            for &b in vertices.range((std::ops::Bound::Excluded(a), std::ops::Bound::Unbounded)) {
+                for &c in vertices.range((std::ops::Bound::Excluded(b), std::ops::Bound::Unbounded))
+                {
+                    if adjacent(a, b) && adjacent(a, c) && adjacent(b, c) {
+                        for vertex in [a, b, c] {
+                            *counts.get_mut(&vertex).unwrap() += 1;
+                        }
                     }
                 }
             }
         }
-    }
+        counts
+    };
     QueryResult::Rows {
         columns: vec!["node".into(), "value".into()],
         rows: counts
             .into_iter()
             .map(|(vertex, count)| {
                 let value = match metric {
-                    "triangles" => CanonicalScalar::Int(count),
+                    "triangles" | "core_number" => CanonicalScalar::Int(count),
                     "clustering_coefficient" => {
                         let degree = vertices
                             .iter()
@@ -189,7 +234,7 @@ fn selected_motif_analytics_follow_label_membership_parallel_support_and_rebuild
         // more than six rows. Its self-pairs retain isolates, not result rows.
         let allowance = GqlQueryPolicy::new(100_000, 6, 10_000_000, 10_000_000);
         let mut handles = Vec::new();
-        for metric in ["triangles", "clustering_coefficient"] {
+        for metric in ["triangles", "clustering_coefficient", "core_number"] {
             for relation in [Some(RelationId(1)), None] {
                 let text = selected_analytic_text(metric, relation);
                 let handle = db
@@ -239,8 +284,29 @@ fn selected_motif_analytics_follow_label_membership_parallel_support_and_rebuild
         rejoin.set_vertex_label(VId(u128::MAX), LabelId(1), true);
         let mut unrelated = WriteBatch::new(RelationId(1));
         unrelated.set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(99)));
+        let mut select_isolate = WriteBatch::new(RelationId(1));
+        select_isolate.set_vertex_label(VId(4), LabelId(1), true);
+        let mut grow_core = WriteBatch::new(RelationId(1));
+        for (id, a, b) in [(40, 0, 1), (41, 1, 3), (42, 2, 3)] {
+            grow_core.add_edge(EId(id), VId(a), VId(b), vec![]);
+        }
+        // The complete four-vertex graph has core 3. Cascading its last
+        // vertex's edges lowers the remaining triangle to core 2; both the
+        // self-loop-only vertex and the newly selected isolate stay at 0.
+        let mut retire = WriteBatch::new(RelationId(1));
+        retire.delete_vertex(VId(3));
         for batch in [
-            seed, select, duplicates, last_edge, other, leave, rejoin, unrelated,
+            seed,
+            select,
+            duplicates,
+            last_edge,
+            other,
+            leave,
+            rejoin,
+            unrelated,
+            select_isolate,
+            grow_core,
+            retire,
         ] {
             db.write(&commit, batch).await.unwrap();
             for (metric, relation, text, handle) in &handles {
@@ -274,13 +340,17 @@ fn selected_motif_result_refusal_preserves_commits_and_rebuild_requires_all_inpu
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let params = GqlParameters::new();
         let small = GqlQueryPolicy::new(100_000, 3, 10_000_000, 10_000_000);
-        let text = selected_analytic_text("triangles", Some(RelationId(1)));
-        let limited = db
-            .register_standing_native(&cx, &text, &params, symbols, small)
-            .unwrap();
-        let healthy = db
-            .register_standing_native(&cx, &text, &params, symbols, policy())
-            .unwrap();
+        let mut handles = Vec::new();
+        for metric in ["triangles", "clustering_coefficient", "core_number"] {
+            let text = selected_analytic_text(metric, Some(RelationId(1)));
+            let limited = db
+                .register_standing_native(&cx, &text, &params, symbols, small)
+                .unwrap();
+            let healthy = db
+                .register_standing_native(&cx, &text, &params, symbols, policy())
+                .unwrap();
+            handles.push((metric, limited, healthy));
+        }
         let mut seed = WriteBatch::new(RelationId(1));
         for id in 0..4 {
             seed.create_vertex(
@@ -293,36 +363,54 @@ fn selected_motif_result_refusal_preserves_commits_and_rebuild_requires_all_inpu
             seed.add_edge(EId(id), VId(a), VId(b), vec![]);
         }
         db.write(&commit, seed).await.unwrap();
-        assert_eq!(
-            db.standing_native_query(&cx, &limited, policy()).unwrap(),
-            db.standing_native_query(&cx, &healthy, policy()).unwrap()
-        );
+        for (_, limited, healthy) in &handles {
+            assert_eq!(
+                db.standing_native_query(&cx, limited, policy()).unwrap(),
+                db.standing_native_query(&cx, healthy, policy()).unwrap()
+            );
+        }
         let mut grow = WriteBatch::new(RelationId(1));
         grow.set_vertex_label(VId(3), LabelId(1), true);
         let committed = db.write(&commit, grow).await.unwrap();
         assert_eq!(db.frontier().unwrap(), committed);
-        assert!(matches!(
-            db.standing_native_query(&cx, &limited, policy()),
-            Err(StandingQueryError::Unavailable { .. })
-        ));
-        assert!(db.rebuild_standing_query(&cx, &limited, small).is_err());
-        let expected = selected_analytic_oracle(&db, "triangles", Some(RelationId(1)));
-        assert_eq!(
-            db.standing_native_query(&cx, &healthy, policy()).unwrap().1,
-            expected
-        );
-        db.rebuild_standing_query(&cx, &limited, policy()).unwrap();
-        assert_eq!(
-            db.standing_native_query(&cx, &limited, policy()).unwrap(),
-            (committed, expected)
-        );
+        for (metric, limited, healthy) in &handles {
+            assert!(matches!(
+                db.standing_native_query(&cx, limited, policy()),
+                Err(StandingQueryError::Unavailable { .. })
+            ));
+            assert!(db.rebuild_standing_query(&cx, limited, small).is_err());
+            assert!(matches!(
+                db.standing_native_query(&cx, limited, policy()),
+                Err(StandingQueryError::Unavailable { .. })
+            ));
+            let expected = selected_analytic_oracle(&db, metric, Some(RelationId(1)));
+            assert_eq!(
+                db.standing_native_query(&cx, healthy, policy()).unwrap().1,
+                expected,
+                "healthy sibling after failed rebuild: {metric}"
+            );
+            db.rebuild_standing_query(&cx, limited, policy()).unwrap();
+            assert_eq!(
+                db.standing_native_query(&cx, limited, policy()).unwrap(),
+                (committed, expected),
+                "repaired selected analytics: {metric}"
+            );
+        }
         let mut shrink = WriteBatch::new(RelationId(1));
         shrink.set_vertex_label(VId(1), LabelId(1), false);
         db.write(&commit, shrink).await.unwrap();
-        assert_eq!(
-            db.standing_native_query(&cx, &limited, policy()).unwrap(),
-            db.standing_native_query(&cx, &healthy, policy()).unwrap()
-        );
+        for (metric, limited, healthy) in &handles {
+            let expected = selected_analytic_oracle(&db, metric, Some(RelationId(1)));
+            assert_eq!(
+                db.standing_native_query(&cx, limited, policy()).unwrap().1,
+                expected,
+                "selected source after repaired view advances: {metric}"
+            );
+            assert_eq!(
+                db.standing_native_query(&cx, limited, policy()).unwrap(),
+                db.standing_native_query(&cx, healthy, policy()).unwrap()
+            );
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

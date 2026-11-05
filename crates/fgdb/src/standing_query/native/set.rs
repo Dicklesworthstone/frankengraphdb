@@ -28,6 +28,9 @@ pub(super) enum AnalyticSource {
         strong: bool,
     },
     CoreNumbers(Option<RelationId>),
+    SelectedCoreNumbers {
+        input: Box<PreparedGraphSet>,
+    },
     TriangleCounts(Option<RelationId>, triangle_counts::Output),
     SelectedTriangleCounts {
         input: Box<PreparedGraphSet>,
@@ -60,7 +63,7 @@ fn selected_topology(
 ) -> Result<Box<PreparedGraphSet>, StandingQueryError> {
     // Compile the induced topology through ordinary maintained GLA sources.
     // A selected vertex contributes a self-pair even when it has no edge;
-    // this supplies its lifetime without changing weak or strong membership.
+    // this supplies its lifetime without adding adjacency to another vertex.
     // Edge rows retain counted parallel support and require BOTH labels.
     let mut pattern = GraphPatternBuilder::new();
     pattern
@@ -103,6 +106,18 @@ fn selected_topology(
         )
         .map_err(StandingQueryError::SetSchema)?;
     Ok(Box::new(input))
+}
+
+fn core_source(
+    relation: Option<RelationId>,
+    label: Option<LabelId>,
+) -> Result<AnalyticSource, StandingQueryError> {
+    Ok(match label {
+        Some(label) => AnalyticSource::SelectedCoreNumbers {
+            input: selected_topology(relation, label)?,
+        },
+        None => AnalyticSource::CoreNumbers(relation),
+    })
 }
 
 fn triangle_source(
@@ -149,6 +164,7 @@ pub(super) fn analytic_procedure(
             FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
+                | FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber)
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
         )
@@ -173,7 +189,7 @@ pub(super) fn analytic_procedure(
             if options.projection.self_loops == SelfLoopPolicy::Drop =>
         {
             (
-                AnalyticSource::CoreNumbers(relation),
+                core_source(relation, options.selection.vertex_label)?,
                 GraphSetColumnType::Scalar,
                 FnxOutput::Core,
             )
@@ -389,6 +405,26 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                     self.database
                         .prepare_standing_core_numbers(cx, relation, policy, true)?,
                 )),
+                AnalyticSource::SelectedCoreNumbers { input } => {
+                    let input = self.compile_group_input(
+                        cx,
+                        &input,
+                        group::input_policy(policy),
+                        checkpoint,
+                    )?;
+                    StandingQuery::CoreNumbers(Box::new(
+                        self.database.prepare_standing_selected_core_numbers(
+                            cx,
+                            components::relation::Definition {
+                                input,
+                                endpoints: [0, 1],
+                                width: 2,
+                            },
+                            policy,
+                            true,
+                        )?,
+                    ))
+                }
                 AnalyticSource::TriangleCounts(relation, output) => {
                     StandingQuery::TriangleCounts(Box::new(
                         self.database
@@ -770,7 +806,11 @@ fn rebuild_checked<V: Vfs + Clone>(
             StandingQuery::Projection(query) => mark(query.input, inherited)?,
             StandingQuery::Window(query) => mark(query.input, inherited)?,
             StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {}
-            StandingQuery::CoreNumbers(query) if query.has_value_rows() => {}
+            StandingQuery::CoreNumbers(query) if query.has_value_rows() => {
+                if let Some(definition) = query.selected {
+                    mark(definition.input, true)?;
+                }
+            }
             StandingQuery::TriangleCounts(query) => {
                 if let Some(definition) = query.selected {
                     mark(definition.input, true)?;
@@ -818,14 +858,26 @@ fn rebuild_checked<V: Vfs + Clone>(
                 ))
             }
             StandingQuery::CoreNumbers(query) if query.has_value_rows() => {
-                StandingQuery::CoreNumbers(Box::new(
+                let replacement = if let Some(mut definition) = query.selected {
+                    if definition.input < first || definition.input >= old {
+                        return Err(StandingQueryError::Unsupported);
+                    }
+                    definition.input = staged
+                        .first
+                        .checked_add(definition.input - first)
+                        .ok_or(StandingQueryError::Unsupported)?;
+                    staged
+                        .database
+                        .prepare_standing_selected_core_numbers(cx, definition, policy, true)?
+                } else {
                     staged.database.prepare_standing_core_numbers(
                         cx,
                         query.relation,
                         policy,
                         true,
-                    )?,
-                ))
+                    )?
+                };
+                StandingQuery::CoreNumbers(Box::new(replacement))
             }
             StandingQuery::TriangleCounts(query) => {
                 let replacement = if let Some(mut definition) = query.selected {
@@ -977,6 +1029,14 @@ fn rebuild_checked<V: Vfs + Clone>(
                 query.relation = query.relation.with_selected_input(input);
             }
         } else if let StandingQuery::TriangleCounts(query) = query {
+            if let Some(definition) = &mut query.selected {
+                definition.input = definition
+                    .input
+                    .checked_sub(staged.first)
+                    .and_then(|offset| first.checked_add(offset))
+                    .ok_or(StandingQueryError::Unsupported)?;
+            }
+        } else if let StandingQuery::CoreNumbers(query) = query {
             if let Some(definition) = &mut query.selected {
                 definition.input = definition
                     .input
