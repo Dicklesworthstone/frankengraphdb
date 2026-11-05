@@ -7,9 +7,10 @@
 //! A cumulative one-count per unary-high word locates `select` targets by
 //! binary search, so adversarial zero-word gaps are never traversed linearly.
 //! Scalar `select` is `O(log high_words)` with at most one word inspected after
-//! the directory search. Rank remains a binary search over `select`, and is
-//! therefore `O(log entries * log high_words)`; this module makes no O(1)
-//! rank/select claim.
+//! the directory search. Rank locates the probe's unary-high bucket with the
+//! same directory, then searches only that bucket's packed low fields. Its
+//! cost is `O(log high_words + log bucket_entries)` without another index or
+//! allocation; this module makes no O(1) rank/select claim.
 
 #![forbid(unsafe_code)]
 
@@ -424,20 +425,20 @@ impl EliasFano {
 
     /// Counts represented values less than or equal to `value`.
     ///
-    /// This is a binary search over [`Self::select`], not a constant-time rank
-    /// operation.
+    /// Locating the unary-high bucket takes `O(log high_words)` directory
+    /// probes, followed by `O(log bucket_entries)` packed-low comparisons.
     #[must_use]
     pub fn rank_le(&self, value: u64) -> usize {
-        self.partition_point(|candidate| candidate <= value)
+        self.search_rank(value, true).0
     }
 
     /// Counts represented values strictly less than `value`.
     ///
-    /// This is a binary search over [`Self::select`], not a constant-time rank
-    /// operation.
+    /// Locating the unary-high bucket takes `O(log high_words)` directory
+    /// probes, followed by `O(log bucket_entries)` packed-low comparisons.
     #[must_use]
     pub fn rank_lt(&self, value: u64) -> usize {
-        self.partition_point(|candidate| candidate < value)
+        self.search_rank(value, false).0
     }
 
     /// Returns the last represented value not greater than `value`.
@@ -454,6 +455,93 @@ impl EliasFano {
         self.select(self.rank_lt(value))
     }
 
+    fn search_rank(&self, value: u64, inclusive: bool) -> (usize, usize) {
+        if self.len == 0 || (!inclusive && value == 0) {
+            return (0, 0);
+        }
+        if value > self.max_value || (inclusive && value == self.max_value) {
+            return (self.len, 0);
+        }
+        // The admitted maximum high field equals high_bit_len - len, so this
+        // conversion fits even on a narrower platform. Check the probe against
+        // max_value BEFORE converting: an arbitrary absent probe need not fit.
+        let high = (value >> self.low_bits) as usize;
+        let mask = low_mask(self.low_bits);
+        let low = value & mask;
+        if inclusive && low == mask {
+            return self.high_bucket_start(high + 1);
+        }
+        let (mut left, mut probes) = self.high_bucket_start(high);
+        if !inclusive && low == 0 {
+            return (left, probes);
+        }
+        let (mut right, end_probes) = self.high_bucket_start(high + 1);
+        probes += end_probes;
+        while left < right {
+            let middle = left + (right - left) / 2;
+            let candidate = self.read_low_bits(middle);
+            if candidate < low || (inclusive && candidate == low) {
+                left = middle + 1;
+            } else {
+                right = middle;
+            }
+        }
+        (left, probes)
+    }
+
+    // The one for entry i occupies high(i) + i. Thus the high-th zero
+    // separates all entries with high(i) < high from this bucket. The existing
+    // cumulative ONE directory also supplies cumulative ZERO counts, with the
+    // final word capped at the actual bit length rather than its zero padding.
+    // Return the directory-probe count for the same bounded-work tests as select.
+    fn high_bucket_start(&self, high: usize) -> (usize, usize) {
+        if high == 0 {
+            return (0, 0);
+        }
+        if high > self.high_bit_len - self.len {
+            return (self.len, 0);
+        }
+        let zero_ordinal = high - 1;
+        let mut left = 0;
+        let mut right = self.high_word_ranks.len();
+        let mut probes = 0;
+        while left < right {
+            let middle = left + (right - left) / 2;
+            probes += 1;
+            // Cap before adding, so even a final partial word near usize::MAX
+            // never rounds its end beyond the platform index domain.
+            let start = middle * 64;
+            let end = start + (self.high_bit_len - start).min(64);
+            let zeros = end - self.high_word_ranks[middle] as usize;
+            if zeros <= zero_ordinal {
+                left = middle + 1;
+            } else {
+                right = middle;
+            }
+        }
+        let first_bit = left * 64;
+        let preceding_ones = if left == 0 {
+            0
+        } else {
+            self.high_word_ranks[left - 1] as usize
+        };
+        let preceding_zeros = first_bit - preceding_ones;
+        let within_word = zero_ordinal - preceding_zeros;
+        let valid_bits = (self.high_bit_len - first_bit).min(64);
+        let zeros = !self.high_words[left] & (u64::MAX >> (64 - valid_bits));
+        let Some(position) = select_one(zeros, within_word) else {
+            debug_assert!(
+                false,
+                "private Elias-Fano representation lost a high bucket"
+            );
+            return (self.len, probes);
+        };
+        (preceding_ones + position - within_word, probes)
+    }
+
+    // The former implementation remains an independent, select-based oracle
+    // and a paired measurement control. It does not use unary zero separators.
+    #[cfg(test)]
     fn partition_point(&self, mut predicate: impl FnMut(u64) -> bool) -> usize {
         let mut left = 0_usize;
         let mut right = self.len;
@@ -773,6 +861,16 @@ mod tests {
             assert_eq!(encoded.rank_le(probe), rank_le, "rank_le({probe})");
             assert_eq!(encoded.rank_lt(probe), rank_lt, "rank_lt({probe})");
             assert_eq!(
+                encoded.rank_le(probe),
+                encoded.partition_point(|value| value <= probe),
+                "select-based rank_le({probe})"
+            );
+            assert_eq!(
+                encoded.rank_lt(probe),
+                encoded.partition_point(|value| value < probe),
+                "select-based rank_lt({probe})"
+            );
+            assert_eq!(
                 encoded.predecessor(probe),
                 values[..rank_le].last().copied(),
                 "predecessor({probe})"
@@ -1039,5 +1137,248 @@ mod tests {
             probes < zero_word_gap,
             "select must not inspect each of the {zero_word_gap} zero words"
         );
+    }
+
+    #[test]
+    fn rank_zero_separators_cross_words_without_counting_final_padding() {
+        for count in [0, 1, 58, 59, 60, 62, 63, 64, 65, 127, 128, 129] {
+            for tail in [1, 2, 65] {
+                let mut values = vec![0; count];
+                values.extend(std::iter::repeat_n(2, tail));
+                values.extend([5, 5]);
+                assert_matches_naive(&values);
+                let encoded = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+                let maximum_high = encoded.high_bit_len - encoded.len;
+                for high in (0..=maximum_high + 1).chain([usize::MAX]) {
+                    let expected =
+                        values.partition_point(|value| (value >> encoded.low_bits) < high as u64);
+                    assert_eq!(encoded.high_bucket_start(high).0, expected);
+                }
+            }
+        }
+        // A separator immediately after a complete unary word and a final
+        // word with exactly 64 valid bits exercise both sides of the cap.
+        for count in [58, 59, 60, 63, 64, 65] {
+            let mut values = vec![0; count];
+            values.push(5);
+            assert_matches_naive(&values);
+        }
+    }
+
+    #[test]
+    fn rank_searches_all_low_widths_and_packed_field_boundaries() {
+        for width in 0..=63 {
+            let count = (u64::MAX >> width).min(257) as usize;
+            let maximum = (count as u64) << width;
+            let mut values = (0..count)
+                .map(|index| {
+                    ((index as u128 * maximum as u128) / count.saturating_sub(1).max(1) as u128)
+                        as u64
+                })
+                .collect::<Vec<_>>();
+            *values.last_mut().unwrap() = maximum;
+            let encoded = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+            assert_eq!(encoded.low_bits, width as u8);
+            assert_matches_naive(&values);
+        }
+    }
+
+    #[test]
+    fn rank_large_duplicates_and_sparse_extremes_match_both_oracles() {
+        let count = 65_537;
+        let mut gap = vec![u64::MAX; count];
+        gap[..65].fill(0);
+        for values in [
+            (0..count).map(|index| index as u64 * 17).collect(),
+            (0..count)
+                .map(|index| (index / 257) as u64 * 1_000_000_007)
+                .collect(),
+            (0..count)
+                .map(|index| u64::MAX - (count - 1 - index) as u64)
+                .collect(),
+            gap,
+            vec![0; count],
+        ] {
+            let encoded = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+            for index in (0..count).step_by(17).chain([count - 1]) {
+                let at = values[index];
+                for probe in [0, at.saturating_sub(1), at, at.saturating_add(1), u64::MAX] {
+                    for inclusive in [false, true] {
+                        let predicate = |value: u64| value < probe || (inclusive && value == probe);
+                        let expected = values.partition_point(|&value| predicate(value));
+                        assert_eq!(encoded.search_rank(probe, inclusive).0, expected);
+                        assert_eq!(encoded.partition_point(predicate), expected);
+                    }
+                }
+            }
+        }
+    }
+
+    fn scalar_rank_directory_probes(encoded: &EliasFano, value: u64) -> (usize, usize) {
+        let mut left = 0;
+        let mut right = encoded.len;
+        let mut probes = 0;
+        while left < right {
+            let middle = left + (right - left) / 2;
+            probes += encoded.select_directory_probes(middle).unwrap();
+            if encoded.select(middle).unwrap() <= value {
+                left = middle + 1;
+            } else {
+                right = middle;
+            }
+        }
+        (left, probes)
+    }
+
+    #[test]
+    fn rank_directory_work_has_no_nested_select_search() {
+        let values = (0..=65_536).map(|index| index * 8).collect::<Vec<_>>();
+        let encoded = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+        let search_bound = usize::BITS - encoded.high_word_ranks.len().leading_zeros();
+        let mut old_probes = 0;
+        let mut new_probes = 0;
+        for index in (1..values.len() - 1).step_by(131) {
+            let probe = values[index] + 1;
+            let (actual, probes) = encoded.search_rank(probe, true);
+            let (expected, scalar_probes) = scalar_rank_directory_probes(&encoded, probe);
+            assert_eq!(actual, expected);
+            assert!(probes <= 2 * search_bound as usize);
+            old_probes += scalar_probes;
+            new_probes += probes;
+        }
+        assert!(old_probes > 5 * new_probes);
+
+        let mut sparse = vec![u64::MAX; 65_537];
+        sparse[..17].fill(0);
+        let encoded = EliasFano::try_new(&sparse, EntryLimit::new(sparse.len())).unwrap();
+        let search_bound = usize::BITS - encoded.high_word_ranks.len().leading_zeros();
+        for probe in [1, 1 << 32, 1 << 63, u64::MAX - 1] {
+            let (actual, probes) = encoded.search_rank(probe, true);
+            assert_eq!(actual, 17);
+            assert!(probes <= 2 * search_bound as usize);
+        }
+    }
+
+    // Incoming rows are a permutation of outgoing CSR positions. Retain only
+    // positions that miss the real cursor's same/adjacent-source shortcut, so
+    // this workload measures the actual offset-rank fallback, not imaginary
+    // repeated work on every incidence of a hub.
+    fn csr_rank_fixture(hub: bool) -> (Vec<u64>, Vec<u64>) {
+        let nodes = 8_192usize;
+        let hubs = [3, 1_031, 2_053, 4_099, 6_143, 7_169, 8_191];
+        let mut offsets = vec![0];
+        let mut incoming = Vec::new();
+        for source in 0..nodes {
+            let mut targets = if hub && hubs.contains(&source) {
+                (0..nodes)
+                    .filter(|&target| target != source)
+                    .collect::<Vec<_>>()
+            } else if hub {
+                vec![(source + 1) % nodes]
+            } else {
+                [1, 2, 3, 7, 17, 65, 257, 1_025]
+                    .map(|offset| (source + offset) % nodes)
+                    .to_vec()
+            };
+            targets.sort_unstable();
+            for target in targets {
+                incoming.push((target, source, incoming.len() as u64));
+            }
+            offsets.push(incoming.len() as u64);
+        }
+        incoming.sort_unstable();
+        let mut probes = Vec::new();
+        let mut previous = None;
+        for (target, source, position) in incoming {
+            if previous.is_none_or(|(prior_target, prior_source)| {
+                target != prior_target || (source != prior_source && source != prior_source + 1)
+            }) {
+                probes.push(position);
+            }
+            previous = Some((target, source));
+        }
+        (offsets, probes)
+    }
+
+    fn resolve_csr_positions(encoded: &EliasFano, probes: &[u64], scalar: bool) -> u64 {
+        probes.iter().fold(0u64, |checksum, &position| {
+            let position = std::hint::black_box(position);
+            let rank = if scalar {
+                encoded.partition_point(|candidate| candidate <= position)
+            } else {
+                encoded.rank_le(position)
+            };
+            let source = rank - 1;
+            let local = position - encoded.select(source).unwrap();
+            checksum
+                .wrapping_mul(1_000_003)
+                .wrapping_add(source as u64)
+                .wrapping_add(local)
+        })
+    }
+
+    #[test]
+    fn rank_csr_sparse_and_hub_positions_resolve_identical_sources_and_offsets() {
+        for hub in [false, true] {
+            let (offsets, probes) = csr_rank_fixture(hub);
+            assert!((65_000..=66_000).contains(offsets.last().unwrap()));
+            assert!(probes.len() > 32_000);
+            let encoded = EliasFano::try_new(&offsets, EntryLimit::new(offsets.len())).unwrap();
+            for &position in &probes {
+                let rank = offsets.partition_point(|&offset| offset <= position);
+                assert_eq!(encoded.rank_le(position), rank);
+                assert_eq!(encoded.select(rank - 1), Some(offsets[rank - 1]));
+            }
+            assert_eq!(
+                resolve_csr_positions(&encoded, &probes, false),
+                resolve_csr_positions(&encoded, &probes, true)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual paired compressed CSR offset-rank measurement"]
+    fn rank_bucket_lookup_paired_csr_offsets_measurement() {
+        for hub in [false, true] {
+            let (offsets, probes) = csr_rank_fixture(hub);
+            let encoded = EliasFano::try_new(&offsets, EntryLimit::new(offsets.len())).unwrap();
+            let expected = resolve_csr_positions(&encoded, &probes, true);
+            assert_eq!(resolve_csr_positions(&encoded, &probes, false), expected);
+            let mut scalar_ns = Vec::new();
+            let mut bucket_ns = Vec::new();
+            for trial in 0..5 {
+                for scalar in [trial % 2 == 0, trial % 2 != 0] {
+                    let started = std::time::Instant::now();
+                    let checksum = resolve_csr_positions(
+                        std::hint::black_box(&encoded),
+                        std::hint::black_box(&probes),
+                        scalar,
+                    );
+                    let elapsed = started.elapsed().as_nanos();
+                    std::hint::black_box(checksum);
+                    assert_eq!(checksum, expected);
+                    if scalar {
+                        scalar_ns.push(elapsed);
+                    } else {
+                        bucket_ns.push(elapsed);
+                    }
+                }
+            }
+            println!(
+                "ef_csr_rank hub={hub} rows={} incidences={} rank_fallbacks={} \
+                 scalar_ns={scalar_ns:?} bucket_ns={bucket_ns:?} checksum={expected}",
+                offsets.len() - 1,
+                offsets.last().unwrap(),
+                probes.len(),
+            );
+            scalar_ns.sort_unstable();
+            bucket_ns.sort_unstable();
+            println!(
+                "ef_csr_rank hub={hub} scalar_median_ns={} bucket_median_ns={} \
+                 scope=offset_rank_and_select_only",
+                scalar_ns[scalar_ns.len() / 2],
+                bucket_ns[bucket_ns.len() / 2],
+            );
+        }
     }
 }
