@@ -950,6 +950,230 @@ fn implicit_exists_preserves_late_refusals_and_cumulative_admission() {
 }
 
 #[test]
+fn count_subquery_bodies_count_completed_rows_with_optional_and_required_matches() {
+    for (body, expected) in [
+        ("MATCH (n)-[:R]->(m) MATCH (m)-[:R]->(last)", [3, 1, 0, 0]),
+        (
+            "MATCH (n)-[:R]->(m) OPTIONAL MATCH (m)-[:R]->(last)",
+            [3, 1, 1, 0],
+        ),
+        ("OPTIONAL MATCH (n)-[:R]->(m)", [3, 1, 1, 1]),
+        ("MATCH (n)-[:R]->(m) RETURN null AS absent", [3, 1, 1, 0]),
+        ("MATCH (n)-[:R]->(m) RETURN DISTINCT m", [2, 1, 1, 0]),
+        (
+            "MATCH (n)-[:R]->(m) RETURN m ORDER BY m SKIP 1 LIMIT 1",
+            [1, 0, 0, 0],
+        ),
+        // A keyless aggregate supplies one row, even on an empty input.
+        ("MATCH (n)-[:R]->(m) RETURN count(*) AS degree", [1; 4]),
+        (
+            "MATCH (n)-[:R]->(m) WITH m,count(*) AS copies WHERE copies > 1",
+            [1, 0, 0, 0],
+        ),
+        // Dropping the outer name creates a genuinely independent local MATCH.
+        ("WITH 1 AS marker MATCH (n) RETURN n", [4; 4]),
+    ] {
+        let statement = format!("MATCH (n) RETURN n,COUNT {{ {body} }} AS total ORDER BY n");
+        assert_eq!(
+            execute(&statement),
+            expected
+                .into_iter()
+                .enumerate()
+                .map(|(at, count)| GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(at as u128 + 1)),
+                    GraphValue::Scalar(CanonicalScalar::Int(count)),
+                ]))
+                .collect::<Vec<_>>(),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn count_subquery_bodies_compose_in_rows_filters_and_nested_subqueries() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    for expression in [
+        "COUNT { MATCH (x)-[:R]->(m) RETURN m }",
+        "COUNT { MATCH (x)-[:R]->(m) WITH m WHERE EXISTS { MATCH (m) RETURN true } }",
+        "COUNT { MATCH (x)-[:R]->(m) WHERE COUNT { MATCH (m) RETURN m } = 1 RETURN m }",
+    ] {
+        assert_eq!(
+            execute(&format!(
+                "{prefix} RETURN x,{expression} AS total ORDER BY x"
+            )),
+            [3, 1, 1, 0]
+                .into_iter()
+                .enumerate()
+                .map(|(at, count)| GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(at as u128 + 1)),
+                    GraphValue::Scalar(CanonicalScalar::Int(count)),
+                ]))
+                .collect::<Vec<_>>(),
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        execute("MATCH (n) WHERE COUNT { MATCH (n)-[:R]->(m) RETURN DISTINCT m } > 1 RETURN n"),
+        vec![vertices(&[1])]
+    );
+    assert_eq!(
+        execute(
+            "MATCH (n) WITH n,COUNT { MATCH (n)-[:R]->(m) RETURN m } AS degree \
+             WHERE degree = 0 RETURN n"
+        ),
+        vec![vertices(&[4])]
+    );
+    assert_eq!(
+        execute(
+            "MATCH (n) WHERE n.p = 1 RETURN \
+             [x IN [n,n] | COUNT { MATCH (x)-[:R]->(m) RETURN DISTINCT m }] AS counts"
+        ),
+        vec![GraphValueRow::from_owned_values(vec![GraphValue::List(
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+            ]
+        )])]
+    );
+}
+
+#[test]
+fn count_subquery_bodies_rebind_parameters_without_exporting_locals() {
+    let template = PreparedGraphSetText::prepare(
+        "MATCH (n) RETURN n,COUNT { MATCH (n)-[:R]->(m) \
+         WITH m WHERE m.p >= $minimum RETURN m LIMIT $take } AS total ORDER BY n",
+        symbols,
+    )
+    .unwrap();
+    let frozen = template.canonical_template_bytes();
+    for (minimum, take) in [(1, 0), (2, 1), (3, 5)] {
+        let arguments = GqlParameters::new()
+            .with_int64("minimum", minimum)
+            .unwrap()
+            .with_uint64("take", take)
+            .unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        let expected = (1..=4)
+            .map(|id| {
+                let count = EDGES
+                    .iter()
+                    .filter(|(source, _, destination)| {
+                        *source == VId(id) && [1, 2, 2, 3][destination.0 as usize - 1] >= minimum
+                    })
+                    .count()
+                    .min(take as usize);
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(id)),
+                    GraphValue::Scalar(CanonicalScalar::Int(count as i64)),
+                ])
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value, expected);
+    }
+    assert_eq!(template.canonical_template_bytes(), frozen);
+    for statement in [
+        "MATCH (n) RETURN COUNT { MATCH (n)-[:R]->(local) RETURN local } AS total,local",
+        "MATCH (n) RETURN COUNT { MATCH (n) WITH n CREATE (:R) RETURN n } AS total",
+        "MATCH (n) RETURN COUNT { MATCH (n) MATCH } AS total",
+    ] {
+        let resolutions = std::cell::Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(statement, |kind, name| {
+                resolutions.set(resolutions.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{statement}"
+        );
+        assert_eq!(resolutions.get(), 0, "{statement}");
+    }
+}
+
+#[test]
+fn count_subquery_bodies_share_budgets_cancellation_and_late_failures() {
+    for suffix in ["", " LIMIT 0"] {
+        let query = prepare(&format!(
+            "MATCH (n) RETURN n,COUNT {{ MATCH (n)-[:R]->(m) \
+             MATCH (m) RETURN m }} AS total{suffix}"
+        ));
+        let mut checkpoints = 0;
+        let measured = run(&query, wide(), &mut || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .unwrap();
+        let caps = [
+            measured.rows.snapshot_records,
+            measured.rows.result_rows,
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        ];
+        assert_eq!(
+            run(
+                &query,
+                GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                &mut || Ok(())
+            )
+            .unwrap(),
+            measured
+        );
+        for dimension in 0..4 {
+            if caps[dimension] == 0 {
+                continue;
+            }
+            let mut bounded = caps;
+            bounded[dimension] -= 1;
+            assert!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(bounded[0], bounded[1], bounded[2], bounded[3]),
+                    &mut || Ok(())
+                )
+                .is_err(),
+                "{suffix}, dimension {dimension}"
+            );
+        }
+        for stop in [1, checkpoints / 2, checkpoints] {
+            let mut seen = 0;
+            assert!(matches!(
+                run(&query, wide(), &mut || {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }),
+                Err(GqlQueryError::Interrupted(at)) if at == stop
+            ));
+        }
+        let mut calls = 0;
+        let failed = query.execute_governed(
+            wide(),
+            |pattern, remaining| {
+                calls += 1;
+                if calls == 3 {
+                    return Err(GqlQueryError::Source("count-body-source-error"));
+                }
+                pattern.plan().execute_governed_with_properties(
+                    9,
+                    (1..=4).map(VId),
+                    EDGES,
+                    |_, _| Ok::<_, &'static str>(true),
+                    |_, _| Ok(None),
+                    remaining,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            || Ok::<_, usize>(()),
+        );
+        assert_eq!(calls, 3);
+        assert!(matches!(
+            failed,
+            Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                "count-body-source-error"
+            )))
+        ));
+    }
+}
+
+#[test]
 fn returning_exists_groups_and_filters_each_correlated_body_before_testing_presence() {
     let template = PreparedGraphSetText::prepare(
         "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \

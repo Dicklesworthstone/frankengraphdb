@@ -30,10 +30,10 @@ enum UnresolvedContinuationOperation<'a> {
         join: RowJoinSpec,
         result: RowPatternResult,
     },
-    ExistsBody {
+    SubqueryBody {
         body: Box<UnresolvedReadInput<'a>>,
         imports: Vec<usize>,
-        negated: Option<bool>,
+        result: RowPatternResult,
     },
     List {
         body: Box<UnresolvedReadInput<'a>>,
@@ -85,7 +85,7 @@ impl<'a> UnresolvedReadInput<'a> {
                 }
                 UnresolvedContinuationOperation::Apply { body, .. }
                 | UnresolvedContinuationOperation::Union { body, .. }
-                | UnresolvedContinuationOperation::ExistsBody { body, .. }
+                | UnresolvedContinuationOperation::SubqueryBody { body, .. }
                 | UnresolvedContinuationOperation::List { body, .. } => {
                     slots.extend(body.element_key_slots());
                 }
@@ -140,7 +140,7 @@ impl<'a> UnresolvedReadInput<'a> {
             part.input.syntax.parameter_offsets = offsets.to_vec();
             if let UnresolvedContinuationOperation::Apply { body, .. }
             | UnresolvedContinuationOperation::Union { body, .. }
-            | UnresolvedContinuationOperation::ExistsBody { body, .. }
+            | UnresolvedContinuationOperation::SubqueryBody { body, .. }
             | UnresolvedContinuationOperation::List { body, .. } = &mut part.operation
             {
                 body.share_parameters(parameters, offsets);
@@ -175,8 +175,13 @@ impl<'a> UnresolvedReadInput<'a> {
                         | RowPatternResult::Count
                         | RowPatternResult::Collect { .. } => 4,
                     },
-                    UnresolvedContinuationOperation::ExistsBody { body, negated, .. } => {
-                        body.depth() + if negated.is_some() { 4 } else { 2 }
+                    UnresolvedContinuationOperation::SubqueryBody { body, result, .. } => {
+                        body.depth()
+                            + if matches!(result, RowPatternResult::Filter { .. }) {
+                                4
+                            } else {
+                                2
+                            }
                     }
                     UnresolvedContinuationOperation::Apply { body, .. }
                     | UnresolvedContinuationOperation::List { body, .. } => 1 + body.depth(),
@@ -218,7 +223,7 @@ impl<'a> UnresolvedReadInput<'a> {
                     UnresolvedContinuationOperation::Pattern { .. } => 1,
                     UnresolvedContinuationOperation::Apply { body, .. }
                     | UnresolvedContinuationOperation::Union { body, .. }
-                    | UnresolvedContinuationOperation::ExistsBody { body, .. }
+                    | UnresolvedContinuationOperation::SubqueryBody { body, .. }
                     | UnresolvedContinuationOperation::List { body, .. } => body.operand_count(),
                 })
                 .sum::<usize>()
@@ -324,14 +329,14 @@ impl<'a> UnresolvedReadInput<'a> {
                         imports,
                         optional,
                     },
-                    UnresolvedContinuationOperation::ExistsBody {
+                    UnresolvedContinuationOperation::SubqueryBody {
                         body,
                         imports,
-                        negated,
-                    } => BoundContinuationOperation::ExistsBody {
+                        result,
+                    } => BoundContinuationOperation::SubqueryBody {
                         body: Box::new(body.resolve(resolve)?),
                         imports,
-                        negated,
+                        result,
                     },
                     UnresolvedContinuationOperation::List {
                         body,
@@ -1052,11 +1057,13 @@ fn row_pattern_ends<'a>(
 /// A brace body containing relational clauses belongs to the native read
 /// compiler, with or without RETURN. Pattern-only bodies keep their
 /// established native scope owner.
-pub(super) fn returning_existence_body(
+pub(super) fn relational_subquery_body(
     token: TokenKind<'_>,
     lexer: &Lexer<'_>,
 ) -> Result<bool, GraphPatternTextError> {
-    if !matches!(token, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
+    if !matches!(token, TokenKind::Word(word)
+        if word.eq_ignore_ascii_case("EXISTS") || word.eq_ignore_ascii_case("COUNT"))
+    {
         return Ok(false);
     }
     let mut lexer = lexer.clone();
@@ -1105,11 +1112,11 @@ pub(super) fn returning_existence_body(
 }
 
 impl<'a> Parser<'a> {
-    pub(in crate::graph_text::scoped) fn relational_existence_body(
+    pub(in crate::graph_text::scoped) fn relational_subquery_body(
         token: TokenKind<'_>,
         lexer: &Lexer<'_>,
     ) -> Result<bool, GraphPatternTextError> {
-        returning_existence_body(token, lexer)
+        relational_subquery_body(token, lexer)
     }
 
     fn at_existence_end(&self) -> bool {
@@ -1159,7 +1166,7 @@ impl<'a> Parser<'a> {
         let expressions = row_pattern_expressions(&mut self.lexer.clone(), hoisted)?;
         if self.is_word("WITH") {
             for (token, lexer) in expressions {
-                if returning_existence_body(token.kind, &lexer)?
+                if relational_subquery_body(token.kind, &lexer)?
                     || row_list_graph_expression_follows(token.kind, &lexer, hoisted)?
                 {
                     return Ok(true);
@@ -1175,7 +1182,7 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         for (token, lexer) in row_pattern_expressions(&mut self.lexer.clone(), |_| false)? {
-            if returning_existence_body(token.kind, &lexer)? {
+            if relational_subquery_body(token.kind, &lexer)? {
                 return Ok(true);
             }
         }
@@ -2033,7 +2040,7 @@ impl<'a> Parser<'a> {
         result: RowPatternResult,
     ) -> Result<UnresolvedContinuationOperation<'a>, GraphSetTextError> {
         let at = self.current.at;
-        if !returning_existence_body(self.current.kind, &self.lexer)? {
+        if !relational_subquery_body(self.current.kind, &self.lexer)? {
             let (pattern, join) =
                 self.multipart_existence_pattern(statement, incoming, captures, at)?;
             return Ok(UnresolvedContinuationOperation::Pattern {
@@ -2045,7 +2052,11 @@ impl<'a> Parser<'a> {
         if call_depth >= 8 {
             return Err(expected(at, "at most eight nested read subquery bodies"));
         }
-        self.word("EXISTS")?;
+        if matches!(result, RowPatternResult::Count) {
+            self.word("COUNT")?;
+        } else {
+            self.word("EXISTS")?;
+        }
         self.punct(b'{', "{")?;
         // A body has a separate namespace, but shares the original parameter
         // table, catalog slots, lexer and statement-wide admission counters.
@@ -2089,17 +2100,11 @@ impl<'a> Parser<'a> {
         self.optional_body = optional_body;
         let (mut body, _) = parsed?;
         body.append_element_keys(&mut remainder.element_keys);
-        self.punct(b'}', "} after a read-only EXISTS body")?;
-        Ok(UnresolvedContinuationOperation::ExistsBody {
+        self.punct(b'}', "} after a read-only subquery body")?;
+        Ok(UnresolvedContinuationOperation::SubqueryBody {
             body: Box::new(body),
             imports: (0..captures).collect(),
-            negated: match result {
-                RowPatternResult::Filter { negated } => Some(negated),
-                RowPatternResult::Exists => None,
-                RowPatternResult::Count | RowPatternResult::Collect { .. } => {
-                    unreachable!("only EXISTS has a returning body")
-                }
-            },
+            result,
         })
     }
 
@@ -4048,7 +4053,7 @@ impl BoundReadInput {
             if matches!(
                 &part.operation,
                 BoundContinuationOperation::Pattern { .. }
-                    | BoundContinuationOperation::ExistsBody { .. }
+                    | BoundContinuationOperation::SubqueryBody { .. }
             ) {
                 let at = source.return_at;
                 let names = input.columns().to_vec();
@@ -4085,18 +4090,11 @@ impl BoundReadInput {
                             })?;
                         (body, (0..width).collect(), *result)
                     }
-                    BoundContinuationOperation::ExistsBody {
+                    BoundContinuationOperation::SubqueryBody {
                         body,
                         imports,
-                        negated,
-                    } => (
-                        body.bind_values(values)?,
-                        imports.clone(),
-                        match *negated {
-                            Some(negated) => RowPatternResult::Filter { negated },
-                            None => RowPatternResult::Exists,
-                        },
-                    ),
+                        result,
+                    } => (body.bind_values(values)?, imports.clone(), *result),
                     _ => unreachable!("graph expression source checked above"),
                 };
                 let body = if matches!(result, RowPatternResult::Count) {

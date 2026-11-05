@@ -392,10 +392,15 @@ impl PreparedGraphPipelineAggregateText {
                             operators.push("Select");
                         }
                     }
-                    BoundContinuationOperation::ExistsBody { body, negated, .. } => {
+                    BoundContinuationOperation::SubqueryBody { body, result, .. } => {
+                        use crate::set_text::multipart::RowPatternResult;
                         input_operators(operators, body);
-                        operators.extend(["ProjectValues", "OrderByPage", "Apply"]);
-                        if negated.is_some() {
+                        if matches!(result, RowPatternResult::Count) {
+                            operators.extend(["Aggregate", "Apply"]);
+                        } else {
+                            operators.extend(["ProjectValues", "OrderByPage", "Apply"]);
+                        }
+                        if matches!(result, RowPatternResult::Filter { .. }) {
                             operators.push("Select");
                         }
                     }

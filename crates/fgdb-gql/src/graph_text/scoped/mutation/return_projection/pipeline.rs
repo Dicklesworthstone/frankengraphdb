@@ -822,9 +822,9 @@ impl<'a> Parser<'a> {
             if token.at < skip_until {
                 continue;
             }
-            if !matches!(window[2], Some(TokenKind::Punct(b'.')))
+            if !matches!(window[2], Some(TokenKind::Punct(b'.' | b':')))
                 && !matches!(window[2], Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"))
-                && multipart::returning_existence_body(token.kind, &lexer)?
+                && multipart::relational_subquery_body(token.kind, &lexer)?
             {
                 // A returning body is evaluated by its correlated read owner.
                 // Its locals and property reads cannot become hidden columns
@@ -1328,7 +1328,7 @@ impl<'a> Parser<'a> {
                 token = lexer.next()?;
                 continue;
             }
-            if multipart::returning_existence_body(token.kind, &lexer)? {
+            if multipart::relational_subquery_body(token.kind, &lexer)? {
                 lexer.next()?; // {
                 skip_group(&mut lexer)?;
                 previous = Some(TokenKind::Punct(b'}'));
