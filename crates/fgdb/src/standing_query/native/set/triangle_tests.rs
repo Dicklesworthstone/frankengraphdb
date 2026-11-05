@@ -561,7 +561,6 @@ fn triangle_projection_refusals_and_source_quotas_never_publish_partial_circuits
             "CALL fnx.triangles({relations:['R'],parallel:'collapse'})".into(),
             "CALL fnx.triangles({relations:['R'],parallel:'collapse',self_loops:'keep'})".into(),
             "CALL fnx.triangles({relations:['R'],parallel:'collapse',self_loops:'reject'})".into(),
-            "CALL fnx.triangles({relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.triangles({relations:['R'],weight:'p',parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.triangles({relations:['R','S'],parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.triangles({relations:['R'],direction:'directed',parallel:'collapse',self_loops:'drop'})".into(),

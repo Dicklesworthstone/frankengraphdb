@@ -292,6 +292,25 @@ impl<V: Vfs + Clone> Database<V> {
         strong: bool,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
+        let definition = self.admit_standing_topology_source(cx, source, endpoints)?;
+        let relation = if strong {
+            ComponentRelation::StrongRows(definition)
+        } else {
+            ComponentRelation::WeakRows(definition)
+        };
+        let state = self.prepare_standing_components(cx, relation, policy)?;
+        self.store_standing_components(cx, state)
+    }
+
+    /// All public selected-topology registrations share owner/freshness and
+    /// schema admission. In particular, an empty source never excuses scalar
+    /// endpoint columns, and a foreign handle never supplies a registry index.
+    pub(in crate::standing_query) fn admit_standing_topology_source(
+        &self,
+        cx: &QueryCx,
+        source: &StandingQueryHandle,
+        endpoints: [usize; 2],
+    ) -> Result<Definition, StandingQueryError> {
         let parent = self.admitted_standing_query(cx, source)?;
         let definition = Definition {
             input: source.index,
@@ -303,13 +322,7 @@ impl<V: Vfs + Clone> Database<V> {
         if !definition.matches_schema(parent) {
             return Err(StandingQueryError::Unsupported);
         }
-        let relation = if strong {
-            ComponentRelation::StrongRows(definition)
-        } else {
-            ComponentRelation::WeakRows(definition)
-        };
-        let state = self.prepare_standing_components(cx, relation, policy)?;
-        self.store_standing_components(cx, state)
+        Ok(definition)
     }
 
     pub(super) fn prepare_selected_components(

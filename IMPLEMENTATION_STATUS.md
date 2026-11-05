@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest is 2026-11-02.
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest is 2026-11-05.
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -113,6 +113,32 @@ The same authorized ordered-result path is now available through explicit FGP `R
 Native standing-query registration now maintains `COLLECT` and `COLLECT DISTINCT` over a vertex or one uncaptured relationship through the existing relational projection/group circuit (`fgdb-w6-views-2wz`). For example, `MATCH (a)-[:R]->(b) RETURN a AS source, collect(b.p) AS values` retains endpoint predicates, parallel multiplicity and the batch evaluator's source/destination occurrence order. Reverse and undirected orientations, self-loops and any-relation scans use the same proof. Computed aggregate inputs retain the complete original source-row order before evaluating expressions. Registration and subscription footprint admit the same definition.
 
 Endpoint property changes, edge additions/retractions and cascade deletions flow through the existing incident-aware delta source; compaction and rebuild preserve the same result. Captured edges, extra hops and scopes remain outside the plain-input occurrence adapter. Computed inputs can additionally retain supported joins and scoped sources with complete canonical rows, subject to independent admission by the maintained circuit. Hidden source columns and excessive schemas still refuse. Regression sources cover explicit collection order, eight mutation/delta stages, frozen parameters, delayed replay, reopen, quotas, interruption and zero-page failures in `crates/fgdb/tests/standing_collection_groups.rs`, `crates/fgdb-gql/tests/computed_aggregate_text.rs` and `crates/fgdb/src/standing_query/native/set/group_tests.rs`; the broader computed-source tests are in `crates/fgdb/tests/standing_computed_collection_sources.rs`. The vertex/one-edge additions have pinned formatter checks and independent source review; runtime execution remains blocked by the foundation compiler memory limit.
+
+### Maintained analytics over label-selected graphs
+
+Source added on 2026-11-05: `Database::register_standing_native` accepts native `fnx.core_number`, `fnx.triangles` and `fnx.clustering_coefficient` calls over a single-label induced graph, optionally restricted to one relation. For example, register this query to keep the selected core numbers current after ordinary committed writes:
+
+```cypher
+CALL fnx.core_number({labels:['Person'], relations:['KNOWS'],
+                      direction:'undirected', parallel:'collapse', self_loops:'drop'})
+YIELD vertex AS person, core
+RETURN person, core
+```
+
+Use `fnx.triangles` with `YIELD vertex, triangles`, or `fnx.clustering_coefficient` with `YIELD vertex, score`, for the same selection. Both endpoints must carry the selected label; selected isolates retain zero-valued rows. Omitting `relations` includes all relation types, including types first added by later commits. Label additions/removals, edge changes and vertex cascades update the maintained topology before the existing exact analytics kernel consumes its derivative. Parallel and opposite edges contribute one neighbor, and vertex identities retain all 128 bits.
+
+`standing_native_query` reads the current accepted generation; `rebuild_standing_query` preserves the selection and output schema while rebuilding at the current frontier. A maintenance refusal fences the view without undoing a durable commit or blocking healthy siblings. The private topology is not charged as public result rows; snapshot, work and scratch bounds still apply, with work/scratch ceilings per registry node. This slice uses unit weights and simple undirected support; triangle and core calls require dropped self-loops. Registrations remain session-local and memory-resident, without a durable view catalog or spill.
+
+The same maintainers also compose with an existing maintained row relation through `register_standing_triangle_counts_from_rows`, `register_standing_clustering_coefficients_from_rows` and `register_standing_core_numbers_from_rows`. Each accepts the source handle and two zero-based Vertex column indexes. For example, a maintained source can select enabled relationships with a property predicate:
+
+```cypher
+MATCH (a)-[e:KNOWS]->(b) WHERE e.enabled = 1
+RETURN 9 AS marker, a AS source, 'ignored' AS note, b AS target
+```
+
+Attach each analytic with endpoint indexes `[1, 3]`. Changing only `e.enabled` changes the selected topology and its analytic output, while the physical edge remains in the database. The parent can use any filters, joins, set operations or pages that its own maintained circuit admits; each parent and child retains its own policy. The selected vertex population consists exactly of supported non-NULL endpoints. One non-NULL endpoint supplies an isolate, two NULLs supply nothing, and duplicate or opposite edge witnesses retain support until the last occurrence retracts. Endpoint types and handle ownership are checked even for empty sources. All three handles expose the existing native query, cursor, delta and replay surfaces; core handles also expose typed core-number reads. Repair a separately registered failed parent before rebuilding its dependent analytics. These APIs are trusted embedded composition, not a new authorization boundary.
+
+Regression sources in `crates/fgdb/tests/native_standing_sets.rs`, `crates/fgdb/src/standing_query/kcore/tests.rs` and `crates/fgdb/src/standing_query/triangle_counts/tests.rs` cover independent graph oracles, label/property changes, counted support, signed-delta integration, source admission, cancellation, quota refusals and parent-first rebuilds. `crates/fgdb-server/src/execute/subscription/tests.rs` covers selected analytics through wire delivery, acknowledgement/replay and capability refusal. These tests are authored but uncompiled and unrun: both focused Cargo attempts stopped when the unchanged pinned asupersync dependency compiler was killed for exceeding available memory, before first-party compilation. Formatting and whitespace checks pass; typechecking, runtime tests and Clippy remain unverified.
 
 ### Reusable plan-only execution
 

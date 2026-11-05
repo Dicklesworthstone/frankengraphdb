@@ -999,7 +999,6 @@ fn clustering_subscription_refuses_hidden_topology_before_registration_or_delive
         for text in [
             "SUBSCRIBE TO CALL fnx.clustering_coefficient({relations:['R'],self_loops:'drop'}) YIELD vertex,score",
             "SUBSCRIBE TO CALL fnx.clustering_coefficient({relations:['R'],parallel:'collapse',self_loops:'reject'}) YIELD vertex,score",
-            "SUBSCRIBE TO CALL fnx.clustering_coefficient({relations:['R'],parallel:'collapse',labels:['L'],self_loops:'drop'}) YIELD vertex,score",
             "SUBSCRIBE TO CALL fnx.clustering_coefficient({relations:['R'],parallel:'collapse',direction:'directed',self_loops:'drop'}) YIELD vertex,score LIMIT 0",
             "SUBSCRIBE TO CALL fnx.directed_clustering_coefficient({relations:['R'],parallel:'collapse',self_loops:'drop'}) YIELD vertex,score LIMIT 0",
         ] {
@@ -1025,6 +1024,189 @@ fn clustering_subscription_refuses_hidden_topology_before_registration_or_delive
                 .map(|vertex| (1, vec![WireValue::Float(1.0), WireValue::Vertex(vertex)]))
                 .to_vec()
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn selected_analytics_subscriptions_replay_label_changes_without_exposing_excluded_vertices() {
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_types::{CanonicalScalar, EId, VId};
+    use fgdb_warden::Scope;
+    use std::collections::BTreeMap;
+
+    let ((), report) = run_async_under_lab(0x79a0_03d3, |root| async move {
+        let (mut server, token, _) = served(&root, "subscription-selected-analytics").await;
+        let served = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+        served
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Relation, "R", 1)
+            .unwrap();
+        served
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Label, "L", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let wide = u128::MAX;
+        let mut seed = vertex(1);
+        for id in [2, 3, wide] {
+            seed.create_vertex(VId(id), vec![], vec![]);
+        }
+        for (eid, a, b) in [
+            (1, 1, 2),
+            (2, 2, 3),
+            (3, 3, 1),
+            (4, 1, 2),
+            (5, 2, 1),
+            (6, wide, wide),
+        ] {
+            seed.add_edge(EId(eid), VId(a), VId(b), vec![]);
+        }
+        let mut after = db
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), seed)
+            .await
+            .unwrap();
+        let scoped = token
+            .attenuate(Restriction::Labels(Scope::only([LabelId(1)])))
+            .unwrap();
+        let mut subscriptions = Vec::new();
+        for (metric, field) in [
+            ("triangles", "triangles"),
+            ("clustering_coefficient", "score"),
+            ("core_number", "core"),
+        ] {
+            let statement = request(&format!(
+                "SUBSCRIBE TO CALL fnx.{metric}(\
+                 {{relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'}}) \
+                 YIELD vertex AS node,{field} AS value RETURN node,value"
+            ));
+            // Selecting a label does not relax the analytic authorization gate.
+            refused(
+                subscribe(&root, db, &scoped, &statement).await,
+                ErrorCode::PermissionDenied,
+            );
+            let mut subscription = success(subscribe(&root, db, &token, &statement).await);
+            assert_eq!(subscription.columns, ["node", "value"]);
+            let initial = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+            assert!(initial.batch.is_snapshot());
+            assert_eq!(initial.batch.frontier(), after);
+            assert!(initial.entries.is_empty());
+            subscriptions.push((metric, subscription, initial, BTreeMap::new()));
+        }
+        assert_eq!(db.subscriptions.load(Ordering::Acquire), 3);
+
+        for tick in 0..5 {
+            let mut change = fgdb::WriteBatch::new(RelationId(1));
+            match tick {
+                0 => {
+                    for id in [1, 2] {
+                        change.set_vertex_label(VId(id), LabelId(1), true);
+                    }
+                }
+                1 => {
+                    for id in [3, wide] {
+                        change.set_vertex_label(VId(id), LabelId(1), true);
+                    }
+                }
+                2 => {
+                    change.set_vertex_label(VId(2), LabelId(1), false);
+                }
+                3 => {
+                    change.set_vertex_property(
+                        VId(2),
+                        PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(7)),
+                    );
+                }
+                _ => {
+                    for id in [1, 3, wide] {
+                        change.set_vertex_label(VId(id), LabelId(1), false);
+                    }
+                }
+            }
+            let at = db
+                .db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), change)
+                .await
+                .unwrap();
+            for (metric, subscription, initial, previous) in &mut subscriptions {
+                if tick == 0 {
+                    // A new topology cannot overwrite the unacknowledged baseline.
+                    let repeated = success(poll(&root, db, &token, subscription).await).unwrap();
+                    assert!(Arc::ptr_eq(&repeated.batch, &initial.batch));
+                    assert!(repeated.entries.is_empty());
+                    subscription
+                        .consumer
+                        .acknowledge(initial.batch.receipt())
+                        .unwrap();
+                }
+                refused(
+                    poll(&root, db, &scoped, subscription).await,
+                    ErrorCode::PermissionDenied,
+                );
+                let core = *metric == "core_number";
+                let values: BTreeMap<u128, i64> = match tick {
+                    0 => [(1, i64::from(core)), (2, i64::from(core))]
+                        .into_iter()
+                        .collect(),
+                    1 => [
+                        (1, if core { 2 } else { 1 }),
+                        (2, if core { 2 } else { 1 }),
+                        (3, if core { 2 } else { 1 }),
+                        (wide, 0),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    2 | 3 => [(1, i64::from(core)), (3, i64::from(core)), (wide, 0)]
+                        .into_iter()
+                        .collect(),
+                    _ => BTreeMap::new(),
+                };
+                let expected: BTreeMap<(u128, i64), i128> = values
+                    .into_iter()
+                    .map(|(vertex, value)| ((vertex, value), 1))
+                    .collect();
+                let mut derivative = expected.clone();
+                for (row, weight) in previous.iter() {
+                    *derivative.entry(*row).or_default() -= weight;
+                }
+                let frame = success(poll(&root, db, &token, subscription).await).unwrap();
+                assert_eq!(
+                    (frame.batch.from(), frame.batch.frontier()),
+                    (Some(after), at)
+                );
+                let expected_entries: Vec<_> = derivative
+                    .into_iter()
+                    .filter(|(_, weight)| *weight != 0)
+                    .map(|((vertex, value), weight)| {
+                        let value = if *metric == "clustering_coefficient" {
+                            WireValue::Float(value as f64)
+                        } else {
+                            WireValue::Int(value)
+                        };
+                        (weight, vec![WireValue::Vertex(vertex), value])
+                    })
+                    .collect();
+                assert_eq!(frame.entries, expected_entries, "{metric}, tick {tick}");
+                subscription
+                    .consumer
+                    .acknowledge(frame.batch.receipt())
+                    .unwrap();
+                *previous = expected;
+            }
+            after = at;
+        }
+        for (_, subscription, _, _) in &mut subscriptions {
+            assert!(success(poll(&root, db, &token, subscription).await).is_none());
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

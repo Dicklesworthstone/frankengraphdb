@@ -122,6 +122,8 @@ fn row(
 
 impl Counts {
     fn new(output: Output, meter: &mut Meter<'_>) -> Result<Self, StandingQueryFailure> {
+        // Fixed row metadata plus the native handle's presentation copy;
+        // scratch units count entries, as in the component row sink.
         meter.units(ZSetEvent::ScratchEntry, 8)?;
         Ok(Self {
             vertices: BTreeMap::new(),
@@ -557,6 +559,81 @@ impl State {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Maintain per-vertex triangle counts over an earlier maintained row source.
+    /// `endpoints` selects two zero-based Vertex columns, checked even on empty
+    /// input. The vertex population is exactly the non-NULL identities supported
+    /// by those columns. Two non-NULL endpoints contribute an undirected edge
+    /// per row occurrence; one contributes an isolate; two NULLs contribute
+    /// nothing. Parallel/opposite occurrences collapse to simple adjacency,
+    /// and self-pairs retain a vertex without contributing triangles or degree.
+    /// Counted support retires a vertex or edge only after its last witness.
+    ///
+    /// Native columns are `vertex, triangles`, one row per selected vertex,
+    /// including isolates with count zero. The handle supports native queries,
+    /// cursors, signed deltas, row-circuit composition and subscription delivery.
+    /// Parent filters/joins/pages execute before this topology projection, so
+    /// property-only changes can alter triangles without changing a base edge.
+    ///
+    /// Initialization/rebuild consumes the current parent bag; each later commit
+    /// consumes its complete accepted derivative, never a graph rescan. A failed
+    /// parent or rebuilt baseline is not an empty delta. Repair the independently
+    /// owned parent first, then this view; rebuild preserves the endpoint columns.
+    /// Failure fences this view without undoing durable writes or healthy siblings.
+    ///
+    /// `max_snapshot_records` bounds compressed parent rows at initialization;
+    /// `max_result_rows` bounds final distinct vertices. Work/scratch cover
+    /// projection, support, kernel and sinks cumulatively per node; the parent
+    /// keeps its own policy. State is session-local and in-memory, with no durable
+    /// registration, spill/byte bound or new authorization boundary.
+    pub fn register_standing_triangle_counts_from_rows(
+        &mut self,
+        cx: &QueryCx,
+        source: &StandingQueryHandle,
+        endpoints: [usize; 2],
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        self.register_selected_triangle_counts(cx, source, endpoints, Output::Triangles, policy)
+    }
+
+    /// Maintain native clustering coefficients over a maintained row source,
+    /// with the same endpoint, NULL, support, budget and rebuild contract as
+    /// [`Self::register_standing_triangle_counts_from_rows`]. Native columns are
+    /// `vertex, score`. A vertex with distinct degree below two has score zero;
+    /// otherwise its score is `2 * triangles / (degree * (degree - 1))`, with
+    /// exact integer products converted once before the native binary64 division.
+    /// Self-pairs retain isolates and never enter that degree or numerator.
+    pub fn register_standing_clustering_coefficients_from_rows(
+        &mut self,
+        cx: &QueryCx,
+        source: &StandingQueryHandle,
+        endpoints: [usize; 2],
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        self.register_selected_triangle_counts(cx, source, endpoints, Output::Clustering, policy)
+    }
+
+    fn register_selected_triangle_counts(
+        &mut self,
+        cx: &QueryCx,
+        source: &StandingQueryHandle,
+        endpoints: [usize; 2],
+        output: Output,
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        let definition = self.admit_standing_topology_source(cx, source, endpoints)?;
+        let state =
+            self.prepare_standing_selected_triangle_counts(cx, definition, output, policy)?;
+        // The fixed presentation copy was admitted by Counts::new. This is
+        // another view of one registry node, not another maintained evaluator.
+        let layout = Arc::new(native::Layout::Rows {
+            columns: state.columns().to_vec(),
+        });
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        let mut handle = self.store_standing_query(StandingQuery::TriangleCounts(Box::new(state)));
+        handle.native = Some(layout);
+        Ok(handle)
+    }
+
     pub(super) fn prepare_standing_selected_triangle_counts(
         &self,
         cx: &QueryCx,
