@@ -19,7 +19,7 @@ use fgdb_prism::{
     ProjectionError, ProjectionLimits, ProjectionSpec, SealedGraphView, SealedProjectionError,
     SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView, SortedVertexLookup,
 };
-use fgdb_strata::store::RootReadLimits;
+use fgdb_strata::store::{RootReadError, RootReadLimits, StoreError};
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
 use fgdb_types::{CanonicalF64, CanonicalScalar, CommitCx, CommitSeq, QueryCx, VId};
 use std::mem::size_of;
@@ -64,6 +64,10 @@ type SealedReadError = FnxSealedReadError<ReadError, Cancel>;
 pub enum SealedProjectionOpenError {
     Open(OpenError),
     Read(SealedReadError),
+    /// An attached durable run or its root membership failed admission.
+    Store(StoreError),
+    /// The ordinary pattern/property or vertex source failed bounded admission.
+    Source(RootReadError),
     /// No checkpoint is current with the observed committed chain. Recovery
     /// or a writer's pending publication must complete before retrying.
     RecoveryRequired,
@@ -74,6 +78,8 @@ impl core::fmt::Display for SealedProjectionOpenError {
         match self {
             Self::Open(error) => error.fmt(f),
             Self::Read(error) => error.fmt(f),
+            Self::Store(error) => error.fmt(f),
+            Self::Source(error) => error.fmt(f),
             Self::RecoveryRequired => f.write_str(
                 "sealed open needs a current authenticated checkpoint; the published root is missing or behind the commit log (wait for the writer or recover through Database::open first)",
             ),
@@ -86,6 +92,8 @@ impl core::error::Error for SealedProjectionOpenError {
         match self {
             Self::Open(error) => Some(error),
             Self::Read(error) => Some(error),
+            Self::Store(error) => Some(error),
+            Self::Source(error) => Some(error),
             Self::RecoveryRequired => None,
         }
     }
@@ -103,14 +111,28 @@ impl From<SealedReadError> for SealedProjectionOpenError {
     }
 }
 
+impl From<StoreError> for SealedProjectionOpenError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<RootReadError> for SealedProjectionOpenError {
+    fn from(error: RootReadError) -> Self {
+        Self::Source(error)
+    }
+}
+
 impl Database<UnixVfs> {
     /// Prepare a reusable compressed projection with one authenticated source
     /// traversal and no resident database or writer lease. The current root
     /// must already be published; this path never repairs or writes storage.
-    /// Only the selected relation is retained for sealing, while every source
-    /// object and its complete history are authenticated under `root_limits`.
+    /// An attached durable run supplies the compressed adjacency directly.
+    /// Otherwise only the selected relation is retained for sealing. Every
+    /// ordinary source object and its complete history are authenticated under
+    /// `root_limits` to select the vertex directory.
     /// The source, vertex staging, sealed image and projection retain their
-    /// separate limits. This is not a persistent Tier R or an RSS bound.
+    /// separate limits; these are population bounds, not an RSS bound.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_prism_sealed_projection(
         cx: &CommitCx,
@@ -267,21 +289,48 @@ impl<V: Vfs + Clone> Database<V> {
                         .into(),
                     );
                 }
-                // Type-erased like the commit chokepoints (fgdb-a5y6m): the
-                // sealer's future nests deep enough that a concrete caller's
-                // Send proof overflows unless the chain is split here.
-                let sealing: crate::SendFuture<'_, _> =
-                    Box::pin(published.store.seal_relation_with_vertex_history(
+                let attached: crate::SendFuture<'_, _> =
+                    Box::pin(published.store.get_published_adj_run(
                         query_cx,
                         published.root_id,
-                        as_of,
                         relation,
+                        as_of,
                         sealing,
-                        root_limits,
+                        root_limits.max_root_bytes,
                     ));
-                let (partition, patches) = sealing.await.map_err(SealedReadError::Seal)?;
+                let (partition, patches, authenticated_source_root) =
+                    if let Some(run) = attached.await? {
+                        // The run's original source root is authenticated by
+                        // its membership in this selected publication. Ordinary
+                        // source admission supplies vertex history separately;
+                        // none of that adjacency is compacted or re-encoded.
+                        let source_root = run.partition().anchor().scope().source_root;
+                        let source: crate::SendFuture<'_, _> =
+                            Box::pin(published.store.reopen_vertices_bounded(
+                                query_cx,
+                                published.root_id,
+                                as_of,
+                                root_limits,
+                            ));
+                        let patches = source.await?;
+                        (run.into_partition(), patches, source_root)
+                    } else {
+                        // Type-erased like the commit chokepoints (fgdb-a5y6m):
+                        // the sealer's deep Send proof stops at this boundary.
+                        let sealing: crate::SendFuture<'_, _> =
+                            Box::pin(published.store.seal_relation_with_vertex_history(
+                                query_cx,
+                                published.root_id,
+                                as_of,
+                                relation,
+                                sealing,
+                                root_limits,
+                            ));
+                        let (partition, patches) = sealing.await.map_err(SealedReadError::Seal)?;
+                        (partition, patches, published.root_id)
+                    };
                 let scope = partition.anchor().scope();
-                if scope.source_root != published.root_id
+                if scope.source_root != authenticated_source_root
                     || scope.publication != published.published_at
                     || scope.graph != crate::GRAPH
                     || scope.branch != crate::BRANCH
@@ -1353,7 +1402,8 @@ impl EmbeddedReadView {
         as_of: CommitSeq,
     ) -> Result<(), SealedReadError> {
         let scope = partition.anchor().scope();
-        if scope.source_root != self.partition_root()
+        if (scope.source_root != self.partition_root()
+            && Some(scope.source_root) != self.snapshot.sealed_source_root)
             || scope.publication != self.frontier()
             || scope.graph != crate::GRAPH
             || scope.branch != crate::BRANCH

@@ -13,16 +13,25 @@
 //! that receipt before interpreting any length. Scalar visibility is valid only
 //! within that exact source lineage and the admitted [floor, publication] cut.
 //!
-//! This is a derived adjacency image, not a newly registered AdjRunSegment kind
-//! or a second durable graph authority. The existing manifest still roots Tier D.
-//! Restart must recover source authority there; no public API deserializes a
-//! self-asserted anchor. Publishing registered run refs, marker-aware cross-branch
-//! attachment, origin-order metadata, and automatic maintenance are separate
-//! integration work. In particular, content-version starts are NOT relabeled as
-//! immutable OriginBirthOrder values. Forking an image handle shares its bytes,
-//! but does not authorize the image under an unrelated branch.
+//! FGSI remains the derived image codec. [`AdjRunSegment`] adds registered FGRN
+//! framing, immutable Chronicle-derived origins, scoped map identities and a
+//! representation-independent digest. V7 selected-root membership can admit a
+//! persisted run after restart; no public parser accepts a self-asserted anchor.
+//! The complete Tier-D source remains rooted. This first durable profile is one
+//! forward relation in one exact admitted lineage, never a second graph history.
+//! Content-version starts are not relabeled as immutable origin orders.
+//! Cross-branch attachment, page/Merkle mmap, automatic tier maintenance and
+//! physical reclamation remain separate work. Cloning shares image bytes without
+//! authorizing them under an unrelated branch or allowing an ordinal to escape
+//! its embedded dictionary.
 
 mod buffered;
+mod durable;
+pub(crate) use durable::read_adj_run;
+pub use durable::{
+    ADJ_RUN_OBJECT_KIND, AdjRunError, AdjRunHeader, AdjRunSegment, AdjRunSegmentVersion,
+    MAX_ADJ_RUN_BYTES, adj_run_id,
+};
 mod image;
 mod incoming;
 pub use incoming::{
@@ -44,6 +53,7 @@ use asupersync::fs::Vfs;
 use fgdb_codec::ef_payload::EfPayloadError;
 use fgdb_codec::elias_fano::EliasFanoError;
 use fgdb_codec::identity::IdentityColumnError;
+pub use fgdb_codec::identity::OriginBirthOrder;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{
     BranchId, CanonicalPropertyValue, CanonicalScalarResolver, CommitSeq, GraphId, QueryCx, VId,
@@ -619,6 +629,35 @@ impl SealedPartition {
     /// image metadata and does not scan descriptors or decode adjacency.
     pub fn incidence_count(&self) -> usize {
         self.image.incidences
+    }
+
+    /// The stable identities retained by this exact admitted image. Historical
+    /// content versions share one identity; parallel edges remain distinct.
+    /// The caller bounds the distinct population before any additional entry
+    /// is retained. This inventory supplies authenticated Chronicle origin
+    /// reconstruction; content-version starts never supply creation order.
+    pub fn stable_edge_ids(
+        &self,
+        cx: &QueryCx,
+        max_ids: usize,
+    ) -> Result<std::collections::BTreeSet<fgdb_types::EId>, SealedError> {
+        let mut ids = std::collections::BTreeSet::new();
+        for row in &self.image.rows {
+            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            let mut cursor = RowScan::new(&self.image, row, 0);
+            while let Some((entry, _)) = cursor.next() {
+                if cursor.position % 128 == 0 {
+                    cx.checkpoint().map_err(SealedError::Interrupted)?;
+                }
+                if !ids.contains(&entry.eid) {
+                    let requested = ids.len().checked_add(1).ok_or(SealedError::SizeOverflow)?;
+                    check_limit("stable edge identities", requested, max_ids)?;
+                    ids.insert(entry.eid);
+                }
+            }
+        }
+        cx.checkpoint().map_err(SealedError::Interrupted)?;
+        Ok(ids)
     }
 
     pub fn stats(&self) -> SealedStats {

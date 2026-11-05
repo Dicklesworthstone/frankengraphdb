@@ -27,7 +27,7 @@ impl<V: Vfs> BlockStore<V> {
             id,
             requested_cut,
             limits,
-            relation,
+            relation.map_or(AdjacencyRetention::All, AdjacencyRetention::Relation),
             retain_vertices,
             false,
         )

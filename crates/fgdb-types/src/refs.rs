@@ -164,6 +164,7 @@ active_logical_object_kinds! {
     DecisionPolicyEpoch = 0x0582 => "DecisionPolicyEpoch",
     DeltaRootSegment = 0x058b => "DeltaRootSegment",
     DeltaRootIndexSegment = 0x058c => "DeltaRootIndexSegment",
+    AdjRunSegment = 0x058d => "AdjRunSegment",
 }
 
 /// Implemented by every durable logical object type that references can

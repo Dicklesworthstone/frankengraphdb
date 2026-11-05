@@ -2,7 +2,9 @@
 //! RaptorQ redundancy in place (object, ciphertext and encoding identity are
 //! unchanged), and re-read the admitted Strata generation's blocks, vertex
 //! patches and publication metadata. Strata objects carry no local redundancy,
-//! so a damaged object is reported, never repaired.
+//! so an ordinary sweep reports damaged data. `--rebuild-derived` explicitly
+//! reopens through authenticated full-history data reconstruction before this
+//! sweep, including when ordinary checkpoint admission would refuse.
 //!
 //! Output: one `scrub` record per damaged object, then either a `scrubbed`
 //! result (nothing lost, exit 0) or, like fsck, an io-class error after the
@@ -123,6 +125,45 @@ fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derived_rebuild_requires_one_explicit_scrub_flag() {
+        let arguments: Vec<String> = [
+            "--db",
+            "unused",
+            "--key-file",
+            "unused.keys",
+            "--rebuild-derived",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let options =
+            crate::parse(&arguments, "scrub").unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(options.rebuild_derived);
+        let ordinary = crate::parse(&arguments[..4], "scrub")
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(!ordinary.rebuild_derived);
+        for command in [
+            "create",
+            "compact",
+            "query",
+            "write",
+            "transaction",
+            "search",
+        ] {
+            let error = crate::parse(&arguments, command)
+                .err()
+                .expect("repair permission belongs only to scrub");
+            assert_eq!((error.code, error.class), (2, "usage"));
+        }
+        let mut repeated = arguments;
+        repeated.push("--rebuild-derived".to_owned());
+        let error = crate::parse(&repeated, "scrub")
+            .err()
+            .expect("duplicate repair flag refuses");
+        assert_eq!((error.code, error.class), (2, "usage"));
+    }
 
     fn id(byte: u8) -> ObjectId {
         ObjectId([byte; 32])

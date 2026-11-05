@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 76
+registry_epoch = 77
 
 [[kind]]
 object_kind = 0x0001
@@ -5488,3 +5488,12 @@ construction_order = 27
 role_predicate = "true"
 max_size_bytes = 2048
 golden_corpus = "corpus/logical/delta_root_index_segment/"
+
+[[kind]]
+object_kind = 0x058d
+name = "AdjRunSegment"
+status = "active"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 268435456
+golden_corpus = "crates/fgdb-strata/src/tiered/sealed/durable/tests.rs"
