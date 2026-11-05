@@ -863,17 +863,26 @@ mod ordered_staging_tests {
                 let expected = db
                     .prepare_ordered_writes(prefix.into_iter().chain([suffix.clone()]).collect())
                     .unwrap_err();
-                assert!(matches!(
-                    &expected,
-                    WriteTxnError::Write(WriteError::CompareAndSetMismatch(_))
-                ));
+                let WriteTxnError::Write(WriteError::CompareAndSetMismatch(expected)) = expected
+                else {
+                    panic!("ordered replay must refuse its CAS guard");
+                };
                 let actual = if explicit_ordered {
                     txn.write_ordered(&mut db, vec![suffix])
                 } else {
                     txn.write(&mut db, suffix)
                 }
                 .unwrap_err();
-                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                let WriteTxnError::Write(WriteError::CompareAndSetMismatch(actual)) = actual else {
+                    panic!("ordered continuation must refuse the same CAS guard");
+                };
+                // Debug redacts property values; compare the typed error and
+                // independently require the exact source-order preimages.
+                assert_eq!(actual, expected);
+                assert_eq!(actual.elem, ElementId::Vertex(VId(1)));
+                assert_eq!(actual.name, P);
+                assert_eq!(actual.expected, Some(CanonicalScalar::Int(0).into()));
+                assert_eq!(actual.actual, Some(CanonicalScalar::Int(1).into()));
                 assert!(std::sync::Arc::ptr_eq(
                     txn.prepared.as_ref().unwrap(),
                     &previous

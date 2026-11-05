@@ -3456,17 +3456,23 @@ impl<'a> Parser<'a> {
             // An imported name cannot silently become an independent local
             // inside EXISTS/OPTIONAL. This subset correlates root vertices;
             // the ordinary scoped compiler can then capture that root value.
+            // Report its use in the child, not its earlier WITH definition:
+            // unresolved_read_input can place that clause after an implicit
+            // WITH or defer its WHERE, then correlate the carried identity.
             let in_root = self.syntax.variables[..self.syntax.root_variables]
                 .iter()
                 .any(|variable| variable.text == name.text);
             if !in_root
-                && self.syntax.scopes.iter().any(|scope| {
-                    scope
-                        .find_name(&|variable| variable.text == name.text)
-                        .is_some()
-                })
+                && let Some(reference) = self
+                    .syntax
+                    .scopes
+                    .iter()
+                    .find_map(|scope| scope.find_name(&|variable| variable.text == name.text))
             {
-                return Err(expected(name.at, "imported vertices in the root MATCH"));
+                return Err(expected(
+                    reference.at,
+                    "imported vertices in the root MATCH",
+                ));
             }
             if let Some(right) = self
                 .syntax
@@ -3475,7 +3481,10 @@ impl<'a> Parser<'a> {
                 .position(|var| var.text == name.text)
             {
                 if right >= self.syntax.root_variables {
-                    return Err(expected(name.at, "imported vertices in the root MATCH"));
+                    return Err(expected(
+                        self.syntax.variables[right].at,
+                        "imported vertices in the root MATCH",
+                    ));
                 }
                 // A known map's open `Any` type is still a map, including
                 // aliases and declared map parameters: openCypher refuses it
