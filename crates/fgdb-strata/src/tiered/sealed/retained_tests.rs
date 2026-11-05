@@ -288,3 +288,273 @@ fn direct_retained_image_admission_precedes_callbacks_and_counts_previous_famili
     ));
     assert_eq!(callbacks, 2);
 }
+
+fn validation_fixture(degree: usize, hosted: bool) -> (SealedScope, Image) {
+    let scope = SealedScope {
+        source_root: PartitionRootVersion(ObjectId([0x46; 32])),
+        graph: GraphId(1),
+        branch: BranchId(2),
+        partition: 0,
+        floor: CommitSeq(1),
+        publication: CommitSeq(10),
+    };
+    let mut retained = Vec::new();
+    for at in 0..degree {
+        retained.push((
+            AdjacencyEntry {
+                src: VId((1u128 << 127) | 3),
+                relation: RelationId(7),
+                dst: VId((1u128 << 100) | ((at / 3) as u128 * 257)),
+                eid: EId((1u128 << 126) | at as u128),
+                created_at: CommitSeq(1 + (at / 3 % 3) as u64),
+                retired_at: (at / 7 % 2 == 0).then_some(CommitSeq(8)),
+            },
+            if hosted && at % 2 != 0 {
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(at as i64).into())]
+            } else {
+                Vec::new()
+            },
+        ));
+    }
+    if degree != 0 {
+        // The same validation must still prove inline dictionary membership.
+        retained.push((
+            AdjacencyEntry {
+                src: VId((1u128 << 127) | 3),
+                relation: RelationId(8),
+                dst: VId(u128::MAX - 1),
+                eid: EId(u128::MAX),
+                created_at: CommitSeq(1),
+                retired_at: None,
+            },
+            Vec::new(),
+        ));
+    }
+    let image = image::build_retained(retained, SealedLimits::default(), &mut || Ok(())).unwrap();
+    (scope, image)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ValidationTrace {
+    // Debug preserves the concrete refusal variant and its fields; none of
+    // these local admission cases contains a non-comparable external error.
+    result: Result<(), String>,
+    checkpoints: usize,
+}
+
+fn validation_trace(
+    image: &Image,
+    scope: SealedScope,
+    scalar: bool,
+    stop: usize,
+) -> ValidationTrace {
+    let mut checkpoints = 0;
+    let mut guard = || {
+        checkpoints += 1;
+        if checkpoints == stop {
+            Err(SealedError::InvalidFloor)
+        } else {
+            Ok(())
+        }
+    };
+    let limits = SealedLimits::default();
+    let result = if scalar {
+        image.validate_scalar(scope, limits, &mut guard)
+    } else {
+        image.validate(scope, limits, &mut guard)
+    };
+    ValidationTrace {
+        result: result.map_err(|error| format!("{error:?}")),
+        checkpoints,
+    }
+}
+
+fn assert_validation_refusal_parity(image: &Image, scope: SealedScope) {
+    let reference = validation_trace(image, scope, true, usize::MAX);
+    assert_eq!(validation_trace(image, scope, false, usize::MAX), reference);
+    for stop in 1..=reference.checkpoints {
+        let expected = ValidationTrace {
+            result: Err("InvalidFloor".to_owned()),
+            checkpoints: stop,
+        };
+        assert_eq!(validation_trace(image, scope, true, stop), expected);
+        assert_eq!(validation_trace(image, scope, false, stop), expected);
+    }
+}
+
+#[test]
+fn sequential_image_validation_matches_scalar_for_tiers_spans_and_property_rows() {
+    for degree in [0, 1, 8, 9, 33, 257, 1025] {
+        for hosted in [false, true] {
+            let (scope, image) = validation_fixture(degree, hosted);
+            let reference = validation_trace(&image, scope, true, usize::MAX);
+            assert!(reference.result.is_ok(), "degree={degree}, hosted={hosted}");
+            assert_eq!(
+                validation_trace(&image, scope, false, usize::MAX),
+                reference
+            );
+            if degree <= 257 {
+                assert_validation_refusal_parity(&image, scope);
+            }
+        }
+    }
+}
+
+#[test]
+fn sequential_image_validation_preserves_malformed_refusals_before_every_checkpoint() {
+    use fgdb_codec::elias_fano::{EliasFano, EntryLimit};
+    use fgdb_codec::identity::IdentityColumn;
+
+    type Mutation = fn(&mut Image, &mut SealedScope);
+    let cases: &[(&str, Mutation)] = &[
+        ("neighbor outside dictionary", |image, _| {
+            let values = vec![image.dictionary.len() as u64; image.runs[0].neighbors.len()];
+            image.runs[0].neighbors =
+                EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+        }),
+        ("unused dictionary member", |image, _| {
+            let mut values: Vec<_> = image.dictionary.iter().collect();
+            values.push(VId(u128::MAX));
+            image.dictionary = IdentityColumn::try_new(
+                &values,
+                image::identity_limits(values.len(), SealedLimits::default()),
+            )
+            .unwrap();
+        }),
+        ("unordered dictionary", |image, _| {
+            let mut values: Vec<_> = image.dictionary.iter().collect();
+            values.swap(0, 1);
+            image.dictionary = IdentityColumn::try_new(
+                &values,
+                image::identity_limits(values.len(), SealedLimits::default()),
+            )
+            .unwrap();
+        }),
+        ("inline neighbor absent from dictionary", |image, _| {
+            let mut values: Vec<_> = image.dictionary.iter().collect();
+            *values.last_mut().unwrap() = VId(u128::MAX);
+            image.dictionary = IdentityColumn::try_new(
+                &values,
+                image::identity_limits(values.len(), SealedLimits::default()),
+            )
+            .unwrap();
+        }),
+        ("unordered identities within one neighbor", |image, _| {
+            let mut values: Vec<_> = image.runs[0].edge_ids.iter().collect();
+            values.swap(0, 1);
+            image.runs[0].edge_ids = IdentityColumn::try_new(
+                &values,
+                image::identity_limits(values.len(), SealedLimits::default()),
+            )
+            .unwrap();
+        }),
+        ("duplicate content statement", |image, _| {
+            let mut values: Vec<_> = image.runs[0].edge_ids.iter().collect();
+            values[1] = values[0];
+            image.runs[0].edge_ids = IdentityColumn::try_new(
+                &values,
+                image::identity_limits(values.len(), SealedLimits::default()),
+            )
+            .unwrap();
+        }),
+        ("missing identity", |image, _| {
+            let mut values: Vec<_> = image.runs[0].edge_ids.iter().collect();
+            values.pop();
+            image.runs[0].edge_ids = IdentityColumn::try_new(
+                &values,
+                image::identity_limits(values.len(), SealedLimits::default()),
+            )
+            .unwrap();
+        }),
+        ("missing locator", |image, _| {
+            image.runs[0].locators.pop();
+        }),
+        ("locator sequence", |image, _| {
+            image.runs[0].locators[0] = 2;
+        }),
+        ("span gap", |image, _| {
+            image.runs[0].spans[1].start_row += 1;
+        }),
+        ("redundant adjacent span", |image, _| {
+            let first = image.runs[0].spans[0];
+            image.runs[0].spans[1].created_at = first.created_at;
+            image.runs[0].spans[1].retired_at = first.retired_at;
+        }),
+        ("zero birth", |image, _| {
+            image.runs[0].spans[0].created_at = CommitSeq(0);
+        }),
+        ("future birth", |image, _| {
+            image.runs[0].spans[0].created_at = CommitSeq(11);
+            image.runs[0].spans[0].retired_at = None;
+        }),
+        ("future retirement", |image, _| {
+            image.runs[0].spans[0].retired_at = Some(CommitSeq(11));
+        }),
+        ("already dropped history", |_, scope| {
+            scope.floor = CommitSeq(8);
+        }),
+        ("missing run", |image, _| {
+            image.rows[0].storage = image::Storage::Run(image.runs.len());
+        }),
+        ("row count mismatch", |image, _| {
+            image.rows[0].count += 1;
+        }),
+        ("unreferenced property row", |image, _| {
+            image.properties.push(image.properties[0].clone());
+        }),
+    ];
+    for &(name, mutate) in cases {
+        let (mut scope, mut image) = validation_fixture(257, true);
+        mutate(&mut image, &mut scope);
+        assert!(
+            validation_trace(&image, scope, true, usize::MAX)
+                .result
+                .is_err(),
+            "ineffective mutation: {name}"
+        );
+        assert_validation_refusal_parity(&image, scope);
+    }
+}
+
+#[test]
+#[ignore = "manual paired complete image validation measurement; no timing gate or competitor claim"]
+fn benchmark_sequential_complete_image_validation() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    for degree in [4096, 65_536] {
+        for hosted in [false, true] {
+            let (scope, image) = validation_fixture(degree, hosted);
+            let reference = validation_trace(&image, scope, true, usize::MAX);
+            assert!(reference.result.is_ok());
+            assert_eq!(
+                validation_trace(&image, scope, false, usize::MAX),
+                reference
+            );
+            let mut samples = [Vec::new(), Vec::new()];
+            for trial in 0..9 {
+                for which in [trial % 2, 1 - trial % 2] {
+                    // Includes allocation of the used-dictionary bitmap and
+                    // all validation, including hosted property admission.
+                    // Source construction, fingerprinting, queries and I/O
+                    // are outside this explicitly bounded measurement.
+                    let started = Instant::now();
+                    if which == 0 {
+                        black_box(&image)
+                            .validate_scalar(scope, SealedLimits::default(), &mut || Ok(()))
+                            .unwrap();
+                    } else {
+                        black_box(&image)
+                            .validate(scope, SealedLimits::default(), &mut || Ok(()))
+                            .unwrap();
+                    }
+                    samples[which].push(started.elapsed().as_nanos());
+                }
+            }
+            eprintln!(
+                "complete_image_validation degree={degree} hosted={hosted} scalar_ns={:?} sequential_ns={:?}",
+                samples[0], samples[1]
+            );
+        }
+    }
+}

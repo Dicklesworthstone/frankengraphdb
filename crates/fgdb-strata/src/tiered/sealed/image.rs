@@ -376,6 +376,27 @@ impl Image {
         limits: SealedLimits,
         checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
     ) -> Result<(), SealedError> {
+        self.validate_with_access::<true>(scope, limits, checkpoint)
+    }
+
+    /// The former positional decoder and dictionary membership search remain
+    /// live only as a differential validation and paired measurement oracle.
+    #[cfg(test)]
+    pub(super) fn validate_scalar(
+        &self,
+        scope: SealedScope,
+        limits: SealedLimits,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        self.validate_with_access::<false>(scope, limits, checkpoint)
+    }
+
+    fn validate_with_access<const SEQUENTIAL: bool>(
+        &self,
+        scope: SealedScope,
+        limits: SealedLimits,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
         check_limit("descriptors", self.rows.len(), limits.max_rows)?;
         check_limit("incidences", self.incidences, limits.max_incidences)?;
         if scope.floor > scope.publication
@@ -424,6 +445,7 @@ impl Image {
             if self.offsets.select(row_index + 1) != Some(position as u64) {
                 return Err(SealedError::NonCanonical);
             }
+            let mut sequential = None;
             match row.storage {
                 Storage::Inline(index) => {
                     if index != next_inline || row.count > INLINE_CAPACITY {
@@ -454,6 +476,12 @@ impl Image {
                         return Err(SealedError::NonCanonical);
                     }
                     next_run += 1;
+                    if SEQUENTIAL {
+                        // Codec construction already validated the EF payload.
+                        // Run shape and complete span coverage are checked
+                        // above, before this cursor can inspect any incidence.
+                        sequential = Some((run, run.neighbors.sequential_cursor(), 0usize));
+                    }
                 }
             }
             let mut previous = None;
@@ -461,7 +489,42 @@ impl Image {
                 if at % 128 == 0 {
                     checkpoint()?;
                 }
-                let (entry, locator) = row.incidence(self, at).ok_or(SealedError::NonCanonical)?;
+                let (entry, locator, stored_rank) = if let Some((run, neighbors, span_index)) =
+                    &mut sequential
+                {
+                    let rank = usize::try_from(neighbors.next().ok_or(SealedError::NonCanonical)?)
+                        .map_err(|_| SealedError::NonCanonical)?;
+                    while run
+                        .spans
+                        .get(*span_index)
+                        .is_some_and(|span| span.end_row as usize <= at)
+                    {
+                        *span_index += 1;
+                    }
+                    let span = run
+                        .spans
+                        .get(*span_index)
+                        .ok_or(SealedError::NonCanonical)?;
+                    if at < span.start_row as usize {
+                        return Err(SealedError::NonCanonical);
+                    }
+                    (
+                        AdjacencyEntry {
+                            src: row.key.src,
+                            relation: row.key.relation,
+                            dst: self.dictionary.get(rank).ok_or(SealedError::NonCanonical)?,
+                            eid: run.edge_ids.get(at).ok_or(SealedError::NonCanonical)?,
+                            created_at: span.created_at,
+                            retired_at: span.retired_at,
+                        },
+                        *run.locators.get(at).ok_or(SealedError::NonCanonical)?,
+                        Some(rank),
+                    )
+                } else {
+                    let (entry, locator) =
+                        row.incidence(self, at).ok_or(SealedError::NonCanonical)?;
+                    (entry, locator, None)
+                };
                 crate::validate_entry(at, &entry).map_err(SealedError::Entry)?;
                 let key = (entry.dst, entry.eid, entry.created_at);
                 if previous.is_some_and(|previous| previous >= key)
@@ -473,10 +536,20 @@ impl Image {
                     return Err(SealedError::NonCanonical);
                 }
                 previous = Some(key);
-                let rank = self.destination_rank(entry.dst);
-                if self.dictionary.get(rank) != Some(entry.dst) {
-                    return Err(SealedError::NonCanonical);
-                }
+                // A CSR neighbor already names the exact position in the
+                // strictly ordered dictionary checked above. Resolving its
+                // identity and then searching for that identity again is
+                // redundant. Inline incidences store identities, so they
+                // retain the original membership search and error order.
+                let rank = if let Some(rank) = stored_rank {
+                    rank
+                } else {
+                    let rank = self.destination_rank(entry.dst);
+                    if self.dictionary.get(rank) != Some(entry.dst) {
+                        return Err(SealedError::NonCanonical);
+                    }
+                    rank
+                };
                 used[rank] = true;
                 if locator != 0 {
                     property_locator = property_locator
