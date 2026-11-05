@@ -28,16 +28,23 @@
 //! last ends at the end of the file. A pack is named by the BLAKE3 hash of its
 //! complete bytes, so two batches never publish different bytes under one name.
 //!
-//! Small batches (an ordinary transaction's handful of objects) stay loose:
-//! their sync count is already small, and loose files are what the existing
-//! crash and damage tooling addresses by path.
+//! Already packed members can be reused after a fresh identity/byte check,
+//! inode sync and durable reread, grouped by physical pack. Publication still
+//! completes the directory barrier before issuing any receipts. The original
+//! complete-pack target, if present, keeps its ordinary equality/refusal check;
+//! deduplication cannot silently repair it by choosing a different grouping.
+//!
+//! New members of small batches (an ordinary transaction's handful of objects)
+//! stay loose: their sync count is already small, and loose files are what the
+//! existing crash and damage tooling addresses by path. An existing loose
+//! target keeps its ordinary verification even when a packed copy is available.
 
 use super::{StoreError, read_bounded};
 use asupersync::fs::{Vfs, VfsFile};
 use asupersync::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use fgdb_types::StorageReadCx;
 use fgdb_types::ids::ObjectId;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -110,36 +117,91 @@ pub(super) enum Located {
     Several(Vec<Location>),
 }
 
+/// Indexed member locations grouped under one physical file. These are hints,
+/// never durability receipts: publication must read the current file, validate
+/// this table and the offered plaintext, sync it and verify its durable bytes.
+pub(super) struct ReusePack {
+    pub(super) path: PathBuf,
+    len: u64,
+    members: Vec<(usize, ObjectId, Location)>,
+}
+
+impl ReusePack {
+    /// Borrow only members whose freshly read table still agrees with the
+    /// indexed location. Validate the complete framing first, without allocating
+    /// another decoded table or trusting the cache's offsets as authority.
+    pub(super) fn members<'a>(
+        &'a self,
+        bytes: &'a [u8],
+    ) -> Option<impl Iterator<Item = (usize, ObjectId, &'a [u8])> + 'a> {
+        if bytes.len() as u64 != self.len {
+            return None;
+        }
+        let count = header_count(bytes.get(..HEADER_BYTES)?, self.len).ok()? as usize;
+        let table_end = HEADER_BYTES + count * ENTRY_BYTES;
+        let table = bytes.get(HEADER_BYTES..table_end)?;
+        visit_table(table, self.len, |_, _, _| {}).ok()?;
+        Some(self.members.iter().filter_map(move |&(at, id, location)| {
+            let start = location.entry as usize * ENTRY_BYTES;
+            let row = table.get(start..start + ENTRY_BYTES)?;
+            if row[..32] != id.0
+                || row[32..40] != location.offset.to_le_bytes()
+                || row[40..44] != location.len.to_le_bytes()
+            {
+                return None;
+            }
+            let start = usize::try_from(location.offset).ok()?;
+            let end = start.checked_add(location.len as usize)?;
+            bytes.get(start..end).map(|bytes| (at, id, bytes))
+        }))
+    }
+}
+
 /// Encode `objects` as one pack. The caller never repeats an identity.
 pub(super) fn encode(objects: &[(ObjectId, &[u8])]) -> Vec<u8> {
     let table_end = HEADER_BYTES + objects.len() * ENTRY_BYTES;
     let payload: usize = objects.iter().map(|(_, bytes)| bytes.len()).sum();
     let mut out = Vec::with_capacity(table_end + payload);
-    out.extend_from_slice(&PACK_MAGIC);
-    out.extend_from_slice(&PACK_VERSION.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(
+    encode_into(objects, |bytes| out.extend_from_slice(bytes));
+    out
+}
+
+fn encode_into(objects: &[(ObjectId, &[u8])], mut write: impl FnMut(&[u8])) {
+    write(&PACK_MAGIC);
+    write(&PACK_VERSION.to_le_bytes());
+    write(&0u16.to_le_bytes());
+    write(
         &u32::try_from(objects.len())
             .expect("a batch flushes far below u32::MAX objects")
             .to_le_bytes(),
     );
-    let mut offset = table_end as u64;
+    let mut offset = (HEADER_BYTES + objects.len() * ENTRY_BYTES) as u64;
     for (id, bytes) in objects {
-        out.extend_from_slice(&id.0);
-        out.extend_from_slice(&offset.to_le_bytes());
+        write(&id.0);
+        write(&offset.to_le_bytes());
         let len = u32::try_from(bytes.len()).expect("a stored object is far below 4 GiB");
-        out.extend_from_slice(&len.to_le_bytes());
+        write(&len.to_le_bytes());
         offset += u64::from(len);
     }
     for (_, bytes) in objects {
-        out.extend_from_slice(bytes);
+        write(bytes);
     }
-    out
 }
 
 /// The canonical file name of a pack's complete bytes.
 pub(super) fn name(bytes: &[u8]) -> String {
     format!("{}.pack", fgdb_crypto::blake3::hash(bytes).to_hex())
+}
+
+/// The incumbent complete-pack name without allocating a second payload copy.
+/// Publication checks that path before deduplication so a damaged existing
+/// realization cannot be bypassed by changing the offered group's layout.
+pub(super) fn name_of(objects: &[(ObjectId, &[u8])]) -> String {
+    let mut hash = fgdb_crypto::blake3::Hasher::new();
+    encode_into(objects, |bytes| {
+        hash.update(bytes);
+    });
+    format!("{}.pack", hash.finalize().to_hex())
 }
 
 /// The declared object count, after checking the fixed header.
@@ -168,12 +230,23 @@ fn header_count(header: &[u8], file_len: u64) -> Result<u64, &'static str> {
 /// Decode and admit a pack table, `table` being the bytes right after the
 /// header. Refuses every shape but the canonical one [`encode`] writes.
 fn decode_table(table: &[u8], file_len: u64) -> Result<Vec<(ObjectId, u64, u32)>, &'static str> {
+    let mut entries = Vec::with_capacity(table.len() / ENTRY_BYTES);
+    visit_table(table, file_len, |id, offset, len| {
+        entries.push((id, offset, len));
+    })?;
+    Ok(entries)
+}
+
+fn visit_table(
+    table: &[u8],
+    file_len: u64,
+    mut visit: impl FnMut(ObjectId, u64, u32),
+) -> Result<(), &'static str> {
     let (rows, torn) = table.as_chunks::<ENTRY_BYTES>();
     if !torn.is_empty() {
         return Err("torn pack table");
     }
     let mut next = (HEADER_BYTES + table.len()) as u64;
-    let mut entries = Vec::with_capacity(rows.len());
     for entry in rows {
         let id = ObjectId(entry[..32].try_into().expect("32-byte identity"));
         let offset = u64::from_le_bytes(entry[32..40].try_into().expect("8-byte offset"));
@@ -187,12 +260,12 @@ fn decode_table(table: &[u8], file_len: u64) -> Result<Vec<(ObjectId, u64, u32)>
         if next > file_len {
             return Err("pack object runs past its file");
         }
-        entries.push((id, offset, len));
+        visit(id, offset, len);
     }
     if next != file_len {
         return Err("pack has bytes no table entry names");
     }
-    Ok(entries)
+    Ok(())
 }
 
 enum Slot {
@@ -492,6 +565,36 @@ impl PackIndex {
         }
     }
 
+    /// Group the currently preferred location of every offered identity. A
+    /// miss is still an ordinary new publication, so fresh commits add no
+    /// filesystem scan to discover candidates. Reads/publications refresh the
+    /// shared index through their existing paths.
+    pub(super) fn reuse_candidates(
+        &self,
+        objects: impl IntoIterator<Item = ObjectId>,
+    ) -> Vec<ReusePack> {
+        let table = self.table.read().expect("pack table");
+        let mut groups = BTreeMap::<u32, ReusePack>::new();
+        for (at, id) in objects.into_iter().enumerate() {
+            let Some(&location) = table.objects.get(&id) else {
+                continue;
+            };
+            groups
+                .entry(location.pack)
+                .or_insert_with(|| {
+                    let pack = &table.packs[location.pack as usize];
+                    ReusePack {
+                        path: pack.path.clone(),
+                        len: pack.len,
+                        members: Vec::new(),
+                    }
+                })
+                .members
+                .push((at, id, location));
+        }
+        groups.into_values().collect()
+    }
+
     /// The bytes at `location`, refusing an object over `limit` before any
     /// read. The caller verifies the object's identity, as for a loose read.
     pub(super) async fn read<V: Vfs>(
@@ -753,6 +856,7 @@ mod tests {
             assert_eq!(&pack[start..start + *len as usize], bytes.as_slice());
         }
         assert_eq!(name(&pack), name(&pack.clone()));
+        assert_eq!(name(&pack), name_of(&refs));
         assert!(name(&pack).ends_with(".pack"));
     }
 

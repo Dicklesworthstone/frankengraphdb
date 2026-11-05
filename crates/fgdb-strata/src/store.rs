@@ -801,7 +801,7 @@ fn ensure_size_within_limit(observed: u64, limit: u64) -> Result<(), StoreError>
     Ok(())
 }
 
-fn repair_checkpoint(cx: &CommitCx) -> Result<(), StoreError> {
+fn publication_checkpoint(cx: &CommitCx) -> Result<(), StoreError> {
     cx.checkpoint().map_err(|error| {
         StoreError::Io(std::io::Error::new(std::io::ErrorKind::Interrupted, error))
     })
@@ -1597,7 +1597,7 @@ impl<V: Vfs> BlockStore<V> {
         receipts: &'a mut PublishReceipts,
         crash_at: Option<BlockStoreCrashPoint>,
     ) -> Result<BlockPublicationBatch<'a, V>, StoreError> {
-        repair_checkpoint(cx)?;
+        publication_checkpoint(cx)?;
         if !receipts.spans.is_empty()
             || !receipts.chains.is_empty()
             || !receipts.patch_spans.is_empty()
@@ -4227,8 +4227,8 @@ pub struct BlockPublicationBatch<'a, V: Vfs> {
     /// written until a flush decides between one pack and loose files.
     unflushed: Vec<(StoredObjectKind, ObjectId, Vec<u8>)>,
     unflushed_bytes: usize,
-    /// Whether a flush of this batch published a pack, whose name `finish`
-    /// must make durable in the pack directory.
+    /// Whether this batch published or reused a pack, whose name `finish`
+    /// must make durable in the pack directory before receipts escape.
     packed: bool,
     pending: Vec<PendingAdmission>,
     crash_at: Option<BlockStoreCrashPoint>,
@@ -4248,7 +4248,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         bytes: &[u8],
     ) -> Result<(), StoreError> {
         if self.repair_data {
-            repair_checkpoint(cx)?;
+            publication_checkpoint(cx)?;
             if !kind.is_data() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -4303,6 +4303,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         self.failed = true;
         let objects = std::mem::take(&mut self.unflushed);
         self.unflushed_bytes = 0;
+        let objects = self.reuse_packed(cx, objects, true).await?;
         if !objects.is_empty() {
             self.flush_pack(cx, &objects).await?;
         }
@@ -4313,8 +4314,21 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     async fn flush_staged(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
         let objects = std::mem::take(&mut self.unflushed);
         self.unflushed_bytes = 0;
-        if !self.repair_data && objects.len() >= PACK_MIN_OBJECTS {
-            return self.flush_pack(cx, &objects).await;
+        // Keep the original publication unit after removing duplicates. A
+        // packed batch can become a small pack, while a loose batch keeps its
+        // existing canonical-file verification and refusal behavior.
+        let packed = !self.repair_data && objects.len() >= PACK_MIN_OBJECTS;
+        let objects = if self.repair_data {
+            objects
+        } else {
+            self.reuse_packed(cx, objects, packed).await?
+        };
+        if packed {
+            return if objects.is_empty() {
+                Ok(())
+            } else {
+                self.flush_pack(cx, &objects).await
+            };
         }
         for chunk in objects.chunks(BATCH_SYNCS_IN_FLIGHT) {
             let mut staged = Vec::with_capacity(chunk.len());
@@ -4336,6 +4350,127 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
             self.flush_loose(cx, staged).await?;
         }
         Ok(())
+    }
+
+    /// Reuse packed members only after proving their current physical bytes
+    /// and re-establishing durability. Cached payloads and location tables are
+    /// hints, not receipts. One bounded file read, sync and durable reread
+    /// serves every offered member of a candidate pack.
+    ///
+    /// Existing whole-pack or loose publication targets keep their ordinary
+    /// checks. Deduplication must not turn a refused damaged target into an
+    /// implicit repair by choosing another layout. Other unusable copies may
+    /// be bypassed by the newly offered bytes, as the existing copy-fallback
+    /// reader already permits. Genuine collisions and I/O failures still fail.
+    async fn reuse_packed(
+        &mut self,
+        cx: &CommitCx,
+        objects: Vec<(StoredObjectKind, ObjectId, Vec<u8>)>,
+        packed: bool,
+    ) -> Result<Vec<(StoredObjectKind, ObjectId, Vec<u8>)>, StoreError> {
+        let store = self.store;
+        let candidates = store
+            .packs
+            .reuse_candidates(objects.iter().map(|(_, id, _)| *id));
+        if candidates.is_empty() {
+            return Ok(objects);
+        }
+        publication_checkpoint(cx)?;
+        if packed {
+            let entries: Vec<_> = objects
+                .iter()
+                .map(|(_, id, bytes)| (*id, bytes.as_slice()))
+                .collect();
+            let incumbent = store.packs.dir().join(pack::name_of(&entries));
+            match cx
+                .with_restriction_async(store.vfs.symlink_metadata(&incumbent))
+                .await
+            {
+                // flush_pack performs the complete ordinary verification,
+                // including its nonregular-path and damaged-byte refusals.
+                Ok(_) => return Ok(objects),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let mut reused = vec![false; objects.len()];
+        for candidate in candidates {
+            publication_checkpoint(cx)?;
+            match cx
+                .with_restriction_async(store.vfs.symlink_metadata(&candidate.path))
+                .await
+            {
+                Ok(metadata) if metadata.file_type().is_file() => {}
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            }
+            let options = OpenOptions::new().read(true).write(true);
+            let file = match cx
+                .with_restriction_async(store.vfs.open(&candidate.path, &options))
+                .await
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let reread = cx
+                .with_restriction_async(store.vfs.open_read(&candidate.path))
+                .await?;
+            let bytes = match read_bounded(cx, reread, pack::MAX_PACK_BYTES).await {
+                Ok(bytes) => bytes,
+                Err(StoreError::ObjectTooLarge { .. }) => continue,
+                Err(error) => return Err(error),
+            };
+            let Some(members) = candidate.members(&bytes) else {
+                continue;
+            };
+            let mut matched = Vec::new();
+            for (at, id, existing) in members {
+                publication_checkpoint(cx)?;
+                let (kind, offered_id, offered) = &objects[at];
+                debug_assert_eq!(*offered_id, id);
+                if !packed {
+                    match cx
+                        .with_restriction_async(store.vfs.symlink_metadata(&store.path(id)))
+                        .await
+                    {
+                        Ok(_) => continue,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                if existing.len() as u64 > kind.stored_limit()
+                    || kind.identity(store.k_oid.expose(), store.namespace, existing) != id
+                {
+                    continue;
+                }
+                if existing != offered.as_slice() {
+                    return Err(StoreError::Collision { object_id: id });
+                }
+                matched.push(at);
+            }
+            if matched.is_empty() {
+                continue;
+            }
+            publication_checkpoint(cx)?;
+            cx.with_restriction_async(file.sync_all()).await?;
+            store
+                .verify_durable_bytes(cx, &candidate.path, &bytes, pack::MAX_PACK_BYTES)
+                .await?;
+            // The pack may have come from an interrupted publication. Its
+            // inode proof alone is insufficient: finish must also sync both
+            // the pack directory and the directory that names it.
+            self.packed = true;
+            for at in matched {
+                reused[at] = true;
+            }
+        }
+        Ok(objects
+            .into_iter()
+            .zip(reused)
+            .filter_map(|(object, reused)| (!reused).then_some(object))
+            .collect())
     }
 
     /// Publish `objects` as one pack: write it under the staging name, sync
@@ -4483,7 +4618,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
             drop(object.file);
             if let Some(staging) = object.staging {
                 if self.repair_data {
-                    repair_checkpoint(cx)?;
+                    publication_checkpoint(cx)?;
                     // Recheck the canonical path after the staging barrier.
                     // A path substituted with a symlink/nonregular inode, or
                     // genuine collision evidence, must not be overwritten.
@@ -4623,7 +4758,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     pub async fn finish(mut self, cx: &CommitCx) -> Result<(), StoreError> {
         self.check_live()?;
         if self.repair_data {
-            repair_checkpoint(cx)?;
+            publication_checkpoint(cx)?;
         }
         self.flush_staged(cx).await?;
         if !self.objects.is_empty() {
@@ -4645,7 +4780,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                 sync_directory(cx, &self.store.vfs, self.store.packs.dir()).await?;
             }
             if self.repair_data {
-                repair_checkpoint(cx)?;
+                publication_checkpoint(cx)?;
             }
             sync_directory(cx, &self.store.vfs, &self.store.dir).await?;
             if self.crash_at == Some(BlockStoreCrashPoint::AfterBatchDirectorySync) {

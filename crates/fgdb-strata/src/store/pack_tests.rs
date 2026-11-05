@@ -29,6 +29,7 @@ struct ReadFaults {
     mode: AtomicU8,
     opens: AtomicUsize,
     pack_opens: AtomicUsize,
+    pack_durable_reads: AtomicUsize,
     directories: AtomicUsize,
     failures: AtomicUsize,
 }
@@ -37,6 +38,7 @@ impl ReadFaults {
     fn arm(&self, mode: u8) {
         self.opens.store(0, SeqCst);
         self.pack_opens.store(0, SeqCst);
+        self.pack_durable_reads.store(0, SeqCst);
         self.directories.store(0, SeqCst);
         self.failures.store(0, SeqCst);
         self.mode.store(mode, SeqCst);
@@ -133,6 +135,12 @@ impl Vfs for ReadFaultVfs {
         UnixVfs.read_link(path).await
     }
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "pack")
+        {
+            self.0.pack_durable_reads.fetch_add(1, SeqCst);
+        }
         let mut bytes = UnixVfs.read(path).await?;
         if self
             .0
@@ -197,9 +205,9 @@ async fn open(cx: &CommitCx, dir: &Path) -> BlockStore {
         .expect("open store")
 }
 
-async fn publish(
+async fn publish<V: Vfs>(
     cx: &CommitCx,
-    store: &BlockStore,
+    store: &BlockStore<V>,
     objects: &[(ObjectId, Vec<u8>)],
     crash_at: Option<BlockStoreCrashPoint>,
 ) -> Result<(), StoreError> {
@@ -213,9 +221,32 @@ async fn publish(
     batch.finish(cx).await
 }
 
-async fn read_all(
+/// Construct the physical copies that recovery laws deliberately damage, and
+/// keep the incumbent full-pack publisher live for the measured comparison.
+/// Ordinary publication may now reuse identical members instead of creating
+/// another copy. This fixture calls the unchanged pack writer and its real
+/// file/directory barriers, without asking deduplication to forge a duplicate.
+async fn publish_physical_copy(
     cx: &CommitCx,
     store: &BlockStore,
+    objects: &[(ObjectId, Vec<u8>)],
+) -> Result<(), StoreError> {
+    let mut receipts = PublishReceipts::new();
+    let mut batch = store.publication_batch(cx, &mut receipts, None)?;
+    for (id, bytes) in objects {
+        batch
+            .put_object(cx, StoredObjectKind::Block, *id, bytes)
+            .await?;
+    }
+    let staged = std::mem::take(&mut batch.unflushed);
+    batch.unflushed_bytes = 0;
+    batch.flush_pack(cx, &staged).await?;
+    batch.finish(cx).await
+}
+
+async fn read_all<V: Vfs>(
+    cx: &CommitCx,
+    store: &BlockStore<V>,
     objects: &[(ObjectId, Vec<u8>)],
 ) -> Vec<Result<Vec<u8>, StoreError>> {
     let mut out = Vec::new();
@@ -236,6 +267,22 @@ fn packs_in(dir: &Path) -> Vec<PathBuf> {
             .collect(),
         Err(_) => Vec::new(),
     }
+}
+
+/// Actual canonical pack bytes and physical table entries on disk. This does
+/// not count offered bytes, logical identities, staging files, or I/O calls.
+fn physical_pack_usage(dir: &Path) -> (usize, usize) {
+    packs_in(dir)
+        .into_iter()
+        .map(|path| {
+            let bytes = std::fs::read(path).expect("canonical pack");
+            assert_eq!(&bytes[..4], b"FGPK");
+            let members = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+            (bytes.len(), members)
+        })
+        .fold((0, 0), |(bytes, members), (next_bytes, next_members)| {
+            (bytes + next_bytes, members + next_members)
+        })
 }
 
 /// Where object `at` of `objects` sits in the pack they were published as.
@@ -267,6 +314,252 @@ fn repair_blocks(count: usize) -> Vec<(ObjectId, Vec<u8>)> {
             (block_id(&K_OID, NAMESPACE, &bytes), bytes)
         })
         .collect()
+}
+
+#[test]
+fn repacked_members_reduce_physical_growth_against_the_live_full_pack_writer() {
+    let baseline_dir = scratch_dir("dedup-baseline");
+    let reuse_dir = scratch_dir("dedup-reuse");
+    under_lab(0x9e01, move |cx| async move {
+        let first = objects(41, PACK_MIN_OBJECTS);
+        let mut offered = first.clone();
+        offered.extend(objects(42, 1));
+        let baseline = open(&cx, &baseline_dir).await;
+        let reuse = open(&cx, &reuse_dir).await;
+        for store in [&baseline, &reuse] {
+            publish(&cx, store, &first, None).await.expect("seed pack");
+        }
+        let before = physical_pack_usage(&baseline_dir);
+        assert_eq!(before, physical_pack_usage(&reuse_dir));
+        let retained = packs_in(&reuse_dir).pop().expect("retained pack");
+        let retained_bytes = std::fs::read(&retained).unwrap();
+
+        // Both publishers execute in this invocation with identical offered
+        // bytes. The baseline retains the real complete-pack write, sync,
+        // durable reread, rename and directory barriers.
+        publish_physical_copy(&cx, &baseline, &offered)
+            .await
+            .expect("incumbent complete pack");
+        publish(&cx, &reuse, &offered, None)
+            .await
+            .expect("reuse existing members");
+        let baseline_after = physical_pack_usage(&baseline_dir);
+        let reuse_after = physical_pack_usage(&reuse_dir);
+        let baseline_new = (baseline_after.0 - before.0, baseline_after.1 - before.1);
+        let reuse_new = (reuse_after.0 - before.0, reuse_after.1 - before.1);
+        assert_eq!(baseline_new.1, PACK_MIN_OBJECTS + 1);
+        assert_eq!(reuse_new.1, 1);
+        assert_eq!(
+            baseline_new.0 - reuse_new.0,
+            first
+                .iter()
+                .map(|(_, bytes)| bytes.len() + 44)
+                .sum::<usize>()
+        );
+        assert_eq!(reuse_new.0, 12 + 44 + offered.last().unwrap().1.len());
+        eprintln!("new canonical pack bytes/members: full={baseline_new:?}, reuse={reuse_new:?}");
+        assert_eq!(std::fs::read(retained).unwrap(), retained_bytes);
+        for dir in [&baseline_dir, &reuse_dir] {
+            let cold = open(&cx, dir).await;
+            assert!(
+                read_all(&cx, &cold, &offered)
+                    .await
+                    .iter()
+                    .zip(&offered)
+                    .all(|(read, (_, bytes))| read.as_ref().unwrap() == bytes)
+            );
+        }
+    });
+}
+
+#[test]
+fn reused_members_share_one_fresh_durable_read_per_pack() {
+    let dir = scratch_dir("dedup-grouped-proof");
+    under_lab(0x9e02, move |cx| async move {
+        let faults = Arc::new(ReadFaults::default());
+        let store = BlockStore::open_with_vfs(
+            &cx,
+            ReadFaultVfs(Arc::clone(&faults)),
+            &dir,
+            K_OID,
+            NAMESPACE,
+        )
+        .await
+        .unwrap();
+        let first = objects(43, PACK_MIN_OBJECTS);
+        let second = objects(44, PACK_MIN_OBJECTS);
+        publish(&cx, &store, &first, None).await.unwrap();
+        publish(&cx, &store, &second, None).await.unwrap();
+        let offered: Vec<_> = first[..PACK_MIN_OBJECTS / 2]
+            .iter()
+            .chain(&second[..PACK_MIN_OBJECTS / 2])
+            .cloned()
+            .collect();
+        // Prime both payload caches; publication must still read physical
+        // bytes and establish new durability independently of those caches.
+        assert!(
+            read_all(&cx, &store, &offered)
+                .await
+                .iter()
+                .all(Result::is_ok)
+        );
+        let before = physical_pack_usage(&dir);
+        faults.arm(0);
+        publish(&cx, &store, &offered, None).await.unwrap();
+        assert_eq!(faults.pack_durable_reads.load(SeqCst), 2);
+        assert_eq!(physical_pack_usage(&dir), before);
+        assert!(offered.iter().all(|(id, _)| !store.path(*id).exists()));
+    });
+}
+
+#[test]
+fn reuse_observes_physical_damage_and_keeps_existing_target_refusals() {
+    for table_damage in [false, true] {
+        let dir = scratch_dir(&format!("dedup-damage-{table_damage}"));
+        under_lab(0x9e03 + u64::from(table_damage), move |cx| async move {
+            let store = open(&cx, &dir).await;
+            let first = objects(45, PACK_MIN_OBJECTS);
+            publish(&cx, &store, &first, None).await.unwrap();
+            assert_eq!(
+                store
+                    .get_bytes(&cx, DeltaBlockVersion(first[0].0))
+                    .await
+                    .unwrap(),
+                first[0].1
+            );
+            let original = packs_in(&dir).pop().unwrap();
+            let mut damaged = std::fs::read(&original).unwrap();
+            let at = if table_damage {
+                0
+            } else {
+                offset_in_pack(&first, 0)
+            };
+            damaged[at] ^= 1;
+            std::fs::write(&original, &damaged).unwrap();
+
+            // The incumbent complete-pack pathname still refuses damage;
+            // deduplication may not bypass that exact publication target.
+            assert!(matches!(
+                publish(&cx, &store, &first, None).await,
+                Err(StoreError::Collision { .. })
+            ));
+            let mut offered = first.clone();
+            offered.reverse();
+            offered.extend(objects(46, 1));
+            publish(&cx, &store, &offered, None).await.unwrap();
+            let new_pack = packs_in(&dir)
+                .into_iter()
+                .find(|path| path != &original)
+                .expect("new members have their own pack");
+            let bytes = std::fs::read(new_pack).unwrap();
+            let new_members = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+            assert_eq!(new_members, if table_damage { offered.len() } else { 2 });
+            assert_eq!(std::fs::read(&original).unwrap(), damaged);
+            let cold = open(&cx, &dir).await;
+            assert!(
+                read_all(&cx, &cold, &offered)
+                    .await
+                    .iter()
+                    .zip(&offered)
+                    .all(|(read, (_, bytes))| read.as_ref().unwrap() == bytes)
+            );
+        });
+    }
+}
+
+#[test]
+fn reuse_never_masks_a_loose_target_or_genuine_collision_evidence() {
+    let dir = scratch_dir("dedup-refusals");
+    under_lab(0x9e05, move |cx| async move {
+        let store = open(&cx, &dir).await;
+        let first = objects(47, PACK_MIN_OBJECTS);
+        publish(&cx, &store, &first, None).await.unwrap();
+        let before = physical_pack_usage(&dir);
+        std::fs::write(store.path(first[0].0), b"damaged loose target").unwrap();
+        assert!(publish(&cx, &store, &first[..1], None).await.is_err());
+        assert_eq!(
+            std::fs::read(store.path(first[0].0)).unwrap(),
+            b"damaged loose target"
+        );
+
+        // Deliberately use the internal fixture seam to model two different
+        // offered byte strings under one authenticated identity. The healthy
+        // existing bytes cannot be treated as absent or silently overwritten.
+        let conflicting = vec![(
+            first[1].0,
+            b"different bytes for the same identity".to_vec(),
+        )];
+        assert!(matches!(
+            publish(&cx, &store, &conflicting, None).await,
+            Err(StoreError::Collision { object_id }) if object_id == first[1].0
+        ));
+        assert_eq!(physical_pack_usage(&dir), before);
+        assert!(!store.path(first[1].0).exists());
+    });
+}
+
+#[test]
+fn reused_pack_receipts_wait_for_durable_readback_and_directory_barriers() {
+    for (case, crash, fault) in [
+        (0, None, DAMAGE_DURABLE_READ),
+        (1, None, INTERRUPT_OPEN),
+        (2, Some(BlockStoreCrashPoint::AfterBatchRenames), 0),
+        (3, Some(BlockStoreCrashPoint::AfterBatchFileSyncs), 0),
+        (4, Some(BlockStoreCrashPoint::AfterBatchDirectorySync), 0),
+    ] {
+        let dir = scratch_dir(&format!("dedup-receipts-{case}"));
+        under_lab(0x9e10 + case, move |cx| async move {
+            let faults = Arc::new(ReadFaults::default());
+            let store = BlockStore::open_with_vfs(
+                &cx,
+                ReadFaultVfs(Arc::clone(&faults)),
+                &dir,
+                K_OID,
+                NAMESPACE,
+            )
+            .await
+            .unwrap();
+            let all = repair_blocks(PACK_MIN_OBJECTS + 1);
+            publish(&cx, &store, &all, None).await.unwrap();
+            let offered = &all[..PACK_MIN_OBJECTS];
+            let before = physical_pack_usage(&dir);
+            let mut receipts = PublishReceipts::new();
+            let mut batch = store.publication_batch(&cx, &mut receipts, crash).unwrap();
+            for (_, bytes) in offered {
+                batch.put_verified(&cx, bytes, None).await.unwrap();
+            }
+            faults.arm(fault);
+            assert!(batch.finish(&cx).await.is_err());
+            assert!(
+                offered
+                    .iter()
+                    .all(|(id, _)| !receipts.holds(DeltaBlockVersion(*id)))
+            );
+            assert_eq!(physical_pack_usage(&dir), before);
+            if fault != 0 {
+                assert_eq!(faults.failures.load(SeqCst), 1);
+            }
+            faults.arm(0);
+            let mut retry = store.publication_batch(&cx, &mut receipts, None).unwrap();
+            for (_, bytes) in offered {
+                retry.put_verified(&cx, bytes, None).await.unwrap();
+            }
+            retry.finish(&cx).await.unwrap();
+            assert!(
+                offered
+                    .iter()
+                    .all(|(id, _)| receipts.holds(DeltaBlockVersion(*id)))
+            );
+            assert_eq!(physical_pack_usage(&dir), before);
+            let cold = open(&cx, &dir).await;
+            assert!(
+                read_all(&cx, &cold, offered)
+                    .await
+                    .iter()
+                    .all(Result::is_ok)
+            );
+        });
+    }
 }
 
 #[test]
@@ -952,7 +1245,7 @@ fn a_damaged_newest_copy_falls_back_to_an_intact_older_one() {
                 .await
                 .expect("publish");
             let before = open(&cx, &dir).await;
-            publish(&cx, &open(&cx, &dir).await, &second, None)
+            publish_physical_copy(&cx, &open(&cx, &dir).await, &second)
                 .await
                 .expect("publish the damaged copy");
             // A miss on the second pack's objects refreshes `before`, which
@@ -1109,7 +1402,7 @@ fn an_interrupted_preferred_copy_never_falls_through_to_another_intact_copy() {
         publish(&cx, &publisher, &first, None)
             .await
             .expect("first pack");
-        publish(&cx, &publisher, &second, None)
+        publish_physical_copy(&cx, &publisher, &second)
             .await
             .expect("second pack");
         let faults = Arc::new(ReadFaults::default());
@@ -1186,7 +1479,7 @@ fn recovery_obeys_interrupted_discovery_and_uses_a_partially_refreshed_index() {
             for seed in [29, 30] {
                 let mut repair = objects(seed, PACK_MIN_OBJECTS);
                 repair.push(first[7].clone());
-                publish(&cx, &publisher, &repair, None)
+                publish_physical_copy(&cx, &publisher, &repair)
                     .await
                     .expect("new repair pack");
             }
@@ -1268,7 +1561,7 @@ fn root_windows_recover_block_and_hosted_patch_proofs_from_older_copies() {
             }
             let mut second = objects(32, PACK_MIN_OBJECTS);
             second.push((id, bytes));
-            publish(&cx, &publisher, &second, None)
+            publish_physical_copy(&cx, &publisher, &second)
                 .await
                 .expect("newer copy");
             assert!(
