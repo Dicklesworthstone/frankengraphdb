@@ -28,12 +28,12 @@ pub(crate) enum BoundContinuationOperation {
         result: RowPatternResult,
     },
     /// A returning read subquery, including its grouping/filter/page stages.
-    /// Its complete output relation determines one existence witness per
-    /// outer occurrence; body columns never enter the outer namespace.
-    ExistsBody {
+    /// Its complete output relation determines one existence witness or row
+    /// count per outer occurrence; body columns never enter the outer namespace.
+    SubqueryBody {
         body: Box<BoundReadInput>,
         imports: Vec<usize>,
-        negated: Option<bool>,
+        result: RowPatternResult,
     },
     /// A list-local read body, collecting every mapped value in occurrence order.
     List {
@@ -74,7 +74,7 @@ pub(crate) struct BoundReadInput {
 // second lexer or a fallback after a failed parse. Nested EXISTS/MATCH bodies,
 // strings, property names and STARTS/ENDS WITH do not start a query part.
 pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
-    if has_relational_exists(tokens) {
+    if has_relational_subquery(tokens) {
         return true;
     }
     let mut depth = 0_usize;
@@ -158,17 +158,19 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     false
 }
 
-/// A multi-clause EXISTS body needs the relational owner even when its
+/// A multi-clause EXISTS or COUNT body needs the relational owner even when its
 /// enclosing query has only one MATCH and the body has no RETURN. This
 /// lookahead does not parse expressions: the shared graph lexer and
 /// multipart compiler still admit the whole body.
-fn has_relational_exists(tokens: &[TextToken<'_>]) -> bool {
+fn has_relational_subquery(tokens: &[TextToken<'_>]) -> bool {
     for (index, token) in tokens.iter().enumerate() {
-        if !token.word("EXISTS")
+        if !(token.word("EXISTS") || token.word("COUNT"))
             || !tokens.get(index + 1).is_some_and(|next| next.punct(b'{'))
-            || index
-                .checked_sub(1)
-                .is_some_and(|previous| tokens[previous].punct(b'.') || tokens[previous].word("AS"))
+            || index.checked_sub(1).is_some_and(|previous| {
+                tokens[previous].punct(b'.')
+                    || tokens[previous].punct(b':')
+                    || tokens[previous].word("AS")
+            })
         {
             continue;
         }
@@ -491,7 +493,7 @@ impl BoundReadInput {
                     }
                     BoundContinuationOperation::Apply { body, .. }
                     | BoundContinuationOperation::Union { body, .. }
-                    | BoundContinuationOperation::ExistsBody { body, .. }
+                    | BoundContinuationOperation::SubqueryBody { body, .. }
                     | BoundContinuationOperation::List { body, .. } => body.graph_source_count(),
                 })
                 .sum::<usize>()
@@ -513,7 +515,7 @@ impl BoundReadInput {
                 BoundContinuationOperation::Apply { .. }
                     | BoundContinuationOperation::Union { .. }
                     | BoundContinuationOperation::Pattern { .. }
-                    | BoundContinuationOperation::ExistsBody { .. }
+                    | BoundContinuationOperation::SubqueryBody { .. }
                     | BoundContinuationOperation::List { .. }
             )
         }) {
@@ -568,16 +570,21 @@ impl BoundReadInput {
                         }
                         body.append_template_transcript(bytes);
                     }
-                    BoundContinuationOperation::ExistsBody {
+                    BoundContinuationOperation::SubqueryBody {
                         body,
                         imports,
-                        negated,
+                        result,
                     } => {
                         bytes.push(6);
-                        bytes.push(match negated {
-                            None => 0,
-                            Some(false) => 1,
-                            Some(true) => 2,
+                        bytes.push(match result {
+                            // Existing existence transcripts stay byte-identical.
+                            RowPatternResult::Exists => 0,
+                            RowPatternResult::Filter { negated: false } => 1,
+                            RowPatternResult::Filter { negated: true } => 2,
+                            RowPatternResult::Count => 3,
+                            RowPatternResult::Collect { .. } => {
+                                unreachable!("a scalar subquery never collects witnesses")
+                            }
                         });
                         bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());
                         for &column in imports {

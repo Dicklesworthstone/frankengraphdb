@@ -625,8 +625,6 @@ fn optional_kind_and_parameters_are_bound_into_the_existing_transcripts() {
 #[test]
 fn unsupported_optional_scopes_and_graph_functions_refuse_before_catalog() {
     for text in [
-        "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN labels(a) AS labels",
-        "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN SIZE(labels(a)) AS size",
         "MATCH (a) WITH a.score AS a OPTIONAL MATCH (a) RETURN a",
         "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN b",
         "MATCH (a) WITH a OPTIONAL RETURN a",
@@ -725,6 +723,361 @@ fn unsupported_optional_scopes_and_graph_functions_refuse_before_catalog() {
         4
     );
     assert!(kept.contains(&vertices(&[None])));
+}
+
+mod carried_metadata {
+    use super::*;
+    use fgdb_gql::{
+        GlaExecutionEvent, GraphElementMetadata, GraphElementMetadataError, GraphSymbolResolver,
+        ReverseSymbolCatalog, with_element_metadata,
+    };
+
+    struct Catalog;
+
+    impl GraphSymbolResolver for Catalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            symbols(kind, name)
+        }
+
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = ReverseSymbolCatalog::new();
+            catalog.insert_label(LabelId(1), "L");
+            catalog.insert_relation(R, "R");
+            catalog.insert_property(P, "score");
+            Some(catalog)
+        }
+    }
+
+    fn text(value: &str) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap())
+    }
+
+    fn integer(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+
+    fn null() -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Null)
+    }
+
+    fn list(value: &str) -> GraphValue {
+        GraphValue::List(vec![text(value)].into_boxed_slice())
+    }
+
+    fn map(value: i64) -> GraphValue {
+        GraphValue::map(vec![("score".into(), integer(value))]).unwrap()
+    }
+
+    fn prepare(statement: &str) -> PreparedGraphSet {
+        PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            statement,
+            &[],
+            &mut Catalog,
+        )
+        .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    }
+
+    /// The same four-vertex multigraph as the outer fixture, with native
+    /// metadata and a governed element reader over exactly the same records.
+    /// Metadata reads are observable here so NULL inputs cannot consult a
+    /// surviving graph binding or silently substitute the OPTIONAL's copy.
+    fn execute(
+        query: &PreparedGraphSet,
+        policy: GqlQueryPolicy,
+        reads: &RefCell<Vec<(ElementId, GraphElementMetadata)>>,
+        fail_at: Option<usize>,
+        checkpoint: impl FnMut() -> Result<(), usize>,
+    ) -> ResultRows {
+        let checkpoint = RefCell::new(checkpoint);
+        let vertices: Vec<_> = (1..=4)
+            .map(|id| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(id * 10)))
+            .collect();
+        let edges: Vec<_> = (1..=4)
+            .map(|id| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(id * 100)))
+            .collect();
+        let vertex_maps: Vec<_> = (1..=4).map(|id| map(id * 10)).collect();
+        let edge_maps: Vec<_> = (1..=4).map(|id| map(id * 100)).collect();
+        let labels = [text("L")];
+        let relation = CanonicalScalar::ucs_basic_text("R").unwrap();
+        query.execute_governed_with_elements(
+            policy,
+            |pattern, remaining| {
+                pattern.plan().execute_governed_with_element_maps(
+                    8,
+                    (1..=4).map(VId),
+                    EDGES
+                        .iter()
+                        .enumerate()
+                        .map(|(at, &(source, relation, target))| {
+                            (EId(at as u128 + 1), source, relation, target)
+                        }),
+                    |vid, predicates| {
+                        Ok::<_, usize>(predicates.iter().all(|predicate| {
+                            predicate.matches(
+                                &[LabelId(1)],
+                                &[(P, vertices[vid.0 as usize - 1].clone())],
+                            )
+                        }))
+                    },
+                    |vid, key| Ok((key == P).then(|| &vertices[vid.0 as usize - 1])),
+                    |eid, key| Ok((key == P).then(|| &edges[eid.0 as usize - 1])),
+                    |_| Ok(Some(labels.as_slice())),
+                    |_| Ok(Some(&relation)),
+                    |vid| Ok(Some(&vertex_maps[vid.0 as usize - 1])),
+                    |eid| Ok(Some(&edge_maps[eid.0 as usize - 1])),
+                    remaining,
+                    || (checkpoint.borrow_mut())(),
+                )
+            },
+            |_, _, _| panic!("this fixture has no CALL source"),
+            with_element_metadata(
+                |element, key| {
+                    let value = match element {
+                        ElementId::Vertex(vid) => &vertices[vid.0 as usize - 1],
+                        ElementId::Edge(eid) => &edges[eid.0 as usize - 1],
+                    };
+                    Ok((key == P).then(|| value.clone()))
+                },
+                |element,
+                 kind,
+                 catalog: &ReverseSymbolCatalog,
+                 control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>| {
+                    reads.borrow_mut().push((element, kind));
+                    if fail_at == Some(reads.borrow().len()) {
+                        return Err(GraphElementMetadataError::Source(91));
+                    }
+                    control(GlaExecutionEvent::Work)
+                        .map_err(|()| GraphElementMetadataError::Interrupted)?;
+                    let value = match (element, kind) {
+                        (ElementId::Vertex(_), GraphElementMetadata::Labels) => {
+                            list(&catalog.labels[&LabelId(1)])
+                        }
+                        (ElementId::Edge(_), GraphElementMetadata::Type) => {
+                            text(&catalog.relations[&R])
+                        }
+                        (_, GraphElementMetadata::Keys) => list(&catalog.properties[&P]),
+                        (ElementId::Vertex(vid), GraphElementMetadata::Properties) => {
+                            vertex_maps[vid.0 as usize - 1].clone()
+                        }
+                        (ElementId::Edge(eid), GraphElementMetadata::Properties) => {
+                            edge_maps[eid.0 as usize - 1].clone()
+                        }
+                        _ => return Ok(None),
+                    };
+                    value
+                        .copy_with_control(&mut |event| control(event))
+                        .map(Some)
+                        .map_err(|()| GraphElementMetadataError::Interrupted)
+                },
+            ),
+            || (checkpoint.borrow_mut())(),
+        )
+    }
+
+    fn values(statement: &str) -> Vec<Vec<GraphValue>> {
+        execute(
+            &prepare(statement),
+            wide(),
+            &RefCell::new(Vec::new()),
+            None,
+            || Ok(()),
+        )
+        .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+        .value
+        .into_iter()
+        .map(|row| row.values().to_vec())
+        .collect()
+    }
+
+    #[test]
+    fn carried_vertex_metadata_keeps_the_left_identity_on_matched_and_unmatched_rows() {
+        let expected: Vec<_> = [
+            (1, Some(2)),
+            (1, Some(2)),
+            (2, Some(3)),
+            (3, Some(3)),
+            (4, None),
+        ]
+        .into_iter()
+        .map(|(a, b)| {
+            vec![
+                GraphValue::Vertex(VId(a)),
+                list("L"),
+                list("score"),
+                map(a as i64 * 10),
+                integer(1),
+                b.map_or_else(null, |b| GraphValue::Vertex(VId(b))),
+            ]
+        })
+        .collect();
+        for (head, name) in [("a", "a"), ("a AS person", "person")] {
+            let statement = format!(
+                "MATCH (a:L) WITH {head} OPTIONAL MATCH ({name})-[:R]->(b) \
+                 RETURN {name},labels({name}),keys({name}),properties({name}), \
+                 size(labels({name})),b ORDER BY {name},b"
+            );
+            assert_eq!(values(&statement), expected, "{statement}");
+        }
+        assert_eq!(
+            values(
+                "MATCH (a:L) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+                 WITH a,properties(a) AS props,labels(a) AS names \
+                 RETURN a,props.score,head(names) ORDER BY a"
+            ),
+            [1, 1, 2, 3, 4]
+                .into_iter()
+                .map(|a| vec![
+                    GraphValue::Vertex(VId(a)),
+                    integer(a as i64 * 10),
+                    text("L")
+                ])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn carried_relationship_metadata_keeps_parallel_identity_when_its_rematch_fails() {
+        for (head, name) in [("r", "r"), ("r AS previous", "previous")] {
+            let statement = format!(
+                "MATCH (a)-[r:R]->(b) WITH a,{head} \
+                 OPTIONAL MATCH (c)-[{name}:R]->(a) \
+                 RETURN {name},type({name}),keys({name}),properties({name}),c,labels(c) \
+                 ORDER BY {name}"
+            );
+            assert_eq!(
+                values(&statement),
+                (1..=4)
+                    .map(|id| vec![
+                        GraphValue::Edge(EId(id)),
+                        text("R"),
+                        list("score"),
+                        map(id as i64 * 100),
+                        if id == 4 {
+                            GraphValue::Vertex(VId(3))
+                        } else {
+                            null()
+                        },
+                        if id == 4 { list("L") } else { null() },
+                    ])
+                    .collect::<Vec<_>>(),
+                "{statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn null_carried_elements_do_not_read_metadata_from_the_optional_graph() {
+        let statement = "UNWIND [null] AS a OPTIONAL MATCH (a)-[:R]->(b) \
+                         RETURN labels(a),keys(a),properties(a),b";
+        let reads = RefCell::new(Vec::new());
+        let result = execute(&prepare(statement), wide(), &reads, None, || Ok(())).unwrap();
+        assert_eq!(
+            result.value,
+            vec![GraphValueRow::from_owned_values(vec![null(); 4])]
+        );
+        assert!(reads.borrow().is_empty());
+
+        let statement = "MATCH (a:L) WITH a OPTIONAL MATCH (a)-[r:R]->(b) \
+                         WITH a,r OPTIONAL MATCH (c)-[r:R]->(a) \
+                         RETURN a,r,type(r),keys(r),properties(r),c ORDER BY a,r";
+        assert_eq!(
+            values(statement),
+            [
+                (1, Some(1)),
+                (1, Some(2)),
+                (2, Some(3)),
+                (3, Some(4)),
+                (4, None)
+            ]
+            .into_iter()
+            .map(|(a, edge)| vec![
+                GraphValue::Vertex(VId(a)),
+                edge.map_or_else(null, |id| GraphValue::Edge(EId(id))),
+                edge.map_or_else(null, |_| text("R")),
+                edge.map_or_else(null, |_| list("score")),
+                edge.map_or_else(null, |id| map(id as i64 * 100)),
+                if edge == Some(4) {
+                    GraphValue::Vertex(VId(3))
+                } else {
+                    null()
+                },
+            ])
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn carried_optional_metadata_retains_exact_limits_cancellation_and_source_errors() {
+        let query = prepare(
+            "MATCH (a:L) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+             RETURN labels(a),properties(a),b",
+        );
+        let checkpoints = Cell::new(0);
+        let measured = execute(&query, wide(), &RefCell::new(Vec::new()), None, || {
+            checkpoints.set(checkpoints.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        let caps = [
+            measured.rows.snapshot_records,
+            measured.rows.result_rows,
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        ];
+        assert_eq!(
+            execute(
+                &query,
+                GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                &RefCell::new(Vec::new()),
+                None,
+                || Ok(()),
+            )
+            .unwrap(),
+            measured,
+        );
+        for dimension in 0..4 {
+            let mut limits = caps;
+            assert!(limits[dimension] > 0);
+            limits[dimension] -= 1;
+            assert!(
+                execute(
+                    &query,
+                    GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                    &RefCell::new(Vec::new()),
+                    None,
+                    || Ok(()),
+                )
+                .is_err()
+            );
+        }
+        for stop in 1..=checkpoints.get() {
+            let seen = Cell::new(0);
+            let result = execute(&query, wide(), &RefCell::new(Vec::new()), None, || {
+                seen.set(seen.get() + 1);
+                if seen.get() == stop {
+                    Err(stop)
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+            assert_eq!(seen.get(), stop);
+        }
+        for limit in ["", " LIMIT 0"] {
+            let query = prepare(&format!(
+                "MATCH (a:L) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+                 RETURN properties(a){limit}"
+            ));
+            let reads = RefCell::new(Vec::new());
+            assert!(matches!(
+                execute(&query, wide(), &reads, Some(2), || Ok(())),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Source(91)))
+            ));
+            assert_eq!(reads.borrow().len(), 2);
+        }
+    }
 }
 
 #[test]

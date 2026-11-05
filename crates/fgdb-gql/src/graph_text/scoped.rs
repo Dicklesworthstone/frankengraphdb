@@ -929,7 +929,7 @@ impl<'a> Parser<'a> {
             if !existence && !key && existence_follows(token.kind, &lexer)? {
                 return Ok(true);
             }
-            if !key && Self::relational_existence_body(token.kind, &lexer)? {
+            if !key && Self::relational_subquery_body(token.kind, &lexer)? {
                 return Ok(true);
             }
             let needs = edge_test || (vertex_test && compound) || (existential && compound);

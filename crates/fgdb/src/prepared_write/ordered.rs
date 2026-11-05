@@ -241,10 +241,7 @@ impl<V: Vfs + Clone> Database<V> {
             }
             coordinate.rows = edges;
             coordinates.insert(relation, coordinate);
-            dependencies.elements.extend(prepared.dependencies.elements);
-            dependencies
-                .adjacency
-                .extend(prepared.dependencies.adjacency);
+            dependencies.extend(prepared.dependencies);
         }
         // Every new endpoint is born before any later coordinate's edges.
         // Vertex deletes also precede later coordinates; each slice's NENF has

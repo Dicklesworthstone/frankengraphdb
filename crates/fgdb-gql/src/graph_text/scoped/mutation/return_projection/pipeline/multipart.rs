@@ -30,10 +30,10 @@ enum UnresolvedContinuationOperation<'a> {
         join: RowJoinSpec,
         result: RowPatternResult,
     },
-    ExistsBody {
+    SubqueryBody {
         body: Box<UnresolvedReadInput<'a>>,
         imports: Vec<usize>,
-        negated: Option<bool>,
+        result: RowPatternResult,
     },
     List {
         body: Box<UnresolvedReadInput<'a>>,
@@ -85,7 +85,7 @@ impl<'a> UnresolvedReadInput<'a> {
                 }
                 UnresolvedContinuationOperation::Apply { body, .. }
                 | UnresolvedContinuationOperation::Union { body, .. }
-                | UnresolvedContinuationOperation::ExistsBody { body, .. }
+                | UnresolvedContinuationOperation::SubqueryBody { body, .. }
                 | UnresolvedContinuationOperation::List { body, .. } => {
                     slots.extend(body.element_key_slots());
                 }
@@ -140,7 +140,7 @@ impl<'a> UnresolvedReadInput<'a> {
             part.input.syntax.parameter_offsets = offsets.to_vec();
             if let UnresolvedContinuationOperation::Apply { body, .. }
             | UnresolvedContinuationOperation::Union { body, .. }
-            | UnresolvedContinuationOperation::ExistsBody { body, .. }
+            | UnresolvedContinuationOperation::SubqueryBody { body, .. }
             | UnresolvedContinuationOperation::List { body, .. } = &mut part.operation
             {
                 body.share_parameters(parameters, offsets);
@@ -175,8 +175,13 @@ impl<'a> UnresolvedReadInput<'a> {
                         | RowPatternResult::Count
                         | RowPatternResult::Collect { .. } => 4,
                     },
-                    UnresolvedContinuationOperation::ExistsBody { body, negated, .. } => {
-                        body.depth() + if negated.is_some() { 4 } else { 2 }
+                    UnresolvedContinuationOperation::SubqueryBody { body, result, .. } => {
+                        body.depth()
+                            + if matches!(result, RowPatternResult::Filter { .. }) {
+                                4
+                            } else {
+                                2
+                            }
                     }
                     UnresolvedContinuationOperation::Apply { body, .. }
                     | UnresolvedContinuationOperation::List { body, .. } => 1 + body.depth(),
@@ -218,7 +223,7 @@ impl<'a> UnresolvedReadInput<'a> {
                     UnresolvedContinuationOperation::Pattern { .. } => 1,
                     UnresolvedContinuationOperation::Apply { body, .. }
                     | UnresolvedContinuationOperation::Union { body, .. }
-                    | UnresolvedContinuationOperation::ExistsBody { body, .. }
+                    | UnresolvedContinuationOperation::SubqueryBody { body, .. }
                     | UnresolvedContinuationOperation::List { body, .. } => body.operand_count(),
                 })
                 .sum::<usize>()
@@ -324,14 +329,14 @@ impl<'a> UnresolvedReadInput<'a> {
                         imports,
                         optional,
                     },
-                    UnresolvedContinuationOperation::ExistsBody {
+                    UnresolvedContinuationOperation::SubqueryBody {
                         body,
                         imports,
-                        negated,
-                    } => BoundContinuationOperation::ExistsBody {
+                        result,
+                    } => BoundContinuationOperation::SubqueryBody {
                         body: Box::new(body.resolve(resolve)?),
                         imports,
-                        negated,
+                        result,
                     },
                     UnresolvedContinuationOperation::List {
                         body,
@@ -1052,11 +1057,13 @@ fn row_pattern_ends<'a>(
 /// A brace body containing relational clauses belongs to the native read
 /// compiler, with or without RETURN. Pattern-only bodies keep their
 /// established native scope owner.
-pub(super) fn returning_existence_body(
+pub(super) fn relational_subquery_body(
     token: TokenKind<'_>,
     lexer: &Lexer<'_>,
 ) -> Result<bool, GraphPatternTextError> {
-    if !matches!(token, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
+    if !matches!(token, TokenKind::Word(word)
+        if word.eq_ignore_ascii_case("EXISTS") || word.eq_ignore_ascii_case("COUNT"))
+    {
         return Ok(false);
     }
     let mut lexer = lexer.clone();
@@ -1105,11 +1112,11 @@ pub(super) fn returning_existence_body(
 }
 
 impl<'a> Parser<'a> {
-    pub(in crate::graph_text::scoped) fn relational_existence_body(
+    pub(in crate::graph_text::scoped) fn relational_subquery_body(
         token: TokenKind<'_>,
         lexer: &Lexer<'_>,
     ) -> Result<bool, GraphPatternTextError> {
-        returning_existence_body(token, lexer)
+        relational_subquery_body(token, lexer)
     }
 
     fn at_existence_end(&self) -> bool {
@@ -1159,7 +1166,7 @@ impl<'a> Parser<'a> {
         let expressions = row_pattern_expressions(&mut self.lexer.clone(), hoisted)?;
         if self.is_word("WITH") {
             for (token, lexer) in expressions {
-                if returning_existence_body(token.kind, &lexer)?
+                if relational_subquery_body(token.kind, &lexer)?
                     || row_list_graph_expression_follows(token.kind, &lexer, hoisted)?
                 {
                     return Ok(true);
@@ -1175,7 +1182,7 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         for (token, lexer) in row_pattern_expressions(&mut self.lexer.clone(), |_| false)? {
-            if returning_existence_body(token.kind, &lexer)? {
+            if relational_subquery_body(token.kind, &lexer)? {
                 return Ok(true);
             }
         }
@@ -2033,7 +2040,7 @@ impl<'a> Parser<'a> {
         result: RowPatternResult,
     ) -> Result<UnresolvedContinuationOperation<'a>, GraphSetTextError> {
         let at = self.current.at;
-        if !returning_existence_body(self.current.kind, &self.lexer)? {
+        if !relational_subquery_body(self.current.kind, &self.lexer)? {
             let (pattern, join) =
                 self.multipart_existence_pattern(statement, incoming, captures, at)?;
             return Ok(UnresolvedContinuationOperation::Pattern {
@@ -2045,7 +2052,11 @@ impl<'a> Parser<'a> {
         if call_depth >= 8 {
             return Err(expected(at, "at most eight nested read subquery bodies"));
         }
-        self.word("EXISTS")?;
+        if matches!(result, RowPatternResult::Count) {
+            self.word("COUNT")?;
+        } else {
+            self.word("EXISTS")?;
+        }
         self.punct(b'{', "{")?;
         // A body has a separate namespace, but shares the original parameter
         // table, catalog slots, lexer and statement-wide admission counters.
@@ -2089,17 +2100,11 @@ impl<'a> Parser<'a> {
         self.optional_body = optional_body;
         let (mut body, _) = parsed?;
         body.append_element_keys(&mut remainder.element_keys);
-        self.punct(b'}', "} after a read-only EXISTS body")?;
-        Ok(UnresolvedContinuationOperation::ExistsBody {
+        self.punct(b'}', "} after a read-only subquery body")?;
+        Ok(UnresolvedContinuationOperation::SubqueryBody {
             body: Box::new(body),
             imports: (0..captures).collect(),
-            negated: match result {
-                RowPatternResult::Filter { negated } => Some(negated),
-                RowPatternResult::Exists => None,
-                RowPatternResult::Count | RowPatternResult::Collect { .. } => {
-                    unreachable!("only EXISTS has a returning body")
-                }
-            },
+            result,
         })
     }
 
@@ -3451,17 +3456,23 @@ impl<'a> Parser<'a> {
             // An imported name cannot silently become an independent local
             // inside EXISTS/OPTIONAL. This subset correlates root vertices;
             // the ordinary scoped compiler can then capture that root value.
+            // Report its use in the child, not its earlier WITH definition:
+            // unresolved_read_input can place that clause after an implicit
+            // WITH or defer its WHERE, then correlate the carried identity.
             let in_root = self.syntax.variables[..self.syntax.root_variables]
                 .iter()
                 .any(|variable| variable.text == name.text);
             if !in_root
-                && self.syntax.scopes.iter().any(|scope| {
-                    scope
-                        .find_name(&|variable| variable.text == name.text)
-                        .is_some()
-                })
+                && let Some(reference) = self
+                    .syntax
+                    .scopes
+                    .iter()
+                    .find_map(|scope| scope.find_name(&|variable| variable.text == name.text))
             {
-                return Err(expected(name.at, "imported vertices in the root MATCH"));
+                return Err(expected(
+                    reference.at,
+                    "imported vertices in the root MATCH",
+                ));
             }
             if let Some(right) = self
                 .syntax
@@ -3470,7 +3481,10 @@ impl<'a> Parser<'a> {
                 .position(|var| var.text == name.text)
             {
                 if right >= self.syntax.root_variables {
-                    return Err(expected(name.at, "imported vertices in the root MATCH"));
+                    return Err(expected(
+                        self.syntax.variables[right].at,
+                        "imported vertices in the root MATCH",
+                    ));
                 }
                 // A known map's open `Any` type is still a map, including
                 // aliases and declared map parameters: openCypher refuses it
@@ -3861,7 +3875,11 @@ impl<'a> Parser<'a> {
                         && let Some(argument) = super::property_map_source(word, parser.current.at, &parser.lexer)?
                         && parser.visible_graph_bindings().any(|name| name.text == argument.text) {
                         if optional && incoming.iter().any(|(binding, _)| binding.text == argument.text) {
-                            return Err(error(argument.at, GraphPatternTextErrorKind::Expected("project carried graph maps before OPTIONAL MATCH")));
+                            // The preserved left identity owns this map, even
+                            // when the OPTIONAL's copy is NULL. Declining the
+                            // graph column lets the ordinary value reader use
+                            // that identity and its governed metadata source.
+                            return Ok(None);
                         }
                         return parser.property_map_function(&mut inputs).map(|column| Some(width + column));
                     }
@@ -3869,10 +3887,10 @@ impl<'a> Parser<'a> {
                         if ["labels", "type", "length", "path_length", "nodes", "edges", "relationships"]
                             .iter().any(|name| word.eq_ignore_ascii_case(name))
                         {
-                            // A graph-function read of an imported value is
-                            // not a read of the nullable right-hand copy. Until
-                            // that read has its own source, require a saved
-                            // left-hand expression instead of returning NULL.
+                            // Metadata of an imported element belongs to the
+                            // preserved left row, not its nullable right-hand
+                            // copy. Path functions retain their existing
+                            // boundary until they have the same value route.
                             if optional {
                                 let mut lookahead = parser.lexer.clone();
                                 lookahead.next()?; // opening parenthesis
@@ -3880,6 +3898,9 @@ impl<'a> Parser<'a> {
                                 if matches!(argument.kind, TokenKind::Word(name)
                                     if incoming.iter().any(|(binding, _)| binding.text == name))
                                 {
+                                    if word.eq_ignore_ascii_case("labels") || word.eq_ignore_ascii_case("type") {
+                                        return Ok(None);
+                                    }
                                     return Err(error(argument.at, GraphPatternTextErrorKind::Expected(
                                         "project carried graph functions before OPTIONAL MATCH",
                                     )));
@@ -4048,7 +4069,7 @@ impl BoundReadInput {
             if matches!(
                 &part.operation,
                 BoundContinuationOperation::Pattern { .. }
-                    | BoundContinuationOperation::ExistsBody { .. }
+                    | BoundContinuationOperation::SubqueryBody { .. }
             ) {
                 let at = source.return_at;
                 let names = input.columns().to_vec();
@@ -4085,18 +4106,11 @@ impl BoundReadInput {
                             })?;
                         (body, (0..width).collect(), *result)
                     }
-                    BoundContinuationOperation::ExistsBody {
+                    BoundContinuationOperation::SubqueryBody {
                         body,
                         imports,
-                        negated,
-                    } => (
-                        body.bind_values(values)?,
-                        imports.clone(),
-                        match *negated {
-                            Some(negated) => RowPatternResult::Filter { negated },
-                            None => RowPatternResult::Exists,
-                        },
-                    ),
+                        result,
+                    } => (body.bind_values(values)?, imports.clone(), *result),
                     _ => unreachable!("graph expression source checked above"),
                 };
                 let body = if matches!(result, RowPatternResult::Count) {

@@ -7,6 +7,7 @@ struct EmbeddedSavepoint {
     name: String,
     staged_len: usize,
     prepared: Option<std::sync::Arc<PreparedWrite>>,
+    prepared_source_ordered: bool,
 }
 
 impl WriteTxn {
@@ -35,6 +36,7 @@ impl WriteTxn {
             name: name.to_owned(),
             staged_len: self.staged.len(),
             prepared: self.prepared.clone(),
+            prepared_source_ordered: self.prepared_source_ordered,
         };
         self.savepoints.push(saved);
         Ok(())
@@ -71,6 +73,7 @@ impl WriteTxn {
         let restored = self.savepoints[index].prepared.clone();
         let appended = self.staged.len() > staged_len;
         let discarded = core::mem::replace(&mut self.prepared, restored);
+        self.prepared_source_ordered = self.savepoints[index].prepared_source_ordered;
         self.staged.truncate(staged_len);
         self.savepoints.truncate(index + 1);
         if appended && let Some(prepared) = discarded {

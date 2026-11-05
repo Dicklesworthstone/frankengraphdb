@@ -950,6 +950,231 @@ fn implicit_exists_preserves_late_refusals_and_cumulative_admission() {
 }
 
 #[test]
+fn count_subquery_bodies_count_completed_rows_with_optional_and_required_matches() {
+    for (body, expected) in [
+        ("MATCH (n)-[:R]->(m) MATCH (m)-[:R]->(last)", [3, 1, 0, 0]),
+        (
+            "MATCH (n)-[:R]->(m) OPTIONAL MATCH (m)-[:R]->(last)",
+            [3, 1, 1, 0],
+        ),
+        ("OPTIONAL MATCH (n)-[:R]->(m)", [3, 1, 1, 1]),
+        ("MATCH (n)-[:R]->(m) RETURN null AS absent", [3, 1, 1, 0]),
+        ("MATCH (n)-[:R]->(m) RETURN DISTINCT m", [2, 1, 1, 0]),
+        (
+            "MATCH (n)-[:R]->(m) RETURN m ORDER BY m SKIP 1 LIMIT 1",
+            [1, 0, 0, 0],
+        ),
+        // A keyless aggregate supplies one row, even on an empty input.
+        ("MATCH (n)-[:R]->(m) RETURN count(*) AS degree", [1; 4]),
+        (
+            "MATCH (n)-[:R]->(m) WITH m,count(*) AS copies WHERE copies > 1",
+            [1, 0, 0, 0],
+        ),
+        // Dropping the outer name creates a genuinely independent local MATCH.
+        ("WITH 1 AS marker MATCH (n) RETURN n", [4; 4]),
+    ] {
+        let statement = format!("MATCH (n) RETURN n,COUNT {{ {body} }} AS total ORDER BY n");
+        assert_eq!(
+            execute(&statement),
+            expected
+                .into_iter()
+                .enumerate()
+                .map(|(at, count)| GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(at as u128 + 1)),
+                    GraphValue::Scalar(CanonicalScalar::Int(count)),
+                ]))
+                .collect::<Vec<_>>(),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn count_subquery_bodies_compose_in_rows_filters_and_nested_subqueries() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    for expression in [
+        "COUNT { MATCH (x)-[:R]->(m) RETURN m }",
+        "COUNT { MATCH (x)-[:R]->(m) WITH m WHERE EXISTS { MATCH (m) RETURN true } }",
+        "COUNT { MATCH (x)-[:R]->(m) WHERE COUNT { MATCH (m) RETURN m } = 1 RETURN m }",
+    ] {
+        assert_eq!(
+            execute(&format!(
+                "{prefix} RETURN x,{expression} AS total ORDER BY x"
+            )),
+            [3, 1, 1, 0]
+                .into_iter()
+                .enumerate()
+                .map(|(at, count)| GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(at as u128 + 1)),
+                    GraphValue::Scalar(CanonicalScalar::Int(count)),
+                ]))
+                .collect::<Vec<_>>(),
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        execute("MATCH (n) WHERE COUNT { MATCH (n)-[:R]->(m) RETURN DISTINCT m } > 1 RETURN n"),
+        vec![vertices(&[1])]
+    );
+    assert_eq!(
+        execute(
+            "MATCH (n) WITH n,COUNT { MATCH (n)-[:R]->(m) RETURN m } AS degree \
+             WHERE degree = 0 RETURN n"
+        ),
+        vec![vertices(&[4])]
+    );
+    assert_eq!(
+        execute(
+            "MATCH (n) WHERE n.p = 1 RETURN \
+             [x IN [n,n] | COUNT { MATCH (x)-[:R]->(m) RETURN DISTINCT m }] AS counts"
+        ),
+        vec![GraphValueRow::from_owned_values(vec![GraphValue::List(
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+            ]
+            .into_boxed_slice()
+        )])]
+    );
+}
+
+#[test]
+fn count_subquery_bodies_rebind_parameters_without_exporting_locals() {
+    let template = PreparedGraphSetText::prepare(
+        "MATCH (n) RETURN n,COUNT { MATCH (n)-[:R]->(m) \
+         WITH m WHERE m.p >= $minimum RETURN m LIMIT $take } AS total ORDER BY n",
+        symbols,
+    )
+    .unwrap();
+    let frozen = template.canonical_template_bytes();
+    for (minimum, take) in [(1, 0), (2, 1), (3, 5)] {
+        let arguments = GqlParameters::new()
+            .with_int64("minimum", minimum)
+            .unwrap()
+            .with_uint64("take", take)
+            .unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        let expected = (1..=4)
+            .map(|id| {
+                let count = EDGES
+                    .iter()
+                    .filter(|(source, _, destination)| {
+                        *source == VId(id) && [1, 2, 2, 3][destination.0 as usize - 1] >= minimum
+                    })
+                    .count()
+                    .min(take as usize);
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(id)),
+                    GraphValue::Scalar(CanonicalScalar::Int(count as i64)),
+                ])
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value, expected);
+    }
+    assert_eq!(template.canonical_template_bytes(), frozen);
+    for statement in [
+        "MATCH (n) RETURN COUNT { MATCH (n)-[:R]->(local) RETURN local } AS total,local",
+        "MATCH (n) RETURN COUNT { MATCH (n) WITH n CREATE (:R) RETURN n } AS total",
+        "MATCH (n) RETURN COUNT { MATCH (n) MATCH } AS total",
+    ] {
+        let resolutions = std::cell::Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(statement, |kind, name| {
+                resolutions.set(resolutions.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{statement}"
+        );
+        assert_eq!(resolutions.get(), 0, "{statement}");
+    }
+}
+
+#[test]
+fn count_subquery_bodies_share_budgets_cancellation_and_late_failures() {
+    for suffix in ["", " LIMIT 0"] {
+        let query = prepare(&format!(
+            "MATCH (n) RETURN n,COUNT {{ MATCH (n)-[:R]->(m) \
+             MATCH (m) RETURN m }} AS total{suffix}"
+        ));
+        let mut checkpoints = 0;
+        let measured = run(&query, wide(), &mut || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .unwrap();
+        let caps = [
+            measured.rows.snapshot_records,
+            measured.rows.result_rows,
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        ];
+        assert_eq!(
+            run(
+                &query,
+                GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                &mut || Ok(())
+            )
+            .unwrap(),
+            measured
+        );
+        for dimension in 0..4 {
+            if caps[dimension] == 0 {
+                continue;
+            }
+            let mut bounded = caps;
+            bounded[dimension] -= 1;
+            assert!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(bounded[0], bounded[1], bounded[2], bounded[3]),
+                    &mut || Ok(())
+                )
+                .is_err(),
+                "{suffix}, dimension {dimension}"
+            );
+        }
+        for stop in [1, checkpoints / 2, checkpoints] {
+            let mut seen = 0;
+            assert!(matches!(
+                run(&query, wide(), &mut || {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }),
+                Err(GqlQueryError::Interrupted(at)) if at == stop
+            ));
+        }
+        let mut calls = 0;
+        let failed = query.execute_governed(
+            wide(),
+            |pattern, remaining| {
+                calls += 1;
+                if calls == 3 {
+                    return Err(GqlQueryError::Source("count-body-source-error"));
+                }
+                pattern.plan().execute_governed_with_properties(
+                    9,
+                    (1..=4).map(VId),
+                    EDGES,
+                    |_, _| Ok::<_, &'static str>(true),
+                    |_, _| Ok(None),
+                    remaining,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            || Ok::<_, usize>(()),
+        );
+        assert_eq!(calls, 3);
+        assert!(matches!(
+            failed,
+            Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                "count-body-source-error"
+            )))
+        ));
+    }
+}
+
+#[test]
 fn returning_exists_groups_and_filters_each_correlated_body_before_testing_presence() {
     let template = PreparedGraphSetText::prepare(
         "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
@@ -1625,6 +1850,144 @@ fn cumulative_budgets_and_every_cancellation_checkpoint_cover_the_whole_join() {
 }
 
 #[test]
+fn imported_vertices_in_later_scopes_use_their_clause_boundaries() {
+    let mut required = Vec::new();
+    let mut optional = Vec::new();
+    for kept in 1..=4 {
+        for other in 1..=4 {
+            let mut matched = false;
+            for &(from, _, to) in &EDGES {
+                if from == VId(kept) {
+                    matched = true;
+                    let row = vertices(&[kept, other, to.0]);
+                    required.push(row.clone());
+                    optional.push(row);
+                }
+            }
+            if !matched {
+                optional.push(GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(kept)),
+                    GraphValue::Vertex(VId(other)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ]));
+            }
+        }
+    }
+    // The imported vertex is absent from MATCH (m), but remains available
+    // to each later clause. Parallel edges keep their two occurrences, and
+    // the OPTIONAL clause preserves kept=4 even though it has no out-edge.
+    for (implicit, explicit, expected) in [
+        (
+            "MATCH (n) WITH n AS kept MATCH (m) MATCH (kept)-[:R]->(x) \
+             RETURN kept, m, x ORDER BY kept, m, x",
+            "MATCH (n) WITH n AS kept MATCH (m) WITH * MATCH (kept)-[:R]->(x) \
+             RETURN kept, m, x ORDER BY kept, m, x",
+            required,
+        ),
+        (
+            "MATCH (n) WITH n AS kept MATCH (m) OPTIONAL MATCH (kept)-[:R]->(x) \
+             RETURN kept, m, x ORDER BY kept, m, x",
+            "MATCH (n) WITH n AS kept MATCH (m) WITH * OPTIONAL MATCH (kept)-[:R]->(x) \
+             RETURN kept, m, x ORDER BY kept, m, x",
+            optional,
+        ),
+    ] {
+        assert_eq!(execute(implicit), expected, "{implicit}");
+        assert_eq!(execute(explicit), expected, "{explicit}");
+        assert_eq!(
+            PreparedGraphSetText::prepare(implicit, symbols)
+                .unwrap()
+                .canonical_template_bytes(),
+            PreparedGraphSetText::prepare(explicit, symbols)
+                .unwrap()
+                .canonical_template_bytes(),
+            "{implicit}"
+        );
+    }
+    // Existence is one boolean per carried row, never the multiplicity of
+    // its witnesses. Its WHERE belongs after MATCH (m)'s required join.
+    for (predicate, kept_ids) in [("EXISTS", vec![1, 2, 3]), ("NOT EXISTS", vec![4])] {
+        let expected: Vec<_> = kept_ids
+            .into_iter()
+            .flat_map(|kept| (1..=4).map(move |other| vertices(&[kept, other])))
+            .collect();
+        for boundary in ["", "WITH * "] {
+            let text = format!(
+                "MATCH (n) WITH n AS kept MATCH (m) {boundary}WHERE {predicate} {{ \
+                 MATCH (kept)-[:R]->(x) }} RETURN kept, m ORDER BY kept, m"
+            );
+            assert_eq!(execute(&text), expected, "{text}");
+        }
+    }
+}
+
+#[test]
+fn scoped_imports_preserve_null_rows_and_relationship_identity() {
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let expected: Vec<_> = (1..=4)
+        .map(|other| {
+            GraphValueRow::from_owned_values(vec![
+                null.clone(),
+                GraphValue::Vertex(VId(other)),
+                null.clone(),
+            ])
+        })
+        .collect();
+    for boundary in ["", "WITH * "] {
+        assert_eq!(
+            execute(&format!(
+                "UNWIND [null] AS kept MATCH (m) {boundary}OPTIONAL MATCH (kept)-[:R]->(x) \
+                 RETURN kept, m, x ORDER BY m"
+            )),
+            expected
+        );
+        assert!(
+            execute(&format!(
+                "UNWIND [null] AS kept MATCH (m) {boundary}MATCH (kept)-[:R]->(x) RETURN x"
+            ))
+            .is_empty()
+        );
+        assert!(
+            execute(&format!(
+                "UNWIND [null] AS kept MATCH (m) {boundary}WHERE EXISTS {{ \
+                 MATCH (kept)-[:R]->(x) }} RETURN m"
+            ))
+            .is_empty()
+        );
+        assert_eq!(
+            execute(&format!(
+                "UNWIND [null] AS kept MATCH (m) {boundary}WHERE NOT EXISTS {{ \
+                 MATCH (kept)-[:R]->(x) }} RETURN m ORDER BY m"
+            )),
+            (1..=4).map(|other| vertices(&[other])).collect::<Vec<_>>()
+        );
+    }
+    // A carried edge is the same physical occurrence, including parallel
+    // edges; the local endpoints are produced by its own OPTIONAL clause.
+    let expected: Vec<_> = EDGES
+        .iter()
+        .enumerate()
+        .flat_map(|(index, &(from, _, to))| {
+            (1..=4).map(move |other| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Edge(fgdb_types::EId(index as u128 + 1)),
+                    GraphValue::Vertex(VId(other)),
+                    GraphValue::Vertex(from),
+                    GraphValue::Vertex(to),
+                ])
+            })
+        })
+        .collect();
+    for boundary in ["", "WITH * "] {
+        let text = format!(
+            "MATCH (a)-[r:R]->(b) WITH r AS kept MATCH (m) {boundary}OPTIONAL MATCH \
+             (x)-[kept:R]->(y) RETURN kept, m, x, y ORDER BY kept, m"
+        );
+        assert_eq!(execute_identified(&text), expected, "{text}");
+    }
+}
+
+#[test]
 fn illegal_imports_scopes_and_statement_wide_depth_refuse_before_catalog() {
     // A carried vertex's property after a later MATCH re-matches it by
     // identity (fgdb-dhcfo; the rows are pinned below).
@@ -1638,8 +2001,10 @@ fn illegal_imports_scopes_and_statement_wide_depth_refuse_before_catalog() {
     for text in [
         "MATCH (n) WITH n.p AS n MATCH (n)-[:R]->(m) RETURN m",
         "MATCH (n) WITH n AS kept MATCH (m) RETURN n",
-        "MATCH (n) WITH n AS kept MATCH (m) OPTIONAL MATCH (kept)-[:R]->(x) RETURN x",
-        "MATCH (n) WITH n AS kept MATCH (m) WHERE EXISTS { MATCH (kept)-[:R]->(x) } RETURN m",
+        "MATCH (n) WITH n.p AS kept MATCH (m) OPTIONAL MATCH (kept)-[:R]->(x) RETURN x",
+        "MATCH (n) WITH n.p AS kept MATCH (m) WHERE EXISTS { MATCH (kept)-[:R]->(x) } RETURN m",
+        "WITH {p:1} AS kept MATCH (m) OPTIONAL MATCH (kept)-[:R]->(x) RETURN x",
+        "WITH {p:1} AS kept MATCH (m) WHERE EXISTS { MATCH (kept)-[:R]->(x) } RETURN m",
         "MATCH (n) WITH n MATCH (n) RETURN n+1 AS bad",
     ] {
         let mut calls = 0;
