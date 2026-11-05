@@ -239,6 +239,7 @@ fn selected_oracle(source: &ZSet<GraphValueRow>) -> ZSet<(VId, u64)> {
     let mut adjacency = BTreeMap::<VId, BTreeSet<VId>>::new();
     for (row, weight) in source.iter() {
         assert!(weight > &ZWeight::ZERO);
+        assert_eq!(row.len(), 2, "invalid oracle fixture width");
         let mut endpoints = [None; 2];
         for (index, value) in row.values().iter().enumerate() {
             match value {
@@ -246,8 +247,7 @@ fn selected_oracle(source: &ZSet<GraphValueRow>) -> ZSet<(VId, u64)> {
                     endpoints[index] = Some(*vertex);
                     adjacency.entry(*vertex).or_default();
                 }
-                value if value.is_null() => {}
-                _ => panic!("invalid oracle fixture"),
+                value => assert!(value.is_null(), "invalid oracle fixture"),
             }
         }
         if let [Some(a), Some(b)] = endpoints
@@ -475,6 +475,7 @@ fn selected_core_refusals_and_cancellation_preserve_all_accepted_support_and_sin
             )]),
             selected_bag([(GraphValueRow::from_owned_values(vec![]), 1)]),
         ] {
+            assert!(std::panic::catch_unwind(|| selected_oracle(&invalid)).is_err());
             let mut state = build_selected(&source, native_rows);
             let mut checkpoint = || Ok(());
             let mut meter = Meter {
