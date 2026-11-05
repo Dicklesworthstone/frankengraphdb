@@ -1749,6 +1749,7 @@ fn source_digest() -> Digest {
             include_str!("sealed_control.rs"),
             include_str!("../../fgdb-strata/src/tiered/sealed/mod.rs"),
             include_str!("../../fgdb-strata/src/tiered/sealed/incoming.rs"),
+            include_str!("../../fgdb-strata/src/tiered/sealed/incoming_transpose.rs"),
             include_str!("call.rs"),
             include_str!("input.rs"),
             include_str!("projection.rs"),

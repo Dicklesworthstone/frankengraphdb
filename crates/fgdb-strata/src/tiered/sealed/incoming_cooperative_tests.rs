@@ -63,6 +63,18 @@ fn source(count: usize, one_group: bool) -> SealedPartition {
     .unwrap()
 }
 
+fn construction_sources(count: usize) -> Vec<SealedPartition> {
+    use super::tests::{TransposeShape, transpose_source};
+    vec![
+        source(count, false),
+        source(count, true),
+        transpose_source(count, TransposeShape::SparseInline, true),
+        transpose_source(count, TransposeShape::Csr, true),
+        transpose_source(count, TransposeShape::Chain, false),
+        transpose_source(count, TransposeShape::FanIn, false),
+    ]
+}
+
 #[derive(Default)]
 struct Wakes(AtomicUsize);
 impl Wake for Wakes {
@@ -138,13 +150,19 @@ fn cooperative_build_preserves_canonical_locators_exact_stats_and_source_ownersh
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     let cx = contexts.query();
     for count in [0, 1, 24, 255, 256, 257, 700] {
-        for one_group in [false, true] {
-            let source = source(count, one_group);
+        for source in construction_sources(count) {
             let expected = expected(&source);
             let sync = source
                 .incoming_index(&cx, IncomingIndexLimits::default())
                 .unwrap();
             assert_eq!(actual(&sync), expected);
+            let incumbent = construction::build_comparison_sync(
+                &source,
+                IncomingIndexLimits::default(),
+                &mut || Ok::<(), SealedError>(()),
+            )
+            .unwrap();
+            super::tests::assert_same_transpose_index(&sync, &incumbent);
             let mut steps = None;
             for q in [1, 3, 7, 257] {
                 let guards = Cell::new(0);
@@ -218,102 +236,103 @@ fn all_live_refusal_cuts_and_suspended_revocations_abandon_without_an_index() {
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     let cx = contexts.query();
-    let source = source(24, false);
-    let anchor = source.anchor();
-    let guards = Cell::new(0);
-    let (expected, pauses) = drive(
-        source.incoming_index_cooperative_with_checkpoint(
-            &cx,
-            IncomingIndexLimits::default(),
-            quantum(3),
-            yield_now,
-            || {
-                guards.set(guards.get() + 1);
-                Ok::<(), Refusal>(())
-            },
-        ),
-        &guards,
-        3,
-    );
-    let expected = expected.unwrap();
-    for stop in 1..=guards.get() {
-        let seen = Cell::new(0);
-        let (result, _) = drive(
+    for source in construction_sources(40) {
+        let anchor = source.anchor();
+        let guards = Cell::new(0);
+        let (expected, pauses) = drive(
             source.incoming_index_cooperative_with_checkpoint(
                 &cx,
                 IncomingIndexLimits::default(),
                 quantum(3),
                 yield_now,
                 || {
+                    guards.set(guards.get() + 1);
+                    Ok::<(), Refusal>(())
+                },
+            ),
+            &guards,
+            3,
+        );
+        let expected = expected.unwrap();
+        for stop in 1..=guards.get() {
+            let seen = Cell::new(0);
+            let (result, _) = drive(
+                source.incoming_index_cooperative_with_checkpoint(
+                    &cx,
+                    IncomingIndexLimits::default(),
+                    quantum(3),
+                    yield_now,
+                    || {
+                        seen.set(seen.get() + 1);
+                        if seen.get() == stop {
+                            Err(Refusal::Guard(stop))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                ),
+                &seen,
+                3,
+            );
+            assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
+            assert_eq!(seen.get(), stop);
+            assert_eq!(source.anchor(), anchor);
+        }
+        for stop in 0..=pauses {
+            let revoked = Cell::new(false);
+            let seen = Cell::new(0);
+            let waker = Waker::from(Arc::new(Wakes::default()));
+            let mut task = Context::from_waker(&waker);
+            let mut future = Box::pin(source.incoming_index_cooperative_with_checkpoint(
+                &cx,
+                IncomingIndexLimits::default(),
+                quantum(3),
+                yield_now,
+                || {
                     seen.set(seen.get() + 1);
-                    if seen.get() == stop {
+                    if revoked.get() {
                         Err(Refusal::Guard(stop))
                     } else {
                         Ok(())
                     }
                 },
-            ),
-            &seen,
-            3,
-        );
-        assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
-        assert_eq!(seen.get(), stop);
-        assert_eq!(source.anchor(), anchor);
-    }
-    for stop in 0..=pauses {
-        let revoked = Cell::new(false);
-        let seen = Cell::new(0);
-        let waker = Waker::from(Arc::new(Wakes::default()));
-        let mut task = Context::from_waker(&waker);
-        let mut future = Box::pin(source.incoming_index_cooperative_with_checkpoint(
-            &cx,
-            IncomingIndexLimits::default(),
-            quantum(3),
-            yield_now,
-            || {
-                seen.set(seen.get() + 1);
-                if revoked.get() {
-                    Err(Refusal::Guard(stop))
-                } else {
-                    Ok(())
-                }
-            },
-        ));
-        for _ in 0..stop {
-            assert!(future.as_mut().poll(&mut task).is_pending());
+            ));
+            for _ in 0..stop {
+                assert!(future.as_mut().poll(&mut task).is_pending());
+            }
+            let before = seen.get();
+            revoked.set(true);
+            let Poll::Ready(result) = future.as_mut().poll(&mut task) else {
+                panic!("revocation cannot schedule or populate another slice");
+            };
+            assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
+            assert_eq!(seen.get(), before + 1);
+            drop(future);
+            // Separately test plain drop at the same stage, without driving to EOF.
+            let mut abandoned = Box::pin(source.incoming_index_cooperative(
+                &cx,
+                IncomingIndexLimits::default(),
+                quantum(3),
+                yield_now,
+            ));
+            for _ in 0..stop {
+                assert!(abandoned.as_mut().poll(&mut task).is_pending());
+            }
+            drop(abandoned);
+            assert_eq!(source.anchor(), anchor);
+            assert_eq!(contexts.outstanding_obligations(), 0);
         }
-        let before = seen.get();
-        revoked.set(true);
-        let Poll::Ready(result) = future.as_mut().poll(&mut task) else {
-            panic!("revocation cannot schedule or populate another slice");
-        };
-        assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
-        assert_eq!(seen.get(), before + 1);
-        drop(future);
-        // Separately test plain drop at the same stage, without driving to EOF.
-        let mut abandoned = Box::pin(source.incoming_index_cooperative(
-            &cx,
-            IncomingIndexLimits::default(),
-            quantum(3),
-            yield_now,
-        ));
-        for _ in 0..stop {
-            assert!(abandoned.as_mut().poll(&mut task).is_pending());
-        }
-        drop(abandoned);
-        assert_eq!(source.anchor(), anchor);
-        assert_eq!(contexts.outstanding_obligations(), 0);
+        let retry = runtime
+            .block_on(source.incoming_index_cooperative(
+                &cx,
+                IncomingIndexLimits::default(),
+                quantum(7),
+                yield_now,
+            ))
+            .unwrap();
+        assert_eq!(actual(&retry), actual(&expected));
+        assert_eq!(retry.stats(), expected.stats());
     }
-    let retry = runtime
-        .block_on(source.incoming_index_cooperative(
-            &cx,
-            IncomingIndexLimits::default(),
-            quantum(7),
-            yield_now,
-        ))
-        .unwrap();
-    assert_eq!(actual(&retry), actual(&expected));
-    assert_eq!(retry.stats(), expected.stats());
 }
 
 #[test]
@@ -322,86 +341,87 @@ fn native_allocation_admission_and_typed_source_errors_do_not_reset_on_resume() 
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     let cx = contexts.query();
-    let source = source(40, false);
-    let sync = source
-        .incoming_index(&cx, IncomingIndexLimits::default())
-        .unwrap();
-    let exact = IncomingIndexLimits {
-        max_rows: sync.stats().rows,
-        max_incidences: sync.stats().incidences,
-        max_workspace_bytes: sync.stats().charged_workspace_bytes,
-    };
-    for q in [1, 17] {
-        let built = runtime
-            .block_on(source.incoming_index_cooperative(&cx, exact, quantum(q), yield_now))
+    for source in construction_sources(40) {
+        let sync = source
+            .incoming_index(&cx, IncomingIndexLimits::default())
             .unwrap();
-        assert_eq!(built.stats(), sync.stats());
-        for (resource, limits) in [
-            (
-                "incoming incidences",
-                IncomingIndexLimits {
-                    max_incidences: exact.max_incidences - 1,
-                    ..exact
-                },
-            ),
-            (
-                "incoming rows",
-                IncomingIndexLimits {
-                    max_rows: exact.max_rows - 1,
-                    ..exact
-                },
-            ),
-            (
-                "incoming workspace bytes",
-                IncomingIndexLimits {
-                    max_workspace_bytes: exact.max_workspace_bytes - 1,
-                    ..exact
-                },
-            ),
-            (
-                "incoming workspace bytes",
-                IncomingIndexLimits {
-                    max_workspace_bytes: 0,
-                    ..exact
-                },
-            ),
-        ] {
-            let result = runtime.block_on(source.incoming_index_cooperative_with_checkpoint(
-                &cx,
-                limits,
-                quantum(q),
-                yield_now,
-                || Ok::<(), Refusal>(()),
-            ));
-            assert!(
-                matches!(result, Err(Refusal::Source(SealedError::Limit { resource: actual, .. })) if actual == resource)
-            );
-            assert!(source.incoming_index(&cx, limits).is_err());
+        let exact = IncomingIndexLimits {
+            max_rows: sync.stats().rows,
+            max_incidences: sync.stats().incidences,
+            max_workspace_bytes: sync.stats().charged_workspace_bytes,
+        };
+        for q in [1, 17] {
+            let built = runtime
+                .block_on(source.incoming_index_cooperative(&cx, exact, quantum(q), yield_now))
+                .unwrap();
+            assert_eq!(built.stats(), sync.stats());
+            for (resource, limits) in [
+                (
+                    "incoming incidences",
+                    IncomingIndexLimits {
+                        max_incidences: exact.max_incidences - 1,
+                        ..exact
+                    },
+                ),
+                (
+                    "incoming rows",
+                    IncomingIndexLimits {
+                        max_rows: exact.max_rows - 1,
+                        ..exact
+                    },
+                ),
+                (
+                    "incoming workspace bytes",
+                    IncomingIndexLimits {
+                        max_workspace_bytes: exact.max_workspace_bytes - 1,
+                        ..exact
+                    },
+                ),
+                (
+                    "incoming workspace bytes",
+                    IncomingIndexLimits {
+                        max_workspace_bytes: 0,
+                        ..exact
+                    },
+                ),
+            ] {
+                let result = runtime.block_on(source.incoming_index_cooperative_with_checkpoint(
+                    &cx,
+                    limits,
+                    quantum(q),
+                    yield_now,
+                    || Ok::<(), Refusal>(()),
+                ));
+                assert!(
+                    matches!(result, Err(Refusal::Source(SealedError::Limit { resource: actual, .. })) if actual == resource)
+                );
+                assert!(source.incoming_index(&cx, limits).is_err());
+            }
         }
+        let mut checks = 0;
+        assert!(matches!(
+            runtime.block_on(source.incoming_index_cooperative_with_checkpoint(
+                &cx,
+                IncomingIndexLimits {
+                    max_incidences: 0,
+                    ..exact
+                },
+                quantum(1),
+                || -> std::future::Ready<()> {
+                    panic!("source preflight must precede first scheduling yield")
+                },
+                || {
+                    checks += 1;
+                    Ok::<(), Refusal>(())
+                },
+            )),
+            Err(Refusal::Source(SealedError::Limit {
+                resource: "incoming incidences",
+                ..
+            }))
+        ));
+        assert_eq!(checks, 1);
     }
-    let mut checks = 0;
-    assert!(matches!(
-        runtime.block_on(source.incoming_index_cooperative_with_checkpoint(
-            &cx,
-            IncomingIndexLimits {
-                max_incidences: 0,
-                ..exact
-            },
-            quantum(1),
-            || -> std::future::Ready<()> {
-                panic!("source preflight must precede first scheduling yield")
-            },
-            || {
-                checks += 1;
-                Ok::<(), Refusal>(())
-            },
-        )),
-        Err(Refusal::Source(SealedError::Limit {
-            resource: "incoming incidences",
-            ..
-        }))
-    ));
-    assert_eq!(checks, 1);
 }
 
 #[test]
@@ -411,8 +431,7 @@ fn classified_build_work_matches_immediate_work_for_every_quantum() {
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     let cx = contexts.query();
     for count in [0, 24, 257] {
-        for one_group in [false, true] {
-            let source = source(count, one_group);
+        for source in construction_sources(count) {
             let mut immediate_work = 0;
             let immediate = source
                 .incoming_index_with_checkpoint(&cx, IncomingIndexLimits::default(), || {
@@ -468,83 +487,84 @@ fn every_classified_work_and_scheduling_refusal_abandons_the_build() {
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     let cx = contexts.query();
-    let source = source(24, false);
-    let anchor = source.anchor();
-    let mut immediate_work = 0;
-    let immediate = source
-        .incoming_index_with_checkpoint(&cx, IncomingIndexLimits::default(), || {
-            immediate_work += 1;
-            Ok::<(), Refusal>(())
-        })
-        .unwrap();
-    for q in [1, 2, 7, 64, usize::MAX] {
-        for stop in 1..=immediate_work {
-            let guards = Cell::new(0);
-            let work = Cell::new(0);
-            let (result, _) = drive(
-                source.incoming_index_cooperative_with_events(
-                    &cx,
-                    IncomingIndexLimits::default(),
-                    quantum(q),
-                    yield_now,
-                    |event| {
-                        guards.set(guards.get() + 1);
-                        if event == SealedBuildEvent::Work {
-                            work.set(work.get() + 1);
-                            if work.get() == stop {
-                                return Err(Refusal::Guard(stop));
-                            }
-                        }
-                        Ok(())
-                    },
-                ),
-                &guards,
-                q,
-            );
-            assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
-            assert_eq!(work.get(), stop);
-            assert_eq!(source.anchor(), anchor);
-        }
-        // Each full allowance is followed by one scheduling check before the
-        // pending logical step may advance. MAX has no suspension to refuse.
-        for stop in 1..=(immediate_work - 1) / q {
-            let guards = Cell::new(0);
-            let work = Cell::new(0);
-            let scheduling = Cell::new(0);
-            let (result, pending) = drive(
-                source.incoming_index_cooperative_with_events(
-                    &cx,
-                    IncomingIndexLimits::default(),
-                    quantum(q),
-                    yield_now,
-                    |event| {
-                        guards.set(guards.get() + 1);
-                        match event {
-                            SealedBuildEvent::Work => work.set(work.get() + 1),
-                            SealedBuildEvent::Scheduling => {
-                                scheduling.set(scheduling.get() + 1);
-                                if scheduling.get() == stop {
+    for source in construction_sources(40) {
+        let anchor = source.anchor();
+        let mut immediate_work = 0;
+        let immediate = source
+            .incoming_index_with_checkpoint(&cx, IncomingIndexLimits::default(), || {
+                immediate_work += 1;
+                Ok::<(), Refusal>(())
+            })
+            .unwrap();
+        for q in [1, 2, 7, 64, usize::MAX] {
+            for stop in 1..=immediate_work {
+                let guards = Cell::new(0);
+                let work = Cell::new(0);
+                let (result, _) = drive(
+                    source.incoming_index_cooperative_with_events(
+                        &cx,
+                        IncomingIndexLimits::default(),
+                        quantum(q),
+                        yield_now,
+                        |event| {
+                            guards.set(guards.get() + 1);
+                            if event == SealedBuildEvent::Work {
+                                work.set(work.get() + 1);
+                                if work.get() == stop {
                                     return Err(Refusal::Guard(stop));
                                 }
                             }
-                        }
-                        Ok(())
-                    },
-                ),
-                &guards,
-                q,
-            );
-            assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
-            assert_eq!(scheduling.get(), stop);
-            assert_eq!(pending, stop);
-            assert_eq!(work.get(), q * stop + 1);
-            assert_eq!(source.anchor(), anchor);
+                            Ok(())
+                        },
+                    ),
+                    &guards,
+                    q,
+                );
+                assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
+                assert_eq!(work.get(), stop);
+                assert_eq!(source.anchor(), anchor);
+            }
+            // Each full allowance is followed by one scheduling check before the
+            // pending logical step may advance. MAX has no suspension to refuse.
+            for stop in 1..=(immediate_work - 1) / q {
+                let guards = Cell::new(0);
+                let work = Cell::new(0);
+                let scheduling = Cell::new(0);
+                let (result, pending) = drive(
+                    source.incoming_index_cooperative_with_events(
+                        &cx,
+                        IncomingIndexLimits::default(),
+                        quantum(q),
+                        yield_now,
+                        |event| {
+                            guards.set(guards.get() + 1);
+                            match event {
+                                SealedBuildEvent::Work => work.set(work.get() + 1),
+                                SealedBuildEvent::Scheduling => {
+                                    scheduling.set(scheduling.get() + 1);
+                                    if scheduling.get() == stop {
+                                        return Err(Refusal::Guard(stop));
+                                    }
+                                }
+                            }
+                            Ok(())
+                        },
+                    ),
+                    &guards,
+                    q,
+                );
+                assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
+                assert_eq!(scheduling.get(), stop);
+                assert_eq!(pending, stop);
+                assert_eq!(work.get(), q * stop + 1);
+                assert_eq!(source.anchor(), anchor);
+            }
         }
+        let retry = source
+            .incoming_index(&cx, IncomingIndexLimits::default())
+            .unwrap();
+        assert_eq!(actual(&retry), expected(&source));
+        assert_eq!(retry.stats(), immediate.stats());
     }
-    let retry = source
-        .incoming_index(&cx, IncomingIndexLimits::default())
-        .unwrap();
-    assert_eq!(actual(&retry), expected(&source));
-    assert_eq!(retry.stats(), immediate.stats());
     assert_eq!(contexts.outstanding_obligations(), 0);
 }

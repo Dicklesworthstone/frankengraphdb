@@ -351,7 +351,7 @@ impl Image {
             .map(|at| &self.rows[at])
     }
 
-    fn destination_rank(&self, target: VId) -> usize {
+    pub(super) fn destination_rank(&self, target: VId) -> usize {
         let mut low = 0;
         let mut high = self.dictionary.len();
         while low < high {

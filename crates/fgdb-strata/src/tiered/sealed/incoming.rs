@@ -6,7 +6,7 @@
 //! A cursor dereferences the same immutable source image on both faces. No
 //! caller-supplied permutation or serialized index can acquire source authority.
 
-use super::image::{RowScan, RowScanStep, reserved};
+use super::image::{Row, RowScan, RowScanStep, Storage, reserved};
 use super::{
     Image, SealedAnchor, SealedBuildEvent, SealedEdge, SealedError, SealedPartition,
     SealedScanBudget, SealedScanStep, check_limit,
@@ -17,8 +17,21 @@ use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::mem::size_of;
 use std::sync::Arc;
 
-// Bound each existing, non-preemptible EF construction call. Sorting, directory
-// walks and individual source incidences checkpoint separately.
+#[path = "incoming_transpose.rs"]
+mod transpose;
+use transpose::{Bucket, TransposeError};
+
+impl From<TransposeError> for SealedError {
+    fn from(error: TransposeError) -> Self {
+        match error {
+            TransposeError::SizeOverflow => Self::SizeOverflow,
+            TransposeError::InvalidPosition => Self::NonCanonical,
+        }
+    }
+}
+
+// Bound each existing, non-preemptible EF construction call. Counting/scatter,
+// sorting, directory walks and source incidences checkpoint separately.
 const CHUNK_ENTRIES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,7 +39,7 @@ pub struct IncomingIndexLimits {
     pub max_rows: usize,
     pub max_incidences: usize,
     /// Conservative peak of requested vector backing stores during construction,
-    /// including the retained index and its sort scratch. Excludes the original
+    /// including the retained index and construction scratch. Excludes the original
     /// image, fixed stack scratch, Arc metadata and allocator rounding/overhead.
     pub max_workspace_bytes: usize,
 }
@@ -166,8 +179,9 @@ impl SealedPartition {
     }
 
     /// Build the same source-bound incoming index with cooperative scheduling.
-    /// The quantum bounds checkpointed steps (collection, comparisons, sift
-    /// levels, group walks and chunks), not CPU time or allocator latency.
+    /// The quantum bounds checkpointed steps (collection, count/scatter,
+    /// comparisons, sift levels, group walks and chunks), not CPU time or
+    /// allocator latency.
     /// Each indivisible EF construction contains at most 256 locators. The
     /// caller supplies its runtime yield; an immediately ready future opts out
     /// of scheduling fairness. No detached task or new source authority exists.
@@ -683,9 +697,8 @@ mod tests;
 mod checkpoint_tests;
 
 // One construction algorithm, two scheduling policies. Rust's future retains
-// the exact loop/sift/group/chunk positions; no handwritten restart or rescans.
-// Keep this executing source inside incoming.rs so the existing Prism source
-// certificate includes BOTH drivers, not just an include/module declaration.
+// the exact loop/scatter/sift/group/chunk positions; no handwritten restarts.
+// Prism's source certificate includes this driver and incoming_transpose.rs.
 mod construction {
     use super::*;
     use std::future::Future;
@@ -794,20 +807,227 @@ mod construction {
         immediate(introsort(values, depth, &mut Immediate(checkpoint)))
     }
 
-    pub(super) async fn build<C: Checkpoint>(
+    #[cfg(test)]
+    pub(super) fn build_comparison_sync<E: From<SealedError>>(
         source: &SealedPartition,
         limits: IncomingIndexLimits,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<SealedIncomingIndex, E> {
+        immediate(build_selected::<false, _>(
+            source,
+            limits,
+            &mut Immediate(checkpoint),
+        ))
+    }
+
+    struct Counted {
+        buckets: Vec<Bucket>,
+        positions: Vec<u64>,
+        relation: RelationId,
+    }
+
+    enum References {
+        Sorted(Vec<IncidenceRef>),
+        Counted(Counted),
+    }
+
+    struct Group {
+        destination: VId,
+        relation: RelationId,
+        end: usize,
+    }
+
+    impl References {
+        fn len(&self) -> usize {
+            match self {
+                Self::Sorted(refs) => refs.len(),
+                Self::Counted(counted) => counted.positions.len(),
+            }
+        }
+
+        fn position(&self, index: usize) -> Result<u64, SealedError> {
+            match self {
+                Self::Sorted(refs) => refs.get(index).map(|entry| entry.position),
+                Self::Counted(counted) => counted.positions.get(index).copied(),
+            }
+            .ok_or(SealedError::NonCanonical)
+        }
+
+        async fn group<C: Checkpoint>(
+            &self,
+            image: &Image,
+            group: usize,
+            start: usize,
+            control: &mut C,
+        ) -> Result<Group, C::Error> {
+            match self {
+                Self::Sorted(refs) => {
+                    let end = group_end(refs, start, control).await?;
+                    Ok(Group {
+                        destination: refs[start].destination,
+                        relation: refs[start].relation,
+                        end,
+                    })
+                }
+                Self::Counted(counted) => {
+                    let bucket = counted
+                        .buckets
+                        .get(group)
+                        .ok_or(SealedError::NonCanonical)?;
+                    let range = bucket.range();
+                    if !bucket.is_complete() || range.start != start || range.end <= start {
+                        return Err(SealedError::NonCanonical.into());
+                    }
+                    Ok(Group {
+                        destination: image
+                            .dictionary
+                            .get(group)
+                            .ok_or(SealedError::NonCanonical)?,
+                        relation: counted.relation,
+                        end: range.end,
+                    })
+                }
+            }
+        }
+    }
+
+    /// Borrow just the destination key. Complete image admission already
+    /// checked EIds, spans, locators and dictionary membership. CSR values are
+    /// dictionary ranks; inline values retain full-width membership lookup.
+    struct DestinationRanks<'a> {
+        image: &'a Image,
+        row: &'a Row,
+        neighbors: Option<EliasFanoSequentialCursor<'a>>,
+        at: usize,
+    }
+
+    impl<'a> DestinationRanks<'a> {
+        fn new(image: &'a Image, row: &'a Row) -> Result<Self, SealedError> {
+            let neighbors = match row.storage {
+                Storage::Inline(_) => None,
+                Storage::Run(index) => Some(
+                    image
+                        .runs
+                        .get(index)
+                        .ok_or(SealedError::NonCanonical)?
+                        .neighbors
+                        .sequential_cursor(),
+                ),
+            };
+            Ok(Self {
+                image,
+                row,
+                neighbors,
+                at: 0,
+            })
+        }
+
+        fn next(&mut self) -> Result<usize, SealedError> {
+            if self.at >= self.row.len() {
+                return Err(SealedError::NonCanonical);
+            }
+            let rank = match &mut self.neighbors {
+                Some(neighbors) => {
+                    usize::try_from(neighbors.next().ok_or(SealedError::NonCanonical)?)
+                        .map_err(|_| SealedError::NonCanonical)?
+                }
+                None => {
+                    let destination = self
+                        .row
+                        .incidence(self.image, self.at)
+                        .ok_or(SealedError::NonCanonical)?
+                        .0
+                        .dst;
+                    let rank = self.image.destination_rank(destination);
+                    if self.image.dictionary.get(rank) != Some(destination) {
+                        return Err(SealedError::NonCanonical);
+                    }
+                    rank
+                }
+            };
+            self.at += 1;
+            Ok(rank)
+        }
+    }
+
+    async fn counted<C: Checkpoint>(
+        source: &SealedPartition,
+        relation: RelationId,
+        scratch: usize,
         control: &mut C,
-    ) -> Result<SealedIncomingIndex, C::Error> {
-        control.check().await?;
+    ) -> Result<References, C::Error> {
         let count = source.image.incidences;
-        check_limit("incoming incidences", count, limits.max_incidences)?;
-        let scratch = mul(count, size_of::<IncidenceRef>())?;
-        check_limit(
-            "incoming workspace bytes",
-            scratch,
-            limits.max_workspace_bytes,
+        let destinations = source.image.dictionary.len();
+        let backing = add(
+            mul(count, size_of::<u64>())?,
+            mul(destinations, size_of::<Bucket>())?,
         )?;
+        // Dictionary admission proves destinations <= count. Preserve the
+        // original 32*count allowance even though this path can retain less.
+        if destinations > count || backing > scratch {
+            return Err(SealedError::NonCanonical.into());
+        }
+        let mut positions = reserved(count)?;
+        let mut buckets = reserved(destinations)?;
+        for _ in 0..destinations {
+            control.check().await?;
+            buckets.push(Bucket::default());
+        }
+        for row in &source.image.rows {
+            control.check().await?;
+            let mut ranks = DestinationRanks::new(&source.image, row)?;
+            for _ in 0..row.len() {
+                control.check().await?;
+                let rank = ranks.next()?;
+                buckets
+                    .get_mut(rank)
+                    .ok_or(SealedError::NonCanonical)?
+                    .count_one()
+                    .map_err(SealedError::from)?;
+                // Initialize inside the already guarded count pass. A second
+                // source pass will fill disjoint slots in this same buffer.
+                positions.push(0);
+            }
+        }
+        if positions.len() != count {
+            return Err(SealedError::NonCanonical.into());
+        }
+        let mut end = 0;
+        for bucket in &mut buckets {
+            control.check().await?;
+            end = bucket.prefix(end).map_err(SealedError::from)?;
+        }
+        if end != count {
+            return Err(SealedError::NonCanonical.into());
+        }
+        let mut position = 0u64;
+        for row in &source.image.rows {
+            control.check().await?;
+            let mut ranks = DestinationRanks::new(&source.image, row)?;
+            for _ in 0..row.len() {
+                control.check().await?;
+                let rank = ranks.next()?;
+                buckets
+                    .get_mut(rank)
+                    .ok_or(SealedError::NonCanonical)?
+                    .scatter(&mut positions, position)
+                    .map_err(SealedError::from)?;
+                position = position.checked_add(1).ok_or(SealedError::SizeOverflow)?;
+            }
+        }
+        Ok(References::Counted(Counted {
+            buckets,
+            positions,
+            relation,
+        }))
+    }
+
+    async fn comparison<C: Checkpoint>(
+        source: &SealedPartition,
+        count: usize,
+        already_ordered: bool,
+        control: &mut C,
+    ) -> Result<References, C::Error> {
         let mut refs = reserved(count)?;
         let mut position = 0u64;
         for row in &source.image.rows {
@@ -827,7 +1047,82 @@ mod construction {
         if refs.len() != count {
             return Err(SealedError::NonCanonical.into());
         }
-        sort(&mut refs, control).await?;
+        if !already_ordered {
+            sort(&mut refs, control).await?;
+        }
+        Ok(References::Sorted(refs))
+    }
+
+    /// Scoped admission proves a single relation and ordered destinations
+    /// within each outgoing row. Only adjacent row boundaries remain to prove
+    /// global incoming order. This replaces, rather than duplicates, the old
+    /// incidence-by-incidence sortedness walk for chains and ordered hubs.
+    async fn scoped_rows_ordered<C: Checkpoint>(
+        source: &SealedPartition,
+        control: &mut C,
+    ) -> Result<bool, C::Error> {
+        if source.image.dictionary.len() <= 1 {
+            return Ok(true);
+        }
+        for pair in source.image.rows.windows(2) {
+            control.check().await?;
+            let last = pair[0]
+                .len()
+                .checked_sub(1)
+                .ok_or(SealedError::NonCanonical)?;
+            let previous = pair[0]
+                .incidence(&source.image, last)
+                .ok_or(SealedError::NonCanonical)?
+                .0
+                .dst;
+            let next = pair[1]
+                .incidence(&source.image, 0)
+                .ok_or(SealedError::NonCanonical)?
+                .0
+                .dst;
+            if previous > next {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(super) async fn build<C: Checkpoint>(
+        source: &SealedPartition,
+        limits: IncomingIndexLimits,
+        control: &mut C,
+    ) -> Result<SealedIncomingIndex, C::Error> {
+        build_selected::<true, _>(source, limits, control).await
+    }
+
+    async fn build_selected<const COUNTING: bool, C: Checkpoint>(
+        source: &SealedPartition,
+        limits: IncomingIndexLimits,
+        control: &mut C,
+    ) -> Result<SealedIncomingIndex, C::Error> {
+        control.check().await?;
+        let count = source.image.incidences;
+        check_limit("incoming incidences", count, limits.max_incidences)?;
+        let scratch = mul(count, size_of::<IncidenceRef>())?;
+        check_limit(
+            "incoming workspace bytes",
+            scratch,
+            limits.max_workspace_bytes,
+        )?;
+        // A scoped anchor proves one immutable relation and dictionary order.
+        // Stable counting avoids comparison sorting for those images. CSR
+        // incidences use stored ranks directly; inline incidences still spend
+        // O(log dictionary) full-width membership lookup. Unscoped images keep
+        // the complete comparator path, including distinct relation groups.
+        let refs = if COUNTING && let Some(relation) = source.anchor.relation() {
+            if scoped_rows_ordered(source, control).await? {
+                comparison(source, count, true, control).await?
+            } else {
+                counted(source, relation, scratch, control).await?
+            }
+        } else {
+            comparison(source, count, false, control).await?
+        };
 
         // Preflight every requested output allocation before retaining any
         // directory or compressed chunk. Scratch remains live through encoding.
@@ -837,18 +1132,17 @@ mod construction {
         let mut start = 0;
         while start < refs.len() {
             control.check().await?;
-            let end = group_end(&refs, start, control).await?;
+            let group = refs.group(&source.image, row_count, start, control).await?;
+            let end = group.end;
             row_count = add(row_count, 1)?;
             check_limit("incoming rows", row_count, limits.max_rows)?;
-            for values in refs[start..end].chunks(CHUNK_ENTRIES) {
+            for first in (start..end).step_by(CHUNK_ENTRIES) {
                 control.check().await?;
                 chunk_count = add(chunk_count, 1)?;
+                let length = (end - first).min(CHUNK_ENTRIES);
                 payload_bytes = add(
                     payload_bytes,
-                    ef_bytes(
-                        values.len(),
-                        values.last().ok_or(SealedError::NonCanonical)?.position,
-                    )?,
+                    ef_bytes(length, refs.position(first + length - 1)?)?,
                 )?;
             }
             start = end;
@@ -872,22 +1166,26 @@ mod construction {
         start = 0;
         while start < refs.len() {
             control.check().await?;
-            let end = group_end(&refs, start, control).await?;
+            let group = refs
+                .group(&source.image, rows.len(), start, control)
+                .await?;
+            let end = group.end;
             let first_chunk = chunks.len();
-            for entries in refs[start..end].chunks(CHUNK_ENTRIES) {
+            for first in (start..end).step_by(CHUNK_ENTRIES) {
                 control.check().await?;
-                for (at, entry) in entries.iter().enumerate() {
-                    values[at] = entry.position;
+                let length = (end - first).min(CHUNK_ENTRIES);
+                for (at, value) in values[..length].iter_mut().enumerate() {
+                    *value = refs.position(first + at)?;
                 }
                 chunks.push(
-                    EliasFano::try_new(&values[..entries.len()], EntryLimit::new(CHUNK_ENTRIES))
+                    EliasFano::try_new(&values[..length], EntryLimit::new(CHUNK_ENTRIES))
                         .map_err(SealedError::EliasFano)?,
                 );
                 control.check().await?;
             }
             rows.push(IncomingRow {
-                destination: refs[start].destination,
-                relation: refs[start].relation,
+                destination: group.destination,
+                relation: group.relation,
                 first_chunk,
                 end_chunk: chunks.len(),
                 incidences: end - start,

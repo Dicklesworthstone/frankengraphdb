@@ -18,6 +18,10 @@ fn entry(source: u128, target: u128, id: u128, relation: u64) -> AdjacencyEntry 
 }
 
 fn seal(entries: &[AdjacencyEntry]) -> SealedPartition {
+    seal_scoped(entries, None)
+}
+
+fn seal_scoped(entries: &[AdjacencyEntry], relation: Option<RelationId>) -> SealedPartition {
     let mut blocks = Vec::new();
     let mut block_props = Vec::new();
     for chunk in entries.chunks(120) {
@@ -48,7 +52,7 @@ fn seal(entries: &[AdjacencyEntry]) -> SealedPartition {
         &mut || Ok(()),
     )
     .unwrap();
-    SealedPartition::finish(
+    SealedPartition::finish_scoped(
         SealedScope {
             source_root: PartitionRootVersion(ObjectId([7; 32])),
             graph: GraphId(1),
@@ -57,6 +61,7 @@ fn seal(entries: &[AdjacencyEntry]) -> SealedPartition {
             floor: CommitSeq(1),
             publication: CommitSeq(10),
         },
+        relation,
         image,
         SealedLimits::default(),
         &mut || Ok(()),
@@ -83,6 +88,518 @@ fn collect(
         rows.push((edge.entry, edge.properties.to_vec()));
     }
     rows
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum TransposeShape {
+    SparseInline,
+    Csr,
+    Hub,
+    OutgoingHub,
+    FanIn,
+    Chain,
+}
+
+const TRANSPOSE_SHAPES: [TransposeShape; 6] = [
+    TransposeShape::SparseInline,
+    TransposeShape::Csr,
+    TransposeShape::Hub,
+    TransposeShape::OutgoingHub,
+    TransposeShape::FanIn,
+    TransposeShape::Chain,
+];
+
+pub(super) fn transpose_source(
+    count: usize,
+    shape: TransposeShape,
+    history: bool,
+) -> SealedPartition {
+    fn wide(index: usize, population: usize) -> u128 {
+        if population > 1 && index + 1 == population {
+            u128::MAX
+        } else {
+            ((index as u128) << 80) | index as u128
+        }
+    }
+    fn mix(mut value: u64) -> u64 {
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value ^= value >> 27;
+        value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+    let degree = if matches!(shape, TransposeShape::SparseInline) {
+        4
+    } else {
+        32
+    };
+    let destinations = match shape {
+        TransposeShape::OutgoingHub => count,
+        TransposeShape::FanIn => 1,
+        TransposeShape::Chain => count + 1,
+        _ => (count / 4).max(2),
+    };
+    let mut entries = Vec::new();
+    for at in 0..count {
+        let source = match shape {
+            TransposeShape::OutgoingHub => 0,
+            TransposeShape::FanIn | TransposeShape::Chain => at,
+            _ => at / degree,
+        };
+        let target = match shape {
+            TransposeShape::OutgoingHub => at,
+            TransposeShape::FanIn => 0,
+            TransposeShape::Chain => at + 1,
+            _ if at == 0 => destinations - 1,
+            _ if at == degree => 0,
+            TransposeShape::Hub if at % 4 != 0 => at % destinations.min(4),
+            _ => (mix(at as u64) % destinations as u64) as usize,
+        };
+        let mut edge = entry(
+            wide(source, count + 1),
+            wide(target, destinations),
+            u128::MAX - at as u128,
+            7,
+        );
+        if history && at % 3 == 0 {
+            edge.retired_at = Some(CommitSeq(4));
+            entries.push(edge);
+            edge.created_at = CommitSeq(4);
+            edge.retired_at = (at % 5 == 0).then_some(CommitSeq(7));
+            if edge.retired_at.is_some() {
+                entries.push(edge);
+                edge.created_at = CommitSeq(7);
+                edge.retired_at = None;
+            }
+        } else if history && at % 5 == 0 {
+            edge.retired_at = Some(CommitSeq(5));
+        }
+        entries.push(edge);
+    }
+    entries.reverse();
+    seal_scoped(&entries, Some(RelationId(7)))
+}
+
+pub(super) fn assert_same_transpose_index(
+    actual: &SealedIncomingIndex,
+    expected: &SealedIncomingIndex,
+) {
+    assert_eq!(actual.source_anchor(), expected.source_anchor());
+    assert_eq!(actual.stats(), expected.stats());
+    assert_eq!(
+        actual.retained_index_bytes(),
+        expected.retained_index_bytes()
+    );
+    let describe = |index: &SealedIncomingIndex| {
+        index
+            .index
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.destination,
+                    row.relation,
+                    row.first_chunk,
+                    row.end_chunk,
+                    row.incidences,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(describe(actual), describe(expected));
+    assert_eq!(actual.index.chunks, expected.index.chunks);
+    let limits = fgdb_codec::ef_payload::EfPayloadLimits {
+        max_entries: CHUNK_ENTRIES,
+        max_bytes: usize::MAX,
+    };
+    for (left, right) in actual.index.chunks.iter().zip(&expected.index.chunks) {
+        assert_eq!(
+            fgdb_codec::ef_payload::encode(left, limits).unwrap(),
+            fgdb_codec::ef_payload::encode(right, limits).unwrap()
+        );
+    }
+}
+
+#[test]
+fn scoped_transpose_matches_comparator_bytes_history_properties_and_seeks() {
+    for count in [0, 1, 7, 8, 9, 31, 33, 256, 257, 521] {
+        for shape in TRANSPOSE_SHAPES {
+            for history in [false, true] {
+                let source = transpose_source(count, shape, history);
+                let anchor = source.anchor();
+                let bytes =
+                    wire::encode(&source.image, SealedLimits::default(), &mut || Ok(())).unwrap();
+                let expected = construction::build_comparison_sync(
+                    &source,
+                    IncomingIndexLimits::default(),
+                    &mut || Ok::<(), SealedError>(()),
+                )
+                .unwrap();
+                let built = index(&source);
+                assert_same_transpose_index(&built, &expected);
+                assert!(built.source().shares_image_with(&source));
+                let mut destinations = vec![VId(17)];
+                let dictionary = &source.image.dictionary;
+                if !dictionary.is_empty() {
+                    for at in [0, dictionary.len() / 2, dictionary.len() - 1] {
+                        destinations.push(dictionary.get(at).unwrap());
+                    }
+                }
+                destinations.sort_unstable();
+                destinations.dedup();
+                for destination in destinations {
+                    for cut in [1, 3, 4, 5, 7, 10] {
+                        for lower in [
+                            None,
+                            Some(VId(0)),
+                            source
+                                .image
+                                .rows
+                                .get(source.image.rows.len() / 2)
+                                .map(|row| row.key.src),
+                            Some(VId(u128::MAX)),
+                        ] {
+                            assert_eq!(
+                                collect(&built, destination, RelationId(7), CommitSeq(cut), lower),
+                                collect(
+                                    &expected,
+                                    destination,
+                                    RelationId(7),
+                                    CommitSeq(cut),
+                                    lower
+                                )
+                            );
+                        }
+                        let mut left = built
+                            .open(
+                                destination,
+                                RelationId(7),
+                                CommitSeq(cut),
+                                None,
+                                &mut || Ok(()),
+                            )
+                            .unwrap();
+                        let mut right = expected
+                            .open(
+                                destination,
+                                RelationId(7),
+                                CommitSeq(cut),
+                                None,
+                                &mut || Ok(()),
+                            )
+                            .unwrap();
+                        loop {
+                            let a = left.next_inner(&mut || Ok(())).unwrap();
+                            let b = right.next_inner(&mut || Ok(())).unwrap();
+                            assert_eq!(a.is_some(), b.is_some());
+                            let (Some(a), Some(b)) = (a, b) else { break };
+                            assert_eq!(a.entry, b.entry);
+                            assert!(std::ptr::eq(a.properties, b.properties));
+                        }
+                    }
+                }
+                assert!(matches!(
+                    built.open(VId(0), RelationId(8), CommitSeq(5), None, &mut || Ok(())),
+                    Err(SealedError::RelationOutsideAnchor { .. })
+                ));
+                assert_eq!(source.anchor(), anchor);
+                assert_eq!(
+                    wire::encode(&source.image, SealedLimits::default(), &mut || Ok(())).unwrap(),
+                    bytes
+                );
+                if history && count == 257 {
+                    let reload = SealedPartition::reload_inner(
+                        anchor,
+                        &bytes,
+                        SealedLimits::default(),
+                        None,
+                        &mut || Ok(()),
+                    )
+                    .unwrap();
+                    assert_same_transpose_index(&index(&reload), &expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn scoped_transpose_has_linear_counted_work_and_no_ordered_input_regression() {
+    for shape in TRANSPOSE_SHAPES {
+        let source = transpose_source(4096, shape, false);
+        let mut old_work = 0;
+        let old = construction::build_comparison_sync(
+            &source,
+            IncomingIndexLimits::default(),
+            &mut || {
+                old_work += 1;
+                Ok::<(), SealedError>(())
+            },
+        )
+        .unwrap();
+        let mut new_work = 0;
+        let new = SealedIncomingIndex::build(&source, IncomingIndexLimits::default(), &mut || {
+            new_work += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_same_transpose_index(&new, &old);
+        let incidences = source.image.incidences;
+        let rows = source.image.rows.len();
+        let destinations = source.image.dictionary.len();
+        let chunks = new.stats().chunks;
+        match shape {
+            TransposeShape::SparseInline | TransposeShape::Csr | TransposeShape::Hub => {
+                // The first row contains the maximum destination, the second
+                // contains zero: exactly one guarded boundary rejects order.
+                assert!(rows > 1 && destinations > 1);
+                assert_eq!(
+                    new_work,
+                    4 + 4 * destinations + 2 * rows + 2 * incidences + 4 * chunks
+                );
+                assert!(new_work < old_work, "{shape:?}: {new_work} >= {old_work}");
+            }
+            TransposeShape::Chain => assert_eq!(new_work, old_work),
+            TransposeShape::OutgoingHub | TransposeShape::FanIn => {
+                assert_eq!(new_work + incidences - 1, old_work);
+            }
+        }
+    }
+    // No scoped proof or count/scatter dispatch applies to an unscoped image,
+    // even if it happens to contain just one relation or one outgoing row.
+    for relations in [1, 3] {
+        for sources in [1, 13] {
+            let entries: Vec<_> = (0..257)
+                .map(|at| entry(at % sources, 31 - at % 31, at, 1 + (at % relations) as u64))
+                .collect();
+            let source = seal(&entries);
+            let mut old_work = 0;
+            let old = construction::build_comparison_sync(
+                &source,
+                IncomingIndexLimits::default(),
+                &mut || {
+                    old_work += 1;
+                    Ok::<(), SealedError>(())
+                },
+            )
+            .unwrap();
+            let mut new_work = 0;
+            let new =
+                SealedIncomingIndex::build(&source, IncomingIndexLimits::default(), &mut || {
+                    new_work += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(new_work, old_work);
+            assert_same_transpose_index(&new, &old);
+        }
+    }
+}
+
+#[test]
+fn scoped_transpose_preserves_exact_limit_refusals_and_every_checkpoint_cut() {
+    fn limit(
+        result: Result<SealedIncomingIndex, SealedError>,
+    ) -> Option<(&'static str, usize, usize)> {
+        match result {
+            Err(SealedError::Limit {
+                resource,
+                requested,
+                limit,
+            }) => Some((resource, requested, limit)),
+            _ => None,
+        }
+    }
+    for shape in [
+        TransposeShape::SparseInline,
+        TransposeShape::Csr,
+        TransposeShape::FanIn,
+        TransposeShape::Chain,
+    ] {
+        let source = transpose_source(40, shape, true);
+        let bytes = wire::encode(&source.image, SealedLimits::default(), &mut || Ok(())).unwrap();
+        let anchor = source.anchor();
+        let expected = construction::build_comparison_sync(
+            &source,
+            IncomingIndexLimits::default(),
+            &mut || Ok::<(), SealedError>(()),
+        )
+        .unwrap();
+        let exact = IncomingIndexLimits {
+            max_rows: expected.stats().rows,
+            max_incidences: expected.stats().incidences,
+            max_workspace_bytes: expected.stats().charged_workspace_bytes,
+        };
+        assert_same_transpose_index(
+            &SealedIncomingIndex::build(&source, exact, &mut || Ok(())).unwrap(),
+            &expected,
+        );
+        let scratch = exact.max_incidences * size_of::<IncidenceRef>();
+        for (limits, refusal, initial) in [
+            (
+                IncomingIndexLimits {
+                    max_incidences: exact.max_incidences - 1,
+                    ..exact
+                },
+                (
+                    "incoming incidences",
+                    exact.max_incidences,
+                    exact.max_incidences - 1,
+                ),
+                true,
+            ),
+            (
+                IncomingIndexLimits {
+                    max_workspace_bytes: scratch - 1,
+                    ..exact
+                },
+                ("incoming workspace bytes", scratch, scratch - 1),
+                true,
+            ),
+            (
+                IncomingIndexLimits {
+                    max_workspace_bytes: exact.max_workspace_bytes - 1,
+                    ..exact
+                },
+                (
+                    "incoming workspace bytes",
+                    exact.max_workspace_bytes,
+                    exact.max_workspace_bytes - 1,
+                ),
+                false,
+            ),
+            (
+                IncomingIndexLimits {
+                    max_rows: exact.max_rows - 1,
+                    ..exact
+                },
+                ("incoming rows", exact.max_rows, exact.max_rows - 1),
+                false,
+            ),
+            (
+                IncomingIndexLimits {
+                    max_rows: 0,
+                    ..exact
+                },
+                ("incoming rows", 1, 0),
+                false,
+            ),
+        ] {
+            let old = construction::build_comparison_sync(&source, limits, &mut || {
+                Ok::<(), SealedError>(())
+            });
+            let mut checks = 0;
+            let new = SealedIncomingIndex::build(&source, limits, &mut || {
+                checks += 1;
+                Ok(())
+            });
+            assert_eq!(limit(old), Some(refusal));
+            assert_eq!(limit(new), Some(refusal));
+            if initial {
+                assert_eq!(checks, 1);
+            }
+        }
+        let mut total = 0;
+        SealedIncomingIndex::build(&source, exact, &mut || {
+            total += 1;
+            Ok(())
+        })
+        .unwrap();
+        for stop in 1..=total {
+            let mut seen = 0;
+            let result = SealedIncomingIndex::build(&source, exact, &mut || {
+                seen += 1;
+                if seen == stop {
+                    Err(SealedError::InvalidFloor)
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(matches!(result, Err(SealedError::InvalidFloor)));
+            assert_eq!(seen, stop);
+            assert_eq!(source.anchor(), anchor);
+        }
+        assert_same_transpose_index(&index(&source), &expected);
+        assert_eq!(
+            wire::encode(&source.image, SealedLimits::default(), &mut || Ok(())).unwrap(),
+            bytes
+        );
+    }
+    let empty = transpose_source(0, TransposeShape::Csr, false);
+    let empty = SealedIncomingIndex::build(
+        &empty,
+        IncomingIndexLimits {
+            max_rows: 0,
+            max_incidences: 0,
+            max_workspace_bytes: 0,
+        },
+        &mut || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(empty.stats().charged_workspace_bytes, 0);
+}
+
+#[test]
+#[ignore = "paired complete incoming-index construction from an admitted image"]
+fn paired_scoped_incoming_construction_measurement() {
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb_types::PurposeContexts;
+    use std::hint::black_box;
+    use std::time::{Duration, Instant};
+    fn measure(
+        source: &SealedPartition,
+        cx: &QueryCx,
+        old: bool,
+    ) -> (SealedIncomingIndex, Duration, usize) {
+        let mut work = 0;
+        let mut guard = || {
+            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            work += 1;
+            Ok::<(), SealedError>(())
+        };
+        let start = Instant::now();
+        let source = black_box(source);
+        let built = if old {
+            construction::build_comparison_sync(source, IncomingIndexLimits::default(), &mut guard)
+        } else {
+            SealedIncomingIndex::build(source, IncomingIndexLimits::default(), &mut guard)
+        }
+        .unwrap();
+        black_box(&built);
+        (built, start.elapsed(), work)
+    }
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    for count in [256, 65_536] {
+        for shape in TRANSPOSE_SHAPES {
+            let source = transpose_source(count, shape, false);
+            let (old, _, old_work) = measure(&source, &cx, true);
+            let (new, _, new_work) = measure(&source, &cx, false);
+            assert_same_transpose_index(&new, &old);
+            drop((old, new));
+            let mut old_times = Vec::new();
+            let mut new_times = Vec::new();
+            for pair in 0..5 {
+                let (old, new) = if pair % 2 == 0 {
+                    (measure(&source, &cx, true), measure(&source, &cx, false))
+                } else {
+                    let new = measure(&source, &cx, false);
+                    (measure(&source, &cx, true), new)
+                };
+                assert_same_transpose_index(&new.0, &old.0);
+                assert_eq!(old.2, old_work);
+                assert_eq!(new.2, new_work);
+                old_times.push(old.1);
+                new_times.push(new.1);
+            }
+            eprintln!(
+                "incoming construction admitted-source scope, excludes source preparation/result drop: shape={shape:?}, incidences={count}, comparator_work={old_work}, selected_work={new_work}, comparator={old_times:?}, selected={new_times:?}"
+            );
+        }
+    }
+    assert_eq!(contexts.outstanding_obligations(), 0);
 }
 
 // The incumbent reader keeps independent positional accesses for both the
