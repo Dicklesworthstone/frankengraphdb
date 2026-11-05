@@ -399,6 +399,25 @@ pub(crate) fn retained_rows_for_sealing(
     Ok(retained)
 }
 
+/// The same retention and descriptor order for property-free statements
+/// consumed directly from a completed root walk's history validator. Only the
+/// store's opaque sealing source calls this; ordinary compaction still proves
+/// arbitrary input histories. No hosted row can be lost or acquire a different
+/// winning copy here, and the empty property's storage charge is exactly zero.
+pub(crate) fn retained_unhosted_statements_for_sealing(
+    statements: Vec<Vec<AdjacencyEntry>>,
+    floor: CommitSeq,
+) -> Vec<(AdjacencyEntry, EdgePropertyRow)> {
+    let mut retained: Vec<_> = statements
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.retired_at.is_none_or(|retired| retired > floor))
+        .map(|entry| (entry, Vec::new()))
+        .collect();
+    order_retained(&mut retained);
+    retained
+}
+
 /// Vertex consolidation refused the source history or its replacement encoding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VertexCompactionError {

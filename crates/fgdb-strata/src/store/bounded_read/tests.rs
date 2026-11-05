@@ -2,6 +2,39 @@ use super::*;
 use crate::root::{BlockRef, PartitionRoot, PatchRef};
 use fgdb_types::{BranchId, GraphId, ObjectId};
 
+// Preserve the actual incumbent source walk for paired sealing laws. This
+// selects/admits exactly the same objects, but discards the history state and
+// leaves its original selected blocks for ordinary compaction to revalidate.
+impl<V: Vfs> BlockStore<V> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn reopen_sealing_revalidated(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+        relation: Option<fgdb_delta_types::RelationId>,
+        retain_vertices: bool,
+    ) -> Result<
+        (
+            ReopenedSealingAdjacency,
+            Vec<crate::vertex::VertexPatchRows>,
+        ),
+        RootReadError,
+    > {
+        self.reopen_selected_adjacency_bounded(
+            cx,
+            id,
+            requested_cut,
+            limits,
+            relation,
+            retain_vertices,
+            false,
+        )
+        .await
+    }
+}
+
 fn root(blocks: usize, patches: usize) -> PartitionRoot {
     PartitionRoot {
         graph: GraphId(1),

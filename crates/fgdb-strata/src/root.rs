@@ -2511,6 +2511,55 @@ impl EdgeHistoryValidator {
         let superseded = self.seen - self.statements;
         (self.statements(), superseded)
     }
+
+    /// Move the selected canonical statements into their already-owned source
+    /// buffers, without another validator, ordered map, or allocation. The
+    /// buffers must belong to the same completed edge walk, contain exactly
+    /// its selected relation (or all relations), and carry no hosted properties.
+    /// Admission proved that a chain never changes relation, and that its
+    /// statement population cannot exceed those selected raw source slots.
+    ///
+    /// This is only provisional topology: the caller must still complete the
+    /// vertex walk before returning any admitted source. Keep every buffer
+    /// record, including empty tails, so the caller's existing post-vertex
+    /// allocation and checkpoint sequence stays unchanged. All validator state
+    /// is consumed before that vertex walk; no unrelated history survives.
+    pub(crate) fn into_selected_unhosted_buffers<'a>(
+        self,
+        relation: Option<fgdb_delta_types::RelationId>,
+        buffers: impl Iterator<Item = &'a mut Vec<crate::AdjacencyEntry>>,
+    ) {
+        let Self { chains, index, .. } = self;
+        drop(index);
+        let mut buffers = buffers;
+        let mut current = buffers.next();
+        let mut written = 0;
+        for chain in chains {
+            if relation.is_some_and(|relation| chain.statements()[0].relation != relation) {
+                continue;
+            }
+            for &statement in chain.statements() {
+                loop {
+                    let buffer = current
+                        .as_mut()
+                        .expect("selected admitted statements fit their raw source buffers");
+                    if written < buffer.len() {
+                        buffer[written] = statement;
+                        written += 1;
+                        break;
+                    }
+                    current = buffers.next();
+                    written = 0;
+                }
+            }
+        }
+        if let Some(buffer) = current {
+            buffer.truncate(written);
+        }
+        for buffer in buffers {
+            buffer.clear();
+        }
+    }
 }
 
 /// Latest-statement coordinates for one fully admitted root walk. This is

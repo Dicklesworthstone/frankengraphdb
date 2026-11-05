@@ -484,17 +484,10 @@ impl<V: Vfs> BlockStore<V> {
         limits: SealedLimits,
         source: crate::store::RootReadLimits,
     ) -> Result<SealedPartition, SealedError> {
-        let adjacency = match relation {
-            Some(relation) => {
-                self.reopen_relation_adjacency_bounded(cx, root_id, floor, source, relation)
-                    .await
-            }
-            None => {
-                self.reopen_adjacency_bounded(cx, root_id, floor, source)
-                    .await
-            }
-        }
-        .map_err(sealed_source_error)?;
+        let adjacency = self
+            .reopen_sealing_adjacency_bounded(cx, root_id, floor, source, relation)
+            .await
+            .map_err(sealed_source_error)?;
         seal_admitted_adjacency(cx, root_id, floor, relation, limits, adjacency)
     }
 }
@@ -507,14 +500,12 @@ fn seal_admitted_adjacency(
     floor: CommitSeq,
     relation: Option<RelationId>,
     limits: SealedLimits,
-    adjacency: crate::store::ReopenedAdjacency,
+    adjacency: crate::store::ReopenedSealingAdjacency,
 ) -> Result<SealedPartition, SealedError> {
-    let (root, blocks, properties) = adjacency;
     cx.checkpoint().map_err(SealedError::Interrupted)?;
-    let retained = crate::compact::retained_rows_for_sealing(&blocks, &properties, floor)
+    let (root, retained) = adjacency
+        .into_retained(floor)
         .map_err(SealedError::History)?;
-    drop(blocks);
-    drop(properties);
     let scope = SealedScope {
         source_root: root_id,
         graph: root.graph,
