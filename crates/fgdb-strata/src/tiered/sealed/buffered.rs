@@ -126,17 +126,22 @@ impl<V: Vfs> BufferedPartition<V> {
                 .map_err(map_error)?
             {
                 checkpoint().map_err(map_error)?;
-                let family =
-                    crate::compact::compact_with_props(&source.blocks, &source.properties, floor)
-                        .map_err(SealedError::History)
-                        .map_err(map_error)?;
+                let family = crate::compact::retained_rows_for_sealing(
+                    &source.blocks,
+                    &source.properties,
+                    floor,
+                )
+                .map_err(SealedError::History)
+                .map_err(map_error)?;
                 drop(source);
                 checkpoint().map_err(map_error)?;
                 // Complete root admission fixed each EId's source/relation.
                 // Sources arrive in canonical order; publication precedence
                 // inside a source was resolved by the ordinary compactor.
                 // The builder consumes and drops this family's decoded output.
-                builder.push(family, &mut checkpoint).map_err(map_error)?;
+                builder
+                    .push_retained(family, &mut checkpoint)
+                    .map_err(map_error)?;
             }
             drop(sources);
             checkpoint().map_err(map_error)?;

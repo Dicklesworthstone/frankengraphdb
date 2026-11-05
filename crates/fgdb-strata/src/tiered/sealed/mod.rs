@@ -454,9 +454,12 @@ impl<V: Vfs> BlockStore<V> {
                 selected_properties.push(props.as_ref());
             }
         }
-        let compacted =
-            crate::compact::compact_with_props(&selected_blocks, &selected_properties, floor)
-                .map_err(SealedError::History)?;
+        let retained = crate::compact::retained_rows_for_sealing(
+            &selected_blocks,
+            &selected_properties,
+            floor,
+        )
+        .map_err(SealedError::History)?;
         drop(selected_blocks);
         drop(selected_properties);
         let scope = SealedScope {
@@ -467,7 +470,7 @@ impl<V: Vfs> BlockStore<V> {
             floor,
             publication: root.published_at,
         };
-        let partition = seal_compacted_adjacency(cx, scope, Some(relation), limits, compacted)?;
+        let partition = seal_retained_adjacency(cx, scope, Some(relation), limits, retained)?;
         Ok((partition, adjacency, vertices))
     }
 
@@ -508,7 +511,7 @@ fn seal_admitted_adjacency(
 ) -> Result<SealedPartition, SealedError> {
     let (root, blocks, properties) = adjacency;
     cx.checkpoint().map_err(SealedError::Interrupted)?;
-    let compacted = crate::compact::compact_with_props(&blocks, &properties, floor)
+    let retained = crate::compact::retained_rows_for_sealing(&blocks, &properties, floor)
         .map_err(SealedError::History)?;
     drop(blocks);
     drop(properties);
@@ -520,18 +523,18 @@ fn seal_admitted_adjacency(
         floor,
         publication: root.published_at,
     };
-    seal_compacted_adjacency(cx, scope, relation, limits, compacted)
+    seal_retained_adjacency(cx, scope, relation, limits, retained)
 }
 
-fn seal_compacted_adjacency(
+fn seal_retained_adjacency(
     cx: &QueryCx,
     scope: SealedScope,
     relation: Option<RelationId>,
     limits: SealedLimits,
-    compacted: crate::compact::Compaction,
+    retained: Vec<(AdjacencyEntry, crate::edge_props::EdgePropertyRow)>,
 ) -> Result<SealedPartition, SealedError> {
     let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
-    let image = image::build(compacted, limits, &mut checkpoint)?;
+    let image = image::build_retained(retained, limits, &mut checkpoint)?;
     SealedPartition::finish_scoped(scope, relation, image, limits, &mut checkpoint)
 }
 

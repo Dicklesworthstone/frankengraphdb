@@ -4,8 +4,11 @@
 
 use super::super::inline::{INLINE_CAPACITY, InlineAdjacency, InlineIncidence};
 use super::{RowStorageKind, SealedError, SealedLimits, SealedScope, check_limit};
+#[cfg(test)]
 use crate::compact::Compaction;
-use crate::edge_props::{EdgePropertyRow, admitted_row_bytes, validate_locator_sequence};
+#[cfg(test)]
+use crate::edge_props::validate_locator_sequence;
+use crate::edge_props::{EdgePropertyRow, admitted_row_bytes};
 use crate::{AdjacencyEntry, DescriptorKey, Direction, VisibilityInterval};
 use fgdb_codec::elias_fano::{EliasFano, EliasFanoSequentialCursor, EntryLimit};
 use fgdb_codec::identity::{IdentityColumn, IdentityColumnLimits};
@@ -510,6 +513,7 @@ impl Image {
     }
 }
 
+#[cfg(test)]
 fn flatten(
     compacted: Compaction,
     limits: SealedLimits,
@@ -612,6 +616,7 @@ impl ImageBuilder {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn push(
         &mut self,
         compacted: Compaction,
@@ -626,6 +631,23 @@ impl ImageBuilder {
         u32::try_from(count).map_err(|_| SealedError::SizeOverflow)?;
         let flat = flatten(compacted, self.limits, checkpoint)?;
         self.append(flat, None, checkpoint)
+    }
+
+    /// Consume the exact canonical rows selected by the ordinary compactor,
+    /// without a temporary block/property-locator round trip.
+    pub(super) fn push_retained(
+        &mut self,
+        retained: Vec<(AdjacencyEntry, EdgePropertyRow)>,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        let count = self
+            .incidences
+            .checked_add(retained.len())
+            .ok_or(SealedError::SizeOverflow)?;
+        check_limit("incidences", count, self.limits.max_incidences)?;
+        u32::try_from(count).map_err(|_| SealedError::SizeOverflow)?;
+        checkpoint()?;
+        self.append(retained, None, checkpoint)
     }
 
     fn append(
@@ -965,13 +987,27 @@ impl ImageBuilder {
     }
 }
 
+#[cfg(test)]
 pub(super) fn build(
     compacted: Compaction,
     limits: SealedLimits,
     checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
 ) -> Result<Image, SealedError> {
     let flat = flatten(compacted, limits, checkpoint)?;
+    build_retained(flat, limits, checkpoint)
+}
+
+/// The caller has collapsed history, applied retention, sorted the rows and
+/// admitted each indivisible property through the compactor's shared path.
+pub(super) fn build_retained(
+    flat: Vec<(AdjacencyEntry, EdgePropertyRow)>,
+    limits: SealedLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+) -> Result<Image, SealedError> {
     let count = flat.len();
+    check_limit("incidences", count, limits.max_incidences)?;
+    u32::try_from(count).map_err(|_| SealedError::SizeOverflow)?;
+    checkpoint()?;
     let mut destinations = reserved(count)?;
     destinations.extend(flat.iter().map(|(entry, _)| entry.dst));
     destinations.sort_unstable();

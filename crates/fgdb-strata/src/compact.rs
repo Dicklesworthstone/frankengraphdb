@@ -316,6 +316,27 @@ fn compact_with_limit(
     max_entries: usize,
     max_patch_rows: usize,
 ) -> Result<Compaction, RootError> {
+    let retained = retain_with_props(blocks, block_props, floor)?;
+    let (packed, packed_props) = pack_retained(retained.rows, max_entries, max_patch_rows)?;
+    Ok(Compaction {
+        blocks: packed,
+        block_props: packed_props,
+        dropped: retained.dropped,
+        superseded: retained.superseded,
+    })
+}
+
+struct RetainedRows {
+    rows: Vec<(AdjacencyEntry, EdgePropertyRow)>,
+    dropped: usize,
+    superseded: usize,
+}
+
+fn retain_with_props(
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
+    floor: CommitSeq,
+) -> Result<RetainedRows, RootError> {
     if blocks.len() != block_props.len() {
         return Err(RootError::BlockPropsArity {
             blocks: blocks.len(),
@@ -347,13 +368,35 @@ fn compact_with_limit(
         .collect();
     let dropped = before_floor - retained.len();
 
-    let (packed, packed_props) = pack_retained(retained, max_entries, max_patch_rows)?;
-    Ok(Compaction {
-        blocks: packed,
-        block_props: packed_props,
+    Ok(RetainedRows {
+        rows: retained,
         dropped,
         superseded,
     })
+}
+
+/// The compactor's exact retained rows in descriptor/target order, without
+/// packing them into temporary Tier-D blocks. Sealed-image construction needs
+/// this order directly; packing, publication-ordering, flattening and sorting
+/// those temporary blocks only to recover these same rows adds no authority.
+///
+/// History, last-copy property precedence, the retention floor and indivisible
+/// property-row admission are shared with ordinary compaction. Only callers
+/// that already proved a complete source may mint a sealed source receipt.
+pub(crate) fn retained_rows_for_sealing(
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
+    floor: CommitSeq,
+) -> Result<Vec<(AdjacencyEntry, EdgePropertyRow)>, RootError> {
+    let mut retained = retain_with_props(blocks, block_props, floor)?.rows;
+    order_retained(&mut retained);
+    // Match the packer's canonical validation order and error domain before
+    // image admission. A large image allowance never admits an indivisible
+    // property row that the ordinary durable compactor would reject.
+    for (_, row) in &retained {
+        admitted_row_bytes(row).map_err(RootError::PropertyPatch)?;
+    }
+    Ok(retained)
 }
 
 /// Vertex consolidation refused the source history or its replacement encoding.
@@ -474,32 +517,7 @@ fn pack_retained(
     debug_assert!(max_entries > 0, "the durable block capacity is nonzero");
     debug_assert!(max_patch_rows > 0, "the hosted patch capacity is nonzero");
 
-    // Group the owned winners in place, then sort each descriptor's target run.
-    // Building a map of per-descriptor vectors retained a second edge-sized
-    // backing store alongside `retained`, plus one allocation per descriptor.
-    // Separate descriptor and target comparisons keep both sorts narrow.
-    // History collapse has already made (eid, created_at) unique, so each
-    // target sort is total and these stages reproduce exactly the old order.
-    retained.sort_unstable_by_key(|(entry, _)| (entry.src, entry.relation));
-    let mut descriptor_start = 0;
-    while descriptor_start < retained.len() {
-        let descriptor = (
-            retained[descriptor_start].0.src,
-            retained[descriptor_start].0.relation,
-        );
-        let mut descriptor_end = descriptor_start + 1;
-        while descriptor_end < retained.len()
-            && (
-                retained[descriptor_end].0.src,
-                retained[descriptor_end].0.relation,
-            ) == descriptor
-        {
-            descriptor_end += 1;
-        }
-        retained[descriptor_start..descriptor_end]
-            .sort_unstable_by_key(|(entry, _)| (entry.dst, entry.eid, entry.created_at));
-        descriptor_start = descriptor_end;
-    }
+    order_retained(&mut retained);
     let mut packed: Vec<(Vec<AdjacencyEntry>, Option<BlockProps>)> = Vec::new();
     let mut descriptor = None;
     let mut chunk: Vec<(AdjacencyEntry, EdgePropertyRow)> = Vec::new();
@@ -551,6 +569,35 @@ fn pack_retained(
             .unwrap_or((CommitSeq(0), CommitSeq(0)))
     });
     Ok(packed.into_iter().unzip())
+}
+
+fn order_retained(retained: &mut [(AdjacencyEntry, EdgePropertyRow)]) {
+    // Group the owned winners in place, then sort each descriptor's target run.
+    // Building a map of per-descriptor vectors retained a second edge-sized
+    // backing store alongside `retained`, plus one allocation per descriptor.
+    // Separate descriptor and target comparisons keep both sorts narrow.
+    // History collapse has already made (eid, created_at) unique, so each
+    // target sort is total and these stages reproduce exactly the old order.
+    retained.sort_unstable_by_key(|(entry, _)| (entry.src, entry.relation));
+    let mut descriptor_start = 0;
+    while descriptor_start < retained.len() {
+        let descriptor = (
+            retained[descriptor_start].0.src,
+            retained[descriptor_start].0.relation,
+        );
+        let mut descriptor_end = descriptor_start + 1;
+        while descriptor_end < retained.len()
+            && (
+                retained[descriptor_end].0.src,
+                retained[descriptor_end].0.relation,
+            ) == descriptor
+        {
+            descriptor_end += 1;
+        }
+        retained[descriptor_start..descriptor_end]
+            .sort_unstable_by_key(|(entry, _)| (entry.dst, entry.eid, entry.created_at));
+        descriptor_start = descriptor_end;
+    }
 }
 
 /// One packed chunk becomes a block and, when any entry owns a row, the
@@ -830,6 +877,37 @@ mod tests {
             );
         }
         assert!(consolidated(&blocks, &props, &patches));
+    }
+
+    #[test]
+    fn retained_sealing_rows_preserve_compaction_history_and_property_errors() {
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_types::CanonicalScalar;
+        let first = entry(1);
+        let mut conflict = first;
+        conflict.dst = VId(2);
+        let invalid = vec![
+            (vec![vec![first]], vec![]),
+            (vec![vec![first], vec![conflict]], vec![None, None]),
+            (vec![vec![entry(2), first]], vec![None]),
+            (
+                vec![vec![first]],
+                vec![Some(BlockProps {
+                    locators: vec![1],
+                    rows: vec![vec![
+                        (PropertyKeyId(2), CanonicalScalar::Int(1).into()),
+                        (PropertyKeyId(1), CanonicalScalar::Int(2).into()),
+                    ]],
+                })],
+            ),
+        ];
+        for (blocks, properties) in invalid {
+            let packed = compact_with_props(&blocks, &properties, CommitSeq(0));
+            let direct = retained_rows_for_sealing(&blocks, &properties, CommitSeq(0));
+            assert!(packed.is_err());
+            assert!(direct.is_err());
+            assert_eq!(packed.unwrap_err(), direct.unwrap_err());
+        }
     }
 
     #[test]
