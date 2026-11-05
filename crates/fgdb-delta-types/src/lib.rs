@@ -282,13 +282,14 @@ pub struct LogicalDeltaTemplate {
 }
 
 impl LogicalDeltaTemplate {
-    /// Build a template: canonicalize the entries, then validate the result.
+    /// Build a template, validating rows while canonicalizing the entries.
     ///
-    /// Canonicalizing cannot fix a duplicate coordinate or a duplicate row —
-    /// sorting only makes equal things adjacent — so validation after sorting
-    /// is where those are caught. That division is deliberate: merging two
-    /// entries for the same coordinate is `NetEffectNormalForm`'s job, and an
-    /// encoder that quietly did it would be inventing effects.
+    /// The owned canonicalizer checks each row through the ordinary encoder
+    /// and rejects duplicate coordinates and row encodings. The format is
+    /// derived from those checked values. No second payload-encoding pass is
+    /// needed; decoding still performs the independent full validation.
+    /// Merging two entries for one coordinate remains `NetEffectNormalForm`'s
+    /// job, and an encoder that quietly did it would be inventing effects.
     pub fn build(
         intent_semantics_oid: ObjectId,
         source_intent_root_digest: [u8; 32],
@@ -297,14 +298,12 @@ impl LogicalDeltaTemplate {
         // The entries are this call's own: an error drops them, so no row
         // needs a defensive copy.
         canonical::canonicalize_owned(&mut coordinate_entries)?;
-        let template = LogicalDeltaTemplate {
+        Ok(LogicalDeltaTemplate {
             format: delta_format_for(&coordinate_entries),
             intent_semantics_oid,
             source_intent_root_digest,
             coordinate_entries,
-        };
-        template.validate()?;
-        Ok(template)
+        })
     }
 
     pub fn format(&self) -> u16 {
@@ -675,6 +674,89 @@ mod tests {
                 after_constraint_root: ObjectId([15; 32]),
             },
         ]
+    }
+
+    /// The reference uses the public borrowed canonicalizer and constructs
+    /// the private template directly before invoking the independent reader
+    /// validator. It never calls the owned builder being checked.
+    #[test]
+    fn owned_build_matches_independent_full_validation() {
+        let mut pool = one_row_of_each_family();
+        pool.push(DeltaRow::CreateVertex {
+            vid: VId(91),
+            birth_ordinal: 1,
+            labels: vec![LabelId(9), LabelId(2)],
+            props: vec![],
+            valid_time: None,
+        });
+        pool.push(DeltaRow::CreateVertex {
+            vid: VId(92),
+            birth_ordinal: 1,
+            labels: vec![LabelId(2), LabelId(2)],
+            props: vec![],
+            valid_time: None,
+        });
+        pool.push(DeltaRow::CreateEdge {
+            eid: EId(93),
+            birth_ordinal: 1,
+            src: VId(1),
+            relation: RelationId(3),
+            dst: VId(2),
+            canonical_key: None,
+            props: vec![
+                (PropertyKeyId(1), CanonicalScalar::Int(1).into()),
+                (PropertyKeyId(1), CanonicalScalar::Int(2).into()),
+            ],
+            valid_time: None,
+        });
+        let mut seed = 0x6972_7175_3200_0001_u64;
+        let mut choose = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let (mut accepted, mut refused) = (0, 0);
+        for _ in 0..512 {
+            let width = 1 + choose(4);
+            let mut entries = Vec::new();
+            for _ in 0..width {
+                let mut coordinate = entry(Vec::new());
+                coordinate.graph = GraphId(choose(3) as u128);
+                coordinate.branch = BranchId(choose(2) as u128);
+                coordinate.relation = RelationId(choose(2) as u64);
+                for _ in 0..choose(10) {
+                    coordinate.rows.push(pool[choose(pool.len())].clone());
+                }
+                entries.push(coordinate);
+            }
+            let mut reference = entries.clone();
+            let expected = (|| {
+                canonicalize(&mut reference)?;
+                let template = LogicalDeltaTemplate {
+                    format: delta_format_for(&reference),
+                    intent_semantics_oid: INTENT_SEMANTICS,
+                    source_intent_root_digest: [0x22; 32],
+                    coordinate_entries: reference,
+                };
+                template.validate()?;
+                Ok::<_, CanonicalError>(template)
+            })();
+            let actual = LogicalDeltaTemplate::build(INTENT_SEMANTICS, [0x22; 32], entries);
+            assert_eq!(actual, expected);
+            match actual {
+                Ok(template) => {
+                    let bytes = template.canonical_bytes().expect("canonical encoding");
+                    assert_eq!(
+                        LogicalDeltaTemplate::decode_canonical(&bytes).expect("reader validates"),
+                        template
+                    );
+                    accepted += 1;
+                }
+                Err(_) => refused += 1,
+            }
+        }
+        assert!(accepted > 0 && refused > 0, "{accepted} accepted, {refused} refused");
     }
 
     #[test]

@@ -774,6 +774,107 @@ fn a_duplicate_row_within_a_coordinate_is_refused() {
 }
 
 #[test]
+fn owned_build_keeps_empty_and_versioned_templates_canonical() {
+    for entries in [
+        vec![],
+        vec![entry(1, 1, 3, vec![])],
+        vec![entry(9, 1, 3, vec![]), entry(1, 1, 3, vec![])],
+    ] {
+        let template = LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], entries).unwrap();
+        assert_eq!(template.row_count(), 0);
+        assert_eq!(template.format(), DELTA_FORMAT_V1);
+        assert_eq!(template.validate(), Ok(()));
+        assert_eq!(
+            LogicalDeltaTemplate::decode_canonical(&template.canonical_bytes().unwrap()).unwrap(),
+            template
+        );
+    }
+    let date = CanonicalScalar::Date(CanonicalDate::from_civil(2026, 11, 5).unwrap());
+    let list = fgdb_types::CanonicalList::try_new(vec![date.clone().into()]).unwrap();
+    for (value, format) in [
+        (CanonicalScalar::Int(1).into(), DELTA_FORMAT_V1),
+        (date.into(), DELTA_FORMAT_V2),
+        (
+            CanonicalPropertyValue::List(list),
+            fgdb_delta_types::DELTA_FORMAT_V3,
+        ),
+    ] {
+        let row = DeltaRow::Property {
+            elem: ElementId::Vertex(VId(1)),
+            property: PropertyKeyId(1),
+            before: None,
+            after: Some(value),
+        };
+        let template = LogicalDeltaTemplate::build(
+            oid(0x11),
+            [0x22; 32],
+            vec![entry(9, 1, 3, vec![]), entry(1, 1, 3, vec![row])],
+        )
+        .unwrap();
+        assert_eq!(template.format(), format);
+        assert_eq!(template.validate(), Ok(()));
+        assert_eq!(
+            LogicalDeltaTemplate::decode_canonical(&template.canonical_bytes().unwrap()).unwrap(),
+            template
+        );
+    }
+}
+
+/// Duplicate keys can be recognized during sorting, but they may only be
+/// reported after every row has encoded and coordinate uniqueness is checked.
+#[test]
+fn owned_build_preserves_the_first_canonical_error() {
+    let rows = every_family_populated();
+    let a = rows[0].clone();
+    let b = rows[1].clone();
+    let duplicated_rows = vec![
+        entry(9, 1, 3, vec![a.clone(), a.clone()]),
+        entry(1, 1, 3, vec![b.clone(), a.clone(), b.clone()]),
+    ];
+    assert_eq!(
+        LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], duplicated_rows.clone()),
+        Err(CanonicalError::NonCanonicalRowOrder { entry: 0, index: 2 }),
+        "the earliest duplicate in canonical coordinate order wins"
+    );
+
+    let mut duplicate_coordinates = duplicated_rows.clone();
+    duplicate_coordinates.push(entry(1, 1, 3, vec![]));
+    assert_eq!(
+        LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], duplicate_coordinates.clone()),
+        Err(CanonicalError::NonCanonicalCoordinateOrder { index: 1 }),
+        "coordinate duplication precedes row duplication"
+    );
+
+    let invalid = embedded_collection_rows(2, 2)[0].1.clone();
+    for mut entries in [duplicated_rows, duplicate_coordinates] {
+        entries.push(entry(0, 1, 3, vec![invalid.clone()]));
+        assert_eq!(
+            LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], entries),
+            Err(CanonicalError::NonCanonicalLabelOrder { index: 1 }),
+            "a later invalid row precedes every duplicate diagnostic"
+        );
+    }
+}
+
+#[test]
+fn owned_build_rejects_duplicates_created_by_embedded_normalization() {
+    for ((kind, left), (_, right)) in embedded_collection_rows(7, 2)
+        .into_iter()
+        .zip(embedded_collection_rows(2, 7))
+    {
+        assert_eq!(
+            LogicalDeltaTemplate::build(
+                oid(0x11),
+                [0x22; 32],
+                vec![entry(1, 1, 3, vec![left, right])],
+            ),
+            Err(CanonicalError::NonCanonicalRowOrder { entry: 0, index: 1 }),
+            "{kind}: uniqueness uses normalized bytes"
+        );
+    }
+}
+
+#[test]
 fn direct_row_encoding_refuses_noncanonical_embedded_collections() {
     let rows = embedded_collection_rows(2, 1);
     let errors: Vec<(&str, CanonicalError)> = rows

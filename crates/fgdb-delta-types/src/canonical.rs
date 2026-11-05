@@ -1318,13 +1318,16 @@ pub fn canonicalize(entries: &mut [CoordinateEntry]) -> Result<(), CanonicalErro
     Ok(())
 }
 
-/// [`canonicalize`] for entries their owner drops on error, as
-/// `LogicalDeltaTemplate::build` does: each row is moved through its
-/// encoding instead of cloned, the same steps in the same order, so the
-/// result and the first error are the same. Cloning every row (labels,
-/// property vectors, text) to keep a borrowed `Err` non-destructive was a
-/// tenth of a bulk load's preparation (fgdb-load-beats-memgraph-xf2n8).
+/// Canonicalize and validate entries their owner drops on error.
+///
+/// Each row moves through the ordinary canonical encoder once. That encoder
+/// checks its embedded collections and values; the sorted encoding keys then
+/// prove strict row order without encoding every accumulated payload again.
+/// Keep duplicate diagnostics until all rows have encoded: malformed rows
+/// precede duplicate coordinates, which precede duplicate rows in canonical
+/// coordinate order, exactly as canonicalization followed by validation does.
 pub(crate) fn canonicalize_owned(entries: &mut [CoordinateEntry]) -> Result<(), CanonicalError> {
+    let mut duplicate: Option<((GraphId, BranchId, RelationId), usize)> = None;
     for entry in entries.iter_mut() {
         let mut encoded: Vec<(Vec<u8>, DeltaRow)> = std::mem::take(&mut entry.rows)
             .into_iter()
@@ -1334,9 +1337,30 @@ pub(crate) fn canonicalize_owned(entries: &mut [CoordinateEntry]) -> Result<(), 
             })
             .collect::<Result<_, _>>()?;
         encoded.sort_by(|left, right| left.0.cmp(&right.0));
+        if let Some(index) = encoded
+            .windows(2)
+            .position(|pair| pair[0].0 == pair[1].0)
+            .map(|index| index + 1)
+        {
+            let coordinate = entry.coordinate();
+            if duplicate.is_none_or(|(previous, _)| coordinate < previous) {
+                duplicate = Some((coordinate, index));
+            }
+        }
         entry.rows = encoded.into_iter().map(|(_, row)| row).collect();
     }
     entries.sort_by_key(|entry| entry.coordinate());
+    for index in 1..entries.len() {
+        if entries[index - 1].coordinate() >= entries[index].coordinate() {
+            return Err(CanonicalError::NonCanonicalCoordinateOrder { index });
+        }
+    }
+    if let Some((coordinate, index)) = duplicate {
+        return Err(CanonicalError::NonCanonicalRowOrder {
+            entry: entries.partition_point(|entry| entry.coordinate() < coordinate),
+            index,
+        });
+    }
     Ok(())
 }
 
