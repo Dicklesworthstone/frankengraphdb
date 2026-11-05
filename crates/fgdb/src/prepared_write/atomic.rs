@@ -28,15 +28,20 @@ impl Independence {
     fn admit(
         &mut self,
         relation: RelationId,
-        reads: &BTreeSet<ElementId>,
+        reads: impl Iterator<Item = ElementId> + Clone,
         writes: &BTreeSet<ElementId>,
     ) -> Result<(), WriteTxnError> {
-        for (elements, previous) in [
-            (reads, &self.writers),
-            (writes, &self.readers),
-            (writes, &self.writers),
-        ] {
-            for element in elements {
+        for element in reads.clone() {
+            if let Some(other) = self.writers.get(&element) {
+                return Err(WriteTxnError::AtomicRelationConflict {
+                    first: *other,
+                    second: relation,
+                    element,
+                });
+            }
+        }
+        for previous in [&self.readers, &self.writers] {
+            for element in writes {
                 if let Some(other) = previous.get(element) {
                     return Err(WriteTxnError::AtomicRelationConflict {
                         first: *other,
@@ -48,7 +53,7 @@ impl Independence {
         }
         // Refusal above cannot leave a partially admitted group's footprint.
         for element in reads {
-            self.readers.entry(*element).or_insert(relation);
+            self.readers.entry(element).or_insert(relation);
         }
         for element in writes {
             self.writers.insert(*element, relation);
@@ -253,7 +258,11 @@ impl<V: Vfs + Clone> Database<V> {
             let (relation, batch) = groups.pop_first().expect("one group");
             let prepared = self.prepare_write_checked(batch)?;
             let writes = written_elements(&prepared.template)?;
-            Independence::default().admit(relation, &prepared.dependencies.elements, &writes)?;
+            Independence::default().admit(
+                relation,
+                prepared.dependencies.elements.iter().copied(),
+                &writes,
+            )?;
             return Ok(prepared);
         }
         let mut independence = Independence::default();
@@ -268,7 +277,11 @@ impl<V: Vfs + Clone> Database<V> {
                 .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
             let prepared = self.prepare_write_checked(batch)?;
             let writes = written_elements(&prepared.template)?;
-            independence.admit(relation, &prepared.dependencies.elements, &writes)?;
+            independence.admit(
+                relation,
+                prepared.dependencies.elements.iter().copied(),
+                &writes,
+            )?;
             for mut coordinate in prepared.template.coordinate_entries().iter().cloned() {
                 // Original independent-group ordinal law is unchanged.
                 for row in &mut coordinate.rows {
@@ -282,10 +295,7 @@ impl<V: Vfs + Clone> Database<V> {
                 }
                 coordinates.push(coordinate);
             }
-            dependencies.elements.extend(prepared.dependencies.elements);
-            dependencies
-                .adjacency
-                .extend(prepared.dependencies.adjacency);
+            dependencies.extend(prepared.dependencies);
             ordinal_offset = next_offset;
         }
         self.finish_atomic_preparation(coordinates, dependencies)
@@ -379,21 +389,18 @@ impl<V: Vfs + Clone> Database<V> {
             // dependencies; remove them only for this intra-command check.
             let created_by_prefix = |element: &ElementId| matches!(element, ElementId::Vertex(vid) if expected.contains_key(vid));
             writes.retain(|element| !created_by_prefix(element));
-            let reads = prepared
+            let reads: BTreeSet<_> = prepared
                 .dependencies
                 .elements
                 .iter()
                 .copied()
                 .filter(|element| !created_by_prefix(element))
                 .collect();
-            independence.admit(relation, &reads, &writes)?;
+            independence.admit(relation, reads.iter().copied(), &writes)?;
             for coordinate in stripped {
                 merge_coordinate(&mut coordinates, coordinate)?;
             }
-            dependencies.elements.extend(prepared.dependencies.elements);
-            dependencies
-                .adjacency
-                .extend(prepared.dependencies.adjacency);
+            dependencies.extend(prepared.dependencies);
             suffix_offset = next_offset;
         }
         self.finish_atomic_preparation(coordinates.into_values().collect(), dependencies)
@@ -442,21 +449,29 @@ mod tests {
         let edge_b = ElementId::Edge(EId(11));
         let mut check = Independence::default();
         check
-            .admit(RelationId(1), &[endpoint, edge_a].into(), &[edge_a].into())
+            .admit(
+                RelationId(1),
+                [endpoint, edge_a].into_iter(),
+                &[edge_a].into(),
+            )
             .unwrap();
         check
-            .admit(RelationId(2), &[endpoint, edge_b].into(), &[edge_b].into())
+            .admit(
+                RelationId(2),
+                [endpoint, edge_b].into_iter(),
+                &[edge_b].into(),
+            )
             .unwrap();
         let before_readers = check.readers.clone();
         let before_writers = check.writers.clone();
-        let rejected = check.admit(RelationId(3), &[endpoint].into(), &[endpoint].into());
+        let rejected = check.admit(RelationId(3), [endpoint].into_iter(), &[endpoint].into());
         assert!(matches!(
             rejected,
             Err(WriteTxnError::AtomicRelationConflict { .. })
         ));
         assert_eq!(check.readers, before_readers);
         assert_eq!(check.writers, before_writers);
-        let rejected = check.admit(RelationId(4), &[edge_a].into(), &BTreeSet::new());
+        let rejected = check.admit(RelationId(4), [edge_a].into_iter(), &BTreeSet::new());
         assert!(matches!(
             rejected,
             Err(WriteTxnError::AtomicRelationConflict { .. })
@@ -504,6 +519,52 @@ mod tests {
         assert!(SharedVertexPrefix::discover(&batches, |_| true).is_none());
         let prefix = SharedVertexPrefix::discover(&batches, |_| false).unwrap();
         assert_eq!(prefix.rows.len(), 2);
+    }
+
+    #[test]
+    fn independence_preserves_conflict_precedence_without_installing_a_refused_group() {
+        let written = ElementId::Vertex(VId(1));
+        let read = ElementId::Vertex(VId(5));
+        let read_against_writer = ElementId::Vertex(VId(9));
+        let mut check = Independence {
+            readers: BTreeMap::from([(read, RelationId(22))]),
+            writers: BTreeMap::from([
+                (written, RelationId(11)),
+                (read_against_writer, RelationId(33)),
+            ]),
+        };
+        let before_readers = check.readers.clone();
+        let before_writers = check.writers.clone();
+        for (reads, writes, expected_first, expected_element) in [
+            (
+                vec![read_against_writer],
+                vec![written, read],
+                RelationId(33),
+                read_against_writer,
+            ),
+            (vec![], vec![written, read], RelationId(22), read),
+            (vec![], vec![written], RelationId(11), written),
+        ] {
+            match check.admit(
+                RelationId(99),
+                reads.into_iter(),
+                &writes.into_iter().collect(),
+            ) {
+                Err(WriteTxnError::AtomicRelationConflict {
+                    first,
+                    second,
+                    element,
+                }) => {
+                    assert_eq!(
+                        (first, second, element),
+                        (expected_first, RelationId(99), expected_element)
+                    );
+                }
+                other => panic!("expected an independence conflict, got {other:?}"),
+            }
+            assert_eq!(check.readers, before_readers);
+            assert_eq!(check.writers, before_writers);
+        }
     }
 
     /// One relation group's preparation is returned as prepared: the same
@@ -577,7 +638,11 @@ mod tests {
                 let rebuilt = (|| {
                     let one = db.prepare_write_checked(batch)?;
                     let writes = written_elements(&one.template)?;
-                    Independence::default().admit(relation, &one.dependencies.elements, &writes)?;
+                    Independence::default().admit(
+                        relation,
+                        one.dependencies.elements.iter().copied(),
+                        &writes,
+                    )?;
                     let coordinates = one.template.coordinate_entries().to_vec();
                     db.finish_atomic_preparation(coordinates, one.dependencies)
                 })();

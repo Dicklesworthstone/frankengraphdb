@@ -7,6 +7,7 @@ mod ordered;
 
 pub(super) use at_basis::PreparationAnchor;
 
+use crate::gql_exec::source::{IndexIter, IndexMap};
 use crate::{
     CommitCx, CommitSeq, CrashPoint, Database, ElementId, FirstCommitterWinsValidator, PendingRow,
     PreparedWrite, VId, WriteBatch, WriteError,
@@ -16,10 +17,125 @@ use fgdb_strata::writer::BlockWriter;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// Captures keep the ordinary mutable set until a prepared prefix is shared.
+/// Later observations copy only AVL search paths, preserving pinned prefixes.
+#[derive(Clone)]
+enum DependencySet<K> {
+    Flat(Arc<BTreeSet<K>>),
+    Shared(IndexMap<K, ()>),
+}
+
+impl<K> Default for DependencySet<K> {
+    fn default() -> Self {
+        Self::Flat(Arc::new(BTreeSet::new()))
+    }
+}
+
+impl<K: Ord + Clone> DependencySet<K> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Flat(keys) => keys.len(),
+            Self::Shared(keys) => keys.len(),
+        }
+    }
+
+    fn contains(&self, key: &K) -> bool {
+        match self {
+            Self::Flat(keys) => keys.contains(key),
+            Self::Shared(keys) => keys.get(key).is_some(),
+        }
+    }
+
+    fn insert(&mut self, key: K) -> bool {
+        if let Self::Flat(keys) = self
+            && let Some(keys) = Arc::get_mut(keys)
+        {
+            return keys.insert(key);
+        }
+        if self.contains(&key) {
+            return false;
+        }
+        // The AVL's compact length is a representation bound, not a limit
+        // on dependency observations. Larger sets retain the ordinary tree.
+        const AVL_CAPACITY: usize = u32::MAX as usize;
+        match self {
+            Self::Flat(keys) if keys.len() < AVL_CAPACITY => {
+                let mut work = 0;
+                let root = IndexMap::from_sorted(
+                    keys.iter().cloned().map(|key| (key, ())).collect(),
+                    &mut work,
+                );
+                *self = Self::Shared(root.insert(key, (), &mut work));
+            }
+            Self::Flat(keys) => {
+                Arc::make_mut(keys).insert(key);
+            }
+            Self::Shared(root) if root.len() < AVL_CAPACITY => {
+                *root = root.insert(key, (), &mut 0);
+            }
+            Self::Shared(root) => {
+                let mut keys: BTreeSet<_> = root.iter().map(|(key, _)| key.clone()).collect();
+                keys.insert(key);
+                *self = Self::Flat(Arc::new(keys));
+            }
+        }
+        true
+    }
+
+    fn iter(&self) -> DependencyIter<'_, K> {
+        match self {
+            Self::Flat(keys) => DependencyIter::Flat(keys.iter()),
+            Self::Shared(keys) => DependencyIter::Shared(keys.iter()),
+        }
+    }
+}
+
+impl<K: Ord + Clone> Extend<K> for DependencySet<K> {
+    fn extend<T: IntoIterator<Item = K>>(&mut self, keys: T) {
+        for key in keys {
+            self.insert(key);
+        }
+    }
+}
+
+impl<K: Ord + Clone> PartialEq for DependencySet<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl<K: Ord + Clone> Eq for DependencySet<K> {}
+
+impl<K: Ord + Clone> core::fmt::Debug for DependencySet<K> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DependencySet")
+            .field("count", &self.len())
+            .field("identities", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+enum DependencyIter<'a, K> {
+    Flat(std::collections::btree_set::Iter<'a, K>),
+    Shared(IndexIter<'a, K, ()>),
+}
+
+impl<'a, K> Iterator for DependencyIter<'a, K> {
+    type Item = &'a K;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Flat(keys) => keys.next(),
+            Self::Shared(keys) => keys.next().map(|(key, _)| key),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) struct PreparedDependencies {
-    elements: BTreeSet<ElementId>,
-    adjacency: BTreeSet<VId>,
+    elements: DependencySet<ElementId>,
+    adjacency: DependencySet<VId>,
 }
 
 impl core::fmt::Debug for PreparedDependencies {
@@ -43,8 +159,8 @@ impl PreparedDependencies {
     }
 
     pub(super) fn extend(&mut self, other: Self) {
-        self.elements.extend(other.elements);
-        self.adjacency.extend(other.adjacency);
+        self.elements.extend(other.elements.iter().copied());
+        self.adjacency.extend(other.adjacency.iter().copied());
     }
 
     pub(super) fn capture(writer: &BlockWriter, batch: &WriteBatch) -> Self {
@@ -106,10 +222,9 @@ impl PreparedDependencies {
     /// A refused preparation still observed its basis. Preserve its
     /// conservative footprint when the caller rolls back the attempted effects.
     pub(super) fn retain_observations(self, observations: &mut BTreeSet<ElementId>) {
-        observations.extend(self.elements);
         // Transaction validation checks adjacency-changing writes against
         // endpoint vertex observations, including previously absent edges.
-        observations.extend(self.adjacency.into_iter().map(ElementId::Vertex));
+        observations.extend(self.observations());
     }
 }
 
@@ -294,8 +409,8 @@ impl<V: Vfs + Clone> Database<V> {
                 .map_err(WriteError::PreparedHistory)?
                 .with_scalar_resolver(self.keys.scalar_resolver.clone())
                 .with_dependencies(
-                    prepared.dependencies.elements,
-                    prepared.dependencies.adjacency,
+                    prepared.dependencies.elements.iter().copied(),
+                    prepared.dependencies.adjacency.iter().copied(),
                 );
         // Always install the validator for THIS basis, even if another prepared
         // write just committed or failed. Prior attempted drafts are not history.
@@ -311,5 +426,86 @@ impl<V: Vfs + Clone> Database<V> {
             None,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+
+    #[test]
+    fn dependency_clones_share_capture_and_isolate_later_observations() {
+        let mut captured = DependencySet::default();
+        captured.extend([5_u64, 1, 3, 1]);
+        let mut next = captured.clone();
+        let shared_flat = |left: &DependencySet<u64>, right: &DependencySet<u64>| matches!((left, right), (DependencySet::Flat(a), DependencySet::Flat(b)) if Arc::ptr_eq(a, b));
+        assert!(shared_flat(&captured, &next));
+        assert!(!next.insert(3));
+        assert!(shared_flat(&captured, &next));
+        assert!(next.insert(2));
+        assert!(matches!(&next, DependencySet::Shared(_)));
+        let pinned = next.clone();
+        next.extend([9, 2, 7, 9]);
+        assert_eq!(captured.iter().copied().collect::<Vec<_>>(), vec![1, 3, 5]);
+        assert_eq!(pinned.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3, 5]);
+        assert_eq!(
+            next.iter().copied().collect::<Vec<_>>(),
+            vec![1, 2, 3, 5, 7, 9]
+        );
+        assert_eq!(next.len(), 6);
+        let mut flat_equivalent = DependencySet::default();
+        flat_equivalent.extend([9, 7, 5, 3, 2, 1]);
+        assert_eq!(next, flat_equivalent);
+        for set in [&captured, &next] {
+            let mut iter = set.iter();
+            assert_eq!(iter.next(), Some(&1));
+            assert_eq!(iter.clone().collect::<Vec<_>>(), iter.collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn shared_dependency_prefixes_match_an_independent_set() {
+        let mut actual = DependencySet::default();
+        let mut expected = BTreeSet::new();
+        let mut pinned = Vec::new();
+        for step in 0..128_u64 {
+            pinned.push((actual.clone(), expected.clone()));
+            for key in [(step * 73) % 257, (step * 19) % 257, step % 11] {
+                assert_eq!(actual.insert(key), expected.insert(key));
+            }
+            assert_eq!(
+                actual.iter().copied().collect::<BTreeSet<_>>(),
+                expected,
+                "prefix {step}"
+            );
+            assert_eq!(actual.len(), expected.len());
+        }
+        for (actual, expected) in pinned {
+            assert_eq!(actual.iter().copied().collect::<BTreeSet<_>>(), expected);
+            assert_eq!(actual.len(), expected.len());
+        }
+    }
+
+    #[test]
+    fn observation_order_and_rollback_footprint_preserve_both_witness_domains() {
+        use fgdb_types::EId;
+        let v = |id| ElementId::Vertex(VId(id));
+        let e = |id| ElementId::Edge(EId(id));
+        let mut prefix = PreparedDependencies::default();
+        prefix.elements.extend([e(3), v(2), v(1), v(2)]);
+        prefix.adjacency.extend([VId(9), VId(2), VId(2)]);
+        let before = vec![v(1), v(2), e(3), v(2), v(9)];
+        assert_eq!(prefix.observations().collect::<Vec<_>>(), before);
+        let mut next = prefix.clone();
+        let mut suffix = PreparedDependencies::default();
+        suffix.elements.extend([v(4), e(3)]);
+        suffix.adjacency.extend([VId(4), VId(2)]);
+        next.extend(suffix);
+        assert_eq!(prefix.observations().collect::<Vec<_>>(), before);
+        let after = vec![v(1), v(2), v(4), e(3), v(2), v(4), v(9)];
+        assert_eq!(next.observations().collect::<Vec<_>>(), after);
+        let mut retained = BTreeSet::from([e(99)]);
+        next.retain_observations(&mut retained);
+        assert_eq!(retained, after.into_iter().chain([e(99)]).collect());
     }
 }

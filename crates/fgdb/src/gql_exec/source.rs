@@ -33,7 +33,7 @@ type EqualityCandidates = IndexMap<(PropertyKeyId, std::sync::Arc<[u8]>), IndexM
 /// Immutable AVL nodes: updating a generation copies only the search path.
 /// Values stored here must themselves have cheap clones (coordinates or roots).
 #[derive(Clone, Debug)]
-struct IndexMap<K, V>(Option<std::sync::Arc<IndexNode<K, V>>>);
+pub(crate) struct IndexMap<K, V>(Option<std::sync::Arc<IndexNode<K, V>>>);
 
 /// `height` and `len` are narrow so that a node keyed by a 16-byte identity
 /// with a root-sized value, or by a statement coordinate, fits the 64-byte
@@ -56,7 +56,7 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
     fn height(&self) -> u16 {
         self.0.as_ref().map_or(0, |n| u16::from(n.height))
     }
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.0.as_ref().map_or(0, |n| n.len as usize)
     }
     fn node(key: K, value: V, left: Self, right: Self, work: &mut u64) -> Self {
@@ -139,7 +139,7 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
     /// duplicates: one node per item, built bottom-up, no rebalancing. Sibling
     /// heights differ by at most one, so later path-copying inserts see the
     /// same AVL invariant they maintain.
-    fn from_sorted(items: Vec<(K, V)>, work: &mut u64) -> Self {
+    pub(crate) fn from_sorted(items: Vec<(K, V)>, work: &mut u64) -> Self {
         fn subtree<K: Ord + Clone, V: Clone>(
             items: &mut std::vec::IntoIter<(K, V)>,
             count: usize,
@@ -158,7 +158,7 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
         subtree(&mut items.into_iter(), count, work)
     }
 
-    fn get(&self, key: &K) -> Option<&V> {
+    pub(crate) fn get(&self, key: &K) -> Option<&V> {
         let mut cursor = self.0.as_deref();
         while let Some(node) = cursor {
             match key.cmp(&node.key) {
@@ -169,7 +169,7 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
         }
         None
     }
-    fn insert(&self, key: K, value: V, work: &mut u64) -> Self {
+    pub(crate) fn insert(&self, key: K, value: V, work: &mut u64) -> Self {
         *work += 1;
         let Some(node) = self.0.as_ref() else {
             return Self::node(key, value, Self::new(), Self::new(), work);
@@ -236,7 +236,7 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
             }
         }
     }
-    fn iter(&self) -> IndexIter<'_, K, V> {
+    pub(crate) fn iter(&self) -> IndexIter<'_, K, V> {
         let mut iter = IndexIter { stack: Vec::new() };
         iter.descend(self.0.as_deref());
         iter
@@ -272,6 +272,7 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct IndexIter<'a, K, V> {
     stack: Vec<&'a IndexNode<K, V>>,
 }
