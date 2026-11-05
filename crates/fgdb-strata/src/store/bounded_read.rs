@@ -206,6 +206,38 @@ pub type ReopenedAdjacency = (
     Vec<Option<BlockProps>>,
 );
 
+/// A completed bounded root walk's private sealing input. Only the walk below
+/// constructs this owner. Its selected topology may already be the canonical
+/// statements consumed from that walk's validator, but only when every selected
+/// property column is absent. Public/composed reads always keep original blocks.
+/// This derived state is not a durable source receipt or a public constructor.
+pub(crate) struct ReopenedSealingAdjacency {
+    adjacency: ReopenedAdjacency,
+    unhosted_collapsed: bool,
+}
+
+impl ReopenedSealingAdjacency {
+    pub(crate) fn into_retained(
+        self,
+        floor: CommitSeq,
+    ) -> Result<
+        (
+            crate::root::PartitionRoot,
+            Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>,
+        ),
+        crate::root::RootError,
+    > {
+        let (root, blocks, properties) = self.adjacency;
+        let retained = if self.unhosted_collapsed {
+            debug_assert!(properties.iter().all(Option::is_none));
+            crate::compact::retained_unhosted_statements_for_sealing(blocks, floor)
+        } else {
+            crate::compact::retained_rows_for_sealing(&blocks, &properties, floor)?
+        };
+        Ok((root, retained))
+    }
+}
+
 impl<V: Vfs> BlockStore<V> {
     /// Resolve a native single-partition manifest under the source's metadata
     /// byte and reference ceilings. Bytes are bounded before decoding, and
@@ -515,26 +547,26 @@ impl<V: Vfs> BlockStore<V> {
         requested_cut: CommitSeq,
         limits: RootReadLimits,
     ) -> Result<ReopenedAdjacency, RootReadError> {
-        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, None, false)
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, None, false, false)
             .await
-            .map(|(adjacency, _)| adjacency)
+            .map(|(source, _)| source.adjacency)
     }
 
-    /// Prove the SAME complete source as `reopen_adjacency_bounded`, but retain
-    /// only one relation for the sealer. Selection happens after each block's
-    /// properties, family, predecessor and cross-object history are admitted.
+    /// Prove the SAME complete source as `reopen_adjacency_bounded`, optionally
+    /// retaining only one relation for the sealer. Selection follows admission
+    /// of each block's properties, family, predecessor and cross-object history.
     /// Unselected source objects still consume the raw input budget.
-    pub(crate) async fn reopen_relation_adjacency_bounded(
+    pub(crate) async fn reopen_sealing_adjacency_bounded(
         &self,
         cx: &QueryCx,
         id: crate::PartitionRootVersion,
         requested_cut: CommitSeq,
         limits: RootReadLimits,
-        relation: fgdb_delta_types::RelationId,
-    ) -> Result<ReopenedAdjacency, RootReadError> {
-        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, Some(relation), false)
+        relation: Option<fgdb_delta_types::RelationId>,
+    ) -> Result<ReopenedSealingAdjacency, RootReadError> {
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, relation, false, true)
             .await
-            .map(|(adjacency, _)| adjacency)
+            .map(|(source, _)| source)
     }
 
     /// Keep the admitted vertex history beside a selected relation so a
@@ -548,9 +580,23 @@ impl<V: Vfs> BlockStore<V> {
         requested_cut: CommitSeq,
         limits: RootReadLimits,
         relation: fgdb_delta_types::RelationId,
-    ) -> Result<(ReopenedAdjacency, Vec<crate::vertex::VertexPatchRows>), RootReadError> {
-        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, Some(relation), true)
-            .await
+    ) -> Result<
+        (
+            ReopenedSealingAdjacency,
+            Vec<crate::vertex::VertexPatchRows>,
+        ),
+        RootReadError,
+    > {
+        self.reopen_selected_adjacency_bounded(
+            cx,
+            id,
+            requested_cut,
+            limits,
+            Some(relation),
+            true,
+            true,
+        )
+        .await
     }
 
     /// Retain the complete admitted source for a composed read owner. Its
@@ -564,8 +610,9 @@ impl<V: Vfs> BlockStore<V> {
         requested_cut: CommitSeq,
         limits: RootReadLimits,
     ) -> Result<(ReopenedAdjacency, Vec<crate::vertex::VertexPatchRows>), RootReadError> {
-        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, None, true)
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, None, true, false)
             .await
+            .map(|(source, patches)| (source.adjacency, patches))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -577,7 +624,14 @@ impl<V: Vfs> BlockStore<V> {
         limits: RootReadLimits,
         relation: Option<fgdb_delta_types::RelationId>,
         retain_vertices: bool,
-    ) -> Result<(ReopenedAdjacency, Vec<crate::vertex::VertexPatchRows>), RootReadError> {
+        prepare_unhosted_sealing: bool,
+    ) -> Result<
+        (
+            ReopenedSealingAdjacency,
+            Vec<crate::vertex::VertexPatchRows>,
+        ),
+        RootReadError,
+    > {
         cx.checkpoint().map_err(RootReadError::Interrupted)?;
         let root = self
             .get_root_with_byte_limit(cx, id, limits.max_root_bytes)
@@ -596,7 +650,8 @@ impl<V: Vfs> BlockStore<V> {
         };
         // One read at a time: admission meters every object before its read
         // starts, so no read may run ahead of the budget that admits it.
-        let resolved = self
+        let mut walk = super::RootWalk::default();
+        let mut resolved = self
             .inspect_root_blocks_observed(
                 cx,
                 &root,
@@ -615,9 +670,29 @@ impl<V: Vfs> BlockStore<V> {
                 },
                 &mut observe,
                 1,
-                &mut super::RootWalk::default(),
+                &mut walk,
             )
             .await?;
+        // Complete edge admission still includes every unselected object and
+        // history. Reuse only the property-free selected case: in-place export
+        // cannot disturb property precedence, allocate, refuse, or introduce a
+        // new checkpoint before the vertex proof. Other cases drop the same
+        // temporary state and retain the ordinary compactor.
+        let unhosted_collapsed =
+            prepare_unhosted_sealing && resolved.iter().all(|(_, properties)| properties.is_none());
+        if unhosted_collapsed {
+            let history = std::mem::take(&mut walk.history);
+            drop(walk);
+            history.into_selected_unhosted_buffers(
+                relation,
+                resolved.iter_mut().map(|(entries, _)| entries),
+            );
+        } else {
+            drop(walk);
+        }
+        // The full edge validator, its index, chain heads and unrelated chains
+        // are now gone. Only the same selected source buffers survive: no new
+        // all-root or selected-history allocation overlaps vertex admission.
         // Every caller validates the complete vertex history. A combined
         // analytics opener keeps the same immutable rows for its directory;
         // adjacency-only callers still retain no second patch collection.
@@ -645,7 +720,13 @@ impl<V: Vfs> BlockStore<V> {
             properties.push(props);
         }
         cx.checkpoint().map_err(RootReadError::Interrupted)?;
-        Ok(((root, blocks, properties), patches))
+        Ok((
+            ReopenedSealingAdjacency {
+                adjacency: (root, blocks, properties),
+                unhosted_collapsed,
+            },
+            patches,
+        ))
     }
 }
 

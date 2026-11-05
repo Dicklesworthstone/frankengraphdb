@@ -7,8 +7,8 @@
 //! The three arms have intentionally different access contracts:
 //!
 //! - [`EliasFanoNeighbors`] delegates to the succinct Elias-Fano index. Select
-//!   does not decode a separate byte stream; rank is the Elias-Fano module's
-//!   binary search over selects.
+//!   does not decode a separate byte stream; rank locates a unary-high bucket
+//!   and searches its packed low fields without another index.
 //! - [`StreamVByteNeighbors`] stores deterministic fixed-size blocks with
 //!   fences. A lookup binary-searches fences where applicable and decodes at
 //!   most [`STREAM_BLOCK_ENTRIES`] values. It makes no direct rank/select claim
@@ -455,8 +455,8 @@ impl EliasFanoNeighbors {
 
     /// Number of neighbors less than or equal to `value`.
     ///
-    /// The Elias-Fano scalar kernel implements this as binary search over its
-    /// succinct selects; it does not decode a separate varint stream.
+    /// The Elias-Fano scalar kernel locates the unary-high bucket and searches
+    /// its packed low fields; it does not decode a separate varint stream.
     #[must_use]
     pub fn rank_le(&self, value: u64) -> usize {
         self.inner.rank_le(value)

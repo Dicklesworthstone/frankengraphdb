@@ -774,3 +774,159 @@ fn latest_edge_rows_keep_newest_content_and_last_copy_property_precedence() {
             .is_empty()
     );
 }
+
+fn unhosted_publications(count: usize) -> Vec<Vec<AdjacencyEntry>> {
+    let mut blocks = Vec::new();
+    for publication in 0..5 {
+        let mut families = BTreeMap::<(VId, RelationId), Vec<AdjacencyEntry>>::new();
+        for at in 0..count {
+            let (created, retired) = match publication {
+                0 => (1, None),
+                1 if at.is_multiple_of(3) => (1, Some(3)),
+                2 if at.is_multiple_of(3) => (3, None),
+                3 if at.is_multiple_of(6) => (3, Some(6)),
+                4 if at.is_multiple_of(6) => (6, None),
+                _ => continue,
+            };
+            let row = AdjacencyEntry {
+                src: VId((1u128 << 120) | (at % 5) as u128),
+                relation: RelationId(1 + (at % 2) as u64),
+                dst: VId((1u128 << 119) | (at % 17) as u128),
+                eid: EId(u128::MAX - at as u128 * 0x9e37_79b9_7f4a_7c15),
+                created_at: CommitSeq(created),
+                retired_at: retired.map(CommitSeq),
+            };
+            families
+                .entry((row.src, row.relation))
+                .or_default()
+                .push(row);
+        }
+        for mut rows in families.into_values() {
+            rows.sort_unstable_by_key(|row| (row.dst, row.eid, row.created_at));
+            blocks.extend(rows.chunks(256).map(<[AdjacencyEntry]>::to_vec));
+        }
+    }
+    blocks
+}
+
+#[test]
+fn unhosted_export_reuses_buffers_and_matches_independent_history_at_every_floor() {
+    for count in [0, 1, 8, 9, 257, 1025] {
+        let blocks = unhosted_publications(count);
+        let mut reference = GlobalMapValidator::default();
+        for (at, block) in blocks.iter().enumerate() {
+            reference.observe_block(at, block).unwrap();
+        }
+        for relation in [
+            None,
+            Some(RelationId(1)),
+            Some(RelationId(2)),
+            Some(RelationId(9)),
+        ] {
+            let mut history = EdgeHistoryValidator::default();
+            for (at, block) in blocks.iter().enumerate() {
+                history.observe_block(at, block).unwrap();
+            }
+            let mut selected: Vec<_> = blocks
+                .iter()
+                .filter(|block| relation.is_none_or(|relation| block[0].relation == relation))
+                .cloned()
+                .collect();
+            let allocations: Vec<_> = selected
+                .iter()
+                .map(|block| (block.as_ptr(), block.capacity()))
+                .collect();
+            let raw: usize = selected.iter().map(Vec::len).sum();
+            history.into_selected_unhosted_buffers(relation, selected.iter_mut());
+            assert_eq!(
+                selected.len(),
+                allocations.len(),
+                "source checkpoint population"
+            );
+            for (block, allocation) in selected.iter().zip(allocations) {
+                assert_eq!((block.as_ptr(), block.capacity()), allocation);
+            }
+            assert!(selected.iter().map(Vec::len).sum::<usize>() <= raw);
+            for floor in [0, 1, 2, 3, 4, 5, 6, 7, u64::MAX] {
+                let mut expected: Vec<(AdjacencyEntry, crate::edge_props::EdgePropertyRow)> =
+                    reference
+                        .statements
+                        .values()
+                        .filter(|row| relation.is_none_or(|relation| row.relation == relation))
+                        .filter(|row| row.retired_at.is_none_or(|end| end.0 > floor))
+                        .map(|row| (*row, Vec::new()))
+                        .collect();
+                expected.sort_unstable_by_key(|(row, _)| {
+                    (row.src, row.relation, row.dst, row.eid, row.created_at)
+                });
+                assert_eq!(
+                    crate::compact::retained_unhosted_statements_for_sealing(
+                        selected.clone(),
+                        CommitSeq(floor),
+                    ),
+                    expected,
+                    "count {count}, relation {relation:?}, floor {floor}",
+                );
+            }
+        }
+    }
+}
+
+fn prepare_unhosted_history(
+    blocks: &[Vec<AdjacencyEntry>],
+    consume: bool,
+) -> Vec<(AdjacencyEntry, crate::edge_props::EdgePropertyRow)> {
+    let relation = Some(RelationId(1));
+    let mut selected: Vec<_> = blocks
+        .iter()
+        .filter(|block| block[0].relation == RelationId(1))
+        .cloned()
+        .collect();
+    let properties = vec![None::<crate::edge_props::BlockProps>; selected.len()];
+    let mut history = EdgeHistoryValidator::default();
+    for (at, block) in blocks.iter().enumerate() {
+        history.observe_block(at, block).unwrap();
+    }
+    if consume {
+        history.into_selected_unhosted_buffers(relation, selected.iter_mut());
+        crate::compact::retained_unhosted_statements_for_sealing(selected, CommitSeq(3))
+    } else {
+        drop(history);
+        crate::compact::retained_rows_for_sealing(&selected, &properties, CommitSeq(3)).unwrap()
+    }
+}
+
+#[test]
+#[ignore = "manual paired history/retention preparation measurement; excludes stored-object I/O and image construction"]
+fn benchmark_unhosted_sealing_history_preparation() {
+    for count in [4096, 65_536] {
+        let blocks = unhosted_publications(count);
+        assert_eq!(
+            prepare_unhosted_history(&blocks, false),
+            prepare_unhosted_history(&blocks, true)
+        );
+        let mut incumbent = Vec::new();
+        let mut consumed = Vec::new();
+        for trial in 0..9 {
+            for consume in if trial % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let started = std::time::Instant::now();
+                let retained = prepare_unhosted_history(std::hint::black_box(&blocks), consume);
+                drop(std::hint::black_box(retained));
+                let elapsed = started.elapsed().as_nanos();
+                if consume {
+                    consumed.push(elapsed);
+                } else {
+                    incumbent.push(elapsed);
+                }
+            }
+        }
+        println!(
+            "unhosted_history_preparation identities={count} raw={} scope=selected-copy+initial-history-admission+retention+release incumbent_ns={incumbent:?} consumed_ns={consumed:?}",
+            blocks.iter().map(Vec::len).sum::<usize>(),
+        );
+    }
+}

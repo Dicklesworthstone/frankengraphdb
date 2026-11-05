@@ -82,6 +82,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod bounded_read;
+pub(crate) use bounded_read::ReopenedSealingAdjacency;
 use bounded_read::RootReadEvent;
 pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
 mod pack;

@@ -173,6 +173,247 @@ fn incremental_partition(
     SealedPartition::finish(scope(floor), image, limits, checkpoint)
 }
 
+fn retained_partition(
+    blocks: &[Vec<AdjacencyEntry>],
+    properties: &[Option<BlockProps>],
+    floor: u64,
+    limits: SealedLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+) -> Result<SealedPartition, SealedError> {
+    let retained = crate::compact::retained_rows_for_sealing(blocks, properties, CommitSeq(floor))
+        .map_err(SealedError::History)?;
+    let image = image::build_retained(retained, limits, checkpoint)?;
+    SealedPartition::finish(scope(floor), image, limits, checkpoint)
+}
+
+#[test]
+fn direct_retained_assembly_matches_packed_images_and_independent_rows() {
+    for degrees in [&[0, 1, 8, 9, 33, 129, 257, 519][..], &[0, 0][..]] {
+        // Keep all original histories: each floor must perform its own
+        // retention, including CSR-to-inline demotion and empty families.
+        let (families, _) = incremental_fixture(degrees, 0);
+        let source = combined_families(&families);
+        for floor in [0, 1, 4, 7, 10] {
+            let (_, expected) = incremental_fixture(degrees, floor);
+            let limits = SealedLimits::default();
+            let packed = seal(&source.blocks, &source.block_props, floor);
+            let direct = retained_partition(
+                &source.blocks,
+                &source.block_props,
+                floor,
+                limits,
+                &mut || Ok(()),
+            )
+            .unwrap();
+            let mut builder = image::ImageBuilder::new(limits).unwrap();
+            for family in &families {
+                let retained = crate::compact::retained_rows_for_sealing(
+                    &family.blocks,
+                    &family.block_props,
+                    CommitSeq(floor),
+                )
+                .unwrap();
+                builder.push_retained(retained, &mut || Ok(())).unwrap();
+            }
+            let incremental = SealedPartition::finish(
+                scope(floor),
+                builder.finish(&mut || Ok(())).unwrap(),
+                limits,
+                &mut || Ok(()),
+            )
+            .unwrap();
+            for candidate in [&direct, &incremental] {
+                assert_eq!(bytes(candidate), bytes(&packed));
+                assert_eq!(candidate.anchor(), packed.anchor());
+                assert_eq!(candidate.stats(), packed.stats());
+            }
+            for source in 0..degrees.len() {
+                let src = (1_u128 << 127) | ((source as u128) << 72) | (source as u128 * 31);
+                for cut in floor..=10 {
+                    let oracle: Vec<_> = expected
+                        .iter()
+                        .filter(|(edge, _)| edge.src == VId(src) && edge.visible_at(CommitSeq(cut)))
+                        .cloned()
+                        .collect();
+                    assert_eq!(collect(&direct, src, cut, None), oracle);
+                    assert_eq!(collect(&incremental, src, cut, None), oracle);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn direct_retained_assembly_preserves_last_copy_properties_and_content_versions() {
+    let initial: Vec<_> = (1..=9).map(|eid| entry(1, 7, eid, 1, None)).collect();
+    let original = BlockProps {
+        locators: (1..=9).collect(),
+        rows: (1..=9)
+            .map(|eid| vec![(PropertyKeyId(1), CanonicalScalar::Int(eid).into())])
+            .collect(),
+    };
+    let retired = entry(1, 7, 1, 1, Some(5));
+    let successor = entry(1, 7, 1, 5, None);
+    // A later copy with no hosted properties must erase the previous row.
+    let blocks = vec![initial, vec![retired], vec![retired], vec![successor]];
+    let properties = vec![
+        Some(original),
+        Some(BlockProps {
+            locators: vec![1],
+            rows: vec![vec![(PropertyKeyId(1), CanonicalScalar::Int(1).into())]],
+        }),
+        None,
+        Some(BlockProps {
+            locators: vec![1],
+            rows: vec![vec![(PropertyKeyId(1), CanonicalScalar::Int(99).into())]],
+        }),
+    ];
+    for floor in [0, 1, 4, 5, 10] {
+        let direct = retained_partition(
+            &blocks,
+            &properties,
+            floor,
+            SealedLimits::default(),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(bytes(&direct), bytes(&seal(&blocks, &properties, floor)));
+        for cut in floor.max(1)..=10 {
+            let rows = collect(&direct, 1, cut, None);
+            assert_eq!(rows.len(), 9);
+            assert_eq!(rows[0].0.eid, EId(1));
+            assert_eq!(
+                rows[0].1,
+                if cut < 5 {
+                    Vec::new()
+                } else {
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(99).into())]
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn direct_retained_assembly_keeps_limits_and_every_image_refusal() {
+    let (families, _) = incremental_fixture(&[1, 9, 33], 0);
+    let source = combined_families(&families);
+    let limits = SealedLimits::default();
+    let run = |limits, checkpoint: &mut dyn FnMut() -> Result<(), SealedError>| {
+        retained_partition(&source.blocks, &source.block_props, 1, limits, &mut || {
+            checkpoint()
+        })
+    };
+    for limited in [
+        SealedLimits {
+            max_rows: 2,
+            ..limits
+        },
+        SealedLimits {
+            max_incidences: 42,
+            ..limits
+        },
+        SealedLimits {
+            max_property_bytes: 1,
+            ..limits
+        },
+        SealedLimits {
+            max_image_bytes: 1,
+            ..limits
+        },
+    ] {
+        let packed =
+            crate::compact::compact_with_props(&source.blocks, &source.block_props, CommitSeq(1))
+                .unwrap();
+        let original = image::build(packed, limited, &mut || Ok(()))
+            .and_then(|image| SealedPartition::finish(scope(1), image, limited, &mut || Ok(())));
+        let candidate = run(limited, &mut || Ok(()));
+        assert!(original.is_err());
+        assert!(candidate.is_err());
+        assert_eq!(
+            original.unwrap_err().to_string(),
+            candidate.unwrap_err().to_string()
+        );
+    }
+    let mut total = 0;
+    run(limits, &mut || {
+        total += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert!(total > 10);
+    for stop in 1..=total {
+        let mut reached = 0;
+        let result = run(limits, &mut || {
+            reached += 1;
+            if reached == stop {
+                Err(SealedError::NonCanonical)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(SealedError::NonCanonical)));
+        assert_eq!(reached, stop);
+    }
+    // Refusal never mutates the authenticated input or publishes partial data.
+    assert_eq!(
+        bytes(&run(limits, &mut || Ok(())).unwrap()),
+        bytes(&seal(&source.blocks, &source.block_props, 1))
+    );
+}
+
+#[test]
+#[ignore = "manual paired image preparation measurement; no timing gate or competitor claim"]
+fn benchmark_direct_retained_image_preparation() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    for (sources, degree) in [(4096usize, 4), (2048, 32), (1, 65536)] {
+        for hosted in [false, true] {
+            let (families, _) = incremental_fixture(&vec![degree; sources], 0);
+            let mut source = combined_families(&families);
+            if !hosted {
+                source.block_props.fill(None);
+            }
+            let mut samples = [Vec::new(), Vec::new()];
+            for trial in 0..7 {
+                let mut outputs = [None, None];
+                for which in [trial % 2, 1 - trial % 2] {
+                    // Both paths borrow the same complete histories. Timing
+                    // includes collapse, property selection, image construction,
+                    // structural validation and canonical authentication. It
+                    // excludes disk I/O, projection, traversal and result rows.
+                    let start = Instant::now();
+                    let partition = if which == 0 {
+                        seal(&source.blocks, &source.block_props, 4)
+                    } else {
+                        retained_partition(
+                            &source.blocks,
+                            &source.block_props,
+                            4,
+                            SealedLimits::default(),
+                            &mut || Ok(()),
+                        )
+                        .unwrap()
+                    };
+                    let partition = black_box(partition);
+                    samples[which].push(start.elapsed().as_nanos());
+                    outputs[which] = Some(partition);
+                }
+                assert!(outputs.iter().all(Option::is_some));
+                if let [Some(packed), Some(direct)] = &outputs {
+                    assert_eq!(bytes(packed), bytes(direct));
+                    assert_eq!(packed.anchor(), direct.anchor());
+                    assert_eq!(packed.stats(), direct.stats());
+                }
+            }
+            eprintln!(
+                "sealed_preparation sources={sources} degree={degree} hosted={hosted} packed_ns={:?} direct_ns={:?}",
+                samples[0], samples[1]
+            );
+        }
+    }
+}
+
 #[test]
 fn incremental_assembly_preserves_exact_images_and_independent_snapshot_rows() {
     for degrees in [&[0, 1, 8, 9, 33, 129][..], &[0, 0][..]] {
