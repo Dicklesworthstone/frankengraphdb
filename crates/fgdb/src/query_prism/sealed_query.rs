@@ -115,11 +115,12 @@ impl Database<UnixVfs> {
     /// or obtains a writer lease. The compressed relation and ordinary GQL
     /// property/pattern source come from that same selected immutable root.
     ///
-    /// `None` selects its publication; an explicit cut is exact. Source and
-    /// image construction have separate admission limits. One authenticated
-    /// source traversal supplies both the compressed relation and decoded GQL
-    /// pattern/property source. Both representations remain resident; this is
-    /// not an external-memory read owner or an RSS bound.
+    /// `None` selects its publication; an explicit cut is exact. An attached
+    /// durable run supplies compressed adjacency without resealing. Legacy
+    /// roots build it during the authenticated source traversal. Ordinary GQL
+    /// pattern/property reads retain one bounded complete source admission.
+    /// Both representations remain resident; this is not an external-memory
+    /// read owner or an RSS bound.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_sealed_read(
         cx: &CommitCx,
@@ -194,19 +195,43 @@ impl<V: Vfs + Clone> Database<V> {
                         .into(),
                     );
                 }
-                // Keep the sealer's deep Send proof behind the same explicit
-                // future boundary as the existing read-only Prism opener.
-                let sealing: crate::SendFuture<'_, _> =
-                    Box::pin(published.store.seal_relation_with_read_source(
+                let attached: crate::SendFuture<'_, _> =
+                    Box::pin(published.store.get_published_adj_run(
                         query_cx,
                         published.root_id,
-                        as_of,
                         relation,
+                        as_of,
                         sealing,
-                        source_limits,
+                        source_limits.max_root_bytes,
                     ));
-                let (partition, (root, blocks, block_props), patches) =
-                    sealing.await.map_err(SealedReadError::Seal)?;
+                let (partition, (root, blocks, block_props), patches, sealed_source_root) =
+                    if let Some(run) = attached.await? {
+                        let source_root = run.partition().anchor().scope().source_root;
+                        let source: crate::SendFuture<'_, _> =
+                            Box::pin(published.store.reopen_with_vertices_bounded(
+                                query_cx,
+                                published.root_id,
+                                as_of,
+                                source_limits,
+                            ));
+                        let (adjacency, patches) = source.await?;
+                        (run.into_partition(), adjacency, patches, Some(source_root))
+                    } else {
+                        // Keep the sealer's deep Send proof behind the same
+                        // explicit future boundary as the Prism opener.
+                        let sealing: crate::SendFuture<'_, _> =
+                            Box::pin(published.store.seal_relation_with_read_source(
+                                query_cx,
+                                published.root_id,
+                                as_of,
+                                relation,
+                                sealing,
+                                source_limits,
+                            ));
+                        let (partition, adjacency, patches) =
+                            sealing.await.map_err(SealedReadError::Seal)?;
+                        (partition, adjacency, patches, None)
+                    };
                 query_cx
                     .checkpoint()
                     .map_err(Error::Cancelled)
@@ -223,6 +248,9 @@ impl<V: Vfs + Clone> Database<V> {
                     block_props,
                     patches,
                 );
+                // This alias is earned only by the store's durable-run
+                // membership check. A caller-supplied image cannot install it.
+                snapshot.sealed_source_root = sealed_source_root;
                 snapshot.delta_index = crate::LocalDeltaBatchIndex::empty_at(snapshot.frontier);
                 let view = EmbeddedReadView {
                     snapshot: std::sync::Arc::new(snapshot),

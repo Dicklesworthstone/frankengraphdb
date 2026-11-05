@@ -34,7 +34,10 @@ use fgdb_prism::{
     FnxReadOptions, FnxReadResult, FnxRowCursor, FnxSealedExecutionError, FnxSelection, FnxValue,
     FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy, ProjectionSpec, SelfLoopPolicy,
 };
-use fgdb_strata::{store::RootReadLimits, tiered::sealed::SealedLimits};
+use fgdb_strata::{
+    store::{RootReadError, RootReadLimits, StoreError},
+    tiered::sealed::{AdjRunError, SealedError, SealedLimits},
+};
 use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -677,11 +680,7 @@ pub(super) async fn run_sealed_read(
         prepared.source_limits,
     )
     .await
-    .map_err(|error| match error {
-        SealedProjectionOpenError::Open(error) => super::open_failure(error),
-        SealedProjectionOpenError::Read(error) => super::execution_failure(error),
-        SealedProjectionOpenError::RecoveryRequired => Failure::open(error),
-    })?;
+    .map_err(sealed_open_failure)?;
     let result = view
         .execute_prepared(
             cx,
@@ -697,6 +696,50 @@ pub(super) async fn run_sealed_read(
             }
         })?;
     super::render(result, view.snapshot_seq().0, "rows", robot, out)
+}
+
+fn sealed_open_failure(error: SealedProjectionOpenError) -> Failure {
+    match error {
+        SealedProjectionOpenError::Open(error) => super::open_failure(error),
+        SealedProjectionOpenError::Read(error) => super::execution_failure(error),
+        SealedProjectionOpenError::Store(error) => sealed_store_failure(error),
+        SealedProjectionOpenError::Source(RootReadError::Store(error)) => {
+            sealed_store_failure(*error)
+        }
+        SealedProjectionOpenError::Source(error @ RootReadError::Limit { .. }) => {
+            Failure::coded(super::refusal::Code::Budget, error)
+        }
+        SealedProjectionOpenError::Source(error) => super::execution_failure(error),
+        SealedProjectionOpenError::RecoveryRequired => Failure::open(error),
+    }
+}
+
+/// Bounded object/run admission is still a caller budget when the store wraps
+/// it in a publication or lookup error. A failed identity, scope or canonical
+/// encoding remains storage corruption. Both seal maintenance and cold reads
+/// use this mapping so moving an image to disk cannot change its refusal class.
+pub(super) fn sealed_store_failure(error: StoreError) -> Failure {
+    fn admission_limit(error: &StoreError) -> bool {
+        match error {
+            StoreError::ObjectTooLarge { .. } | StoreError::RootReferenceLimit { .. } => true,
+            StoreError::MalformedAdjRun(error) => {
+                matches!(
+                    error.as_ref(),
+                    AdjRunError::Sealed(SealedError::Limit { .. })
+                )
+            }
+            StoreError::RootBlockLoad { error, .. }
+            | StoreError::RootPatchLoad { error, .. }
+            | StoreError::ManifestRootLoad { error, .. }
+            | StoreError::BlockPatchLoad { error, .. } => admission_limit(error),
+            _ => false,
+        }
+    }
+    if admission_limit(&error) {
+        Failure::coded(super::refusal::Code::Budget, error)
+    } else {
+        Failure::io(error)
+    }
 }
 
 pub(super) fn run(
@@ -917,11 +960,7 @@ pub(super) async fn run_sealed(
             .await
         }
     }
-    .map_err(|error| match error {
-        SealedProjectionOpenError::Open(error) => super::open_failure(error),
-        SealedProjectionOpenError::Read(error) => super::execution_failure(error),
-        SealedProjectionOpenError::RecoveryRequired => Failure::open(error),
-    })?;
+    .map_err(sealed_open_failure)?;
     if robot {
         let mut rows = match prepared.quantum {
             Some(quantum) => {
@@ -1067,6 +1106,55 @@ fn cell(value: FnxValue, robot: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn persisted_seal_limits_remain_budgets_and_corruption_remains_io() {
+        use super::{
+            AdjRunError, RootReadError, SealedError, SealedProjectionOpenError, StoreError,
+            sealed_open_failure,
+        };
+        use crate::refusal::Code;
+
+        for error in [
+            SealedProjectionOpenError::Store(StoreError::ObjectTooLarge {
+                observed: 1,
+                limit: 0,
+            }),
+            SealedProjectionOpenError::Store(StoreError::MalformedAdjRun(Box::new(
+                AdjRunError::Sealed(SealedError::Limit {
+                    resource: "rows",
+                    requested: 1,
+                    limit: 0,
+                }),
+            ))),
+            SealedProjectionOpenError::Source(RootReadError::Store(Box::new(
+                StoreError::ObjectTooLarge {
+                    observed: 1,
+                    limit: 0,
+                },
+            ))),
+            SealedProjectionOpenError::Source(RootReadError::Limit {
+                resource: "source bytes",
+                requested: 1,
+                limit: 0,
+            }),
+        ] {
+            let failure = sealed_open_failure(error);
+            assert_eq!(failure.code, 3);
+            assert_eq!(failure.refusal, Code::Budget);
+        }
+        for error in [
+            StoreError::IdentityMismatch {
+                expected: fgdb_types::ObjectId([1; 32]),
+                actual: fgdb_types::ObjectId([2; 32]),
+            },
+            StoreError::MalformedAdjRun(Box::new(AdjRunError::ScopeMismatch)),
+        ] {
+            let failure = sealed_open_failure(SealedProjectionOpenError::Store(error));
+            assert_eq!(failure.code, 5);
+            assert_eq!(failure.refusal, Code::Io);
+        }
+    }
+
     use super::{Failure, arguments, is_call};
     use fgdb_prism::{FnxCallSpec, FnxParameters};
 

@@ -56,7 +56,7 @@ impl From<crate::OpenError> for CapsuleRecoveryError {
 }
 
 /// Capsule repair results and separate audits of the current generation's data
-/// (FGSB/FGSP/FGVP) and metadata (manifest, root, root segments). Strata objects
+/// (FGSB/FGSP/FGVP/FGRN) and metadata (manifest, root, root segments). Strata objects
 /// have no local redundancy: this sweep reports lost objects. Explicit
 /// [`Database::open_repairing_derived`] may reconstruct data from the complete
 /// authenticated history; the sweep never substitutes cached graph state.
@@ -77,6 +77,7 @@ pub struct ScrubSummary {
 #[derive(Clone, Copy)]
 enum DataKind {
     Block,
+    AdjRun,
     EdgeProperties,
     VertexPatch,
 }
@@ -287,7 +288,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// redundancy without changing object, ciphertext, or encoding identity.
     /// Lost objects are reported individually and are never overwritten.
     /// Also re-read the admitted generation's manifest, partition root, V4
-    /// segments, FGSB blocks, hosted FGSP properties and FGVP vertex patches.
+    /// segments, FGSB blocks, hosted FGSP properties, FGVP vertex patches and
+    /// attached FGRN adjacency runs.
     /// Packed objects use freshly admitted location tables and uncached
     /// payload reads, so a prior successful sweep cannot hide later damage.
     /// The complete inventory comes from admission metadata retained before
@@ -386,11 +388,22 @@ impl<V: Vfs + Clone> Database<V> {
         for reference in &self.published_root.vertex_patches {
             objects.insert(reference.patch_id, DataKind::VertexPatch);
         }
+        for run in self.attached_runs.values() {
+            objects.insert(run.0, DataKind::AdjRun);
+        }
         summary.block_objects = objects.len();
         for (object_id, kind) in objects {
             checkpoint(cx)?;
             let result = match kind {
                 DataKind::Block => store.get_bytes(cx, DeltaBlockVersion(object_id)).await,
+                DataKind::AdjRun => {
+                    store
+                        .get_adj_run_bytes(
+                            cx,
+                            fgdb_strata::tiered::sealed::AdjRunSegmentVersion(object_id),
+                        )
+                        .await
+                }
                 DataKind::EdgeProperties => {
                     store.get_edge_property_patch_bytes(cx, object_id).await
                 }

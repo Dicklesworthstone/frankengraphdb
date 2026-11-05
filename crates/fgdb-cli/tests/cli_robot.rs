@@ -653,6 +653,30 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                         assert_eq!(index, 1);
                         event.get("seq").unsigned();
                     }
+                    "sealed" => {
+                        exact_fields(
+                            event,
+                            &[
+                                "v",
+                                "event",
+                                "kind",
+                                "seq",
+                                "relation",
+                                "retain_from",
+                                "run",
+                            ],
+                        );
+                        assert_eq!(index, 1);
+                        let seq = event.get("seq").unsigned();
+                        event.get("relation").unsigned();
+                        assert!(event.get("retain_from").unsigned() <= seq);
+                        let run = event.get("run").string();
+                        assert_eq!(run.len(), 64);
+                        assert!(
+                            run.bytes()
+                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                        );
+                    }
                     "adopted" => {
                         exact_fields(event, &["v", "event", "kind", "files", "directories"]);
                         assert_eq!(index, 1);
@@ -3996,6 +4020,72 @@ fn capsule_files(db: &TestDb) -> Vec<PathBuf> {
         .collect();
     paths.sort();
     paths
+}
+
+#[test]
+fn seal_publishes_for_cold_reads_without_advancing_or_rewriting_history() {
+    let db = TestDb::new("seal");
+    db.create();
+    let seq =
+        db.write(&["INSERT (a:Person {name:'Ada'}),(b:Person {name:'Grace'}),(a)-[:KNOWS]->(b)"]);
+    let query = "MATCH (p:Person) RETURN p.name AS name ORDER BY name";
+    let before = db.command("query", &[query]);
+    before.success();
+    let analytics = db.command("query", &["CALL fnx.pagerank() YIELD vertex, score"]);
+    analytics.success();
+    let capsules: Vec<_> = capsule_files(&db)
+        .into_iter()
+        .map(|path| {
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    let sealed = db.command("seal", &["--seal-relation", "1"]);
+    assert_eq!(sealed.sequence("sealed"), seq);
+    assert_eq!(sealed.terminal().get("relation").unsigned(), 1);
+    assert_eq!(sealed.terminal().get("retain_from").unsigned(), 0);
+    let again = db.command("seal", &["--seal-relation", "1", "--retain-from", "0"]);
+    assert_eq!(again.sequence("sealed"), seq);
+    assert_eq!(again.terminal().get("run"), sealed.terminal().get("run"));
+    assert_eq!(db.command("query", &[query]).stdout, before.stdout);
+    let compressed = db.command(
+        "query",
+        &[
+            "--sealed",
+            "--graph-relation",
+            "KNOWS",
+            "CALL fnx.pagerank() YIELD vertex, score",
+        ],
+    );
+    compressed.success();
+    assert_eq!(compressed.stdout, analytics.stdout);
+    let refused_read = db.command(
+        "query",
+        &[
+            "--sealed",
+            "--graph-relation",
+            "KNOWS",
+            "--sealed-image-bytes",
+            "0",
+            "CALL fnx.pagerank() YIELD vertex, score",
+        ],
+    );
+    refused_read.failure(3, "query");
+    assert_eq!(refused_read.terminal().get("code").string(), "budget");
+    assert_eq!(db.command("scrub", &[]).sequence("scrubbed"), seq);
+
+    // A refused output admission emits only an error and keeps the previously
+    // admitted generation readable, without creating any graph commit.
+    for bound in ["--sealed-image-bytes", "--seal-source-root-bytes"] {
+        let refused = db.command("seal", &["--seal-relation", "1", bound, "0"]);
+        refused.failure(3, "query");
+        assert_eq!(refused.terminal().get("code").string(), "budget");
+    }
+    assert_eq!(db.command("query", &[query]).stdout, before.stdout);
+    assert_eq!(capsule_files(&db).len(), capsules.len());
+    for (path, bytes) in capsules {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
 }
 
 #[test]

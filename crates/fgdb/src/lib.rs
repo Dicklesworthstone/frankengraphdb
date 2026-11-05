@@ -140,6 +140,10 @@ pub use pinned_tzdb::{PinnedTzdb, TzdbArtifactError, TzdbTransition, TzdbZone};
 mod gql_cert;
 mod gql_exec;
 mod memvfs;
+mod origin_birth;
+pub use origin_birth::OriginBirthError;
+mod seal_maintenance;
+pub use seal_maintenance::SealPublicationError;
 mod prepared_write;
 mod query;
 mod scrub;
@@ -1860,6 +1864,9 @@ struct Snapshot {
     patches: Vec<VertexPatchRows>,
     frontier: CommitSeq,
     root: PartitionRootVersion,
+    /// Exact embedded Tier-D source of an authenticated V7 run attachment.
+    /// Ordinary successors clear it; callers cannot supply this alias.
+    sealed_source_root: Option<PartitionRootVersion>,
     /// The manifest published beside `root` (fgdb-63w2) — the identity a
     /// root slot carries, re-derived identically by every rebuild.
     manifest: ManifestVersion,
@@ -2681,6 +2688,10 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// or seeds them from the admission of the root the slot selected
     /// (fgdb-ibbuq).
     receipts: PublishReceipts,
+    /// Authenticated current-root run membership retained for integrity sweep.
+    /// This inventory cannot mint a run anchor or grant physical reclamation.
+    attached_runs:
+        std::collections::BTreeMap<RelationId, fgdb_strata::tiered::sealed::AdjRunSegmentVersion>,
     /// The durable I/O authority retained so same-handle recovery reopens
     /// through the SAME injected filesystem rather than silently escaping to
     /// `UnixVfs`. Chronicle and Strata's `BlockStore` both open through this
@@ -3435,6 +3446,18 @@ impl<V: Vfs + Clone> Database<V> {
         let identity_allocation =
             crate::write_txn::IdentityAllocation::from_chain(coordinator.chain(), &keys);
         let published_frontier = snapshot.frontier;
+        let attached_runs = store
+            .published_adj_run_refs(cx, snapshot.root, fgdb_strata::root::MAX_ROOT_READ_BYTES)
+            .await
+            .map_err(RebuildError::Store)?
+            .into_iter()
+            .map(|reference| {
+                (
+                    reference.relation,
+                    fgdb_strata::tiered::sealed::AdjRunSegmentVersion(reference.run),
+                )
+            })
+            .collect();
         Ok(Self {
             coordinator,
             store,
@@ -3449,6 +3472,7 @@ impl<V: Vfs + Clone> Database<V> {
             // Earned by the rebuild's or suffix's publication, or seeded from
             // the slot-selected root's admission (fgdb-ibbuq).
             receipts,
+            attached_runs,
             vfs,
             crypto_verification_events,
             next_txn_obligation: 0,
@@ -5191,6 +5215,7 @@ impl<V: Vfs + Clone> Database<V> {
             patches: decoded_patches,
             frontier,
             root: root_id,
+            sealed_source_root: None,
             manifest,
             delta_index: next_delta_index,
         });
@@ -5200,6 +5225,7 @@ impl<V: Vfs + Clone> Database<V> {
         self.published_root.blocks.extend(new_refs);
         self.published_root.vertex_patches.extend(new_patch_refs);
         self.published_root.published_at = frontier;
+        self.attached_runs.clear();
         self.state = DatabaseState::Healthy {
             published_frontier: self.snapshot.frontier,
         };
@@ -5787,6 +5813,7 @@ impl<V: Vfs + Clone> Database<V> {
         self.heads.versions = versions;
         self.snapshot = Arc::new(snapshot);
         self.published_root = published_root;
+        self.attached_runs.clear();
         self.writer = writer;
         // The receipts now hold every durable object of both generations, and
         // their root memo is the replacement root's.
@@ -6863,6 +6890,7 @@ fn current_generation(
         patches,
         frontier: published_at,
         root: root_id,
+        sealed_source_root: None,
         manifest,
         delta_index: LocalDeltaBatchIndex::new(),
     }
@@ -7573,6 +7601,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
             patches: decoded_patches,
             frontier,
             root: root_id,
+            sealed_source_root: None,
             manifest,
             delta_index: LocalDeltaBatchIndex::new(),
         },
