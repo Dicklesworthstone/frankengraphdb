@@ -825,6 +825,34 @@ impl<'a> Parser<'a> {
             }
         }
         self.syntax.return_at = self.current.at;
+        self.require_root_row_imports()?;
+        Ok(())
+    }
+
+    /// A carried row name used only by a child scope must not become a fresh
+    /// graph local. Report the child use so the multipart owner can place its
+    /// clause or WHERE after the proper row boundary, including leading UNWIND.
+    fn require_root_row_imports(&self) -> Result<(), GraphPatternTextError> {
+        for name in &self.read_row_bindings {
+            if name.text.starts_with(Self::ANONYMOUS_PREFIX) {
+                continue;
+            }
+            let in_root = self.syntax.variables[..self.syntax.root_variables]
+                .iter()
+                .any(|variable| variable.text == name.text);
+            if !in_root
+                && let Some(reference) = self
+                    .syntax
+                    .scopes
+                    .iter()
+                    .find_map(|scope| scope.find_name(&|variable| variable.text == name.text))
+            {
+                return Err(error(
+                    reference.at,
+                    GraphPatternTextErrorKind::Expected("imported vertices in the root MATCH"),
+                ));
+            }
+        }
         Ok(())
     }
 

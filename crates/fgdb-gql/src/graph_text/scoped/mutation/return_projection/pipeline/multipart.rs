@@ -396,6 +396,19 @@ pub(in crate::graph_text) fn has_row_graph_expressions(
         {
             row_scope = true;
         }
+        if row_scope
+            && depth == 0
+            && !key
+            && matches!(token.kind, TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("WHERE") || word.eq_ignore_ascii_case("RETURN"))
+        {
+            let mut expressions = list_probe.clone();
+            if row_pattern_filter_starts(&mut expressions.clone(), |_| false)?
+                || !row_pattern_expressions(&mut expressions, |_| false)?.is_empty()
+            {
+                return Ok(true);
+            }
+        }
         let graph_read = if row_scope {
             row_list_graph_expression_follows(token.kind, &list_probe, |_| false)?
         } else {
@@ -3410,17 +3423,25 @@ impl<'a> Parser<'a> {
         // clause: this part ends before the next clause, at an implicit
         // `WITH *` (multipart_head), never wrapping it in one left join.
         self.optional_part = optional;
-        // The first part's WHERE over values is that part's implicit `WITH *
-        // WHERE` (fgdb-1c29d, fgdb-qo3jv). A continuation's WHERE stays its
-        // own: an OPTIONAL one belongs to the left join, not after it.
-        self.defer_where = kind.is_none();
+        // A required part's WHERE over values runs after that part's join,
+        // including inside a nested read body whose offsets a top-level
+        // retry cannot see. An OPTIONAL predicate stays inside its left join.
+        self.defer_where = !optional;
         let parsed = self.parse_match_prefix();
         self.defer_where = false;
         let deferred = self.deferred_where.take();
         self.optional_part = false;
         let row_fields = core::mem::take(&mut self.read_row_fields);
         let row_comparisons = self.read_comparisons.take().unwrap_or_default();
-        parsed?;
+        // This is a row-import refusal even when the graph parser finds it
+        // before the join-key audit below. Keep its row-level error contract.
+        parsed.map_err(|source| match source {
+            GraphPatternTextError {
+                offset,
+                kind: GraphPatternTextErrorKind::Expected("imported vertices in the root MATCH"),
+            } => expected(offset, "imported vertices in the root MATCH"),
+            source => source.into(),
+        })?;
         self.refuse_call_write(call_depth)?;
         // An OPTIONAL clause's WHERE over the incoming row filters inside
         // its optional Apply (multipart_optional_apply). After the left join
@@ -3452,27 +3473,6 @@ impl<'a> Parser<'a> {
             // correlate the next MATCH (TCK Create3 [3]).
             if name.text.starts_with(Self::ANONYMOUS_PREFIX) {
                 continue;
-            }
-            // An imported name cannot silently become an independent local
-            // inside EXISTS/OPTIONAL. This subset correlates root vertices;
-            // the ordinary scoped compiler can then capture that root value.
-            // Report its use in the child, not its earlier WITH definition:
-            // unresolved_read_input can place that clause after an implicit
-            // WITH or defer its WHERE, then correlate the carried identity.
-            let in_root = self.syntax.variables[..self.syntax.root_variables]
-                .iter()
-                .any(|variable| variable.text == name.text);
-            if !in_root
-                && let Some(reference) = self
-                    .syntax
-                    .scopes
-                    .iter()
-                    .find_map(|scope| scope.find_name(&|variable| variable.text == name.text))
-            {
-                return Err(expected(
-                    reference.at,
-                    "imported vertices in the root MATCH",
-                ));
             }
             if let Some(right) = self
                 .syntax

@@ -463,8 +463,8 @@ fn carries_own(head: &GraphProjectionHead<'_>, offset: usize, name: &str) -> boo
     })
 }
 
-/// Outputs whose pattern bindings belong to the projected row: renamed
-/// MATCH elements and known maps. Hoisting a pattern over either alias can
+/// Outputs whose pattern bindings belong to the projected row: incoming
+/// columns, renamed MATCH elements and known maps. Hoisting over these aliases can
 /// bind a fresh vertex instead of preserving the row's identity or map type.
 fn row_owned_aliases<'a>(
     head: &GraphProjectionHead<'a>,
@@ -474,6 +474,7 @@ fn row_owned_aliases<'a>(
     (head.outputs.iter())
         .filter(|(output, value)| {
             known_maps.contains(&output.at)
+                || matches!(value, ReadValueTemplate::Column(column) if *column < offset)
                 || matches!(value, ReadValueTemplate::Column(column)
                 if column.checked_sub(offset)
                     .and_then(|input| head.inputs.get(input))
