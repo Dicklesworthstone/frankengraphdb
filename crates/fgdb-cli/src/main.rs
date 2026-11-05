@@ -50,7 +50,7 @@ Usage: fgdb [--robot] <command>
   create --db <dir> --key-file <file>
   adopt --db <dir>
   compact --db <dir> --key-file <file>
-  scrub --db <dir> --key-file <file>
+  scrub --db <dir> --key-file <file> [--rebuild-derived]
   write --db <dir> --key-file <file> [bindings] [--param name=value]... [--rows json:<objects>] <gql>
   query --db <dir> --key-file <file> [bindings] [--param name=value]... [limits] [--sealed [--buffered] | --stream | --buffered [--spill-dir <dir>] | --spill-dir <dir>] <gql>
   query --db <dir> --key-file <file> [bindings] [projection] [--param name=value]...
@@ -79,6 +79,11 @@ Usage: fgdb [--robot] <command>
          [--max-batches N] subscribe <read>
   robot schema
   help
+scrub --rebuild-derived reconstructs graph data from the complete authenticated
+commit history before verifying the recovered generation. Root metadata and all
+retained capsules must still authenticate. No commit is appended. Damaged packed
+payloads are restored through verified loose copies; unrelated history remains.
+Ordinary scrub reports lost data without reconstructing it from retained history.
 remote runs one statement on an fgdbd server over FGP, authenticated by the hex
 capability token in --token-file (owner-only; minted by `fgdbd token`). Output and
 exit codes are query/write's; the server's own name bindings apply. Remote
@@ -700,6 +705,7 @@ struct Options {
     steps: Vec<transaction::Step>,
     rollback: bool,
     stream: bool,
+    rebuild_derived: bool,
     buffered: buffered::BufferedOptions,
     spill: spill::SpillOptions,
     /// Native read/write execution limits; absent ones keep the CLI defaults.
@@ -899,6 +905,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut steps: Vec<transaction::Step> = Vec::new();
     let mut rollback = false;
     let mut stream = false;
+    let mut rebuild_derived = false;
     let mut overwrite = false;
     let mut buffered = buffered::BufferedOptions::default();
     let mut spill = spill::SpillOptions::default();
@@ -911,6 +918,15 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut search_flags = search::SearchFlags::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
+        if arg == "--rebuild-derived" {
+            if command != "scrub" || rebuild_derived {
+                return Err(Failure::usage(
+                    "--rebuild-derived is allowed once, only on scrub",
+                ));
+            }
+            rebuild_derived = true;
+            continue;
+        }
         if arg == "--stream" {
             if command != "query" || stream {
                 return Err(Failure::usage("--stream is allowed once, only on query"));
@@ -1289,6 +1305,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         steps,
         rollback,
         stream,
+        rebuild_derived,
         buffered,
         spill,
         budget,
@@ -2101,7 +2118,13 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     std::mem::forget(view);
                     return outcome;
                 }
-                let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
+                let mut db = if command == "create" {
+                    Database::create(&contexts.commit(), &options.db, keys).await
+                } else if options.rebuild_derived {
+                    Database::open_repairing_derived(&contexts.commit(), &options.db, keys).await
+                } else {
+                    Database::open(&contexts.commit(), &options.db, keys).await
+                }.map_err(open_failure)?;
                 db.set_statement_clock(Some(statement_clock()));
                 if command == "create" {
                     let seq = db.frontier().map_err(Failure::io)?.0;

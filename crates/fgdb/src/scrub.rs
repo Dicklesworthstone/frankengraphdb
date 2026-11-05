@@ -57,7 +57,9 @@ impl From<crate::OpenError> for CapsuleRecoveryError {
 
 /// Capsule repair results and separate audits of the current generation's data
 /// (FGSB/FGSP/FGVP) and metadata (manifest, root, root segments). Strata objects
-/// have no local redundancy: a lost object is reported, never repaired.
+/// have no local redundancy: this sweep reports lost objects. Explicit
+/// [`Database::open_repairing_derived`] may reconstruct data from the complete
+/// authenticated history; the sweep never substitutes cached graph state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScrubSummary {
     pub objects: usize,
@@ -118,6 +120,33 @@ fn checkpoint(cx: &CommitCx) -> Result<(), CommitError> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Database<asupersync::fs::UnixVfs> {
+    /// Reconstruct derived graph data from the complete authenticated commit
+    /// history and reopen the database under its exclusive writer lease.
+    ///
+    /// The selected root metadata must still authenticate and belong to the
+    /// recovered marker chain. Every retained capsule is authenticated and
+    /// folded before any data repair is published. Missing or damaged root
+    /// metadata and unrecoverable capsules remain errors, never authority to
+    /// invent another history. No commit or marker is appended.
+    /// Replaying a previously compacted database may publish a different
+    /// derived generation while preserving the committed frontier and history.
+    ///
+    /// Damaged loose data is replaced atomically with verified regenerated
+    /// bytes. Packed payloads can be recovered through authenticated loose
+    /// copies, preserving the original pack and unrelated historical objects.
+    /// Valid existing bytes, identity collisions and nonregular paths retain
+    /// their ordinary fail-closed publication rules. This operation can leave
+    /// a verified subset repaired if storage fails or cancellation interrupts
+    /// it; no serving handle is returned until complete admission succeeds.
+    /// Retrying is safe. Ordinary [`Database::open`] does not enable repair.
+    pub async fn open_repairing_derived(
+        cx: &CommitCx,
+        path: impl AsRef<std::path::Path>,
+        keys: crate::DatabaseKeys,
+    ) -> Result<Self, crate::OpenError> {
+        Self::open_repairing_derived_with_vfs(cx, asupersync::fs::UnixVfs::new(), path, keys).await
+    }
+
     /// Reopen a damaged database using authenticated copies of committed
     /// capsules, including capsules that local redundancy cannot recover.
     ///
@@ -208,7 +237,7 @@ impl<V: Vfs + Clone> Database<V> {
                 vfs,
                 path,
                 keys,
-                true,
+                crate::OpenReplay::Rebuild,
                 crate::ReplayRootCapacity::DURABLE,
                 coordinator,
             ));
@@ -220,6 +249,40 @@ impl<V: Vfs + Clone> Database<V> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// The caller-selected filesystem form of
+    /// [`Database::open_repairing_derived`]. The same VFS owns history reads,
+    /// staged data repair, durability verification and final root admission.
+    pub async fn open_repairing_derived_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<std::path::Path>,
+        keys: crate::DatabaseKeys,
+    ) -> Result<Self, crate::OpenError> {
+        let path = path.as_ref();
+        crate::require_database_dir(cx, &vfs, path).await?;
+        let coordinator = fgdb_chronicle::CommitCoordinator::open_with_vfs(
+            cx,
+            vfs.clone(),
+            path,
+            keys.capsule_keys(),
+        )
+        .await?;
+        // Keep the exact writer lease from chain selection through repair.
+        // The binder validates root metadata first, then completes the entire
+        // fold with fresh receipts before enabling data-only repair.
+        let admission: crate::SendFuture<'_, Result<Self, crate::OpenError>> =
+            Box::pin(Self::bind_with_coordinator(
+                cx,
+                vfs,
+                path,
+                keys,
+                crate::OpenReplay::RepairDerived,
+                crate::ReplayRootCapacity::DURABLE,
+                coordinator,
+            ));
+        admission.await
+    }
+
     /// Verify every capsule named by the published history and restore damaged
     /// redundancy without changing object, ciphertext, or encoding identity.
     /// Lost objects are reported individually and are never overwritten.

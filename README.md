@@ -329,6 +329,10 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys --bindings-file social.binding
 # Verify every capsule and block; repair damaged redundancy in place
 fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys
 
+# Reconstruct damaged derived graph data from intact committed history, then verify
+fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys --rebuild-derived
+# Root metadata and every retained capsule must authenticate; no commit is appended.
+
 # In-database analytics over an explicit projection (registered Prism procedures)
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --relation KNOWS=1 \
   --graph-relation KNOWS --direction undirected "CALL fnx.connected_components() YIELD vertex, component"
