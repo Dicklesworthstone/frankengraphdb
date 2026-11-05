@@ -756,7 +756,10 @@ mod tests {
                 Err(_) => refused += 1,
             }
         }
-        assert!(accepted > 0 && refused > 0, "{accepted} accepted, {refused} refused");
+        assert!(
+            accepted > 0 && refused > 0,
+            "{accepted} accepted, {refused} refused"
+        );
     }
 
     #[test]
