@@ -301,6 +301,57 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(self.store_standing_query(StandingQuery::CoreNumbers(Box::new(state))))
     }
 
+    /// Maintain exact core numbers over an earlier maintained row source.
+    /// `endpoints` selects two zero-based Vertex columns, checked even on empty
+    /// input. Non-NULL endpoints define the selected vertex population; two
+    /// endpoints also supply an undirected edge per row occurrence. A lone
+    /// endpoint or self-pair keeps an isolate, and two NULLs contribute nothing.
+    /// Parallel/opposite occurrences collapse to simple adjacency; self-loops
+    /// contribute no degree. Counted support preserves shared endpoints until
+    /// their last witness retracts. Parent filters/joins/pages apply first, so
+    /// property-only changes can change core membership without base-edge edits.
+    ///
+    /// The handle supports the typed `standing_core_numbers`/`standing_core_number`
+    /// methods and native `vertex, core` rows, cursors, signed deltas, row-circuit
+    /// composition and subscription delivery. A selected isolate has core zero;
+    /// an identity without selected support is absent, not a zero-core member.
+    ///
+    /// Initialization/rebuild consumes the current parent bag; later commits
+    /// consume only its accepted derivatives. A failed parent or new baseline is
+    /// not an empty tick. Repair the independently owned parent before rebuilding
+    /// this view; the source and endpoint selection persist. A failed view never
+    /// rolls back a durable write or prevents healthy siblings from advancing.
+    ///
+    /// `max_snapshot_records` bounds compressed parent rows at initialization;
+    /// `max_result_rows` bounds final distinct vertices. Work/scratch cover
+    /// projection, support, kernel and sinks cumulatively per node, while the
+    /// parent retains its own policy. Core peeling may traverse an entire
+    /// affected component. This trusted embedded registration is session-local
+    /// and in-memory, not durable state, a spill/byte bound or an authorization
+    /// boundary.
+    pub fn register_standing_core_numbers_from_rows(
+        &mut self,
+        cx: &QueryCx,
+        source: &StandingQueryHandle,
+        endpoints: [usize; 2],
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        let definition = self.admit_standing_topology_source(cx, source, endpoints)?;
+        let state = self.prepare_standing_selected_core_numbers(cx, definition, policy, true)?;
+        // Native bootstrap admitted the fixed presentation copy. Retain the
+        // typed and native sinks of this one owner without a projection node.
+        let layout = Arc::new(native::Layout::Rows {
+            columns: state
+                .columns()
+                .ok_or(StandingQueryError::Unsupported)?
+                .to_vec(),
+        });
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        let mut handle = self.store_standing_query(StandingQuery::CoreNumbers(Box::new(state)));
+        handle.native = Some(layout);
+        Ok(handle)
+    }
+
     pub(super) fn prepare_standing_core_numbers(
         &self,
         cx: &QueryCx,

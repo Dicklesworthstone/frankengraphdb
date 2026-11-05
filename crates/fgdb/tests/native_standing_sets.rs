@@ -2,13 +2,13 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
     Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryResult, QueryValue,
-    StandingQueryError, StandingQueryFailure, WriteBatch,
+    StandingQueryError, StandingQueryFailure, StandingQueryHandle, WriteBatch,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
 use fgdb_types::{
-    CanonicalF64, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalF64, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -88,14 +88,18 @@ fn oracle(db: &Database<MemVfs>, op: usize) -> QueryResult {
     }
 }
 
-fn selected_analytic_text(metric: &str, relation: Option<RelationId>) -> String {
-    let relation = relation.map_or("", |_| "relations:['R'],");
-    let field = match metric {
+fn analytic_field(metric: &str) -> &'static str {
+    match metric {
         "triangles" => "triangles",
         "clustering_coefficient" => "score",
         "core_number" => "core",
         _ => unreachable!(),
-    };
+    }
+}
+
+fn selected_analytic_text(metric: &str, relation: Option<RelationId>) -> String {
+    let relation = relation.map_or("", |_| "relations:['R'],");
+    let field = analytic_field(metric);
     format!(
         "CALL fnx.{metric}({{labels:['L'],{relation}direction:'undirected',\
          parallel:'collapse',self_loops:'drop'}}) YIELD vertex AS node,{field} AS value \
@@ -173,12 +177,21 @@ fn selected_analytic_oracle(
             )
         })
         .collect();
+    simple_analytic_oracle(&vertices, &edges, metric, ["node", "value"])
+}
+
+fn simple_analytic_oracle(
+    vertices: &BTreeSet<VId>,
+    edges: &BTreeSet<(VId, VId)>,
+    metric: &str,
+    columns: [&str; 2],
+) -> QueryResult {
     let adjacent = |a: VId, b: VId| edges.contains(&(a.min(b), a.max(b)));
     let counts = if metric == "core_number" {
-        selected_core_oracle(&vertices, &edges)
+        selected_core_oracle(vertices, edges)
     } else {
         let mut counts: BTreeMap<_, i64> = vertices.iter().map(|&vertex| (vertex, 0)).collect();
-        for &a in &vertices {
+        for &a in vertices {
             for &b in vertices.range((std::ops::Bound::Excluded(a), std::ops::Bound::Unbounded)) {
                 for &c in vertices.range((std::ops::Bound::Excluded(b), std::ops::Bound::Unbounded))
                 {
@@ -193,7 +206,7 @@ fn selected_analytic_oracle(
         counts
     };
     QueryResult::Rows {
-        columns: vec!["node".into(), "value".into()],
+        columns: columns.into_iter().map(String::from).collect(),
         rows: counts
             .into_iter()
             .map(|(vertex, count)| {
@@ -408,6 +421,365 @@ fn selected_motif_result_refusal_preserves_commits_and_rebuild_requires_all_inpu
             );
             assert_eq!(
                 db.standing_native_query(&cx, limited, policy()).unwrap(),
+                db.standing_native_query(&cx, healthy, policy()).unwrap()
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+const ROW_ANALYTIC_SOURCE: &str = "MATCH (a)-[e:R]->(b) WHERE e.p = 1 \
+     RETURN 9 AS marker,a AS source,'ignored' AS note,b AS target";
+
+fn register_row_analytic(
+    db: &mut Database<MemVfs>,
+    cx: &QueryCx,
+    source: &StandingQueryHandle,
+    metric: &str,
+    endpoints: [usize; 2],
+    allowance: GqlQueryPolicy,
+) -> Result<StandingQueryHandle, StandingQueryError> {
+    match metric {
+        "triangles" => {
+            db.register_standing_triangle_counts_from_rows(cx, source, endpoints, allowance)
+        }
+        "clustering_coefficient" => {
+            db.register_standing_clustering_coefficients_from_rows(cx, source, endpoints, allowance)
+        }
+        "core_number" => {
+            db.register_standing_core_numbers_from_rows(cx, source, endpoints, allowance)
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn row_analytic_seed(tail_enabled: bool) -> WriteBatch {
+    let mut seed = WriteBatch::new(RelationId(1));
+    for vertex in [0, 1, 2, 3, u128::MAX] {
+        seed.create_vertex(VId(vertex), vec![], vec![]);
+    }
+    for (id, a, b) in [(10, 0, 1), (11, 1, 2), (12, 2, 0), (13, 0, 3)] {
+        seed.add_edge(
+            EId(id),
+            VId(a),
+            VId(b),
+            vec![(P, CanonicalScalar::Int(i64::from(id != 13 || tail_enabled)))],
+        );
+    }
+    seed
+}
+
+// Select the input graph independently from stored edge properties, not from
+// the maintained parent or any of the analytics being checked. Vertices enter
+// this selected universe only through a row's endpoints.
+fn row_analytic_oracle(db: &Database<MemVfs>, metric: &str) -> QueryResult {
+    let mut vertices = BTreeSet::new();
+    let mut edges = BTreeSet::new();
+    for edge in db.edges().unwrap() {
+        if edge.entry.relation != RelationId(1)
+            || !edge.props.iter().any(|(key, value)| {
+                *key == P && matches!(value.as_scalar(), Some(CanonicalScalar::Int(1)))
+            })
+        {
+            continue;
+        }
+        let (a, b) = (edge.entry.src, edge.entry.dst);
+        vertices.extend([a, b]);
+        if a != b {
+            edges.insert((a.min(b), a.max(b)));
+        }
+    }
+    simple_analytic_oracle(
+        &vertices,
+        &edges,
+        metric,
+        ["vertex", analytic_field(metric)],
+    )
+}
+
+#[test]
+fn analytics_from_rows_follow_property_filters_and_integrate_native_signed_deltas() {
+    let ((), report) = run_async_under_lab(0x6e73_7303, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut after = db.write(&commit, row_analytic_seed(true)).await.unwrap();
+        let source = db
+            .register_standing_native(
+                &cx,
+                ROW_ANALYTIC_SOURCE,
+                &GqlParameters::new(),
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        assert_eq!(
+            db.standing_native_columns(&cx, &source).unwrap(),
+            ["marker", "source", "note", "target"]
+        );
+        let allowance = GqlQueryPolicy::new(100_000, 4, 10_000_000, 10_000_000);
+        let mut handles = Vec::new();
+        for metric in ["triangles", "clustering_coefficient", "core_number"] {
+            let handle =
+                register_row_analytic(&mut db, &cx, &source, metric, [1, 3], allowance).unwrap();
+            assert_eq!(
+                db.standing_native_columns(&cx, &handle).unwrap(),
+                ["vertex", analytic_field(metric)]
+            );
+            let expected = row_analytic_oracle(&db, metric);
+            assert_eq!(
+                db.standing_native_query(&cx, &handle, policy()).unwrap(),
+                (after, expected)
+            );
+            if metric == "core_number" {
+                assert_eq!(
+                    db.standing_core_number(&cx, &handle, VId(0)).unwrap(),
+                    Some(2)
+                );
+                assert_eq!(
+                    db.standing_core_number(&cx, &handle, VId(3)).unwrap(),
+                    Some(1)
+                );
+                assert_eq!(
+                    db.standing_core_number(&cx, &handle, VId(u128::MAX))
+                        .unwrap(),
+                    None
+                );
+                assert_eq!(
+                    db.standing_core_numbers(&cx, &handle).unwrap().rows().len(),
+                    4
+                );
+            }
+            let (at, delivered) = db.standing_native_bag(&cx, &handle, policy()).unwrap();
+            assert_eq!(at, after);
+            handles.push((metric, handle, delivered));
+        }
+        // Initially the triangle plus tail has coefficient 1/3 at vertex 0,
+        // coefficient 1 at 1/2, and core numbers 2,2,2,1. Removing only the
+        // 1->2 row turns it into a star while the physical edge remains live.
+        for tick in 0..8 {
+            let mut change = WriteBatch::new(RelationId(1));
+            match tick {
+                0 | 1 | 5 => {
+                    change.set_edge_property(
+                        EId(11),
+                        P,
+                        Some(CanonicalScalar::Int(i64::from(tick != 0))),
+                    );
+                }
+                2 => {
+                    change.add_edge(EId(14), VId(1), VId(2), vec![(P, CanonicalScalar::Int(1))]);
+                    change.add_edge(EId(15), VId(2), VId(1), vec![(P, CanonicalScalar::Int(1))]);
+                }
+                3 => {
+                    for id in [11, 14] {
+                        change.set_edge_property(EId(id), P, Some(CanonicalScalar::Int(0)));
+                    }
+                }
+                4 => {
+                    change.set_edge_property(EId(15), P, Some(CanonicalScalar::Int(0)));
+                }
+                6 => {
+                    change.set_edge_property(EId(13), P, Some(CanonicalScalar::Int(0)));
+                }
+                _ => {
+                    for id in [10, 11, 12] {
+                        change.set_edge_property(EId(id), P, Some(CanonicalScalar::Int(0)));
+                    }
+                }
+            }
+            let at = db.write(&commit, change).await.unwrap();
+            assert!(
+                db.edge(EId(11)).unwrap().is_some(),
+                "selection must not delete the base edge"
+            );
+            assert!(db.vertex(VId(3)).unwrap().is_some());
+            for (metric, handle, delivered) in &mut handles {
+                let expected = row_analytic_oracle(&db, metric);
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap(),
+                    (at, expected),
+                    "{metric}, tick {tick}"
+                );
+                let (frontier, delta) = db
+                    .standing_native_delta(&cx, handle, after, policy())
+                    .unwrap();
+                assert_eq!(frontier, at);
+                if matches!(tick, 2 | 3) {
+                    assert!(
+                        delta.is_empty(),
+                        "parallel/opposite support does not change {metric}"
+                    );
+                }
+                if matches!(tick, 0 | 4 | 6 | 7) {
+                    assert!(
+                        delta
+                            .iter()
+                            .any(|(_, weight)| weight.to_i128().is_some_and(|weight| weight < 0)),
+                        "{metric} must retract old rows at tick {tick}"
+                    );
+                }
+                delivered
+                    .integrate(&delta, fgdb_delta_types::LimbLimit::new(4), &mut |_| {
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                let (frontier, current) = db.standing_native_bag(&cx, handle, policy()).unwrap();
+                assert_eq!(frontier, at);
+                assert_eq!(&*delivered, &current);
+                if tick == 2 {
+                    db.rebuild_standing_query(&cx, handle, allowance).unwrap();
+                    assert!(matches!(
+                        db.standing_native_delta(&cx, handle, after, policy()),
+                        Err(StandingQueryError::DeltaUnavailable { .. })
+                    ));
+                    assert_eq!(
+                        db.standing_native_bag(&cx, handle, policy()).unwrap().1,
+                        current
+                    );
+                }
+                if *metric == "core_number" && tick >= 6 {
+                    assert_eq!(db.standing_core_number(&cx, handle, VId(3)).unwrap(), None);
+                }
+            }
+            after = at;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn analytics_from_rows_require_valid_schemas_and_repair_parents_before_children() {
+    let ((), report) = run_async_under_lab(0x6e73_7304, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let params = GqlParameters::new();
+        let small = GqlQueryPolicy::new(100_000, 3, 10_000_000, 10_000_000);
+        let parent = db
+            .register_standing_native(&cx, ROW_ANALYTIC_SOURCE, &params, symbols, small)
+            .unwrap();
+        let healthy_parent = db
+            .register_standing_native(&cx, ROW_ANALYTIC_SOURCE, &params, symbols, policy())
+            .unwrap();
+        let scalar = db
+            .register_standing_native(
+                &cx,
+                "MATCH (n) RETURN n.p AS value",
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        let mut foreign = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut handles = Vec::new();
+        for metric in ["triangles", "clustering_coefficient", "core_number"] {
+            // Empty inputs still validate declared endpoint types and bounds;
+            // owner admission precedes even an invalid endpoint selection.
+            for endpoints in [[0, 3], [1, 4]] {
+                assert!(matches!(
+                    register_row_analytic(&mut db, &cx, &parent, metric, endpoints, policy()),
+                    Err(StandingQueryError::Unsupported)
+                ));
+            }
+            assert!(matches!(
+                register_row_analytic(&mut db, &cx, &scalar, metric, [0, 0], policy()),
+                Err(StandingQueryError::Unsupported)
+            ));
+            assert!(matches!(
+                register_row_analytic(
+                    &mut foreign,
+                    &cx,
+                    &parent,
+                    metric,
+                    [usize::MAX, usize::MAX],
+                    policy()
+                ),
+                Err(StandingQueryError::ForeignHandle)
+            ));
+            let dependent =
+                register_row_analytic(&mut db, &cx, &parent, metric, [1, 3], policy()).unwrap();
+            let healthy =
+                register_row_analytic(&mut db, &cx, &healthy_parent, metric, [1, 3], policy())
+                    .unwrap();
+            assert!(
+                db.standing_native_bag(&cx, &dependent, policy())
+                    .unwrap()
+                    .1
+                    .is_empty()
+            );
+            handles.push((metric, dependent, healthy));
+        }
+        db.write(&commit, row_analytic_seed(false)).await.unwrap();
+        for (metric, dependent, healthy) in &handles {
+            assert_eq!(
+                db.standing_native_query(&cx, dependent, policy())
+                    .unwrap()
+                    .1,
+                row_analytic_oracle(&db, metric)
+            );
+            assert_eq!(
+                db.standing_native_query(&cx, dependent, policy()).unwrap(),
+                db.standing_native_query(&cx, healthy, policy()).unwrap()
+            );
+        }
+        let mut grow = WriteBatch::new(RelationId(1));
+        grow.set_edge_property(EId(13), P, Some(CanonicalScalar::Int(1)));
+        let committed = db.write(&commit, grow).await.unwrap();
+        assert_eq!(db.frontier().unwrap(), committed);
+        assert!(matches!(
+            db.standing_native_query(&cx, &parent, policy()),
+            Err(StandingQueryError::Unavailable { .. })
+        ));
+        for (metric, dependent, healthy) in &handles {
+            assert!(matches!(
+                db.standing_native_query(&cx, dependent, policy()),
+                Err(StandingQueryError::Unavailable {
+                    reason: StandingQueryFailure::DependencyUnavailable,
+                    ..
+                })
+            ));
+            assert!(matches!(
+                db.rebuild_standing_query(&cx, dependent, policy()),
+                Err(StandingQueryError::Maintenance(
+                    StandingQueryFailure::DependencyUnavailable
+                ))
+            ));
+            assert_eq!(
+                db.standing_native_query(&cx, healthy, policy()).unwrap().1,
+                row_analytic_oracle(&db, metric)
+            );
+        }
+        assert!(db.rebuild_standing_query(&cx, &parent, small).is_err());
+        db.rebuild_standing_query(&cx, &parent, policy()).unwrap();
+        for (metric, dependent, healthy) in &handles {
+            assert!(matches!(
+                db.standing_native_query(&cx, dependent, policy()),
+                Err(StandingQueryError::Unavailable { .. })
+            ));
+            db.rebuild_standing_query(&cx, dependent, policy()).unwrap();
+            assert_eq!(
+                db.standing_native_query(&cx, dependent, policy()).unwrap(),
+                (committed, row_analytic_oracle(&db, metric))
+            );
+            assert_eq!(
+                db.standing_native_query(&cx, dependent, policy()).unwrap(),
+                db.standing_native_query(&cx, healthy, policy()).unwrap()
+            );
+        }
+        let mut selected_change = WriteBatch::new(RelationId(1));
+        selected_change.set_edge_property(EId(11), P, Some(CanonicalScalar::Int(0)));
+        let at = db.write(&commit, selected_change).await.unwrap();
+        assert!(db.edge(EId(11)).unwrap().is_some());
+        for (metric, dependent, healthy) in &handles {
+            assert_eq!(
+                db.standing_native_query(&cx, dependent, policy()).unwrap(),
+                (at, row_analytic_oracle(&db, metric))
+            );
+            assert_eq!(
+                db.standing_native_query(&cx, dependent, policy()).unwrap(),
                 db.standing_native_query(&cx, healthy, policy()).unwrap()
             );
         }

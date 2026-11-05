@@ -1,5 +1,6 @@
 //! Checked native rows for an accepted core-number derivative. This optional
-//! sink owns no topology and is allocated only by native query registration.
+//! sink owns no topology and is allocated only when native row delivery is
+//! requested, including direct selected-source registration.
 
 use super::*;
 use fgdb_delta_types::zset::ZSetUpdate;
@@ -30,6 +31,8 @@ impl State {
         numbers: &ZSet<(VId, u64)>,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
+        // Fixed row metadata plus the native handle's presentation copy;
+        // scratch units count entries, as in the component row sink.
         meter.units(ZSetEvent::ScratchEntry, 8)?;
         let mut state = Self {
             columns: ["vertex".into(), "core".into()],
