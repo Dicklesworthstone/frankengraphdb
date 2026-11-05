@@ -4,10 +4,14 @@
 //! API keeps its separate profile. Distinct degrees use the same authoritative
 //! prepared edge support, including multiplicity-only and opposite-edge ticks.
 //! Bootstrap still owns the kernel's transient complete triangle derivative.
+//! A selected topology consumes its maintained parent's accepted row derivative;
+//! endpoint support supplies vertex lifetime without rescanning graph storage.
 
 use super::*;
+use components::relation::{Definition, VertexSupport, project_rows, support_error};
 use fgdb_delta_types::zset::ZSetUpdate;
 use fgdb_delta_types::zset::committed::CommittedEdgeInput;
+use fgdb_delta_types::zset::set::SetOperation;
 use fgdb_delta_types::zset::triangles::{IncrementalTriangles, TriangleError, TriangleQuantifier};
 use fgdb_delta_types::{LimbLimit, ZWeight};
 use fgdb_gql::algebra::GraphValue;
@@ -324,12 +328,20 @@ impl CountsUpdate<'_> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Input {
+    Committed(CommittedEdgeInput),
+    Selected(VertexSupport),
+}
+
 pub(crate) struct State {
-    input: CommittedEdgeInput,
+    input: Input,
     triangles: IncrementalTriangles<VId>,
     counts: Counts,
-    // None retains the whole-graph selector, including future relation types.
+    // Without a selected parent, None retains the whole-graph selector,
+    // including future relation types.
     pub(super) relation: Option<RelationId>,
+    pub(super) selected: Option<Definition>,
     pub(super) policy: GqlQueryPolicy,
     pub(super) frontier: CommitSeq,
     pub(super) stats: StandingQueryStats,
@@ -366,12 +378,14 @@ impl State {
         batch: &LogicalDeltaBatch,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        if self.frontier != self.input.frontier() {
+        let Input::Committed(source) = &mut self.input else {
+            return Err(StandingQueryFailure::InvalidDelta);
+        };
+        if self.selected.is_some() || self.frontier != source.frontier() {
             return Err(StandingQueryFailure::InvalidDelta);
         }
         recursive::observe_batch(batch, meter)?;
-        let input = self
-            .input
+        let input = source
             .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
             .map_err(components::input_error)?;
         let vertices = components::vertex_delta(batch, meter)?;
@@ -392,6 +406,113 @@ impl State {
         counts.commit();
         let _ = input.commit();
         Ok(())
+    }
+
+    fn apply_selected(
+        &mut self,
+        delta: &ZSet<GraphValueRow>,
+        meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        let definition = self.selected.ok_or(StandingQueryFailure::InvalidDelta)?;
+        let Input::Selected(support) = &mut self.input else {
+            return Err(StandingQueryFailure::InvalidDelta);
+        };
+        let projection = project_rows(delta, definition, meter)?;
+        let vertices = support
+            .prepare(&projection.vertices, &ZSet::new(), LIMBS, &mut |event| {
+                meter.charge(event)
+            })
+            .map_err(support_error)?;
+        let triangles = self
+            .triangles
+            .prepare(&projection.edges, LIMBS, &mut |event| meter.charge(event))
+            .map_err(triangle_error)?;
+        let counts = self.counts.prepare(
+            vertices.delta(),
+            &projection.edges,
+            triangles.edge_presence_updates(),
+            triangles.delta(),
+            meter,
+        )?;
+        // Parent support, topology, counters and rows advance together. Every
+        // fallible admission and cancellation point precedes publication.
+        (meter.checkpoint)()?;
+        let _ = triangles.commit();
+        counts.commit();
+        let _ = vertices.commit();
+        Ok(())
+    }
+
+    pub(super) fn maintain_with_sources(
+        &mut self,
+        cx: &CommitCx,
+        batch: &LogicalDeltaBatch,
+        sources: &[StandingQuery],
+        meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        let Some(definition) = self.selected else {
+            return self.maintain(cx, batch, meter);
+        };
+        meter.charge(ZSetEvent::Work)?;
+        let at = batch.commit_seq();
+        if self.frontier.checked_successor().ok() != Some(at)
+            || batch.frontier() != at
+            || batch.commit_marker_identity().commit_seq != at
+        {
+            return Err(StandingQueryFailure::InvalidDelta);
+        }
+        let source = sets::input_at(sources, definition.input, at)?;
+        if !definition.matches_schema(source) {
+            return Err(StandingQueryFailure::DependencyUnavailable);
+        }
+        let delta = sets::delta(source).ok_or(StandingQueryFailure::DependencyUnavailable)?;
+        meter.stats.delta_rows =
+            u64::try_from(delta.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
+        self.apply_selected(delta, meter)
+    }
+
+    fn from_selected(
+        source: &ZSet<GraphValueRow>,
+        definition: Definition,
+        output: Output,
+        frontier: CommitSeq,
+        meter: &mut Meter<'_>,
+    ) -> Result<Self, StandingQueryFailure> {
+        let projection = project_rows(source, definition, meter)?;
+        let mut support = VertexSupport::new(SetOperation::UnionDistinct);
+        let vertices = support
+            .prepare(&projection.vertices, &ZSet::new(), LIMBS, &mut |event| {
+                meter.charge(event)
+            })
+            .map_err(support_error)?;
+        let mut triangles = IncrementalTriangles::new(TriangleQuantifier::Distinct);
+        let pending = triangles
+            .prepare(&projection.edges, LIMBS, &mut |event| meter.charge(event))
+            .map_err(triangle_error)?;
+        let mut counts = Counts::new(output, meter)?;
+        let sink = counts.prepare(
+            vertices.delta(),
+            &projection.edges,
+            pending.edge_presence_updates(),
+            pending.delta(),
+            meter,
+        )?;
+        (meter.checkpoint)()?;
+        let _ = pending.commit();
+        sink.commit();
+        let _ = vertices.commit();
+        counts.last_delta = None;
+        Ok(Self {
+            input: Input::Selected(support),
+            triangles,
+            counts,
+            relation: None,
+            selected: Some(definition),
+            policy: meter.policy,
+            frontier,
+            stats: meter.stats,
+            failure: None,
+        })
     }
 
     fn from_snapshot(
@@ -422,10 +543,11 @@ impl State {
         sink.commit();
         counts.last_delta = None;
         Ok(Self {
-            input,
+            input: Input::Committed(input),
             triangles,
             counts,
             relation,
+            selected: None,
             policy: meter.policy,
             frontier: snapshot.frontier,
             stats: meter.stats,
@@ -435,6 +557,56 @@ impl State {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    pub(super) fn prepare_standing_selected_triangle_counts(
+        &self,
+        cx: &QueryCx,
+        definition: Definition,
+        output: Output,
+        policy: GqlQueryPolicy,
+    ) -> Result<State, StandingQueryError> {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        self.ensure_readable().map_err(StandingQueryError::Read)?;
+        cx.with_restriction(|| {
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            meter
+                .charge(ZSetEvent::Work)
+                .map_err(StandingQueryError::Maintenance)?;
+            let parent = sets::input_at(
+                &self.standing_queries,
+                definition.input,
+                self.snapshot.frontier,
+            )
+            .map_err(StandingQueryError::Maintenance)?;
+            if !definition.matches_schema(parent) {
+                return Err(StandingQueryError::Maintenance(
+                    StandingQueryFailure::DependencyUnavailable,
+                ));
+            }
+            let rows = sets::rows(parent).ok_or(StandingQueryError::Maintenance(
+                StandingQueryFailure::DependencyUnavailable,
+            ))?;
+            if policy
+                .rows
+                .max_snapshot_records()
+                .is_some_and(|limit| rows.len() as u128 > u128::from(limit))
+            {
+                return Err(StandingQueryError::Maintenance(
+                    StandingQueryFailure::SnapshotBudget,
+                ));
+            }
+            State::from_selected(rows, definition, output, self.snapshot.frontier, &mut meter)
+                .map_err(StandingQueryError::Maintenance)
+        })
+    }
+
     pub(super) fn prepare_standing_triangle_counts(
         &self,
         cx: &QueryCx,

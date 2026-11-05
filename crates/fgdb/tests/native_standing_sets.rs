@@ -7,7 +7,9 @@ use fgdb::{
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalF64, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -33,6 +35,8 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
         (GraphSymbolKind::Label, "R") => Some(GraphSymbol::Label(LabelId(2))),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+        (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         _ => None,
     }
@@ -82,6 +86,245 @@ fn oracle(db: &Database<MemVfs>, op: usize) -> QueryResult {
         columns: vec!["p".into()],
         rows,
     }
+}
+
+fn selected_analytic_text(metric: &str, relation: Option<RelationId>) -> String {
+    let relation = relation.map_or("", |_| "relations:['R'],");
+    let field = match metric {
+        "triangles" => "triangles",
+        "clustering_coefficient" => "score",
+        _ => unreachable!(),
+    };
+    format!(
+        "CALL fnx.{metric}({{labels:['L'],{relation}direction:'undirected',\
+         parallel:'collapse',self_loops:'drop'}}) YIELD vertex AS node,{field} AS value \
+         RETURN node,value"
+    )
+}
+
+// Enumerate unordered triples in the induced simple graph. The oracle uses
+// neither Prism's intersection kernel nor the maintained triangle derivative.
+fn selected_analytic_oracle(
+    db: &Database<MemVfs>,
+    metric: &str,
+    relation: Option<RelationId>,
+) -> QueryResult {
+    let vertices: BTreeSet<_> = db
+        .vertices()
+        .unwrap()
+        .iter()
+        .filter(|vertex| vertex.labels.contains(&LabelId(1)))
+        .map(|vertex| vertex.vid)
+        .collect();
+    let edges: BTreeSet<_> = db
+        .edges()
+        .unwrap()
+        .iter()
+        .filter(|edge| {
+            let edge = &edge.entry;
+            relation.is_none_or(|relation| edge.relation == relation)
+                && edge.src != edge.dst
+                && vertices.contains(&edge.src)
+                && vertices.contains(&edge.dst)
+        })
+        .map(|edge| {
+            (
+                edge.entry.src.min(edge.entry.dst),
+                edge.entry.src.max(edge.entry.dst),
+            )
+        })
+        .collect();
+    let adjacent = |a: VId, b: VId| edges.contains(&(a.min(b), a.max(b)));
+    let mut counts: BTreeMap<_, i64> = vertices.iter().map(|&vertex| (vertex, 0)).collect();
+    for &a in &vertices {
+        for &b in vertices.range((std::ops::Bound::Excluded(a), std::ops::Bound::Unbounded)) {
+            for &c in vertices.range((std::ops::Bound::Excluded(b), std::ops::Bound::Unbounded)) {
+                if adjacent(a, b) && adjacent(a, c) && adjacent(b, c) {
+                    for vertex in [a, b, c] {
+                        *counts.get_mut(&vertex).unwrap() += 1;
+                    }
+                }
+            }
+        }
+    }
+    QueryResult::Rows {
+        columns: vec!["node".into(), "value".into()],
+        rows: counts
+            .into_iter()
+            .map(|(vertex, count)| {
+                let value = match metric {
+                    "triangles" => CanonicalScalar::Int(count),
+                    "clustering_coefficient" => {
+                        let degree = vertices
+                            .iter()
+                            .filter(|&&other| adjacent(vertex, other))
+                            .count();
+                        let score = if degree < 2 {
+                            0.0
+                        } else {
+                            (2 * count) as f64 / (degree * (degree - 1)) as f64
+                        };
+                        CanonicalScalar::Float(CanonicalF64::new(score))
+                    }
+                    _ => unreachable!(),
+                };
+                vec![
+                    QueryValue::Value(GraphValue::Vertex(vertex)),
+                    QueryValue::Value(GraphValue::Scalar(value)),
+                ]
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn selected_motif_analytics_follow_label_membership_parallel_support_and_rebuilds() {
+    let ((), report) = run_async_under_lab(0x6e73_7301, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let params = GqlParameters::new();
+        // Six public vertices fit even when the private selected topology has
+        // more than six rows. Its self-pairs retain isolates, not result rows.
+        let allowance = GqlQueryPolicy::new(100_000, 6, 10_000_000, 10_000_000);
+        let mut handles = Vec::new();
+        for metric in ["triangles", "clustering_coefficient"] {
+            for relation in [Some(RelationId(1)), None] {
+                let text = selected_analytic_text(metric, relation);
+                let handle = db
+                    .register_standing_native(&cx, &text, &params, symbols, allowance)
+                    .unwrap();
+                assert_eq!(
+                    db.standing_native_query(&cx, &handle, policy()).unwrap().1,
+                    selected_analytic_oracle(&db, metric, relation)
+                );
+                handles.push((metric, relation, text, handle));
+            }
+        }
+        let mut seed = WriteBatch::new(RelationId(1));
+        for id in [0, 1, 2, 3, 4, u128::MAX] {
+            let labels = if [0, 1, 3, u128::MAX].contains(&id) {
+                vec![LabelId(1)]
+            } else {
+                vec![]
+            };
+            seed.create_vertex(VId(id), labels, vec![]);
+        }
+        for (id, a, b) in [
+            (10, 0, 1),
+            (11, 1, 2),
+            (12, 2, 0),
+            (13, 0, 1),
+            (14, 1, 0),
+            (15, u128::MAX, u128::MAX),
+            (16, 0, 3),
+        ] {
+            seed.add_edge(EId(id), VId(a), VId(b), vec![]);
+        }
+        let mut select = WriteBatch::new(RelationId(1));
+        select.set_vertex_label(VId(2), LabelId(1), true);
+        let mut duplicates = WriteBatch::new(RelationId(1));
+        duplicates.delete_edge(EId(10));
+        duplicates.delete_edge(EId(13));
+        let mut last_edge = WriteBatch::new(RelationId(1));
+        last_edge.delete_edge(EId(14));
+        let mut other = WriteBatch::new(RelationId(2));
+        other.add_edge(EId(30), VId(0), VId(1), vec![]);
+        let mut leave = WriteBatch::new(RelationId(1));
+        leave.set_vertex_label(VId(1), LabelId(1), false);
+        leave.set_vertex_label(VId(u128::MAX), LabelId(1), false);
+        let mut rejoin = WriteBatch::new(RelationId(1));
+        rejoin.set_vertex_label(VId(1), LabelId(1), true);
+        rejoin.set_vertex_label(VId(u128::MAX), LabelId(1), true);
+        let mut unrelated = WriteBatch::new(RelationId(1));
+        unrelated.set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(99)));
+        for batch in [
+            seed, select, duplicates, last_edge, other, leave, rejoin, unrelated,
+        ] {
+            db.write(&commit, batch).await.unwrap();
+            for (metric, relation, text, handle) in &handles {
+                let expected = selected_analytic_oracle(&db, metric, *relation);
+                let (at, actual) = db.standing_native_query(&cx, handle, policy()).unwrap();
+                assert_eq!(at, db.frontier().unwrap());
+                assert_eq!(actual, expected, "{text}");
+                assert_eq!(
+                    actual,
+                    db.query(&cx, text, &params, symbols, policy()).unwrap(),
+                    "fresh execution: {text}"
+                );
+                db.rebuild_standing_query(&cx, handle, allowance).unwrap();
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap(),
+                    (at, expected),
+                    "rebuild: {text}"
+                );
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn selected_motif_result_refusal_preserves_commits_and_rebuild_requires_all_inputs() {
+    let ((), report) = run_async_under_lab(0x6e73_7302, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let params = GqlParameters::new();
+        let small = GqlQueryPolicy::new(100_000, 3, 10_000_000, 10_000_000);
+        let text = selected_analytic_text("triangles", Some(RelationId(1)));
+        let limited = db
+            .register_standing_native(&cx, &text, &params, symbols, small)
+            .unwrap();
+        let healthy = db
+            .register_standing_native(&cx, &text, &params, symbols, policy())
+            .unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for id in 0..4 {
+            seed.create_vertex(
+                VId(id),
+                if id < 3 { vec![LabelId(1)] } else { vec![] },
+                vec![],
+            );
+        }
+        for (id, a, b) in [(10, 0, 1), (11, 1, 2), (12, 2, 0), (13, 2, 3)] {
+            seed.add_edge(EId(id), VId(a), VId(b), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        assert_eq!(
+            db.standing_native_query(&cx, &limited, policy()).unwrap(),
+            db.standing_native_query(&cx, &healthy, policy()).unwrap()
+        );
+        let mut grow = WriteBatch::new(RelationId(1));
+        grow.set_vertex_label(VId(3), LabelId(1), true);
+        let committed = db.write(&commit, grow).await.unwrap();
+        assert_eq!(db.frontier().unwrap(), committed);
+        assert!(matches!(
+            db.standing_native_query(&cx, &limited, policy()),
+            Err(StandingQueryError::Unavailable { .. })
+        ));
+        assert!(db.rebuild_standing_query(&cx, &limited, small).is_err());
+        let expected = selected_analytic_oracle(&db, "triangles", Some(RelationId(1)));
+        assert_eq!(
+            db.standing_native_query(&cx, &healthy, policy()).unwrap().1,
+            expected
+        );
+        db.rebuild_standing_query(&cx, &limited, policy()).unwrap();
+        assert_eq!(
+            db.standing_native_query(&cx, &limited, policy()).unwrap(),
+            (committed, expected)
+        );
+        let mut shrink = WriteBatch::new(RelationId(1));
+        shrink.set_vertex_label(VId(1), LabelId(1), false);
+        db.write(&commit, shrink).await.unwrap();
+        assert_eq!(
+            db.standing_native_query(&cx, &limited, policy()).unwrap(),
+            db.standing_native_query(&cx, &healthy, policy()).unwrap()
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

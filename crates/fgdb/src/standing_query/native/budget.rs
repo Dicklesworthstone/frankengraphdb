@@ -92,9 +92,11 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
         });
     }
     if let Some((source, _)) = set::analytic_procedure(query)? {
-        if let set::AnalyticSource::SelectedComponents { input, .. } = source {
+        if let set::AnalyticSource::SelectedComponents { input, .. }
+        | set::AnalyticSource::SelectedTriangleCounts { input, .. } = source
+        {
             // The induced graph owns both labelled source leaves and their
-            // union, then the shared component engine and YIELD projection.
+            // union, then the shared analytic engine and YIELD projection.
             return circuit(cx, &input)?.append(2);
         }
         // One topology/analytics owner plus its exact YIELD projection.

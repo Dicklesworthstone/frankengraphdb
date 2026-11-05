@@ -29,6 +29,10 @@ pub(super) enum AnalyticSource {
     },
     CoreNumbers(Option<RelationId>),
     TriangleCounts(Option<RelationId>, triangle_counts::Output),
+    SelectedTriangleCounts {
+        input: Box<PreparedGraphSet>,
+        output: triangle_counts::Output,
+    },
 }
 
 fn component_source(
@@ -44,6 +48,16 @@ fn component_source(
             (true, None) => components::ComponentRelation::StrongAll,
         }));
     };
+    Ok(AnalyticSource::SelectedComponents {
+        input: selected_topology(relation, label)?,
+        strong,
+    })
+}
+
+fn selected_topology(
+    relation: Option<RelationId>,
+    label: LabelId,
+) -> Result<Box<PreparedGraphSet>, StandingQueryError> {
     // Compile the induced topology through ordinary maintained GLA sources.
     // A selected vertex contributes a self-pair even when it has no edge;
     // this supplies its lifetime without changing weak or strong membership.
@@ -88,9 +102,20 @@ fn component_source(
             PreparedGraphSet::from(edges),
         )
         .map_err(StandingQueryError::SetSchema)?;
-    Ok(AnalyticSource::SelectedComponents {
-        input: Box::new(input),
-        strong,
+    Ok(Box::new(input))
+}
+
+fn triangle_source(
+    relation: Option<RelationId>,
+    label: Option<LabelId>,
+    output: triangle_counts::Output,
+) -> Result<AnalyticSource, StandingQueryError> {
+    Ok(match label {
+        Some(label) => AnalyticSource::SelectedTriangleCounts {
+            input: selected_topology(relation, label)?,
+            output,
+        },
+        None => AnalyticSource::TriangleCounts(relation, output),
     })
 }
 
@@ -124,6 +149,8 @@ pub(super) fn analytic_procedure(
             FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
+                | FnxAlgorithm::Triangles
+                | FnxAlgorithm::ClusteringCoefficient
         )
     {
         return Err(StandingQueryError::Unsupported);
@@ -152,12 +179,20 @@ pub(super) fn analytic_procedure(
             )
         }
         FnxAlgorithm::Triangles if options.projection.self_loops == SelfLoopPolicy::Drop => (
-            AnalyticSource::TriangleCounts(relation, triangle_counts::Output::Triangles),
+            triangle_source(
+                relation,
+                options.selection.vertex_label,
+                triangle_counts::Output::Triangles,
+            )?,
             GraphSetColumnType::Scalar,
             FnxOutput::Triangles,
         ),
         FnxAlgorithm::ClusteringCoefficient => (
-            AnalyticSource::TriangleCounts(relation, triangle_counts::Output::Clustering),
+            triangle_source(
+                relation,
+                options.selection.vertex_label,
+                triangle_counts::Output::Clustering,
+            )?,
             GraphSetColumnType::Scalar,
             FnxOutput::Score,
         ),
@@ -358,6 +393,26 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                     StandingQuery::TriangleCounts(Box::new(
                         self.database
                             .prepare_standing_triangle_counts(cx, relation, output, policy)?,
+                    ))
+                }
+                AnalyticSource::SelectedTriangleCounts { input, output } => {
+                    let input = self.compile_group_input(
+                        cx,
+                        &input,
+                        group::input_policy(policy),
+                        checkpoint,
+                    )?;
+                    StandingQuery::TriangleCounts(Box::new(
+                        self.database.prepare_standing_selected_triangle_counts(
+                            cx,
+                            components::relation::Definition {
+                                input,
+                                endpoints: [0, 1],
+                                width: 2,
+                            },
+                            output,
+                            policy,
+                        )?,
                     ))
                 }
             };
@@ -716,7 +771,11 @@ fn rebuild_checked<V: Vfs + Clone>(
             StandingQuery::Window(query) => mark(query.input, inherited)?,
             StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {}
             StandingQuery::CoreNumbers(query) if query.has_value_rows() => {}
-            StandingQuery::TriangleCounts(_) => {}
+            StandingQuery::TriangleCounts(query) => {
+                if let Some(definition) = query.selected {
+                    mark(definition.input, true)?;
+                }
+            }
             StandingQuery::Components(query) => {
                 if let Some(input) = query.relation.selected_input() {
                     mark(input, true)?;
@@ -768,14 +827,31 @@ fn rebuild_checked<V: Vfs + Clone>(
                     )?,
                 ))
             }
-            StandingQuery::TriangleCounts(query) => StandingQuery::TriangleCounts(Box::new(
-                staged.database.prepare_standing_triangle_counts(
-                    cx,
-                    query.relation,
-                    query.output(),
-                    policy,
-                )?,
-            )),
+            StandingQuery::TriangleCounts(query) => {
+                let replacement = if let Some(mut definition) = query.selected {
+                    if definition.input < first || definition.input >= old {
+                        return Err(StandingQueryError::Unsupported);
+                    }
+                    definition.input = staged
+                        .first
+                        .checked_add(definition.input - first)
+                        .ok_or(StandingQueryError::Unsupported)?;
+                    staged.database.prepare_standing_selected_triangle_counts(
+                        cx,
+                        definition,
+                        query.output(),
+                        policy,
+                    )?
+                } else {
+                    staged.database.prepare_standing_triangle_counts(
+                        cx,
+                        query.relation,
+                        query.output(),
+                        policy,
+                    )?
+                };
+                StandingQuery::TriangleCounts(Box::new(replacement))
+            }
             StandingQuery::Rows { output, .. } => {
                 staged.database.prepare_registered_rows_with_delivery(
                     cx,
@@ -899,6 +975,14 @@ fn rebuild_checked<V: Vfs + Clone>(
                     .and_then(|offset| first.checked_add(offset))
                     .ok_or(StandingQueryError::Unsupported)?;
                 query.relation = query.relation.with_selected_input(input);
+            }
+        } else if let StandingQuery::TriangleCounts(query) = query {
+            if let Some(definition) = &mut query.selected {
+                definition.input = definition
+                    .input
+                    .checked_sub(staged.first)
+                    .and_then(|offset| first.checked_add(offset))
+                    .ok_or(StandingQueryError::Unsupported)?;
             }
         } else if let StandingQuery::Set(query) = query {
             for input in &mut query.inputs {

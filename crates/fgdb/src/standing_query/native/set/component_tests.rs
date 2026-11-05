@@ -933,8 +933,6 @@ fn unsupported_component_contracts_and_unbounded_pages_refuse_before_publication
             "CALL fnx.connected_components({relations:['R'],self_loops:'drop'})".into(),
             "CALL fnx.connected_components({relations:['R'],parallel:'collapse',self_loops:'reject'})".into(),
             "CALL fnx.core_number({relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'})".into(),
-            "CALL fnx.triangles({relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'})".into(),
-            "CALL fnx.clustering_coefficient({relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.connected_components({relations:['R'],weight:'p',parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.connected_components({relations:['R'],direction:'directed',parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.strongly_connected_components({relations:['R'],direction:'undirected',parallel:'collapse',self_loops:'drop'})".into(),

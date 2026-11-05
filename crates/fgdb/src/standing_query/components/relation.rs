@@ -1,8 +1,8 @@
-//! Query-selected connectivity over a complete maintained row relation.
+//! Query-selected topology over a complete maintained row relation.
 //!
 //! Selection, joins and bag semantics belong to the parent circuit. This
 //! adapter derives endpoint presence and directed edge support, then uses the
-//! SAME weak/strong kernels and pair/native sinks as graph-owned components.
+//! SAME analytic kernels and native sinks as graph-owned analytics.
 //! No graph scan, intent evaluation or second topology algorithm lives here.
 
 use super::*;
@@ -10,15 +10,15 @@ use fgdb_delta_types::zset::set::{IncrementalSet, SetError, SetOperation};
 use fgdb_gql::GraphSetColumnType;
 use fgdb_gql::algebra::GraphValue;
 
-pub(super) type VertexSupport = IncrementalSet<VId>;
+pub(in crate::standing_query) type VertexSupport = IncrementalSet<VId>;
 
 /// Fixed source identity and schema, retained across rebuild. Only registration
 /// constructs this definition, from an already admitted, earlier registry entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::standing_query) struct Definition {
-    input: usize,
-    endpoints: [usize; 2],
-    width: usize,
+    pub(in crate::standing_query) input: usize,
+    pub(in crate::standing_query) endpoints: [usize; 2],
+    pub(in crate::standing_query) width: usize,
 }
 
 impl ComponentRelation {
@@ -59,7 +59,7 @@ impl ComponentRelation {
 }
 
 impl Definition {
-    fn matches_schema(self, source: &StandingQuery) -> bool {
+    pub(in crate::standing_query) fn matches_schema(self, source: &StandingQuery) -> bool {
         sets::columns(source).is_some_and(|names| names.len() == self.width)
             && self.endpoints.iter().all(|&column| {
                 column < self.width
@@ -68,16 +68,18 @@ impl Definition {
     }
 }
 
-fn support_error(error: SetError<StandingQueryFailure>) -> StandingQueryFailure {
+pub(in crate::standing_query) fn support_error(
+    error: SetError<StandingQueryFailure>,
+) -> StandingQueryFailure {
     match error {
         SetError::Delta(error) => zset_error(error),
         SetError::NegativeMultiplicity { .. } => StandingQueryFailure::InvalidDelta,
     }
 }
 
-struct Projection {
-    vertices: ZSet<VId>,
-    edges: ZSet<Pair>,
+pub(in crate::standing_query) struct Projection {
+    pub(in crate::standing_query) vertices: ZSet<VId>,
+    pub(in crate::standing_query) edges: ZSet<Pair>,
 }
 
 fn endpoint(value: &GraphValue) -> Result<Option<VId>, StandingQueryFailure> {
@@ -88,7 +90,7 @@ fn endpoint(value: &GraphValue) -> Result<Option<VId>, StandingQueryFailure> {
     }
 }
 
-fn project_rows(
+pub(in crate::standing_query) fn project_rows(
     delta: &ZSet<GraphValueRow>,
     definition: Definition,
     meter: &mut Meter<'_>,

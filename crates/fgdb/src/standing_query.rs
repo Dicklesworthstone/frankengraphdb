@@ -710,9 +710,24 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Triangles(query) => StandingQuery::Triangles(Box::new(
                 self.prepare_standing_triangles(cx, query.relation(), query.quantifier(), policy)?,
             )),
-            StandingQuery::TriangleCounts(query) => StandingQuery::TriangleCounts(Box::new(
-                self.prepare_standing_triangle_counts(cx, query.relation, query.output(), policy)?,
-            )),
+            StandingQuery::TriangleCounts(query) => {
+                let state = if let Some(definition) = query.selected {
+                    self.prepare_standing_selected_triangle_counts(
+                        cx,
+                        definition,
+                        query.output(),
+                        policy,
+                    )?
+                } else {
+                    self.prepare_standing_triangle_counts(
+                        cx,
+                        query.relation,
+                        query.output(),
+                        policy,
+                    )?
+                };
+                StandingQuery::TriangleCounts(Box::new(state))
+            }
             StandingQuery::Components(query) => StandingQuery::Components(Box::new(
                 self.prepare_standing_components(cx, query.relation, policy)?,
             )),
@@ -1000,7 +1015,9 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Closure(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Triangles(query) => query.maintain(cx, batch, &mut meter),
-            StandingQuery::TriangleCounts(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::TriangleCounts(query) => {
+                query.maintain_with_sources(cx, batch, prior, &mut meter)
+            }
             StandingQuery::Components(query) => {
                 query.maintain_with_sources(cx, batch, prior, &mut meter)
             }

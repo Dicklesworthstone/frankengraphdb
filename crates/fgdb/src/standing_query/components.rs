@@ -2,7 +2,7 @@
 //! CommittedEdgeInput validates EId lifetimes, cascades and source succession;
 //! the shared component kernel owns connectivity. No second log or graph store.
 
-mod relation;
+pub(super) mod relation;
 mod rows;
 
 use super::*;
