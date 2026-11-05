@@ -656,7 +656,7 @@ fn shallow_bfs_bounds_only_rows_keep_general_order_duplicates_and_exact_fallback
             assert_eq!(fixture.calls.get(), prior_pulls);
             match (actual, prior) {
                 (Ok((actual, bytes)), Ok(prior)) => {
-                    assert_eq!(bytes, 8 * size_of::<usize>());
+                    assert_eq!(bytes, size_of::<[usize; 8]>());
                     assert_eq!(actual.row_count, prior.row_count);
                     assert_eq!(actual.witness, prior.witness);
                     let (KernelValues::Distances(actual), KernelValues::Distances(prior)) =
