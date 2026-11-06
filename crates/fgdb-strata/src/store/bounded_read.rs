@@ -679,6 +679,31 @@ impl<V: Vfs> BlockStore<V> {
         .map(|(_, patches)| patches)
     }
 
+    /// Authenticate the complete source without retaining another decoded
+    /// graph. An existing read owner may reuse a durable compressed run, but
+    /// still owes the same raw-source limits, identity and history checks as
+    /// a fresh seal. This shares the ordinary bounded traversal and retains
+    /// neither adjacency nor vertex patches after their validation.
+    pub async fn validate_source_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+    ) -> Result<(), RootReadError> {
+        self.reopen_selected_adjacency_bounded(
+            cx,
+            id,
+            requested_cut,
+            limits,
+            AdjacencyRetention::None,
+            false,
+            false,
+        )
+        .await
+        .map(|_| ())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn reopen_selected_adjacency_bounded(
         &self,

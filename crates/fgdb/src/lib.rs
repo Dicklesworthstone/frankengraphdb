@@ -3446,7 +3446,7 @@ impl<V: Vfs + Clone> Database<V> {
         let identity_allocation =
             crate::write_txn::IdentityAllocation::from_chain(coordinator.chain(), &keys);
         let published_frontier = snapshot.frontier;
-        let attached_runs = store
+        let attached_runs: std::collections::BTreeMap<_, _> = store
             .published_adj_run_refs(cx, snapshot.root, fgdb_strata::root::MAX_ROOT_READ_BYTES)
             .await
             .map_err(RebuildError::Store)?
@@ -3458,6 +3458,18 @@ impl<V: Vfs + Clone> Database<V> {
                 )
             })
             .collect();
+        if !attached_runs.is_empty() {
+            // Preserve the selected V7 root's authenticated Tier-D lineage
+            // across ordinary writable opens, just as seal_relation does.
+            // Live compressed readers must accept its attached runs without
+            // substituting a newly rebuilt image of the envelope root.
+            snapshot.sealed_source_root = Some(
+                store
+                    .get_root_run_source(cx, snapshot.root, fgdb_strata::root::MAX_ROOT_READ_BYTES)
+                    .await
+                    .map_err(RebuildError::Store)?,
+            );
+        }
         Ok(Self {
             coordinator,
             store,

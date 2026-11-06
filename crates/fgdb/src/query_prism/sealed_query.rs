@@ -277,8 +277,9 @@ impl<V: Vfs + Clone> Database<V> {
             .await
     }
 
-    /// Pin one generation before I/O, authenticate the complete root, and seal
-    /// only the requested relation through Strata's existing compaction path.
+    /// Pin one generation before I/O and authenticate the complete root. Reuse
+    /// its attached durable run when the requested cut is retained; otherwise
+    /// seal only the requested relation through Strata's compaction path.
     /// `None` chooses the pinned publication. A future or unretained cut fails;
     /// no requested sequence is clamped and no image becomes durable authority.
     ///
@@ -300,17 +301,8 @@ impl<V: Vfs + Clone> Database<V> {
             view.snapshot.check_frontier(as_of).map_err(Error::Read)?;
             cx.checkpoint().map_err(Error::Cancelled)?;
             let partition = self
-                .store
-                .seal_relation_with_source_limits(
-                    cx,
-                    view.partition_root(),
-                    as_of,
-                    relation,
-                    sealing,
-                    source_limits,
-                )
-                .await
-                .map_err(SealedReadError::Seal)?;
+                .sealed_partition_for_view(cx, &view, as_of, relation, sealing, source_limits)
+                .await?;
             view.check_sealed_source(&partition, as_of)?;
             partition
                 .anchor()
