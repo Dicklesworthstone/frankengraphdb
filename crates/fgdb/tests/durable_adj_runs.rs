@@ -325,15 +325,20 @@ fn durable_runs_reopen_native_authorized_and_prism_history_without_changing_orig
         let measured =
             std::sync::Arc::new(fgdb_types::context::SimulationCheckpointProbe::new(None));
         let observed = query.with_checkpoint_probe(std::sync::Arc::clone(&measured));
-        db.prepare_sealed_read(
-            &observed,
-            Some(CommitSeq(3)),
-            R,
-            SealedLimits::default(),
-            RootReadLimits::default(),
-        )
-        .await
-        .unwrap();
+        let measured_view = db
+            .prepare_sealed_read(
+                &observed,
+                Some(CommitSeq(3)),
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sealed_answers(&measured_view, &query),
+            answers(&current, &query)
+        );
         assert!(measured.calls() > 2);
         let published_root = db.partition_root().unwrap();
         for stop in [1, measured.calls() / 2, measured.calls()] {

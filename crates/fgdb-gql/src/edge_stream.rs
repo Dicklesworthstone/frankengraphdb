@@ -37,7 +37,9 @@ use crate::{
     GqlQueryPolicy,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
+#[cfg(test)]
+use fgdb_types::CanonicalScalar;
+use fgdb_types::{CanonicalPropertyValue, CommitSeq, EId, VId};
 use std::sync::Arc;
 
 pub use crate::stream::{
