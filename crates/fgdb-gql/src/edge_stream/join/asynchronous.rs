@@ -123,7 +123,7 @@ impl AsyncEdgeJoinPlan {
         if let Some(operator) = plan
             .operators()
             .iter()
-            .position(|op| matches!(op, GlaOperator::ScanVertices))
+            .position(|op| matches!(op, GlaOperator::ScanVertices | GlaOperator::Collect { .. }))
         {
             return Err(EdgeScanBuildError { operator });
         }
@@ -676,6 +676,9 @@ where
                 {
                     return Ok(None);
                 }
+            }
+            Instruction::Collect(_) => {
+                unreachable!("async admission requires a collection output reservation")
             }
             Instruction::Native(op) => {
                 let local = FrameSource::<_, S::Error> {

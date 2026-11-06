@@ -35,7 +35,7 @@ pub enum GlaExecutionEvent {
 
 /// Copy one already matched identity or path into a private collection. The
 /// caller reserves the element slot; path storage is charged before cloning.
-fn collect_witness_element<E>(
+pub(crate) fn collect_witness_element<E>(
     value: Option<&crate::algebra::ValueProjection>,
     bindings: &[Option<VId>],
     paths: &[Option<GraphPath>],

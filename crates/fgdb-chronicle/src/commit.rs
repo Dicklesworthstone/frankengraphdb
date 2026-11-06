@@ -562,8 +562,10 @@ impl<V: Vfs> CommitCoordinator<V> {
     /// The committed marker chain, read WITHOUT the writer lease and without
     /// repairing anything, for a read-only observer of a database that a live
     /// writer (another process, or another handle) may be appending to. The
-    /// chain stops at the last complete entry; damage to a complete entry
-    /// still fails closed. A missing log is an empty chain, as for `open`.
+    /// opened log's length fixes the scan boundary: later appends belong to a
+    /// subsequent scan. The chain stops at the last complete entry within that
+    /// boundary; damage to a complete entry or a shrinking log still fails
+    /// closed. A missing log is an empty chain, as for `open`.
     pub async fn scan_committed_chain(
         cx: &CommitCx,
         vfs: &V,
@@ -577,9 +579,11 @@ impl<V: Vfs> CommitCoordinator<V> {
     /// Verify the complete committed prefix without retaining its history.
     ///
     /// Like [`Self::scan_committed_chain`], this takes no writer lease, writes
-    /// nothing, ignores only a genuinely torn final entry, and refuses damage
-    /// to any complete entry. Finding `requested` does not stop the scan: a
-    /// checkpoint selector must still detect later commits and corrupt suffixes.
+    /// nothing, ignores only a genuinely torn final entry within the captured
+    /// log extent, and refuses damage to any complete entry. Finding `requested`
+    /// does not stop the scan: a checkpoint selector must still detect later
+    /// commits and corrupt suffixes within that extent. A concurrent writer
+    /// cannot extend the scan by appending more entries after it starts.
     ///
     /// Working memory is bounded by one maximum frame and the current head for
     /// each distinct graph/branch, rather than by the number of commits. The
@@ -1334,6 +1338,14 @@ impl<V: Vfs> CommitCoordinator<V> {
                 }
                 Err(error) => return Err(error.into()),
             };
+            // Read-only scans do not own the writer lease. Capture the extent
+            // from this opened inode once, then impose an EOF at that boundary:
+            // an active writer must not keep recovery chasing a moving tail.
+            // A partial final frame at the captured cut remains an in-flight
+            // append, even if the writer completes it while earlier entries are
+            // being authenticated. Existing complete entries still all verify.
+            let file_len = file.metadata().await?.len();
+            let mut reader = (&mut file).take(file_len);
 
             let mut cursor = 0usize;
             // One bounded entry buffer replaces whole-log materialization. A valid
@@ -1345,7 +1357,7 @@ impl<V: Vfs> CommitCoordinator<V> {
             );
             loop {
                 scan_checkpoint(cx)?;
-                let Some(decoded) = Self::read_next_entry(&mut file, &mut entry).await? else {
+                let Some(decoded) = Self::read_next_entry(&mut reader, &mut entry).await? else {
                     break;
                 };
                 let (marker, stored_chain_hash, consumed) = match decoded {
@@ -1387,8 +1399,33 @@ impl<V: Vfs> CommitCoordinator<V> {
                     "commit log length does not fit u64",
                 ))
             })?;
-            let file_len = file.metadata().await?.len();
+            // `read_next_entry` clears its buffer before each frame, leaving
+            // only an incomplete final frame (or an empty boundary EOF) here.
+            // A physical EOF before the captured cut is shrinkage, not a torn
+            // append. Accepting it could silently discard a committed suffix.
+            let observed_len = cursor.checked_add(entry.len()).ok_or_else(|| {
+                CommitError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "commit log length exceeds this platform's address space",
+                ))
+            })?;
+            if u64::try_from(observed_len).ok() != Some(file_len) {
+                return Err(CommitError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "commit log ended before its captured extent",
+                )));
+            }
+            let current_len = file.metadata().await?.len();
             scan_checkpoint(cx)?;
+            if current_len < file_len || (repair_tail && current_len != file_len) {
+                // The exclusive recovery owner must not truncate bytes that
+                // appeared outside its admitted extent, even if an unexpected
+                // external writer bypassed the ordinary lease protocol.
+                return Err(CommitError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "commit log length changed during recovery",
+                )));
+            }
             let discarded_tail_bytes =
                 usize::try_from(file_len.checked_sub(valid_len).ok_or_else(|| {
                     CommitError::Io(std::io::Error::new(
@@ -1754,6 +1791,283 @@ mod tests {
             LIMIT + 1,
             "the hostile suffix must not be consumed past the proof byte"
         );
+    }
+
+    fn scan_fixture_frames() -> Vec<Vec<u8>> {
+        let mut chain = MarkerChain::new();
+        (1..=3)
+            .map(|seq| {
+                let marker = CommitMarker {
+                    logical_command_seq: seq,
+                    commit_seq: seq,
+                    effect_source: EffectSource::Local {
+                        capsule_ref: ObjectId([0x11; 32]),
+                        logical_delta_template_digest: Digest([0x22; 32]),
+                    },
+                    prev_global: None,
+                    head_updates: Vec::new(),
+                    merge_record_oid: None,
+                    coordinate_schema_transition_digest: Digest([0x33; 32]),
+                    topology_epoch: 1,
+                    policy_epoch: 1,
+                    revocation_index: 1,
+                    txn_token: [0x44; 16],
+                    commit_hlc: seq,
+                    final_effect_digest: Digest([0x55; 32]),
+                    authorization_decision_digest: Digest([0x66; 32]),
+                    resource_effect_digest: Digest([0x77; 32]),
+                    payload_availability_certificate_oid: None,
+                    flags: 0,
+                    identity_counters: None,
+                };
+                let accepted = chain.append(marker).unwrap();
+                CommitCoordinator::<UnixVfs>::encode_entry(&accepted.marker, accepted.chain_hash)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    // Change the physical log after its first complete entry has passed the
+    // real recovery checks. Both production collectors use this same scanner;
+    // the seam changes only concurrent filesystem activity, never decoding.
+    struct MutateDuringScan<C, F> {
+        collector: C,
+        after_first: Option<F>,
+    }
+
+    impl<C: ScanCollector, F: FnOnce() + Send> ScanCollector for MutateDuringScan<C, F> {
+        fn chain_value(&self) -> Digest {
+            self.collector.chain_value()
+        }
+
+        fn next_commit_seq(&self) -> Result<CommitSeq, ChainError> {
+            self.collector.next_commit_seq()
+        }
+
+        fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
+            self.collector.append_marker(marker)?;
+            if let Some(mutate) = self.after_first.take() {
+                mutate();
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn read_only_scans_stop_at_the_captured_extent_despite_concurrent_appends() {
+        let ((), report) = run_async_under_lab(0x5052_4558, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let frames = scan_fixture_frames();
+            let complete = frames.concat();
+            for partial in [
+                0,
+                4,
+                ENTRY_HEADER_BYTES + 5,
+                frames[1].len() - 1,
+                frames[1].len(),
+            ] {
+                for summary in [false, true] {
+                    let dir = std::env::temp_dir().join(format!(
+                        "fgdb-scan-captured-{}-{partial}-{summary}",
+                        std::process::id()
+                    ));
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let path = dir.join(COMMIT_LOG_NAME);
+                    let captured_len = frames[0].len() + partial;
+                    std::fs::write(&path, &complete[..captured_len]).unwrap();
+                    let append = || {
+                        use std::io::Write;
+                        std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&path)
+                            .unwrap()
+                            .write_all(&complete[captured_len..])
+                            .unwrap();
+                    };
+                    let expected_frontier = if partial == frames[1].len() { 2 } else { 1 };
+                    let expected_tail = if expected_frontier == 2 { 0 } else { partial };
+                    let tail = if summary {
+                        let mut collector = MutateDuringScan {
+                            collector: PrefixScan::new(CommitSeq::FIRST),
+                            after_first: Some(append),
+                        };
+                        let tail = CommitCoordinator::scan_chain_into(
+                            &cx,
+                            &UnixVfs::new(),
+                            &dir,
+                            false,
+                            &mut collector,
+                        )
+                        .await
+                        .expect("a captured prefix is a finite valid read");
+                        assert_eq!(
+                            collector.collector.finish().frontier(),
+                            CommitSeq(expected_frontier)
+                        );
+                        tail
+                    } else {
+                        let mut collector = MutateDuringScan {
+                            collector: MarkerChain::new(),
+                            after_first: Some(append),
+                        };
+                        let tail = CommitCoordinator::scan_chain_into(
+                            &cx,
+                            &UnixVfs::new(),
+                            &dir,
+                            false,
+                            &mut collector,
+                        )
+                        .await
+                        .expect("a captured history is a finite valid read");
+                        assert_eq!(
+                            collector.collector.entries().len() as u64,
+                            expected_frontier
+                        );
+                        tail
+                    };
+                    assert_eq!(tail, expected_tail, "new bytes are not a discarded tail");
+                    assert_eq!(std::fs::read(&path).unwrap(), complete);
+                    let next = CommitCoordinator::scan_committed_prefix(
+                        &cx,
+                        &UnixVfs::new(),
+                        &dir,
+                        CommitSeq::FIRST,
+                    )
+                    .await
+                    .expect("the subsequent scan sees the completed append");
+                    assert_eq!(next.frontier(), CommitSeq(3));
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn captured_extent_scans_refuse_shrinkage_and_never_repair_an_uncaptured_append() {
+        let ((), report) = run_async_under_lab(0x5052_5348, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let frames = scan_fixture_frames();
+            let complete = frames.concat();
+            for repair in [false, true] {
+                for partial in [0, 4] {
+                    let dir = std::env::temp_dir().join(format!(
+                        "fgdb-scan-shrink-{}-{partial}-{repair}",
+                        std::process::id()
+                    ));
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let path = dir.join(COMMIT_LOG_NAME);
+                    std::fs::write(&path, &complete).unwrap();
+                    let new_len = frames[0].len() + partial;
+                    let mut collector = MutateDuringScan {
+                        collector: PrefixScan::new(CommitSeq::FIRST),
+                        after_first: Some(|| {
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .open(&path)
+                                .unwrap()
+                                .set_len(new_len as u64)
+                                .unwrap();
+                        }),
+                    };
+                    let result = CommitCoordinator::scan_chain_into(
+                        &cx,
+                        &UnixVfs::new(),
+                        &dir,
+                        repair,
+                        &mut collector,
+                    )
+                    .await;
+                    assert!(matches!(
+                        result,
+                        Err(CommitError::Io(ref error))
+                            if error.kind() == io::ErrorKind::UnexpectedEof
+                    ));
+                    assert_eq!(std::fs::read(&path).unwrap(), complete[..new_len]);
+                }
+            }
+
+            let dir = std::env::temp_dir().join(format!(
+                "fgdb-scan-repair-moving-tail-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(COMMIT_LOG_NAME);
+            let captured_len = frames[0].len() + 4;
+            std::fs::write(&path, &complete[..captured_len]).unwrap();
+            let mut collector = MutateDuringScan {
+                collector: MarkerChain::new(),
+                after_first: Some(|| {
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .unwrap()
+                        .write_all(&complete[captured_len..])
+                        .unwrap();
+                }),
+            };
+            let result = CommitCoordinator::scan_chain_into(
+                &cx,
+                &UnixVfs::new(),
+                &dir,
+                true,
+                &mut collector,
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(CommitError::Io(ref error)) if error.kind() == io::ErrorKind::InvalidData
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), complete);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn captured_extent_scan_still_authenticates_the_complete_suffix_after_the_requested_cut() {
+        let ((), report) = run_async_under_lab(0x5052_434f, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let frames = scan_fixture_frames();
+            let mut initial = [frames[0].clone(), frames[1].clone()].concat();
+            *initial.last_mut().unwrap() ^= 1;
+            let dir = std::env::temp_dir().join(format!(
+                "fgdb-scan-captured-corruption-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(COMMIT_LOG_NAME);
+            std::fs::write(&path, &initial).unwrap();
+            let mut collector = MutateDuringScan {
+                collector: PrefixScan::new(CommitSeq::FIRST),
+                after_first: Some(|| {
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .unwrap()
+                        .write_all(&frames[2])
+                        .unwrap();
+                }),
+            };
+            let result = CommitCoordinator::scan_chain_into(
+                &cx,
+                &UnixVfs::new(),
+                &dir,
+                false,
+                &mut collector,
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(CommitError::CorruptLogEntry { commit_seq: 2 })
+            ));
+            initial.extend_from_slice(&frames[2]);
+            assert_eq!(std::fs::read(&path).unwrap(), initial);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

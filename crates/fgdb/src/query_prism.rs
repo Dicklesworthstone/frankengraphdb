@@ -57,6 +57,41 @@ pub(crate) use sealed_query::{
 type Error = FnxReadError<ReadError, Cancel>;
 type SealedReadError = FnxSealedReadError<ReadError, Cancel>;
 
+fn sealed_store_error(error: StoreError) -> SealedReadError {
+    // Run decoding carries ordinary sealing admission and cancellation inside
+    // its storage error. Preserve those typed causes for the live API rather
+    // than disguising an interrupted or budget-limited read as corruption.
+    let error = match error {
+        StoreError::MalformedAdjRun(error) => match *error {
+            fgdb_strata::tiered::sealed::AdjRunError::Sealed(error) => {
+                return SealedReadError::Seal(error);
+            }
+            error => StoreError::MalformedAdjRun(Box::new(error)),
+        },
+        error => error,
+    };
+    SealedReadError::Seal(SealedError::Store(Box::new(error)))
+}
+
+fn sealed_source_error(error: RootReadError) -> SealedReadError {
+    SealedReadError::Seal(match error {
+        RootReadError::Store(error) => return sealed_store_error(*error),
+        RootReadError::Interrupted(error) => SealedError::Interrupted(error),
+        RootReadError::Limit {
+            resource,
+            requested,
+            limit,
+        } => SealedError::Limit {
+            resource,
+            requested,
+            limit,
+        },
+        RootReadError::BeyondPublication { .. } => SealedError::InvalidFloor,
+        RootReadError::SizeOverflow => SealedError::SizeOverflow,
+        RootReadError::AllocationFailed => SealedError::AllocationFailed,
+    })
+}
+
 /// Failure to prepare compressed analytics directly from a read-only
 /// checkpoint. Source authentication, projection admission and opening keep
 /// their original causes; no error falls back to a writable resident open.
@@ -871,10 +906,11 @@ impl<V: Vfs + Clone> Database<V> {
             .await
     }
 
-    /// Pin once before storage I/O. The temporary image retains history from
-    /// the requested cut through this view's publication; it is not installed
-    /// as new durable graph authority. Sealing uses Strata's existing verified
-    /// reopen/compaction path, which itself materializes its admitted source.
+    /// Pin once before storage I/O. An attached durable run retains its original
+    /// history and image limits. Without a covering run, a temporary image is
+    /// built from the requested cut through this view's publication using
+    /// Strata's verified reopen/compaction path. Neither image replaces graph
+    /// authority, and every fresh preparation admits the complete raw source.
     /// Sealing, vertex staging, projection and kernel have separate budgets.
     /// Completed exact preparations may reuse this database owner's compressed
     /// cache. Every construction limit is part of the key; current cancellation
@@ -1162,17 +1198,8 @@ impl<V: Vfs + Clone> Database<V> {
                 cx.checkpoint().map_err(Error::Cancelled)?;
                 partition
             } else {
-                self.store
-                    .seal_relation_with_source_limits(
-                        cx,
-                        view.partition_root(),
-                        as_of,
-                        relation,
-                        sealing,
-                        root_limits,
-                    )
-                    .await
-                    .map_err(SealedReadError::Seal)?
+                self.sealed_partition_for_view(cx, &view, as_of, relation, sealing, root_limits)
+                    .await?
             };
             view.check_sealed_source(&partition, as_of)?;
             let graph = build
@@ -1200,6 +1227,51 @@ impl<V: Vfs + Clone> Database<V> {
             Ok(graph)
         })
         .await
+    }
+
+    /// Load only a run authenticated by this exact pinned root. A failed
+    /// attached run cannot silently become a successful reseal. Absence or a
+    /// cut below its retained floor is the store's explicit fallback arm.
+    /// The resident view already owns decoded source rows, so validation of a
+    /// durable run's complete source need not retain another graph copy.
+    #[allow(clippy::too_many_arguments)]
+    async fn sealed_partition_for_view(
+        &self,
+        cx: &QueryCx,
+        view: &EmbeddedReadView,
+        as_of: CommitSeq,
+        relation: fgdb_delta_types::RelationId,
+        sealing: SealedLimits,
+        source_limits: RootReadLimits,
+    ) -> Result<SealedPartition, SealedReadError> {
+        let attached: crate::SendFuture<'_, _> = Box::pin(self.store.get_published_adj_run(
+            cx,
+            view.partition_root(),
+            relation,
+            as_of,
+            sealing,
+            source_limits.max_root_bytes,
+        ));
+        if let Some(run) = attached.await.map_err(sealed_store_error)? {
+            let validation: crate::SendFuture<'_, _> = Box::pin(
+                self.store
+                    .validate_source_bounded(cx, view.partition_root(), as_of, source_limits),
+            );
+            validation.await.map_err(sealed_source_error)?;
+            Ok(run.into_partition())
+        } else {
+            self.store
+                .seal_relation_with_source_limits(
+                    cx,
+                    view.partition_root(),
+                    as_of,
+                    relation,
+                    sealing,
+                    source_limits,
+                )
+                .await
+                .map_err(SealedReadError::Seal)
+        }
     }
 
     /// Bind a registered CALL before acquiring a generation; then pin exactly

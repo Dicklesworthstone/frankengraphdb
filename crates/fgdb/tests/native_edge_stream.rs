@@ -133,6 +133,86 @@ fn native_dispatch_matches_existing_edge_cursors_and_eager_rows_in_every_directi
 }
 
 #[test]
+fn streamed_pattern_collections_preserve_parallel_witnesses_and_the_pinned_generation() {
+    let ((), report) = run_async_under_lab(0x6e65_0010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.write(&commit, seed()).await.unwrap();
+        let view = db.read_session().unwrap();
+        let args = GqlParameters::new();
+        let text = "MATCH (a)-[r:R]->(b) RETURN r, a, b, \
+                    [(b)-[s:R]->(c) | c.p] AS neighbors, \
+                    [(b)-[s:R]->(c) | s.p] AS weights";
+        let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+        let expected = prepared.execute(&db, &cx, &args, policy()).unwrap();
+        let (columns, mut stream) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(stream.kind(), ScanKind::Edge);
+        assert_eq!(stream.snapshot_seq(), basis);
+        assert_eq!(stream.row_stats().snapshot_records, 0);
+        let first = stream.next().unwrap().unwrap();
+
+        // Change both a collected value and the witness set after the first
+        // outer occurrence. Neither later pulls nor a separately opened cursor
+        // on the retained view may consult this successor generation.
+        let mut update = WriteBatch::new(R);
+        update.set_vertex_property(VId(u128::MAX), P, Some(CanonicalScalar::Int(31)));
+        update.delete_edge(EId(0));
+        update.add_edge(
+            EId(99),
+            VId(u128::MAX),
+            WIDE,
+            vec![(P, CanonicalScalar::Int(21))],
+        );
+        let current = db.write(&commit, update).await.unwrap();
+        let mut old_rows = vec![first];
+        old_rows.extend(stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap());
+        assert_eq!(stream.state(), ScanState::Exhausted);
+        assert!(stream.next().is_none());
+        assert_eq!(result(columns, old_rows.clone()), expected);
+
+        // Literal witnesses pin duplicates, empty lists, self-loops and EId
+        // order independently of the eager evaluator. Full-width identities
+        // remain the outer keys; collection order is not destination sorting.
+        for (row, (id, neighbors, weights)) in old_rows.iter().zip([
+            (EId(0), vec![11], vec![-1]),
+            (EId(2), vec![11], vec![-1]),
+            (EId(3), vec![3, 3, 7], vec![4, 5, 8]),
+            (EId(u128::MAX), vec![], vec![]),
+        ]) {
+            assert_eq!(row.values()[0], GraphValue::Edge(id));
+            for (column, values) in [(3, neighbors), (4, weights)] {
+                assert_eq!(
+                    row.values()[column],
+                    GraphValue::List(
+                        values
+                            .into_iter()
+                            .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+        assert_eq!(old_rows.len(), 4);
+        let (columns, cursor) = prepared
+            .stream_in_view(&view, &cx, &args, policy())
+            .unwrap();
+        assert_eq!(
+            result(columns, cursor.collect::<Result<Vec<_>, _>>().unwrap()),
+            expected,
+        );
+
+        let (columns, cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(cursor.snapshot_seq(), current);
+        let fresh = result(columns, cursor.collect::<Result<Vec<_>, _>>().unwrap());
+        assert_eq!(fresh, prepared.execute(&db, &cx, &args, policy()).unwrap());
+        assert_ne!(fresh, expected);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn paused_native_edge_streams_and_temporal_reads_do_not_switch_generations() {
     let ((), report) = run_async_under_lab(0x6e65_0002, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

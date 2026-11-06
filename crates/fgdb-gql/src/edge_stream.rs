@@ -101,10 +101,14 @@ enum LocalOutput {
 impl EdgeScanPlan {
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         let ops = plan.operators();
-        if ops
-            .iter()
-            .any(|op| matches!(op, GlaOperator::Expand { .. } | GlaOperator::Probe { .. }))
-        {
+        if ops.iter().any(|op| {
+            matches!(
+                op,
+                GlaOperator::Expand { .. }
+                    | GlaOperator::Probe { .. }
+                    | GlaOperator::Collect { .. }
+            )
+        }) {
             return join::compile(plan);
         }
         Self::compile_local(plan, LocalOutput::OrderedRows)

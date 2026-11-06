@@ -14,7 +14,10 @@ use fgdb::{
 use fgdb_chronicle::commit::COMMIT_LOG_NAME;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
-use fgdb_prism::{FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions, ParallelEdgePolicy};
+use fgdb_prism::{
+    FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions, FnxSealedReadError,
+    ParallelEdgePolicy,
+};
 use fgdb_strata::root::runs::decode_root_runs;
 use fgdb_strata::store::{BlockStore, RootReadError, RootReadLimits, StoreError};
 use fgdb_strata::tiered::sealed::{AdjRunError, OriginBirthOrder, SealedError, SealedLimits};
@@ -242,6 +245,117 @@ fn durable_runs_reopen_native_authorized_and_prism_history_without_changing_orig
             .unwrap();
         assert_eq!(changed.entry.created_at, CommitSeq(3));
         assert_eq!(run.origin(EDGE).unwrap().commit_seq(), CommitSeq(1));
+        let live = db
+            .prepare_sealed_read(
+                &query,
+                Some(CommitSeq(3)),
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sealed_answers(&live, &query), answers(&current, &query));
+
+        // Current-only resealing would fit this budget. Reusing the published
+        // run must instead admit its complete retained historical image.
+        let current_image = store
+            .seal_relation(
+                &query,
+                db.partition_root().unwrap(),
+                CommitSeq(3),
+                R,
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
+        let retained_count = run.partition().incidence_count();
+        let current_count = current_image.incidence_count();
+        assert!(retained_count > current_count);
+        let limits = SealedLimits {
+            max_incidences: current_count,
+            ..SealedLimits::default()
+        };
+        let error = db
+            .prepare_sealed_read(
+                &query,
+                Some(CommitSeq(3)),
+                R,
+                limits,
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                FnxSealedReadError::Seal(SealedError::Limit {
+                    resource: "incidences",
+                    requested,
+                    limit,
+                }) if requested == retained_count && limit == current_count
+            ),
+            "{error:?}",
+        );
+        let current_options = options(CommitSeq(3));
+        let error = db
+            .prism_sealed_projection_with_source_limits(
+                &query,
+                current_options.as_of,
+                current_options.selection,
+                current_options.projection,
+                current_options.projection_limits,
+                current_options.source_limits,
+                limits,
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                FnxSealedReadError::Seal(SealedError::Limit {
+                    resource: "incidences",
+                    requested,
+                    limit,
+                }) if requested == retained_count && limit == current_count
+            ),
+            "{error:?}",
+        );
+        let measured =
+            std::sync::Arc::new(fgdb_types::context::SimulationCheckpointProbe::new(None));
+        let observed = query.with_checkpoint_probe(std::sync::Arc::clone(&measured));
+        db.prepare_sealed_read(
+            &observed,
+            Some(CommitSeq(3)),
+            R,
+            SealedLimits::default(),
+            RootReadLimits::default(),
+        )
+        .await
+        .unwrap();
+        assert!(measured.calls() > 2);
+        let published_root = db.partition_root().unwrap();
+        for stop in [1, measured.calls() / 2, measured.calls()] {
+            let probe = std::sync::Arc::new(fgdb_types::context::SimulationCheckpointProbe::new(
+                Some(stop),
+            ));
+            let interrupted = query.with_checkpoint_probe(std::sync::Arc::clone(&probe));
+            assert!(
+                db.prepare_sealed_read(
+                    &interrupted,
+                    Some(CommitSeq(3)),
+                    R,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(probe.calls(), stop);
+            assert_eq!(db.partition_root().unwrap(), published_root);
+            assert_eq!(db.frontier().unwrap(), CommitSeq(3));
+        }
         drop(db);
         let mut db = Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
             .await
@@ -260,6 +374,17 @@ fn durable_runs_reopen_native_authorized_and_prism_history_without_changing_orig
             let view = cold(&vfs, &cx, &query, cut).await;
             let expected = answers(&oracle, &query);
             assert_eq!(sealed_answers(&view, &query), expected);
+            let live = db
+                .prepare_sealed_read(
+                    &query,
+                    Some(cut),
+                    R,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(sealed_answers(&live, &query), expected);
             for restricted in [false, true] {
                 let token = authority.issue_at(&grant(restricted), 100).unwrap();
                 let mut authorized = view
@@ -285,17 +410,56 @@ fn durable_runs_reopen_native_authorized_and_prism_history_without_changing_orig
                         || 100,
                     )
                     .unwrap();
+                let mut live_authorized = live
+                    .authorized_read_session(
+                        &query,
+                        &authority,
+                        &token,
+                        "main",
+                        catalog,
+                        policy(),
+                        memory(),
+                        || 100,
+                    )
+                    .unwrap();
                 for text in READS {
+                    let expected = decoded.query(&query, text, &GqlParameters::new()).unwrap();
                     assert_eq!(
                         authorized
                             .query(&query, text, &GqlParameters::new())
                             .unwrap(),
-                        decoded.query(&query, text, &GqlParameters::new()).unwrap(),
+                        expected,
                         "cut={cut:?}, restricted={restricted}, query={text}",
+                    );
+                    assert_eq!(
+                        live_authorized
+                            .query(&query, text, &GqlParameters::new())
+                            .unwrap(),
+                        expected,
+                        "live cut={cut:?}, restricted={restricted}, query={text}",
                     );
                 }
             }
             let options = options(cut);
+            let live_graph = db
+                .prism_sealed_projection_with_source_limits(
+                    &query,
+                    Some(cut),
+                    options.selection,
+                    options.projection,
+                    options.projection_limits,
+                    options.source_limits,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap();
+            // Equality of answers alone would also admit resealing. Preserve
+            // the actual stored image's original root, floor and fingerprint.
+            assert_eq!(
+                live_graph.unmasked_source().unwrap().anchor(),
+                run.partition().anchor(),
+            );
             let graph = Database::open_prism_sealed_projection_with_vfs(
                 &cx,
                 &query,
@@ -311,6 +475,12 @@ fn durable_runs_reopen_native_authorized_and_prism_history_without_changing_orig
             let sealed = bfs
                 .execute_sealed(&query, &graph, options.execution_limits, memory())
                 .unwrap();
+            assert_eq!(
+                bfs.execute_sealed(&query, &live_graph, options.execution_limits, memory())
+                    .unwrap()
+                    .rows,
+                sealed.rows,
+            );
             assert_eq!(
                 sealed.rows,
                 oracle
@@ -424,6 +594,62 @@ fn retained_floor_falls_back_to_history_but_corrupt_attached_run_refuses_current
             matches!(error, SealedProjectionOpenError::Store(_)),
             "{error:?}"
         );
+        for reopen in [false, true] {
+            if reopen {
+                drop(db);
+                db = Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
+                    .await
+                    .unwrap();
+            }
+            let error = db
+                .prepare_sealed_read(
+                    &query,
+                    Some(CommitSeq(3)),
+                    R,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, FnxSealedReadError::Seal(SealedError::Store(_))),
+                "live native reopen={reopen}: {error:?}",
+            );
+            let options = options(CommitSeq(3));
+            let error = db
+                .prism_sealed_projection_with_source_limits(
+                    &query,
+                    options.as_of,
+                    options.selection,
+                    options.projection,
+                    options.projection_limits,
+                    options.source_limits,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, FnxSealedReadError::Seal(SealedError::Store(_))),
+                "live Prism reopen={reopen}: {error:?}",
+            );
+            // This cut is explicitly outside the attachment's coverage. Its
+            // retained Tier-D history remains usable even if the run is bad.
+            let earlier = db
+                .prepare_sealed_read(
+                    &query,
+                    Some(CommitSeq(2)),
+                    R,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                sealed_answers(&earlier, &query),
+                answers(&historical, &query)
+            );
+        }
         assert_eq!(
             vfs.read(&run_path).await.unwrap(),
             b"corrupt durable adjacency run"
@@ -482,6 +708,52 @@ fn durable_vertex_directory_still_admits_unselected_edge_history_and_source_limi
             ),
             "{error:?}"
         );
+        let error = db
+            .prepare_sealed_read(
+                &query,
+                Some(CommitSeq(3)),
+                R,
+                SealedLimits::default(),
+                limits,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                FnxSealedReadError::Seal(SealedError::Limit {
+                    resource: "source incidences",
+                    limit: 0,
+                    ..
+                })
+            ),
+            "{error:?}",
+        );
+        let options = options(CommitSeq(3));
+        let error = db
+            .prism_sealed_projection_with_source_limits(
+                &query,
+                options.as_of,
+                options.selection,
+                options.projection,
+                options.projection_limits,
+                options.source_limits,
+                SealedLimits::default(),
+                limits,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                FnxSealedReadError::Seal(SealedError::Limit {
+                    resource: "source incidences",
+                    limit: 0,
+                    ..
+                })
+            ),
+            "{error:?}",
+        );
 
         let store = BlockStore::open_existing_for_read_with_vfs(
             &cx,
@@ -521,7 +793,7 @@ fn durable_vertex_directory_still_admits_unselected_edge_history_and_source_limi
             vfs.clone(),
             vfs.database_dir(),
             keys(),
-            options(CommitSeq(3)),
+            options,
             SealedLimits::default(),
             RootReadLimits::default(),
         )
@@ -534,6 +806,37 @@ fn durable_vertex_directory_still_admits_unselected_edge_history_and_source_limi
             ),
             "{error:?}"
         );
+        let error = db
+            .prepare_sealed_read(
+                &query,
+                Some(CommitSeq(3)),
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, FnxSealedReadError::Seal(SealedError::Store(_))),
+            "{error:?}",
+        );
+        let error = db
+            .prism_sealed_projection_with_source_limits(
+                &query,
+                options.as_of,
+                options.selection,
+                options.projection,
+                options.projection_limits,
+                options.source_limits,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, FnxSealedReadError::Seal(SealedError::Store(_))),
+            "{error:?}",
+        );
         assert_eq!(
             vfs.read(&path).await.unwrap(),
             b"damaged unselected edge history"
@@ -545,7 +848,7 @@ fn durable_vertex_directory_still_admits_unselected_edge_history_and_source_limi
             vfs.clone(),
             vfs.database_dir(),
             keys(),
-            options(CommitSeq(3)),
+            options,
             SealedLimits::default(),
             RootReadLimits::default(),
         )

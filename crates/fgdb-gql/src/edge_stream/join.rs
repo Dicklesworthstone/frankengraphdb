@@ -19,6 +19,7 @@ pub(crate) use probe::Probe;
 enum Instruction {
     Native(GlaOperator),
     Probe(probe::Probe),
+    Collect(probe::Collection),
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +104,7 @@ fn compile_output(
     let mut expansions = Vec::new();
     let mut stages = vec![Vec::new()];
     let mut captures: Vec<Vec<usize>> = Vec::new();
+    let mut collections = Vec::new();
     let mut terminal = false;
     let mut at = 1;
     loop {
@@ -117,6 +119,27 @@ fn compile_output(
                     .last_mut()
                     .expect("root stage")
                     .push(Instruction::Probe(probe));
+                terminal = true;
+                at = end + 1;
+                continue;
+            }
+            GlaOperator::Collect { .. } => {
+                // An identified eager expansion enumerates by EId, exactly
+                // the order of this source's strict-successor incidence read.
+                // Endpoint-only eager plans use another order; do not silently
+                // reorder their lists merely because the outer row is sorted.
+                if !plan.requires_identified_edges() {
+                    return Err(bad());
+                }
+                let (collection, end) = probe::Collection::compile(ops, at, width)?;
+                if collections.contains(&collection.group) {
+                    return Err(bad());
+                }
+                collections.push(collection.group);
+                stages
+                    .last_mut()
+                    .expect("root stage")
+                    .push(Instruction::Collect(collection));
                 terminal = true;
                 at = end + 1;
                 continue;
@@ -214,6 +237,9 @@ fn compile_output(
                                 | GraphPathFunction::Edges => true,
                                 _ => false,
                             }),
+                        ValueProjection::Collected { group } => {
+                            collections.contains(&(*group as usize))
+                        }
                         _ => false,
                     };
                     if !valid {
@@ -544,7 +570,7 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
         // Probe candidates share this very meter, but never count as output.
         // The two short-lived borrows cannot overlap: source callbacks return
         // before a candidate record is admitted or the next predicate runs.
-        let paths = {
+        let values = {
             let metered = std::cell::RefCell::new(&mut *meter);
             test_stage(
                 &plan.stages[depth],
@@ -562,7 +588,7 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
                 },
             )?
         };
-        let Some(paths) = paths else {
+        let Some(values) = values else {
             traversal.pop();
             continue;
         };
@@ -580,10 +606,11 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
         } else {
             None
         };
-        let row = project(
+        let row = project_collected(
             &cursor.plan.projection,
             &traversal.bindings,
-            &paths,
+            &values.paths,
+            &values.collected,
             source,
             &mut |event| meter.event(event),
         )?;
@@ -627,15 +654,21 @@ fn edge_property<'a, S: EdgeScanSource, C>(
         .ok_or(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable))
 }
 
+struct StageValues {
+    paths: Vec<Option<GraphPath>>,
+    collected: Vec<Option<crate::algebra::GraphValue>>,
+}
+
 fn test_stage<S: EdgeScanSource, C>(
     ops: &[Instruction],
     traversal: &Traversal,
     source: &S,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
     record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
-) -> ScanResult<Option<Vec<Option<GraphPath>>>, S::Error, C> {
+) -> ScanResult<Option<StageValues>, S::Error, C> {
     let ids = &traversal.bindings;
     let mut paths = Vec::new();
+    let mut collected = Vec::new();
     for op in ops {
         control(GlaExecutionEvent::Work)?;
         match op {
@@ -644,6 +677,14 @@ fn test_stage<S: EdgeScanSource, C>(
                     return Ok(None);
                 }
             }
+            Instruction::Collect(collection) => {
+                while collected.len() <= collection.group {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    collected.push(None);
+                }
+                collected[collection.group] =
+                    Some(collection.evaluate(ids, source, control, record)?);
+            }
             Instruction::Native(op) => {
                 if !test_native_stage(op, traversal, &mut paths, source, control)? {
                     return Ok(None);
@@ -651,7 +692,7 @@ fn test_stage<S: EdgeScanSource, C>(
             }
         }
     }
-    Ok(Some(paths))
+    Ok(Some(StageValues { paths, collected }))
 }
 
 // Captures and fixed-edge constraints stay in this one kernel when the stage
@@ -780,37 +821,6 @@ pub(super) fn accepts<S: EdgeScanSource, C>(
         _ => unreachable!("checked fixed-hop predicate"),
     }
 }
-#[allow(clippy::too_many_arguments)]
-fn collect_element_properties<'a, Row: GlaOutput, E: From<crate::GraphIntegerError>>(
-    operator: &GlaOperator,
-    bindings: &[Option<VId>],
-    paths: &[Option<GraphPath>],
-    projected: &mut ProjectedRows<Row>,
-    property: &mut impl FnMut(
-        VId,
-        PropertyKeyId,
-    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
-    edge_property: &mut impl FnMut(
-        EId,
-        PropertyKeyId,
-    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
-    vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
-    edge_type: &mut impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-) -> Result<(), E> {
-    Row::collect_element_properties(
-        operator,
-        bindings,
-        paths,
-        projected,
-        property,
-        edge_property,
-        vertex_labels,
-        edge_type,
-        control,
-    )
-}
-
 pub(super) fn project<S: EdgeScanSource, C>(
     projection: &GlaOperator,
     ids: &[Option<VId>],
@@ -818,17 +828,31 @@ pub(super) fn project<S: EdgeScanSource, C>(
     source: &S,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
 ) -> ScanResult<GraphValueRow, S::Error, C> {
+    project_collected(projection, ids, paths, &[], source, control)
+}
+
+fn project_collected<S: EdgeScanSource, C, Row: GlaOutput>(
+    projection: &GlaOperator,
+    ids: &[Option<VId>],
+    paths: &[Option<GraphPath>],
+    collected: &[Option<crate::algebra::GraphValue>],
+    source: &S,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
+) -> ScanResult<Row, S::Error, C> {
     let meter = std::cell::RefCell::new(control);
     let mut rows = ProjectedRows::new(true);
-    collect_element_properties(
+    Row::collect_element_maps(
         projection,
         ids,
         paths,
+        collected,
         &mut rows,
         &mut |vid, key| property(source, vid, key, &mut **meter.borrow_mut()),
         &mut |eid, key| edge_property(source, eid, key, &mut **meter.borrow_mut()),
         &mut |_| unreachable!("catalog labels outside the checked profile"),
         &mut |_| unreachable!("catalog types outside the checked profile"),
+        &mut |_| unreachable!("vertex property maps outside the checked profile"),
+        &mut |_| unreachable!("edge property maps outside the checked profile"),
         &mut |event| (**meter.borrow_mut())(event),
     )?;
     let mut rows = rows.into_rows();
