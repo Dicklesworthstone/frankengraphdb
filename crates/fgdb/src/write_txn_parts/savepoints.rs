@@ -74,7 +74,7 @@ impl WriteTxn {
         let appended = self.staged.len() > staged_len;
         let discarded = core::mem::replace(&mut self.prepared, restored);
         self.prepared_source_ordered = self.savepoints[index].prepared_source_ordered;
-        self.staged.truncate(staged_len);
+        self.truncate_staged(staged_len);
         self.savepoints.truncate(index + 1);
         if appended && let Some(prepared) = discarded {
             // The latest successful preparation includes the whole raw prefix,

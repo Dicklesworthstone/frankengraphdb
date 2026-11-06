@@ -10,6 +10,7 @@ impl WriteTxn {
             handle_owner,
             basis,
             staged: Vec::new(),
+            observed_staged_vertex_batches: std::cell::Cell::new(0),
             prepared: None,
             prepared_source_ordered: true,
             chain_retirements: None,
@@ -127,7 +128,7 @@ impl WriteTxn {
             Ok(prepared) => prepared,
             Err(source) => {
                 self.retain_failed_preparation_observations(database, previous_len);
-                let _ = self.staged.pop();
+                self.truncate_staged(previous_len);
                 return Err(source);
             }
         };
@@ -241,7 +242,7 @@ impl WriteTxn {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.retain_failed_preparation_observations(database, previous_len);
-                self.staged.truncate(previous_len);
+                self.truncate_staged(previous_len);
                 return Err(error);
             }
         };
@@ -256,6 +257,12 @@ impl WriteTxn {
                     .all(|batch| batch.relation == first.relation)
             });
         Ok(())
+    }
+
+    fn truncate_staged(&mut self, len: usize) {
+        self.staged.truncate(len);
+        self.observed_staged_vertex_batches
+            .set(self.observed_staged_vertex_batches.get().min(len));
     }
 
     fn retain_failed_preparation_observations<V: Vfs>(

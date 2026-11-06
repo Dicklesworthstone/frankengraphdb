@@ -801,6 +801,10 @@ pub struct WriteTxn {
     handle_owner: std::sync::Arc<()>,
     basis: CommitSeq,
     staged: Vec<WriteBatch>,
+    /// Raw vertex identities in this many complete staged batches have already
+    /// entered the monotonic read set. Truncating staged input also truncates
+    /// this cursor, never the observations themselves.
+    observed_staged_vertex_batches: std::cell::Cell<usize>,
     // Program guards and savepoints retain this exact immutable prefix. Staging
     // replaces the handle; it never copies the accumulated delta to save it.
     prepared: Option<std::sync::Arc<PreparedWrite>>,

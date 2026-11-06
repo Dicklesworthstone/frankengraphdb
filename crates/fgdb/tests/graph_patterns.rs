@@ -12,11 +12,13 @@ use fgdb_gql::algebra::{
     GlaDirection, GraphPatternBuilder, IntegerComparison, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{GlaLimitDimension, GqlBudgetDimension, GqlQueryError, GqlQueryPolicy};
+use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
     CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
     PurposeContexts, VId,
 };
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
@@ -686,6 +688,17 @@ fn indexed_overlay_prunes_unmatched_creations_before_admitting_source_rows() {
             .unwrap();
         assert_eq!(restored.rows.snapshot_records, 4);
         assert_eq!(restored.value, initial.value);
+        let exact = GqlQueryPolicy::new(
+            4,
+            4,
+            restored.evaluator.work_units,
+            restored.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            txn.execute_graph_pattern_governed(&db, &cx, &pair, exact)
+                .unwrap(),
+            restored
+        );
         assert!(matches!(
             txn.execute_graph_pattern_governed(
                 &db,
@@ -696,6 +709,53 @@ fn indexed_overlay_prunes_unmatched_creations_before_admitting_source_rows() {
             Err(GqlQueryError::Rows(error))
                 if error.dimension == GqlBudgetDimension::SnapshotRecords
         ));
+        assert!(matches!(
+            txn.execute_graph_pattern_governed(
+                &db,
+                &cx,
+                &pair,
+                GqlQueryPolicy::new(4, 3, 1_000_000, 1_000_000),
+            ),
+            Err(GqlQueryError::Rows(error))
+                if error.dimension == GqlBudgetDimension::ResultRows && error.observed == 4
+        ));
+        for (work, scratch, dimension) in [
+            (
+                restored.evaluator.work_units - 1,
+                restored.evaluator.scratch_entries,
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                restored.evaluator.work_units,
+                restored.evaluator.scratch_entries - 1,
+                GlaLimitDimension::ScratchEntries,
+            ),
+        ] {
+            assert!(matches!(
+                txn.execute_graph_pattern_governed(
+                    &db,
+                    &cx,
+                    &pair,
+                    GqlQueryPolicy::new(4, 4, work, scratch),
+                ),
+                Err(GqlQueryError::Evaluator(error)) if error.dimension == dimension
+            ));
+        }
+        for stop in [1, 32, 96] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let interrupted = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(matches!(
+                txn.execute_graph_pattern_governed(&db, &interrupted, &pair, selected),
+                Err(GqlQueryError::Interrupted(_))
+            ));
+            assert_eq!(probe.calls(), stop);
+        }
+        assert_eq!(
+            txn.execute_graph_pattern_governed(&db, &cx, &pair, selected)
+                .unwrap()
+                .value,
+            restored.value
+        );
         txn.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -754,6 +814,101 @@ fn pruned_creation_reads_survive_savepoint_rollback_without_broad_false_conflict
                 ));
             } else {
                 assert!(completion.is_ok(), "{completion:?}");
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn normalized_staged_vertex_reads_survive_prefix_reuse_rollback_and_reappend() {
+    let ((), report) = run_async_under_lab(0xc0a4_0019, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        for (winner_id, refuse) in [
+            (7_000, false),
+            (8_000, false),
+            (9_000, false),
+            (8_000, true),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed_indexed_overlay_chain(&mut db, &commit).await;
+            let pair = indexed_overlay_vertex_pair(Some(100), Some(200));
+            let mut txn = db.begin(&txcx).unwrap();
+            txn.savepoint(&db, "empty-prefix").unwrap();
+            for discarded_id in [7_000, 9_000] {
+                let mut staged = WriteBatch::new(R);
+                staged.create_vertex(
+                    VId(discarded_id),
+                    vec![L],
+                    vec![(N, CanonicalScalar::Int(999))],
+                );
+                staged.delete_vertex(VId(discarded_id));
+                staged.create_vertex(
+                    VId(discarded_id + 100),
+                    vec![L],
+                    vec![(N, CanonicalScalar::Int(999))],
+                );
+                txn.write(&mut db, staged).unwrap();
+                // A refused membership domain remains conservative even if
+                // a later query completes. Successful domains alone permit
+                // an unrelated concurrent creation outside both predicates.
+                if refuse {
+                    assert!(matches!(
+                        txn.execute_graph_pattern_governed(
+                            &db,
+                            &cx,
+                            &pair,
+                            GqlQueryPolicy::new(2, 0, 1_000_000, 1_000_000),
+                        ),
+                        Err(GqlQueryError::Rows(error))
+                            if error.dimension == GqlBudgetDimension::ResultRows
+                    ));
+                }
+                for _ in 0..2 {
+                    let rows = txn
+                        .execute_graph_pattern_governed(
+                            &db,
+                            &cx,
+                            &pair,
+                            GqlQueryPolicy::new(2, 1, 1_000_000, 1_000_000),
+                        )
+                        .unwrap();
+                    assert_eq!(rows.value.len(), 1);
+                    assert_eq!(rows.value[0].values(), &[VId(100), VId(200)]);
+                }
+                txn.rollback_to_savepoint(&db, "empty-prefix").unwrap();
+            }
+            let mut survivor = WriteBatch::new(R);
+            survivor.create_vertex(VId(9_900), vec![], vec![]);
+            txn.write(&mut db, survivor).unwrap();
+            let mut winner = WriteBatch::new(R);
+            winner.create_vertex(
+                VId(winner_id),
+                vec![L],
+                vec![(N, CanonicalScalar::Int(999))],
+            );
+            db.write(&commit, winner).await.unwrap();
+            let completion = txn.finish(&mut db, &commit).await;
+            if winner_id == 8_000 && !refuse {
+                assert!(
+                    matches!(
+                        completion,
+                        Ok(fgdb_types::EmbeddedTxnCompletion::WriteCommitted { .. })
+                    ),
+                    "{completion:?}"
+                );
+            } else {
+                assert!(matches!(
+                    completion,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    }))
+                ));
             }
             assert_eq!(txcx.outstanding_obligations(), 0);
         }

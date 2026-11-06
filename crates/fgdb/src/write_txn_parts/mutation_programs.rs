@@ -74,7 +74,7 @@ impl Drop for MutationProgramWorkspace<'_> {
         let appended = self.txn.staged.len() > self.staged_len;
         let discarded = core::mem::replace(&mut self.txn.prepared, self.prepared.take());
         self.txn.prepared_source_ordered = self.prepared_source_ordered;
-        self.txn.staged.truncate(self.staged_len);
+        self.txn.truncate_staged(self.staged_len);
         // Restore effects FIRST. Do not rewind query/scan observations: even an
         // error, conditional no-op or discarded program can expose its basis.
         // The latest successful preparation captured the complete staged prefix,

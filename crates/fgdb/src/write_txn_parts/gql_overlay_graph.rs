@@ -1707,6 +1707,23 @@ mod query_source {
             }
             Ok(())
         }
+
+        /// Staged vertex observations belong to the transaction, including
+        /// after a failed read or rollback. Reuse that owner instead of making
+        /// another statement-local copy of the entire staged vertex prefix.
+        fn note_staged_vertex_read<E>(
+            &self,
+            vid: VId,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            control(SourceEvent::Work)?;
+            let element = ElementId::Vertex(vid);
+            if !self.read_set.borrow().contains(&element) {
+                control(SourceEvent::ScratchEntry)?;
+                self.read_set.borrow_mut().insert(element);
+            }
+            Ok(())
+        }
         pub(super) fn query_source_over<'a, E>(
             &'a self,
             snapshot: &'a Snapshot,
@@ -1883,13 +1900,33 @@ mod query_source {
             let mut observed = BTreeSet::new();
             // Raw intentions contribute only negative-read identities. The
             // canonical template, not these intentions, creates query rows.
-            for batch in &self.staged {
+            let reuse_staged_vertices = !reads_edges && vertex_bound.is_some();
+            let observed_prefix = self
+                .observed_staged_vertex_batches
+                .get()
+                .min(self.staged.len());
+            // Edge observations retain their existing per-query domains. A
+            // vertex-only query can skip the already observed raw prefix.
+            let first_batch = if reuse_staged_vertices {
+                observed_prefix
+            } else {
+                0
+            };
+            for (offset, batch) in self.staged[first_batch..].iter().enumerate() {
                 control(SourceEvent::Work)?;
                 for pending in &batch.rows {
                     control(SourceEvent::Work)?;
                     match pending {
                         PendingRow::Vertex { vid, .. } | PendingRow::DeleteVertex { vid, .. } => {
-                            self.note_query_read(&mut observed, ElementId::Vertex(*vid), control)?;
+                            if reuse_staged_vertices {
+                                self.note_staged_vertex_read(*vid, control)?;
+                            } else {
+                                self.note_query_read(
+                                    &mut observed,
+                                    ElementId::Vertex(*vid),
+                                    control,
+                                )?;
+                            }
                         }
                         PendingRow::Edge { eid, src, dst, .. }
                             if reads_edges
@@ -1910,6 +1947,12 @@ mod query_source {
                         }
                         _ => {}
                     }
+                }
+                // A failed partial batch is retried; its already inserted
+                // identities remain in read_set and need no second allocation.
+                if first_batch + offset >= observed_prefix {
+                    self.observed_staged_vertex_batches
+                        .set(first_batch + offset + 1);
                 }
             }
             let bound = match (vertex_bound, logical) {
@@ -2023,11 +2066,15 @@ mod query_source {
                                 // historical images. Observe every affected ID
                                 // broadly, even if it leaves the predicate or
                                 // its statement is subsequently rolled back.
-                                self.note_query_read(
-                                    &mut observed,
-                                    ElementId::Vertex(vid),
-                                    control,
-                                )?;
+                                if reuse_staged_vertices {
+                                    self.note_staged_vertex_read(vid, control)?;
+                                } else {
+                                    self.note_query_read(
+                                        &mut observed,
+                                        ElementId::Vertex(vid),
+                                        control,
+                                    )?;
+                                }
                             }
                             apply_vertex(
                                 &mut vertices,
