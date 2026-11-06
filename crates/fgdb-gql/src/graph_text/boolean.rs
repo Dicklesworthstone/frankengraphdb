@@ -1043,6 +1043,7 @@ impl<'a> Parser<'a> {
         let mut lexer = self.lexer.clone();
         let mut token = self.current;
         let mut depth = 0_usize;
+        let mut list_depth = 0_usize;
         let mut arithmetic = false;
         let mut operand_end = false;
         let mut after_dot = false;
@@ -1058,6 +1059,18 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b'(') => depth += 1,
                 TokenKind::Punct(b')') if depth == 0 => break,
                 TokenKind::Punct(b')') => depth -= 1,
+                TokenKind::Punct(b'[') => list_depth += 1,
+                TokenKind::Punct(b']') if list_depth != 0 => list_depth -= 1,
+                // A comprehension's single pipe ends its WHERE predicate.
+                // Only a pair is concatenation. Keep pipes inside a nested
+                // list expression on the scalar path that owns that list.
+                TokenKind::Punct(b'|')
+                    if depth == 0
+                        && list_depth == 0
+                        && !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'|')) =>
+                {
+                    break;
+                }
                 // `||` concatenation and `=~` matching need the scalar compiler.
                 TokenKind::Punct(b'|' | b'~') => return Ok(true),
                 TokenKind::Punct(b'<' | b'>' | b'=' | b'!') if depth == 0 && !comparing => {
