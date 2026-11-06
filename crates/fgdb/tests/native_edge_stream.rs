@@ -208,6 +208,118 @@ fn streamed_pattern_collections_preserve_parallel_witnesses_and_the_pinned_gener
         let fresh = result(columns, cursor.collect::<Result<Vec<_>, _>>().unwrap());
         assert_eq!(fresh, prepared.execute(&db, &cx, &args, policy()).unwrap());
         assert_ne!(fresh, expected);
+        let temporal = format!(
+            "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ {} \
+             RETURN r, a, b, [(b)-[s:R]->(c) | c.p] AS neighbors, \
+             [(b)-[s:R]->(c) | s.p] AS weights",
+            basis.0,
+        );
+        let historical = PreparedNativeRead::prepare(&temporal, &args, symbols).unwrap();
+        let (columns, cursor) = historical.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(cursor.snapshot_seq(), basis);
+        assert_eq!(
+            result(columns, cursor.collect::<Result<Vec<_>, _>>().unwrap()),
+            expected,
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn projected_edge_streams_share_budgets_and_publish_only_complete_rows() {
+    let ((), report) = run_async_under_lab(0x6e65_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        for (left, right) in [("-", "->"), ("<-", "-"), ("-", "-")] {
+            let text =
+                format!("MATCH (a){left}[r:R]{right}(b) RETURN r, a, b, r.p + 1 AS cost");
+            let prepared = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+            let (columns, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+            assert_eq!(cursor.kind(), ScanKind::Edge);
+            assert_eq!(cursor.row_stats().snapshot_records, 0);
+            let expected = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(
+                result(columns, expected.clone()),
+                prepared.execute(&db, &cx, &args, policy()).unwrap(),
+                "{text}",
+            );
+            let rows = cursor.row_stats();
+            let events = cursor.evaluator_stats();
+            assert_eq!(rows.result_rows, expected.len() as u64);
+            let exact = GqlQueryPolicy::new(
+                rows.snapshot_records,
+                rows.result_rows,
+                events.work_units,
+                events.scratch_entries,
+            );
+            let (_, mut retry) = prepared.stream(&db, &cx, &args, exact).unwrap();
+            assert_eq!(
+                retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected,
+            );
+            assert_eq!((retry.row_stats(), retry.evaluator_stats()), (rows, events));
+            for dimension in [
+                fgdb_gql::GlaLimitDimension::WorkUnits,
+                fgdb_gql::GlaLimitDimension::ScratchEntries,
+            ] {
+                let mut allowance = exact;
+                match dimension {
+                    fgdb_gql::GlaLimitDimension::WorkUnits => {
+                        allowance.evaluator.max_work_units -= 1;
+                    }
+                    fgdb_gql::GlaLimitDimension::ScratchEntries => {
+                        allowance.evaluator.max_scratch_entries -= 1;
+                    }
+                }
+                let (_, mut refused) = prepared.stream(&db, &cx, &args, allowance).unwrap();
+                let mut prefix = Vec::new();
+                loop {
+                    match refused.next() {
+                        Some(Ok(row)) => prefix.push(row),
+                        Some(Err(GqlQueryError::Evaluator(error))) => {
+                            assert_eq!(error.dimension, dimension);
+                            break;
+                        }
+                        other => panic!("{text}, {dimension:?}: {other:?}"),
+                    }
+                }
+                assert_eq!(prefix, expected[..prefix.len()]);
+                assert_eq!(refused.row_stats().result_rows, prefix.len() as u64);
+                assert_eq!(refused.state(), ScanState::Failed);
+                let stopped = (refused.row_stats(), refused.evaluator_stats());
+                assert!(refused.next().is_none());
+                refused.close();
+                assert!(refused.next().is_none());
+                assert_eq!((refused.row_stats(), refused.evaluator_stats()), stopped);
+            }
+        }
+
+        // The first relationship has p=4, the next has p=5. The later data
+        // exception keeps its source-row ordinal and must not count or expose
+        // the failed projection as a delivered row.
+        let prepared = PreparedNativeRead::prepare(
+            "MATCH (a)-[r:R]->(b) RETURN r, a, b, 1 / (r.p - 5) AS inverse",
+            &args,
+            symbols,
+        )
+        .unwrap();
+        let (_, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        let first = cursor.next().unwrap().unwrap();
+        assert_eq!(first.values()[0], GraphValue::Edge(EId(0)));
+        assert_eq!(first.values()[3], GraphValue::Scalar(CanonicalScalar::Int(-1)));
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(
+                fgdb_gql::scan_stream::ScanError::Projection { row: 1, column: 3, error }
+            ))) if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 1);
+        assert_eq!(cursor.state(), ScanState::Failed);
+        assert!(cursor.next().is_none());
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

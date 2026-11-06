@@ -60,6 +60,20 @@ pub(super) fn compile_aggregate(
 }
 
 impl EdgeScanPlan {
+    /// Width of the identity prefix of a canonical ordered source. Callers
+    /// first require OrderByValues with no hidden keys, then retain these
+    /// exact leading cells in the final projection to preserve row order.
+    pub(crate) fn canonical_identity_prefix_width(&self) -> usize {
+        let hops = self.joined.as_ref().map_or(1, |plan| plan.expansions.len() + 1);
+        let GlaOperator::ProjectValues { columns } = self.projection.as_ref() else {
+            unreachable!("the source compiler checked the value projection")
+        };
+        let oriented = self.direction == GlaDirection::Undirected
+            || (hops > 1
+                && matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0));
+        hops + usize::from(oriented)
+    }
+
     /// Compile fixed-edge matches as input to a blocking external ORDER BY.
     ///
     /// Reuse the complete indexed join compiler, including the single-edge
@@ -409,6 +423,7 @@ impl Traversal {
 pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
     cursor: &mut EdgeScanCursor<S, F>,
     remaining: &mut usize,
+    emit_rows: bool,
 ) -> ScanResult<core::task::Poll<Option<GraphValueRow>>, S::Error, C> {
     let plan = cursor.plan.joined.as_ref().expect("joined plan");
     let meter = &mut cursor.meter;
@@ -601,7 +616,7 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             traversal.pop();
             continue;
         }
-        let count = if plan.emit_rows {
+        let count = if plan.emit_rows && emit_rows {
             Some(meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?)
         } else {
             None

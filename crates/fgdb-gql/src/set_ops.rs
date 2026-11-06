@@ -1671,6 +1671,71 @@ impl PreparedGraphSet {
         Some(pull)
     }
 
+    /// A property-aware projection over an ordered fixed-edge cursor.
+    ///
+    /// The source and final output both retain their complete unique traversal
+    /// identity prefix. Their canonical row orders therefore agree without a
+    /// sort or seen-set, including both orientations of an undirected root.
+    /// Every expression uses the existing row VM and the source's admitted
+    /// property readers; catalog metadata and random draws remain unavailable.
+    /// No order, page, DISTINCT, hidden key, or relational barrier is elided.
+    ///
+    /// This is a separate profile: the vertex-only contracts of row_pull and
+    /// ordered_row_pull remain unchanged for their existing host adapters.
+    #[must_use]
+    pub fn edge_row_pull(&self) -> Option<GraphSetRowPull> {
+        if !self.order.is_empty() || self.offset != 0 || self.count.is_some() {
+            return None;
+        }
+        let SetNode::Project {
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
+            preserve_order: false,
+        } = &self.node
+        else {
+            return None;
+        };
+        if !input.order.is_empty() || input.offset != 0 || input.count.is_some() {
+            return None;
+        }
+        let SetNode::Pattern(pattern) = &input.node else {
+            return None;
+        };
+        let operators = pattern.plan().operators();
+        if pattern.plan().visible_columns.is_some()
+            || !matches!(
+                operators.get(operators.len().checked_sub(2)?),
+                Some(crate::algebra::GlaOperator::OrderByValues)
+            )
+            || !matches!(
+                operators.last(),
+                Some(crate::algebra::GlaOperator::Limit {
+                    offset: 0,
+                    count: None,
+                })
+            )
+            || !projection
+                .iter()
+                .all(|cell| cell.value().is_element_scan_local())
+        {
+            return None;
+        }
+        let source = crate::edge_stream::EdgeScanPlan::compile(pattern.plan()).ok()?;
+        let prefix = source.canonical_identity_prefix_width();
+        if projection.len() < prefix
+            || !projection.iter().take(prefix).enumerate().all(|(index, cell)| {
+                matches!(cell.value(), GraphSetValue::Column(column) if *column == index)
+            })
+        {
+            return None;
+        }
+        Some(GraphSetRowPull {
+            pattern: pattern.clone(),
+            projection: projection.clone(),
+        })
+    }
+
     /// The ordered pull of this relation, when it has one (fgdb-7xqxb): the
     /// same checked projection over one vertex-rooted pattern as
     /// [`Self::row_pull`], with this relation's ALL/DISTINCT, ORDER BY and
@@ -1774,8 +1839,9 @@ impl PreparedGraphSet {
     }
 }
 
-/// A relation that pulls row by row (PreparedGraphSet::row_pull): one
-/// vertex-rooted source pattern and the projection each of its rows takes.
+/// A relation that pulls row by row: one checked source pattern and the
+/// projection each of its rows takes. The accessor selects the vertex-only or
+/// property-aware fixed-edge profile; it does not grant source capabilities.
 #[derive(Clone)]
 pub struct GraphSetRowPull {
     pattern: PreparedGraphPattern<GraphValueRow>,
@@ -1819,6 +1885,31 @@ impl GraphSetRowPull {
             arithmetic,
         )
     }
+
+    /// Project one source row with property reads at that source's admitted cut.
+    /// The host must meter every source operation and admit the entire owned
+    /// property copy before cloning it. Absent or masked values yield None;
+    /// source and control failures retain their original typed error.
+    pub fn project_with_properties<E>(
+        &self,
+        row: &GraphValueRow,
+        ordinal: u64,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+        read: &mut impl FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        arithmetic: impl FnOnce(usize, crate::GraphIntegerError) -> E,
+    ) -> Result<GraphValueRow, E> {
+        GraphSetProjection::evaluate_numbered_row_with_control(
+            row,
+            ordinal,
+            &self.projection,
+            control,
+            &mut |element, key| Some(read(element, key)),
+            arithmetic,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1839,6 +1930,89 @@ mod pulled_projection_tests {
             .bind_parameters(&GqlParameters::new())
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn fixed_edge_projection_pulls_preserve_the_existing_vertex_contract() {
+        let prepare = |text: &str| {
+            crate::PreparedGraphSetText::prepare(text, |kind, name: &str| {
+                match (kind, name) {
+                    (GraphSymbolKind::Relation, "R") => {
+                        Some(GraphSymbol::Relation(fgdb_delta_types::RelationId(1)))
+                    }
+                    (GraphSymbolKind::Property, "p") => {
+                        Some(GraphSymbol::Property(PropertyKeyId(1)))
+                    }
+                    _ => None,
+                }
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+        };
+        for (left, right) in [("-", "->"), ("<-", "-"), ("-", "-")] {
+            for suffix in [
+                "r.p + 1 AS cost",
+                "[(b)-[s:R]->(c) | c.p] AS neighbors, [(b)-[s:R]->(c) | s.p] AS weights",
+            ] {
+                let text = format!("MATCH (a){left}[r:R]{right}(b) RETURN r,a,b,{suffix}");
+                let query = prepare(&text);
+                let frozen = query.canonical_bytes();
+                let pull = query.edge_row_pull().expect(&text);
+                assert!(query.row_pull().is_none(), "{text}");
+                assert!(query.ordered_row_pull().is_none(), "{text}");
+                assert!(crate::edge_stream::EdgeScanPlan::compile(pull.pattern().plan()).is_ok());
+                assert_eq!(query.canonical_bytes(), frozen);
+            }
+        }
+        for text in [
+            "MATCH (a)-[r:R]->(b) RETURN a,r,b,r.p + 1 AS cost",
+            "MATCH (a)-[r:R]-(b) RETURN r,r.p + 1 AS cost",
+            "MATCH (a)-[r:R]->(b) RETURN DISTINCT r,a,b,r.p + 1 AS cost",
+            "MATCH (a)-[r:R]->(b) RETURN r,a,b,r.p + 1 AS cost ORDER BY r",
+            "MATCH (a)-[r:R]->(b) RETURN r,a,b,r.p + 1 AS cost LIMIT 0",
+            "MATCH (a)-[r:R]->(b) RETURN r,a,b,rand() AS draw",
+        ] {
+            assert!(prepare(text).edge_row_pull().is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn fixed_edge_projection_pulls_inspect_unevaluated_effects() {
+        let source = input("MATCH (a)-[r]->(b) RETURN r,a,b");
+        for hidden in [
+            GraphSetValue::Random { site: 0, scope: 0 },
+            GraphSetValue::ElementMetadata {
+                kind: GraphElementMetadata::Properties,
+                value: Box::new(GraphSetValue::Column(1)),
+                catalog: None,
+            },
+        ] {
+            let query = source
+                .clone()
+                .project(
+                    vec![
+                        GraphSetProjection::new("r", GraphSetValue::Column(0)),
+                        GraphSetProjection::new("a", GraphSetValue::Column(1)),
+                        GraphSetProjection::new("b", GraphSetValue::Column(2)),
+                        GraphSetProjection::new(
+                            "hidden",
+                            GraphSetValue::Case {
+                                arms: vec![(
+                                    GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(
+                                        false,
+                                    ))),
+                                    hidden,
+                                )],
+                                otherwise: None,
+                            },
+                        ),
+                    ],
+                    GraphSetQuantifier::All,
+                )
+                .unwrap();
+            assert!(query.edge_row_pull().is_none());
+        }
     }
 
     #[test]

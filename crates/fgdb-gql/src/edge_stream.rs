@@ -683,6 +683,123 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
         self.advancing = false;
         self.source_pending = false;
     }
+    /// Pull and project one complete row under this cursor's single meter.
+    ///
+    /// The cursor must be compiled from pull.pattern(), with that same checked
+    /// pull retained for every call, as for the vertex projection adapter.
+    /// The private pattern input does not publish a ResultRow. Its properties
+    /// are resolved through this same retained, admitted source, and every
+    /// owned property copy is charged before cloning. Only a successful final
+    /// projection consumes the result allowance. A later source, expression,
+    /// or control failure preserves earlier rows and fuses/releases the cursor.
+    pub fn next_projected<C, E>(
+        &mut self,
+        pull: &crate::GraphSetRowPull,
+        mut scan: impl FnMut(GqlQueryError<EdgeScanError<S::Error>, C>) -> E,
+        arithmetic: impl FnOnce(u64, usize, crate::GraphIntegerError) -> E,
+    ) -> Option<Result<GraphValueRow, E>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != EdgeScanState::Open {
+            return None;
+        }
+        let result: Result<Option<GraphValueRow>, E> = (|| {
+            let input = loop {
+                let mut remaining = usize::MAX;
+                if let core::task::Poll::Ready(row) = self
+                    .advance_bounded_with_output(&mut remaining, false)
+                    .map_err(&mut scan)?
+                {
+                    break row;
+                }
+            };
+            let Some(row) = input else {
+                return Ok(None);
+            };
+            let ordinal = self.meter.rows.result_rows;
+            let next = self
+                .meter
+                .increment(GqlBudgetDimension::ResultRows, ordinal)
+                .map_err(&mut scan)?;
+            let projected = {
+                let source = self.source.as_ref().expect("open cursor owns its source");
+                // VM checkpoints and property callbacks execute serially. Both
+                // debit the same meter before work, allocation, or source read.
+                let meter = std::cell::RefCell::new(&mut self.meter);
+                let mapping = std::cell::RefCell::new(&mut scan);
+                pull.project_with_properties(
+                    &row,
+                    ordinal,
+                    &mut |event| {
+                        meter
+                            .borrow_mut()
+                            .event(match event {
+                                GlaExecutionEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                                GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => {
+                                    GlaExecutionEvent::Work
+                                }
+                            })
+                            .map_err(&mut **mapping.borrow_mut())
+                    },
+                    &mut |element, key| {
+                        let mut control = |event| meter.borrow_mut().event(event);
+                        let value = match element {
+                            fgdb_delta_types::ElementId::Vertex(vid) => {
+                                flatten(source.vertex_property(vid, key, &mut control))
+                            }
+                            fgdb_delta_types::ElementId::Edge(eid) => {
+                                flatten(source.edge_property(eid, key, &mut control))
+                            }
+                        }
+                        .map_err(&mut **mapping.borrow_mut())?
+                        .flatten();
+                        value
+                            .map(|value| {
+                                crate::algebra::GraphValue::charge_property_value(
+                                    value,
+                                    &mut |event| {
+                                        meter
+                                            .borrow_mut()
+                                            .event(event)
+                                            .map_err(&mut **mapping.borrow_mut())
+                                    },
+                                )?;
+                                Ok(value.clone())
+                            })
+                            .transpose()
+                    },
+                    |column, error| arithmetic(ordinal, column, error),
+                )?
+            };
+            self.meter
+                .event(GlaExecutionEvent::ResultRow)
+                .map_err(&mut scan)?;
+            self.meter.rows.result_rows = next;
+            Ok(Some(projected))
+        })();
+        let item = match result {
+            Ok(Some(row)) => {
+                if self.plan.count == Some(self.meter.rows.result_rows) {
+                    self.state = EdgeScanState::Exhausted;
+                }
+                Some(Ok(row))
+            }
+            Ok(None) => {
+                self.state = EdgeScanState::Exhausted;
+                None
+            }
+            Err(error) => {
+                self.state = EdgeScanState::Failed;
+                Some(Err(error))
+            }
+        };
+        if self.state != EdgeScanState::Open {
+            self.close();
+        }
+        item
+    }
+
     fn advance<C>(&mut self) -> ScanResult<Option<GraphValueRow>, S::Error, C>
     where
         F: FnMut() -> Result<(), C>,
@@ -702,7 +819,18 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
     where
         F: FnMut() -> Result<(), C>,
     {
-        let result = self.advance_batch(remaining);
+        self.advance_bounded_with_output(remaining, true)
+    }
+
+    fn advance_bounded_with_output<C>(
+        &mut self,
+        remaining: &mut usize,
+        emit_rows: bool,
+    ) -> ScanResult<core::task::Poll<Option<GraphValueRow>>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        let result = self.advance_batch(remaining, emit_rows);
         if !matches!(result, Ok(core::task::Poll::Pending)) {
             self.advancing = false;
         }
@@ -712,12 +840,13 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
     fn advance_batch<C>(
         &mut self,
         remaining: &mut usize,
+        emit_rows: bool,
     ) -> ScanResult<core::task::Poll<Option<GraphValueRow>>, S::Error, C>
     where
         F: FnMut() -> Result<(), C>,
     {
         if self.plan.joined.is_some() {
-            return join::advance(self, remaining);
+            return join::advance(self, remaining, emit_rows);
         }
         let meter = &mut self.meter;
         if !self.advancing {
@@ -818,12 +947,20 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             }
             // Check quota BEFORE copying projected payloads, and publish only
             // after the last fallible checkpoint has accepted the complete row.
-            let next = meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?;
+            let next = if emit_rows {
+                Some(meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?)
+            } else {
+                None
+            };
             let row = self
                 .plan
                 .project(&image, &paths, &mut |event| meter.event(event))?;
-            meter.event(GlaExecutionEvent::ResultRow)?;
-            meter.rows.result_rows = next;
+            if let Some(next) = next {
+                meter.event(GlaExecutionEvent::ResultRow)?;
+                meter.rows.result_rows = next;
+            } else {
+                meter.event(GlaExecutionEvent::Work)?;
+            }
             return Ok(core::task::Poll::Ready(Some(row)));
         }
     }

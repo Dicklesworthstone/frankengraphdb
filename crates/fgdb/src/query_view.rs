@@ -293,9 +293,10 @@ impl PreparedNativeRead {
     /// scan with leading edge/source identities. The existing physical compiler
     /// checks predicates, projections, canonical order and SKIP/LIMIT. The first
     /// GLA operator selects the lane before source execution; runtime errors do
-    /// not trigger another lane. Identity-leading, unpaged vertex Set
-    /// projections use the same governed row projection as authorized streams;
-    /// bound constants and integer expressions run once per source row.
+    /// not trigger another lane. Unpaged Set projections retain the complete
+    /// scan identity prefix. Their computed values and admitted single-hop
+    /// collections run under the source cursor's original meter and pinned
+    /// element readers, before the completed row is counted or published.
     /// Temporal patterns and admitted Sets use their exact bound cut.
     /// Unsupported classes/operators refuse rather than falling back to eager
     /// execution. The source generation is in memory; this does not add spill.
@@ -374,9 +375,12 @@ impl PreparedNativeRead {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::SetText)?;
-                let pull = query.row_pull().ok_or(QueryError::StreamingUnsupported {
-                    facade: self.facade_class(),
-                })?;
+                let pull = query
+                    .row_pull()
+                    .or_else(|| query.edge_row_pull())
+                    .ok_or(QueryError::StreamingUnsupported {
+                        facade: self.facade_class(),
+                    })?;
                 (pull, query.columns().to_vec(), view.frontier())
             }
             Self::TemporalSet(prepared) => {
@@ -386,6 +390,7 @@ impl PreparedNativeRead {
                 let pull = query
                     .query()
                     .row_pull()
+                    .or_else(|| query.query().edge_row_pull())
                     .ok_or(QueryError::StreamingUnsupported {
                         facade: self.facade_class(),
                     })?;
@@ -398,15 +403,16 @@ impl PreparedNativeRead {
             }
         };
         let (_, cursor) = open_pattern_stream(view, cx, pull.pattern(), as_of, policy)?;
-        let ScanCursor::Vertex(cursor) = cursor else {
-            return Err(QueryError::StreamingUnsupported {
-                facade: self.facade_class(),
-            });
+        let cursor = match cursor {
+            ScanCursor::Vertex(cursor) => ScanCursor::ProjectedVertex(Box::new((cursor, pull))),
+            ScanCursor::Edge(cursor) => ScanCursor::ProjectedEdge(Box::new((*cursor, pull))),
+            _ => {
+                return Err(QueryError::StreamingUnsupported {
+                    facade: self.facade_class(),
+                });
+            }
         };
-        Ok((
-            columns,
-            ScanCursor::ProjectedVertex(Box::new((cursor, pull))),
-        ))
+        Ok((columns, cursor))
     }
 }
 

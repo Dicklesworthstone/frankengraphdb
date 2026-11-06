@@ -370,7 +370,7 @@ impl<E: core::error::Error + 'static> core::error::Error for ScanError<E> {
 /// late-error behavior and source lifetime. Switching physical strategies is
 /// never an error-recovery mechanism; the host chooses before opening a source.
 /// Source errors have one shared domain; checkpoint closures may differ while
-/// retaining the same interruption type. A projected vertex cursor retains its
+/// retaining the same interruption type. A projected cursor retains its
 /// checked row projection beside the source in one box; it adds no row bag or
 /// second meter.
 pub enum ScanCursor<VS, VF, ES, EF> {
@@ -386,6 +386,9 @@ pub enum ScanCursor<VS, VF, ES, EF> {
     /// Boxed: the edge cursor's join and resumable-quantum state is twice
     /// the vertex cursor's size (clippy::large_enum_variant).
     Edge(Box<EdgeScanCursor<ES, EF>>),
+    /// The source is compiled from this pull's pattern. Its complete traversal
+    /// identity prefix also leads the checked final relational projection.
+    ProjectedEdge(Box<(EdgeScanCursor<ES, EF>, crate::GraphSetRowPull)>),
 }
 impl<VS, VF, ES, EF> ScanCursor<VS, VF, ES, EF>
 where
@@ -397,7 +400,7 @@ where
         match self {
             Self::Vertex(_) => ScanKind::Vertex,
             Self::ProjectedVertex(_) => ScanKind::Vertex,
-            Self::Edge(_) => ScanKind::Edge,
+            Self::Edge(_) | Self::ProjectedEdge(_) => ScanKind::Edge,
         }
     }
     #[must_use]
@@ -406,6 +409,7 @@ where
             Self::Vertex(cursor) => cursor.snapshot_seq(),
             Self::ProjectedVertex(projected) => projected.0.snapshot_seq(),
             Self::Edge(cursor) => cursor.snapshot_seq(),
+            Self::ProjectedEdge(projected) => projected.0.snapshot_seq(),
         }
     }
     #[must_use]
@@ -414,6 +418,7 @@ where
             Self::Vertex(cursor) => cursor.row_stats(),
             Self::ProjectedVertex(projected) => projected.0.row_stats(),
             Self::Edge(cursor) => cursor.row_stats(),
+            Self::ProjectedEdge(projected) => projected.0.row_stats(),
         }
     }
     #[must_use]
@@ -422,6 +427,7 @@ where
             Self::Vertex(cursor) => cursor.evaluator_stats(),
             Self::ProjectedVertex(projected) => projected.0.evaluator_stats(),
             Self::Edge(cursor) => cursor.evaluator_stats(),
+            Self::ProjectedEdge(projected) => projected.0.evaluator_stats(),
         }
     }
     #[must_use]
@@ -435,6 +441,12 @@ where
                 EdgeScanState::Closed => ScanState::Closed,
                 EdgeScanState::Failed => ScanState::Failed,
             },
+            Self::ProjectedEdge(projected) => match projected.0.state() {
+                EdgeScanState::Open => ScanState::Open,
+                EdgeScanState::Exhausted => ScanState::Exhausted,
+                EdgeScanState::Closed => ScanState::Closed,
+                EdgeScanState::Failed => ScanState::Failed,
+            },
         }
     }
     /// Idempotent; the selected cursor releases its pin without another pull.
@@ -443,6 +455,7 @@ where
             Self::Vertex(cursor) => cursor.close(),
             Self::ProjectedVertex(projected) => projected.0.close(),
             Self::Edge(cursor) => cursor.close(),
+            Self::ProjectedEdge(projected) => projected.0.close(),
         }
     }
 }
@@ -472,6 +485,16 @@ where
             Self::Edge(cursor) => cursor
                 .next()
                 .map(|row| row.map_err(|error| error.map_source(ScanError::Edge))),
+            Self::ProjectedEdge(projected) => {
+                let (cursor, pull) = projected.as_mut();
+                cursor.next_projected(
+                    pull,
+                    |error| error.map_source(ScanError::Edge),
+                    |row, column, error| {
+                        GqlQueryError::Source(ScanError::Projection { row, column, error })
+                    },
+                )
+            }
         }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -479,6 +502,7 @@ where
             Self::Vertex(cursor) => cursor.size_hint(),
             Self::ProjectedVertex(projected) => projected.0.size_hint(),
             Self::Edge(cursor) => cursor.size_hint(),
+            Self::ProjectedEdge(projected) => projected.0.size_hint(),
         }
     }
 }
@@ -500,6 +524,11 @@ impl<VS, VF, ES, EF> core::fmt::Debug for ScanCursor<VS, VF, ES, EF> {
                 .field(&projected.1)
                 .finish(),
             Self::Edge(cursor) => f.debug_tuple("ScanCursor::Edge").field(cursor).finish(),
+            Self::ProjectedEdge(projected) => f
+                .debug_tuple("ScanCursor::ProjectedEdge")
+                .field(&projected.0)
+                .field(&projected.1)
+                .finish(),
         }
     }
 }
