@@ -1415,7 +1415,7 @@ impl PreparedGraphMutationText {
             ordering: Vec::new(),
             parameters: syntax.parameters,
             parameter_offsets: syntax.parameter_offsets,
-            offset: Number::Literal(GqlParameterValue::UInt64(0)),
+            offset: ReadPageNumber::Literal(0),
             count: None,
             distinct: false,
             visible_columns: None,

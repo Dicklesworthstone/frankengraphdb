@@ -1385,10 +1385,11 @@ impl MutationReturnTemplate {
                 })?;
         }
         let query = query.with_page(
-            return_projection::pipeline::page_value(&self.offset, values),
+            return_projection::pipeline::page_value(&self.offset, values)?,
             self.count
                 .as_ref()
-                .map(|count| return_projection::pipeline::page_value(count, values)),
+                .map(|count| return_projection::pipeline::page_value(count, values))
+                .transpose()?,
         );
         let Some(stages) = &self.tail else {
             return Ok(query);

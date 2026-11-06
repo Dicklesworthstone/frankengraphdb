@@ -10,6 +10,7 @@ mod boolean;
 pub(crate) mod literal;
 mod map_arguments;
 mod ordering;
+pub(crate) mod page;
 mod parameters;
 mod row_fields;
 mod scoped;
@@ -20,13 +21,14 @@ use crate::algebra::{
     MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError, PreparedGraphPattern,
     VertexPredicate,
 };
+use crate::set_text::ReadPageNumber;
 use crate::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters};
 pub(crate) use aggregate::having::HavingTemplate;
 pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 pub use map_arguments::{GqlMapArgumentError, GqlMapArgumentText, GqlTextOffsets};
 use scoped::{BoundScope, ScopeSyntax};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Definition admission, not execution work or a promise of cheap matching.
 pub const MAX_GRAPH_TEXT_BYTES: usize = 65_536;
@@ -257,6 +259,10 @@ pub enum GraphPatternTextErrorKind {
     NameTooLong,
     Expected(&'static str),
     IntegerOutOfRange,
+    /// A bound pagination expression must produce a nonnegative integer.
+    InvalidPageValue,
+    /// Preparing or binding a page cannot run an unbounded expression.
+    PageExpressionLimit,
     ScalarLiteral,
     StoredLiteral,
     BooleanExpression,
@@ -334,6 +340,12 @@ impl core::fmt::Display for GraphPatternTextErrorKind {
             Self::NameTooLong => f.write_str("name is too long"),
             Self::Expected(item) => write_expected(f, item),
             Self::IntegerOutOfRange => f.write_str("integer literal is out of range"),
+            Self::InvalidPageValue => {
+                f.write_str("page expression must evaluate to a nonnegative integer")
+            }
+            Self::PageExpressionLimit => {
+                f.write_str("page expression exceeds its bounded evaluation allowance")
+            }
             Self::ScalarLiteral => f.write_str("literal is not a valid scalar value here"),
             Self::StoredLiteral => {
                 f.write_str("literal is not a valid bounded stored property value here")
@@ -384,6 +396,7 @@ impl GraphPatternTextErrorKind {
             Self::UnsupportedBooleanScope => C::Unsupported,
             Self::UnknownSymbol(_) | Self::WrongSymbolKind { .. } => C::NotFound,
             Self::IntegerOutOfRange
+            | Self::InvalidPageValue
             | Self::ScalarLiteral
             | Self::StoredLiteral
             | Self::ParameterDeclaration
@@ -394,6 +407,7 @@ impl GraphPatternTextErrorKind {
             | Self::ParameterTypeMismatch { .. }
             | Self::UnexpectedArguments => C::InvalidValue,
             Self::DefinitionTooLarge
+            | Self::PageExpressionLimit
             | Self::TooManyTokens
             | Self::NameTooLong
             | Self::BooleanNesting { .. }
@@ -854,12 +868,6 @@ impl Number {
             _ => unreachable!("private numeric syntax and schema agree"),
         }
     }
-    fn unsigned(&self, arguments: &[GqlParameterValue]) -> u64 {
-        match self.value(arguments) {
-            GqlParameterValue::UInt64(value) => value,
-            _ => unreachable!("private numeric syntax and schema agree"),
-        }
-    }
 }
 
 struct Edge<'a> {
@@ -973,8 +981,8 @@ struct Syntax<'a> {
     ordering: Vec<GraphValueOrder>,
     parameters: Vec<GqlParameterSpec>,
     parameter_offsets: Vec<usize>,
-    offset: Number,
-    count: Option<Number>,
+    offset: ReadPageNumber,
+    count: Option<ReadPageNumber>,
     distinct: bool,
     return_at: usize,
     /// Every `x.key` read this part's expressions parsed, with the slot its
@@ -1047,6 +1055,10 @@ struct Parser<'a> {
     /// must never make a newly parsed `()` correlate with an ancestor node.
     outer_anonymous: Vec<&'a str>,
     parameter_types: BTreeMap<String, GqlParameterType>,
+    /// Implicit UInt64 declarations used only by bare pagination operands.
+    /// A later native numeric expression may infer Int64 for the same name;
+    /// other unsigned uses keep their strict declaration contract.
+    flexible_page_parameters: BTreeSet<String>,
     read_row_bindings: Vec<Name<'a>>,
     read_correlations: Vec<(Name<'a>, Option<Name<'a>>, usize)>,
     /// Computed imported join keys, evaluated once per leading row before
@@ -1287,6 +1299,7 @@ impl<'a> Parser<'a> {
             scope_count: 0,
             outer_anonymous: Vec::new(),
             parameter_types: BTreeMap::new(),
+            flexible_page_parameters: BTreeSet::new(),
             read_row_bindings: Vec::new(),
             read_correlations: Vec::new(),
             read_row_fields: Vec::new(),
@@ -1350,7 +1363,7 @@ impl<'a> Parser<'a> {
                 ordering: Vec::new(),
                 parameters: Vec::new(),
                 parameter_offsets: Vec::new(),
-                offset: Number::Literal(GqlParameterValue::UInt64(0)),
+                offset: ReadPageNumber::Literal(0),
                 count: None,
                 distinct: false,
                 return_at: 0,
@@ -1975,6 +1988,7 @@ impl<'a> Parser<'a> {
         expected: GqlParameterType,
         at: usize,
     ) -> Result<usize, GraphPatternTextError> {
+        let page_only = self.flexible_page_parameters.remove(name);
         if let Some(index) = self
             .syntax
             .parameters
@@ -1983,10 +1997,18 @@ impl<'a> Parser<'a> {
         {
             let spec = &mut self.syntax.parameters[index];
             if spec.parameter_type != expected {
-                return Err(error(
-                    at,
-                    GraphPatternTextErrorKind::ConflictingParameterTypes,
-                ));
+                if page_only
+                    && spec.parameter_type == GqlParameterType::UInt64
+                    && expected == GqlParameterType::Int64
+                    && !self.parameter_types.contains_key(name)
+                {
+                    spec.parameter_type = expected;
+                } else {
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::ConflictingParameterTypes,
+                    ));
+                }
             }
             spec.occurrences += 1;
             return Ok(index);
@@ -2345,68 +2367,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// A page is fixed before source access. Bare UInt64 operands retain their
-    /// full-width contract; a literal expression uses the ordinary scalar
-    /// compiler and folds once during preparation (fgdb-ebioe). Row reads,
-    /// random draws and parameters inside an expression are not constants.
-    fn page_number(&mut self) -> Result<Number, GraphPatternTextError> {
-        if matches!(self.current.kind, TokenKind::Parameter(_)) {
-            return self.number(GqlParameterType::UInt64);
-        }
-        if matches!(self.current.kind, TokenKind::Digits(_)) {
-            let mut lexer = self.lexer.clone();
-            if !matches!(
-                lexer.next()?.kind,
-                TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^')
-            ) {
-                return self.number(GqlParameterType::UInt64);
-            }
-        }
-        let at = self.current.at;
-        let invalid = || {
-            error(
-                at,
-                GraphPatternTextErrorKind::Expected(
-                    "bounded constant nonnegative integer page expression",
-                ),
-            )
-        };
-        let uses = self
-            .syntax
-            .parameters
-            .iter()
-            .map(|spec| spec.occurrences)
-            .sum::<usize>();
-        let value = self.read_row_value(&[], 0).map_err(|_| invalid())?;
-        if !value.row_independent()
-            || self
-                .syntax
-                .parameters
-                .iter()
-                .map(|spec| spec.occurrences)
-                .sum::<usize>()
-                != uses
-        {
-            return Err(invalid());
-        }
-        let value = scoped::mutation::return_projection::bind_read_value(&value, &[])
-            .map_err(|_| invalid())?;
-        let row = GraphValueRow::from_owned_values(Vec::new());
-        // Preparation has no query Cx. Charge every native work/scratch event
-        // against a finite ceiling before allocation, including dead-result
-        // expressions such as size(range(...)). No graph reader is installed.
-        let mut remaining = 65_536_u32;
-        let value = crate::set_ops::evaluate_value(&value, &row, 0, &mut |_| {
-            remaining = remaining.checked_sub(1).ok_or(())?;
-            Ok::<_, ()>(())
-        })
-        .map_err(|_| invalid())?;
-        let Some(fgdb_types::CanonicalScalar::Int(value)) = value.as_scalar() else {
-            return Err(invalid());
-        };
-        let value = u64::try_from(*value).map_err(|_| invalid())?;
-        Ok(Number::Literal(GqlParameterValue::UInt64(value)))
-    }
     fn end(&self) -> Result<(), GraphPatternTextError> {
         if !matches!(self.current.kind, TokenKind::End) {
             return Err(error(
@@ -2421,25 +2381,6 @@ impl<'a> Parser<'a> {
         }
         self.check_parameter_declarations()
     }
-}
-
-/// The compound-page framer uses the same constant compiler as a native
-/// MATCH/RETURN/WITH page. The returned byte offset is the first unconsumed
-/// token in the caller's original text; values are never interpolated.
-pub(crate) fn constant_page_number(
-    statement: &str,
-    at: usize,
-) -> Result<(u64, usize), GraphPatternTextError> {
-    let mut parser = Parser::new(statement)?;
-    parser.lexer.at = at;
-    parser.current = parser.lexer.next()?;
-    let Number::Literal(GqlParameterValue::UInt64(value)) = parser.page_number()? else {
-        return Err(error(
-            at,
-            GraphPatternTextErrorKind::Expected("constant page expression"),
-        ));
-    };
-    Ok((value, parser.current.at))
 }
 
 #[derive(Clone)]
@@ -2513,8 +2454,8 @@ pub struct PreparedGraphText {
     ordering: Vec<GraphValueOrder>,
     parameters: Vec<GqlParameterSpec>,
     parameter_offsets: Vec<usize>,
-    offset: Number,
-    count: Option<Number>,
+    offset: ReadPageNumber,
+    count: Option<ReadPageNumber>,
     distinct: bool,
     return_at: usize,
     pub reverse_catalog: Option<std::sync::Arc<ReverseSymbolCatalog>>,
@@ -2966,12 +2907,12 @@ impl PreparedGraphText {
             bytes.push(u8::from(order.descending));
             bytes.push(u8::from(order.nulls_first));
         }
-        append_number(&mut bytes, &self.offset);
+        self.offset.append_pattern_transcript(&mut bytes);
         match &self.count {
             None => bytes.push(0),
             Some(count) => {
                 bytes.push(1);
-                append_number(&mut bytes, count);
+                count.append_pattern_transcript(&mut bytes);
             }
         }
         bytes.push(u8::from(self.distinct));
@@ -3058,8 +2999,11 @@ impl PreparedGraphText {
             builder.prepare_values_with_clauses(
                 &clauses,
                 &columns,
-                self.offset.unsigned(values),
-                self.count.as_ref().map(|count| count.unsigned(values)),
+                self.offset.bind_values(values)?,
+                self.count
+                    .as_ref()
+                    .map(|count| count.bind_values(values))
+                    .transpose()?,
             ),
         )?;
         let pattern = if self.distinct {

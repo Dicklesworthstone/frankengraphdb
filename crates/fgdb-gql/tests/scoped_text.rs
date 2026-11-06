@@ -52,6 +52,53 @@ fn ids(rows: &[GraphValueRow]) -> Vec<Vec<Option<VId>>> {
         })
         .collect()
 }
+
+#[test]
+fn direct_aggregate_pages_bind_native_expressions_without_paging_the_input() {
+    let text = "MATCH (n) RETURN n,count(*) AS copies ORDER BY n \
+                SKIP $offset LIMIT $offset + 1";
+    let definition = PreparedGraphAggregateText::prepare(text, symbols).unwrap();
+    for offset in [0, 1, 2] {
+        let query = definition
+            .bind_parameters(&GqlParameters::new().with_int64("offset", offset).unwrap())
+            .unwrap();
+        let literal = PreparedGraphAggregateText::prepare(
+            &format!(
+                "MATCH (n) RETURN n,count(*) AS copies ORDER BY n SKIP {offset} LIMIT {}",
+                offset + 1
+            ),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert_eq!(query.canonical_bytes(), literal.canonical_bytes());
+        let rows = query
+            .execute_governed(
+                5,
+                [VId(5), VId(1), VId(4), VId(2), VId(3)],
+                std::iter::empty::<Edge>(),
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(rows.value.len(), (offset + 1) as usize);
+        assert!(
+            rows.value
+                .iter()
+                .all(|row| row.get(0).unwrap().as_count() == Some(1))
+        );
+        assert_eq!(rows.rows.snapshot_records, 5);
+    }
+    let error = definition
+        .bind_parameters(&GqlParameters::new().with_int64("offset", -1).unwrap())
+        .unwrap_err();
+    assert_eq!(error.kind, GraphPatternTextErrorKind::InvalidPageValue);
+    assert_eq!(error.offset, text.find("$offset").unwrap());
+}
+
 fn orient(edges: &[Edge], relation: RelationId, source: VId, direction: usize) -> Vec<VId> {
     let mut result = Vec::new();
     for &(left, actual, right) in edges {

@@ -62,6 +62,40 @@ fn constant_pagination_preserves_aggregate_completion_and_group_order() {
 }
 
 #[test]
+fn parameterized_aggregate_pages_bind_each_execution_and_refuse_invalid_values() {
+    let text = "UNWIND [3,1,2,2,4] AS x RETURN x,count(*) AS n \
+                ORDER BY x SKIP $offset LIMIT $offset + 1";
+    let definition = template(text);
+    for offset in [0, 1, 2] {
+        let arguments = GqlParameters::new().with_int64("offset", offset).unwrap();
+        let query = definition.bind_relation_parameters(&arguments).unwrap();
+        let literal = format!(
+            "UNWIND [3,1,2,2,4] AS x RETURN x,count(*) AS n \
+             ORDER BY x SKIP {offset} LIMIT {}",
+            offset + 1,
+        );
+        assert_eq!(run(&query), run(&prepare(&literal)));
+    }
+    let error = definition
+        .bind_relation_parameters(&GqlParameters::new().with_int64("offset", -1).unwrap())
+        .unwrap_err();
+    assert_eq!(error.class(), fgdb_gql::GqlRefusalClass::InvalidValue);
+    assert_eq!(error.offset, text.find("$offset").unwrap());
+    let definition = template("UNWIND [1,2,3] AS x RETURN sum(10/x) AS total LIMIT $take - 1");
+    let arguments = GqlParameters::new().with_int64("take", 1).unwrap();
+    assert!(
+        run(&definition.bind_relation_parameters(&arguments).unwrap())
+            .value
+            .is_empty()
+    );
+    assert!(
+        definition
+            .bind_relation_parameters(&GqlParameters::new().with_int64("take", 0).unwrap(),)
+            .is_err()
+    );
+}
+
+#[test]
 fn computed_having_keeps_hidden_summaries_and_aliases_in_one_exact_group() {
     let definition = template(
         "UNWIND [1,1,2,3,3,3] AS x \

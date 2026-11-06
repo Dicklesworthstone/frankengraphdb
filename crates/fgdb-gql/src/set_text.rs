@@ -582,7 +582,16 @@ pub(crate) struct ReadProjectionTemplate {
 #[derive(Clone)]
 pub(crate) enum ReadPageNumber {
     Literal(u64),
-    Parameter(usize),
+    Parameter {
+        index: usize,
+        at: usize,
+    },
+    /// Row-independent native value program, evaluated once per binding.
+    /// The original offset is diagnostic only and never enters the transcript.
+    Expression {
+        value: Box<ReadValueTemplate>,
+        at: usize,
+    },
 }
 impl ReadValueTemplate {
     /// Shared resolved-unbound transcript: structural identity only. Literal
@@ -813,9 +822,13 @@ impl ReadPageNumber {
                 bytes.push(0);
                 bytes.extend_from_slice(&value.to_be_bytes());
             }
-            Self::Parameter(index) => {
+            Self::Parameter { index, .. } => {
                 bytes.push(1);
                 bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+            }
+            Self::Expression { value, .. } => {
+                bytes.push(2);
+                value.append_template_transcript(bytes);
             }
         }
     }
@@ -1270,17 +1283,37 @@ impl TextToken<'_> {
 #[derive(Clone)]
 enum PageNumber {
     Literal(u64),
-    Parameter(String),
+    Parameter {
+        name: String,
+        at: usize,
+    },
+    Expression {
+        number: ReadPageNumber,
+        parameters: Vec<String>,
+    },
 }
 impl PageNumber {
-    fn value(&self, arguments: &GqlParameters) -> u64 {
-        match self {
+    fn value(&self, arguments: &GqlParameters) -> Result<u64, GraphSetTextError> {
+        Ok(match self {
             Self::Literal(value) => *value,
-            Self::Parameter(name) => match arguments.get(name) {
-                Some(GqlParameterValue::UInt64(value)) => value,
-                _ => unreachable!("the complete argument schema was validated before binding"),
-            },
-        }
+            Self::Parameter { name, at } => crate::graph_text::page::bound_operand(
+                &arguments
+                    .get(name)
+                    .expect("the complete argument schema was validated before binding"),
+                *at,
+            )?,
+            Self::Expression { number, parameters } => {
+                let values: Vec<_> = parameters
+                    .iter()
+                    .map(|name| {
+                        arguments
+                            .get(name)
+                            .expect("the complete argument schema was validated before binding")
+                    })
+                    .collect();
+                number.bind_values(&values)?
+            }
+        })
     }
 }
 #[derive(Clone)]
@@ -1539,8 +1572,11 @@ impl Node {
                 .map_err(|kind| fail(self.at, GraphSetTextErrorKind::OrderBuild(kind)))?;
         }
         bound = bound.with_page(
-            self.offset.value(arguments),
-            self.count.as_ref().map(|n| n.value(arguments)),
+            self.offset.value(arguments)?,
+            self.count
+                .as_ref()
+                .map(|n| n.value(arguments))
+                .transpose()?,
         );
         if let Some(order) = &self.expression_order {
             bound = order
@@ -1662,14 +1698,15 @@ struct Span {
     first_token: usize,
     last_token: usize,
 }
-struct Composition<'a> {
+struct Composition<'a, 'd> {
     statement: &'a str,
+    declarations: &'d [(&'d str, GqlParameterType)],
     tokens: Vec<TextToken<'a>>,
     at: usize,
     spans: Vec<Span>,
-    page_parameters: Vec<(usize, GqlParameterSpec)>,
+    page_parameters: crate::graph_text::page::PageParameters,
 }
-impl<'a> Composition<'a> {
+impl<'a> Composition<'a, '_> {
     fn current(&self) -> TextToken<'a> {
         self.tokens[self.at]
     }
@@ -2068,32 +2105,30 @@ impl<'a> Composition<'a> {
     }
     fn page_number(&mut self) -> Result<PageNumber, GraphSetTextError> {
         let token = self.current();
-        let result = match token.kind {
-            TextKind::Parameter(name) => {
-                let name = name.to_owned();
-                self.page_parameters.push((
-                    token.at,
-                    GqlParameterSpec {
-                        name: name.clone(),
-                        parameter_type: GqlParameterType::UInt64,
-                        requires_positive: false,
-                        occurrences: 1,
-                    },
-                ));
-                PageNumber::Parameter(name)
-            }
-            _ => {
-                let (value, end) =
-                    crate::graph_text::constant_page_number(self.statement, token.at)
-                        .map_err(|error| pattern_error(0, error))?;
-                while self.current().at < end && !matches!(self.current().kind, TextKind::End) {
-                    self.advance();
-                }
-                return Ok(PageNumber::Literal(value));
-            }
-        };
-        self.advance();
-        Ok(result)
+        let prepared = crate::graph_text::page::prepare(
+            self.statement,
+            token.at,
+            self.declarations,
+            &mut self.page_parameters,
+        )?;
+        while self.current().at < prepared.end && !matches!(self.current().kind, TextKind::End) {
+            self.advance();
+        }
+        Ok(match prepared.page {
+            ReadPageNumber::Literal(value) => PageNumber::Literal(value),
+            ReadPageNumber::Parameter { index, at } => PageNumber::Parameter {
+                name: prepared.parameters[index].name.clone(),
+                at,
+            },
+            number @ ReadPageNumber::Expression { .. } => PageNumber::Expression {
+                number,
+                parameters: prepared
+                    .parameters
+                    .into_iter()
+                    .map(|spec| spec.name)
+                    .collect(),
+            },
+        })
     }
 }
 
@@ -2243,16 +2278,17 @@ impl PreparedGraphSetText {
             .map_err(|error| pattern_error(0, error))?;
         let mut parser = Composition {
             statement,
+            declarations,
             tokens,
             at: 0,
             spans: Vec::new(),
-            page_parameters: Vec::new(),
+            page_parameters: crate::graph_text::page::PageParameters::default(),
         };
         let mut root = parser.expression(0)?;
         if !matches!(parser.current().kind, TextKind::End) {
             return Err(expected(parser.current().at, "end of compound statement"));
         }
-        let page_parameters = std::mem::take(&mut parser.page_parameters);
+        let page_parameters = std::mem::take(&mut parser.page_parameters).into_uses();
         let tokens = &parser.tokens;
         let compile = |spans: &[Span], mut uses: Vec<(usize, GqlParameterSpec)>| {
             let mut pending = Vec::new();
@@ -2420,9 +2456,22 @@ impl PreparedGraphSetText {
                     bytes.push(0);
                     bytes.extend_from_slice(&value.to_be_bytes());
                 }
-                PageNumber::Parameter(parameter) => {
+                PageNumber::Parameter {
+                    name: parameter, ..
+                } => {
                     bytes.push(1);
                     name(bytes, parameter);
+                }
+                PageNumber::Expression { number, parameters } => {
+                    bytes.push(2);
+                    number.append_template_transcript(bytes);
+                    // The native program uses local ordinals. Bind their
+                    // names here; the complete declaration schema below
+                    // retains the final types shared by all pages and arms.
+                    ordinal(bytes, parameters.len());
+                    for parameter in parameters {
+                        name(bytes, parameter);
+                    }
                 }
             }
         }

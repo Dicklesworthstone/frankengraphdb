@@ -129,8 +129,8 @@ pub struct PreparedGraphAggregateText {
     output_distinct: bool,
     names: Vec<String>,
     slots: Vec<GraphAggregateTextSlot>,
-    offset: Number,
-    count: Option<Number>,
+    offset: ReadPageNumber,
+    count: Option<ReadPageNumber>,
     having: Vec<Having>,
     having_expression: Option<having::HavingTemplate>,
     ordering: Vec<GraphAggregateOrder>,
@@ -811,10 +811,7 @@ impl PreparedGraphAggregateText {
                 collect: None,
             });
         }
-        let offset = core::mem::replace(
-            &mut parser.syntax.offset,
-            Number::Literal(GqlParameterValue::UInt64(0)),
-        );
+        let offset = core::mem::replace(&mut parser.syntax.offset, ReadPageNumber::Literal(0));
         let count = parser.syntax.count.take();
         parser.syntax.distinct = false;
         // Every `x.key` an output reads binds its key now, as a pipeline's
@@ -975,12 +972,12 @@ impl PreparedGraphAggregateText {
                 GraphNullPlacement::Last => 1,
             });
         }
-        append_number(&mut bytes, &self.offset);
+        self.offset.append_pattern_transcript(&mut bytes);
         match &self.count {
             None => bytes.push(0),
             Some(count) => {
                 bytes.push(1);
-                append_number(&mut bytes, count);
+                count.append_pattern_transcript(&mut bytes);
             }
         }
         if let Some(projection) = &self.output_projection {
@@ -1075,8 +1072,12 @@ impl PreparedGraphAggregateText {
                 },
             })
             .collect();
-        let offset = self.offset.unsigned(&values);
-        let count = self.count.as_ref().map(|count| count.unsigned(&values));
+        let offset = self.offset.bind_values(&values)?;
+        let count = self
+            .count
+            .as_ref()
+            .map(|count| count.bind_values(&values))
+            .transpose()?;
         let prepared = match &self.input_projection {
             Some(projection) => PreparedGraphAggregate::prepare_projected(
                 input,
