@@ -262,7 +262,7 @@ impl Probe {
                     observed.map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
                 })?
             };
-            if !passed {
+            if passed.is_none() {
                 ids.pop();
                 continue;
             }

@@ -61,6 +61,16 @@ pub(crate) struct Probe {
     steps: Vec<Step>,
 }
 
+/// A bounded, correlated Collect scope over the same fixed-hop traversal and
+/// predicate kernel as a probe. Only its completion rule differs: every
+/// witness contributes one value, and only successful exhaustion emits a list.
+pub(super) struct Collection {
+    pub(super) group: usize,
+    probe: Probe,
+    value: Option<ValueProjection>,
+    tuple: Option<Vec<ValueProjection>>,
+}
+
 impl Probe {
     /// Fixed and finite variable-length atoms may start from a correlation or
     /// an independent vertex scan. Captures only copy values; a nullable capture
@@ -82,6 +92,23 @@ impl Probe {
         {
             return Err(EdgeScanBuildError { operator: start });
         }
+        let (steps, _) = Self::compile_body(ops, start, end, outer_width)?;
+        Ok((
+            Self {
+                anti: *anti,
+                outer_width,
+                steps,
+            },
+            end,
+        ))
+    }
+
+    fn compile_body(
+        ops: &[GlaOperator],
+        start: usize,
+        end: usize,
+        outer_width: usize,
+    ) -> Result<(Vec<Step>, BTreeMap<u32, u32>), EdgeScanBuildError> {
         if !matches!(
             ops.get(start + 1),
             Some(
@@ -266,14 +293,7 @@ impl Probe {
                     .push(predicate.unwrap_or_else(|| op.clone()));
             }
         }
-        Ok((
-            Self {
-                anti: *anti,
-                outer_width,
-                steps,
-            },
-            end,
-        ))
+        Ok((steps, capture_slots))
     }
 
     pub(crate) fn accepts<S: EdgeScanSource, C>(
@@ -293,6 +313,27 @@ impl Probe {
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
         record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
     ) -> ScanResult<bool, S::Error, C> {
+        self.visit_witnesses(outer, source, control, record, &mut |_, _, _| Ok(true))
+    }
+
+    /// Visit complete witnesses in native identified-edge enumeration order.
+    /// Returning true stops at this witness; false resumes the same indexed
+    /// traversal. Neither the probe nor the collector builds a neighbor bag.
+    fn visit_witnesses<S: EdgeScanSource, C, F>(
+        &self,
+        outer: &[Option<VId>],
+        source: &S,
+        control: &mut F,
+        record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
+        visit: &mut impl FnMut(
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut F,
+        ) -> ScanResult<bool, S::Error, C>,
+    ) -> ScanResult<bool, S::Error, C>
+    where
+        F: FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
+    {
         debug_assert_eq!(outer.len(), self.outer_width);
         // Both frames have definition-bounded sizes. Reserve before allocating
         // and reuse them throughout backtracking, rather than copying prefixes.
@@ -315,9 +356,6 @@ impl Probe {
         let mut depth = 0;
         loop {
             control(GlaExecutionEvent::Work)?;
-            if depth == self.steps.len() {
-                return Ok(true);
-            }
             let step = &self.steps[depth];
             let candidate = match step.binding {
                 Binding::Copy {
@@ -445,12 +483,21 @@ impl Probe {
                 continue;
             };
             ids.push(candidate);
-            if !self.test_candidate(&step.predicates, &ids, &frames, source, control)? {
+            let Some(paths) =
+                self.test_candidate(&step.predicates, &ids, &frames, source, control)?
+            else {
                 ids.pop();
                 continue;
-            }
+            };
             depth += 1;
-            if depth < self.steps.len() {
+            if depth == self.steps.len() {
+                control(GlaExecutionEvent::Work)?;
+                if visit(&ids, &paths, control)? {
+                    return Ok(true);
+                }
+                depth -= 1;
+                ids.pop();
+            } else {
                 frames[depth] = Position::new(self.steps[depth].binding);
                 walks.remove(&depth); // A new correlated prefix gets fresh atom-local history.
             }
@@ -466,7 +513,7 @@ impl Probe {
         frames: &[Position],
         source: &S,
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
-    ) -> ScanResult<bool, S::Error, C> {
+    ) -> ScanResult<Option<Vec<Option<GraphPath>>>, S::Error, C> {
         let mut passed = true;
         let mut paths = Vec::new();
         for predicate in predicates {
@@ -536,7 +583,149 @@ impl Probe {
                 break;
             }
         }
-        Ok(passed)
+        Ok(passed.then_some(paths))
+    }
+}
+
+impl Collection {
+    pub(super) fn compile(
+        ops: &[GlaOperator],
+        start: usize,
+        outer_width: usize,
+    ) -> Result<(Self, usize), EdgeScanBuildError> {
+        let bad = || EdgeScanBuildError { operator: start };
+        let GlaOperator::Collect { group, end, slots } = &ops[start] else {
+            return Err(bad());
+        };
+        let end = *end as usize;
+        if end <= start + 1 || *group as usize >= crate::algebra::MAX_PATTERN_IDENTITIES {
+            return Err(bad());
+        }
+        let Some(GlaOperator::CollectEnd {
+            group: close,
+            value,
+            tuple,
+        }) = ops.get(end)
+        else {
+            return Err(bad());
+        };
+        if close != group {
+            return Err(bad());
+        }
+        // This slice admits a correlated fixed hop only. Independent scans,
+        // multiple hops, walks and nested scopes remain explicit refusals.
+        let mut expansions = 0;
+        for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
+            match op {
+                GlaOperator::Expand { .. } => expansions += 1,
+                GlaOperator::ScanVertices | GlaOperator::VarLengthExpand { .. } => {
+                    return Err(EdgeScanBuildError { operator: at });
+                }
+                _ => {}
+            }
+        }
+        if expansions != 1 {
+            return Err(bad());
+        }
+        let (steps, captures) = Probe::compile_body(ops, start, end, outer_width)?;
+        if *slots as usize != steps.len() {
+            return Err(bad());
+        }
+        let width = outer_width + steps.len();
+        let remap = |value: &ValueProjection| match *value {
+            ValueProjection::Vertex { slot } if (slot.ordinal() as usize) < width => Ok(*value),
+            ValueProjection::Path { capture, function }
+                if matches!(function, GraphPathFunction::Value | GraphPathFunction::Edge) =>
+            {
+                captures
+                    .get(&capture)
+                    .map(|capture| ValueProjection::Path {
+                        capture: *capture,
+                        function,
+                    })
+                    .ok_or_else(bad)
+            }
+            _ => Err(bad()),
+        };
+        let value = value.as_ref().map(remap).transpose()?;
+        let tuple = tuple
+            .as_ref()
+            .map(|columns| {
+                if columns.is_empty() || columns.len() > crate::algebra::MAX_PATTERN_VERTICES {
+                    return Err(bad());
+                }
+                columns.iter().map(remap).collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        if value.is_some() && tuple.is_some() {
+            return Err(bad());
+        }
+        Ok((
+            Self {
+                group: *group as usize,
+                probe: Probe {
+                    anti: false,
+                    outer_width,
+                    steps,
+                },
+                value,
+                tuple,
+            },
+            end,
+        ))
+    }
+
+    pub(super) fn evaluate<S: EdgeScanSource, C>(
+        &self,
+        outer: &[Option<VId>],
+        source: &S,
+        control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
+        record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
+    ) -> ScanResult<crate::algebra::GraphValue, S::Error, C> {
+        use crate::algebra::GraphValue;
+        use crate::algebra_exec::collect_witness_element;
+
+        let mut values = Vec::new();
+        let nodes = self.tuple.as_ref().map_or(1, |columns| columns.len() + 1);
+        self.probe.visit_witnesses(
+            outer,
+            source,
+            control,
+            record,
+            &mut |bindings, paths, control| {
+                // The final value bound is known before any witness allocation.
+                // Every tuple/path payload is then admitted by the same kernel
+                // as the eager CollectEnd instruction, under the source meter.
+                if values.len() >= (GraphValue::MAX_LIST_NODES - 1) / nodes {
+                    return Err(crate::GraphIntegerError {
+                        instruction: 0,
+                        kind: crate::GraphIntegerErrorKind::CollectionBounds,
+                    }
+                    .into());
+                }
+                control(GlaExecutionEvent::ScratchEntry)?;
+                let value = if let Some(columns) = &self.tuple {
+                    let mut fields = Vec::new();
+                    for column in columns {
+                        control(GlaExecutionEvent::Work)?;
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        fields.push(collect_witness_element(
+                            Some(column),
+                            bindings,
+                            paths,
+                            control,
+                        )?);
+                    }
+                    GraphValue::List(fields.into_boxed_slice())
+                } else {
+                    collect_witness_element(self.value.as_ref(), bindings, paths, control)?
+                };
+                values.push(value);
+                Ok(false)
+            },
+        )?;
+        control(GlaExecutionEvent::ScratchEntry)?;
+        Ok(GraphValue::List(values.into_boxed_slice()))
     }
 }
 

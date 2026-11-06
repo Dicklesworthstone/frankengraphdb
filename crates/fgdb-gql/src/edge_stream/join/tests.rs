@@ -20,6 +20,7 @@ struct Fixture {
     drops: Arc<AtomicUsize>,
     unavailable: bool,
     repeat: bool,
+    fail_edge: Option<EId>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -39,6 +40,7 @@ impl Fixture {
             drops: Arc::new(AtomicUsize::new(0)),
             unavailable: false,
             repeat: false,
+            fail_edge: None,
         };
         for (id, from, to) in edges {
             f.vertices.extend([VId(from), VId(to)]);
@@ -99,6 +101,9 @@ impl EdgeScanSource for Fixture {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        if self.fail_edge == Some(id) {
+            return Err(EdgeScanSourceError::Source("edge history unreadable"));
+        }
         Ok(self.edges.get(&id).map(|(a, b, p)| EdgeScanRow {
             source: *a,
             target: *b,
@@ -764,4 +769,337 @@ fn unsupported_sources_bad_order_and_invalid_plan_prefixes_never_silently_change
     );
     assert!(c.next().is_none());
     assert_eq!(roots.load(Ordering::SeqCst), 0);
+}
+
+mod collections {
+    use super::*;
+    use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder, GraphValueOrder};
+
+    fn definition(
+        outer_direction: GlaDirection,
+        inner_direction: GlaDirection,
+        offset: u64,
+        count: Option<u64>,
+    ) -> PreparedGraphPattern<GraphValueRow> {
+        let mut outer = GraphPatternBuilder::new();
+        outer.vertex("a").unwrap().vertex("b").unwrap();
+        outer.edge("a", R, outer_direction, "b").unwrap();
+        outer.capture_edge("r", 0).unwrap();
+        let mut inner = GraphPatternBuilder::new();
+        inner.vertex("b").unwrap().vertex("c").unwrap();
+        inner.edge("b", R, inner_direction, "c").unwrap();
+        inner.capture_edge("s", 0).unwrap();
+        inner.capture_path("p").unwrap();
+        outer
+            .prepare_values_with_clauses(
+                &[
+                    GraphMatchClause::collect(&inner, Some("c")),
+                    GraphMatchClause::collect(&inner, Some("s")),
+                    GraphMatchClause::collect(&inner, Some("p")),
+                    GraphMatchClause::collect_tuple(&inner, vec!["b", "s", "c", "p"]),
+                    GraphMatchClause::collect(&inner, None),
+                ],
+                &[
+                    GraphColumn::path("r", "r", GraphPathFunction::Edge),
+                    GraphColumn::vertex("a", "a"),
+                    GraphColumn::vertex("b", "b"),
+                    GraphColumn::collection("vertices", 0),
+                    GraphColumn::collection("edges", 1),
+                    GraphColumn::collection("paths", 2),
+                    GraphColumn::collection("tuples", 3),
+                    GraphColumn::collection("nulls", 4),
+                ],
+                offset,
+                count,
+            )
+            .unwrap()
+    }
+
+    fn list(values: Vec<GraphValue>) -> GraphValue {
+        GraphValue::List(values.into_boxed_slice())
+    }
+
+    fn orientations(a: VId, b: VId, direction: GlaDirection) -> Vec<(VId, VId)> {
+        match direction {
+            GlaDirection::Forward => vec![(a, b)],
+            GlaDirection::Reverse => vec![(b, a)],
+            GlaDirection::Undirected if a == b => vec![(a, b)],
+            GlaDirection::Undirected => vec![(a, b), (b, a)],
+        }
+    }
+
+    // A complete finite edge-product oracle, independent of cursor traversal.
+    // The inner list keeps EId order, repetitions, orientation and tuple
+    // association; only complete outer rows are canonically sorted.
+    fn expected(
+        fixture: &Fixture,
+        outer_direction: GlaDirection,
+        inner_direction: GlaDirection,
+    ) -> Vec<GraphValueRow> {
+        let mut rows = Vec::new();
+        for (&r, (x, y, _)) in &fixture.edges {
+            for (a, b) in orientations(*x, *y, outer_direction) {
+                let mut vertices = Vec::new();
+                let mut edges = Vec::new();
+                let mut paths = Vec::new();
+                let mut tuples = Vec::new();
+                let mut nulls = Vec::new();
+                for (&s, (u, v, _)) in &fixture.edges {
+                    for (start, c) in orientations(*u, *v, inner_direction) {
+                        if start != b {
+                            continue;
+                        }
+                        let path =
+                            GraphValue::Path(GraphPath::new(b, vec![(s, c)].into_boxed_slice()));
+                        vertices.push(GraphValue::Vertex(c));
+                        edges.push(GraphValue::Edge(s));
+                        paths.push(path.clone());
+                        tuples.push(list(vec![
+                            GraphValue::Vertex(b),
+                            GraphValue::Edge(s),
+                            GraphValue::Vertex(c),
+                            path,
+                        ]));
+                        nulls.push(GraphValue::Scalar(CanonicalScalar::Null));
+                    }
+                }
+                rows.push(GraphValueRow::from_owned_values(vec![
+                    GraphValue::Edge(r),
+                    GraphValue::Vertex(a),
+                    GraphValue::Vertex(b),
+                    list(vertices),
+                    list(edges),
+                    list(paths),
+                    list(tuples),
+                    list(nulls),
+                ]));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    fn eager(query: &PreparedGraphPattern<GraphValueRow>, fixture: &Fixture) -> Vec<GraphValueRow> {
+        query
+            .plan()
+            .execute_governed_with_element_properties(
+                (fixture.vertices.len() + fixture.edges.len()) as u64,
+                fixture.vertices.iter().copied(),
+                fixture
+                    .edges
+                    .iter()
+                    .rev()
+                    .map(|(&eid, (a, b, _))| (eid, *a, R, *b)),
+                |_, predicates| Ok::<_, ()>(predicates.iter().all(|p| p.matches(&[], &[]))),
+                |_, _| Ok(None),
+                |eid, key| {
+                    Ok(fixture.edges[&eid]
+                        .2
+                        .iter()
+                        .find(|(property, _)| *property == key)
+                        .map(|(_, value)| value))
+                },
+                policy(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+    }
+
+    #[test]
+    fn collected_single_hops_match_eager_and_finite_multigraph_oracles() {
+        let directions = [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ];
+        for outer in directions {
+            for inner in directions {
+                let query = definition(outer, inner, 0, None);
+                let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+                for mask in 0..64 {
+                    let fixture = Fixture::small(mask);
+                    let expected = expected(&fixture, outer, inner);
+                    assert_eq!(eager(&query, &fixture), expected);
+                    let actual =
+                        EdgeScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()))
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap();
+                    assert_eq!(actual, expected, "{outer:?}/{inner:?}; mask={mask}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn collection_scope_predicates_keep_captured_edges_and_outer_values_distinct() {
+        let query = crate::PreparedGraphSetText::prepare(
+            "MATCH (a)-[r:R]->(b) RETURN r,a,b,\
+             [(b)-[s:R]->(c) WHERE s.p >= 0 AND c <> a | c] AS matches",
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let pattern = query.single_pattern_input().unwrap();
+        let fixture = Fixture::small(63);
+        let expected = eager(pattern, &fixture);
+        let actual = EdgeScanCursor::new(
+            fixture,
+            EdgeScanPlan::compile(pattern.plan()).unwrap(),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert!(actual.iter().any(|row| {
+            row.values()
+                .iter()
+                .any(|value| value.as_list().is_some_and(|list| !list.is_empty()))
+        }));
+    }
+
+    #[test]
+    fn collected_sort_input_keeps_all_rows_before_the_blocking_page() {
+        let query = definition(GlaDirection::Forward, GlaDirection::Undirected, 2, Some(1))
+            .with_order_by(&[GraphValueOrder::descending(3)])
+            .unwrap();
+        assert!(EdgeScanPlan::compile(query.plan()).is_err());
+        let (plan, tail) = EdgeScanPlan::compile_sort_input(query.plan()).unwrap();
+        assert_eq!(tail.offset(), 2);
+        assert_eq!(tail.count(), Some(1));
+        assert_eq!(tail.order(), &[GraphValueOrder::descending(3)]);
+        let fixture = Fixture::small(63);
+        let expected = expected(&fixture, GlaDirection::Forward, GlaDirection::Undirected);
+        let actual = EdgeScanCursor::new(fixture, plan, policy(), || Ok::<_, ()>(()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(actual, expected, "the sort consumer owns the final page");
+
+        let query = definition(GlaDirection::Forward, GlaDirection::Forward, 0, Some(0));
+        let (plan, _) = EdgeScanPlan::compile_sort_input(query.plan()).unwrap();
+        let mut fixture = Fixture::small(63);
+        fixture.fail_edge = Some(EId(1));
+        let mut cursor = EdgeScanCursor::new(fixture, plan, policy(), || Ok::<_, ()>(()));
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(EdgeScanError::Source(
+                "edge history unreadable"
+            ))))
+        ));
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(cursor.next().is_none());
+    }
+
+    #[test]
+    fn every_collection_checkpoint_cancels_without_a_partial_row_and_retry_is_exact() {
+        let query = definition(GlaDirection::Forward, GlaDirection::Forward, 0, Some(2));
+        let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+        let mut checkpoints = 0;
+        let mut cursor = EdgeScanCursor::new(Fixture::small(63), plan.clone(), policy(), || {
+            checkpoints += 1;
+            Ok::<_, usize>(())
+        });
+        let expected = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let rows = cursor.row_stats();
+        let evaluator = cursor.evaluator_stats();
+        drop(cursor);
+        for stop in 1..=checkpoints {
+            let fixture = Fixture::small(63);
+            let drops = fixture.drops.clone();
+            let mut at = 0;
+            let mut cursor = EdgeScanCursor::new(fixture, plan.clone(), policy(), || {
+                at += 1;
+                if at == stop { Err(stop) } else { Ok(()) }
+            });
+            let mut prefix = Vec::new();
+            loop {
+                match cursor.next() {
+                    Some(Ok(row)) => prefix.push(row),
+                    Some(Err(GqlQueryError::Interrupted(reported))) => {
+                        assert_eq!(reported, stop);
+                        break;
+                    }
+                    other => panic!("checkpoint {stop} became {other:?}"),
+                }
+            }
+            assert_eq!(prefix, expected[..prefix.len()]);
+            assert_eq!(cursor.row_stats().result_rows, prefix.len() as u64);
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+            assert!(cursor.traversal.is_none());
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(cursor.next().is_none());
+            drop(cursor);
+            assert_eq!(at, stop);
+        }
+        let exact = GqlQueryPolicy::new(
+            rows.snapshot_records,
+            rows.result_rows,
+            evaluator.work_units,
+            evaluator.scratch_entries,
+        );
+        let mut retry =
+            EdgeScanCursor::new(Fixture::small(63), plan.clone(), exact, || Ok::<_, ()>(()));
+        assert_eq!(
+            retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+            expected
+        );
+        assert_eq!(
+            (retry.row_stats(), retry.evaluator_stats()),
+            (rows, evaluator)
+        );
+        for allowance in [
+            GqlQueryPolicy::new(rows.snapshot_records - 1, 100, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(1_000, rows.result_rows - 1, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(1_000, 100, evaluator.work_units - 1, u64::MAX),
+            GqlQueryPolicy::new(1_000, 100, u64::MAX, evaluator.scratch_entries - 1),
+        ] {
+            let mut cursor =
+                EdgeScanCursor::new(Fixture::small(63), plan.clone(), allowance, || {
+                    Ok::<_, ()>(())
+                });
+            assert!(matches!(
+                cursor.by_ref().collect::<Result<Vec<_>, _>>(),
+                Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
+            ));
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+            assert!(cursor.next().is_none());
+        }
+    }
+
+    #[test]
+    fn incomplete_collection_reads_refuse_instead_of_publishing_a_prefix() {
+        let query = definition(GlaDirection::Forward, GlaDirection::Forward, 0, None);
+        let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+        for failure in 0..3 {
+            let mut fixture = Fixture::small(63);
+            fixture.unavailable = failure == 0;
+            fixture.repeat = failure == 1;
+            fixture.fail_edge = (failure == 2).then_some(EId(1));
+            let dropped = fixture.drops.clone();
+            let mut cursor =
+                EdgeScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
+            assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Source(_)))));
+            assert_eq!(cursor.row_stats().result_rows, 0);
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+            assert!(cursor.next().is_none());
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        }
+        // Async byte guards do not yet reserve retained collection payloads.
+        // Preparation must continue to refuse, even at LIMIT zero.
+        let query = definition(GlaDirection::Forward, GlaDirection::Forward, 0, Some(0));
+        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
+        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+        let fixture = Fixture::small(63);
+        let roots = fixture.roots.clone();
+        let mut cursor = EdgeScanCursor::new(
+            fixture,
+            EdgeScanPlan::compile(query.plan()).unwrap(),
+            policy(),
+            || Ok::<_, ()>(()),
+        );
+        assert!(cursor.next().is_none());
+        assert_eq!(roots.load(Ordering::SeqCst), 0);
+    }
 }
