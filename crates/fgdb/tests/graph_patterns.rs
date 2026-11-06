@@ -608,6 +608,79 @@ fn independent_indexed_roots_admit_the_union_and_preserve_staged_products() {
 }
 
 #[test]
+fn single_indexed_overlay_reads_preserve_exact_costs_across_repeated_execution() {
+    let ((), report) = run_async_under_lab(0xc0a4_001a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed_indexed_overlay_chain(&mut db, &commit).await;
+        let mut builder = GraphPatternBuilder::new();
+        builder
+            .vertex("a")
+            .unwrap()
+            .filter("a", VertexPredicate::HasLabel(L))
+            .unwrap()
+            .filter(
+                "a",
+                VertexPredicate::IntegerProperty {
+                    key: N,
+                    comparison: IntegerComparison::Equal,
+                    value: 100,
+                },
+            )
+            .unwrap();
+        let single = builder.prepare("a", 0, None).unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(R);
+        staged.create_vertex(VId(7_000), vec![L], vec![(N, CanonicalScalar::Int(999))]);
+        txn.write(&mut db, staged).unwrap();
+        let first = txn
+            .execute_graph_pattern_governed(&db, &cx, &single, generous())
+            .unwrap();
+        assert_eq!(first.value, vec![VId(100)]);
+        assert_eq!(first.rows.snapshot_records, 1);
+        let exact = GqlQueryPolicy::new(
+            1,
+            1,
+            first.evaluator.work_units,
+            first.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            txn.execute_graph_pattern_governed(&db, &cx, &single, exact)
+                .unwrap(),
+            first
+        );
+        for (work, scratch, dimension) in [
+            (
+                first.evaluator.work_units - 1,
+                first.evaluator.scratch_entries,
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                first.evaluator.work_units,
+                first.evaluator.scratch_entries - 1,
+                GlaLimitDimension::ScratchEntries,
+            ),
+        ] {
+            assert!(matches!(
+                txn.execute_graph_pattern_governed(
+                    &db,
+                    &cx,
+                    &single,
+                    GqlQueryPolicy::new(1, 1, work, scratch),
+                ),
+                Err(GqlQueryError::Evaluator(error)) if error.dimension == dimension
+            ));
+        }
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn indexed_overlay_prunes_unmatched_creations_before_admitting_source_rows() {
     let ((), report) = run_async_under_lab(0xc0a4_0017, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

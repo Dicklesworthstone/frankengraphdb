@@ -1902,7 +1902,13 @@ mod query_source {
             let mut observed = BTreeSet::new();
             // Raw intentions contribute only negative-read identities. The
             // canonical template, not these intentions, creates query rows.
-            let reuse_staged_vertices = !reads_edges && vertex_bound.is_some();
+            // Independent indexed roots have a shared union owner. Precise
+            // single-root reads retain their existing per-execution charges
+            // and checkpoint sequence, including retries after refusal.
+            let reuse_staged_vertices = !reads_edges
+                && vertex_bound
+                    .as_ref()
+                    .is_some_and(|bound| bound.root_observations.len() > 1);
             let observed_prefix = self
                 .observed_staged_vertex_batches
                 .get()
