@@ -12464,6 +12464,46 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "EdgePropertyPatch"
         )
     };
+    // FGRN-v1's twenty fields (1a4835b, fgdb-w3-tier-r-0tj) are new rows,
+    // not members of the frozen pre-erratum namespace. Enumerate the exact
+    // cohort; an unknown future field must still widen and fail the witness.
+    let post_erratum_adj_run_field = |schema: &str, name: &str| {
+        schema == "AdjRunSegment"
+            && matches!(
+                name,
+                "graph"
+                    | "branch_projection"
+                    | "source_partition"
+                    | "source_root_digest"
+                    | "direction"
+                    | "edge_type"
+                    | "seq_range"
+                    | "profile"
+                    | "source_map_id"
+                    | "destination_map_id"
+                    | "source_rows"
+                    | "incidence_count"
+                    | "origin_count"
+                    | "codec_table"
+                    | "encoded_image"
+                    | "image_fingerprint"
+                    | "stable_eids"
+                    | "origin_birth_orders"
+                    | "canonical_stable_id_digest"
+                    | "checksum"
+            )
+    };
+    assert_eq!(
+        pre_erratum
+            .fields
+            .iter()
+            .filter(|field| {
+                post_erratum_adj_run_field(&field.containing_schema, &field.stable_name)
+            })
+            .count(),
+        20,
+        "the post-erratum FGRN-v1 cohort must contain exactly its twenty registered fields"
+    );
     // A16's four exact AuthorityBoundHeader<Role> fields use the already
     // registered generic-free wire family inline. They postdate the erratum
     // and therefore stay out of its historical namespace witness.
@@ -12692,6 +12732,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a08_lifecycle_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a09_field(&field.containing_schema)
             && !post_erratum_ge6a_reachability_field(&field.containing_schema)
+            && !post_erratum_adj_run_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a16_inline_authority_headers(
                 &field.containing_schema,
                 &field.stable_name,
@@ -13072,7 +13113,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // DeltaPartitionRoot and DeltaRootSegment. Both schemas were already
         // covered by post_erratum_ge6a_reachability_field, and the frozen
         // historical reconstruction remains 225.
-        pre_erratum.fields.len() + 972,
+        // 972 -> 995 (1a4835b, fgdb-w3-tier-r-0tj): twenty newly registered
+        // AdjRunSegment fields are enumerated by post_erratum_adj_run_field;
+        // DeltaPartitionRoot base_frame/adjacency_runs/run_membership_digest
+        // already belong to post_erratum_ge6a_reachability_field. All1197
+        // older rows are unchanged; epoch105->106 adds exactly these23rows.
+        // The independent frozen width225 and historical hash stay unchanged.
+        pre_erratum.fields.len() + 995,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

@@ -252,6 +252,8 @@ fn complete_cold_relations_match_historical_queries_not_their_first_leaf() {
             "MATCH (n) RETURN n.p AS p ORDER BY n.q DESC SKIP 1 LIMIT 2",
             "MATCH (a)-[r:R]->(b) RETURN a.p AS a, b.p AS b",
             "MATCH route = WALK (a)-[:R*0..2]->(b) RETURN route",
+            "MATCH route = WALK (a)-[:R*]->(b) RETURN route",
+            "MATCH route = WALK (a)-[:R*]->(b) RETURN route LIMIT 0",
             "MATCH route = ANY SHORTEST (a)-[:R*0..2]->(b) RETURN route",
             "MATCH route = ANY SHORTEST (a)-[:R*1..2]->(b) RETURN route",
             "MATCH route = ANY SHORTEST (a)-[:R*1..2]->(b) RETURN route LIMIT 0",
@@ -270,9 +272,21 @@ fn complete_cold_relations_match_historical_queries_not_their_first_leaf() {
             "UNWIND [3,1,3] AS x RETURN x ORDER BY x DESC LIMIT 2",
         ] {
             let prepared = plan(text);
+            // This history has only forward edges from 1 to 3 or 4, so its
+            // finite interval covers every nonempty terminating route. Keep
+            // that independent bound as the oracle for the open profile.
+            let oracle = plan(match text {
+                "MATCH route = WALK (a)-[:R*]->(b) RETURN route" => {
+                    "MATCH route = WALK (a)-[:R*1..2]->(b) RETURN route"
+                }
+                "MATCH route = WALK (a)-[:R*]->(b) RETURN route LIMIT 0" => {
+                    "MATCH route = WALK (a)-[:R*1..2]->(b) RETURN route LIMIT 0"
+                }
+                _ => text,
+            });
             for before in [CommitSeq::ORIGIN, cuts[0], cuts[1], cuts[2]] {
                 for after in [CommitSeq::ORIGIN, cuts[0], cuts[1], cuts[2]] {
-                    let expected = prepared
+                    let expected = oracle
                         .diff_in_view(
                             &resident,
                             &cx,
@@ -353,6 +367,24 @@ fn complete_cold_relations_match_historical_queries_not_their_first_leaf() {
                 (path_row(4, &[]), 1),
                 (path_row(1, &[(3, 4)]), 1),
             ]),
+        );
+        // The open profile retains the exact new route, not just an empty page.
+        let open = plan("MATCH route = WALK (a)-[:R*]->(b) RETURN route");
+        assert_eq!(
+            attempt(
+                &cx,
+                &open,
+                &mut view,
+                &cx,
+                cuts[0],
+                cuts[1],
+                policy(1),
+                u64::MAX,
+            )
+            .await
+            .unwrap()
+            .0,
+            Bag::from([(path_row(1, &[(3, 4)]), 1)]),
         );
         // Directed shortest routes with a lower bound of one cannot repeat
         // an edge. The existing native shortest owner therefore admits this
@@ -654,10 +686,28 @@ fn admission_precedes_binding_and_io_including_empty_and_source_free_results() {
             None,
         );
         drop(future);
+        // A repeatable unbounded WALK refuses before a spool template or a
+        // catalog read exists. The default terminating mode is positive above.
+        let mut catalog_calls = 0;
+        let error = fgdb_gql::PreparedGraphText::prepare(
+            "MATCH REPEATABLE ELEMENTS route = WALK (a)-[:R*]->(b) RETURN route LIMIT 0",
+            |kind, name| {
+                catalog_calls += 1;
+                symbols(kind, name)
+            },
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            fgdb_gql::GraphPatternTextErrorKind::Expected(
+                "an upper hop bound, or TRAIL, ACYCLIC, SIMPLE, a shortest selector or DIFFERENT EDGES for an unbounded quantifier"
+            )
+        ));
+        assert_eq!(catalog_calls, 0);
         for text in [
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p",
             "MATCH (n) RETURN COUNT(*) AS n",
-            "MATCH route = WALK (a)-[:R*]->(b) RETURN route LIMIT 0",
             "MATCH route = ANY SHORTEST (a)-[:R*2..2]->(b) RETURN route LIMIT 0",
             "MATCH route = WALK (a)-[:R*0..2]->(b)-[:R]->(c) RETURN route LIMIT 0",
         ] {

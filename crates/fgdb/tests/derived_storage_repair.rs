@@ -70,9 +70,19 @@ async fn fixture(
     );
     assert_eq!(db.write(cx, batch).await.unwrap(), CommitSeq::FIRST);
     let pinned = db.read_session().unwrap();
+    // The neighbour projection is distinct, while the lossless edge face must
+    // retain both parallel identities before any repair or deletion.
+    assert_eq!(pinned.neighbours(VId(1), R).unwrap(), vec![VId(sink)]);
+    let parallel: Vec<_> = pinned
+        .edges()
+        .unwrap()
+        .into_iter()
+        .filter(|edge| edge.entry.src == VId(1) && edge.entry.relation == R)
+        .map(|edge| (edge.entry.eid, edge.entry.dst))
+        .collect();
     assert_eq!(
-        pinned.neighbours(VId(1), R).unwrap(),
-        vec![VId(sink), VId(sink)]
+        parallel,
+        vec![(EId(1), VId(sink)), (EId(sources + 1), VId(sink))]
     );
     assert_eq!(pinned.neighbours(VId(sink), R).unwrap(), vec![VId(sink)]);
 
@@ -334,6 +344,23 @@ fn unavailable_capsule_refuses_before_any_derived_repair_or_root_publication() {
         let (db, pinned) = fixture(&cx, &vfs, false).await;
         let object = data_objects(&cx, &vfs, &db).await.remove(0);
         let expected = answers(&db);
+        let pinned_edges = pinned.edges().unwrap();
+        // The old generation cannot know the later content retirement/delete.
+        // A retrospective read from the new generation carries those ends;
+        // neither is the baseline for mutating the other generation's snapshot.
+        for eid in [EId(1), EId(4)] {
+            let original = pinned_edges
+                .iter()
+                .find(|edge| edge.entry.eid == eid)
+                .unwrap();
+            let retrospective = expected[1]
+                .edges
+                .iter()
+                .find(|edge| edge.entry.eid == eid)
+                .unwrap();
+            assert_eq!(original.entry.retired_at, None);
+            assert_eq!(retrospective.entry.retired_at, Some(CommitSeq(2)));
+        }
         drop(db);
         let coordinator =
             CommitCoordinator::open_with_vfs(&cx, vfs.clone(), &dir, keys().capsule_keys())
@@ -375,7 +402,7 @@ fn unavailable_capsule_refuses_before_any_derived_repair_or_root_publication() {
             b"truncated retained capsule"
         );
         assert_eq!(pinned.frontier(), CommitSeq::FIRST);
-        assert_eq!(pinned.edges().unwrap(), expected[1].edges);
+        assert_eq!(pinned.edges().unwrap(), pinned_edges);
         // Restore only the fixture's source loss; the product API must still
         // reconstruct the damaged derived object through authenticated replay.
         vfs.write(&capsule, &original).await.unwrap();
@@ -434,14 +461,29 @@ fn explicit_repair_refuses_a_symlink_at_a_derived_object_path() {
     let ((), report) = run_async_under_lab(0xd370_0005, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.commit();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-derived-repair-symlink-{}-{nonce}",
-            std::process::id(),
-        ));
+        // Reserve the parent atomically: retained fixtures and concurrent
+        // attempts must never be opened or overwritten after a name collision.
+        let reserve = || -> std::io::Result<PathBuf> {
+            for ordinal in 0..u64::MAX {
+                let parent = std::env::temp_dir().join(format!(
+                    "fgdb-derived-repair-symlink-{}-{ordinal}",
+                    std::process::id(),
+                ));
+                match std::fs::create_dir(&parent) {
+                    Ok(()) => return Ok(parent),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(std::io::Error::other("fixture namespace exhausted"))
+        };
+        let occupied = reserve().unwrap();
+        let marker = occupied.join("retained-owner");
+        std::fs::write(&marker, b"retained fixture owner").unwrap();
+        let parent = reserve().unwrap();
+        assert_ne!(parent, occupied);
+        assert_eq!(std::fs::read(&marker).unwrap(), b"retained fixture owner");
+        let dir = parent.join("database");
         let mut db = Database::create(&cx, &dir, keys()).await.unwrap();
         let mut batch = WriteBatch::new(R);
         batch.create_vertex(VId(1), vec![L], vec![]);
@@ -487,6 +529,7 @@ fn explicit_repair_refuses_a_symlink_at_a_derived_object_path() {
         );
         assert_eq!(std::fs::read(&retained).unwrap(), object.bytes);
         assert_eq!(std::fs::read(dir.join("manifest.root")).unwrap(), slot);
+        assert_eq!(std::fs::read(&marker).unwrap(), b"retained fixture owner");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
