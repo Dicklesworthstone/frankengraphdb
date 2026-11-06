@@ -181,8 +181,6 @@ fn page_constants_refuse_row_reads_invalid_domains_and_unbounded_preparation() {
         "n.p",
         "rand()",
         "toInteger(rand() * 0)",
-        "1 + $offset",
-        "($offset)",
         "size(range(0, 100000000))",
     ] {
         for clause in ["SKIP", "LIMIT"] {
@@ -197,6 +195,530 @@ fn page_constants_refuse_row_reads_invalid_domains_and_unbounded_preparation() {
                 calls.get(),
                 0,
                 "invalid pagination resolves no catalog: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn bare_page_parameters_do_not_refine_property_or_later_scalar_domains() {
+    let vertices = [VId(1), VId(2), VId(3)];
+    let props = Props::from([
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
+        ((VId(3), P), CanonicalScalar::Int(1).into()),
+    ]);
+    for text in [
+        "MATCH (n) WHERE n.p=$x RETURN n LIMIT $x",
+        "MATCH (n {p:$x}) RETURN n LIMIT $x",
+        "UNWIND [1,2,3] AS n WITH n SKIP $x RETURN n+$x AS value",
+    ] {
+        let calls = Cell::new(0);
+        let error = PreparedGraphSetText::prepare(text, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::ConflictingParameterTypes,),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+
+        // An explicit signed declaration disambiguates the two roles. It
+        // binds once and must execute exactly like the complete literal query.
+        let definition = PreparedGraphSetText::prepare_with_parameter_types(
+            text,
+            &[("x", GqlParameterType::Int64)],
+            symbols,
+        )
+        .unwrap();
+        let arguments = GqlParameters::new().with_int64("x", 1).unwrap();
+        let query = definition.bind_parameters(&arguments).unwrap();
+        assert_eq!(
+            run(&query, &vertices, &[], &props).unwrap().value,
+            run(&prepare(&text.replace("$x", "1")), &vertices, &[], &props)
+                .unwrap()
+                .value,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn parameterized_pages_rebind_native_expressions_across_read_and_compound_shapes() {
+    let vertices = [VId(1), VId(2), VId(3), VId(4), VId(5)];
+    let arguments = GqlParameters::new()
+        .with_int64("offset", 1)
+        .unwrap()
+        .with_int64("take", 2)
+        .unwrap();
+    for (computed, literal) in [
+        (
+            "MATCH (n) RETURN n SKIP $offset + 1 LIMIT $take * 1",
+            "MATCH (n) RETURN n SKIP 2 LIMIT 2",
+        ),
+        (
+            "MATCH (n) WITH n SKIP abs(-$offset) LIMIT ($take) RETURN n",
+            "MATCH (n) WITH n SKIP 1 LIMIT 2 RETURN n",
+        ),
+        (
+            "UNWIND [5,4,3,2,1] AS x RETURN x ORDER BY x SKIP 1 + $offset LIMIT toInteger($take)",
+            "UNWIND [5,4,3,2,1] AS x RETURN x ORDER BY x SKIP 2 LIMIT 2",
+        ),
+        (
+            "(RETURN 1 AS x UNION ALL RETURN 2 AS x UNION ALL RETURN 3 AS x) \
+             SKIP $offset * 2 LIMIT $take - 1",
+            "(RETURN 1 AS x UNION ALL RETURN 2 AS x UNION ALL RETURN 3 AS x) \
+             SKIP 2 LIMIT 1",
+        ),
+        (
+            "RETURN 1 AS x UNION ALL RETURN 2 AS x UNION ALL RETURN 3 AS x \
+             ORDER BY x + 1 DESC SKIP ($offset) LIMIT $take - 1",
+            "RETURN 1 AS x UNION ALL RETURN 2 AS x UNION ALL RETURN 3 AS x \
+             ORDER BY x + 1 DESC SKIP 1 LIMIT 1",
+        ),
+        (
+            "RETURN 1 AS x UNION ALL (RETURN 2 AS x LIMIT $take - 2) \
+             UNION ALL RETURN 3 AS x SKIP $offset - 1",
+            "RETURN 1 AS x UNION ALL (RETURN 2 AS x LIMIT 0) \
+             UNION ALL RETURN 3 AS x SKIP 0",
+        ),
+    ] {
+        let definition = PreparedGraphSetText::prepare(computed, symbols).unwrap();
+        let transcript = definition.canonical_template_bytes();
+        let query = definition.bind_parameters(&arguments).unwrap();
+        assert_eq!(
+            run(&query, &vertices, &[], &Props::new()).unwrap(),
+            run(&prepare(literal), &vertices, &[], &Props::new()).unwrap(),
+            "{computed}"
+        );
+        assert_eq!(definition.canonical_template_bytes(), transcript);
+    }
+
+    // Direct MATCH binding retains no old argument value and produces the
+    // same native plan bytes as the independently prepared literal page.
+    let definition = PreparedGraphText::prepare(
+        "MATCH (n) RETURN n SKIP $offset + 1 LIMIT $take * 1",
+        symbols,
+    )
+    .unwrap();
+    let first = definition.bind_parameters(&arguments).unwrap();
+    let frozen = first.canonical_bytes();
+    assert_eq!(
+        frozen,
+        PreparedGraphText::prepare("MATCH (n) RETURN n SKIP 2 LIMIT 2", symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    );
+    let second = definition
+        .bind_parameters(
+            &GqlParameters::new()
+                .with_int64("offset", 0)
+                .unwrap()
+                .with_int64("take", 1)
+                .unwrap(),
+        )
+        .unwrap();
+    assert_ne!(second.canonical_bytes(), frozen);
+    assert_eq!(first.canonical_bytes(), frozen);
+}
+
+#[test]
+fn parameterized_pages_keep_declarations_occurrences_and_template_identity() {
+    let text = "RETURN $n AS value UNION ALL RETURN $n AS value SKIP $n - 2 LIMIT $n + $n";
+    let definition = PreparedGraphSetText::prepare(text, symbols).unwrap();
+    let schema = definition.parameter_schema();
+    assert_eq!(schema.len(), 1);
+    assert_eq!(schema[0].name, "n");
+    assert_eq!(schema[0].parameter_type, GqlParameterType::Int64);
+    assert_eq!(schema[0].occurrences, 5);
+    let query = definition
+        .bind_parameters(&GqlParameters::new().with_int64("n", 2).unwrap())
+        .unwrap();
+    assert_eq!(
+        ints(&run(&query, &[], &[], &Props::new()).unwrap().value),
+        vec![vec![Some(2)], vec![Some(2)]]
+    );
+
+    // Separate compound input scopes retain their existing exact schema
+    // merge. A bare outer page has an unsigned default unless declared; an
+    // arithmetic page and a scalar input both infer the signed domain.
+    let bare = "(RETURN $n AS x UNION ALL RETURN $n AS x) LIMIT $n";
+    let calls = Cell::new(0);
+    let error = PreparedGraphSetText::prepare(bare, |_, _| {
+        calls.set(calls.get() + 1);
+        None
+    })
+    .unwrap_err();
+    assert_eq!(
+        error.kind,
+        GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::ConflictingParameterTypes)
+    );
+    assert_eq!(calls.get(), 0);
+    for definition in [
+        PreparedGraphSetText::prepare_with_parameter_types(
+            bare,
+            &[("n", GqlParameterType::Int64)],
+            symbols,
+        )
+        .unwrap(),
+        PreparedGraphSetText::prepare(&format!("{bare} + 0"), symbols).unwrap(),
+    ] {
+        assert_eq!(definition.parameter_schema()[0].occurrences, 3);
+        let query = definition
+            .bind_parameters(&GqlParameters::new().with_int64("n", 1).unwrap())
+            .unwrap();
+        assert_eq!(
+            ints(&run(&query, &[], &[], &Props::new()).unwrap().value),
+            vec![vec![Some(1)]]
+        );
+    }
+
+    let canonical = |text| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .canonical_template_bytes()
+    };
+    let a = "RETURN 1 AS x UNION ALL RETURN 2 AS x LIMIT $take + 1";
+    assert_eq!(
+        canonical(a),
+        canonical("RETURN 1 AS x UNION ALL RETURN 2 AS x LIMIT ( $take + 1 )")
+    );
+    for other in [
+        "RETURN 1 AS x UNION ALL RETURN 2 AS x LIMIT $take - 1",
+        "RETURN 1 AS x UNION ALL RETURN 2 AS x LIMIT $other + 1",
+    ] {
+        assert_ne!(canonical(a), canonical(other), "{other}");
+    }
+
+    let definition = PreparedGraphSetText::prepare_with_parameter_types(
+        "UNWIND [1,2,3] AS x RETURN x LIMIT toInteger($take)",
+        &[("take", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
+        symbols,
+    )
+    .unwrap();
+    for (take, expected) in [("2", Some(2)), ("0", Some(0)), ("bad", None)] {
+        let arguments = GqlParameters::new().with_text("take", take).unwrap();
+        let result = definition.bind_parameters(&arguments);
+        if let Some(expected) = expected {
+            assert_eq!(
+                run(&result.unwrap(), &[], &[], &Props::new())
+                    .unwrap()
+                    .value
+                    .len(),
+                expected
+            );
+        } else {
+            assert_eq!(
+                result.unwrap_err().kind,
+                GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::InvalidPageValue)
+            );
+        }
+    }
+}
+
+#[test]
+fn bare_pages_share_expression_parameters_without_losing_the_full_unsigned_domain() {
+    for (clauses, arguments, wanted) in [
+        (
+            "SKIP $page * $size LIMIT $size",
+            GqlParameters::new()
+                .with_int64("page", 1)
+                .unwrap()
+                .with_int64("size", 2)
+                .unwrap(),
+            vec![vec![Some(3)], vec![Some(4)]],
+        ),
+        (
+            "SKIP $offset LIMIT $offset + 1",
+            GqlParameters::new().with_int64("offset", 1).unwrap(),
+            vec![vec![Some(2)], vec![Some(3)]],
+        ),
+    ] {
+        for prefix in [
+            "UNWIND [1,2,3,4,5] AS x RETURN x",
+            "RETURN 1 AS x UNION ALL RETURN 2 AS x UNION ALL RETURN 3 AS x \
+             UNION ALL RETURN 4 AS x UNION ALL RETURN 5 AS x",
+        ] {
+            let definition =
+                PreparedGraphSetText::prepare(&format!("{prefix} {clauses}"), symbols).unwrap();
+            assert!(
+                definition
+                    .parameter_schema()
+                    .iter()
+                    .all(|spec| spec.parameter_type == GqlParameterType::Int64)
+            );
+            let query = definition.bind_parameters(&arguments).unwrap();
+            assert_eq!(
+                ints(&run(&query, &[], &[], &Props::new()).unwrap().value),
+                wanted
+            );
+        }
+        // Native graph preparation uses the same inference and binding.
+        let definition =
+            PreparedGraphText::prepare(&format!("MATCH (n) RETURN n {clauses}"), symbols).unwrap();
+        assert!(
+            definition
+                .parameter_schema()
+                .iter()
+                .all(|spec| spec.parameter_type == GqlParameterType::Int64)
+        );
+        assert!(definition.bind_parameters(&arguments).is_ok());
+    }
+    let direct = PreparedGraphSetText::prepare_with_parameter_types(
+        "UNWIND [1,2,3,4] AS x WITH x SKIP $offset RETURN x LIMIT $size",
+        &[
+            ("offset", GqlParameterType::Int64),
+            ("size", GqlParameterType::Int64),
+        ],
+        symbols,
+    )
+    .unwrap();
+    for (offset, size, wanted) in [
+        (0, 2, vec![vec![Some(1)], vec![Some(2)]]),
+        (1, 1, vec![vec![Some(2)]]),
+    ] {
+        let args = GqlParameters::new()
+            .with_int64("offset", offset)
+            .unwrap()
+            .with_int64("size", size)
+            .unwrap();
+        let query = direct.bind_parameters(&args).unwrap();
+        assert_eq!(
+            ints(&run(&query, &[], &[], &Props::new()).unwrap().value),
+            wanted
+        );
+    }
+    assert!(
+        direct
+            .bind_parameters(
+                &GqlParameters::new()
+                    .with_int64("offset", -1)
+                    .unwrap()
+                    .with_int64("size", 1)
+                    .unwrap(),
+            )
+            .is_err()
+    );
+    let full =
+        PreparedGraphText::prepare("MATCH (n) RETURN n SKIP $offset LIMIT $size", symbols).unwrap();
+    assert!(
+        full.parameter_schema()
+            .iter()
+            .all(|spec| spec.parameter_type == GqlParameterType::UInt64)
+    );
+    assert!(
+        full.bind_parameters(
+            &GqlParameters::new()
+                .with_uint64("offset", u64::MAX)
+                .unwrap()
+                .with_uint64("size", u64::MAX)
+                .unwrap(),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn invalid_parameter_pages_refuse_at_binding_and_preserve_a_previous_valid_plan() {
+    for (expression, value, kind) in [
+        ("$n - 1", 0, GraphPatternTextErrorKind::InvalidPageValue),
+        (
+            "$n + 1",
+            i64::MAX,
+            GraphPatternTextErrorKind::InvalidPageValue,
+        ),
+        ("1 / $n", 0, GraphPatternTextErrorKind::InvalidPageValue),
+        (
+            "toFloat($n)",
+            2,
+            GraphPatternTextErrorKind::InvalidPageValue,
+        ),
+        (
+            "size(range(0, $n))",
+            65_535,
+            GraphPatternTextErrorKind::PageExpressionLimit,
+        ),
+        (
+            "size(range(0, $n))",
+            100_000_000,
+            GraphPatternTextErrorKind::InvalidPageValue,
+        ),
+    ] {
+        for prefix in [
+            "MATCH (n) RETURN n",
+            "RETURN 1 AS x UNION ALL RETURN 2 AS x",
+        ] {
+            for clause in ["SKIP", "LIMIT"] {
+                let text = format!("{prefix} {clause} {expression}");
+                let definition = PreparedGraphSetText::prepare(&text, symbols).unwrap();
+                let result = definition
+                    .bind_parameters(&GqlParameters::new().with_int64("n", value).unwrap());
+                assert_eq!(
+                    result.unwrap_err().kind,
+                    GraphSetTextErrorKind::Pattern(kind.clone()),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    let definition = PreparedGraphSetText::prepare_with_parameter_types(
+        "RETURN 1 AS x LIMIT ($n)",
+        &[("n", GqlParameterType::Scalar(CanonicalScalarKind::Int))],
+        symbols,
+    )
+    .unwrap();
+    let mut null = GqlParameters::new();
+    null.insert(
+        "n",
+        fgdb_gql::GqlParameterValue::Scalar(
+            fgdb_gql::GqlScalarParameter::new(CanonicalScalar::Null).unwrap(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        definition.bind_parameters(&null).unwrap_err().kind,
+        GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::InvalidPageValue)
+    );
+    let definition =
+        PreparedGraphSetText::prepare("UNWIND [1,2,3] AS x RETURN x LIMIT $n - 1", symbols)
+            .unwrap();
+    let query = definition
+        .bind_parameters(&GqlParameters::new().with_int64("n", 3).unwrap())
+        .unwrap();
+    assert!(definition.bind_parameters(&GqlParameters::new()).is_err());
+    assert!(
+        definition
+            .bind_parameters(&GqlParameters::new().with_int64("n", 0).unwrap())
+            .is_err()
+    );
+    assert_eq!(
+        ints(&run(&query, &[], &[], &Props::new()).unwrap().value),
+        vec![vec![Some(1)], vec![Some(2)]]
+    );
+    for expression in [
+        "$n + rand()",
+        "CASE WHEN true THEN $n ELSE rand() END",
+        "$n + n.p",
+    ] {
+        let calls = Cell::new(0);
+        let text = format!("MATCH (n:R) RETURN n LIMIT {expression}");
+        assert!(
+            PreparedGraphSetText::prepare(&text, |_, _| {
+                calls.set(calls.get() + 1);
+                None
+            })
+            .is_err()
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+    // A zero result limit never hides an error in the result expression.
+    let query = PreparedGraphSetText::prepare(
+        "UNWIND [1,0] AS x RETURN 10 / x AS value LIMIT $n - 1",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new().with_int64("n", 1).unwrap())
+    .unwrap();
+    assert!(run(&query, &[], &[], &Props::new()).is_err());
+}
+
+#[test]
+fn parameter_pages_admit_each_collection_copy_before_binding_lazy_branches() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GqlListParameter, GqlMapParameter, GqlParameterValue};
+
+    let items = vec![GraphValue::Scalar(CanonicalScalar::Int(1)); 2_500];
+    let list = GqlListParameter::new(items.clone()).unwrap();
+    let map = GqlMapParameter::new(vec![
+        ("count".into(), GraphValue::Scalar(CanonicalScalar::Int(1))),
+        ("items".into(), GraphValue::List(items.into_boxed_slice())),
+    ])
+    .unwrap();
+    // Each argument is independently valid near the ordinary 64 KiB value
+    // bound. Repeating its name must spend the copying allowance each time.
+    for bytes in [list.canonical_bytes().len(), map.canonical_bytes().len()] {
+        assert!(bytes > 60_000 && bytes <= fgdb_gql::algebra::MAX_SCALAR_PREDICATE_BYTES);
+        assert!(bytes * 2 > fgdb_gql::algebra::MAX_SCALAR_PREDICATE_BYTES);
+    }
+    for (kind, large, small, ordinary, ordinary_rows, scalar_branch) in [
+        (
+            GqlParameterType::List,
+            GqlParameterValue::List(list),
+            GqlParameterValue::List(
+                GqlListParameter::new(vec![GraphValue::Scalar(CanonicalScalar::Int(1))]).unwrap(),
+            ),
+            "size($arg)",
+            3,
+            "CASE WHEN true THEN 1 WHEN 1 IN $arg THEN 0 WHEN 2 IN $arg THEN 0 ELSE 0 END",
+        ),
+        (
+            GqlParameterType::Map,
+            GqlParameterValue::Map(map),
+            GqlParameterValue::Map(
+                GqlMapParameter::new(vec![(
+                    "count".into(),
+                    GraphValue::Scalar(CanonicalScalar::Int(1)),
+                )])
+                .unwrap(),
+            ),
+            "size(keys($arg))",
+            2,
+            "CASE WHEN true THEN 1 ELSE $arg.count + $arg.count END",
+        ),
+    ] {
+        let mut large_arguments = GqlParameters::new();
+        large_arguments.insert("arg", large).unwrap();
+        let mut small_arguments = GqlParameters::new();
+        small_arguments.insert("arg", small).unwrap();
+        let definition = PreparedGraphSetText::prepare_with_parameter_types(
+            &format!("UNWIND [1,2,3] AS x RETURN x LIMIT {ordinary}"),
+            &[("arg", kind)],
+            symbols,
+        )
+        .unwrap();
+        let query = definition.bind_parameters(&large_arguments).unwrap();
+        assert_eq!(
+            run(&query, &[], &[], &Props::new()).unwrap().value.len(),
+            ordinary_rows
+        );
+
+        let repeated = std::iter::repeat_n("$arg", 128)
+            .collect::<Vec<_>>()
+            .join(",");
+        let composite_branch = format!("CASE WHEN true THEN 1 ELSE size([{repeated}]) END");
+        for expression in [composite_branch.as_str(), scalar_branch] {
+            let text = format!("UNWIND [1,2,3] AS x RETURN x LIMIT {expression}");
+            let definition = PreparedGraphSetText::prepare_with_parameter_types(
+                &text,
+                &[("arg", kind)],
+                symbols,
+            )
+            .unwrap();
+            let transcript = definition.canonical_template_bytes();
+            let query = definition.bind_parameters(&small_arguments).unwrap();
+            assert_eq!(
+                ints(&run(&query, &[], &[], &Props::new()).unwrap().value),
+                vec![vec![Some(1)]]
+            );
+            // Evaluation would discard the large branch. Its arguments are
+            // still materialized by binding, so admission must refuse first.
+            let error = definition.bind_parameters(&large_arguments).unwrap_err();
+            assert_eq!(
+                error.kind,
+                GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::PageExpressionLimit),
+                "{text}"
+            );
+            assert_eq!(error.offset, text.find("CASE").unwrap());
+            assert_eq!(definition.canonical_template_bytes(), transcript);
+            assert_eq!(
+                ints(&run(&query, &[], &[], &Props::new()).unwrap().value),
+                vec![vec![Some(1)]]
             );
         }
     }

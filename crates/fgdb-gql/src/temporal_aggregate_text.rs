@@ -328,8 +328,8 @@ fn has_row_sources(
 
 #[derive(Clone)]
 enum AggregateTemplate {
-    Direct(PreparedGraphAggregateText),
-    Pipeline(PreparedGraphPipelineAggregateText),
+    Direct(Box<PreparedGraphAggregateText>),
+    Pipeline(Box<PreparedGraphPipelineAggregateText>),
 }
 
 impl AggregateTemplate {
@@ -474,21 +474,21 @@ impl PreparedTemporalGraphAggregateText {
             .any(|token| token.word("WITH"))
             || has_row_sources(&blanked, &inner_declarations)?;
         let inner = if pipeline {
-            AggregateTemplate::Pipeline(
+            AggregateTemplate::Pipeline(Box::new(
                 PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
                     &blanked,
                     &inner_declarations,
                     resolve,
                 )?,
-            )
+            ))
         } else {
-            AggregateTemplate::Direct(
+            AggregateTemplate::Direct(Box::new(
                 PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
                     &blanked,
                     &inner_declarations,
                     resolve,
                 )?,
-            )
+            ))
         };
         let mut parameters = inner.parameter_schema().to_vec();
         if let Some(name) = temporal_name {

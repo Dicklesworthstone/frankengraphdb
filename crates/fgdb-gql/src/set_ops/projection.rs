@@ -545,14 +545,18 @@ impl GraphSetValue {
     /// neither a dead graph read nor an unused random draw loses its contract.
     /// Typed preparation already bounds the expression tree and lexical locals.
     pub(crate) fn is_scan_local(&self) -> bool {
-        self.is_scan_local_with_properties(false)
+        self.is_scan_value(false)
     }
 
-    /// The same complete expression audit, with property reads available from
-    /// the executing cursor's pinned source. Metadata and ordinal draws still
-    /// require a different contract, even in an unreachable expression branch.
-    pub(crate) fn is_scan_local_with_properties(&self, properties: bool) -> bool {
-        let local = |value: &Self| value.is_scan_local_with_properties(properties);
+    /// The same row-local VM with property reads through the scan's admitted
+    /// source. Metadata and random draws still require their own host/order
+    /// contract, including when they occur in an unevaluated lazy branch.
+    pub(crate) fn is_element_scan_local(&self) -> bool {
+        self.is_scan_value(true)
+    }
+
+    fn is_scan_value(&self, properties: bool) -> bool {
+        let accepts = |value: &Self| value.is_scan_value(properties);
         match self {
             Self::Column(_)
             | Self::Literal(_)
@@ -560,9 +564,10 @@ impl GraphSetValue {
             | Self::Integer(_)
             | Self::Value(_)
             | Self::Local(_) => true,
-            Self::MapGet { map, .. } => properties && local(map),
+            // The reader-free profile remains conservative even for maps.
+            Self::MapGet { map, .. } => properties && accepts(map),
             Self::ElementMetadata { .. } | Self::Random { .. } => false,
-            Self::List(values) => values.iter().all(local),
+            Self::List(values) => values.iter().all(accepts),
             Self::Size(value)
             | Self::Keys(value)
             | Self::Temporal {
@@ -570,37 +575,39 @@ impl GraphSetValue {
             }
             | Self::Function {
                 argument: value, ..
-            } => local(value),
-            Self::Index { list, index } => local(list) && local(index),
-            Self::In { value, list } => local(value) && local(list),
+            } => accepts(value),
+            Self::Index { list, index } => accepts(list) && accepts(index),
+            Self::In { value, list } => accepts(value) && accepts(list),
             Self::Equal { left, right } | Self::Ordered { left, right, .. } => {
-                local(left) && local(right)
+                accepts(left) && accepts(right)
             }
             Self::Comprehension { list, filter, map } => {
-                local(list)
-                    && filter.as_deref().is_none_or(local)
-                    && map.as_deref().is_none_or(local)
+                accepts(list)
+                    && filter.as_deref().is_none_or(accepts)
+                    && map.as_deref().is_none_or(accepts)
             }
             Self::Quantifier {
                 list, predicate, ..
-            } => local(list) && local(predicate),
+            } => accepts(list) && accepts(predicate),
             Self::Slice { list, from, to } => {
-                local(list) && from.as_deref().is_none_or(local) && to.as_deref().is_none_or(local)
+                accepts(list)
+                    && from.as_deref().is_none_or(accepts)
+                    && to.as_deref().is_none_or(accepts)
             }
             Self::Range { start, end, step } => {
-                local(start) && local(end) && step.as_deref().is_none_or(local)
+                accepts(start) && accepts(end) && step.as_deref().is_none_or(accepts)
             }
-            Self::Reduce { init, list, expr } => local(init) && local(list) && local(expr),
+            Self::Reduce { init, list, expr } => accepts(init) && accepts(list) && accepts(expr),
             Self::MapLiteral { values, guard, .. } => {
-                values.iter().all(local) && guard.as_deref().is_none_or(local)
+                values.iter().all(accepts) && guard.as_deref().is_none_or(accepts)
             }
             Self::MapOverlay { base, values, .. } | Self::Let { body: base, values } => {
-                local(base) && values.iter().all(local)
+                accepts(base) && values.iter().all(accepts)
             }
             Self::Case { arms, otherwise } => {
                 arms.iter()
-                    .all(|(condition, value)| local(condition) && local(value))
-                    && otherwise.as_deref().is_none_or(local)
+                    .all(|(condition, value)| accepts(condition) && accepts(value))
+                    && otherwise.as_deref().is_none_or(accepts)
             }
         }
     }

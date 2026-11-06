@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 pub enum PreparedNativeRead {
     Pattern(PreparedGraphText),
     Aggregate(PreparedGraphAggregateText),
-    PipelineAggregate(PreparedGraphPipelineAggregateText),
+    PipelineAggregate(Box<PreparedGraphPipelineAggregateText>),
     Set(PreparedGraphSetText),
     TemporalPattern(PreparedTemporalGraphText),
     TemporalSet(PreparedTemporalGraphSetText),
@@ -217,7 +217,7 @@ impl PreparedNativeRead {
             &declarations,
             &mut resolve,
         ) {
-            Ok(prepared) => return Ok(Self::PipelineAggregate(prepared)),
+            Ok(prepared) => return Ok(Self::PipelineAggregate(Box::new(prepared))),
             Err(error) => consider(
                 error.offset,
                 5,

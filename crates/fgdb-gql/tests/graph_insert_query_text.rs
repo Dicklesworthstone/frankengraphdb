@@ -76,6 +76,38 @@ fn values(batch: &GraphInsertQueryBatch) -> Vec<Vec<GraphValue>> {
 }
 
 #[test]
+fn parameterized_return_pages_select_rows_after_all_create_intents_and_rebind() {
+    let text = "UNWIND [4,1,3,2] AS x CREATE (n:Copy {p:x}) \
+                RETURN n.p AS value ORDER BY value SKIP $offset LIMIT $offset + 1";
+    let definition = PreparedGraphInsertQueryText::prepare(text, R, symbols).unwrap();
+    for (offset, wanted) in [
+        (0, vec![vec![int(1)]]),
+        (1, vec![vec![int(2)], vec![int(3)]]),
+    ] {
+        let arguments = GqlParameters::new().with_int64("offset", offset).unwrap();
+        let query = definition.bind_parameters(&arguments).unwrap();
+        let result = run(&query).unwrap();
+        assert_eq!(values(&result), wanted);
+        // Pagination affects returned rows, never the four created vertices.
+        assert_eq!(result.insertion().intents().len(), 4);
+        let literal = format!(
+            "UNWIND [4,1,3,2] AS x CREATE (n:Copy {{p:x}}) \
+             RETURN n.p AS value ORDER BY value SKIP {offset} LIMIT {}",
+            offset + 1,
+        );
+        assert_eq!(
+            result.insertion().intents(),
+            run(&prepare(&literal)).unwrap().insertion().intents()
+        );
+    }
+    let error = definition
+        .bind_parameters(&GqlParameters::new().with_int64("offset", -1).unwrap())
+        .unwrap_err();
+    assert_eq!(error.class(), fgdb_gql::GqlRefusalClass::InvalidValue);
+    assert_eq!(error.offset, text.find("$offset").unwrap());
+}
+
+#[test]
 fn standalone_return_reads_exact_created_vertex_edge_and_frozen_properties() {
     let query = prepare(
         "CREATE (a:Copy {p:3})-[e:R {p:9}]->(b {p:8}) \

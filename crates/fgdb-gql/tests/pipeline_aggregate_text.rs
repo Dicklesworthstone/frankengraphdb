@@ -1748,7 +1748,13 @@ fn a_terminal_aggregate_return_reads_pattern_comprehensions() {
                 (stored.len() + edges.len()) as u64,
                 (0..3).map(VId),
                 edges,
-                |_, _| Ok::<_, ()>(true),
+                // Select delegates its predicates to the host. Supplying the
+                // property reader alone does not evaluate pushed-down filters.
+                |vid, predicates| {
+                    Ok::<_, ()>(predicates.iter().all(|predicate| {
+                        predicate.matches_borrowed([], [(P, &stored[vid.0 as usize])])
+                    }))
+                },
                 |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
                 wide(),
                 || Ok::<_, ()>(()),
@@ -1778,6 +1784,14 @@ fn a_terminal_aggregate_return_reads_pattern_comprehensions() {
             .as_integer(),
         Some(1)
     );
+    // Literal edge-product counts: both parallel edges target 20, the third
+    // targets 30. Test every threshold boundary, including the empty result.
+    for (threshold, expected) in [(0, 3), (19, 3), (20, 1), (29, 1), (30, 0)] {
+        let text = format!(
+            "MATCH (n) WITH n RETURN sum(size([(n)-->(m) WHERE m.p > {threshold} | m])) AS s"
+        );
+        assert_eq!(single(&text).as_integer(), Some(expected), "{text}");
+    }
     // As a grouping key: degrees 2, 1 and 0, one vertex each.
     let grouped = rows("MATCH (n) RETURN size([(n)-->() | 1]) AS d, count(*) AS c");
     let keys: Vec<_> = grouped.iter().map(|row| row.keys().to_vec()).collect();

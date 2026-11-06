@@ -320,10 +320,11 @@ impl PreparedGraphPipelineAggregateText {
             relation,
             &self.keys,
             &declarations,
-            pipeline::page_value(&self.offset, &values),
+            pipeline::page_value(&self.offset, &values)?,
             self.count
                 .as_ref()
-                .map(|value| pipeline::page_value(value, &values)),
+                .map(|value| pipeline::page_value(value, &values))
+                .transpose()?,
         )
         .map_err(|kind| build(self.aggregate_at, kind))?
         .with_key_aliases(&self.key_aliases)

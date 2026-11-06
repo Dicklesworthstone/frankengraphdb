@@ -2985,11 +2985,7 @@ impl<'a> Parser<'a> {
     }
 
     fn row_page_number(&mut self) -> Result<ReadPageNumber, GraphPatternTextError> {
-        Ok(match self.page_number()? {
-            Number::Literal(GqlParameterValue::UInt64(value)) => ReadPageNumber::Literal(value),
-            Number::Parameter(index) => ReadPageNumber::Parameter(index),
-            _ => unreachable!("UInt64 page parser returns its declared domain"),
-        })
+        self.page_number()
     }
 }
 
@@ -3129,14 +3125,8 @@ impl<'a> Parser<'a> {
 pub(in crate::graph_text) fn page_value(
     number: &ReadPageNumber,
     values: &[GqlParameterValue],
-) -> u64 {
-    match number {
-        ReadPageNumber::Literal(value) => *value,
-        ReadPageNumber::Parameter(index) => match &values[*index] {
-            GqlParameterValue::UInt64(value) => *value,
-            _ => unreachable!("the complete parameter map was checked before binding"),
-        },
-    }
+) -> Result<u64, GraphSetTextError> {
+    number.bind_values(values).map_err(Into::into)
 }
 
 /// None uses scalar NULL placeholders for preparation-time schema validation.

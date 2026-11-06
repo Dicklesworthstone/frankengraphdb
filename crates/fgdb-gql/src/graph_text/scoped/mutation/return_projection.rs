@@ -4646,10 +4646,11 @@ pub(super) fn bind_stages(
                         })?;
                 }
                 input = input.with_page(
-                    pipeline::page_value(offset, values),
+                    pipeline::page_value(offset, values)?,
                     count
                         .as_ref()
-                        .map(|count| pipeline::page_value(count, values)),
+                        .map(|count| pipeline::page_value(count, values))
+                        .transpose()?,
                 );
                 if let Some(visible) = visible {
                     let projection = input.columns()[..visible]

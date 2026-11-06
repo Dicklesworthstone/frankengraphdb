@@ -116,39 +116,6 @@ impl EdgeScanPlan {
         Self::compile_local(plan, LocalOutput::OrderedRows)
     }
 
-    /// Final and source row order share this unique identity prefix. Private
-    /// sort keys, a page or outer expansions need their own projection proof.
-    pub(crate) fn row_projection_prefix(&self) -> Option<usize> {
-        if self.offset != 0
-            || self.count.is_some()
-            || self.visible_columns.is_some()
-            || self
-                .joined
-                .as_ref()
-                .is_some_and(|plan| plan.has_expansions())
-        {
-            return None;
-        }
-        let GlaOperator::ProjectValues { columns } = self.projection.as_ref() else {
-            return None;
-        };
-        if !matches!(
-            columns.first(),
-            Some(ValueProjection::Path {
-                function: GraphPathFunction::Edge,
-                ..
-            })
-        ) {
-            return None;
-        }
-        if self.direction == GlaDirection::Undirected {
-            matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
-                .then_some(2)
-        } else {
-            Some(1)
-        }
-    }
-
     fn compile_local(
         plan: &GlaPlan<GraphValueRow>,
         output: LocalOutput,
@@ -718,6 +685,128 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
         self.advancing = false;
         self.source_pending = false;
     }
+    /// Pull and project one complete row under this cursor's single meter.
+    ///
+    /// The cursor must be compiled from pull.pattern(), with that same checked
+    /// pull retained for every call, as for the vertex projection adapter.
+    /// The private pattern input does not publish a ResultRow. Its properties
+    /// are resolved through this same retained, admitted source, and every
+    /// owned property copy is charged before cloning. Only a successful final
+    /// projection consumes the result allowance. A later source, expression,
+    /// or control failure preserves earlier rows and fuses/releases the cursor.
+    /// SnapshotRecords also admits each dynamic property lookup before the
+    /// source inspects its history; its version/payload work shares this meter.
+    pub fn next_projected<C, E>(
+        &mut self,
+        pull: &crate::GraphSetRowPull,
+        mut scan: impl FnMut(GqlQueryError<EdgeScanError<S::Error>, C>) -> E,
+        arithmetic: impl FnOnce(u64, usize, crate::GraphIntegerError) -> E,
+    ) -> Option<Result<GraphValueRow, E>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != EdgeScanState::Open {
+            return None;
+        }
+        let result: Result<Option<GraphValueRow>, E> = (|| {
+            let Some(row) = self.advance_inner::<false, C>().map_err(&mut scan)? else {
+                return Ok(None);
+            };
+            let ordinal = self.meter.rows.result_rows;
+            let next = self
+                .meter
+                .increment(GqlBudgetDimension::ResultRows, ordinal)
+                .map_err(&mut scan)?;
+            let projected = {
+                let source = self.source.as_ref().expect("open cursor owns its source");
+                // VM checkpoints and property callbacks execute serially. Both
+                // debit the same meter before work, allocation, or source read.
+                let meter = std::cell::RefCell::new(&mut self.meter);
+                let mapping = std::cell::RefCell::new(&mut scan);
+                pull.project_with_properties(
+                    &row,
+                    ordinal,
+                    &mut |event| {
+                        meter
+                            .borrow_mut()
+                            .event(match event {
+                                GlaExecutionEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                                GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => {
+                                    GlaExecutionEvent::Work
+                                }
+                            })
+                            .map_err(&mut **mapping.borrow_mut())
+                    },
+                    &mut |element, key| {
+                        // Dynamic operands can name elements outside the root
+                        // binding. Admit their histories before source access.
+                        {
+                            let mut meter = meter.borrow_mut();
+                            let next = meter
+                                .increment(
+                                    GqlBudgetDimension::SnapshotRecords,
+                                    meter.rows.snapshot_records,
+                                )
+                                .map_err(&mut **mapping.borrow_mut())?;
+                            meter.rows.snapshot_records = next;
+                        }
+                        let mut control = |event| meter.borrow_mut().event(event);
+                        let value = match element {
+                            fgdb_delta_types::ElementId::Vertex(vid) => {
+                                flatten(source.vertex_property(vid, key, &mut control))
+                            }
+                            fgdb_delta_types::ElementId::Edge(eid) => {
+                                flatten(source.edge_property(eid, key, &mut control))
+                            }
+                        }
+                        .map_err(&mut **mapping.borrow_mut())?
+                        .flatten();
+                        value
+                            .map(|value| {
+                                crate::algebra::GraphValue::charge_property_value(
+                                    value,
+                                    &mut |event| {
+                                        meter
+                                            .borrow_mut()
+                                            .event(event)
+                                            .map_err(&mut **mapping.borrow_mut())
+                                    },
+                                )?;
+                                Ok(value.clone())
+                            })
+                            .transpose()
+                    },
+                    |column, error| arithmetic(ordinal, column, error),
+                )?
+            };
+            self.meter
+                .event(GlaExecutionEvent::ResultRow)
+                .map_err(&mut scan)?;
+            self.meter.rows.result_rows = next;
+            Ok(Some(projected))
+        })();
+        let item = match result {
+            Ok(Some(row)) => {
+                if self.plan.count == Some(self.meter.rows.result_rows) {
+                    self.state = EdgeScanState::Exhausted;
+                }
+                Some(Ok(row))
+            }
+            Ok(None) => {
+                self.state = EdgeScanState::Exhausted;
+                None
+            }
+            Err(error) => {
+                self.state = EdgeScanState::Failed;
+                Some(Err(error))
+            }
+        };
+        if self.state != EdgeScanState::Open {
+            self.close();
+        }
+        item
+    }
+
     fn advance<C>(&mut self) -> ScanResult<Option<GraphValueRow>, S::Error, C>
     where
         F: FnMut() -> Result<(), C>,
@@ -886,122 +975,6 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             }
             return Ok(core::task::Poll::Ready(Some(row)));
         }
-    }
-
-    /// Evaluate the admitted row projection before committing its one result
-    /// charge. The source and every meter remain the original cursor's; an
-    /// error fuses and releases traversal state without exposing a partial row.
-    pub(crate) fn next_projected<C>(
-        &mut self,
-        pull: &crate::GraphSetRowPull,
-    ) -> Option<Result<GraphValueRow, GqlQueryError<crate::scan_stream::ScanError<S::Error>, C>>>
-    where
-        F: FnMut() -> Result<(), C>,
-    {
-        use crate::scan_stream::ScanError;
-        use fgdb_delta_types::ElementId;
-        if self.state != EdgeScanState::Open {
-            return None;
-        }
-        let result = (|| {
-            let Some(row) = self
-                .advance_inner::<false, C>()
-                .map_err(|error| error.map_source(ScanError::Edge))?
-            else {
-                return Ok(None);
-            };
-            let ordinal = self.meter.rows.result_rows;
-            let next = self
-                .meter
-                .increment(GqlBudgetDimension::ResultRows, ordinal)
-                .map_err(|error| error.map_source(ScanError::Edge))?;
-            let source = self
-                .source
-                .as_ref()
-                .expect("open cursor owns its pinned source");
-            let meter = std::cell::RefCell::new(&mut self.meter);
-            let mut control = |event| {
-                meter
-                    .borrow_mut()
-                    .event(event)
-                    .map_err(|error| error.map_source(ScanError::Edge))
-            };
-            let projected = pull.project_with_properties(
-                &row,
-                ordinal,
-                &mut control,
-                &mut |element, key| {
-                    // A dynamic operand can name an element outside the root
-                    // binding. Admit the lookup before inspecting its history.
-                    {
-                        let mut meter = meter.borrow_mut();
-                        let count = meter
-                            .increment(
-                                GqlBudgetDimension::SnapshotRecords,
-                                meter.rows.snapshot_records,
-                            )
-                            .map_err(|error| error.map_source(ScanError::Edge))?;
-                        meter.rows.snapshot_records = count;
-                    }
-                    let value = match element {
-                        ElementId::Vertex(vid) => {
-                            flatten(source.vertex_property(vid, key, &mut |event| {
-                                meter.borrow_mut().event(event)
-                            }))
-                        }
-                        ElementId::Edge(eid) => {
-                            flatten(source.edge_property(eid, key, &mut |event| {
-                                meter.borrow_mut().event(event)
-                            }))
-                        }
-                    }
-                    .map_err(|error| error.map_source(ScanError::Edge))?
-                    .flatten();
-                    if let Some(value) = value {
-                        // Stored lists/maps own recursive Vec payloads. Reserve
-                        // their copy before clone, independently of the VM's
-                        // later conversion into a projected graph value.
-                        crate::algebra_exec::charge_stored_payload(value, &mut |_| {
-                            let mut meter = meter.borrow_mut();
-                            meter
-                                .event(GlaExecutionEvent::Work)
-                                .map_err(|error| error.map_source(ScanError::Edge))?;
-                            meter
-                                .event(GlaExecutionEvent::ScratchEntry)
-                                .map_err(|error| error.map_source(ScanError::Edge))
-                        })?;
-                    }
-                    Ok(value.cloned())
-                },
-                |column, error| {
-                    GqlQueryError::Source(ScanError::Projection {
-                        row: ordinal,
-                        column,
-                        error,
-                    })
-                },
-            )?;
-            self.meter
-                .event(GlaExecutionEvent::ResultRow)
-                .map_err(|error| error.map_source(ScanError::Edge))?;
-            self.meter.rows.result_rows = next;
-            Ok(Some(projected))
-        })();
-        let item = match result {
-            Ok(Some(row)) => Some(Ok(row)),
-            Ok(None) => {
-                self.state = EdgeScanState::Exhausted;
-                None
-            }
-            Err(error) => {
-                self.state = EdgeScanState::Failed;
-                Some(Err(error))
-            }
-        };
-        if self.state != EdgeScanState::Open {
-            self.close();
-        }
-        item
     }
 }
 impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> Iterator for EdgeScanCursor<S, F> {

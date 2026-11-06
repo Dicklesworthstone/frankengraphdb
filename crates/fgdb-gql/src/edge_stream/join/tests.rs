@@ -775,6 +775,23 @@ mod collections {
     use super::*;
     use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder, GraphValueOrder};
 
+    type ProjectedResult<C> =
+        Result<GraphValueRow, GqlQueryError<crate::scan_stream::ScanError<&'static str>, C>>;
+
+    fn projected_next<C, F: FnMut() -> Result<(), C>>(
+        cursor: &mut EdgeScanCursor<Fixture, F>,
+        pull: &crate::GraphSetRowPull,
+    ) -> Option<ProjectedResult<C>> {
+        use crate::scan_stream::ScanError;
+        cursor.next_projected(
+            pull,
+            |error| error.map_source(ScanError::Edge),
+            |row, column, error| {
+                GqlQueryError::Source(ScanError::Projection { row, column, error })
+            },
+        )
+    }
+
     fn projected(text: &str) -> crate::GraphSetRowPull {
         crate::PreparedGraphSetText::prepare(text, symbols)
             .unwrap()
@@ -782,6 +799,71 @@ mod collections {
             .unwrap()
             .edge_row_pull()
             .unwrap()
+    }
+
+    #[test]
+    fn projected_join_rows_keep_the_complete_identity_prefix_and_literal_properties() {
+        let directions = [
+            ("-", "->", GlaDirection::Forward),
+            ("<-", "-", GlaDirection::Reverse),
+            ("-", "-", GlaDirection::Undirected),
+        ];
+        for (left, right, root) in directions {
+            for (next_left, next_right, next) in directions {
+                let pull = projected(&format!(
+                    "MATCH REPEATABLE ELEMENTS (a){left}[r:R]{right}(b)\
+                     {next_left}[s:R]{next_right}(c) RETURN r,a,s,b,c,r.p+s.p AS total,\
+                     [(c)-[t:R]->(d) | t.p] AS weights"
+                ));
+                let plan = EdgeScanPlan::compile(pull.pattern().plan()).unwrap();
+                for mask in 0..64 {
+                    let fixture = Fixture::small(mask);
+                    let mut expected = Vec::new();
+                    for (&r, (a, b, _)) in &fixture.edges {
+                        for (a, b) in orientations(*a, *b, root) {
+                            for (&s, (start, c, _)) in &fixture.edges {
+                                for (start, c) in orientations(*start, *c, next) {
+                                    if start != b {
+                                        continue;
+                                    }
+                                    let weights = fixture
+                                        .edges
+                                        .iter()
+                                        .filter(|(_, (from, _, _))| *from == c)
+                                        .map(|(id, _)| {
+                                            GraphValue::Scalar(CanonicalScalar::Int(
+                                                (id.0 % 5) as i64 - 2,
+                                            ))
+                                        })
+                                        .collect();
+                                    expected.push(GraphValueRow::from_owned_values(vec![
+                                        GraphValue::Edge(r),
+                                        GraphValue::Vertex(a),
+                                        GraphValue::Edge(s),
+                                        GraphValue::Vertex(b),
+                                        GraphValue::Vertex(c),
+                                        GraphValue::Scalar(CanonicalScalar::Int(
+                                            (r.0 % 5) as i64 + (s.0 % 5) as i64 - 4,
+                                        )),
+                                        list(weights),
+                                    ]));
+                                }
+                            }
+                        }
+                    }
+                    expected.sort();
+                    let mut cursor =
+                        EdgeScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
+                    let mut actual = Vec::new();
+                    while let Some(row) = projected_next(&mut cursor, &pull) {
+                        actual.push(row.unwrap());
+                    }
+                    assert_eq!(actual, expected, "{root:?}/{next:?}; mask={mask}");
+                    assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
+                    assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                }
+            }
+        }
     }
 
     #[test]
@@ -833,13 +915,13 @@ mod collections {
                     assert_eq!(roots.load(Ordering::SeqCst), 0);
                     assert_eq!(cursor.row_stats().snapshot_records, 0);
                     let mut actual = Vec::new();
-                    while let Some(row) = cursor.next_projected(&pull) {
+                    while let Some(row) = projected_next(&mut cursor, &pull) {
                         actual.push(row.unwrap());
                     }
                     assert_eq!(actual, expected, "{outer:?}/{inner:?}; mask={mask}");
                     assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
                     assert_eq!(cursor.state(), EdgeScanState::Exhausted);
-                    assert!(cursor.next_projected(&pull).is_none());
+                    assert!(projected_next(&mut cursor, &pull).is_none());
                 }
             }
         }
@@ -855,7 +937,7 @@ mod collections {
             Ok::<_, usize>(())
         });
         let mut expected = Vec::new();
-        while let Some(row) = cursor.next_projected(&pull) {
+        while let Some(row) = projected_next(&mut cursor, &pull) {
             expected.push(row.unwrap());
         }
         let rows = cursor.row_stats();
@@ -872,7 +954,7 @@ mod collections {
             });
             let mut prefix = Vec::new();
             loop {
-                match cursor.next_projected(&pull) {
+                match projected_next(&mut cursor, &pull) {
                     Some(Ok(row)) => prefix.push(row),
                     Some(Err(GqlQueryError::Interrupted(reported))) => {
                         assert_eq!(reported, stop);
@@ -887,7 +969,7 @@ mod collections {
             assert!(cursor.source.is_none());
             assert!(cursor.traversal.is_none());
             assert_eq!(drops.load(Ordering::SeqCst), 1);
-            assert!(cursor.next_projected(&pull).is_none());
+            assert!(projected_next(&mut cursor, &pull).is_none());
             drop(cursor);
             assert_eq!(at, stop);
         }
@@ -900,7 +982,7 @@ mod collections {
         let mut retry =
             EdgeScanCursor::new(Fixture::small(63), plan.clone(), exact, || Ok::<_, ()>(()));
         let mut actual = Vec::new();
-        while let Some(row) = retry.next_projected(&pull) {
+        while let Some(row) = projected_next(&mut retry, &pull) {
             actual.push(row.unwrap());
         }
         assert_eq!(actual, expected);
@@ -920,7 +1002,7 @@ mod collections {
                 });
             let mut delivered = 0;
             loop {
-                match cursor.next_projected(&pull) {
+                match projected_next(&mut cursor, &pull) {
                     Some(Ok(row)) => {
                         assert_eq!(row, expected[delivered]);
                         delivered += 1;
@@ -931,7 +1013,7 @@ mod collections {
             }
             assert_eq!(cursor.row_stats().result_rows, delivered as u64);
             assert_eq!(cursor.state(), EdgeScanState::Failed);
-            assert!(cursor.next_projected(&pull).is_none());
+            assert!(projected_next(&mut cursor, &pull).is_none());
         }
     }
 
@@ -950,11 +1032,14 @@ mod collections {
             || Ok::<_, ()>(()),
         );
         assert_eq!(
-            cursor.next_projected(&pull).unwrap().unwrap().values()[0],
+            projected_next(&mut cursor, &pull)
+                .unwrap()
+                .unwrap()
+                .values()[0],
             GraphValue::Edge(EId(0))
         );
         assert!(matches!(
-            cursor.next_projected(&pull),
+            projected_next(&mut cursor, &pull),
             Some(Err(GqlQueryError::Source(
                 crate::scan_stream::ScanError::Projection {
                     row: 1,
@@ -966,7 +1051,7 @@ mod collections {
         assert_eq!(cursor.row_stats().result_rows, 1);
         assert_eq!(cursor.state(), EdgeScanState::Failed);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert!(cursor.next_projected(&pull).is_none());
+        assert!(projected_next(&mut cursor, &pull).is_none());
     }
 
     #[test]

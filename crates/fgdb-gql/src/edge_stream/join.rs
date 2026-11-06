@@ -37,12 +37,6 @@ pub(super) struct JoinPlan {
     emit_rows: bool,
 }
 
-impl JoinPlan {
-    pub(super) fn has_expansions(&self) -> bool {
-        !self.expansions.is_empty()
-    }
-}
-
 // Keep occurrence delivery separate from the proof that source traversal is
 // already in final result order. Sort input needs a row allowance but cannot
 // drop duplicates or apply the query window before its blocking consumer.
@@ -66,6 +60,23 @@ pub(super) fn compile_aggregate(
 }
 
 impl EdgeScanPlan {
+    /// Width of the identity prefix of a canonical ordered source. Callers
+    /// first require OrderByValues with no hidden keys, then retain these
+    /// exact leading cells in the final projection to preserve row order.
+    pub(crate) fn canonical_identity_prefix_width(&self) -> usize {
+        let hops = self
+            .joined
+            .as_ref()
+            .map_or(1, |plan| plan.expansions.len() + 1);
+        let GlaOperator::ProjectValues { columns } = self.projection.as_ref() else {
+            unreachable!("the source compiler checked the value projection")
+        };
+        let oriented = self.direction == GlaDirection::Undirected
+            || (hops > 1
+                && matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0));
+        hops + usize::from(oriented)
+    }
+
     /// Compile fixed-edge matches as input to a blocking external ORDER BY.
     ///
     /// Reuse the complete indexed join compiler, including the single-edge

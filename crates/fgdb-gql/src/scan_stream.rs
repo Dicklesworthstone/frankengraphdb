@@ -386,7 +386,8 @@ pub enum ScanCursor<VS, VF, ES, EF> {
     /// Boxed: the edge cursor's join and resumable-quantum state is twice
     /// the vertex cursor's size (clippy::large_enum_variant).
     Edge(Box<EdgeScanCursor<ES, EF>>),
-    /// The checked edge projection retains its source for property evaluation.
+    /// The source is compiled from this pull's pattern. Its complete traversal
+    /// identity prefix also leads the checked final relational projection.
     ProjectedEdge(Box<(EdgeScanCursor<ES, EF>, crate::GraphSetRowPull)>),
 }
 impl<VS, VF, ES, EF> ScanCursor<VS, VF, ES, EF>
@@ -399,8 +400,7 @@ where
         match self {
             Self::Vertex(_) => ScanKind::Vertex,
             Self::ProjectedVertex(_) => ScanKind::Vertex,
-            Self::Edge(_) => ScanKind::Edge,
-            Self::ProjectedEdge(_) => ScanKind::Edge,
+            Self::Edge(_) | Self::ProjectedEdge(_) => ScanKind::Edge,
         }
     }
     #[must_use]
@@ -486,7 +486,13 @@ where
                 .map(|row| row.map_err(|error| error.map_source(ScanError::Edge))),
             Self::ProjectedEdge(projected) => {
                 let (cursor, pull) = projected.as_mut();
-                cursor.next_projected(pull)
+                cursor.next_projected(
+                    pull,
+                    |error| error.map_source(ScanError::Edge),
+                    |row, column, error| {
+                        GqlQueryError::Source(ScanError::Projection { row, column, error })
+                    },
+                )
             }
         }
     }
