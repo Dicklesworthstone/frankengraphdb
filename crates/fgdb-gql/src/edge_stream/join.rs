@@ -37,6 +37,12 @@ pub(super) struct JoinPlan {
     emit_rows: bool,
 }
 
+impl JoinPlan {
+    pub(super) fn has_expansions(&self) -> bool {
+        !self.expansions.is_empty()
+    }
+}
+
 // Keep occurrence delivery separate from the proof that source traversal is
 // already in final result order. Sort input needs a row allowance but cannot
 // drop duplicates or apply the query window before its blocking consumer.
@@ -406,7 +412,7 @@ impl Traversal {
     }
 }
 
-pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
+pub(super) fn advance<const EMIT: bool, S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
     cursor: &mut EdgeScanCursor<S, F>,
     remaining: &mut usize,
 ) -> ScanResult<core::task::Poll<Option<GraphValueRow>>, S::Error, C> {
@@ -614,7 +620,7 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             source,
             &mut |event| meter.event(event),
         )?;
-        if let Some(count) = count {
+        if let Some(count) = count.filter(|_| EMIT) {
             meter.event(GlaExecutionEvent::ResultRow)?;
             meter.rows.result_rows = count;
         } else {

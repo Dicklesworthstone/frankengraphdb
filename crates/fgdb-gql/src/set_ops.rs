@@ -1671,6 +1671,49 @@ impl PreparedGraphSet {
         Some(pull)
     }
 
+    /// A row projection over one fixed root edge, optionally with correlated
+    /// collections. The unchanged leading edge identity (and oriented source
+    /// for an undirected root) proves both input ordinals and final row order.
+    /// Properties use the cursor's pinned reader; metadata, random draws,
+    /// DISTINCT, ordering, pagination and outer joins remain unsupported here.
+    #[must_use]
+    pub fn edge_row_pull(&self) -> Option<GraphSetRowPull> {
+        if !self.order.is_empty() || self.offset != 0 || self.count.is_some() {
+            return None;
+        }
+        let SetNode::Project {
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
+            preserve_order: false,
+        } = &self.node
+        else {
+            return None;
+        };
+        if !input.order.is_empty() || input.offset != 0 || input.count.is_some() {
+            return None;
+        }
+        let SetNode::Pattern(pattern) = &input.node else {
+            return None;
+        };
+        let plan = crate::edge_stream::EdgeScanPlan::compile(pattern.plan()).ok()?;
+        let prefix = plan.row_projection_prefix()?;
+        if projection.len() < prefix
+            || !projection.iter().take(prefix).enumerate().all(
+                |(at, cell)| matches!(cell.value(), GraphSetValue::Column(column) if *column == at),
+            )
+            || projection
+                .iter()
+                .any(|cell| !cell.value().is_scan_local_with_properties(true))
+        {
+            return None;
+        }
+        Some(GraphSetRowPull {
+            pattern: pattern.clone(),
+            projection: projection.clone(),
+        })
+    }
+
     /// The ordered pull of this relation, when it has one (fgdb-7xqxb): the
     /// same checked projection over one vertex-rooted pattern as
     /// [`Self::row_pull`], with this relation's ALL/DISTINCT, ORDER BY and
@@ -1774,8 +1817,8 @@ impl PreparedGraphSet {
     }
 }
 
-/// A relation that pulls row by row (PreparedGraphSet::row_pull): one
-/// vertex-rooted source pattern and the projection each of its rows takes.
+/// A checked row projection over one native source pattern. The admission
+/// accessor determines its vertex/edge source and canonical identity prefix.
 #[derive(Clone)]
 pub struct GraphSetRowPull {
     pattern: PreparedGraphPattern<GraphValueRow>,
@@ -1816,6 +1859,24 @@ impl GraphSetRowPull {
             &self.projection,
             control,
             &mut projection::no_element_reads,
+            arithmetic,
+        )
+    }
+
+    pub(crate) fn project_with_properties<E>(
+        &self,
+        row: &GraphValueRow,
+        ordinal: u64,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+        elements: &mut impl GraphElementReader<E>,
+        arithmetic: impl FnOnce(usize, crate::GraphIntegerError) -> E,
+    ) -> Result<GraphValueRow, E> {
+        GraphSetProjection::evaluate_numbered_row_with_control(
+            row,
+            ordinal,
+            &self.projection,
+            control,
+            &mut projection::HostElements(elements),
             arithmetic,
         )
     }

@@ -545,6 +545,14 @@ impl GraphSetValue {
     /// neither a dead graph read nor an unused random draw loses its contract.
     /// Typed preparation already bounds the expression tree and lexical locals.
     pub(crate) fn is_scan_local(&self) -> bool {
+        self.is_scan_local_with_properties(false)
+    }
+
+    /// The same complete expression audit, with property reads available from
+    /// the executing cursor's pinned source. Metadata and ordinal draws still
+    /// require a different contract, even in an unreachable expression branch.
+    pub(crate) fn is_scan_local_with_properties(&self, properties: bool) -> bool {
+        let local = |value: &Self| value.is_scan_local_with_properties(properties);
         match self {
             Self::Column(_)
             | Self::Literal(_)
@@ -552,10 +560,9 @@ impl GraphSetValue {
             | Self::Integer(_)
             | Self::Value(_)
             | Self::Local(_) => true,
-            // Even a map-valued receiver stays conservative here. Its static
-            // domain can be widened independently, with a reader-free proof.
-            Self::MapGet { .. } | Self::ElementMetadata { .. } | Self::Random { .. } => false,
-            Self::List(values) => values.iter().all(Self::is_scan_local),
+            Self::MapGet { map, .. } => properties && local(map),
+            Self::ElementMetadata { .. } | Self::Random { .. } => false,
+            Self::List(values) => values.iter().all(local),
             Self::Size(value)
             | Self::Keys(value)
             | Self::Temporal {
@@ -563,44 +570,37 @@ impl GraphSetValue {
             }
             | Self::Function {
                 argument: value, ..
-            } => value.is_scan_local(),
-            Self::Index { list, index } => list.is_scan_local() && index.is_scan_local(),
-            Self::In { value, list } => value.is_scan_local() && list.is_scan_local(),
+            } => local(value),
+            Self::Index { list, index } => local(list) && local(index),
+            Self::In { value, list } => local(value) && local(list),
             Self::Equal { left, right } | Self::Ordered { left, right, .. } => {
-                left.is_scan_local() && right.is_scan_local()
+                local(left) && local(right)
             }
             Self::Comprehension { list, filter, map } => {
-                list.is_scan_local()
-                    && filter.as_deref().is_none_or(Self::is_scan_local)
-                    && map.as_deref().is_none_or(Self::is_scan_local)
+                local(list)
+                    && filter.as_deref().is_none_or(local)
+                    && map.as_deref().is_none_or(local)
             }
             Self::Quantifier {
                 list, predicate, ..
-            } => list.is_scan_local() && predicate.is_scan_local(),
+            } => local(list) && local(predicate),
             Self::Slice { list, from, to } => {
-                list.is_scan_local()
-                    && from.as_deref().is_none_or(Self::is_scan_local)
-                    && to.as_deref().is_none_or(Self::is_scan_local)
+                local(list) && from.as_deref().is_none_or(local) && to.as_deref().is_none_or(local)
             }
             Self::Range { start, end, step } => {
-                start.is_scan_local()
-                    && end.is_scan_local()
-                    && step.as_deref().is_none_or(Self::is_scan_local)
+                local(start) && local(end) && step.as_deref().is_none_or(local)
             }
-            Self::Reduce { init, list, expr } => {
-                init.is_scan_local() && list.is_scan_local() && expr.is_scan_local()
-            }
+            Self::Reduce { init, list, expr } => local(init) && local(list) && local(expr),
             Self::MapLiteral { values, guard, .. } => {
-                values.iter().all(Self::is_scan_local)
-                    && guard.as_deref().is_none_or(Self::is_scan_local)
+                values.iter().all(local) && guard.as_deref().is_none_or(local)
             }
             Self::MapOverlay { base, values, .. } | Self::Let { body: base, values } => {
-                base.is_scan_local() && values.iter().all(Self::is_scan_local)
+                local(base) && values.iter().all(local)
             }
             Self::Case { arms, otherwise } => {
                 arms.iter()
-                    .all(|(condition, value)| condition.is_scan_local() && value.is_scan_local())
-                    && otherwise.as_deref().is_none_or(Self::is_scan_local)
+                    .all(|(condition, value)| local(condition) && local(value))
+                    && otherwise.as_deref().is_none_or(local)
             }
         }
     }

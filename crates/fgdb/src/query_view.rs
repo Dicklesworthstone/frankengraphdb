@@ -374,9 +374,11 @@ impl PreparedNativeRead {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::SetText)?;
-                let pull = query.row_pull().ok_or(QueryError::StreamingUnsupported {
-                    facade: self.facade_class(),
-                })?;
+                let pull = query.row_pull().or_else(|| query.edge_row_pull()).ok_or(
+                    QueryError::StreamingUnsupported {
+                        facade: self.facade_class(),
+                    },
+                )?;
                 (pull, query.columns().to_vec(), view.frontier())
             }
             Self::TemporalSet(prepared) => {
@@ -386,6 +388,7 @@ impl PreparedNativeRead {
                 let pull = query
                     .query()
                     .row_pull()
+                    .or_else(|| query.query().edge_row_pull())
                     .ok_or(QueryError::StreamingUnsupported {
                         facade: self.facade_class(),
                     })?;
@@ -398,15 +401,16 @@ impl PreparedNativeRead {
             }
         };
         let (_, cursor) = open_pattern_stream(view, cx, pull.pattern(), as_of, policy)?;
-        let ScanCursor::Vertex(cursor) = cursor else {
-            return Err(QueryError::StreamingUnsupported {
-                facade: self.facade_class(),
-            });
+        let cursor = match cursor {
+            ScanCursor::Vertex(cursor) => ScanCursor::ProjectedVertex(Box::new((cursor, pull))),
+            ScanCursor::Edge(cursor) => ScanCursor::ProjectedEdge(Box::new((*cursor, pull))),
+            _ => {
+                return Err(QueryError::StreamingUnsupported {
+                    facade: self.facade_class(),
+                });
+            }
         };
-        Ok((
-            columns,
-            ScanCursor::ProjectedVertex(Box::new((cursor, pull))),
-        ))
+        Ok((columns, cursor))
     }
 }
 

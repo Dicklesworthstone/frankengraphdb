@@ -775,6 +775,231 @@ mod collections {
     use super::*;
     use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder, GraphValueOrder};
 
+    fn projected(text: &str) -> crate::GraphSetRowPull {
+        crate::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .edge_row_pull()
+            .unwrap()
+    }
+
+    #[test]
+    fn projected_collection_properties_preserve_literal_multigraph_order_in_every_direction() {
+        for (outer_left, outer_right, outer) in [
+            ("-", "->", GlaDirection::Forward),
+            ("<-", "-", GlaDirection::Reverse),
+            ("-", "-", GlaDirection::Undirected),
+        ] {
+            for (inner_left, inner_right, inner) in [
+                ("-", "->", GlaDirection::Forward),
+                ("<-", "-", GlaDirection::Reverse),
+                ("-", "-", GlaDirection::Undirected),
+            ] {
+                let pull = projected(&format!(
+                    "MATCH (a){outer_left}[r:R]{outer_right}(b) RETURN r,a,b,\
+                     [(b){inner_left}[s:R]{inner_right}(c) | s.p] AS weights"
+                ));
+                let plan = EdgeScanPlan::compile(pull.pattern().plan()).unwrap();
+                for mask in 0..64 {
+                    let fixture = Fixture::small(mask);
+                    let expected: Vec<_> = expected(&fixture, outer, inner)
+                        .into_iter()
+                        .map(|row| {
+                            let weights = row.values()[4]
+                                .as_list()
+                                .unwrap()
+                                .iter()
+                                .map(|value| {
+                                    let GraphValue::Edge(id) = value else {
+                                        panic!("edge witness")
+                                    };
+                                    let value =
+                                        fixture.edges[id].2[0].1.as_scalar().unwrap().clone();
+                                    GraphValue::Scalar(value)
+                                })
+                                .collect();
+                            GraphValueRow::from_owned_values(vec![
+                                row.values()[0].clone(),
+                                row.values()[1].clone(),
+                                row.values()[2].clone(),
+                                GraphValue::List(weights),
+                            ])
+                        })
+                        .collect();
+                    let roots = fixture.roots.clone();
+                    let mut cursor =
+                        EdgeScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
+                    assert_eq!(roots.load(Ordering::SeqCst), 0);
+                    assert_eq!(cursor.row_stats().snapshot_records, 0);
+                    let mut actual = Vec::new();
+                    while let Some(row) = cursor.next_projected(&pull) {
+                        actual.push(row.unwrap());
+                    }
+                    assert_eq!(actual, expected, "{outer:?}/{inner:?}; mask={mask}");
+                    assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
+                    assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                    assert!(cursor.next_projected(&pull).is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn projected_collections_share_every_checkpoint_and_exact_cumulative_allowance() {
+        let pull = projected("MATCH (a)-[r:R]->(b) RETURN r,a,b,[(b)-[s:R]->(c) | s.p] AS weights");
+        let plan = EdgeScanPlan::compile(pull.pattern().plan()).unwrap();
+        let mut checkpoints = 0;
+        let mut cursor = EdgeScanCursor::new(Fixture::small(63), plan.clone(), policy(), || {
+            checkpoints += 1;
+            Ok::<_, usize>(())
+        });
+        let mut expected = Vec::new();
+        while let Some(row) = cursor.next_projected(&pull) {
+            expected.push(row.unwrap());
+        }
+        let rows = cursor.row_stats();
+        let evaluator = cursor.evaluator_stats();
+        drop(cursor);
+        assert!(checkpoints > 0);
+        for stop in 1..=checkpoints {
+            let fixture = Fixture::small(63);
+            let drops = fixture.drops.clone();
+            let mut at = 0;
+            let mut cursor = EdgeScanCursor::new(fixture, plan.clone(), policy(), || {
+                at += 1;
+                if at == stop { Err(stop) } else { Ok(()) }
+            });
+            let mut prefix = Vec::new();
+            loop {
+                match cursor.next_projected(&pull) {
+                    Some(Ok(row)) => prefix.push(row),
+                    Some(Err(GqlQueryError::Interrupted(reported))) => {
+                        assert_eq!(reported, stop);
+                        break;
+                    }
+                    other => panic!("checkpoint {stop} became {other:?}"),
+                }
+            }
+            assert_eq!(prefix, expected[..prefix.len()]);
+            assert_eq!(cursor.row_stats().result_rows, prefix.len() as u64);
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+            assert!(cursor.source.is_none());
+            assert!(cursor.traversal.is_none());
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(cursor.next_projected(&pull).is_none());
+            drop(cursor);
+            assert_eq!(at, stop);
+        }
+        let exact = GqlQueryPolicy::new(
+            rows.snapshot_records,
+            rows.result_rows,
+            evaluator.work_units,
+            evaluator.scratch_entries,
+        );
+        let mut retry =
+            EdgeScanCursor::new(Fixture::small(63), plan.clone(), exact, || Ok::<_, ()>(()));
+        let mut actual = Vec::new();
+        while let Some(row) = retry.next_projected(&pull) {
+            actual.push(row.unwrap());
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(
+            (retry.row_stats(), retry.evaluator_stats()),
+            (rows, evaluator)
+        );
+        for allowance in [
+            GqlQueryPolicy::new(rows.snapshot_records - 1, 100, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(1_000, rows.result_rows - 1, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(1_000, 100, evaluator.work_units - 1, u64::MAX),
+            GqlQueryPolicy::new(1_000, 100, u64::MAX, evaluator.scratch_entries - 1),
+        ] {
+            let mut cursor =
+                EdgeScanCursor::new(Fixture::small(63), plan.clone(), allowance, || {
+                    Ok::<_, ()>(())
+                });
+            let mut delivered = 0;
+            loop {
+                match cursor.next_projected(&pull) {
+                    Some(Ok(row)) => {
+                        assert_eq!(row, expected[delivered]);
+                        delivered += 1;
+                    }
+                    Some(Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))) => break,
+                    other => panic!("short allowance became {other:?}"),
+                }
+            }
+            assert_eq!(cursor.row_stats().result_rows, delivered as u64);
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+            assert!(cursor.next_projected(&pull).is_none());
+        }
+    }
+
+    #[test]
+    fn projected_collection_failure_keeps_the_original_row_and_column_without_counting_it() {
+        let pull = projected(
+            "MATCH (a)-[r:R]->(b) RETURN r,a,b,10/(r.p+1) AS q,\
+                              [(b)-[s:R]->(c) | s.p] AS weights",
+        );
+        let fixture = Fixture::small(63);
+        let drops = fixture.drops.clone();
+        let mut cursor = EdgeScanCursor::new(
+            fixture,
+            EdgeScanPlan::compile(pull.pattern().plan()).unwrap(),
+            policy(),
+            || Ok::<_, ()>(()),
+        );
+        assert_eq!(
+            cursor.next_projected(&pull).unwrap().unwrap().values()[0],
+            GraphValue::Edge(EId(0))
+        );
+        assert!(matches!(
+            cursor.next_projected(&pull),
+            Some(Err(GqlQueryError::Source(
+                crate::scan_stream::ScanError::Projection {
+                    row: 1,
+                    column: 3,
+                    ..
+                }
+            )))
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 1);
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(cursor.next_projected(&pull).is_none());
+    }
+
+    #[test]
+    fn projected_edge_admission_checks_keys_and_every_hidden_effect_before_opening() {
+        let prepare = |text: &str| {
+            crate::PreparedGraphSetText::prepare(text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+        };
+        let base = "MATCH (a)-[r:R]->(b) RETURN r,a,b,[(b)-[s:R]->(c) | s.p] AS weights";
+        assert!(prepare(base).edge_row_pull().is_some());
+        for invalid in [
+            base.replace("RETURN r,a,b", "RETURN a,r,b"),
+            base.replace("RETURN r,a,b", "RETURN DISTINCT r,a,b"),
+            format!("{base} LIMIT 0"),
+            format!("{base} ORDER BY weights LIMIT 0"),
+            base.replace(
+                "RETURN r,a,b",
+                "RETURN r,CASE WHEN false THEN rand() ELSE 0 END AS x,a,b",
+            ),
+            base.replace(
+                "RETURN r,a,b",
+                "RETURN r,CASE WHEN false THEN properties(a) ELSE 0 END AS x,a,b",
+            ),
+            base.replace("[r:R]->(b)", "[r:R]-(b)")
+                .replace("RETURN r,a,b", "RETURN r,b,a"),
+            base.replace("(b) RETURN", "(b)-[t:R]->(d) RETURN"),
+        ] {
+            assert!(prepare(&invalid).edge_row_pull().is_none(), "{invalid}");
+        }
+    }
+
     fn definition(
         outer_direction: GlaDirection,
         inner_direction: GlaDirection,
