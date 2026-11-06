@@ -1310,7 +1310,9 @@ mod query_source {
                                 for selection in roots.iter().flatten() {
                                     control(SourceEvent::Work)?;
                                     let GlaOperator::Select { predicates, .. } = selection else {
-                                        unreachable!("only primitive root selections were retained");
+                                        unreachable!(
+                                            "only primitive root selections were retained"
+                                        );
                                     };
                                     let mut matches = true;
                                     for predicate in predicates {
