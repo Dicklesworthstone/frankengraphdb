@@ -13,7 +13,7 @@ use fgdb_types::QueryCx;
 #[derive(Debug)]
 pub enum SealPublicationError {
     Publication(RebuildError),
-    Origin(crate::OriginBirthError),
+    Origin(Box<crate::OriginBirthError>),
     Source(SealedError),
     Run(AdjRunError),
 }
@@ -33,7 +33,7 @@ impl core::error::Error for SealPublicationError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Publication(error) => Some(error),
-            Self::Origin(error) => Some(error),
+            Self::Origin(error) => Some(error.as_ref()),
             Self::Source(error) => Some(error),
             Self::Run(error) => Some(error),
         }
@@ -115,7 +115,7 @@ impl<V: Vfs + Clone> Database<V> {
             &mut self.crypto_verification_events,
         )
         .await
-        .map_err(SealPublicationError::Origin)?;
+        .map_err(|error| SealPublicationError::Origin(Box::new(error)))?;
         let run = AdjRunSegment::from_sealed(query_cx, &partition, &origins, sealing)
             .map_err(SealPublicationError::Run)?;
         let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)

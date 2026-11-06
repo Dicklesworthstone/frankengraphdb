@@ -210,7 +210,7 @@ fn stable_digest(
         checkpoint(cx)?;
         let mut cursor = RowScan::new(&partition.image, row, 0);
         while let Some((entry, locator)) = cursor.next() {
-            if cursor.position % 128 == 0 {
+            if cursor.position.is_multiple_of(128) {
                 checkpoint(cx)?;
             }
             let origin =

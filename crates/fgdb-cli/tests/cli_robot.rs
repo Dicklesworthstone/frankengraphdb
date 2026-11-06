@@ -4040,6 +4040,33 @@ fn seal_publishes_for_cold_reads_without_advancing_or_rewriting_history() {
             (path, bytes)
         })
         .collect();
+    // Before the first attachment, a zero image allowance can be refused by
+    // the identity encoder. It is the same caller budget as an attached run's
+    // admission limit, and neither path may publish a root or graph commit.
+    let root_path = std::path::Path::new(&db.db).join("manifest.root");
+    let root_before = std::fs::read(&root_path).unwrap();
+    for (command, args) in [
+        (
+            "seal",
+            &["--seal-relation", "1", "--sealed-image-bytes", "0"][..],
+        ),
+        (
+            "query",
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--sealed-image-bytes",
+                "0",
+                "CALL fnx.pagerank() YIELD vertex, score",
+            ][..],
+        ),
+    ] {
+        let refused = db.command(command, args);
+        refused.failure(3, "query");
+        assert_eq!(refused.terminal().get("code").string(), "budget");
+        assert_eq!(std::fs::read(&root_path).unwrap(), root_before);
+    }
     let sealed = db.command("seal", &["--seal-relation", "1"]);
     assert_eq!(sealed.sequence("sealed"), seq);
     assert_eq!(sealed.terminal().get("relation").unsigned(), 1);
@@ -4195,7 +4222,9 @@ fn scrub_rebuilds_derived_data_only_after_authenticating_the_retained_history() 
         })
         .find_map(|path| {
             let bytes = std::fs::read(&path).unwrap();
-            bytes.starts_with(b"FGVP").then_some((path, bytes))
+            bytes
+                .starts_with(&fgdb_strata::vertex::VERTEX_PATCH_MAGIC)
+                .then_some((path, bytes))
         })
         .expect("a single vertex write publishes one loose patch");
     let mut damaged = original.clone();
@@ -5999,7 +6028,7 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
                 "--buffered",
                 "--spill-dir",
                 spill,
-                "MATCH p = WALK (a)-[:KNOWS*]->(b) RETURN p LIMIT 0",
+                "MATCH REPEATABLE ELEMENTS p = WALK (a)-[:KNOWS*]->(b) RETURN p LIMIT 0",
             ],
             3,
             "query",

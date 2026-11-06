@@ -128,7 +128,9 @@ fn seal_failure(error: SealPublicationError) -> Failure {
             }
             error => execution_failure(error),
         },
-        SealPublicationError::Origin(error @ OriginBirthError::Limit { .. }) => {
+        SealPublicationError::Origin(error)
+            if matches!(error.as_ref(), OriginBirthError::Limit { .. }) =>
+        {
             Failure::coded(super::refusal::Code::Budget, error)
         }
         error => execution_failure(error),

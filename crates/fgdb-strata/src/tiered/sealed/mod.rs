@@ -129,6 +129,23 @@ pub enum SealedError {
     ImageMismatch,
 }
 
+impl SealedError {
+    /// Whether an explicit caller allowance refused the image. Malformed
+    /// identities, arithmetic overflow and allocation failures stay distinct.
+    pub fn is_admission_limit(&self) -> bool {
+        matches!(
+            self,
+            Self::Limit { .. }
+                | Self::Identity(
+                    IdentityColumnError::RowLimitExceeded { .. }
+                        | IdentityColumnError::PrefixLimitExceeded { .. }
+                        | IdentityColumnError::PayloadLimitExceeded { .. }
+                        | IdentityColumnError::NoRepresentationFits { .. }
+                )
+        )
+    }
+}
+
 impl core::fmt::Display for SealedError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -646,7 +663,7 @@ impl SealedPartition {
             cx.checkpoint().map_err(SealedError::Interrupted)?;
             let mut cursor = RowScan::new(&self.image, row, 0);
             while let Some((entry, _)) = cursor.next() {
-                if cursor.position % 128 == 0 {
+                if cursor.position.is_multiple_of(128) {
                     cx.checkpoint().map_err(SealedError::Interrupted)?;
                 }
                 if !ids.contains(&entry.eid) {

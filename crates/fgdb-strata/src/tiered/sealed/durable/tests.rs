@@ -433,8 +433,10 @@ fn durable_run_refuses_unknown_profiles_oversized_counts_and_short_byte_budgets(
             read(&cx, &segment, &count),
             Err(AdjRunError::Sealed(SealedError::Limit { .. }))
         ));
-        let mut limits = SealedLimits::default();
-        limits.max_image_bytes = bytes.len();
+        let mut limits = SealedLimits {
+            max_image_bytes: bytes.len(),
+            ..SealedLimits::default()
+        };
         assert_eq!(segment.encode(&cx, limits).unwrap(), bytes);
         limits.max_image_bytes -= 1;
         assert!(matches!(

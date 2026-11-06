@@ -133,6 +133,11 @@ fn classify_one(error: &(dyn Error + 'static)) -> Option<(Code, Option<usize>)> 
     if error.is::<fgdb_gql::GqlBudgetExceeded>() || error.is::<fgdb_gql::GlaLimitExceeded>() {
         return Some((Code::Budget, None));
     }
+    if let Some(error) = error.downcast_ref::<fgdb_strata::tiered::sealed::SealedError>()
+        && error.is_admission_limit()
+    {
+        return Some((Code::Budget, None));
+    }
     // A data exception (division by zero, overflow, a collection where a
     // scalar is read) is the value's, not the statement's.
     if error.is::<fgdb_gql::GraphIntegerError>() {

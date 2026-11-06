@@ -134,7 +134,7 @@ pub fn decode_root_runs(bytes: &[u8]) -> Result<Option<RootRuns<'_>>, RootError>
     let mut runs = Vec::new();
     runs.try_reserve_exact(count)
         .map_err(|_| RootError::InvalidRunRoot)?;
-    for entry in bytes[base_end..payload_end].chunks_exact(REF_BYTES) {
+    for entry in bytes[base_end..payload_end].as_chunks::<REF_BYTES>().0 {
         runs.push(AdjRunRef {
             relation: RelationId(u64::from_be_bytes(entry[..8].try_into().unwrap())),
             run: ObjectId(entry[8..40].try_into().unwrap()),

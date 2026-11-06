@@ -129,10 +129,10 @@ fn seal_refusals_preserve_budget_invalid_floor_and_storage_error_classes() {
     for error in [
         SealPublicationError::Source(limit()),
         SealPublicationError::Run(AdjRunError::Sealed(limit())),
-        SealPublicationError::Origin(OriginBirthError::Limit {
+        SealPublicationError::Origin(Box::new(OriginBirthError::Limit {
             requested: 1,
             limit: 0,
-        }),
+        })),
         SealPublicationError::Source(SealedError::Store(Box::new(
             fgdb_strata::store::StoreError::ObjectTooLarge {
                 observed: 1,

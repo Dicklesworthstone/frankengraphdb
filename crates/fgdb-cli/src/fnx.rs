@@ -36,7 +36,7 @@ use fgdb_prism::{
 };
 use fgdb_strata::{
     store::{RootReadError, RootReadLimits, StoreError},
-    tiered::sealed::{AdjRunError, SealedError, SealedLimits},
+    tiered::sealed::{AdjRunError, SealedLimits},
 };
 use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::io::Write;
@@ -725,7 +725,7 @@ pub(super) fn sealed_store_failure(error: StoreError) -> Failure {
             StoreError::MalformedAdjRun(error) => {
                 matches!(
                     error.as_ref(),
-                    AdjRunError::Sealed(SealedError::Limit { .. })
+                    AdjRunError::Sealed(error) if error.is_admission_limit()
                 )
             }
             StoreError::RootBlockLoad { error, .. }
@@ -1109,10 +1109,10 @@ mod tests {
     #[test]
     fn persisted_seal_limits_remain_budgets_and_corruption_remains_io() {
         use super::{
-            AdjRunError, RootReadError, SealedError, SealedProjectionOpenError, StoreError,
-            sealed_open_failure,
+            AdjRunError, RootReadError, SealedProjectionOpenError, StoreError, sealed_open_failure,
         };
         use crate::refusal::Code;
+        use fgdb_strata::tiered::sealed::SealedError;
 
         for error in [
             SealedProjectionOpenError::Store(StoreError::ObjectTooLarge {
