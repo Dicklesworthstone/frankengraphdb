@@ -606,6 +606,162 @@ fn independent_indexed_roots_admit_the_union_and_preserve_staged_products() {
 }
 
 #[test]
+fn indexed_overlay_prunes_unmatched_creations_before_admitting_source_rows() {
+    let ((), report) = run_async_under_lab(0xc0a4_0017, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed_indexed_overlay_chain(&mut db, &commit).await;
+        let pair = indexed_overlay_vertex_pair(Some(100), Some(200));
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(R);
+        for id in 10_000..10_064_u128 {
+            staged.create_vertex(
+                VId(id),
+                vec![L],
+                vec![(N, CanonicalScalar::Int(i64::try_from(id).unwrap()))],
+            );
+        }
+        staged.create_vertex(VId(10_100), vec![L], vec![]);
+        staged.create_vertex(VId(10_101), vec![L], vec![(N, CanonicalScalar::Null)]);
+        staged.create_vertex(VId(20_000), vec![L], vec![(N, CanonicalScalar::Int(100))]);
+        staged.create_vertex(VId(20_001), vec![L], vec![(N, CanonicalScalar::Int(200))]);
+        staged.create_vertex(VId(20_002), vec![], vec![(N, CanonicalScalar::Int(200))]);
+        txn.write(&mut db, staged).unwrap();
+        txn.savepoint(&db, "before-entrants").unwrap();
+        let selected = GqlQueryPolicy::new(4, 4, 1_000_000, 1_000_000);
+        let initial = txn
+            .execute_graph_pattern_governed(&db, &cx, &pair, selected)
+            .unwrap();
+        let tuples = |rows: &[_]| {
+            rows.iter()
+                .map(|row: &fgdb_gql::algebra::GraphBindingRow| (row.values()[0], row.values()[1]))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(initial.rows.snapshot_records, 4);
+        assert_eq!(
+            tuples(&initial.value),
+            vec![
+                (VId(100), VId(200)),
+                (VId(100), VId(20_001)),
+                (VId(20_000), VId(200)),
+                (VId(20_000), VId(20_001)),
+            ]
+        );
+
+        // A property edit or label edit can make a previously excluded
+        // creation enter either root. Both must remain candidates.
+        let mut entrants = WriteBatch::new(R);
+        entrants.set_vertex_property(VId(10_000), N, Some(CanonicalScalar::Int(100)));
+        entrants.set_vertex_label(VId(20_002), L, true);
+        txn.write(&mut db, entrants).unwrap();
+        let changed = txn
+            .execute_graph_pattern_governed(
+                &db,
+                &cx,
+                &pair,
+                GqlQueryPolicy::new(6, 9, 1_000_000, 1_000_000),
+            )
+            .unwrap();
+        assert_eq!(changed.rows.snapshot_records, 6);
+        assert_eq!(
+            tuples(&changed.value),
+            vec![
+                (VId(100), VId(200)),
+                (VId(100), VId(20_001)),
+                (VId(100), VId(20_002)),
+                (VId(10_000), VId(200)),
+                (VId(10_000), VId(20_001)),
+                (VId(10_000), VId(20_002)),
+                (VId(20_000), VId(200)),
+                (VId(20_000), VId(20_001)),
+                (VId(20_000), VId(20_002)),
+            ]
+        );
+        txn.rollback_to_savepoint(&db, "before-entrants").unwrap();
+        let restored = txn
+            .execute_graph_pattern_governed(&db, &cx, &pair, selected)
+            .unwrap();
+        assert_eq!(restored.rows.snapshot_records, 4);
+        assert_eq!(restored.value, initial.value);
+        assert!(matches!(
+            txn.execute_graph_pattern_governed(
+                &db,
+                &cx,
+                &pair,
+                GqlQueryPolicy::new(3, 4, 1_000_000, 1_000_000),
+            ),
+            Err(GqlQueryError::Rows(error))
+                if error.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn pruned_creation_reads_survive_savepoint_rollback_without_broad_false_conflicts() {
+    let ((), report) = run_async_under_lab(0xc0a4_0018, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        for reuse_observed_identity in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed_indexed_overlay_chain(&mut db, &commit).await;
+            let pair = indexed_overlay_vertex_pair(Some(100), Some(200));
+            let mut txn = db.begin(&txcx).unwrap();
+            txn.savepoint(&db, "before-creation").unwrap();
+            let mut discarded = WriteBatch::new(R);
+            discarded.create_vertex(VId(7_000), vec![L], vec![(N, CanonicalScalar::Int(999))]);
+            txn.write(&mut db, discarded).unwrap();
+            let result = txn
+                .execute_graph_pattern_governed(
+                    &db,
+                    &cx,
+                    &pair,
+                    GqlQueryPolicy::new(3, 1, 1_000_000, 1_000_000),
+                )
+                .unwrap();
+            assert_eq!(result.value.len(), 1);
+            assert_eq!(result.value[0].values(), &[VId(100), VId(200)]);
+            txn.rollback_to_savepoint(&db, "before-creation").unwrap();
+            let mut survivor = WriteBatch::new(R);
+            survivor.create_vertex(VId(9_000), vec![L], vec![(N, CanonicalScalar::Int(999))]);
+            txn.write(&mut db, survivor).unwrap();
+            let mut winner = WriteBatch::new(R);
+            winner.create_vertex(
+                VId(if reuse_observed_identity {
+                    7_000
+                } else {
+                    8_000
+                }),
+                vec![L],
+                vec![(N, CanonicalScalar::Int(999))],
+            );
+            db.write(&commit, winner).await.unwrap();
+            let completion = txn.finish(&mut db, &commit).await;
+            if reuse_observed_identity {
+                assert!(matches!(
+                    completion,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    }))
+                ));
+            } else {
+                assert!(completion.is_ok(), "{completion:?}");
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn every_indexed_root_keeps_empty_and_refused_membership_observations() {
     let ((), report) = run_async_under_lab(0xc0a4_0015, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

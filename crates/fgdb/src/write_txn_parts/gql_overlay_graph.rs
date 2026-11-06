@@ -1275,7 +1275,7 @@ mod query_source {
                 }
             }
             let mut vertices = BTreeSet::new();
-            for selection in roots.into_iter().flatten() {
+            for selection in roots.iter().flatten() {
                 let GlaOperator::Select { predicates, .. } = selection else {
                     unreachable!("only primitive root selections were retained");
                 };
@@ -1298,7 +1298,35 @@ mod query_source {
                     for effect in &coordinate.rows {
                         control(SourceEvent::Work)?;
                         let candidate = match effect {
-                            DeltaRow::CreateVertex { vid, .. } => Some(*vid),
+                            DeltaRow::CreateVertex {
+                                vid, labels, props, ..
+                            } => {
+                                // A creation only needs source admission if it
+                                // can enter a root. Relevant later edits below
+                                // still admit its identity conservatively; raw
+                                // staged read observations remain unchanged.
+                                let view = VertexView::new(labels, props);
+                                let mut matches_root = false;
+                                for selection in roots.iter().flatten() {
+                                    control(SourceEvent::Work)?;
+                                    let GlaOperator::Select { predicates, .. } = selection else {
+                                        unreachable!("only primitive root selections were retained");
+                                    };
+                                    let mut matches = true;
+                                    for predicate in predicates {
+                                        control(SourceEvent::Work)?;
+                                        if !view.matches(predicate) {
+                                            matches = false;
+                                            break;
+                                        }
+                                    }
+                                    if matches {
+                                        matches_root = true;
+                                        break;
+                                    }
+                                }
+                                matches_root.then_some(*vid)
+                            }
                             DeltaRow::LabelMembership { vid, label, .. }
                                 if labels.contains(label) =>
                             {
