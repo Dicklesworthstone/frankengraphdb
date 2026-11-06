@@ -214,11 +214,9 @@ impl<V: Vfs + Clone> Database<V> {
 
         let mut seed = WriteBatch::new(suffix.relation);
         let mut retained_births = BTreeMap::new();
-        let mut untouched = Vec::with_capacity(coordinate.rows.len());
         for row in &coordinate.rows {
             let element = target(row).expect("supported prefix checked above");
             if !needed.contains(&element) {
-                untouched.push(row.clone());
                 continue;
             }
             let Some((pending, birth)) = seed_row(row, suffix.relation, prefix_visits) else {
@@ -242,6 +240,7 @@ impl<V: Vfs + Clone> Database<V> {
         let [partial_coordinate] = partial.template.coordinate_entries() else {
             return Err(WriteTxnError::UnsupportedAtomicMutation);
         };
+        let mut next_rows = Vec::with_capacity(partial_coordinate.rows.len());
         for row in &partial_coordinate.rows {
             let mut row = row.clone();
             let birth = match &mut row {
@@ -262,25 +261,24 @@ impl<V: Vfs + Clone> Database<V> {
                         .ok_or(WriteTxnError::AtomicOrdinalOverflow)?,
                 };
             }
-            untouched.push(row);
+            next_rows.push(row);
         }
         // The replaced and retained sets have disjoint element identities.
         // No delete/cascade can cross that boundary, so only the small input
-        // needs NENF folding; the full prefix is merely canonically encoded.
-        let next_coordinate = crate::CoordinateEntry {
-            graph: coordinate.graph,
-            branch: coordinate.branch,
-            relation: coordinate.relation,
-            schema_epoch: coordinate.schema_epoch,
-            schema_transition: coordinate.schema_transition,
-            rows: untouched,
+        // needs NENF folding. Retained canonical rows need no full re-sort or
+        // payload encoding pass; their owned copies are still composed here.
+        let Some(template) = previous
+            .template
+            .replace_coordinate_rows(
+                coordinate.coordinate(),
+                |row| !needed.contains(&target(row).expect("supported prefix checked above")),
+                next_rows,
+            )
+            .map_err(WriteError::Canonical)?
+        else {
+            return Ok(None);
         };
-        partial.template = crate::LogicalDeltaTemplate::build(
-            previous.template.intent_semantics_oid(),
-            *previous.template.source_intent_root_digest(),
-            vec![next_coordinate],
-        )
-        .map_err(WriteError::Canonical)?;
+        partial.template = template;
         let mut dependencies: PreparedDependencies = previous.dependencies.clone();
         dependencies.extend(partial.dependencies);
         partial.dependencies = dependencies;

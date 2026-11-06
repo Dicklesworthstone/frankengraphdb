@@ -174,6 +174,79 @@ fn pure_create_chunks_keep_the_native_creation_lane_and_raw_birth_visits() {
 }
 
 #[test]
+fn incremental_collection_prefixes_keep_bytes_births_and_format_downgrades() {
+    let ((), report) = run_async_under_lab(0x6972_0010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let mut db = seeded(&cx).await;
+        let collection = fgdb_types::CanonicalPropertyValue::List(
+            fgdb_types::CanonicalList::try_new(vec![
+                int(5).into(),
+                CanonicalScalar::Date(fgdb_types::CanonicalDate::from_civil(2026, 11, 6).unwrap())
+                    .into(),
+            ])
+            .unwrap(),
+        );
+        let mut prefix = WriteBatch::new(R);
+        prefix.ensure_vertex(VId(1), vec![], vec![]);
+        prefix.create_vertex_values(
+            VId(5),
+            vec![LabelId(2), LabelId(1)],
+            vec![(Q, collection), (P, int(5).into())],
+        );
+        prefix.create_vertex(VId(6), vec![], vec![(P, int(6))]);
+        prefix.add_edge(EId(50), VId(5), VId(6), vec![(P, int(50))]);
+        let mut staged = vec![prefix.clone()];
+        let mut previous = db.prepare_write(prefix).unwrap();
+        assert_eq!(
+            previous.template.format(),
+            fgdb_delta_types::DELTA_FORMAT_V3
+        );
+        let frozen = previous.template.clone();
+        let frozen_bytes = frozen.canonical_bytes().unwrap();
+        let mut unrelated = WriteBatch::new(R);
+        unrelated.create_vertex(VId(7), vec![], vec![(P, int(7))]);
+        let mut remove_collection = WriteBatch::new(R);
+        remove_collection.set_vertex_property_value(VId(5), Q, None);
+        for (suffix, format) in [
+            (unrelated, fgdb_delta_types::DELTA_FORMAT_V3),
+            (remove_collection, fgdb_delta_types::DELTA_FORMAT_V1),
+        ] {
+            let before = previous.template.canonical_bytes().unwrap();
+            let next = db
+                .try_extend_prepared_write(&previous, &staged, &suffix)
+                .unwrap()
+                .expect("the native collection prefix supports incremental extension");
+            staged.push(suffix);
+            let full = db.prepare_write(combined(&staged)).unwrap();
+            assert_eq!(
+                next.template.canonical_bytes(),
+                full.template.canonical_bytes()
+            );
+            assert_eq!(next.template.format(), format);
+            assert_eq!(next.dependencies.elements, full.dependencies.elements);
+            assert_eq!(next.dependencies.adjacency, full.dependencies.adjacency);
+            assert_eq!(next.replay_row_allowance, full.replay_row_allowance);
+            assert_eq!(previous.template.canonical_bytes().unwrap(), before);
+            assert_eq!(frozen.canonical_bytes().unwrap(), frozen_bytes);
+            previous = next;
+        }
+        let births: Vec<_> = previous
+            .template
+            .rows()
+            .filter_map(|row| match row {
+                DeltaRow::CreateVertex { birth_ordinal, .. }
+                | DeltaRow::CreateEdge { birth_ordinal, .. } => Some(*birth_ordinal),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(births, vec![2, 3, 5, 4]);
+        assert!(db.vertex(VId(5)).unwrap().is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn refused_suffix_preserves_identity_and_cas_errors() {
     let ((), report) = run_async_under_lab(0x6972_0003, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

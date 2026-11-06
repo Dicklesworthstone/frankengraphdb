@@ -1364,6 +1364,77 @@ pub(crate) fn canonicalize_owned(entries: &mut [CoordinateEntry]) -> Result<(), 
     Ok(())
 }
 
+/// Merge into a retained subsequence of a checked template's canonical rows.
+/// Only `LogicalDeltaTemplate` lends the existing rows to this constructor.
+pub(crate) fn replace_canonical_rows(
+    existing: &[DeltaRow],
+    mut retain: impl FnMut(&DeltaRow) -> bool,
+    additional: Vec<DeltaRow>,
+    entry: usize,
+) -> Result<Vec<DeltaRow>, CanonicalError> {
+    // Validate ALL additions before reporting any duplicate, including a
+    // duplicate against the retained prefix. This is build's error precedence.
+    let mut encoded: Vec<(Vec<u8>, DeltaRow)> = additional
+        .into_iter()
+        .map(|mut row| {
+            row.canonicalize_embedded_collections();
+            row.canonical_bytes().map(|bytes| (bytes, row))
+        })
+        .collect::<Result<_, _>>()?;
+    encoded.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut retained: Vec<(&DeltaRow, Option<Vec<u8>>)> = existing
+        .iter()
+        .filter(|row| retain(row))
+        .map(|row| (row, None))
+        .collect();
+    // Keys are lazy and local to this call. Even a large suffix encodes each
+    // compared old row at most once; no persistent cache can become stale.
+    fn compare(
+        (row, cached): &mut (&DeltaRow, Option<Vec<u8>>),
+        key: &[u8],
+    ) -> Result<std::cmp::Ordering, CanonicalError> {
+        let bytes = match cached {
+            Some(bytes) => bytes,
+            None => cached.insert(row.canonical_bytes()?),
+        };
+        Ok(bytes.as_slice().cmp(key))
+    }
+
+    let mut rows = Vec::with_capacity(retained.len() + encoded.len());
+    let mut cursor = 0;
+    let mut previous: Option<Vec<u8>> = None;
+    for (key, row) in encoded {
+        if previous.as_deref() == Some(key.as_slice()) {
+            return Err(CanonicalError::NonCanonicalRowOrder {
+                entry,
+                index: rows.len(),
+            });
+        }
+        let (mut low, mut high) = (cursor, retained.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if compare(&mut retained[middle], &key)?.is_lt() {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        rows.extend(retained[cursor..low].iter().map(|(row, _)| (*row).clone()));
+        if low < retained.len() && compare(&mut retained[low], &key)?.is_eq() {
+            return Err(CanonicalError::NonCanonicalRowOrder {
+                entry,
+                index: rows.len() + 1,
+            });
+        }
+        rows.push(row);
+        cursor = low;
+        previous = Some(key);
+    }
+    rows.extend(retained[cursor..].iter().map(|(row, _)| (*row).clone()));
+    Ok(rows)
+}
+
 impl crate::LogicalDeltaBatch {
     /// The batch's canonical bytes — the transcript its `batch_digest` is taken
     /// over, and therefore what makes that digest an idempotency key two

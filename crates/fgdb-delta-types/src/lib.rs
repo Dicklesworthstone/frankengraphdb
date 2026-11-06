@@ -306,6 +306,63 @@ impl LogicalDeltaTemplate {
         })
     }
 
+    /// Retain selected rows of an existing coordinate and add new effects.
+    ///
+    /// Returns `None` when the coordinate is absent. The receiver and every
+    /// coordinate's metadata remain unchanged. New rows use the ordinary
+    /// canonical encoder; retained rows are a subsequence of this immutable,
+    /// already checked template. Merging preserves their order without
+    /// encoding and sorting every accumulated payload again. Duplicate rows
+    /// still refuse at their position in the complete canonical result.
+    ///
+    /// This does not fold overlapping effects: the caller must produce the
+    /// net effects before adding them, just as for [`Self::build`].
+    pub fn replace_coordinate_rows(
+        &self,
+        coordinate: (GraphId, BranchId, RelationId),
+        retain: impl FnMut(&DeltaRow) -> bool,
+        additional: Vec<DeltaRow>,
+    ) -> Result<Option<Self>, CanonicalError> {
+        let Ok(index) = self
+            .coordinate_entries
+            .binary_search_by_key(&coordinate, CoordinateEntry::coordinate)
+        else {
+            return Ok(None);
+        };
+        let rows = canonical::replace_canonical_rows(
+            &self.coordinate_entries[index].rows,
+            retain,
+            additional,
+            index,
+        )?;
+        // Avoid cloning the target's old payload only to replace it. Other
+        // coordinates keep their existing canonical rows and all metadata.
+        let mut coordinate_entries: Vec<_> = self
+            .coordinate_entries
+            .iter()
+            .enumerate()
+            .map(|(at, entry)| CoordinateEntry {
+                graph: entry.graph,
+                branch: entry.branch,
+                relation: entry.relation,
+                schema_epoch: entry.schema_epoch,
+                schema_transition: entry.schema_transition,
+                rows: if at == index {
+                    Vec::new()
+                } else {
+                    entry.rows.clone()
+                },
+            })
+            .collect();
+        coordinate_entries[index].rows = rows;
+        Ok(Some(Self {
+            format: delta_format_for(&coordinate_entries),
+            intent_semantics_oid: self.intent_semantics_oid,
+            source_intent_root_digest: self.source_intent_root_digest,
+            coordinate_entries,
+        }))
+    }
+
     pub fn format(&self) -> u16 {
         self.format
     }

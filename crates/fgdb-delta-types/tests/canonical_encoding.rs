@@ -875,6 +875,232 @@ fn owned_build_rejects_duplicates_created_by_embedded_normalization() {
 }
 
 #[test]
+fn coordinate_row_replacement_matches_full_build_across_all_families() {
+    let mut pool = every_family_populated();
+    pool.extend(field_variants_of_every_arm());
+    pool.extend(embedded_collection_rows(7, 2).map(|(_, row)| row));
+    let mut unique = std::collections::BTreeMap::new();
+    for row in pool {
+        let checked =
+            LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], vec![entry(1, 1, 3, vec![row])])
+                .unwrap();
+        let row = checked.coordinate_entries()[0].rows[0].clone();
+        unique.insert(bytes_of(&row), row);
+    }
+    let pool: Vec<_> = unique.into_values().collect();
+    assert_eq!(
+        pool.iter()
+            .map(|row| bytes_of(row)[0])
+            .collect::<std::collections::BTreeSet<_>>(),
+        (1..=12).collect()
+    );
+    let invalid = embedded_collection_rows(2, 2).map(|(_, row)| row);
+    let mut state = 0x6972_cafe_0000_0001_u64;
+    let mut random = |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % bound as u64) as usize
+    };
+    let (mut accepted, mut refused) = (0, 0);
+    for case in 0..400 {
+        let mut order: Vec<_> = (0..pool.len()).collect();
+        for at in (1..order.len()).rev() {
+            order.swap(at, random(at + 1));
+        }
+        let rows = order[..1 + random(pool.len())]
+            .iter()
+            .map(|&at| pool[at].clone())
+            .collect();
+        let original = LogicalDeltaTemplate::build(
+            oid(0x11),
+            [0x22; 32],
+            vec![entry(9, 1, 3, vec![pool[0].clone()]), entry(1, 1, 3, rows)],
+        )
+        .unwrap();
+        let before = original.canonical_bytes().unwrap();
+        let mut additional: Vec<_> = (0..random(9))
+            .map(|_| pool[random(pool.len())].clone())
+            .collect();
+        if case % 5 == 0 {
+            additional.push(invalid[case % invalid.len()].clone());
+        }
+        let retain = |row: &DeltaRow| {
+            bytes_of(row)
+                .iter()
+                .map(|byte| usize::from(*byte))
+                .sum::<usize>()
+                % 3
+                != case % 3
+        };
+        let mut entries = original.coordinate_entries().to_vec();
+        entries[0].rows.retain(retain);
+        entries[0].rows.extend(additional.clone());
+        let expected = LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], entries);
+        let got = original
+            .replace_coordinate_rows((GraphId(1), BranchId(1), RelationId(3)), retain, additional)
+            .map(|template| template.expect("the coordinate exists"));
+        assert_eq!(got, expected, "case {case}");
+        match got {
+            Ok(template) => {
+                assert_eq!(template.validate(), Ok(()));
+                assert_eq!(
+                    LogicalDeltaTemplate::decode_canonical(&template.canonical_bytes().unwrap()),
+                    Ok(template)
+                );
+                accepted += 1;
+            }
+            Err(_) => refused += 1,
+        }
+        assert_eq!(original.canonical_bytes().unwrap(), before);
+    }
+    assert!(
+        accepted > 0 && refused > 0,
+        "{accepted} accepted, {refused} refused"
+    );
+}
+
+#[test]
+fn coordinate_row_replacement_keeps_literal_order_and_first_errors() {
+    let vertex = |id| {
+        let mut row = every_family_populated()[0].clone();
+        let DeltaRow::CreateVertex { vid, .. } = &mut row else {
+            unreachable!()
+        };
+        *vid = VId(id);
+        row
+    };
+    let original = LogicalDeltaTemplate::build(
+        oid(0x11),
+        [0x22; 32],
+        vec![entry(
+            1,
+            1,
+            3,
+            vec![
+                vertex(9),
+                vertex(1),
+                every_family_populated()[1].clone(),
+                vertex(5),
+            ],
+        )],
+    )
+    .unwrap();
+    let coordinate = (GraphId(1), BranchId(1), RelationId(3));
+    let before = original.canonical_bytes().unwrap();
+    let changed = original
+        .replace_coordinate_rows(
+            coordinate,
+            |row| !matches!(row, DeltaRow::CreateVertex { vid: VId(5), .. }),
+            vec![vertex(7), vertex(2)],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        changed
+            .rows()
+            .filter_map(|row| match row {
+                DeltaRow::CreateVertex { vid, .. } => Some(vid.0),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![1, 2, 7, 9]
+    );
+    assert_eq!(changed.rows().last(), Some(&every_family_populated()[1]));
+    assert_eq!(changed.row_count(), 5);
+    for (additional, index) in [
+        (vec![vertex(5), vertex(2), vertex(2)], 2),
+        (vec![vertex(7), vertex(5)], 2),
+        (vec![vertex(7), vertex(7), vertex(1)], 1),
+    ] {
+        assert_eq!(
+            original.replace_coordinate_rows(coordinate, |_| true, additional),
+            Err(CanonicalError::NonCanonicalRowOrder { entry: 0, index })
+        );
+    }
+    let mut normalized_duplicate = vertex(1);
+    let DeltaRow::CreateVertex { labels, props, .. } = &mut normalized_duplicate else {
+        unreachable!()
+    };
+    labels.reverse();
+    props.reverse();
+    assert_eq!(
+        original.replace_coordinate_rows(coordinate, |_| true, vec![normalized_duplicate]),
+        Err(CanonicalError::NonCanonicalRowOrder { entry: 0, index: 1 })
+    );
+    assert_eq!(
+        original.replace_coordinate_rows(
+            coordinate,
+            |_| true,
+            vec![vertex(1), embedded_collection_rows(2, 2)[0].1.clone()],
+        ),
+        Err(CanonicalError::NonCanonicalLabelOrder { index: 1 })
+    );
+    assert_eq!(
+        original.replace_coordinate_rows(
+            (GraphId(2), BranchId(1), RelationId(3)),
+            |_| panic!("an absent coordinate cannot visit retained rows"),
+            Vec::new(),
+        ),
+        Ok(None)
+    );
+    assert_eq!(original.canonical_bytes().unwrap(), before);
+}
+
+#[test]
+fn coordinate_row_replacement_recomputes_formats_and_preserves_other_coordinates() {
+    let mut target = entry(1, 2, 3, Vec::new());
+    target.schema_epoch = SchemaEpoch(42);
+    target.schema_transition = Some(oid(0x77));
+    let other = entry(9, 2, 3, vec![every_family_populated()[3].clone()]);
+    let mut previous =
+        LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], vec![other.clone(), target.clone()])
+            .unwrap();
+    let date = CanonicalScalar::Date(CanonicalDate::from_civil(2026, 11, 6).unwrap());
+    let list = fgdb_types::CanonicalList::try_new(vec![date.clone().into()]).unwrap();
+    for (value, format) in [
+        (
+            CanonicalPropertyValue::List(list),
+            fgdb_delta_types::DELTA_FORMAT_V3,
+        ),
+        (date.into(), DELTA_FORMAT_V2),
+        (CanonicalScalar::Int(7).into(), DELTA_FORMAT_V1),
+    ] {
+        let before = previous.canonical_bytes().unwrap();
+        target.rows = vec![DeltaRow::Property {
+            elem: ElementId::Vertex(VId(1)),
+            property: PropertyKeyId(1),
+            before: None,
+            after: Some(value),
+        }];
+        let next = previous
+            .replace_coordinate_rows(target.coordinate(), |_| false, target.rows.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.format(), format);
+        assert_eq!(next.coordinate_entries(), &[target.clone(), other.clone()]);
+        assert_eq!(next.intent_semantics_oid(), oid(0x11));
+        assert_eq!(*next.source_intent_root_digest(), [0x22; 32]);
+        assert_eq!(next.validate(), Ok(()));
+        assert_eq!(
+            LogicalDeltaTemplate::decode_canonical(&next.canonical_bytes().unwrap()),
+            Ok(next.clone())
+        );
+        assert_eq!(previous.canonical_bytes().unwrap(), before);
+        previous = next;
+    }
+    let empty = previous
+        .replace_coordinate_rows(target.coordinate(), |_| false, Vec::new())
+        .unwrap()
+        .unwrap();
+    target.rows.clear();
+    assert_eq!(empty.coordinate_entries(), &[target, other]);
+    assert_eq!(empty.row_count(), 1);
+    assert_eq!(empty.format(), DELTA_FORMAT_V1);
+    assert_eq!(empty.validate(), Ok(()));
+}
+
+#[test]
 fn direct_row_encoding_refuses_noncanonical_embedded_collections() {
     let rows = embedded_collection_rows(2, 1);
     let errors: Vec<(&str, CanonicalError)> = rows
