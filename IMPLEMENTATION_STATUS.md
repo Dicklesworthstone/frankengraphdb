@@ -58,6 +58,37 @@ Seven statement parsers still probe the input; UNION schema and quantifier error
 
 Typed statement parameters have landed in `crates/fgdb-gql/src/parameters.rs` as structural parser operands, and the engine execution spine consumes them (see the 2026-09-08 → 2026-09-22 reality check below).
 
+### Native catalog procedures
+
+Source added 2026-11-07 for `fgdb-hne`: `CALL db.labels()`,
+`CALL db.relationshipTypes()` and `CALL db.propertyKeys()` use the shared native
+read pipeline in embedded databases, pinned read views, transactions, the CLI
+and authorized server sessions. Their default output names are `label`,
+`relationshipType` and `propertyKey`; explicit `YIELD`, aliases, filters,
+projection and aggregation compose normally. For example:
+
+```cypher
+CALL db.labels() YIELD label
+WITH label WHERE label STARTS WITH 'P'
+RETURN collect(label) AS labels
+```
+
+These procedures enumerate the complete reverse catalog supplied by the trusted
+host, including declared names not yet used by any element. They do not infer a
+durable catalog or scan graph records. A resolver without a complete reverse
+catalog refuses preparation. Each prepared call freezes its selected names and
+full-width identities into its template and plan transcript. Authorized hosts
+apply the live label, relationship and property scope before charging, copying
+or returning a name. Visible work and payload scratch share the enclosing query
+allowance; hidden entries receive cancellation polls without visible charges.
+The former Bolt execution shortcut is removed while its standalone no-bookmark
+response metadata is preserved.
+
+Regression sources: `fgdb-gql/tests/procedure_calls.rs`,
+`fgdb/tests/catalog_procedures.rs`, `fgdb-cli/tests/cli.rs` and the Bolt loopback
+tests. Compilation and runtime qualification are pending for this source slice;
+the bead remains open until its required verification completes.
+
 ### List predicates inside aggregates
 
 `COUNT(ALL(x IN values WHERE predicate))` and `COLLECT(ALL(...))` retain the list predicate through native read pipelines, aggregating `WITH`, and simple or computed write `RETURN` expressions (`fgdb-xv0sy`). All aggregate argument owners use the shared lexical lookahead that distinguishes the list predicate from an explicit set quantifier such as `COUNT(ALL n.p)`. Both forms compose, including `COUNT(ALL ALL(...))`; comments and keyword case follow the ordinary lexer. NULL predicates remain absent from COUNT/COLLECT, false remains a value, and an empty list retains ALL's vacuous truth. Regression sources are `fgdb-gql/tests/multipart_aggregates.rs` and `fgdb-gql/tests/write_return_aggregates.rs`.

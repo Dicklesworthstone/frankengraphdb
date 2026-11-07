@@ -2659,11 +2659,36 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        self.word("YIELD")?;
+        let catalog_kind = crate::ProcedureCatalogKind::from_call(namespace.text, name.text);
+        if catalog_kind.is_some() && !arguments.is_empty() {
+            return Err(expected(at, "a catalog procedure without arguments"));
+        }
+        let explicit_yield = self.take_word("YIELD")?;
+        if !explicit_yield && catalog_kind.is_none() {
+            return Err(expected(self.current.at, "YIELD"));
+        }
         let mut outputs = Vec::new();
         loop {
-            let output = self.name()?;
-            let alias = if self.take_word("AS")? {
+            let mut output = if explicit_yield {
+                self.name()?
+            } else {
+                let Some(kind) = catalog_kind else {
+                    return Err(expected(self.current.at, "YIELD"));
+                };
+                Name {
+                    text: kind.output_name(),
+                    at: name.at,
+                }
+            };
+            if let Some(kind) = catalog_kind {
+                if !output.text.eq_ignore_ascii_case(kind.output_name()) {
+                    return Err(expected(output.at, kind.output_name()));
+                }
+                // The established Bolt schema profile folds these registered
+                // names and exposes the canonical output spelling.
+                output.text = kind.output_name();
+            }
+            let alias = if explicit_yield && self.take_word("AS")? {
                 self.name()?
             } else {
                 output
@@ -2676,16 +2701,34 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_VERTICES,
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
-            schema.push((alias, GraphSetColumnType::Any));
+            let kind = if catalog_kind.is_some() {
+                GraphSetColumnType::Scalar
+            } else {
+                GraphSetColumnType::Any
+            };
+            schema.push((alias, kind));
             outputs.push((output.text.to_owned(), alias.text.to_owned()));
-            if !self.take(b',')? {
+            if !explicit_yield || !self.take(b',')? {
                 break;
+            }
+            if catalog_kind.is_some() {
+                return Err(expected(
+                    self.current.at,
+                    "one catalog procedure YIELD column",
+                ));
             }
         }
         Ok(ReadStageTemplate::Call {
             at,
-            namespace: namespace.text.to_owned(),
-            name: name.text.to_owned(),
+            namespace: if catalog_kind.is_some() {
+                "db"
+            } else {
+                namespace.text
+            }
+            .to_owned(),
+            name: catalog_kind
+                .map_or(name.text, crate::ProcedureCatalogKind::procedure_name)
+                .to_owned(),
             arguments,
             names,
             offsets,
@@ -2693,6 +2736,7 @@ impl<'a> Parser<'a> {
             // A following MATCH (written or implied) marks its vertex uses.
             vertices: Vec::new(),
             graph_projection: None,
+            catalog_projection: None,
         })
     }
 

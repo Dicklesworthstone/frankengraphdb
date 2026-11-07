@@ -367,6 +367,16 @@ fn procedure_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     remaining: GqlQueryPolicy,
 ) -> Result<fgdb_gql::GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, QueryError>> {
+    if let Some(catalog) = call.catalog_projection() {
+        return crate::query::catalog_procedure(catalog, remaining, Some(scope), |units| {
+            let mut live = execution.borrow_mut();
+            if units == 0 {
+                live.poll()
+            } else {
+                live.reserve_work(units)
+            }
+        });
+    }
     if crate::query::is_hybrid(call) {
         return super::beacon::hybrid_at(
             snapshot, at, call, arguments, scope, execution, remaining,

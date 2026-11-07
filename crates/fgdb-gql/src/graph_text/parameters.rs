@@ -184,11 +184,23 @@ impl UnresolvedGraphText<'_> {
                 names.truncate(computed.visible);
                 types.truncate(computed.visible);
             }
-            // A CALL source appends each YIELD alias, all Any, as UNWIND does.
-            if let ReadStageTemplate::Call { outputs, .. } = stage {
+            // Catalog procedures have one scalar text output; external
+            // procedure outputs retain their host-checked Any domain.
+            if let ReadStageTemplate::Call {
+                namespace,
+                name,
+                outputs,
+                ..
+            } = stage
+            {
+                let kind = if crate::ProcedureCatalogKind::from_call(namespace, name).is_some() {
+                    crate::GraphSetColumnType::Scalar
+                } else {
+                    crate::GraphSetColumnType::Any
+                };
                 for (_, alias) in outputs {
                     names.push(alias.clone());
-                    types.push(crate::GraphSetColumnType::Any);
+                    types.push(kind);
                 }
             }
         }
@@ -225,6 +237,47 @@ impl UnresolvedGraphText<'_> {
             .element_catalog
             .resolve(&mut resolve, self.statement);
         for stage in self.leading.iter_mut().chain(self.pipeline.iter_mut()) {
+            if let ReadStageTemplate::Call {
+                at,
+                namespace,
+                name,
+                vertices,
+                catalog_projection,
+                ..
+            } = stage
+                && let Some(kind) = crate::ProcedureCatalogKind::from_call(namespace, name)
+            {
+                if !vertices.is_empty() {
+                    return Err(error(
+                        *at,
+                        GraphPatternTextErrorKind::Expected("a scalar catalog procedure output"),
+                    ));
+                }
+                let catalog = resolve.reverse_catalog().ok_or_else(|| {
+                    error(
+                        *at,
+                        GraphPatternTextErrorKind::Expected("a complete reverse symbol catalog"),
+                    )
+                })?;
+                let projection = crate::ProcedureCatalogProjection::new(kind, catalog);
+                if projection
+                    .entries()
+                    .iter()
+                    .any(|(_, name)| name.len() > fgdb_types::MAX_CANONICAL_TEXT_BYTES)
+                    || projection
+                        .entries()
+                        .windows(2)
+                        .any(|pair| pair[0].1 == pair[1].1)
+                {
+                    return Err(error(
+                        *at,
+                        GraphPatternTextErrorKind::Expected(
+                            "bounded unique names in a catalog relation",
+                        ),
+                    ));
+                }
+                *catalog_projection = Some(projection);
+            }
             resolve_call_symbols(stage, &mut |kind, name| resolve.resolve_symbol(kind, name))?;
         }
         // Every `x.key` read binds its key now, so an element operand reads

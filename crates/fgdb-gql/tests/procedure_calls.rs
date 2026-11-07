@@ -1503,3 +1503,265 @@ fn invalid_fnx_projection_schema_selectors_refuse_during_preparation() {
         );
     }
 }
+
+#[derive(Clone)]
+struct ProcedureCatalog(ReverseSymbolCatalog);
+
+impl GraphSymbolResolver for ProcedureCatalog {
+    fn resolve_symbol(&mut self, _: GraphSymbolKind, _: &str) -> Option<GraphSymbol> {
+        None
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        Some(self.0.clone())
+    }
+}
+
+fn catalog_fixture() -> ProcedureCatalog {
+    let mut catalog = ReverseSymbolCatalog::new();
+    catalog.insert_label(LabelId(1), "Zebra");
+    catalog.insert_label(LabelId(u64::MAX), "Person");
+    catalog.insert_label(LabelId(3), "Company");
+    catalog.insert_relation(RelationId(1), "WORKS_AT");
+    catalog.insert_relation(RelationId(u64::MAX), "KNOWS");
+    catalog.insert_property(PropertyKeyId(1), "name");
+    catalog.insert_property(PropertyKeyId(u64::MAX), "age");
+    ProcedureCatalog(catalog)
+}
+
+fn catalog_query(text: &str, catalog: &mut ProcedureCatalog) -> PreparedGraphSetText {
+    PreparedGraphSetText::prepare_with_parameter_types_and_resolver(text, &[], catalog).unwrap()
+}
+
+fn catalog_host(call: &PreparedProcedureCall, arguments: &[GraphValue]) -> Rows {
+    let projection = call.catalog_projection().expect("catalog is bound");
+    assert!(arguments.is_empty());
+    assert_eq!(call.outputs(), [projection.kind().output_name()]);
+    assert!(call.vertex_outputs().is_empty());
+    rows(
+        projection
+            .entries()
+            .iter()
+            .map(|(_, name)| {
+                vec![GraphValue::Scalar(
+                    CanonicalScalar::ucs_basic_text(name).unwrap(),
+                )]
+            })
+            .collect(),
+    )
+}
+
+fn run_catalog(query: &PreparedGraphSet) -> Vec<GraphValueRow> {
+    query
+        .execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |call, arguments, _| catalog_host(call, arguments),
+            || Ok(()),
+        )
+        .unwrap()
+        .value
+}
+
+fn text_values(values: &[&str]) -> Vec<GraphValue> {
+    values
+        .iter()
+        .map(|value| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(*value).unwrap()))
+        .collect()
+}
+
+#[test]
+fn catalog_calls_have_optional_yield_sorted_scalar_columns_and_composition() {
+    use fgdb_gql::GraphSetColumnType;
+    for (name, output, expected) in [
+        ("labels", "label", vec!["Company", "Person", "Zebra"]),
+        (
+            "relationshipTypes",
+            "relationshipType",
+            vec!["KNOWS", "WORKS_AT"],
+        ),
+        ("propertyKeys", "propertyKey", vec!["age", "name"]),
+    ] {
+        for tail in [
+            String::new(),
+            format!(" YIELD {output}"),
+            format!(" YIELD {output} RETURN {output}"),
+        ] {
+            let text = format!("CALL db.{name}(){tail}");
+            let prepared = catalog_query(&text, &mut catalog_fixture());
+            assert_eq!(prepared.columns(), [output], "{text}");
+            assert_eq!(
+                prepared.column_types(),
+                [GraphSetColumnType::Scalar],
+                "{text}"
+            );
+            let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
+            assert_eq!(
+                column(&run_catalog(&bound), 0),
+                text_values(&expected),
+                "{text}"
+            );
+        }
+    }
+    let prepared = catalog_query(
+        "CALL db.labels() YIELD label AS name WITH name WHERE name STARTS WITH 'P' RETURN name",
+        &mut catalog_fixture(),
+    );
+    let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
+    assert_eq!(column(&run_catalog(&bound), 0), text_values(&["Person"]));
+
+    let repeated = catalog_query(
+        "UNWIND [1,2] AS n CALL db.propertyKeys() YIELD propertyKey RETURN n,propertyKey",
+        &mut catalog_fixture(),
+    )
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert_eq!(run_catalog(&repeated).len(), 4);
+
+    // Preserve the case-insensitive standalone schema profile previously
+    // served by Bolt, including its canonical output-column spelling.
+    for (canonical, folded, output) in [
+        (
+            "CALL db.labels() YIELD label",
+            "call DB.LABELS() YIELD LABEL",
+            "label",
+        ),
+        (
+            "CALL db.relationshipTypes() YIELD relationshipType",
+            "call DB.RELATIONSHIPTYPES() YIELD relationshiptype",
+            "relationshipType",
+        ),
+        (
+            "CALL db.propertyKeys() YIELD propertyKey",
+            "call Db.PropertyKeys() YIELD PROPERTYKEY",
+            "propertyKey",
+        ),
+    ] {
+        let canonical = catalog_query(canonical, &mut catalog_fixture());
+        let folded = catalog_query(folded, &mut catalog_fixture());
+        assert_eq!(folded.columns(), [output]);
+        assert_eq!(
+            canonical.canonical_template_bytes(),
+            folded.canonical_template_bytes()
+        );
+    }
+}
+
+#[test]
+fn catalog_binding_freezes_complete_names_and_full_width_ids_in_both_identities() {
+    use fgdb_gql::ProcedureCatalogKind;
+    let mut catalog = catalog_fixture();
+    let prepared = catalog_query("CALL db.labels()", &mut catalog);
+    let template = prepared.canonical_template_bytes();
+    let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
+    let plan = bound.canonical_bytes();
+    let seen = RefCell::new(false);
+    bound
+        .execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |call, arguments, _| {
+                let projection = call.catalog_projection().unwrap();
+                assert_eq!(projection.kind(), ProcedureCatalogKind::Labels);
+                assert_eq!(
+                    projection.entries(),
+                    &[
+                        (3, "Company".to_owned()),
+                        (u64::MAX, "Person".to_owned()),
+                        (1, "Zebra".to_owned())
+                    ]
+                );
+                *seen.borrow_mut() = true;
+                catalog_host(call, arguments)
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    assert!(*seen.borrow());
+
+    catalog.0.insert_label(LabelId(u64::MAX), "People");
+    let renamed = catalog_query("CALL db.labels()", &mut catalog);
+    assert_ne!(template, renamed.canonical_template_bytes());
+    assert_ne!(
+        plan,
+        renamed
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    );
+    assert_eq!(
+        column(&run_catalog(&bound), 0),
+        text_values(&["Company", "Person", "Zebra"])
+    );
+
+    let mut changed_id = catalog_fixture();
+    changed_id.0.labels.remove(&LabelId(u64::MAX));
+    changed_id.0.insert_label(LabelId(u64::MAX - 1), "Person");
+    let changed = catalog_query("CALL db.labels()", &mut changed_id);
+    assert_ne!(template, changed.canonical_template_bytes());
+    assert_ne!(
+        plan,
+        changed
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    );
+
+    // An unrelated catalog domain does not change this call's result identity.
+    let mut other_domain = catalog_fixture();
+    other_domain
+        .0
+        .insert_property(PropertyKeyId(10), "unrelated");
+    let unchanged = catalog_query("CALL db.labels()", &mut other_domain);
+    assert_eq!(template, unchanged.canonical_template_bytes());
+    assert_eq!(
+        plan,
+        unchanged
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    );
+}
+
+#[test]
+fn catalog_calls_refuse_missing_catalog_arguments_wrong_outputs_and_vertex_use() {
+    for text in [
+        "CALL db.labels(1)",
+        "CALL db.labels(value => 1) YIELD label",
+        "CALL db.labels() YIELD other",
+        "CALL db.relationshipTypes() YIELD label",
+        "CALL db.propertyKeys() YIELD wrongKey",
+        "CALL db.labels() YIELD label AS a,label AS b RETURN a,b",
+        "CALL db.labels() YIELD label MATCH (label) RETURN label",
+        "CALL db.labels() YIELD label RETURN label.p",
+    ] {
+        let result = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            text,
+            &[],
+            &mut catalog_fixture(),
+        );
+        assert!(result.is_err(), "{text} must refuse before execution");
+    }
+    assert!(PreparedGraphSetText::prepare("CALL db.labels()", symbols).is_err());
+    // Optional YIELD is reserved for known catalog procedures.
+    assert!(PreparedGraphSetText::prepare("CALL t.scores()", symbols).is_err());
+
+    let mut duplicate = catalog_fixture();
+    duplicate.0.insert_label(LabelId(10), "Person");
+    assert!(
+        PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            "CALL db.labels()",
+            &[],
+            &mut duplicate,
+        )
+        .is_err()
+    );
+
+    let empty = catalog_query(
+        "CALL db.labels()",
+        &mut ProcedureCatalog(ReverseSymbolCatalog::new()),
+    )
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert!(run_catalog(&empty).is_empty());
+}

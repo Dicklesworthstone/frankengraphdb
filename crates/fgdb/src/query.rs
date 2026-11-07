@@ -148,6 +148,8 @@ mod aggregate_stream;
 pub(crate) mod authorized;
 #[path = "query_beacon.rs"]
 mod beacon;
+#[path = "query_catalog.rs"]
+mod catalog;
 #[path = "query_diff.rs"]
 mod diff;
 #[path = "query_explain.rs"]
@@ -173,6 +175,7 @@ pub(crate) use beacon::procedure::{
     privileged_with_registry as hybrid_procedure_with_registry, refuse as hybrid_refusal,
 };
 pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
+pub(crate) use catalog::catalog_procedure;
 pub(crate) use beacon::{BeaconQueryIndexes, BeaconRegistry};
 pub use beacon::{
     MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,

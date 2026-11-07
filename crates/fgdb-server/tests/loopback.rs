@@ -3316,6 +3316,34 @@ fn bolt_drivers_read_hydrated_nodes_in_pinned_transactions_and_writes_refuse() {
             scoped.pull_all().await.0,
             [[Value::string("Company")], [Value::string("Person")]]
         );
+        // Catalog composition goes through the same authorized native CALL
+        // source as the bare forms, including aggregation and field masking.
+        scoped
+            .expect(
+                0x10,
+                run_message(
+                    "CALL db.labels() YIELD label WITH label \
+                     WHERE label STARTS WITH 'P' RETURN label",
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(scoped.pull_all().await.0, [[Value::string("Person")]]);
+        scoped
+            .expect(
+                0x10,
+                run_message(
+                    "CALL db.propertyKeys() YIELD propertyKey RETURN collect(propertyKey) AS fields",
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(
+            scoped.pull_all().await.0,
+            [[Value::List(vec![Value::string("name")])]]
+        );
 
         // Deleting the current edge must not erase historical path metadata.
         writer

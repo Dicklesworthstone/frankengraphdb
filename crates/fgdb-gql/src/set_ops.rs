@@ -31,10 +31,10 @@ pub(crate) use procedure::{BorrowedSource, DynPatterns, DynProcedures, DynSeeded
 pub use procedure::{
     GraphElementReader, GraphPatternFactorExecution, GraphProcedureExecution,
     GraphProcedureRowCursor, GraphSeeds, GraphSetSource, PreparedProcedureCall,
-    ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
-    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementMetadata,
-    WithElementReads, WithProcedureRows, WithProcedures, WithSeededPatterns, procedure_row_source,
-    with_element_metadata,
+    ProcedureCatalogKind, ProcedureCatalogProjection, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops, WithElementMetadata, WithElementReads, WithProcedureRows, WithProcedures,
+    WithSeededPatterns, procedure_row_source, with_element_metadata,
 };
 pub(crate) use projection::{
     ElementRead, ProjectionFailure, UnwindRows, construct_temporal, evaluate_equality,
@@ -679,6 +679,30 @@ impl PreparedGraphSet {
         vertices: Vec<usize>,
         graph_projection: Option<ProcedureGraphProjection>,
     ) -> Result<Self, GraphSetProjectionError> {
+        self.procedure_call_with_catalog(
+            namespace,
+            name,
+            arguments,
+            names,
+            outputs,
+            vertices,
+            graph_projection,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn procedure_call_with_catalog(
+        self,
+        namespace: String,
+        name: String,
+        arguments: Vec<GraphSetValue>,
+        names: Vec<String>,
+        outputs: Vec<(String, String)>,
+        vertices: Vec<usize>,
+        graph_projection: Option<ProcedureGraphProjection>,
+        catalog_projection: Option<ProcedureCatalogProjection>,
+    ) -> Result<Self, GraphSetProjectionError> {
         self.procedure_call_in_frame(
             namespace,
             name,
@@ -687,6 +711,7 @@ impl PreparedGraphSet {
             outputs,
             vertices,
             graph_projection,
+            catalog_projection,
             Vec::new(),
         )
     }
@@ -701,6 +726,7 @@ impl PreparedGraphSet {
         outputs: Vec<(String, String)>,
         vertices: Vec<usize>,
         graph_projection: Option<ProcedureGraphProjection>,
+        catalog_projection: Option<ProcedureCatalogProjection>,
         input_types: Vec<GraphSetColumnType>,
     ) -> Result<Self, GraphSetProjectionError> {
         use GraphSetProjectionError as Error;
@@ -746,6 +772,7 @@ impl PreparedGraphSet {
                 outputs,
                 vertices,
                 graph_projection,
+                catalog_projection,
                 frame_types,
             )?;
             if correlated {
@@ -801,7 +828,12 @@ impl PreparedGraphSet {
                 observed: operands,
             }));
         }
-        let types = vec![GraphSetColumnType::Any; columns.len()];
+        let output_type = if catalog_projection.is_some() {
+            GraphSetColumnType::Scalar
+        } else {
+            GraphSetColumnType::Any
+        };
+        let types = vec![output_type; columns.len()];
         Ok(Self {
             node: SetNode::ProcedureCall(Box::new(PreparedProcedureCall {
                 namespace,
@@ -810,6 +842,7 @@ impl PreparedGraphSet {
                 input_types,
                 names,
                 graph_projection,
+                catalog_projection,
                 outputs: output_names,
                 vertices,
             })),

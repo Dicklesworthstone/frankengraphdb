@@ -5,8 +5,9 @@
 //! it (Prism for `fnx.*`) through [`GraphSetSource::procedure`], so this crate
 //! never depends on a procedure implementation. A host that supplies no
 //! procedures refuses with `ProcedureUnavailable`; an unknown name or bad
-//! argument is the host's typed refusal. Yield columns are the Any domain, as
-//! UNWIND columns are: their values are checked where they are used.
+//! argument is the host's typed refusal. External yield columns are the Any
+//! domain, as UNWIND columns are: their values are checked where they are used.
+//! The three built-in catalog relations instead have a bound scalar domain.
 
 use crate::algebra::{
     GraphValue, GraphValueRow, PreparedGraphPattern, PreparedGraphPatternFactors,
@@ -121,6 +122,103 @@ impl ProcedureGraphProjection {
     }
 }
 
+/// The catalog relation exposed by a built-in schema procedure. Its bound
+/// entries are names, not authority: hosts still mask each ID at execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ProcedureCatalogKind {
+    Labels = 0,
+    RelationshipTypes = 1,
+    PropertyKeys = 2,
+}
+
+impl ProcedureCatalogKind {
+    pub(crate) fn from_call(namespace: &str, name: &str) -> Option<Self> {
+        if !namespace.eq_ignore_ascii_case("db") {
+            return None;
+        }
+        if name.eq_ignore_ascii_case("labels") {
+            Some(Self::Labels)
+        } else if name.eq_ignore_ascii_case("relationshipTypes") {
+            Some(Self::RelationshipTypes)
+        } else if name.eq_ignore_ascii_case("propertyKeys") {
+            Some(Self::PropertyKeys)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn procedure_name(self) -> &'static str {
+        match self {
+            Self::Labels => "labels",
+            Self::RelationshipTypes => "relationshipTypes",
+            Self::PropertyKeys => "propertyKeys",
+        }
+    }
+
+    #[must_use]
+    pub fn output_name(self) -> &'static str {
+        match self {
+            Self::Labels => "label",
+            Self::RelationshipTypes => "relationshipType",
+            Self::PropertyKeys => "propertyKey",
+        }
+    }
+}
+
+/// A frozen, complete host-declared catalog relation. Entries retain the full
+/// durable ID for authorization and sort by name, then ID, for strict replay.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProcedureCatalogProjection {
+    kind: ProcedureCatalogKind,
+    entries: Vec<(u64, String)>,
+}
+
+impl ProcedureCatalogProjection {
+    pub(crate) fn new(kind: ProcedureCatalogKind, catalog: crate::ReverseSymbolCatalog) -> Self {
+        let mut entries: Vec<_> = match kind {
+            ProcedureCatalogKind::Labels => catalog
+                .labels
+                .into_iter()
+                .map(|(id, name)| (id.0, name))
+                .collect(),
+            ProcedureCatalogKind::RelationshipTypes => catalog
+                .relations
+                .into_iter()
+                .map(|(id, name)| (id.0, name))
+                .collect(),
+            ProcedureCatalogKind::PropertyKeys => catalog
+                .properties
+                .into_iter()
+                .map(|(id, name)| (id.0, name))
+                .collect(),
+        };
+        entries.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+        Self { kind, entries }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> ProcedureCatalogKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[(u64, String)] {
+        &self.entries
+    }
+
+    pub(crate) fn append_transcript(&self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(b"fgdb:gql:catalog-procedure:v1\0");
+        bytes.push(self.kind as u8);
+        bytes.extend_from_slice(&(self.entries.len() as u64).to_be_bytes());
+        for (id, name) in &self.entries {
+            bytes.extend_from_slice(&id.to_be_bytes());
+            bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+    }
+}
+
 /// A prepared, bound procedure invocation. Constant arguments evaluate once
 /// per execution. Row-dependent arguments evaluate against the imported frame
 /// of the owning Apply, once for every reached input occurrence.
@@ -135,6 +233,8 @@ pub struct PreparedProcedureCall {
     pub(super) names: Vec<String>,
     /// Catalog-bound graph argument, separate from runtime algorithm values.
     pub(super) graph_projection: Option<ProcedureGraphProjection>,
+    /// Complete catalog entries frozen by the text binder, masked by the host.
+    pub(super) catalog_projection: Option<ProcedureCatalogProjection>,
     /// The procedure's own output names, in YIELD order.
     pub(super) outputs: Vec<String>,
     /// Ascending positions in `outputs` the statement matches as vertices.
@@ -192,6 +292,10 @@ impl PreparedProcedureCall {
     pub fn graph_projection(&self) -> Option<&ProcedureGraphProjection> {
         self.graph_projection.as_ref()
     }
+    #[must_use]
+    pub fn catalog_projection(&self) -> Option<&ProcedureCatalogProjection> {
+        self.catalog_projection.as_ref()
+    }
     /// The procedure output columns the host must return, in this order.
     #[must_use]
     pub fn outputs(&self) -> &[String] {
@@ -232,8 +336,13 @@ impl PreparedProcedureCall {
         } else {
             1 << 61
         };
+        let catalog = if self.catalog_projection.is_some() {
+            1 << 60
+        } else {
+            0
+        };
         bytes.extend_from_slice(
-            &(self.arguments.len() as u64 | named | projected | correlated).to_be_bytes(),
+            &(self.arguments.len() as u64 | named | projected | correlated | catalog).to_be_bytes(),
         );
         if correlated != 0 {
             bytes.extend_from_slice(&(self.input_types.len() as u64).to_be_bytes());
@@ -242,6 +351,9 @@ impl PreparedProcedureCall {
             }
         }
         if let Some(projection) = &self.graph_projection {
+            projection.append_transcript(bytes);
+        }
+        if let Some(projection) = &self.catalog_projection {
             projection.append_transcript(bytes);
         }
         for (index, argument) in self.arguments.iter().enumerate() {
@@ -1219,6 +1331,7 @@ mod tests {
             input_types: Vec::new(),
             names: Vec::new(),
             graph_projection: None,
+            catalog_projection: None,
             outputs: vec!["v".to_owned()],
             vertices: Vec::new(),
         };
@@ -1249,6 +1362,7 @@ mod tests {
             outputs: vec![("v".to_owned(), "v".to_owned())],
             vertices: Vec::new(),
             graph_projection: None,
+            catalog_projection: None,
         };
         let mut unprojected = Vec::new();
         call.append_template_transcript(&mut unprojected);

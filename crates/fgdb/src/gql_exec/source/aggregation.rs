@@ -514,6 +514,14 @@ impl<V: Vfs + Clone> Database<V> {
                             ))
                         },
                         |call, arguments, remaining| {
+                            if let Some(catalog) = call.catalog_projection() {
+                                return crate::query::catalog_procedure(
+                                    catalog,
+                                    remaining,
+                                    None,
+                                    |_| cx.checkpoint(),
+                                );
+                            }
                             if crate::query::is_hybrid(call) {
                                 return crate::query::hybrid_procedure_with_registry(
                                     &self.snapshot,
@@ -618,6 +626,14 @@ impl EmbeddedReadView {
                             ))
                         },
                         |call, arguments, remaining| {
+                            if let Some(catalog) = call.catalog_projection() {
+                                return crate::query::catalog_procedure(
+                                    catalog,
+                                    remaining,
+                                    None,
+                                    |_| cx.checkpoint(),
+                                );
+                            }
                             if crate::query::is_hybrid(call) {
                                 return crate::query::hybrid_procedure(
                                     &self.snapshot,

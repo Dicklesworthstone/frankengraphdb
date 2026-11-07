@@ -726,6 +726,16 @@ fn call_at(
     retrieved: &RefCell<BTreeSet<VId>>,
     identity: &RefCell<Option<IdentityRows>>,
 ) -> CallResult {
+    if let Some(catalog) = call.catalog_projection() {
+        return crate::query::catalog_procedure(catalog, remaining, Some(scope), |units| {
+            let mut live = execution.borrow_mut();
+            if units == 0 {
+                live.poll()
+            } else {
+                live.reserve_work(units)
+            }
+        });
+    }
     if !crate::query::is_hybrid(call) {
         return Err(hybrid_refusal(HybridCallError::Combination(
             "prepared index execution accepts only hybrid.search sources",

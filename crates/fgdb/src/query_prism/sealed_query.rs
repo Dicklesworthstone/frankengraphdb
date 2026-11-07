@@ -534,6 +534,11 @@ impl SealedReadView {
                     ))
                 },
                 move |call, arguments, remaining| {
+                    if let Some(catalog) = call.catalog_projection() {
+                        return crate::query::catalog_procedure(catalog, remaining, None, |_| {
+                            cx.checkpoint()
+                        });
+                    }
                     if crate::query::is_hybrid(call) {
                         return crate::query::hybrid_procedure(
                             &self.view.snapshot,
