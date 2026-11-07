@@ -1147,6 +1147,318 @@ const VERTEX_COLLECTION_TEXT: &str = "MATCH (a) RETURN a,a.p,\
     [(a)-[s]->(b) | b.hidden] AS hidden_vertices,\
     [(a)-[s]->(b) | s.hidden] AS hidden_edges";
 
+fn captured_visible_trails(
+    anchor: u128,
+    direction: usize,
+    reverse: bool,
+    closed: bool,
+) -> GraphValue {
+    // Enumerate the finite visible product independently of the production DFS.
+    // Intermediate vertices must be visible too, not just a route's endpoints.
+    let mut frontier = vec![(Vec::<(EId, VId)>::new(), VId(anchor))];
+    let mut accepted = frontier.clone();
+    for _ in 1..=3 {
+        let mut next = Vec::new();
+        for (path, from) in frontier {
+            for &(eid, source, target, _) in &COLLECTION_EDGES {
+                if path.iter().any(|&(used, _)| used == EId(eid)) {
+                    continue;
+                }
+                let to = match direction {
+                    0 if VId(source) == from => VId(target),
+                    1 if VId(target) == from => VId(source),
+                    2 if VId(source) == from => VId(target),
+                    2 if VId(target) == from => VId(source),
+                    _ => continue,
+                };
+                let mut extended = path.clone();
+                extended.push((EId(eid), to));
+                next.push((extended, to));
+            }
+        }
+        accepted.extend(next.iter().cloned());
+        frontier = next;
+    }
+    accepted.sort_unstable_by(|left, right| {
+        left.0
+            .iter()
+            .map(|step| step.0)
+            .cmp(right.0.iter().map(|step| step.0))
+    });
+    collection_list(accepted.into_iter().filter_map(|(steps, endpoint)| {
+        if closed && endpoint != VId(anchor) {
+            return None;
+        }
+        let vertices: Vec<_> = std::iter::once(VId(anchor))
+            .chain(steps.iter().map(|step| step.1))
+            .collect();
+        // Match the eager forward preference when a reversed route is closed.
+        let (start, steps) = if reverse && endpoint != VId(anchor) {
+            (
+                endpoint,
+                steps
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .map(|(at, &(eid, _))| (eid, vertices[at]))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            (VId(anchor), steps)
+        };
+        let nodes = std::iter::once(start)
+            .chain(steps.iter().map(|step| step.1))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let relationships = steps
+            .iter()
+            .map(|step| step.0)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Some(collection_list([
+            GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                start,
+                steps.into_boxed_slice(),
+            )),
+            GraphValue::Vertices(nodes),
+            GraphValue::Edges(relationships),
+            GraphValue::Vertex(endpoint),
+            collection_scalar(Some(endpoint.0 as i64 * 10)),
+            collection_scalar(None),
+        ]))
+    }))
+}
+
+#[test]
+fn captured_trail_paths_apply_masks_to_every_retained_identity_and_scoped_charge() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let slim = runtime.block_on(collection_database(&commit, false));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let calls = Cell::new(0_u64);
+    let clock = || {
+        calls.set(calls.get() + 1);
+        100
+    };
+    let mut scoped = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    let mut visible = slim
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    for edge_root in [false, true] {
+        let (head, prefix) = if edge_root {
+            ("MATCH (x)-[r]->(a)", "r,x,a")
+        } else {
+            ("MATCH (a)", "a")
+        };
+        for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+            .into_iter()
+            .enumerate()
+        {
+            for (reverse, closed) in [(false, false), (true, false), (false, true)] {
+                let endpoint = if closed { "a" } else { "c" };
+                let (start, end) = if reverse {
+                    (endpoint, "a")
+                } else {
+                    ("a", endpoint)
+                };
+                let text = format!(
+                    "{head} RETURN {prefix}, [p = ({start}){left}[:R*0..3]{right}({end}) | \
+                     [p,nodes(p),relationships(p),{endpoint},{endpoint}.p,{endpoint}.hidden]] AS routes"
+                );
+                let walk_direction = if reverse && direction < 2 {
+                    1 - direction
+                } else {
+                    direction
+                };
+                let values = |a| captured_visible_trails(a, walk_direction, reverse, closed);
+                let expected: Vec<_> = if edge_root {
+                    COLLECTION_EDGES
+                        .iter()
+                        .map(|&(r, x, a, _)| {
+                            GraphValueRow::from_owned_values(vec![
+                                GraphValue::Edge(EId(r)),
+                                GraphValue::Vertex(VId(x)),
+                                GraphValue::Vertex(VId(a)),
+                                values(a),
+                            ])
+                        })
+                        .collect()
+                } else {
+                    [1_u128, 3, 4]
+                        .into_iter()
+                        .map(|a| {
+                            GraphValueRow::from_owned_values(vec![
+                                GraphValue::Vertex(VId(a)),
+                                values(a),
+                            ])
+                        })
+                        .collect()
+                };
+                let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+                let eager = scoped.execute(&cx, &prepared, &args).unwrap();
+                let before = calls.get();
+                let mut cursor = scoped.stream(&cx, &prepared, &args).unwrap();
+                let columns = cursor.columns().to_vec();
+                let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                let checkpoints = calls.get() - before;
+                assert_eq!(actual, expected, "{text}");
+                assert_eq!(native(columns, &actual), eager, "{text}");
+                assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                assert!(cursor.next().is_none());
+                drop(cursor);
+                let prepared = visible.prepare(&cx, &text, &args).unwrap();
+                let before = calls.get();
+                assert_eq!(
+                    visible
+                        .stream(&cx, &prepared, &args)
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap(),
+                    expected,
+                    "{text}"
+                );
+                assert_eq!(
+                    calls.get() - before,
+                    checkpoints,
+                    "hidden records changed logical charges: {text}"
+                );
+                let mut send = db
+                    .authorized_read_session(
+                        &cx,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        symbols,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap();
+                let prepared = send.prepare(&cx, &text, &args).unwrap();
+                let cursor = send.stream_send(&cx, &prepared, &args).unwrap();
+                fn assert_send<T: Send>(_: &T) {}
+                assert_send(&cursor);
+                assert_eq!(
+                    cursor.collect::<Result<Vec<_>, _>>().unwrap(),
+                    expected,
+                    "{text}"
+                );
+            }
+        }
+    }
+    // Denied relationships still permit the visible zero-hop path, with no EId.
+    for (minimum, include_zero) in [(0, true), (1, false)] {
+        let text = format!("MATCH (a) RETURN a,[p = (a)-[:S*{minimum}..3]->(c) | p] AS paths");
+        let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+        let expected: Vec<_> = [1_u128, 3, 4]
+            .into_iter()
+            .map(|a| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(a)),
+                    collection_list(include_zero.then(|| {
+                        GraphValue::Path(fgdb_gql::algebra::GraphPath::new(VId(a), Box::new([])))
+                    })),
+                ])
+            })
+            .collect();
+        assert_eq!(
+            scoped
+                .stream(&cx, &prepared, &args)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn captured_trail_values_stay_private_until_a_complete_authorized_row_is_ready() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let db = runtime.block_on(collection_database(&contexts.commit(), true));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let text = "MATCH (a) RETURN a,[p = (a)-[:R*0..3]->(c) | \
+                [p,nodes(p),relationships(p),c,c.p,c.hidden]] AS routes";
+    let expected = GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(1)),
+        captured_visible_trails(1, 0, false, false),
+    ]);
+    let active = Cell::new(false);
+    let calls = Cell::new(0_usize);
+    let stop = Cell::new(usize::MAX);
+    let clock = || {
+        if active.get() {
+            calls.set(calls.get() + 1);
+        }
+        if active.get() && calls.get() == stop.get() {
+            1000
+        } else {
+            100
+        }
+    };
+    let first_row_calls = {
+        let mut session = db
+            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+            .unwrap();
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        active.set(true);
+        assert_eq!(cursor.next().unwrap().unwrap(), expected);
+        active.set(false);
+        calls.get()
+    };
+    assert!(first_row_calls > 3);
+    for cut in [1, first_row_calls / 2, first_row_calls] {
+        calls.set(0);
+        stop.set(cut);
+        let mut session = db
+            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+            .unwrap();
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        active.set(true);
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Authorization(Error::Expired)))
+        ));
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().is_none());
+        assert_eq!(calls.get(), cut);
+        active.set(false);
+        drop(cursor);
+        assert!(session.is_closed());
+    }
+    let mut session = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
+        .unwrap();
+    let prepared = session.prepare(&cx, text, &args).unwrap();
+    let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+    assert_eq!(cursor.next().unwrap().unwrap(), expected);
+    root.set_cancel_reason(
+        asupersync::CancelReason::new(asupersync::CancelKind::User)
+            .with_message("cancel after publishing one complete captured trail list"),
+    );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(QueryError::Pattern(GqlQueryError::Interrupted(_))))
+    ));
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(cursor.next().is_none());
+}
+
 fn bounded_trail_collection(
     anchor: u128,
     direction: usize,
@@ -2123,11 +2435,10 @@ fn nested_collection_filters_keep_all_child_reads_inside_the_authorized_graph() 
                             // This oracle sees only the literal visible graph.
                             // Child matches contribute truth, never multiplicity
                             // or relationship exclusions to the parent witness.
-                            let qualifying_child = COLLECTION_EDGES.iter().any(
-                                |&(_, start, _, weight)| {
+                            let qualifying_child =
+                                COLLECTION_EDGES.iter().any(|&(_, start, _, weight)| {
                                     start == target && weight.is_some_and(|value| value > 3)
-                                },
-                            );
+                                });
                             let accepted = match predicate {
                                 0 => qualifying_child,
                                 1 => !qualifying_child,
@@ -2135,9 +2446,9 @@ fn nested_collection_filters_keep_all_child_reads_inside_the_authorized_graph() 
                                     COLLECTION_EDGES
                                         .iter()
                                         .any(|&(_, start, _, _)| start == target)
-                                        && !COLLECTION_EDGES.iter().any(|&(_, start, end, _)| {
-                                            start == target && end == 1
-                                        })
+                                        && !COLLECTION_EDGES
+                                            .iter()
+                                            .any(|&(_, start, end, _)| start == target && end == 1)
                                 }
                                 3 | 5 => false,
                                 _ => true,
@@ -2189,7 +2500,13 @@ fn nested_collection_filters_keep_all_child_reads_inside_the_authorized_graph() 
                 };
                 let mut scoped = db
                     .authorized_read_session(
-                        &cx, &authority, &token, BRANCH, symbols, policy(), clock,
+                        &cx,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        symbols,
+                        policy(),
+                        clock,
                     )
                     .unwrap();
                 let prepared = scoped.prepare(&cx, &text, &args).unwrap();
@@ -2209,7 +2526,13 @@ fn nested_collection_filters_keep_all_child_reads_inside_the_authorized_graph() 
 
                 let mut visible = slim
                     .authorized_read_session(
-                        &cx, &authority, &token, BRANCH, symbols, policy(), clock,
+                        &cx,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        symbols,
+                        policy(),
+                        clock,
                     )
                     .unwrap();
                 let prepared = visible.prepare(&cx, &text, &args).unwrap();

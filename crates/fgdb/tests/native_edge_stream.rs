@@ -1186,6 +1186,234 @@ fn collected_fixed_paths_keep_oriented_segments_locals_and_closed_endpoints() {
 }
 
 #[test]
+fn captured_trail_collections_keep_exact_routes_orientation_and_pinned_generations() {
+    let ((), report) = run_async_under_lab(0x6e65_0028, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = seed();
+        batch.add_edge(EId(1), VId(0), WIDE, vec![(P, CanonicalScalar::Int(13))]);
+        let basis = db.write(&commit, batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let args = GqlParameters::new();
+        let edges = [
+            (EId(0), WIDE, VId(0)),
+            (EId(1), VId(0), WIDE),
+            (EId(2), WIDE, VId(0)),
+            (EId(3), WIDE, WIDE),
+            (EId(u128::MAX), VId(0), VId(u128::MAX)),
+        ];
+        let routes = |anchor, direction, reverse, closed, minimum, maximum| {
+            // Enumerate complete products by length, independently of the
+            // production DFS, then sort identity sequences with prefixes first.
+            let mut frontier = vec![(Vec::<(EId, VId)>::new(), anchor)];
+            let mut accepted = if minimum == 0 {
+                frontier.clone()
+            } else {
+                Vec::new()
+            };
+            for length in 1..=maximum {
+                let mut next = Vec::new();
+                for (path, at) in frontier {
+                    for &(eid, source, target) in &edges {
+                        if path.iter().any(|&(used, _)| used == eid) {
+                            continue;
+                        }
+                        let to = match direction {
+                            0 if source == at => target,
+                            1 if target == at => source,
+                            2 if source == at => target,
+                            2 if target == at => source,
+                            _ => continue,
+                        };
+                        let mut extended = path.clone();
+                        extended.push((eid, to));
+                        next.push((extended, to));
+                    }
+                }
+                if length >= minimum {
+                    accepted.extend(next.iter().cloned());
+                }
+                frontier = next;
+            }
+            accepted.sort_unstable_by(|left, right| {
+                left.0
+                    .iter()
+                    .map(|step| step.0)
+                    .cmp(right.0.iter().map(|step| step.0))
+            });
+            GraphValue::List(
+                accepted
+                    .into_iter()
+                    .filter_map(|(steps, endpoint)| {
+                        if closed && endpoint != anchor {
+                            return None;
+                        }
+                        let vertices: Vec<_> = std::iter::once(anchor)
+                            .chain(steps.iter().map(|step| step.1))
+                            .collect();
+                        // The eager capture contract prefers forward orientation when
+                        // both ends equal the declared start, including closed routes.
+                        let (start, steps) = if reverse && endpoint != anchor {
+                            (
+                                endpoint,
+                                steps
+                                    .iter()
+                                    .enumerate()
+                                    .rev()
+                                    .map(|(at, &(eid, _))| (eid, vertices[at]))
+                                    .collect::<Vec<_>>(),
+                            )
+                        } else {
+                            (anchor, steps)
+                        };
+                        let nodes = std::iter::once(start)
+                            .chain(steps.iter().map(|step| step.1))
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice();
+                        let relationships = steps
+                            .iter()
+                            .map(|step| step.0)
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice();
+                        let length = steps.len() as i64;
+                        let property = if endpoint == WIDE {
+                            7
+                        } else if endpoint == VId(0) {
+                            3
+                        } else {
+                            11
+                        };
+                        Some(GraphValue::List(
+                            vec![
+                                GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                                    start,
+                                    steps.into_boxed_slice(),
+                                )),
+                                GraphValue::Vertices(nodes),
+                                GraphValue::Edges(relationships),
+                                GraphValue::Scalar(CanonicalScalar::Int(length)),
+                                GraphValue::Vertex(endpoint),
+                                GraphValue::Scalar(CanonicalScalar::Int(property)),
+                            ]
+                            .into_boxed_slice(),
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )
+        };
+        for edge_root in [false, true] {
+            let (head, prefix, anchor) = if edge_root {
+                ("MATCH (x)-[r:R]->(a)", "r,x,a", "a")
+            } else {
+                ("MATCH (a)", "a", "a")
+            };
+            for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+                .into_iter()
+                .enumerate()
+            {
+                for (reverse, closed) in [(false, false), (true, false), (false, true)] {
+                    for (minimum, maximum) in [(0, 0), (0, 3), (2, 2)] {
+                        let endpoint = if closed { anchor } else { "c" };
+                        let (start, end) = if reverse {
+                            (endpoint, anchor)
+                        } else {
+                            (anchor, endpoint)
+                        };
+                        let text = format!(
+                            "{head} RETURN {prefix}, [p = ({start}){left}[:R*{minimum}..{maximum}]{right}({end}) | \
+                             [p,nodes(p),relationships(p),length(p),{endpoint},{endpoint}.p]] AS routes"
+                        );
+                        let walk_direction = if reverse && direction < 2 {
+                            1 - direction
+                        } else {
+                            direction
+                        };
+                        let values =
+                            |at| routes(at, walk_direction, reverse, closed, minimum, maximum);
+                        let expected: Vec<_> = if edge_root {
+                            edges
+                                .iter()
+                                .map(|&(r, x, a)| {
+                                    GraphValueRow::from_owned_values(vec![
+                                        GraphValue::Edge(r),
+                                        GraphValue::Vertex(x),
+                                        GraphValue::Vertex(a),
+                                        values(a),
+                                    ])
+                                })
+                                .collect()
+                        } else {
+                            [VId(0), WIDE, VId(u128::MAX)]
+                                .into_iter()
+                                .map(|a| {
+                                    GraphValueRow::from_owned_values(vec![
+                                        GraphValue::Vertex(a),
+                                        values(a),
+                                    ])
+                                })
+                                .collect()
+                        };
+                        let prepared = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+                        let (columns, mut cursor) =
+                            prepared.stream(&db, &cx, &args, policy()).unwrap();
+                        let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                        assert_eq!(actual, expected, "{text}");
+                        assert_eq!(
+                            result(columns, actual),
+                            prepared.execute(&db, &cx, &args, policy()).unwrap(),
+                            "{text}"
+                        );
+                        assert_eq!(cursor.state(), ScanState::Exhausted);
+                        assert!(cursor.next().is_none());
+                    }
+                }
+            }
+        }
+
+        // Retained capture values, later roots, and a separately opened old-view
+        // cursor all keep the original identities after writes and compaction.
+        let text = "MATCH (a) RETURN a, [p = (a)-[:R*0..3]->(c) | \
+                    [p,nodes(p),relationships(p),length(p),c,c.p]] AS routes";
+        let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+        let expected: Vec<_> = [VId(0), WIDE, VId(u128::MAX)]
+            .into_iter()
+            .map(|a| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(a),
+                    routes(a, 0, false, false, 0, 3),
+                ])
+            })
+            .collect();
+        let (_, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(cursor.snapshot_seq(), basis);
+        let mut actual = vec![cursor.next().unwrap().unwrap()];
+        let mut edit = WriteBatch::new(R);
+        edit.delete_edge(EId(0));
+        edit.set_vertex_property(VId(u128::MAX), P, Some(CanonicalScalar::Int(31)));
+        edit.add_edge(EId(99), VId(u128::MAX), WIDE, vec![]);
+        db.write(&commit, edit).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        actual.extend(cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap());
+        assert_eq!(actual, expected);
+        let (_, old) = prepared
+            .stream_in_view(&view, &cx, &args, policy())
+            .unwrap();
+        assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        let (columns, fresh) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        let fresh = fresh.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_ne!(fresh, expected);
+        assert_eq!(
+            result(columns, fresh),
+            prepared.execute(&db, &cx, &args, policy()).unwrap()
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn computed_graph_pages_rebind_windows_and_charge_only_selected_results() {
     let ((), report) = run_async_under_lab(0x6e65_0015, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -1977,9 +2205,9 @@ fn native_nested_collection_filters_keep_parent_witnesses_and_capture_frames() {
                     1 => !qualifying_child,
                     _ => {
                         edges.iter().any(|&(_, start, _, _)| start == target)
-                            && !edges.iter().any(|&(_, start, end, _)| {
-                                start == target && property(end) == 7
-                            })
+                            && !edges
+                                .iter()
+                                .any(|&(_, start, end, _)| start == target && property(end) == 7)
                     }
                 };
                 if accepted {
@@ -2076,10 +2304,7 @@ fn native_nested_collection_filters_keep_parent_witnesses_and_capture_frames() {
                             evaluator.scratch_entries,
                         );
                         let (_, mut retry) = query.stream(&db, &cx, &args, exact).unwrap();
-                        assert_eq!(
-                            retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
-                            rows,
-                        );
+                        assert_eq!(retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), rows,);
                         assert_eq!(retry.row_stats(), stats);
                         assert_eq!(retry.evaluator_stats(), evaluator);
                     }

@@ -61,7 +61,9 @@ struct Step {
 #[derive(Clone, Copy)]
 struct LocalCapture {
     slot: u32,
-    edges: usize,
+    // One variable-length segment remains a path, even at a one-hop bound.
+    // Only a fixed single-edge capture can supply an Edge/property operand.
+    single_edge: bool,
 }
 
 pub(crate) struct Probe {
@@ -301,16 +303,29 @@ impl Probe {
                         return Err(bad());
                     }
                     let mut endpoint = aliases[start.ordinal() as usize];
+                    let mut single_edge = segments.len() == 1;
                     for (at, segment) in segments.iter().enumerate() {
                         let target = segment.ordinal() as usize;
-                        let expansion = target
+                        let binding = target
                             .checked_sub(outer_width)
                             .and_then(|local| steps.get(local))
-                            .and_then(|step| match step.binding {
-                                Binding::Expand(expansion) => Some(expansion),
-                                _ => None,
-                            })
+                            .map(|step| step.binding)
                             .ok_or_else(bad)?;
+                        let expansion = match binding {
+                            Binding::Expand(expansion) => expansion,
+                            Binding::Walk {
+                                expansion,
+                                bounds,
+                                search: GraphWalkSearch::Trail,
+                            } if compound_captures
+                                && segments.len() == 1
+                                && bounds.is_bounded() =>
+                            {
+                                single_edge = false;
+                                expansion
+                            }
+                            _ => return Err(bad()),
+                        };
                         if segments[..at].contains(segment) {
                             return Err(bad());
                         }
@@ -329,7 +344,7 @@ impl Probe {
                         *capture,
                         LocalCapture {
                             slot: local,
-                            edges: segments.len(),
+                            single_edge,
                         },
                     );
                     predicate = Some(GlaOperator::CapturePath {
@@ -348,7 +363,7 @@ impl Probe {
                             slot
                         },
                         |capture| match capture_slots.get(&capture) {
-                            Some(local) if local.edges == 1 => local.slot,
+                            Some(local) if local.single_edge => local.slot,
                             _ => {
                                 captures_valid = false;
                                 capture
@@ -593,8 +608,14 @@ impl Probe {
                 continue;
             };
             ids.push(candidate);
-            let Some(paths) =
-                self.test_candidate(&step.predicates, &ids, &frames, source, control)?
+            let Some(paths) = self.test_candidate(
+                &step.predicates,
+                &ids,
+                &frames,
+                Some(&walks),
+                source,
+                control,
+            )?
             else {
                 ids.pop();
                 continue;
@@ -633,6 +654,7 @@ impl Probe {
         predicates: &[GlaOperator],
         ids: &[Option<VId>],
         frames: &[Position],
+        walks: Option<&BTreeMap<usize, walk::Endpoints>>,
         source: &S,
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
     ) -> ScanResult<Option<Vec<Option<GraphPath>>>, S::Error, C> {
@@ -679,6 +701,18 @@ impl Probe {
                     return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
                 };
                 debug_assert_eq!(*capture as usize, paths.len());
+                let local = segments[0].ordinal() as usize - self.outer_width;
+                if matches!(self.steps[local].binding, Binding::Walk { .. }) {
+                    // Collection admission keeps this as one finite TRAIL
+                    // atom. The offered occurrence still owns its exact route;
+                    // endpoint support and async probes cannot supply it.
+                    debug_assert_eq!(segments.len(), 1);
+                    let walk = walks.and_then(|walks| walks.get(&local)).ok_or_else(|| {
+                        GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable)
+                    })?;
+                    paths.push(Some(walk.capture(*start, control)?));
+                    continue;
+                }
                 // Charge the path slot and every step before reserving payload.
                 // A one-edge capture retains its original three scratch events.
                 control(GlaExecutionEvent::ScratchEntry)?;
@@ -795,7 +829,7 @@ impl Collection {
         let (steps, captures) = Probe::compile_body(ops, start, end, outer_width, true)?;
         // Ordinary openCypher DifferentEdges lowers a single ALL atom to
         // TRAIL in compile_body. Other modes have different multiplicity or
-        // enumeration order, and captured walks need retained route payloads.
+        // enumeration order. Captures snapshot this atom's live route only.
         if walks != 0
             && steps.iter().any(|step| {
                 matches!(step.binding, Binding::Walk { search, .. }
@@ -815,7 +849,7 @@ impl Collection {
             {
                 captures
                     .get(&capture)
-                    .filter(|capture| function != GraphPathFunction::Edge || capture.edges == 1)
+                    .filter(|capture| function != GraphPathFunction::Edge || capture.single_edge)
                     .map(|capture| ValueProjection::Path {
                         capture: capture.slot,
                         function,
