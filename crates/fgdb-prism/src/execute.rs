@@ -1930,6 +1930,11 @@ impl FnxCallSpec {
                 let (output, workspace_bytes) =
                     crate::foundation::run(graph, algorithm, arcs, &mut checkpoint)?;
                 kernel_workspace_bytes = workspace_bytes;
+                if graph.is_directed()
+                    && algorithm == crate::FoundationAlgorithm::EigenvectorCentrality
+                {
+                    execution_kernel = "fgdb-prism/eigenvector-csr-incoming-gather-v1";
+                }
                 output
             }
             FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {

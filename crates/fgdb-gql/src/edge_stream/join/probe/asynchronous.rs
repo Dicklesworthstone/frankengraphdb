@@ -60,7 +60,7 @@ impl Probe {
     async fn accepts_async_outer<S, O, F, C>(
         &self,
         bindings: &[Option<VId>],
-        mut outer: O,
+        outer: O,
         source: &mut S,
         meter: &mut Meter<F>,
     ) -> ScanResult<bool, S::Error, C>
@@ -69,6 +69,39 @@ impl Probe {
         O: Outer<S>,
         F: FnMut() -> Result<(), C> + Send,
         C: Send,
+    {
+        let found = self
+            .visit_witnesses_async(bindings, outer, source, meter, &mut |_, _, _, _, _| {
+                Ok(true)
+            })
+            .await?;
+        Ok(found != self.anti)
+    }
+
+    // One awaitable witness driver serves both existential short-circuiting
+    // and collection exhaustion. The visitor runs while the chosen records
+    // and native captures are still alive; it never performs source intake.
+    async fn visit_witnesses_async<S, O, F, C, Visit>(
+        &self,
+        bindings: &[Option<VId>],
+        mut outer: O,
+        source: &mut S,
+        meter: &mut Meter<F>,
+        visit: &mut Visit,
+    ) -> ScanResult<bool, S::Error, C>
+    where
+        S: AsyncEdgeJoinSource,
+        O: Outer<S>,
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+        Visit: FnMut(
+                &[Option<VId>],
+                &[Option<GraphPath>],
+                &S,
+                &O,
+                &mut Meter<F>,
+            ) -> ScanResult<bool, S::Error, C>
+            + Send,
     {
         debug_assert_eq!(bindings.len(), self.outer_width);
         // Admission precedes vectors and payloads. This guard covers fixed
@@ -97,9 +130,6 @@ impl Probe {
         let mut depth = 0;
         loop {
             meter.event(GlaExecutionEvent::Work)?;
-            if depth == self.steps.len() {
-                return Ok(!self.anti);
-            }
             // Retrying this binding drops its previous candidate, not any
             // accepted ancestor. Never keep a sibling's fields through descent.
             records[depth] = None;
@@ -236,7 +266,7 @@ impl Probe {
             let Some(candidate) = candidate else {
                 walks.remove(&depth);
                 if depth == 0 {
-                    return Ok(self.anti);
+                    return Ok(false);
                 }
                 depth -= 1;
                 ids.pop();
@@ -270,16 +300,107 @@ impl Probe {
                     },
                 )?
             };
-            if passed.is_none() {
+            let Some(paths) = passed else {
                 ids.pop();
                 continue;
-            }
+            };
             depth += 1;
-            if depth < self.steps.len() {
+            if depth == self.steps.len() {
+                // The former first-witness loop performed this same checkpoint
+                // before returning. A collection resumes only after its complete
+                // occurrence has been copied under the outer owner's charge.
+                meter.event(GlaExecutionEvent::Work)?;
+                if visit(&ids, &paths, source, &outer, meter)? {
+                    return Ok(true);
+                }
+                depth -= 1;
+                ids.pop();
+            } else {
                 positions[depth] = Position::new(self.steps[depth].binding);
                 walks.remove(&depth); // Each new local prefix owns fresh history.
             }
         }
+    }
+}
+
+impl Collection {
+    pub(in crate::edge_stream::join) async fn evaluate_async<S, F, C>(
+        &self,
+        outer: &Traversal,
+        outer_records: &mut [S::Record],
+        source: &mut S,
+        meter: &mut Meter<F>,
+        seq: CommitSeq,
+    ) -> ScanResult<crate::algebra::GraphValue, S::Error, C>
+    where
+        S: AsyncEdgeJoinSource,
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
+        use crate::algebra::GraphValue;
+        use crate::algebra_exec::collect_witness_element;
+
+        let mut values = Vec::new();
+        let nodes = self.tuple.as_ref().map_or(1, |columns| columns.len() + 1);
+        let frame = EdgeOuter::<S> {
+            records: outer_records,
+            choices: &outer.choices,
+            seq,
+        };
+        self.probe
+            .visit_witnesses_async(
+                &outer.bindings,
+                frame,
+                source,
+                meter,
+                &mut |bindings, paths, source, owner, meter| {
+                    // The eager CollectEnd and synchronous collection use the
+                    // same value bound and element copier. Retained cells belong
+                    // to the outer record, which survives every child backtrack
+                    // and await, not to a transient candidate's reservation.
+                    if values.len() >= (GraphValue::MAX_LIST_NODES - 1) / nodes {
+                        return Err(crate::GraphIntegerError {
+                            instruction: 0,
+                            kind: crate::GraphIntegerErrorKind::CollectionBounds,
+                        }
+                        .into());
+                    }
+                    let mut control = |event| {
+                        meter.event(event)?;
+                        owner
+                            .observe(source, event)
+                            .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
+                    };
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    let value = if let Some(columns) = &self.tuple {
+                        let mut fields = Vec::new();
+                        for column in columns {
+                            control(GlaExecutionEvent::Work)?;
+                            control(GlaExecutionEvent::ScratchEntry)?;
+                            fields.push(collect_witness_element(
+                                Some(column),
+                                bindings,
+                                paths,
+                                &mut control,
+                            )?);
+                        }
+                        GraphValue::List(fields.into_boxed_slice())
+                    } else {
+                        collect_witness_element(self.value.as_ref(), bindings, paths, &mut control)?
+                    };
+                    values.push(value);
+                    Ok(false)
+                },
+            )
+            .await?;
+        meter.event(GlaExecutionEvent::ScratchEntry)?;
+        source
+            .evaluation_event(
+                outer_records.last().expect("outer collection record"),
+                GlaExecutionEvent::ScratchEntry,
+            )
+            .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))?;
+        Ok(GraphValue::List(values.into_boxed_slice()))
     }
 }
 

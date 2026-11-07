@@ -62,6 +62,9 @@ struct Counts {
     seeks: AtomicUsize,
     roots: AtomicUsize,
     drops: AtomicUsize,
+    retained_scratch: AtomicUsize,
+    output_scratch: AtomicUsize,
+    output_events: AtomicUsize,
 }
 struct Image {
     id: EId,
@@ -108,12 +111,16 @@ impl AsyncEdgeScanRecord for Record {
 }
 impl Drop for Record {
     fn drop(&mut self) {
+        self.counts
+            .retained_scratch
+            .fetch_sub(self.scratch.get(), Ordering::SeqCst);
         self.counts.records.fetch_sub(1, Ordering::SeqCst);
     }
 }
-struct Guard(Arc<Counts>);
+struct Guard(Arc<Counts>, usize);
 impl Drop for Guard {
     fn drop(&mut self) {
+        self.0.output_scratch.fetch_sub(self.1, Ordering::SeqCst);
         self.0.guards.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -128,6 +135,9 @@ enum Fault {
     FalseEof,
     Repeat,
     Pending,
+    PendingAfterWitness,
+    IoAfterWitness,
+    Output,
 }
 struct Source {
     data: Arc<Data>,
@@ -169,7 +179,7 @@ impl Source {
     ) -> Result<Guard, EdgeScanSourceError<&'static str, C>> {
         control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
         self.counts.guards.fetch_add(1, Ordering::SeqCst);
-        Ok(Guard(self.counts.clone()))
+        Ok(Guard(self.counts.clone(), 0))
     }
     fn emit<C>(
         &self,
@@ -241,6 +251,7 @@ impl AsyncEdgeScanSource for Source {
     ) -> Result<(), Self::Error> {
         if event == GlaExecutionEvent::ScratchEntry {
             record.scratch.set(record.scratch.get() + 1);
+            self.counts.retained_scratch.fetch_add(1, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -269,10 +280,13 @@ impl AsyncEdgeJoinSource for Source {
         }
         control(AsyncEdgeScanEvent::Work)
             .map_err(|e| EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(e)))?;
-        if self.fault == Fault::Pending {
+        if self.fault == Fault::Pending
+            || (self.fault == Fault::PendingAfterWitness && after == Some(EId(3)))
+        {
             std::future::pending::<()>().await;
         }
-        if self.fault == Fault::Io {
+        if self.fault == Fault::Io || (self.fault == Fault::IoAfterWitness && after == Some(EId(3)))
+        {
             return Err(EdgeExpansionSourceError::Read(EdgeScanSourceError::Source(
                 "probe I/O",
             )));
@@ -315,7 +329,25 @@ impl AsyncEdgeJoinSource for Source {
     ) -> Result<Guard, EdgeScanSourceError<Self::Error, C>> {
         self.guard(control)
     }
+
+    fn join_output_event(
+        &self,
+        guard: &mut Guard,
+        event: GlaExecutionEvent,
+    ) -> Result<(), Self::Error> {
+        if event == GlaExecutionEvent::ScratchEntry {
+            let at = self.counts.output_events.fetch_add(1, Ordering::SeqCst);
+            if self.fault == Fault::Output && at == 12 {
+                return Err("collection output admission");
+            }
+            guard.1 += 1;
+            self.counts.output_scratch.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
 }
+
+mod collections;
 fn text(direction: usize, two: bool, anti: bool, filtered: bool) -> String {
     let atom = |name: &str, end: &str| match direction {
         0 => format!("-[{name}:S]->({end})"),

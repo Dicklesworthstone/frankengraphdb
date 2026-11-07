@@ -6,6 +6,8 @@ use fgdb_gql::edge_stream::EdgeScanState;
 use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
 use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, PurposeContexts};
 
+mod collections;
+
 const R: RelationId = RelationId(7);
 const P: PropertyKeyId = PropertyKeyId(9);
 const IDS: [VId; 3] = [VId(0), VId(1_u128 << 100), VId(u128::MAX)];

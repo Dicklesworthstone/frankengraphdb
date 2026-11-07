@@ -175,6 +175,13 @@ impl AsyncEdgeJoinSource for Source<'_> {
     ) -> Result<(), EdgeScanSourceError<ReadError, C>> {
         control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)
     }
+
+    fn join_output_event(&self, _: &mut (), _: GlaExecutionEvent) -> Result<(), ReadError> {
+        // The native meter charges every clone before allocation. As for the
+        // other resident source reservations, an explicit unit guard makes no
+        // physical byte-bound claim.
+        Ok(())
+    }
 }
 
 // The cursor's source and checkpoint are opaque, and stable Rust cannot name
@@ -217,7 +224,10 @@ impl<V: Vfs + Clone> Database<V> {
     ///
     /// This is an OWNER-level resident read, not Warden authorization or cold
     /// storage. Unit output/traversal guards establish NO physical memory bound.
-    /// Probes, OPTIONAL, variable-length expansion and nonidentity order refuse.
+    /// Correlated fixed-hop collections use the native occurrence/copy kernel,
+    /// preserving complete identity, path and tuple lists. Independent scans,
+    /// nested collection probes, variable collection atoms, OPTIONAL and
+    /// nonidentity order refuse during physical preparation.
     /// Errors/drop/close release the active traversal without draining. Earlier
     /// rows remain delivered; successful completion requires Exhausted.
     #[allow(clippy::type_complexity)]

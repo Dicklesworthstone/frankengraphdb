@@ -1589,10 +1589,9 @@ mod tests {
     }
 
     #[test]
-    fn sealed_core_and_eigenvector_preflight_accept_only_undirected_projections() {
+    fn sealed_core_and_load_preflight_accept_only_undirected_projections() {
         for call in [
             "CALL fnx.core_number() YIELD core AS level, node AS id",
-            "CALL fnx.eigenvector_centrality() YIELD score AS rank, node AS id",
             "CALL fnx.load_centrality() YIELD score AS rank, node AS id",
         ] {
             for direction in ["directed", "reversed", "undirected"] {
@@ -1628,6 +1627,44 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn sealed_eigenvector_preflight_accepts_all_explicit_graph_kinds() {
+        for direction in ["directed", "reversed", "undirected"] {
+            let args: Vec<String> = [
+                "--db",
+                "never-opened-database",
+                "--key-file",
+                "never-opened-key",
+                "--sealed",
+                "--relation",
+                "KNOWS=1",
+                "--graph-relation",
+                "KNOWS",
+                "--direction",
+                direction,
+                "CALL fnx.eigenvector_centrality() YIELD score AS rank, node AS id",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            let options = super::super::parse(&args, "query").unwrap();
+            assert!(options.fnx_call);
+            let prepared = super::prepare(&options).unwrap();
+            assert!(prepared.is_sealed());
+            assert!(prepared.call.supports_sealed_execution());
+            assert!(prepared.call.supports_cooperative_sealed_execution());
+            assert_eq!(
+                prepared
+                    .call
+                    .outputs()
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["rank", "id"],
+            );
         }
     }
 

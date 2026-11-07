@@ -407,6 +407,10 @@ impl AsyncEdgeJoinSource for Source {
     ) -> Result<Guard, EdgeScanSourceError<Self::Error, C>> {
         panic!("walk output must include zero-hop/root values")
     }
+
+    fn join_output_event(&self, _: &mut Guard, _: GlaExecutionEvent) -> Result<(), Self::Error> {
+        panic!("walk fixture never projects an edge-join collection")
+    }
 }
 impl AsyncGraphWalkSource for Source {
     type RootRecord = Root;
