@@ -161,15 +161,19 @@ fn suspended_cold_projection_is_unpublished_and_drop_or_cancel_leaves_reader_usa
             &parameters(),
         )
         .with_analytics_quantum(NonZeroUsize::new(1).unwrap());
-        let mut first_suspend = None;
         for cancel in [false, true] {
             let mut cold = view(&commit, &vfs, &source_pool).await;
             let retained = cold.sealed_read_cache_pool().clone();
             assert_eq!(retained.used(), 0);
-            let probe = Arc::new(SimulationCheckpointProbe::new(
-                first_suspend.map(|calls| calls + 1),
-            ));
-            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            // Physical preparation checkpoints can differ between fresh views.
+            // Cancel this request after its own observed suspension instead of
+            // guessing an ordinal from the previous invocation.
+            let request = runtime.request_cx_with_budget(Budget::INFINITE);
+            let request_contexts = PurposeContexts::narrow_runtime_root(&request);
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = request_contexts
+                .query()
+                .with_checkpoint_probe(Arc::clone(&probe));
             let mut future = Box::pin(execute(
                 &prepared,
                 &mut cold,
@@ -180,27 +184,42 @@ fn suspended_cold_projection_is_unpublished_and_drop_or_cancel_leaves_reader_usa
                 WORK,
             ));
             poll_fn(|task| {
-                assert!(future.as_mut().poll(task).is_pending());
+                let first_poll = future.as_mut().poll(task);
+                assert!(
+                    first_poll.is_pending(),
+                    "cancel={cancel}, checkpoints={}, poll={first_poll:?}",
+                    probe.calls(),
+                );
                 Poll::Ready(())
             })
             .await;
+            let suspended_after = probe.calls();
+            assert!(suspended_after > 0);
             // These files have immediate I/O. Unlike the warm-kernel law,
             // suspension occurs before a completed projection is cached.
             assert_eq!(retained.used(), 0);
             if cancel {
-                assert_eq!(Some(probe.calls()), first_suspend);
+                request.cancel_with(
+                    asupersync::types::CancelKind::User,
+                    Some("cancel suspended cold projection"),
+                );
+                assert!(controlled.checkpoint().is_err());
+                assert!(cx.checkpoint().is_ok());
                 let error = future.await.unwrap_err();
                 assert!(
                     matches!(error, NativeSpoolError::Procedure(ref inner)
                     if matches!(inner.as_ref(), GqlQueryError::Interrupted(_))),
                     "{error:?}"
                 );
+                // Runtime cancellation is observed before another successful
+                // checkpoint, rather than after additional projection work.
+                assert_eq!(probe.calls(), suspended_after);
             } else {
-                first_suspend = Some(probe.calls());
                 drop(future);
             }
             assert_eq!(retained.used(), 0);
             assert_eq!(spill_pool.used(), 0);
+            assert_eq!(request_contexts.outstanding_obligations(), 0);
             let answer = execute(&prepared, &mut cold, &cx, policy(), &spill_pool, 2, WORK)
                 .await
                 .unwrap();
