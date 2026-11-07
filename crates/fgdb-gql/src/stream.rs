@@ -212,10 +212,12 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                     at = end;
                 }
                 Some(GlaOperator::Collect { .. }) => {
-                    let (collection, end) = crate::edge_stream::Collection::compile(operators, at, 1)
-                        .map_err(|error| VertexScanBuildError {
-                            operator: error.operator,
-                        })?;
+                    let (collection, end) = crate::edge_stream::Collection::compile(
+                        operators, at, 1,
+                    )
+                    .map_err(|error| VertexScanBuildError {
+                        operator: error.operator,
+                    })?;
                     // Identified plans keep the walker's EId witness order.
                     // A single anonymous hop can normalize its retained raw
                     // values before any fallible computed projection. Other
@@ -269,12 +271,14 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         if let GlaOperator::ProjectValues { columns } = &operators[projection_at]
             && columns.iter().any(|column| {
                 matches!(column, ValueProjection::Collected { group }
-                    if !tests.iter().any(|test| {
-                        matches!(test, Test::Collect(collection) if collection.group == *group as usize)
-                    }))
+                if !tests.iter().any(|test| {
+                    matches!(test, Test::Collect(collection) if collection.group == *group as usize)
+                }))
             })
         {
-            return Err(VertexScanBuildError { operator: projection_at });
+            return Err(VertexScanBuildError {
+                operator: projection_at,
+            });
         }
         at += 1;
         let distinct = matches!(operators.get(at), Some(GlaOperator::Distinct));
@@ -402,7 +406,12 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             return Ok(None);
         };
         self.project_accepted::<EMIT, _, _, _, _>(
-            vid, row, &collected, skip, meter, (reserve, observe),
+            vid,
+            row,
+            &collected,
+            skip,
+            meter,
+            (reserve, observe),
         )
     }
 

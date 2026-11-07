@@ -70,6 +70,161 @@ fn statement(left: &str, right: &str, filter: &str, distinct: &str, page: &str) 
 }
 
 #[test]
+fn independent_collections_keep_scan_order_outer_values_and_the_pinned_graph() {
+    fn expected(edge_root: bool, direction: usize) -> Vec<GraphValueRow> {
+        let edges = [
+            (0, WIDE, VId(0), 4),
+            (2, WIDE, VId(0), 5),
+            (3, WIDE, WIDE, 8),
+            (u128::MAX, VId(0), VId(u128::MAX), -1),
+        ];
+        let property = |id| {
+            if id == VId(0) {
+                3
+            } else if id == WIDE {
+                7
+            } else {
+                11
+            }
+        };
+        let mut witnesses = Vec::new();
+        for (eid, from, to, weight) in edges {
+            match direction {
+                0 => witnesses.push((from, eid, to, weight)),
+                1 => witnesses.push((to, eid, from, weight)),
+                _ => {
+                    witnesses.push((from, eid, to, weight));
+                    if from != to {
+                        witnesses.push((to, eid, from, weight));
+                    }
+                }
+            }
+        }
+        // Independent roots are visited by VId, then their relationships by
+        // EId. In this fixture that differs from a global relationship scan.
+        witnesses.sort_by_key(|&(from, eid, _, _)| (from, eid));
+        let collection = |outer| {
+            GraphValue::List(
+                witnesses
+                    .iter()
+                    .map(|&(from, eid, to, weight)| {
+                        GraphValue::List(
+                            vec![
+                                GraphValue::Vertex(from),
+                                GraphValue::Vertex(to),
+                                GraphValue::Edge(EId(eid)),
+                                GraphValue::Scalar(CanonicalScalar::Int(property(outer))),
+                                GraphValue::Scalar(CanonicalScalar::Int(property(from))),
+                                GraphValue::Scalar(CanonicalScalar::Int(property(to))),
+                                GraphValue::Scalar(CanonicalScalar::Int(weight)),
+                            ]
+                            .into_boxed_slice(),
+                        )
+                    })
+                    .collect(),
+            )
+        };
+        if edge_root {
+            edges
+                .into_iter()
+                .map(|(eid, from, to, _)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Edge(EId(eid)),
+                        GraphValue::Vertex(from),
+                        GraphValue::Vertex(to),
+                        collection(from),
+                    ])
+                })
+                .collect()
+        } else {
+            [VId(0), WIDE, VId(u128::MAX)]
+                .into_iter()
+                .map(|id| {
+                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(id), collection(id)])
+                })
+                .collect()
+        }
+    }
+
+    let ((), report) = run_async_under_lab(0x6e65_0022, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let args = GqlParameters::new();
+        for edge_root in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.write(&commit, seed()).await.unwrap();
+            let view = db.read_session().unwrap();
+            let (head, prefix, kind) = if edge_root {
+                ("MATCH (a)-[r:R]->(b)", "r,a,b", ScanKind::Edge)
+            } else {
+                ("MATCH (a)", "a", ScanKind::Vertex)
+            };
+            for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+                .into_iter()
+                .enumerate()
+            {
+                // The pattern is independent of a; only its value expression
+                // captures a property from the outer row.
+                let text = format!(
+                    "{head} RETURN {prefix}, [(x){left}[s:R]{right}(y) | \
+                     [x,y,s,a.p,x.p,y.p,s.p]] AS graph"
+                );
+                let query = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+                let (columns, mut cursor) = query.stream(&db, &cx, &args, policy()).unwrap();
+                assert_eq!(cursor.kind(), kind);
+                let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                assert_eq!(rows, expected(edge_root, direction), "{text}");
+                assert_eq!(
+                    result(columns, rows),
+                    query.execute(&db, &cx, &args, policy()).unwrap()
+                );
+                assert_eq!(cursor.state(), ScanState::Exhausted);
+                assert!(cursor.next().is_none());
+            }
+            let projection =
+                format!("RETURN {prefix}, [(x)-[s:R]->(y) | [x,y,s,a.p,x.p,y.p,s.p]] AS graph");
+            let text = format!("{head} {projection}");
+            let query = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+            let (_, mut paused) = query.stream(&db, &cx, &args, policy()).unwrap();
+            let mut rows = vec![paused.next().unwrap().unwrap()];
+            let mut edit = WriteBatch::new(R);
+            edit.set_vertex_property(WIDE, P, Some(CanonicalScalar::Int(70)));
+            edit.delete_edge(EId(0));
+            edit.add_edge(
+                EId(99),
+                VId(u128::MAX),
+                WIDE,
+                vec![(P, CanonicalScalar::Int(21))],
+            );
+            db.write(&commit, edit).await.unwrap();
+            db.compact(&commit).await.unwrap();
+            rows.extend(paused.by_ref().collect::<Result<Vec<_>, _>>().unwrap());
+            assert_eq!(rows, expected(edge_root, 0));
+            assert_eq!(paused.snapshot_seq(), basis);
+            let (_, old) = query.stream_in_view(&view, &cx, &args, policy()).unwrap();
+            assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), rows);
+            let historical = PreparedNativeRead::prepare(
+                &format!("{head} FOR SYSTEM_TIME AS OF SEQ {} {projection}", basis.0),
+                &args,
+                symbols,
+            )
+            .unwrap();
+            let (_, old) = historical.stream(&db, &cx, &args, policy()).unwrap();
+            assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), rows);
+            let (columns, fresh) = query.stream(&db, &cx, &args, policy()).unwrap();
+            let fresh = fresh.collect::<Result<Vec<_>, _>>().unwrap();
+            assert_ne!(fresh, rows);
+            assert_eq!(
+                result(columns, fresh),
+                query.execute(&db, &cx, &args, policy()).unwrap()
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn multihop_collections_keep_local_witnesses_properties_and_historical_cuts() {
     let ((), report) = run_async_under_lab(0x6e65_0021, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -594,19 +749,16 @@ fn vertex_rooted_collection_budgets_and_late_errors_preserve_complete_prefixes()
         db.write(&commit, opposed).await.unwrap();
         for value in ["b", "b.p"] {
             for page in ["", " LIMIT 0"] {
-                let text = format!(
-                    "MATCH (a) RETURN a, [(a)-[:R]->(b) | {value}] AS neighbors{page}"
-                );
+                let text =
+                    format!("MATCH (a) RETURN a, [(a)-[:R]->(b) | {value}] AS neighbors{page}");
                 let anonymous = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
                 let (columns, mut cursor) = anonymous.stream(&db, &cx, &args, policy()).unwrap();
                 let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
                 if page.is_empty() {
                     let ordered = if value == "b" {
-                        [VId(0), VId(0), WIDE, VId(u128::MAX)]
-                            .map(GraphValue::Vertex)
+                        [VId(0), VId(0), WIDE, VId(u128::MAX)].map(GraphValue::Vertex)
                     } else {
-                        [3, 3, 7, 11]
-                            .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                        [3, 3, 7, 11].map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
                     };
                     assert_eq!(rows[1].values()[1], GraphValue::List(ordered.into()));
                 } else {
@@ -746,12 +898,7 @@ fn collected_fixed_paths_keep_oriented_segments_locals_and_closed_endpoints() {
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut batch = seed();
-        batch.add_edge(
-            EId(1),
-            VId(0),
-            WIDE,
-            vec![(P, CanonicalScalar::Int(13))],
-        );
+        batch.add_edge(EId(1), VId(0), WIDE, vec![(P, CanonicalScalar::Int(13))]);
         db.write(&commit, batch).await.unwrap();
         let args = GqlParameters::new();
         let edges = [
@@ -762,7 +909,13 @@ fn collected_fixed_paths_keep_oriented_segments_locals_and_closed_endpoints() {
             (u128::MAX, VId(0), VId(u128::MAX), -1),
         ];
         let vertex_property = |id| {
-            if id == VId(0) { 3 } else if id == WIDE { 7 } else { 11 }
+            if id == VId(0) {
+                3
+            } else if id == WIDE {
+                7
+            } else {
+                11
+            }
         };
         for (edge_root, direction, closed) in [
             (false, 0, false),
@@ -798,49 +951,69 @@ fn collected_fixed_paths_keep_oriented_segments_locals_and_closed_endpoints() {
                 };
                 let mut values = Vec::new();
                 for &(s, from, to, s_property) in &edges {
-                    let Some(middle) = target(start, from, to) else { continue };
+                    let Some(middle) = target(start, from, to) else {
+                        continue;
+                    };
                     for &(t, from, to, t_property) in &edges {
-                        if s == t { continue; }
-                        let Some(end) = target(middle, from, to) else { continue };
-                        if closed && end != start { continue; }
-                        values.push(GraphValue::List(vec![
-                            GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
-                                start,
-                                vec![(EId(s), middle), (EId(t), end)].into_boxed_slice(),
-                            )),
-                            GraphValue::Vertex(middle),
-                            GraphValue::Vertex(end),
-                            GraphValue::Edge(EId(s)),
-                            GraphValue::Edge(EId(t)),
-                            GraphValue::Vertices([start, middle, end].into()),
-                            GraphValue::Edges([EId(s), EId(t)].into()),
-                            GraphValue::Scalar(CanonicalScalar::Int(vertex_property(middle))),
-                            GraphValue::Scalar(CanonicalScalar::Int(vertex_property(end))),
-                            GraphValue::Scalar(CanonicalScalar::Int(s_property)),
-                            GraphValue::Scalar(CanonicalScalar::Int(t_property)),
-                        ].into_boxed_slice()));
+                        if s == t {
+                            continue;
+                        }
+                        let Some(end) = target(middle, from, to) else {
+                            continue;
+                        };
+                        if closed && end != start {
+                            continue;
+                        }
+                        values.push(GraphValue::List(
+                            vec![
+                                GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                                    start,
+                                    vec![(EId(s), middle), (EId(t), end)].into_boxed_slice(),
+                                )),
+                                GraphValue::Vertex(middle),
+                                GraphValue::Vertex(end),
+                                GraphValue::Edge(EId(s)),
+                                GraphValue::Edge(EId(t)),
+                                GraphValue::Vertices([start, middle, end].into()),
+                                GraphValue::Edges([EId(s), EId(t)].into()),
+                                GraphValue::Scalar(CanonicalScalar::Int(vertex_property(middle))),
+                                GraphValue::Scalar(CanonicalScalar::Int(vertex_property(end))),
+                                GraphValue::Scalar(CanonicalScalar::Int(s_property)),
+                                GraphValue::Scalar(CanonicalScalar::Int(t_property)),
+                            ]
+                            .into_boxed_slice(),
+                        ));
                     }
                 }
                 GraphValue::List(values.into_boxed_slice())
             };
             let expected: Vec<_> = if edge_root {
-                edges.iter().map(|&(id, from, to, _)| {
-                    GraphValueRow::from_owned_values(vec![
-                        GraphValue::Edge(EId(id)),
-                        GraphValue::Vertex(from),
-                        GraphValue::Vertex(to),
-                        routes(to),
-                    ])
-                }).collect()
+                edges
+                    .iter()
+                    .map(|&(id, from, to, _)| {
+                        GraphValueRow::from_owned_values(vec![
+                            GraphValue::Edge(EId(id)),
+                            GraphValue::Vertex(from),
+                            GraphValue::Vertex(to),
+                            routes(to),
+                        ])
+                    })
+                    .collect()
             } else {
-                [VId(0), WIDE, VId(u128::MAX)].into_iter().map(|id| {
-                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(id), routes(id)])
-                }).collect()
+                [VId(0), WIDE, VId(u128::MAX)]
+                    .into_iter()
+                    .map(|id| {
+                        GraphValueRow::from_owned_values(vec![GraphValue::Vertex(id), routes(id)])
+                    })
+                    .collect()
             };
-            assert!(expected.iter().any(|row| match row.values().last() {
-                Some(GraphValue::List(routes)) => !routes.is_empty(),
-                _ => false,
-            }), "{text}");
+            assert!(
+                expected.iter().any(|row| match row.values().last() {
+                    Some(GraphValue::List(routes)) => !routes.is_empty(),
+                    _ => false,
+                }),
+                "{text}"
+            );
             let prepared = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
             let (columns, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
             let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
@@ -889,14 +1062,26 @@ fn computed_graph_pages_rebind_windows_and_charge_only_selected_results() {
             let source_events = cursor.evaluator_stats();
             let text = format!("{base} SKIP $skip LIMIT $take");
             let initial = GqlParameters::new()
-                .with_uint64("skip", 0).unwrap()
-                .with_uint64("take", 1).unwrap();
+                .with_uint64("skip", 0)
+                .unwrap()
+                .with_uint64("take", 1)
+                .unwrap();
             let prepared = PreparedNativeRead::prepare(&text, &initial, symbols).unwrap();
-            for (skip, take) in [(0, 0), (0, 1), (1, 1), (2, 2), (99, 2), (u64::MAX, u64::MAX)] {
+            for (skip, take) in [
+                (0, 0),
+                (0, 1),
+                (1, 1),
+                (2, 2),
+                (99, 2),
+                (u64::MAX, u64::MAX),
+            ] {
                 let args = GqlParameters::new()
-                    .with_uint64("skip", skip).unwrap()
-                    .with_uint64("take", take).unwrap();
-                let expected: Vec<_> = full.iter()
+                    .with_uint64("skip", skip)
+                    .unwrap()
+                    .with_uint64("take", take)
+                    .unwrap();
+                let expected: Vec<_> = full
+                    .iter()
                     .skip(usize::try_from(skip).unwrap_or(usize::MAX))
                     .take(usize::try_from(take).unwrap_or(usize::MAX))
                     .cloned()
@@ -909,9 +1094,8 @@ fn computed_graph_pages_rebind_windows_and_charge_only_selected_results() {
                     source_events.work_units,
                     source_events.scratch_entries,
                 );
-                let (paged_columns, mut paged) = prepared
-                    .stream(&db, &cx, &args, allowance)
-                    .unwrap();
+                let (paged_columns, mut paged) =
+                    prepared.stream(&db, &cx, &args, allowance).unwrap();
                 let actual = paged.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
                 assert_eq!(actual, expected, "{text}: {skip}/{take}");
                 assert_eq!(paged_columns, columns);
@@ -919,7 +1103,10 @@ fn computed_graph_pages_rebind_windows_and_charge_only_selected_results() {
                     result(paged_columns, actual),
                     prepared.execute(&db, &cx, &args, policy()).unwrap(),
                 );
-                assert_eq!(paged.row_stats().snapshot_records, source_rows.snapshot_records);
+                assert_eq!(
+                    paged.row_stats().snapshot_records,
+                    source_rows.snapshot_records
+                );
                 assert_eq!(paged.row_stats().result_rows, expected.len() as u64);
                 assert_eq!(
                     paged.evaluator_stats().scratch_entries,
@@ -962,12 +1149,15 @@ fn computed_graph_pages_preserve_skipped_and_suffix_errors_until_explicit_close(
                     assert!(cursor.next().unwrap().is_ok());
                     assert_eq!(cursor.state(), ScanState::Open);
                 }
-                assert!(matches!(
-                    cursor.next(),
-                    Some(Err(GqlQueryError::Source(
-                        fgdb_gql::scan_stream::ScanError::Projection { row: 2, column: actual, error }
-                    ))) if actual == column && error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
-                ), "{text}");
+                assert!(
+                    matches!(
+                        cursor.next(),
+                        Some(Err(GqlQueryError::Source(
+                            fgdb_gql::scan_stream::ScanError::Projection { row: 2, column: actual, error }
+                        ))) if actual == column && error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+                    ),
+                    "{text}"
+                );
                 assert_eq!(cursor.row_stats().result_rows, delivered);
                 assert_eq!(cursor.state(), ScanState::Failed);
                 let stopped = (cursor.row_stats(), cursor.evaluator_stats());

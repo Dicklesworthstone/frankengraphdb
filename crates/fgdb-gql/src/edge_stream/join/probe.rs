@@ -67,7 +67,7 @@ pub(crate) struct Probe {
     steps: Vec<Step>,
 }
 
-/// A bounded, correlated Collect scope over the same fixed-hop traversal and
+/// A bounded Collect scope over the same fixed-hop traversal and
 /// predicate kernel as a probe. Only its completion rule differs: every
 /// witness contributes one value, and only successful exhaustion emits a list.
 pub(crate) struct Collection {
@@ -680,15 +680,17 @@ impl Collection {
         if close != group {
             return Err(bad());
         }
-        // Fixed-hop witnesses use the same increasing-EId, depth-first order
-        // as identified eager expansion, including multiple local bindings.
-        // Keep independent scans and walks fenced here; compile_body also
-        // rejects nested scopes and nonlocal or disconnected path captures.
+        // Local scans advance in VId order, then fixed hops in EId order, just
+        // like identified eager scopes. Each disconnected component owns its
+        // scan position, even with copied outer predicate operands in scope.
+        // Walks still refuse because their probe specialization
+        // keeps endpoint support rather than every relationship witness.
+        // compile_body also rejects nested scopes and malformed path captures.
         let mut expansions = 0;
         for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
             match op {
                 GlaOperator::Expand { .. } => expansions += 1,
-                GlaOperator::ScanVertices | GlaOperator::VarLengthExpand { .. } => {
+                GlaOperator::VarLengthExpand { .. } => {
                     return Err(EdgeScanBuildError { operator: at });
                 }
                 _ => {}

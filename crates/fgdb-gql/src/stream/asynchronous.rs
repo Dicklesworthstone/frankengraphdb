@@ -112,13 +112,12 @@ impl<Row: VertexScanOutput> AsyncVertexScanPlan<Row> {
     }
 
     fn check_source(plan: &GlaPlan<Row>) -> Result<(), VertexScanBuildError> {
-        if let Some(operator) = plan
-            .operators()
-            .iter()
-            .position(|operator| {
-                matches!(operator, GlaOperator::Probe { .. } | GlaOperator::Collect { .. })
-            })
-        {
+        if let Some(operator) = plan.operators().iter().position(|operator| {
+            matches!(
+                operator,
+                GlaOperator::Probe { .. } | GlaOperator::Collect { .. }
+            )
+        }) {
             return Err(VertexScanBuildError { operator });
         }
         Ok(())

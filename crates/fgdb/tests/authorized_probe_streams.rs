@@ -667,6 +667,128 @@ const COLLECTION_TEXT: &str = "MATCH (a)-[r]->(b) RETURN r,a,b,\
     [(b)-[s]->(c) | s.hidden] AS hidden_edges";
 
 #[test]
+fn independent_collection_scans_apply_masks_before_matching_and_value_reads() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let slim = runtime.block_on(collection_database(&commit, false));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let calls = AtomicU64::new(0);
+    let clock = || {
+        calls.fetch_add(1, Ordering::Relaxed);
+        100
+    };
+    let mut scoped = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    let mut visible = slim
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    for edge_root in [false, true] {
+        let (head, prefix) = if edge_root {
+            ("MATCH (a)-[r]->(b)", "r,a,b")
+        } else {
+            ("MATCH (a)", "a")
+        };
+        for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+            .into_iter()
+            .enumerate()
+        {
+            let text = format!(
+                "{head} RETURN {prefix}, [(x){left}[s]{right}(y) | \
+                 [x,y,s,a.p,x.p,y.p,s.p,x.hidden,s.hidden]] AS graph"
+            );
+            let mut witnesses = Vec::new();
+            for (eid, from, to, weight) in COLLECTION_EDGES {
+                match direction {
+                    0 => witnesses.push((from, eid, to, weight)),
+                    1 => witnesses.push((to, eid, from, weight)),
+                    _ => {
+                        witnesses.push((from, eid, to, weight));
+                        if from != to {
+                            witnesses.push((to, eid, from, weight));
+                        }
+                    }
+                }
+            }
+            witnesses.sort_by_key(|&(from, eid, _, _)| (from, eid));
+            let collection = |outer| {
+                collection_list(witnesses.iter().map(|&(from, eid, to, weight)| {
+                    collection_list([
+                        GraphValue::Vertex(VId(from)),
+                        GraphValue::Vertex(VId(to)),
+                        GraphValue::Edge(EId(eid)),
+                        collection_scalar(Some(outer as i64 * 10)),
+                        collection_scalar(Some(from as i64 * 10)),
+                        collection_scalar(Some(to as i64 * 10)),
+                        collection_scalar(weight),
+                        collection_scalar(None),
+                        collection_scalar(None),
+                    ])
+                }))
+            };
+            let expected: Vec<_> = if edge_root {
+                COLLECTION_EDGES
+                    .iter()
+                    .map(|&(r, a, b, _)| {
+                        GraphValueRow::from_owned_values(vec![
+                            GraphValue::Edge(EId(r)),
+                            GraphValue::Vertex(VId(a)),
+                            GraphValue::Vertex(VId(b)),
+                            collection(a),
+                        ])
+                    })
+                    .collect()
+            } else {
+                [1_u128, 3, 4]
+                    .into_iter()
+                    .map(|a| {
+                        GraphValueRow::from_owned_values(vec![
+                            GraphValue::Vertex(VId(a)),
+                            collection(a),
+                        ])
+                    })
+                    .collect()
+            };
+            let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+            let eager = scoped.execute(&cx, &prepared, &args).unwrap();
+            let before = calls.load(Ordering::Relaxed);
+            let mut cursor = scoped.stream_send(&cx, &prepared, &args).unwrap();
+            let columns = cursor.columns().to_vec();
+            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(rows, expected, "{text}");
+            assert_eq!(native(columns, &rows), eager, "{text}");
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            let checkpoints = calls.load(Ordering::Relaxed) - before;
+            assert!(cursor.next().is_none());
+            drop(cursor);
+
+            let prepared = visible.prepare(&cx, &text, &args).unwrap();
+            let before = calls.load(Ordering::Relaxed);
+            let mut cursor = visible.stream_send(&cx, &prepared, &args).unwrap();
+            assert_eq!(
+                cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected,
+                "{text}"
+            );
+            assert_eq!(
+                calls.load(Ordering::Relaxed) - before,
+                checkpoints,
+                "{text}"
+            );
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        }
+    }
+}
+
+#[test]
 fn authorized_projected_collections_match_a_physically_masked_graph_in_every_direction() {
     let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
@@ -1388,12 +1510,8 @@ fn authorized_projected_pages_keep_masks_and_signed_delivery_limits() {
             let mut allowed = grant();
             allowed.limits.max_rows = expected.len() as u64;
             let token = authority.issue_at(&allowed, 100).unwrap();
-            let allowance = GqlQueryPolicy::new(
-                1_000_000,
-                expected.len() as u64,
-                10_000_000,
-                10_000_000,
-            );
+            let allowance =
+                GqlQueryPolicy::new(1_000_000, expected.len() as u64, 10_000_000, 10_000_000);
             let calls = Cell::new(0_u64);
             let clock = || {
                 calls.set(calls.get() + 1);
@@ -1453,7 +1571,10 @@ fn authorized_projected_page_suffixes_keep_live_expiry_and_cancellation() {
     let text = format!("{VERTEX_COLLECTION_TEXT} LIMIT 1");
     let prepared = session.prepare(&cx, &text, &args).unwrap();
     let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
-    assert_eq!(cursor.next().unwrap().unwrap(), vertex_collection_expected(0)[0]);
+    assert_eq!(
+        cursor.next().unwrap().unwrap(),
+        vertex_collection_expected(0)[0]
+    );
     assert_eq!(cursor.state(), VertexScanState::Open);
     expired.set(true);
     assert!(matches!(
@@ -1471,7 +1592,10 @@ fn authorized_projected_page_suffixes_keep_live_expiry_and_cancellation() {
     let text = format!("{COLLECTION_TEXT} LIMIT 1");
     let prepared = session.prepare(&cx, &text, &args).unwrap();
     let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
-    assert_eq!(cursor.next().unwrap().unwrap(), collection_expected(0, 0)[0]);
+    assert_eq!(
+        cursor.next().unwrap().unwrap(),
+        collection_expected(0, 0)[0]
+    );
     assert_eq!(cursor.state(), VertexScanState::Open);
     root.set_cancel_reason(
         asupersync::CancelReason::new(asupersync::CancelKind::User)
@@ -1531,11 +1655,19 @@ fn authorized_collected_paths_keep_every_segment_inside_the_visible_graph() {
             };
             let mut values = Vec::new();
             for &(s, from, to, s_property) in &COLLECTION_EDGES {
-                let Some(middle) = target(start, from, to) else { continue };
+                let Some(middle) = target(start, from, to) else {
+                    continue;
+                };
                 for &(t, from, to, t_property) in &COLLECTION_EDGES {
-                    if s == t { continue; }
-                    let Some(end) = target(middle, from, to) else { continue };
-                    if closed && end != start { continue; }
+                    if s == t {
+                        continue;
+                    }
+                    let Some(end) = target(middle, from, to) else {
+                        continue;
+                    };
+                    if closed && end != start {
+                        continue;
+                    }
                     values.push(collection_list([
                         GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
                             VId(start),
@@ -1561,23 +1693,32 @@ fn authorized_collected_paths_keep_every_segment_inside_the_visible_graph() {
             collection_list(values)
         };
         let expected: Vec<_> = if edge_root {
-            COLLECTION_EDGES.iter().map(|&(id, from, to, _)| {
-                GraphValueRow::from_owned_values(vec![
-                    GraphValue::Edge(EId(id)),
-                    GraphValue::Vertex(VId(from)),
-                    GraphValue::Vertex(VId(to)),
-                    routes(to),
-                ])
-            }).collect()
+            COLLECTION_EDGES
+                .iter()
+                .map(|&(id, from, to, _)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Edge(EId(id)),
+                        GraphValue::Vertex(VId(from)),
+                        GraphValue::Vertex(VId(to)),
+                        routes(to),
+                    ])
+                })
+                .collect()
         } else {
-            [1_u128, 3, 4].into_iter().map(|id| {
-                GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(id)), routes(id)])
-            }).collect()
+            [1_u128, 3, 4]
+                .into_iter()
+                .map(|id| {
+                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(id)), routes(id)])
+                })
+                .collect()
         };
-        assert!(expected.iter().any(|row| match row.values().last() {
-            Some(GraphValue::List(routes)) => !routes.is_empty(),
-            _ => false,
-        }), "{text}");
+        assert!(
+            expected.iter().any(|row| match row.values().last() {
+                Some(GraphValue::List(routes)) => !routes.is_empty(),
+                _ => false,
+            }),
+            "{text}"
+        );
 
         // The additional graph contains hidden intermediate vertices, a
         // forbidden relation, and masked fields on otherwise visible elements.
@@ -1614,7 +1755,11 @@ fn authorized_collected_paths_keep_every_segment_inside_the_visible_graph() {
             expected,
             "{text}",
         );
-        assert_eq!(calls.load(Ordering::Relaxed) - before, checkpoints, "{text}");
+        assert_eq!(
+            calls.load(Ordering::Relaxed) - before,
+            checkpoints,
+            "{text}"
+        );
         assert_eq!(cursor.state(), VertexScanState::Exhausted);
         assert!(cursor.next().is_none());
     }

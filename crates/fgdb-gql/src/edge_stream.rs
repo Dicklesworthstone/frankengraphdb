@@ -15,11 +15,11 @@ pub use asynchronous::{
     AsyncEdgeSpillAggregatePlan,
 };
 mod join;
-pub(crate) use join::{Collection, Probe};
 pub use join::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
     AsyncIncidentCandidateResult,
 };
+pub(crate) use join::{Collection, Probe};
 mod record;
 pub use record::EdgeScanRecord;
 mod walk;
@@ -719,9 +719,9 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
                 return Ok(None);
             };
             let ordinal = self.projected_rows;
-            let next_ordinal = ordinal.checked_add(1).ok_or_else(|| {
-                scan(GqlQueryError::Source(EdgeScanError::CounterExhausted))
-            })?;
+            let next_ordinal = ordinal
+                .checked_add(1)
+                .ok_or_else(|| scan(GqlQueryError::Source(EdgeScanError::CounterExhausted)))?;
             let selected = pull.selects_row(ordinal);
             let next = if selected {
                 Some(

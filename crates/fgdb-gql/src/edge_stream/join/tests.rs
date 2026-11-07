@@ -17,10 +17,13 @@ struct Fixture {
     after: Option<EId>,
     roots: Arc<AtomicUsize>,
     seeks: Arc<AtomicUsize>,
+    scans: Arc<AtomicUsize>,
     drops: Arc<AtomicUsize>,
     unavailable: bool,
     repeat: bool,
+    repeat_vertex: bool,
     fail_edge: Option<EId>,
+    fail_vertex: Option<VId>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -37,10 +40,13 @@ impl Fixture {
             after: None,
             roots: Arc::new(AtomicUsize::new(0)),
             seeks: Arc::new(AtomicUsize::new(0)),
+            scans: Arc::new(AtomicUsize::new(0)),
             drops: Arc::new(AtomicUsize::new(0)),
             unavailable: false,
             repeat: false,
+            repeat_vertex: false,
             fail_edge: None,
+            fail_vertex: None,
         };
         for (id, from, to) in edges {
             f.vertices.extend([VId(from), VId(to)]);
@@ -117,10 +123,33 @@ impl EdgeScanSource for Fixture {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        if self.fail_vertex == Some(id) {
+            return Err(EdgeScanSourceError::Source("vertex history unreadable"));
+        }
         Ok(self.vertices.contains(&id).then_some(VertexScanRow {
             labels: &[],
             properties: &[],
         }))
+    }
+    fn next_probe_vertex<C>(
+        &self,
+        after: Option<VId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VId>, EdgeExpansionSourceError<Self::Error, C>> {
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        if self.unavailable {
+            return Err(EdgeExpansionSourceError::Unavailable);
+        }
+        control(GlaExecutionEvent::Work)
+            .map_err(|error| EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error)))?;
+        if self.repeat_vertex && after.is_some() {
+            return Ok(after);
+        }
+        Ok(self
+            .vertices
+            .range((after.map_or(Unbounded, Excluded), Unbounded))
+            .next()
+            .copied())
     }
     fn next_incident_edge<C>(
         &self,
@@ -1069,7 +1098,11 @@ mod collections {
         };
         let base = "MATCH (a)-[r:R]->(b) RETURN r,a,b,[(b)-[s:R]->(c) | s.p] AS weights";
         assert!(prepare(base).edge_row_pull().is_some());
-        assert!(prepare(&format!("{base} LIMIT 0")).edge_row_pull().is_some());
+        assert!(
+            prepare(&format!("{base} LIMIT 0"))
+                .edge_row_pull()
+                .is_some()
+        );
         for invalid in [
             base.replace("RETURN r,a,b", "RETURN a,r,b"),
             base.replace("RETURN r,a,b", "RETURN DISTINCT r,a,b"),
@@ -1130,6 +1163,255 @@ mod collections {
             .unwrap()
     }
 
+    fn independent_definition(
+        directions: &[GlaDirection],
+        mode: GraphMatchMode,
+        disconnected: bool,
+        count: Option<u64>,
+    ) -> PreparedGraphPattern<GraphValueRow> {
+        let mut outer = GraphPatternBuilder::new();
+        outer.vertex("a").unwrap().vertex("b").unwrap();
+        outer.edge("a", R, GlaDirection::Forward, "b").unwrap();
+        outer.capture_edge("r", 0).unwrap();
+        let mut inner = GraphPatternBuilder::new();
+        inner.vertex("x").unwrap().vertex("y").unwrap();
+        inner.edge("x", R, directions[0], "y").unwrap();
+        inner.capture_edge("s", 0).unwrap();
+        let mut tuple = vec!["x", "s", "y"];
+        if directions.len() == 2 {
+            inner.vertex("z").unwrap();
+            if disconnected {
+                inner.vertex("w").unwrap();
+                inner.edge("z", R, directions[1], "w").unwrap();
+                tuple.extend(["z", "t", "w"]);
+            } else {
+                inner.edge("y", R, directions[1], "z").unwrap();
+                tuple.extend(["t", "z"]);
+            }
+            inner.capture_edge("t", 1).unwrap();
+        }
+        inner.match_mode(mode);
+        outer
+            .prepare_values_with_clauses(
+                &[
+                    GraphMatchClause::collect_tuple(&inner, tuple),
+                    GraphMatchClause::collect(&inner, None),
+                ],
+                &[
+                    GraphColumn::path("r", "r", GraphPathFunction::Edge),
+                    GraphColumn::vertex("a", "a"),
+                    GraphColumn::vertex("b", "b"),
+                    GraphColumn::collection("tuples", 0),
+                    GraphColumn::collection("nulls", 1),
+                ],
+                0,
+                count,
+            )
+            .unwrap()
+    }
+
+    // Construct complete finite relations in source-VId then relationship-EId
+    // order. Their product is independent of the cursor's scan positions and
+    // incidence lookup; only connected endpoint equality and clause-local
+    // edge reuse filter witnesses. Parallel and repeated tuples stay separate.
+    fn independent_expected(
+        fixture: &Fixture,
+        directions: &[GlaDirection],
+        mode: GraphMatchMode,
+        disconnected: bool,
+    ) -> Vec<GraphValueRow> {
+        let domains: Vec<Vec<_>> = directions
+            .iter()
+            .map(|&direction| {
+                let mut domain = Vec::new();
+                for &root in &fixture.vertices {
+                    for (&eid, (from, to, _)) in &fixture.edges {
+                        for (start, end) in orientations(*from, *to, direction) {
+                            if start == root {
+                                domain.push((start, eid, end));
+                            }
+                        }
+                    }
+                }
+                domain
+            })
+            .collect();
+        let mut tuples = Vec::new();
+        for &(x, s, y) in &domains[0] {
+            let prefix = vec![
+                GraphValue::Vertex(x),
+                GraphValue::Edge(s),
+                GraphValue::Vertex(y),
+            ];
+            if domains.len() == 1 {
+                tuples.push(list(prefix));
+                continue;
+            }
+            for &(z, t, w) in &domains[1] {
+                if (!disconnected && z != y) || (mode == GraphMatchMode::DifferentEdges && s == t) {
+                    continue;
+                }
+                let mut fields = prefix.clone();
+                if disconnected {
+                    fields.push(GraphValue::Vertex(z));
+                }
+                fields.extend([GraphValue::Edge(t), GraphValue::Vertex(w)]);
+                tuples.push(list(fields));
+            }
+        }
+        let nulls = list(vec![
+            GraphValue::Scalar(CanonicalScalar::Null);
+            tuples.len()
+        ]);
+        let tuples = list(tuples);
+        fixture
+            .edges
+            .iter()
+            .map(|(&r, (a, b, _))| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Edge(r),
+                    GraphValue::Vertex(*a),
+                    GraphValue::Vertex(*b),
+                    tuples.clone(),
+                    nulls.clone(),
+                ])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn independent_collections_keep_vertex_then_edge_order_and_disconnected_products() {
+        use GlaDirection::{Forward as F, Reverse as R, Undirected as U};
+
+        for directions in [
+            vec![F],
+            vec![R],
+            vec![U],
+            vec![F, F],
+            vec![R, U],
+            vec![U, U],
+        ] {
+            for disconnected in [false, true] {
+                for mode in [
+                    GraphMatchMode::RepeatableElements,
+                    GraphMatchMode::DifferentEdges,
+                ] {
+                    let query = independent_definition(&directions, mode, disconnected, None);
+                    let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+                    for mask in [0, 3, 31, 63, 64] {
+                        let mut fixture = if mask == 64 {
+                            // EId zero starts at the greatest connected vertex;
+                            // a global EId scan would return a different list.
+                            Fixture::from_edges([
+                                (0, 9, 0),
+                                (1, 1, 2),
+                                (2, 0, 1),
+                                (3, 0, 1),
+                                (4, 2, 0),
+                                (u128::MAX, 2, 2),
+                            ])
+                        } else {
+                            Fixture::small(mask)
+                        };
+                        fixture.vertices.insert(VId(u128::MAX));
+                        let expected =
+                            independent_expected(&fixture, &directions, mode, disconnected);
+                        assert_eq!(eager(&query, &fixture), expected, "eager");
+                        let scans = fixture.scans.clone();
+                        let mut cursor = EdgeScanCursor::new(
+                            fixture,
+                            plan.clone(),
+                            policy(),
+                            || Ok::<_, ()>(()),
+                        );
+                        assert_eq!(scans.load(Ordering::SeqCst), 0);
+                        let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                        assert_eq!(
+                            actual, expected,
+                            "{directions:?}/{mode:?}; disconnected={disconnected}; mask={mask}"
+                        );
+                        assert_eq!(cursor.row_stats().result_rows, expected.len() as u64);
+                        if !expected.is_empty() {
+                            assert!(scans.load(Ordering::SeqCst) > 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn independent_collection_scan_failures_discard_complete_private_witnesses() {
+        let query = independent_definition(
+            &[GlaDirection::Forward],
+            GraphMatchMode::DifferentEdges,
+            false,
+            Some(1),
+        );
+        let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+        for failure in 0..3 {
+            let mut fixture = Fixture::small(63);
+            fixture.vertices.insert(VId(u128::MAX));
+            fixture.unavailable = failure == 0;
+            fixture.repeat_vertex = failure == 1;
+            // The isolate has no incident relationships. Reading it can still
+            // fail after every real witness was retained, before publication.
+            fixture.fail_vertex = (failure == 2).then_some(VId(u128::MAX));
+            let scans = fixture.scans.clone();
+            let drops = fixture.drops.clone();
+            let mut cursor =
+                EdgeScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
+            let error = cursor.next().unwrap().unwrap_err();
+            match failure {
+                0 => assert!(matches!(
+                    error,
+                    GqlQueryError::Source(EdgeScanError::ExpansionUnavailable)
+                )),
+                1 => assert!(matches!(
+                    error,
+                    GqlQueryError::Source(EdgeScanError::NonIncreasingIdentity)
+                )),
+                _ => assert!(matches!(
+                    error,
+                    GqlQueryError::Source(EdgeScanError::Source("vertex history unreadable"))
+                )),
+            }
+            assert!(scans.load(Ordering::SeqCst) > 0);
+            assert_eq!(cursor.row_stats().result_rows, 0);
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+            assert!(cursor.source.is_none());
+            assert!(cursor.traversal.is_none());
+            assert!(cursor.next().is_none());
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
+        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+    }
+
+    #[test]
+    fn anonymous_independent_collections_keep_the_endpoint_order_refusal() {
+        let mut outer = GraphPatternBuilder::new();
+        outer.vertex("a").unwrap();
+        let mut inner = GraphPatternBuilder::new();
+        inner.vertex("x").unwrap().vertex("y").unwrap();
+        inner.edge("x", R, GlaDirection::Forward, "y").unwrap();
+        let query = outer
+            .prepare_values_with_clauses(
+                &[GraphMatchClause::collect(&inner, Some("y"))],
+                &[
+                    GraphColumn::vertex("a", "a"),
+                    GraphColumn::collection("ys", 0),
+                ],
+                0,
+                Some(0),
+            )
+            .unwrap();
+        assert!(!query.plan().requires_identified_edges());
+        // Sorting returned y values cannot reconstruct source-x-major order.
+        // An anonymous endpoint scope must refuse until that order is proven.
+        assert!(crate::stream::VertexScanPlan::compile(query.plan()).is_err());
+    }
+
     fn multi_hop_definition(
         directions: [GlaDirection; 2],
         mode: GraphMatchMode,
@@ -1171,7 +1453,6 @@ mod collections {
             )
             .unwrap()
     }
-
 
     fn captured_path_definition(
         outer_direction: GlaDirection,
@@ -1329,23 +1610,26 @@ mod collections {
             vec![U, U, U],
         ] {
             for returning in [false, true] {
-                for mode in [GraphMatchMode::RepeatableElements, GraphMatchMode::DifferentEdges] {
-                    let query =
-                        captured_path_definition(U, &directions, mode, returning, None);
+                for mode in [
+                    GraphMatchMode::RepeatableElements,
+                    GraphMatchMode::DifferentEdges,
+                ] {
+                    let query = captured_path_definition(U, &directions, mode, returning, None);
                     let plan = EdgeScanPlan::compile(query.plan()).unwrap();
                     for mask in [0, 3, 31, 63] {
                         let fixture = Fixture::small(mask);
                         let expected =
                             captured_path_expected(&fixture, U, &directions, mode, returning);
                         assert_eq!(eager(&query, &fixture), expected, "eager");
-                        let actual = EdgeScanCursor::new(
-                            fixture,
-                            plan.clone(),
-                            policy(),
-                            || Ok::<_, ()>(()),
-                        )
-                        .collect::<Result<Vec<_>, _>>()
-                        .unwrap();
+                        let actual =
+                            EdgeScanCursor::new(
+                                fixture,
+                                plan.clone(),
+                                policy(),
+                                || Ok::<_, ()>(()),
+                            )
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap();
                         assert_eq!(
                             actual, expected,
                             "{directions:?}/{mode:?}; returning={returning}; mask={mask}"
@@ -1389,7 +1673,10 @@ mod collections {
                 };
                 *function = GraphPathFunction::Edge;
             } else {
-                let GlaOperator::CapturePath { start, segments, .. } = &mut ops[path] else {
+                let GlaOperator::CapturePath {
+                    start, segments, ..
+                } = &mut ops[path]
+                else {
                     unreachable!("compound capture")
                 };
                 match corruption {
@@ -1411,7 +1698,11 @@ mod collections {
         let GlaOperator::Collect { group, .. } = ops[start] else {
             unreachable!("collection opening")
         };
-        ops[start] = GlaOperator::Probe { group, end: end as u32, anti: false };
+        ops[start] = GlaOperator::Probe {
+            group,
+            end: end as u32,
+            anti: false,
+        };
         ops[end] = GlaOperator::ProbeEnd { group };
         assert!(probe::Probe::compile(&ops, start, 2).is_err());
         assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
@@ -1427,7 +1718,14 @@ mod collections {
             false,
             Some(1),
         );
-        let edges = [(0, 9, 0), (1, 0, 1), (2, 1, 2), (3, 1, 3), (4, 2, 4), (5, 3, 4)];
+        let edges = [
+            (0, 9, 0),
+            (1, 0, 1),
+            (2, 1, 2),
+            (3, 1, 3),
+            (4, 2, 4),
+            (5, 3, 4),
+        ];
         let fixture = Fixture::from_edges(edges);
         let expected = captured_path_expected(
             &fixture,
@@ -1682,7 +1980,11 @@ mod collections {
         for corruption in 0..6 {
             let mut ops = original.to_vec();
             match corruption {
-                0 => ops[start + 1] = GlaOperator::ScanVertices,
+                0 => {
+                    ops[start + 1] = GlaOperator::BindVertex {
+                        source: BindingSlot(u32::MAX),
+                    };
+                }
                 1 => {
                     for &at in &expansions {
                         ops[at] = GlaOperator::BindVertex {
@@ -1853,6 +2155,12 @@ mod collections {
     fn every_collection_checkpoint_cancels_without_a_partial_row_and_retry_is_exact() {
         for query in [
             definition(GlaDirection::Forward, GlaDirection::Forward, 0, Some(2)),
+            independent_definition(
+                &[GlaDirection::Forward],
+                GraphMatchMode::DifferentEdges,
+                false,
+                Some(2),
+            ),
             captured_path_definition(
                 GlaDirection::Forward,
                 &[GlaDirection::Forward; 3],
@@ -1863,10 +2171,11 @@ mod collections {
         ] {
             let plan = EdgeScanPlan::compile(query.plan()).unwrap();
             let mut checkpoints = 0;
-            let mut cursor = EdgeScanCursor::new(Fixture::small(63), plan.clone(), policy(), || {
-                checkpoints += 1;
-                Ok::<_, usize>(())
-            });
+            let mut cursor =
+                EdgeScanCursor::new(Fixture::small(63), plan.clone(), policy(), || {
+                    checkpoints += 1;
+                    Ok::<_, usize>(())
+                });
             let expected = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
             let rows = cursor.row_stats();
             let evaluator = cursor.evaluator_stats();

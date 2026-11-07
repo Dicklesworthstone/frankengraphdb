@@ -780,8 +780,7 @@ fn vertex_collections_preserve_every_witness_capture_and_empty_root() {
             let expected = expected_collections(&fixture, direction);
             let plan = VertexScanPlan::compile(pattern.plan()).unwrap();
             assert!(plan.has_graph_probes());
-            let mut cursor =
-                VertexScanCursor::new(fixture, plan, policy(), || Ok::<_, ()>(()));
+            let mut cursor = VertexScanCursor::new(fixture, plan, policy(), || Ok::<_, ()>(()));
             let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
             assert_eq!(plain(&actual), expected, "mask={mask}, {direction:?}");
             assert_eq!(cursor.row_stats().result_rows, 5);
@@ -848,8 +847,7 @@ fn collection_source_failures_never_become_absence_or_publish_partial_rows() {
     let expected = expected_collections(&fixture, GlaDirection::Forward);
     fixture.fail_edge = Some(EId(3));
     let drops = fixture.drops.clone();
-    let mut cursor =
-        VertexScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
+    let mut cursor = VertexScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
     assert_eq!(cursor.next().unwrap().unwrap().values(), expected[0]);
     assert!(matches!(
         cursor.next(),
@@ -864,8 +862,7 @@ fn collection_source_failures_never_become_absence_or_publish_partial_rows() {
 
     let mut fixture = Fixture::small(63);
     fixture.repeat = true;
-    let mut cursor =
-        VertexScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
+    let mut cursor = VertexScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
     assert!(matches!(
         cursor.next(),
         Some(Err(GqlQueryError::Source(VertexScanError::Probe(
@@ -875,12 +872,9 @@ fn collection_source_failures_never_become_absence_or_publish_partial_rows() {
     assert_eq!(cursor.row_stats().result_rows, 0);
     assert!(cursor.next().is_none());
 
-    let mut cursor = VertexScanCursor::new(
-        NoLookup(Fixture::small(63)),
-        plan,
-        policy(),
-        || Ok::<_, ()>(()),
-    );
+    let mut cursor = VertexScanCursor::new(NoLookup(Fixture::small(63)), plan, policy(), || {
+        Ok::<_, ()>(())
+    });
     assert!(matches!(
         cursor.next(),
         Some(Err(GqlQueryError::Source(VertexScanError::Probe(
@@ -1009,7 +1003,11 @@ fn anonymous_collections_keep_endpoint_order_tuples_and_parallel_multiplicity() 
                     || Ok::<_, ()>(()),
                 )
                 .unwrap();
-            assert_eq!(plain(&eager.value), expected, "eager mask={mask}, {direction:?}");
+            assert_eq!(
+                plain(&eager.value),
+                expected,
+                "eager mask={mask}, {direction:?}"
+            );
             let mut cursor = VertexScanCursor::new(
                 fixture,
                 VertexScanPlan::compile(pattern.plan()).unwrap(),
@@ -1032,11 +1030,15 @@ fn anonymous_collection_normalization_keeps_one_meter_and_terminal_prefixes() {
     let pattern = anonymous_collection_pattern(GlaDirection::Forward, Some(2));
     let plan = VertexScanPlan::compile(pattern.plan()).unwrap();
     let mut total = 0;
-    let mut baseline =
-        VertexScanCursor::new(anonymous_collection_fixture(63), plan.clone(), policy(), || {
+    let mut baseline = VertexScanCursor::new(
+        anonymous_collection_fixture(63),
+        plan.clone(),
+        policy(),
+        || {
             total += 1;
             Ok::<_, usize>(())
-        });
+        },
+    );
     let expected = baseline.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
     let rows = baseline.row_stats();
     let evaluator = baseline.evaluator_stats();
@@ -1086,8 +1088,14 @@ fn anonymous_collection_normalization_keeps_one_meter_and_terminal_prefixes() {
         evaluator.scratch_entries,
     );
     let mut retry = run(exact);
-    assert_eq!(retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), expected);
-    assert_eq!((retry.row_stats(), retry.evaluator_stats()), (rows, evaluator));
+    assert_eq!(
+        retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        expected
+    );
+    assert_eq!(
+        (retry.row_stats(), retry.evaluator_stats()),
+        (rows, evaluator)
+    );
     for budget in [
         GqlQueryPolicy::new(rows.snapshot_records - 1, u64::MAX, u64::MAX, u64::MAX),
         GqlQueryPolicy::new(u64::MAX, rows.result_rows - 1, u64::MAX, u64::MAX),

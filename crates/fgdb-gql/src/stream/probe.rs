@@ -67,9 +67,7 @@ pub(super) fn collect<S: VertexScanSource, C>(
             &mut || record().map_err(|error| error.map_source(EdgeScanError::Source)),
         )
         .map_err(|error| error.map_source(unpack))?;
-    if endpoint_ordered
-        && let GraphValue::List(values) = &mut value
-    {
+    if endpoint_ordered && let GraphValue::List(values) = &mut value {
         // Reuse the governed, allocation-free sorter on the list we already
         // retain. Normalize before the row VM reads properties or evaluates
         // computed elements, whose order can affect visible expression errors.
@@ -90,12 +88,8 @@ pub(super) fn element_property<S: VertexScanSource, C>(
     let lookup = Lookup(source);
     let mut events = |event| control(vertex_event(event));
     let value = match element {
-        fgdb_delta_types::ElementId::Vertex(vid) => {
-            lookup.vertex_property(vid, key, &mut events)
-        }
-        fgdb_delta_types::ElementId::Edge(eid) => {
-            lookup.edge_property(eid, key, &mut events)
-        }
+        fgdb_delta_types::ElementId::Vertex(vid) => lookup.vertex_property(vid, key, &mut events),
+        fgdb_delta_types::ElementId::Edge(eid) => lookup.edge_property(eid, key, &mut events),
     }
     .map_err(|error| match error {
         EdgeScanSourceError::Source(error) => GqlQueryError::Source(error),

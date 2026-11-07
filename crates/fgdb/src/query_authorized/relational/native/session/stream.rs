@@ -732,14 +732,10 @@ fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result
             scope = None;
         }
         match op {
-            GlaOperator::Probe { group, end, .. }
-            | GlaOperator::Collect { group, end, .. } => {
+            GlaOperator::Probe { group, end, .. } | GlaOperator::Collect { group, end, .. } => {
                 let end = *end as usize;
                 let closes = match (op, operators.get(end)) {
-                    (
-                        GlaOperator::Probe { .. },
-                        Some(GlaOperator::ProbeEnd { group: close }),
-                    )
+                    (GlaOperator::Probe { .. }, Some(GlaOperator::ProbeEnd { group: close }))
                     | (
                         GlaOperator::Collect { .. },
                         Some(GlaOperator::CollectEnd { group: close, .. }),

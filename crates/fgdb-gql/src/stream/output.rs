@@ -964,5 +964,4 @@ mod projected_tests {
             assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), stopped);
         }
     }
-
 }
