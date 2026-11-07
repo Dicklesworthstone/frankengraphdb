@@ -629,6 +629,7 @@ pub struct EdgeScanCursor<S, F> {
     last: Option<EId>,
     reverse_pending: Option<EId>,
     skip: u64,
+    projected_rows: u64,
     state: EdgeScanState,
     traversal: Option<join::Traversal>,
     advancing: bool,
@@ -653,6 +654,7 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             },
             last: None,
             reverse_pending: None,
+            projected_rows: 0,
             state: EdgeScanState::Open,
             traversal: None,
             advancing: false,
@@ -692,7 +694,10 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
     /// The private pattern input does not publish a ResultRow. Its properties
     /// are resolved through this same retained, admitted source, and every
     /// owned property copy is charged before cloning. Only a successful final
-    /// projection consumes the result allowance. A later source, expression,
+    /// projection selected by the output window consumes the result allowance.
+    /// Skipped and suffix rows keep their source ordinal and are still projected.
+    /// After the last selected row, a further pull drains that suffix before
+    /// successful EOF; LIMIT 0 drains on its first pull. A later source, expression,
     /// or control failure preserves earlier rows and fuses/releases the cursor.
     /// SnapshotRecords also admits each dynamic property lookup before the
     /// source inspects its history; its version/payload work shares this meter.
@@ -708,15 +713,25 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
         if self.state != EdgeScanState::Open {
             return None;
         }
-        let result: Result<Option<GraphValueRow>, E> = (|| {
+        let mut arithmetic = Some(arithmetic);
+        let result: Result<Option<GraphValueRow>, E> = (|| loop {
             let Some(row) = self.advance_inner::<false, C>().map_err(&mut scan)? else {
                 return Ok(None);
             };
-            let ordinal = self.meter.rows.result_rows;
-            let next = self
-                .meter
-                .increment(GqlBudgetDimension::ResultRows, ordinal)
-                .map_err(&mut scan)?;
+            let ordinal = self.projected_rows;
+            let next_ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                scan(GqlQueryError::Source(EdgeScanError::CounterExhausted))
+            })?;
+            let selected = pull.selects_row(ordinal);
+            let next = if selected {
+                Some(
+                    self.meter
+                        .increment(GqlBudgetDimension::ResultRows, self.meter.rows.result_rows)
+                        .map_err(&mut scan)?,
+                )
+            } else {
+                None
+            };
             let projected = {
                 let source = self.source.as_ref().expect("open cursor owns its source");
                 // VM checkpoints and property callbacks execute serially. Both
@@ -776,14 +791,22 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
                             })
                             .transpose()
                     },
-                    |column, error| arithmetic(ordinal, column, error),
+                    |column, error| {
+                        arithmetic.take().expect("a projection error ends the pull")(
+                            ordinal, column, error,
+                        )
+                    },
                 )?
+            };
+            self.projected_rows = next_ordinal;
+            let Some(next) = next else {
+                continue;
             };
             self.meter
                 .event(GlaExecutionEvent::ResultRow)
                 .map_err(&mut scan)?;
             self.meter.rows.result_rows = next;
-            Ok(Some(projected))
+            return Ok(Some(projected));
         })();
         let item = match result {
             Ok(Some(row)) => {
@@ -961,9 +984,13 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
                 self.skip -= 1;
                 continue;
             }
-            // Check quota BEFORE copying projected payloads, and publish only
-            // after the last fallible checkpoint has accepted the complete row.
-            let next = meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?;
+            // Only public delivery spends ResultRows. A private input row
+            // still projects under the same source/work/scratch controls.
+            let next = if EMIT {
+                meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?
+            } else {
+                meter.rows.result_rows
+            };
             let row = self
                 .plan
                 .project(&image, &paths, &mut |event| meter.event(event))?;

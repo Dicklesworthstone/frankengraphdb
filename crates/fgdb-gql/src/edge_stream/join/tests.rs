@@ -1069,10 +1069,10 @@ mod collections {
         };
         let base = "MATCH (a)-[r:R]->(b) RETURN r,a,b,[(b)-[s:R]->(c) | s.p] AS weights";
         assert!(prepare(base).edge_row_pull().is_some());
+        assert!(prepare(&format!("{base} LIMIT 0")).edge_row_pull().is_some());
         for invalid in [
             base.replace("RETURN r,a,b", "RETURN a,r,b"),
             base.replace("RETURN r,a,b", "RETURN DISTINCT r,a,b"),
-            format!("{base} LIMIT 0"),
             format!("{base} ORDER BY weights LIMIT 0"),
             base.replace(
                 "RETURN r,a,b",

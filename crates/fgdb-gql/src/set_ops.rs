@@ -1677,12 +1677,14 @@ impl PreparedGraphSet {
     /// scope. Both the source and final projection retain the root identity as
     /// their leading cell, so canonical order needs no sort or seen set.
     /// Dynamic properties must be read through that cursor's admitted source;
-    /// metadata, randomness, pages and relational barriers remain outside this
-    /// profile. The row-only row_pull/ordered_row_pull contracts stay narrow
-    /// for hosts that have not supplied an element reader.
+    /// metadata, randomness and relational barriers remain outside this
+    /// profile. The final window selects completed projections, including
+    /// evaluating skipped rows and the suffix before successful exhaustion.
+    /// The row-only row_pull/ordered_row_pull contracts stay narrow for hosts
+    /// that have not supplied an element reader.
     #[must_use]
     pub fn vertex_graph_row_pull(&self) -> Option<GraphSetRowPull> {
-        if !self.order.is_empty() || self.offset != 0 || self.count.is_some() {
+        if !self.order.is_empty() {
             return None;
         }
         let SetNode::Project {
@@ -1732,6 +1734,8 @@ impl PreparedGraphSet {
         Some(GraphSetRowPull {
             pattern: pattern.clone(),
             projection: projection.clone(),
+            offset: self.offset,
+            count: self.count,
         })
     }
 
@@ -1742,13 +1746,15 @@ impl PreparedGraphSet {
     /// sort or seen-set, including both orientations of an undirected root.
     /// Every expression uses the existing row VM and the source's admitted
     /// property readers; catalog metadata and random draws remain unavailable.
-    /// No order, page, DISTINCT, hidden key, or relational barrier is elided.
+    /// The final window selects completed projections; neither SKIP nor LIMIT
+    /// can hide an expression failure in the consumed input. No order,
+    /// DISTINCT, hidden key, or relational barrier is elided.
     ///
     /// This is a separate profile: the vertex-only contracts of row_pull and
     /// ordered_row_pull remain unchanged for their existing host adapters.
     #[must_use]
     pub fn edge_row_pull(&self) -> Option<GraphSetRowPull> {
-        if !self.order.is_empty() || self.offset != 0 || self.count.is_some() {
+        if !self.order.is_empty() {
             return None;
         }
         let SetNode::Project {
@@ -1797,6 +1803,8 @@ impl PreparedGraphSet {
         Some(GraphSetRowPull {
             pattern: pattern.clone(),
             projection: projection.clone(),
+            offset: self.offset,
+            count: self.count,
         })
     }
 
@@ -1897,6 +1905,8 @@ impl PreparedGraphSet {
             GraphSetRowPull {
                 pattern: pattern.clone(),
                 projection: projection.clone(),
+                offset: 0,
+                count: None,
             },
             *quantifier,
         ))
@@ -1904,12 +1914,15 @@ impl PreparedGraphSet {
 }
 
 /// A relation that pulls row by row: one checked source pattern and the
-/// projection each of its rows takes. The accessor selects a row-local or
-/// property-aware graph profile; it does not grant source capabilities.
+/// projection each of its rows takes, followed by its final output window.
+/// The accessor selects a row-local or property-aware graph profile; it does
+/// not grant source capabilities. A window never moves before projection.
 #[derive(Clone)]
 pub struct GraphSetRowPull {
     pattern: PreparedGraphPattern<GraphValueRow>,
     projection: Vec<GraphSetProjection>,
+    offset: u64,
+    count: Option<u64>,
 }
 
 impl core::fmt::Debug for GraphSetRowPull {
@@ -1926,6 +1939,18 @@ impl GraphSetRowPull {
     #[must_use]
     pub fn pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
         &self.pattern
+    }
+
+    /// Whether a completed projection belongs to the final output window.
+    /// `ordinal` numbers source rows from zero, including skipped rows.
+    /// Evaluate every reached projection before discarding an unselected row,
+    /// and exhaust the input before reporting successful completion. LIMIT 0
+    /// therefore still observes source, expression and control failures.
+    #[must_use]
+    pub fn selects_row(&self, ordinal: u64) -> bool {
+        ordinal
+            .checked_sub(self.offset)
+            .is_some_and(|selected| self.count.is_none_or(|count| selected < count))
     }
 
     /// Project one source row exactly as the eager projection does.
@@ -2015,14 +2040,16 @@ mod pulled_projection_tests {
                 "r.p + 1 AS cost",
                 "[(b)-[s:R]->(c) | c.p] AS neighbors, [(b)-[s:R]->(c) | s.p] AS weights",
             ] {
-                let text = format!("MATCH (a){left}[r:R]{right}(b) RETURN r,a,b,{suffix}");
-                let query = prepare(&text);
-                let frozen = query.canonical_bytes();
-                let pull = query.edge_row_pull().expect(&text);
-                assert!(query.row_pull().is_none(), "{text}");
-                assert!(query.ordered_row_pull().is_none(), "{text}");
-                assert!(crate::edge_stream::EdgeScanPlan::compile(pull.pattern().plan()).is_ok());
-                assert_eq!(query.canonical_bytes(), frozen);
+                for page in ["", " SKIP 1 LIMIT 2", " LIMIT 0"] {
+                    let text = format!("MATCH (a){left}[r:R]{right}(b) RETURN r,a,b,{suffix}{page}");
+                    let query = prepare(&text);
+                    let frozen = query.canonical_bytes();
+                    let pull = query.edge_row_pull().expect(&text);
+                    assert!(query.row_pull().is_none(), "{text}");
+                    assert!(query.ordered_row_pull().is_none(), "{text}");
+                    assert!(crate::edge_stream::EdgeScanPlan::compile(pull.pattern().plan()).is_ok());
+                    assert_eq!(query.canonical_bytes(), frozen);
+                }
             }
         }
         for text in [
@@ -2030,7 +2057,6 @@ mod pulled_projection_tests {
             "MATCH (a)-[r:R]-(b) RETURN r,r.p + 1 AS cost",
             "MATCH (a)-[r:R]->(b) RETURN DISTINCT r,a,b,r.p + 1 AS cost",
             "MATCH (a)-[r:R]->(b) RETURN r,a,b,r.p + 1 AS cost ORDER BY r",
-            "MATCH (a)-[r:R]->(b) RETURN r,a,b,r.p + 1 AS cost LIMIT 0",
             "MATCH (a)-[r:R]->(b) RETURN r,a,b,rand() AS draw",
         ] {
             assert!(prepare(text).edge_row_pull().is_none(), "{text}");

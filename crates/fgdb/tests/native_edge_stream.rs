@@ -666,6 +666,140 @@ fn vertex_rooted_collection_budgets_and_late_errors_preserve_complete_prefixes()
 }
 
 #[test]
+fn computed_graph_pages_rebind_windows_and_charge_only_selected_results() {
+    let ((), report) = run_async_under_lab(0x6e65_0015, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        let mut queries = vec![
+            "MATCH (a) RETURN a, [(a)-[r:R]->(b) | [r.p,b.p]] AS details".to_owned(),
+            "MATCH (a)-[r:R]->(b) RETURN r,a,b,r.p + 1 AS cost".to_owned(),
+        ];
+        for (left, right) in [("-", "->"), ("<-", "-"), ("-", "-")] {
+            queries.push(format!(
+                "MATCH (a){left}[r:R]{right}(b) RETURN r,a,b,r.p + 1 AS cost,\
+                 [(b)-[s:R]->(c) | c.p] AS values"
+            ));
+        }
+        for base in queries {
+            let complete = PreparedNativeRead::prepare(&base, &args, symbols).unwrap();
+            let (columns, mut cursor) = complete.stream(&db, &cx, &args, policy()).unwrap();
+            let full = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert!(!full.is_empty(), "{base}");
+            assert_eq!(
+                result(columns.clone(), full.clone()),
+                complete.execute(&db, &cx, &args, policy()).unwrap(),
+            );
+            let source_rows = cursor.row_stats();
+            let source_events = cursor.evaluator_stats();
+            let text = format!("{base} SKIP $skip LIMIT $take");
+            let initial = GqlParameters::new()
+                .with_uint64("skip", 0).unwrap()
+                .with_uint64("take", 1).unwrap();
+            let prepared = PreparedNativeRead::prepare(&text, &initial, symbols).unwrap();
+            for (skip, take) in [(0, 0), (0, 1), (1, 1), (2, 2), (99, 2), (u64::MAX, u64::MAX)] {
+                let args = GqlParameters::new()
+                    .with_uint64("skip", skip).unwrap()
+                    .with_uint64("take", take).unwrap();
+                let expected: Vec<_> = full.iter()
+                    .skip(usize::try_from(skip).unwrap_or(usize::MAX))
+                    .take(usize::try_from(take).unwrap_or(usize::MAX))
+                    .cloned()
+                    .collect();
+                // The input population exceeds the final row allowance. A
+                // LIMIT 0 page has no delivery allowance at all.
+                let allowance = GqlQueryPolicy::new(
+                    source_rows.snapshot_records,
+                    expected.len() as u64,
+                    source_events.work_units,
+                    source_events.scratch_entries,
+                );
+                let (paged_columns, mut paged) = prepared
+                    .stream(&db, &cx, &args, allowance)
+                    .unwrap();
+                let actual = paged.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                assert_eq!(actual, expected, "{text}: {skip}/{take}");
+                assert_eq!(paged_columns, columns);
+                assert_eq!(
+                    result(paged_columns, actual),
+                    prepared.execute(&db, &cx, &args, policy()).unwrap(),
+                );
+                assert_eq!(paged.row_stats().snapshot_records, source_rows.snapshot_records);
+                assert_eq!(paged.row_stats().result_rows, expected.len() as u64);
+                assert_eq!(
+                    paged.evaluator_stats().scratch_entries,
+                    source_events.scratch_entries,
+                );
+                assert_eq!(paged.state(), ScanState::Exhausted);
+                let stopped = (paged.row_stats(), paged.evaluator_stats());
+                assert!(paged.next().is_none());
+                assert_eq!((paged.row_stats(), paged.evaluator_stats()), stopped);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_graph_pages_preserve_skipped_and_suffix_errors_until_explicit_close() {
+    let ((), report) = run_async_under_lab(0x6e65_0016, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        for (base, column) in [
+            ("MATCH (a) RETURN a, 1/(a.p-11) AS value", 1),
+            ("MATCH (a)-[r:R]->(b) RETURN r,a,b,1/(r.p-8) AS value", 3),
+        ] {
+            for (page, delivered) in [
+                (" SKIP 1 LIMIT 1", 1),
+                (" LIMIT 0", 0),
+                (" SKIP 3 LIMIT 1", 0),
+            ] {
+                let text = format!("{base}{page}");
+                let prepared = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+                assert!(prepared.execute(&db, &cx, &args, policy()).is_err());
+                let allowance = GqlQueryPolicy::new(u64::MAX, delivered, u64::MAX, u64::MAX);
+                let (_, mut cursor) = prepared.stream(&db, &cx, &args, allowance).unwrap();
+                for _ in 0..delivered {
+                    assert!(cursor.next().unwrap().is_ok());
+                    assert_eq!(cursor.state(), ScanState::Open);
+                }
+                assert!(matches!(
+                    cursor.next(),
+                    Some(Err(GqlQueryError::Source(
+                        fgdb_gql::scan_stream::ScanError::Projection { row: 2, column: actual, error }
+                    ))) if actual == column && error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+                ), "{text}");
+                assert_eq!(cursor.row_stats().result_rows, delivered);
+                assert_eq!(cursor.state(), ScanState::Failed);
+                let stopped = (cursor.row_stats(), cursor.evaluator_stats());
+                assert!(cursor.next().is_none());
+                assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), stopped);
+            }
+
+            // Closing after the selected row releases the source without
+            // evaluating its unread, failing suffix.
+            let text = format!("{base} SKIP 1 LIMIT 1");
+            let prepared = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+            let (_, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+            cursor.next().unwrap().unwrap();
+            let stopped = (cursor.row_stats(), cursor.evaluator_stats());
+            cursor.close();
+            assert_eq!(cursor.state(), ScanState::Closed);
+            assert!(cursor.next().is_none());
+            assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), stopped);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn projected_edge_streams_share_budgets_and_publish_only_complete_rows() {
     let ((), report) = run_async_under_lab(0x6e65_0011, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

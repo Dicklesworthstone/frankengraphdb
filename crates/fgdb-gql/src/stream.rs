@@ -883,6 +883,7 @@ pub struct VertexScanCursor<S, F, Row = VId> {
     snapshot_seq: CommitSeq,
     last: Option<VId>,
     skip: u64,
+    projected_rows: u64,
     state: VertexScanState,
 }
 impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> {
@@ -909,6 +910,7 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
                 evaluator: GlaExecutionStats::default(),
             },
             last: None,
+            projected_rows: 0,
             state: VertexScanState::Open,
         }
     }

@@ -1366,3 +1366,121 @@ fn authorized_collection_property_reads_keep_the_pinned_generation_after_writes_
     assert_eq!(paused.state(), VertexScanState::Exhausted);
     assert!(paused.next().is_none());
 }
+
+#[test]
+fn authorized_projected_pages_keep_masks_and_signed_delivery_limits() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let slim = runtime.block_on(collection_database(&commit, false));
+    let authority = issuer();
+    let args = GqlParameters::new();
+    for (base, full) in [
+        (VERTEX_COLLECTION_TEXT, vertex_collection_expected(0)),
+        (COLLECTION_TEXT, collection_expected(0, 0)),
+    ] {
+        for (skip, take) in [(0, 0), (1, 1), (2, 1), (99, 1)] {
+            let text = format!("{base} SKIP {skip} LIMIT {take}");
+            let expected: Vec<_> = full.iter().skip(skip).take(take).cloned().collect();
+            let mut allowed = grant();
+            allowed.limits.max_rows = expected.len() as u64;
+            let token = authority.issue_at(&allowed, 100).unwrap();
+            let allowance = GqlQueryPolicy::new(
+                1_000_000,
+                expected.len() as u64,
+                10_000_000,
+                10_000_000,
+            );
+            let calls = Cell::new(0_u64);
+            let clock = || {
+                calls.set(calls.get() + 1);
+                100
+            };
+            let mut scoped = db
+                .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, allowance, clock)
+                .unwrap();
+            let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+            let before = calls.get();
+            let mut cursor = scoped.stream(&cx, &prepared, &args).unwrap();
+            assert_eq!(
+                cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected,
+                "{text}",
+            );
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            let checkpoints = calls.get() - before;
+            assert!(cursor.next().is_none());
+            drop(cursor);
+
+            let mut visible = slim
+                .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, allowance, clock)
+                .unwrap();
+            let prepared = visible.prepare(&cx, &text, &args).unwrap();
+            let before = calls.get();
+            let mut cursor = visible.stream(&cx, &prepared, &args).unwrap();
+            assert_eq!(
+                cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected,
+                "{text}",
+            );
+            assert_eq!(calls.get() - before, checkpoints, "{text}");
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            assert!(cursor.next().is_none());
+        }
+    }
+}
+
+#[test]
+fn authorized_projected_page_suffixes_keep_live_expiry_and_cancellation() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let expired = Cell::new(false);
+    let mut session = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || {
+            if expired.get() { 1000 } else { 100 }
+        })
+        .unwrap();
+    let text = format!("{VERTEX_COLLECTION_TEXT} LIMIT 1");
+    let prepared = session.prepare(&cx, &text, &args).unwrap();
+    let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+    assert_eq!(cursor.next().unwrap().unwrap(), vertex_collection_expected(0)[0]);
+    assert_eq!(cursor.state(), VertexScanState::Open);
+    expired.set(true);
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(QueryError::Authorization(Error::Expired)))
+    ));
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(cursor.next().is_none());
+    drop(cursor);
+    assert!(session.is_closed());
+
+    let mut session = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
+        .unwrap();
+    let text = format!("{COLLECTION_TEXT} LIMIT 1");
+    let prepared = session.prepare(&cx, &text, &args).unwrap();
+    let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+    assert_eq!(cursor.next().unwrap().unwrap(), collection_expected(0, 0)[0]);
+    assert_eq!(cursor.state(), VertexScanState::Open);
+    root.set_cancel_reason(
+        asupersync::CancelReason::new(asupersync::CancelKind::User)
+            .with_message("cancel while validating the suffix after a projected page"),
+    );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(QueryError::Pattern(GqlQueryError::Interrupted(_))))
+    ));
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(cursor.next().is_none());
+}

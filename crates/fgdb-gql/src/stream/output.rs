@@ -69,13 +69,16 @@ impl<S: super::VertexScanSource, F> super::VertexScanCursor<S, F, GraphValueRow>
     /// The host must compile this cursor from `pull.pattern()` and retain the
     /// same pull definition for the execution. No source is opened or retried.
     ///
-    /// The source row stays private: only a successfully projected row spends
-    /// ResultRows. Its zero-based ordinal therefore survives successive pulls
-    /// without a second counter. Every projection event is charged immediately,
+    /// The source row stays private: only a successfully projected, selected
+    /// row spends ResultRows. A separate source ordinal includes skipped rows
+    /// and the suffix after the page. Every projection event is charged immediately,
     /// before the VM performs the corresponding work or allocation. Private
     /// projection events never increment the public result count. Properties
     /// of collected elements use this same source at the retained cut, with
     /// history admission and payload-copy charges before the lookup/copy.
+    /// SKIP and LIMIT apply after projection. After the last selected row, a
+    /// further pull evaluates the remaining input before reporting EOF; LIMIT 0
+    /// does that on its first pull. Closing still discards the unread suffix.
     ///
     /// `scan` preserves the host's native source/control error mapping;
     /// `arithmetic` retains the projection's row, column and typed data error.
@@ -95,12 +98,23 @@ impl<S: super::VertexScanSource, F> super::VertexScanCursor<S, F, GraphValueRow>
         if self.state != VertexScanState::Open {
             return None;
         }
-        let result: Result<Option<GraphValueRow>, E> = (|| {
+        // A failed projection ends this pull immediately, so the error mapper
+        // is consumed at most once even when many private rows are evaluated.
+        let mut arithmetic = Some(arithmetic);
+        let result: Result<Option<GraphValueRow>, E> = (|| loop {
             let Some(row) = self.advance_inner::<false, C>().map_err(&mut scan)? else {
                 return Ok(None);
             };
-            let ordinal = self.meter.rows.result_rows;
-            self.meter.next_result_count().map_err(&mut scan)?;
+            let ordinal = self.projected_rows;
+            let next_ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                scan(crate::GqlQueryError::Source(
+                    super::VertexScanError::CounterExhausted,
+                ))
+            })?;
+            let selected = pull.selects_row(ordinal);
+            if selected {
+                self.meter.next_result_count().map_err(&mut scan)?;
+            }
             let projected = {
                 let source = self.source.as_ref().expect("open cursor owns its source");
                 // Projection checkpoints and dynamic property reads execute
@@ -131,11 +145,19 @@ impl<S: super::VertexScanSource, F> super::VertexScanCursor<S, F, GraphValueRow>
                         })
                         .map_err(&mut **mapping.borrow_mut())
                     },
-                    |column, error| arithmetic(ordinal, column, error),
+                    |column, error| {
+                        arithmetic.take().expect("a projection error ends the pull")(
+                            ordinal, column, error,
+                        )
+                    },
                 )?
             };
+            self.projected_rows = next_ordinal;
+            if !selected {
+                continue;
+            }
             self.meter.emit().map_err(&mut scan)?;
-            Ok(Some(projected))
+            return Ok(Some(projected));
         })();
         match result {
             Ok(Some(row)) => {
@@ -848,4 +870,99 @@ mod projected_tests {
         assert_eq!(reads.load(Ordering::SeqCst), 0);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
+
+    fn paged_projection(offset: u64, count: u64) -> GraphSetRowPull {
+        crate::PreparedGraphSetText::prepare(
+            "MATCH (n) RETURN n, 10 / n.p AS value",
+            |kind, name: &str| {
+                (kind == crate::GraphSymbolKind::Property && name == "p")
+                    .then_some(crate::GraphSymbol::Property(P))
+            },
+        )
+        .unwrap()
+        .bind_parameters(&crate::GqlParameters::new())
+        .unwrap()
+        .with_page(offset, Some(count))
+        .vertex_graph_row_pull()
+        .unwrap()
+    }
+
+    #[test]
+    fn projected_pages_consume_private_rows_without_spending_the_delivery_allowance() {
+        for (offset, count, expected) in [
+            (0, 0, vec![]),
+            (0, 1, vec![(VId(0), 5)]),
+            (1, 1, vec![(VId(9), 2)]),
+            (2, 3, vec![(VId(u128::MAX), 1)]),
+            (u64::MAX, u64::MAX, vec![]),
+        ] {
+            let pull = paged_projection(offset, count);
+            let source = Source::new([2, 5, 9]);
+            let reads = source.reads.clone();
+            let drops = source.drops.clone();
+            let mut cursor = VertexScanCursor::new(
+                source,
+                VertexScanPlan::compile(pull.pattern().plan()).unwrap(),
+                GqlQueryPolicy::new(3, expected.len() as u64, u64::MAX, u64::MAX),
+                || Ok::<_, usize>(()),
+            );
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+            for (id, value) in &expected {
+                let row = pull_next(&mut cursor, &pull).unwrap().unwrap();
+                assert_eq!(
+                    row.values(),
+                    &[
+                        GraphValue::Vertex(*id),
+                        GraphValue::Scalar(CanonicalScalar::Int(*value)),
+                    ]
+                );
+                assert_eq!(cursor.state(), VertexScanState::Open);
+            }
+            assert!(pull_next(&mut cursor, &pull).is_none());
+            assert_eq!(reads.load(Ordering::SeqCst), 3);
+            assert_eq!(cursor.row_stats().snapshot_records, 3);
+            assert_eq!(cursor.row_stats().result_rows, expected.len() as u64);
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            let stopped = (cursor.row_stats(), cursor.evaluator_stats());
+            assert!(pull_next(&mut cursor, &pull).is_none());
+            assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), stopped);
+        }
+    }
+
+    #[test]
+    fn projected_pages_preserve_skipped_and_suffix_failure_ordinals() {
+        for (offset, count, values, ordinal, delivered) in [
+            (0, 0, [2, 0, 9], 1, 0),
+            (2, 1, [2, 0, 9], 1, 0),
+            (1, 1, [2, 5, 0], 2, 1),
+        ] {
+            let pull = paged_projection(offset, count);
+            let source = Source::new(values);
+            let reads = source.reads.clone();
+            let drops = source.drops.clone();
+            let mut cursor = VertexScanCursor::new(
+                source,
+                VertexScanPlan::compile(pull.pattern().plan()).unwrap(),
+                GqlQueryPolicy::new(3, delivered, u64::MAX, u64::MAX),
+                || Ok::<_, usize>(()),
+            );
+            for _ in 0..delivered {
+                assert!(pull_next(&mut cursor, &pull).unwrap().is_ok());
+            }
+            assert!(matches!(
+                pull_next(&mut cursor, &pull),
+                Some(Err(Failure::Projection { row, column: 1, error }))
+                    if row == ordinal && error.kind == GraphIntegerErrorKind::DivisionByZero
+            ));
+            assert_eq!(reads.load(Ordering::SeqCst), ordinal as usize + 1);
+            assert_eq!(cursor.row_stats().result_rows, delivered);
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            let stopped = (cursor.row_stats(), cursor.evaluator_stats());
+            assert!(pull_next(&mut cursor, &pull).is_none());
+            assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), stopped);
+        }
+    }
+
 }

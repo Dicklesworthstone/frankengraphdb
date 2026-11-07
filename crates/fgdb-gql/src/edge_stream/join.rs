@@ -618,7 +618,7 @@ pub(super) fn advance<const EMIT: bool, S: EdgeScanSource, F: FnMut() -> Result<
             traversal.pop();
             continue;
         }
-        let count = if plan.emit_rows {
+        let count = if EMIT && plan.emit_rows {
             Some(meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?)
         } else {
             None
@@ -631,7 +631,7 @@ pub(super) fn advance<const EMIT: bool, S: EdgeScanSource, F: FnMut() -> Result<
             source,
             &mut |event| meter.event(event),
         )?;
-        if let Some(count) = count.filter(|_| EMIT) {
+        if let Some(count) = count {
             meter.event(GlaExecutionEvent::ResultRow)?;
             meter.rows.result_rows = count;
         } else {
