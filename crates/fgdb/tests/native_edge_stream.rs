@@ -2753,3 +2753,173 @@ fn mixed_trail_collections_match_path_products_and_keep_the_pinned_generation() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn multiple_trail_collections_keep_segment_products_and_pinned_captures() {
+    let ((), report) = run_async_under_lab(0x6e65_0031, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = seed();
+        batch.add_edge(EId(1), VId(0), WIDE, vec![(P, CanonicalScalar::Int(13))]);
+        let basis = db.write(&commit, batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let args = GqlParameters::new();
+        let edges = [
+            (EId(0), WIDE, VId(0)),
+            (EId(1), VId(0), WIDE),
+            (EId(2), WIDE, VId(0)),
+            (EId(3), WIDE, WIDE),
+            (EId(u128::MAX), VId(0), VId(u128::MAX)),
+        ];
+        let property = |id| {
+            if id == WIDE {
+                7
+            } else if id == VId(0) {
+                3
+            } else {
+                11
+            }
+        };
+        let shapes: &[(&[&str], &[(usize, usize)])] = &[
+            (&["*0..1", "*0..2"], &[(0, 1), (0, 2)]),
+            (&["*0..2", "", "*0..2"], &[(0, 2), (1, 1), (0, 2)]),
+            (&["*0..1", "*0..1", "*1..2"], &[(0, 1), (0, 1), (1, 2)]),
+            (&["*0..0", "*0..0"], &[(0, 0), (0, 0)]),
+        ];
+        for edge_root in [false, true] {
+            let (head, prefix, kind) = if edge_root {
+                ("MATCH (x)-[r:R]->(a)", "r,x,a", ScanKind::Edge)
+            } else {
+                ("MATCH (a)", "a", ScanKind::Vertex)
+            };
+            for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+                .into_iter()
+                .enumerate()
+            {
+                for &(spellings, bounds) in shapes {
+                    let names = ["a", "b", "c", "d"];
+                    let end = names[spellings.len()];
+                    let mut pattern = String::from("(a)");
+                    for (at, spelling) in spellings.iter().enumerate() {
+                        pattern
+                            .push_str(&format!("{left}[:R{spelling}]{right}({})", names[at + 1]));
+                    }
+                    for child in [false, true] {
+                        let filter = if child {
+                            format!("WHERE EXISTS {{ MATCH ({end})-[:R]->(z) }}")
+                        } else {
+                            String::new()
+                        };
+                        let text = format!(
+                            "{head} RETURN {prefix}, [p = {pattern} {filter} | [p,nodes(p),relationships(p),length(p),{end},{end}.p,NULL]] AS routes"
+                        );
+                        let values = |anchor| {
+                            mixed_trail::values(
+                                mixed_trail::routes_for_bounds(&edges, anchor, direction, bounds)
+                                    .into_iter()
+                                    .filter(|path| {
+                                        !child
+                                            || edges.iter().any(|&(_, from, _)| {
+                                                from == mixed_trail::endpoint(path)
+                                            })
+                                    }),
+                                property,
+                            )
+                        };
+                        let expected: Vec<_> = if edge_root {
+                            edges
+                                .iter()
+                                .map(|&(r, x, a)| {
+                                    GraphValueRow::from_owned_values(vec![
+                                        GraphValue::Edge(r),
+                                        GraphValue::Vertex(x),
+                                        GraphValue::Vertex(a),
+                                        values(a),
+                                    ])
+                                })
+                                .collect()
+                        } else {
+                            [VId(0), WIDE, VId(u128::MAX)]
+                                .into_iter()
+                                .map(|a| {
+                                    GraphValueRow::from_owned_values(vec![
+                                        GraphValue::Vertex(a),
+                                        values(a),
+                                    ])
+                                })
+                                .collect()
+                        };
+                        let prepared = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+                        let (columns, mut cursor) =
+                            prepared.stream(&db, &cx, &args, policy()).unwrap();
+                        assert_eq!(cursor.kind(), kind);
+                        assert_eq!(cursor.snapshot_seq(), basis);
+                        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                        assert_eq!(rows, expected, "{text}");
+                        assert_eq!(
+                            result(columns, rows),
+                            prepared.execute(&db, &cx, &args, policy()).unwrap(),
+                            "{text}"
+                        );
+                        assert_eq!(cursor.state(), ScanState::Exhausted);
+                        assert!(cursor.next().is_none());
+                    }
+                }
+            }
+        }
+        // The same EId word can be split between the two quantified atoms in
+        // two ways. Collection multiplicity must retain both occurrences.
+        let duplicate =
+            fgdb_gql::algebra::GraphPath::new(WIDE, vec![(EId(0), VId(0))].into_boxed_slice());
+        let product = mixed_trail::routes_for_bounds(&edges, WIDE, 0, &[(0, 1), (0, 1)]);
+        assert_eq!(product.iter().filter(|path| **path == duplicate).count(), 2);
+
+        let text = "MATCH (a) RETURN a,[p = (a)-[:R*0..1]->(b)-[:R*0..2]->(c) | [p,nodes(p),relationships(p),length(p),c,c.p,NULL]] AS routes";
+        let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+        let expected: Vec<_> = [VId(0), WIDE, VId(u128::MAX)]
+            .into_iter()
+            .map(|a| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(a),
+                    mixed_trail::values(
+                        mixed_trail::routes_for_bounds(&edges, a, 0, &[(0, 1), (0, 2)]),
+                        property,
+                    ),
+                ])
+            })
+            .collect();
+        let (_, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        let mut rows = vec![cursor.next().unwrap().unwrap()];
+        let mut edit = WriteBatch::new(R);
+        edit.delete_edge(EId(0));
+        edit.add_edge(EId(99), VId(u128::MAX), WIDE, vec![]);
+        edit.set_vertex_property(VId(u128::MAX), P, Some(CanonicalScalar::Int(31)));
+        db.write(&commit, edit).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        rows.extend(cursor.collect::<Result<Vec<_>, _>>().unwrap());
+        assert_eq!(rows, expected);
+        let (_, old) = prepared
+            .stream_in_view(&view, &cx, &args, policy())
+            .unwrap();
+        assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        let historical = text.replacen(
+            "MATCH (a)",
+            &format!("MATCH (a) FOR SYSTEM_TIME AS OF SEQ {}", basis.0),
+            1,
+        );
+        let historical = PreparedNativeRead::prepare(&historical, &args, symbols).unwrap();
+        let (_, old) = historical.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(old.snapshot_seq(), basis);
+        assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        let (columns, fresh) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        let fresh = fresh.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_ne!(fresh, expected);
+        assert_eq!(
+            result(columns, fresh),
+            prepared.execute(&db, &cx, &args, policy()).unwrap()
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

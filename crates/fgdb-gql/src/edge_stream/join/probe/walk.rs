@@ -13,7 +13,8 @@
 //! and endpoint deliveries share the outer query's control and record meter.
 //! A finite TRAIL collection uses the same active-edge traversal but emits
 //! every route occurrence, without allocating endpoint support. Prior fixed
-//! atoms in its DifferentEdges domain are excluded before route descent.
+//! choices and retained trails in its DifferentEdges domain are excluded
+//! before route descent. Each atom owns only its current route and exclusions.
 //! A collection capture snapshots that exact live route only when requested.
 //! This is not a graph store, spill or byte-memory bound.
 
@@ -59,7 +60,7 @@ impl Endpoints {
         Self::from_admitted_start(start, bounds, search, control)
     }
 
-    /// Collection admission proves one finite TRAIL atom.
+    /// Collection admission proves this atom is a finite TRAIL.
     /// Retain its path-local edge membership but never settle an endpoint: two
     /// routes to the same vertex contribute two list elements, in DFS order.
     pub(super) fn trail_occurrences<S: EdgeScanSource, C>(
@@ -91,11 +92,51 @@ impl Endpoints {
         Ok(())
     }
 
+    /// Retain only the identities of an earlier, currently offered TRAIL.
+    /// Its owner remains paused while this cursor explores the suffix. Copy
+    /// through the governed insertion path, without a captured path or source
+    /// lookup; duplicate exclusions never allocate another retained entry.
+    pub(super) fn forbid_route<E>(
+        &mut self,
+        previous: &Self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        debug_assert_eq!(previous.emission, Emission::TrailOccurrences);
+        control(GlaExecutionEvent::Work)?;
+        for &edge in &previous.edges {
+            self.forbid(edge, control)?;
+        }
+        Ok(())
+    }
+
     /// The selected occurrence's identities, including every transit edge.
     /// No path value or adjacency lookup is needed for a later fixed atom.
     pub(super) fn contains_edge(&self, edge: EId) -> bool {
         debug_assert_eq!(self.emission, Emission::TrailOccurrences);
         self.edges.contains(&edge)
+    }
+
+    /// Test two offered occurrences without allocating either path. The
+    /// smaller live set bounds the membership work; every lookup is governed.
+    pub(super) fn shares_edge<E>(
+        &self,
+        other: &Self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        debug_assert_eq!(self.emission, Emission::TrailOccurrences);
+        debug_assert_eq!(other.emission, Emission::TrailOccurrences);
+        let (smaller, larger) = if self.edges.len() <= other.edges.len() {
+            (&self.edges, &other.edges)
+        } else {
+            (&other.edges, &self.edges)
+        };
+        for edge in smaller {
+            control(GlaExecutionEvent::Work)?;
+            if larger.contains(edge) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(super) fn capture_len(&self) -> usize {
