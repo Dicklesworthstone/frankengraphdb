@@ -1795,8 +1795,8 @@ mod collections {
             .unwrap();
         assert!(EdgeScanPlan::compile(query.plan()).is_err());
 
-        // Preserve the independently shipped bounded-TRAIL collection lane.
-        // This increment admits child constraints only on fixed-hop parents.
+        // Preserve bare bounded-TRAIL collections and admit a terminal child
+        // constraint without changing the parent route-occurrence profile.
         let mut walk = GraphPatternBuilder::new();
         walk.match_mode(GraphMatchMode::DifferentEdges);
         walk.vertex("b").unwrap().vertex("c").unwrap();
@@ -1829,7 +1829,10 @@ mod collections {
                     Some(0),
                 )
                 .unwrap();
-            assert_eq!(EdgeScanPlan::compile(query.plan()).is_ok(), !nested);
+            assert!(
+                EdgeScanPlan::compile(query.plan()).is_ok(),
+                "bounded TRAIL collection with nested constraint: {nested}"
+            );
         }
     }
 

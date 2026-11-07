@@ -793,12 +793,12 @@ impl Collection {
         // Fixed parents may have terminal child probes. Only direct parent
         // scans and expansion atoms determine the collection profile; child
         // finite walks keep their existing endpoint-support EXISTS semantics.
-        // Nested constraints on a variable-length parent remain outside this
-        // profile until their route/error ordering has its own proof.
+        // Children test each fixed/TRAIL occurrence in separate Support
+        // frames. Rejection never advances or coalesces the paused parent
+        // route; every accepted route still contributes one list element.
         let mut fixed = 0;
         let mut walks = 0;
         let mut scans = false;
-        let mut probes = false;
         let mut at = start + 1;
         while at < end {
             match &ops[at] {
@@ -812,7 +812,6 @@ impl Collection {
                     if *child_end as usize <= at + 1 || *child_end as usize >= end {
                         return Err(EdgeScanBuildError { operator: at });
                     }
-                    probes = true;
                     at = *child_end as usize;
                 }
                 _ => {}
@@ -822,7 +821,7 @@ impl Collection {
         if (fixed == 0 && walks == 0)
             || fixed > MAX_PATTERN_EDGES
             || walks > 1
-            || (walks != 0 && (fixed != 0 || scans || probes))
+            || (walks != 0 && (fixed != 0 || scans))
         {
             return Err(bad());
         }

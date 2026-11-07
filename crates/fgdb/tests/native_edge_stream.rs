@@ -2167,6 +2167,230 @@ fn root_edge_scan_work_is_linear_and_every_public_allowance_preserves_prefixes()
 }
 
 #[test]
+fn nested_trail_filters_keep_occurrences_and_their_original_graph() {
+    fn values(anchor: VId, minimum: usize, maximum: usize, predicate: usize) -> GraphValue {
+        let last = VId(u128::MAX);
+        let endpoints = match (minimum, maximum) {
+            (0, 0) => vec![anchor],
+            (2, 2) if anchor == WIDE => vec![last, last, VId(0), VId(0)],
+            (2, 2) => Vec::new(),
+            _ if anchor == WIDE => vec![
+                WIDE,
+                VId(0),
+                last,
+                VId(0),
+                last,
+                WIDE,
+                VId(0),
+                last,
+                VId(0),
+                last,
+            ],
+            _ if anchor == VId(0) => vec![VId(0), last],
+            _ => vec![last],
+        };
+        // In seed(), only WIDE has an outgoing edge with p > 3. Only VId(0)
+        // has an outgoing edge but none to the vertex with p = 7. Filtering
+        // these literal route occurrences must never coalesce equal endpoints.
+        GraphValue::List(
+            endpoints
+                .into_iter()
+                .filter(|&endpoint| match predicate {
+                    0 => endpoint == WIDE,
+                    1 => endpoint != WIDE,
+                    _ => endpoint == VId(0),
+                })
+                .map(|endpoint| {
+                    let property = if endpoint == WIDE {
+                        7
+                    } else if endpoint == VId(0) {
+                        3
+                    } else {
+                        11
+                    };
+                    GraphValue::List(
+                        vec![
+                            GraphValue::Vertex(endpoint),
+                            GraphValue::Scalar(CanonicalScalar::Int(property)),
+                        ]
+                        .into_boxed_slice(),
+                    )
+                })
+                .collect(),
+        )
+    }
+    fn expected(
+        edge_root: bool,
+        minimum: usize,
+        maximum: usize,
+        predicate: usize,
+    ) -> Vec<GraphValueRow> {
+        if edge_root {
+            [
+                (0, WIDE, VId(0)),
+                (2, WIDE, VId(0)),
+                (3, WIDE, WIDE),
+                (u128::MAX, VId(0), VId(u128::MAX)),
+            ]
+            .into_iter()
+            .map(|(eid, from, to)| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Edge(EId(eid)),
+                    GraphValue::Vertex(from),
+                    GraphValue::Vertex(to),
+                    values(to, minimum, maximum, predicate),
+                ])
+            })
+            .collect()
+        } else {
+            [VId(0), WIDE, VId(u128::MAX)]
+                .into_iter()
+                .map(|id| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(id),
+                        values(id, minimum, maximum, predicate),
+                    ])
+                })
+                .collect()
+        }
+    }
+
+    let ((), report) = run_async_under_lab(0x6e65_0027, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let args = GqlParameters::new();
+        for edge_root in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.write(&commit, seed()).await.unwrap();
+            let view = db.read_session().unwrap();
+            let (head, prefix, kind) = if edge_root {
+                ("MATCH (x)-[r:R]->(a)", "r,x,a", ScanKind::Edge)
+            } else {
+                ("MATCH (a)", "a", ScanKind::Vertex)
+            };
+            for (minimum, maximum) in [(0, 0), (0, 3), (2, 2)] {
+                for (predicate, filter) in [
+                    "EXISTS { MATCH (b)-[t:R]->(c) WHERE t.p > 3 }",
+                    "NOT EXISTS { MATCH (b)-[t:R]->(c) WHERE t.p > 3 }",
+                    "EXISTS { MATCH (b)-[t:R]->(c) } \
+                     AND NOT EXISTS { MATCH (b)-[u:R]->(d) WHERE d.p = 7 }",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let text = format!(
+                        "{head} RETURN {prefix}, [(a)-[:R*{minimum}..{maximum}]->(b) \
+                         WHERE {filter} | [b,b.p]] AS routes"
+                    );
+                    let query = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+                    let (columns, mut cursor) = query.stream(&db, &cx, &args, policy()).unwrap();
+                    assert_eq!(cursor.kind(), kind);
+                    let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(
+                        rows,
+                        expected(edge_root, minimum, maximum, predicate),
+                        "{text}"
+                    );
+                    assert_eq!(
+                        result(columns, rows),
+                        query.execute(&db, &cx, &args, policy()).unwrap(),
+                        "{text}",
+                    );
+                    assert_eq!(cursor.state(), ScanState::Exhausted);
+                }
+            }
+            let projection = format!(
+                "RETURN {prefix}, [(a)-[:R*0..3]->(b) WHERE EXISTS {{ \
+                 MATCH (b)-[t:R]->(c) WHERE t.p > 3 }} | [b,b.p]] AS routes"
+            );
+            let query =
+                PreparedNativeRead::prepare(&format!("{head} {projection}"), &args, symbols)
+                    .unwrap();
+            let (_, mut paused) = query.stream(&db, &cx, &args, policy()).unwrap();
+            let mut rows = vec![paused.next().unwrap().unwrap()];
+            let mut change = WriteBatch::new(R);
+            for eid in [0, 2, 3] {
+                change.set_edge_property(EId(eid), P, Some(CanonicalScalar::Int(0)));
+            }
+            change.set_vertex_property(WIDE, P, Some(CanonicalScalar::Int(70)));
+            db.write(&commit, change).await.unwrap();
+            db.compact(&commit).await.unwrap();
+            rows.extend(paused.by_ref().collect::<Result<Vec<_>, _>>().unwrap());
+            assert_eq!(rows, expected(edge_root, 0, 3, 0));
+            assert_eq!(paused.snapshot_seq(), basis);
+            let (_, old) = query.stream_in_view(&view, &cx, &args, policy()).unwrap();
+            assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), rows);
+            let historical = PreparedNativeRead::prepare(
+                &format!("{head} FOR SYSTEM_TIME AS OF SEQ {} {projection}", basis.0),
+                &args,
+                symbols,
+            )
+            .unwrap();
+            let (_, old) = historical.stream(&db, &cx, &args, policy()).unwrap();
+            assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), rows);
+            let (columns, fresh) = query.stream(&db, &cx, &args, policy()).unwrap();
+            let fresh = fresh.collect::<Result<Vec<_>, _>>().unwrap();
+            assert_ne!(fresh, rows);
+            assert_eq!(
+                result(columns, fresh),
+                query.execute(&db, &cx, &args, policy()).unwrap()
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn nested_trail_filters_preserve_live_path_captures() {
+    let ((), report) = run_async_under_lab(0x6e65_0029, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(
+            "MATCH (a) RETURN a, [p = (a)-[:R*0..3]->(b) WHERE EXISTS { \
+             MATCH (b)-[t:R]->(c) WHERE t.p > 3 } | p] AS paths",
+            &args,
+            symbols,
+        )
+        .unwrap();
+        let expected: Vec<_> = [VId(0), WIDE, VId(u128::MAX)]
+            .into_iter()
+            .map(|at| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(at),
+                    GraphValue::List(
+                        if at == WIDE {
+                            vec![
+                                GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                                    WIDE, Vec::new().into_boxed_slice(),
+                                )),
+                                GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                                    WIDE, vec![(EId(3), WIDE)].into_boxed_slice(),
+                                )),
+                            ]
+                        } else {
+                            Vec::new()
+                        }
+                        .into_boxed_slice(),
+                    ),
+                ])
+            })
+            .collect();
+        let (columns, cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(cursor.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        assert_eq!(
+            prepared.execute(&db, &cx, &args, policy()).unwrap(),
+            result(columns, expected),
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn native_nested_collection_filters_keep_parent_witnesses_and_capture_frames() {
     fn expected(edge_root: bool, direction: usize, predicate: usize) -> Vec<GraphValueRow> {
         let edges = [

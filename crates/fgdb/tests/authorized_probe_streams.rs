@@ -2380,6 +2380,165 @@ fn authorized_collected_paths_keep_every_segment_inside_the_visible_graph() {
 }
 
 #[test]
+fn nested_trail_filters_preserve_visible_route_multiplicity_and_scoped_reads() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let slim = runtime.block_on(collection_database(&commit, false));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    for edge_root in [false, true] {
+        let (head, prefix) = if edge_root {
+            ("MATCH (x)-[r]->(a)", "r,x,a")
+        } else {
+            ("MATCH (a)", "a")
+        };
+        for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+            .into_iter()
+            .enumerate()
+        {
+            for (minimum, maximum) in [(0, 0), (0, 3), (2, 2)] {
+                for (predicate, filter) in [
+                    "EXISTS { MATCH (b)-[t]->(c) WHERE t.p > 3 }",
+                    "NOT EXISTS { MATCH (b)-[t]->(c) WHERE t.p > 3 }",
+                    "EXISTS { MATCH (b)-[t]->(c) } \
+                     AND NOT EXISTS { MATCH (b)-[u]->(d) WHERE d.p = 10 }",
+                    "EXISTS { MATCH (b)-[t:S]->(c) }",
+                    "NOT EXISTS { MATCH (b)-[t]->(c:H) }",
+                    "EXISTS { MATCH (b)-[t]->(c) WHERE t.hidden = 999 OR c.hidden = 999 }",
+                    "NOT EXISTS { MATCH (b)-[t]->(c) WHERE t.hidden = 999 OR c.hidden = 999 }",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let text = format!(
+                        "{head} RETURN {prefix}, \
+                         [(a){left}[:R*{minimum}..{maximum}]{right}(b) WHERE {filter} | \
+                         [b,b.p,b.hidden]] AS routes"
+                    );
+                    let values = |anchor| {
+                        let GraphValue::List(routes) =
+                            bounded_trail_collection(anchor, direction, minimum, maximum, None)
+                        else {
+                            panic!("literal trail oracle must return a list");
+                        };
+                        collection_list(routes.into_vec().into_iter().filter(|route| {
+                            let GraphValue::List(cells) = route else {
+                                panic!("literal trail oracle must return tuples");
+                            };
+                            let GraphValue::Vertex(endpoint) = &cells[0] else {
+                                panic!("literal route tuple must start with its endpoint");
+                            };
+                            let qualifying_child =
+                                COLLECTION_EDGES.iter().any(|&(_, start, _, weight)| {
+                                    start == endpoint.0 && weight.is_some_and(|value| value > 3)
+                                });
+                            match predicate {
+                                0 => qualifying_child,
+                                1 => !qualifying_child,
+                                2 => {
+                                    COLLECTION_EDGES
+                                        .iter()
+                                        .any(|&(_, start, _, _)| start == endpoint.0)
+                                        && !COLLECTION_EDGES.iter().any(|&(_, start, end, _)| {
+                                            start == endpoint.0 && end == 1
+                                        })
+                                }
+                                3 | 5 => false,
+                                _ => true,
+                            }
+                        }))
+                    };
+                    let expected: Vec<_> = if edge_root {
+                        COLLECTION_EDGES
+                            .iter()
+                            .map(|&(eid, from, to, _)| {
+                                GraphValueRow::from_owned_values(vec![
+                                    GraphValue::Edge(EId(eid)),
+                                    GraphValue::Vertex(VId(from)),
+                                    GraphValue::Vertex(VId(to)),
+                                    values(to),
+                                ])
+                            })
+                            .collect()
+                    } else {
+                        [1_u128, 3, 4]
+                            .into_iter()
+                            .map(|id| {
+                                GraphValueRow::from_owned_values(vec![
+                                    GraphValue::Vertex(VId(id)),
+                                    values(id),
+                                ])
+                            })
+                            .collect()
+                    };
+                    let calls = AtomicU64::new(0);
+                    let clock = || {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        100
+                    };
+                    let mut scoped = db
+                        .authorized_read_session(
+                            &cx,
+                            &authority,
+                            &token,
+                            BRANCH,
+                            symbols,
+                            policy(),
+                            clock,
+                        )
+                        .unwrap();
+                    let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+                    let eager = scoped.execute(&cx, &prepared, &args).unwrap();
+                    let before = calls.load(Ordering::Relaxed);
+                    let mut cursor = scoped.stream_send(&cx, &prepared, &args).unwrap();
+                    let columns = cursor.columns().to_vec();
+                    let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(rows, expected, "{text}");
+                    assert_eq!(native(columns, &rows), eager, "{text}");
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    let checkpoints = calls.load(Ordering::Relaxed) - before;
+                    assert!(cursor.next().is_none());
+                    drop(cursor);
+                    let mut visible = slim
+                        .authorized_read_session(
+                            &cx,
+                            &authority,
+                            &token,
+                            BRANCH,
+                            symbols,
+                            policy(),
+                            clock,
+                        )
+                        .unwrap();
+                    let prepared = visible.prepare(&cx, &text, &args).unwrap();
+                    let before = calls.load(Ordering::Relaxed);
+                    let mut cursor = visible.stream_send(&cx, &prepared, &args).unwrap();
+                    assert_eq!(
+                        cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                        expected,
+                        "{text}"
+                    );
+                    assert_eq!(
+                        calls.load(Ordering::Relaxed) - before,
+                        checkpoints,
+                        "{text}"
+                    );
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    assert!(cursor.next().is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn nested_collection_filters_keep_all_child_reads_inside_the_authorized_graph() {
     use std::sync::atomic::{AtomicU64, Ordering};
 
