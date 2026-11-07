@@ -198,7 +198,7 @@ impl WriteTxn {
                             &read_error,
                         ),
                         _ => property_maps::collect_keys(
-                            properties.effective_properties().map(|(key, _)| key),
+                            properties.effective_properties(),
                             catalog,
                             visible_property,
                             control,
@@ -244,10 +244,7 @@ impl WriteTxn {
                             &read_error,
                         ),
                         GraphElementMetadata::Keys => property_maps::collect_keys(
-                            projected
-                                .properties
-                                .effective_properties()
-                                .map(|(key, _)| key),
+                            projected.properties.effective_properties(),
                             catalog,
                             visible_property,
                             control,

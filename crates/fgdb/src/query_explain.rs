@@ -84,13 +84,39 @@ pub(crate) fn without_terminator(text: &str) -> &str {
     text.trim_end().strip_suffix(';').unwrap_or(text)
 }
 
+/// Catalog binding follows complete native syntax validation. An unrelated
+/// grammar's later syntax failure cannot explain that accepted statement.
+fn catalog_binding_refusal(error: &QueryError) -> bool {
+    use GraphPatternTextErrorKind::Catalog;
+    match error {
+        QueryError::PatternText(error) => matches!(error.kind, Catalog(_)),
+        QueryError::SetText(error) => {
+            matches!(error.kind, GraphSetTextErrorKind::Pattern(Catalog(_)))
+        }
+        QueryError::PipelineText(error) => matches!(
+            error.kind,
+            GraphPipelineAggregateTextErrorKind::Input(GraphSetTextErrorKind::Pattern(Catalog(_)))
+        ),
+        QueryError::TemporalText(error) => {
+            matches!(error.kind, GraphTemporalTextErrorKind::Query(Catalog(_)))
+        }
+        QueryError::TemporalSetText(error) => matches!(
+            error.kind,
+            GraphTemporalSetTextErrorKind::Set(GraphSetTextErrorKind::Pattern(Catalog(_)))
+        ),
+        _ => false,
+    }
+}
+
 impl PreparedNativeRead {
     /// Classify using native parsers, accepting a complete ordinary pattern
     /// before probing the temporal, aggregate and composed grammars. Its
     /// grammar cannot consume their required selector, summary or set tail,
     /// so a successful pattern retains the original facade and certificate.
     /// Resolution, including misses, is frozen across all grammar probes.
-    /// Refusals select the largest typed byte offset. Ties prefer temporal
+    /// Catalog binding refusals from a validated grammar take precedence over
+    /// unrelated syntax failures. Other refusals select the largest typed byte
+    /// offset. Ties prefer temporal
     /// pattern, aggregate, then set when the native selector parser recognizes
     /// a system-time clause; otherwise pattern, aggregate, pipeline, then set.
     /// MissingSystemTimeClause is not a candidate. A failed pattern probe is
@@ -135,14 +161,17 @@ impl PreparedNativeRead {
             Err(error) => error,
         };
         let mut best = None;
-        let mut consider = |offset, priority, facade, source| {
+        let mut consider = |offset, priority, facade, source: QueryError| {
+            let rank = (
+                catalog_binding_refusal(&source),
+                offset,
+                std::cmp::Reverse(priority),
+            );
             if best
                 .as_ref()
-                .is_none_or(|(old_offset, old_priority, _, _)| {
-                    offset > *old_offset || (offset == *old_offset && priority < *old_priority)
-                })
+                .is_none_or(|(old_rank, _, _)| rank > *old_rank)
             {
-                best = Some((offset, priority, facade, source));
+                best = Some((rank, facade, source));
             }
         };
         match PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
@@ -288,7 +317,7 @@ impl PreparedNativeRead {
                 QueryError::SetText(error),
             ),
         }
-        let (_, _, facade, source) = best.expect("non-temporal parsers always supply a refusal");
+        let (_, facade, source) = best.expect("non-temporal parsers always supply a refusal");
         Err(QueryError::Refused {
             facade,
             source: Box::new(source),

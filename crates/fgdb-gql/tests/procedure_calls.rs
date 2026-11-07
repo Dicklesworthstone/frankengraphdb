@@ -148,7 +148,12 @@ fn catalog_calls_have_default_scalar_outputs_and_frozen_complete_names() {
             vec!["display name"],
         ),
     ] {
-        let prepared = PreparedGraphSetText::prepare(text, resolver.clone()).unwrap();
+        let prepared = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            text,
+            &[],
+            &mut resolver.clone(),
+        )
+        .unwrap();
         assert_eq!(prepared.columns(), [output]);
         assert_eq!(
             prepared.column_types(),
@@ -185,7 +190,12 @@ fn catalog_calls_have_default_scalar_outputs_and_frozen_complete_names() {
                 .collect::<Vec<_>>()
         );
     }
-    let prepared = PreparedGraphSetText::prepare("CALL db.labels()", resolver.clone()).unwrap();
+    let prepared = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+        "CALL db.labels()",
+        &[],
+        &mut resolver.clone(),
+    )
+    .unwrap();
     let template = prepared.canonical_template_bytes();
     resolver.0.borrow_mut().insert_label(LabelId(99), "Later");
     let query = prepared.bind_parameters(&GqlParameters::new()).unwrap();
@@ -210,7 +220,12 @@ fn catalog_calls_have_default_scalar_outputs_and_frozen_complete_names() {
         ]
     );
     assert_eq!(template, prepared.canonical_template_bytes());
-    let refreshed = PreparedGraphSetText::prepare("CALL db.labels()", resolver).unwrap();
+    let refreshed = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+        "CALL db.labels()",
+        &[],
+        &mut resolver.clone(),
+    )
+    .unwrap();
     assert_ne!(template, refreshed.canonical_template_bytes());
     assert_ne!(
         query.canonical_bytes(),
@@ -230,10 +245,14 @@ fn catalog_calls_require_complete_reverse_names_and_valid_signatures() {
     ] {
         // A point-name resolver can never prove that its known spellings are
         // the whole catalog, even when it recognizes common symbols.
-        assert!(
-            PreparedGraphSetText::prepare(text, symbols).is_err(),
-            "{text}"
-        );
+        let result = PreparedGraphSetText::prepare(text, symbols);
+        assert!(result.is_err(), "{text}");
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error.kind,
+            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Catalog(_))
+        ));
+        assert_eq!(error.kind.class(), fgdb_gql::GqlRefusalClass::Statement);
     }
     for text in [
         "CALL db.labels(1)",
@@ -243,15 +262,23 @@ fn catalog_calls_require_complete_reverse_names_and_valid_signatures() {
         "CALL db.propertyKeys() YIELD propertyKey AS key, label AS other",
         "CALL db.labels() YIELD label MATCH (label) RETURN label",
     ] {
-        let result = PreparedGraphSetText::prepare(text, discovery_catalog())
-            .and_then(|query| query.bind_parameters(&GqlParameters::new()));
+        let result = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            text,
+            &[],
+            &mut discovery_catalog(),
+        )
+        .and_then(|query| query.bind_parameters(&GqlParameters::new()));
         assert!(result.is_err(), "{text}");
     }
-    let empty = DiscoveryCatalog(Rc::new(RefCell::new(ReverseSymbolCatalog::new())));
-    let query = PreparedGraphSetText::prepare("CALL db.labels()", empty)
-        .unwrap()
-        .bind_parameters(&GqlParameters::new())
-        .unwrap();
+    let mut empty = DiscoveryCatalog(Rc::new(RefCell::new(ReverseSymbolCatalog::new())));
+    let query = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+        "CALL db.labels()",
+        &[],
+        &mut empty,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
     let mut seen = false;
     query
         .execute_governed_with_procedures(
@@ -301,7 +328,12 @@ fn catalog_yields_use_registered_spelling_and_preserve_explicit_aliases() {
         ("CALL t.empty() YIELD VALUE", &["VALUE"], &["VALUE"]),
     ];
     for &(statement, columns, outputs) in cases {
-        let prepared = PreparedGraphSetText::prepare(statement, discovery_catalog()).unwrap();
+        let prepared = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            statement,
+            &[],
+            &mut discovery_catalog(),
+        )
+        .unwrap();
         assert_eq!(prepared.columns(), columns, "{statement}");
         let query = prepared.bind_parameters(&GqlParameters::new()).unwrap();
         let mut called = false;
@@ -344,9 +376,10 @@ fn catalog_names_are_unique_within_each_identity_domain() {
         ),
     ] {
         let symbols = vec![(first, "same".to_owned()), (second, "same".to_owned())];
-        let error = PreparedGraphSetText::prepare(
+        let error = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
             &format!("CALL db.{procedure}()"),
-            DiscoveryCatalog::from_symbols(symbols.clone()),
+            &[],
+            &mut DiscoveryCatalog::from_symbols(symbols.clone()),
         )
         .unwrap_err();
         assert!(error.to_string().contains("distinct catalog names"));
@@ -374,8 +407,12 @@ fn catalog_names_are_unique_within_each_identity_domain() {
     ]);
     for procedure in ["labels", "relationshipTypes", "propertyKeys"] {
         assert!(
-            PreparedGraphSetText::prepare(&format!("CALL db.{procedure}()"), resolver.clone(),)
-                .is_ok()
+            PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+                &format!("CALL db.{procedure}()"),
+                &[],
+                &mut resolver.clone(),
+            )
+            .is_ok()
         );
     }
 }
@@ -398,9 +435,10 @@ fn catalog_names_must_fit_canonical_text_before_execution() {
             )
             .is_err()
     );
-    let error = PreparedGraphSetText::prepare(
+    let error = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
         "CALL db.labels()",
-        DiscoveryCatalog::from_symbols(vec![(symbol, name)]),
+        &[],
+        &mut DiscoveryCatalog::from_symbols(vec![(symbol, name)]),
     )
     .unwrap_err();
     assert!(error.to_string().contains("canonical text bound"));
@@ -427,9 +465,10 @@ fn catalog_calls_preserve_full_width_symbol_ids_and_transcripts() {
     ] {
         let statement = format!("CALL db.{procedure}()");
         let prepare = |symbol| {
-            PreparedGraphSetText::prepare(
+            PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
                 &statement,
-                DiscoveryCatalog::from_symbols(vec![(symbol, "FullWidth".to_owned())]),
+                &[],
+                &mut DiscoveryCatalog::from_symbols(vec![(symbol, "FullWidth".to_owned())]),
             )
             .unwrap()
         };

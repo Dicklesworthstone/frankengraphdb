@@ -1732,6 +1732,14 @@ fn imported_map_return_reads_its_entries_and_no_other_leaf_does() {
     // share a RETURN, regardless of which leaf was encountered first.
     for (text, expected) in [
         (
+            "UNWIND [{p:1}] AS row CREATE (a)-[e:R]->(b) RETURN row.p AS p,startNode(e).p",
+            vec![int(1), GraphValue::Scalar(CanonicalScalar::Null)],
+        ),
+        (
+            "UNWIND [{p:1}] AS row CREATE (a)-[e:R]->(b) RETURN startNode(e).p,row.p AS p",
+            vec![GraphValue::Scalar(CanonicalScalar::Null), int(1)],
+        ),
+        (
             "UNWIND [{p:1}] AS row CREATE (a {p:7})-[e:R]->(b) RETURN row.p AS p,startNode(e).p",
             vec![int(1), int(7)],
         ),

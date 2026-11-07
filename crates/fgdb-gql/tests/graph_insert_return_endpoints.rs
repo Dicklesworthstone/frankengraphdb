@@ -330,6 +330,50 @@ fn dynamic_endpoint_wrong_domains_fail_without_graph_access() {
     ] {
         assert!(run(&prepare(statement)).is_err(), "{statement}");
     }
+    assert!(
+        run_matched(
+            &prepare("MATCH (a) CREATE (n) RETURN startNode(a)"),
+            &[VId(1)],
+            &[]
+        )
+        .is_err(),
+    );
+    for statement in [
+        "CREATE (a)-[e:R]->(b) RETURN startNode(e.p)",
+        "CREATE (a)-[e:R]->(b) RETURN startNode(e).p",
+    ] {
+        assert_eq!(
+            values(&run(&prepare(statement)).unwrap()),
+            vec![vec![GraphValue::Scalar(CanonicalScalar::Null)]],
+            "{statement}",
+        );
+    }
+    let parameterized = PreparedGraphInsertQueryText::prepare_with_parameter_types(
+        "CREATE (a)-[e:R]->(b) RETURN endNode($edge)",
+        R,
+        &[(
+            "edge",
+            fgdb_gql::GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Null),
+        )],
+        symbols,
+    )
+    .unwrap();
+    assert!(matches!(
+        parameterized.bind_parameters(&GqlParameters::new()),
+        Err(fgdb_gql::GraphInsertTextError {
+            kind: fgdb_gql::GraphInsertTextErrorKind::Query(
+                fgdb_gql::GraphPatternTextErrorKind::MissingParameter
+            ),
+            ..
+        })
+    ));
+    let bound = parameterized
+        .bind_parameters(&GqlParameters::new().with_null("edge").unwrap())
+        .unwrap();
+    assert_eq!(
+        values(&run(&bound).unwrap()),
+        vec![vec![GraphValue::Scalar(CanonicalScalar::Null)]],
+    );
     let query =
         prepare("CREATE (a)-[e:R]->(b) RETURN startNode(e.p) AS missing,endNode(NULL) AS absent");
     assert_eq!(

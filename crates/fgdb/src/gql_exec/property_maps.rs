@@ -60,7 +60,7 @@ pub(crate) fn metadata<E>(
                 MetadataRecord::Edge { properties, .. } => properties,
             };
             collect_keys(
-                properties.iter().map(|(key, _)| *key),
+                properties.iter().map(|(key, value)| (*key, value)),
                 catalog,
                 visible_property,
                 control,
@@ -101,9 +101,10 @@ pub(crate) fn endpoint<E>(
 }
 
 /// The same bounded key collector also accepts a borrowed canonical overlay.
-/// Values are never inspected: keys() observes membership, not their payloads.
-pub(crate) fn collect_keys<E>(
-    properties: impl IntoIterator<Item = PropertyKeyId>,
+/// Only the top-level NULL tag affects membership, as in `collect`; nested
+/// payloads are neither traversed nor copied. Mask keys before either check.
+pub(crate) fn collect_keys<'a, E>(
+    properties: impl IntoIterator<Item = (PropertyKeyId, &'a CanonicalPropertyValue)>,
     catalog: &ReverseSymbolCatalog,
     mut visible: impl FnMut(PropertyKeyId) -> bool,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
@@ -112,8 +113,8 @@ pub(crate) fn collect_keys<E>(
     control(SourceEvent::Work)?;
     control(SourceEvent::ScratchEntry)?;
     let mut names = BTreeMap::new();
-    for key in properties {
-        if !visible(key) {
+    for (key, value) in properties {
+        if !visible(key) || crate::is_null_property(value) {
             continue;
         }
         control(SourceEvent::Work)?;
@@ -512,6 +513,35 @@ mod tests {
     /// and its name need not even be in the catalog.
     #[test]
     fn stored_null_reads_as_physical_removal_in_values_and_charges() {
+        fn read_metadata<E>(
+            properties: &[(PropertyKeyId, CanonicalPropertyValue)],
+            kind: GraphElementMetadata,
+            edge: bool,
+            catalog: &ReverseSymbolCatalog,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+            failure: &impl Fn(ReadError) -> E,
+        ) -> Result<GraphValue, E> {
+            let row = VertexRow {
+                vid: VId(1),
+                birth_ordinal: 0,
+                created_at: fgdb_types::CommitSeq(1),
+                retired_at: None,
+                labels: vec![],
+                props: properties.to_vec(),
+            };
+            let record = if edge {
+                MetadataRecord::Edge {
+                    relation: RelationId(1),
+                    source: VId(1),
+                    destination: VId(2),
+                    properties: &row.props,
+                }
+            } else {
+                MetadataRecord::Vertex(&row)
+            };
+            metadata(record, kind, catalog, |_| true, |_| true, control, failure)
+        }
+
         let present: [(PropertyKeyId, CanonicalPropertyValue); 1] =
             [(PropertyKeyId(1), CanonicalScalar::Int(7).into())];
         let mut legacy = present.to_vec();
@@ -545,6 +575,331 @@ mod tests {
             )])
             .unwrap()
         );
+        for edge in [false, true] {
+            for kind in [GraphElementMetadata::Properties, GraphElementMetadata::Keys] {
+                let expected = if kind == GraphElementMetadata::Properties {
+                    value.clone()
+                } else {
+                    GraphValue::List(
+                        vec![GraphValue::Scalar(
+                            CanonicalScalar::ucs_basic_text("zeta").unwrap(),
+                        )]
+                        .into_boxed_slice(),
+                    )
+                };
+                let mut legacy_events = Vec::new();
+                let actual = read_metadata(
+                    &legacy,
+                    kind,
+                    edge,
+                    &catalog,
+                    &mut |event| {
+                        legacy_events.push(event);
+                        Ok::<_, ReadError>(())
+                    },
+                    &core::convert::identity,
+                )
+                .unwrap();
+                assert_eq!(actual, expected, "{kind:?}, edge={edge}");
+                let mut present_events = Vec::new();
+                assert_eq!(
+                    read_metadata(
+                        &present,
+                        kind,
+                        edge,
+                        &catalog,
+                        &mut |event| {
+                            present_events.push(event);
+                            Ok::<_, ReadError>(())
+                        },
+                        &core::convert::identity,
+                    )
+                    .unwrap(),
+                    expected,
+                );
+                assert_eq!(legacy_events, present_events);
+                for stop in 1..=legacy_events.len() {
+                    let mut calls = 0;
+                    let result = read_metadata(
+                        &legacy,
+                        kind,
+                        edge,
+                        &catalog,
+                        &mut |_| {
+                            calls += 1;
+                            if calls == stop { Err(calls) } else { Ok(()) }
+                        },
+                        &|_| usize::MAX,
+                    );
+                    assert_eq!(result, Err(stop));
+                    assert_eq!(calls, stop);
+                }
+            }
+            let mut unknown = legacy.clone();
+            unknown[2].1 = CanonicalScalar::Int(9).into();
+            assert!(matches!(
+                read_metadata(
+                    &unknown,
+                    GraphElementMetadata::Keys,
+                    edge,
+                    &catalog,
+                    &mut |_| Ok::<_, ReadError>(()),
+                    &core::convert::identity,
+                ),
+                Err(ReadError::UnmappedProperty(PropertyKeyId(3)))
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_null_keys_match_bound_values_after_native_commit_and_reopen() {
+        use crate::{
+            Database, DatabaseKeys, MemVfs, PendingRow, QueryResult, QueryValue, WriteBatch,
+        };
+        use asupersync::lab::run_async_under_lab;
+        use fgdb_gql::{
+            GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
+        };
+        use fgdb_types::{CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts};
+
+        struct Symbols;
+        impl GraphSymbolResolver for Symbols {
+            fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+                match (kind, name) {
+                    (GraphSymbolKind::Label, "Thing") => Some(GraphSymbol::Label(LabelId(1))),
+                    (GraphSymbolKind::Label, "Other") => Some(GraphSymbol::Label(LabelId(2))),
+                    (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                    (GraphSymbolKind::Property, "known") => {
+                        Some(GraphSymbol::Property(PropertyKeyId(1)))
+                    }
+                    (GraphSymbolKind::Property, "dead") => {
+                        Some(GraphSymbol::Property(PropertyKeyId(2)))
+                    }
+                    _ => None,
+                }
+            }
+
+            fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+                let mut catalog = ReverseSymbolCatalog::new();
+                catalog.insert_label(LabelId(1), "Thing");
+                catalog.insert_label(LabelId(2), "Other");
+                catalog.insert_relation(RelationId(1), "R");
+                catalog.insert_property(PropertyKeyId(1), "known");
+                catalog.insert_property(PropertyKeyId(2), "dead");
+                Some(catalog)
+            }
+        }
+
+        fn cells(result: QueryResult) -> Vec<Vec<GraphValue>> {
+            let QueryResult::Rows { rows, .. } = result else {
+                panic!("expected metadata rows");
+            };
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|value| match value {
+                            QueryValue::Value(value) => value,
+                            value => panic!("unexpected metadata cell {value:?}"),
+                        })
+                        .collect()
+                })
+                .collect()
+        }
+
+        let ((), report) = run_async_under_lab(0x6c65_6b79, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, cx) = (contexts.commit(), contexts.query());
+            let keys = || {
+                DatabaseKeys::new(
+                    [0x61; 32],
+                    DatabaseSecurityNamespaceId([0x62; 32]),
+                    [0x63; 32],
+                )
+            };
+            let policy = || GqlQueryPolicy::new(100_000, 100_000, 1_000_000, 1_000_000);
+            for unmapped_null in [false, true] {
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                let mut batch = WriteBatch::new(RelationId(1));
+                batch.create_vertex(
+                    VId(1),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+                );
+                batch.create_vertex(VId(2), vec![LabelId(2)], vec![]);
+                batch.add_edge(
+                    EId(1),
+                    VId(1),
+                    VId(2),
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(11))],
+                );
+                // Older builders retained these legal stored values. Seed
+                // that historical input before the ordinary native validator,
+                // commit, encoding and reopen; production builders stay intact.
+                for row in &mut batch.rows {
+                    let properties = match row {
+                        PendingRow::Vertex { vid, props, .. } if *vid == VId(1) => props,
+                        PendingRow::Edge { props, .. } => props,
+                        _ => continue,
+                    };
+                    properties.push((PropertyKeyId(2), CanonicalScalar::Null.into()));
+                    if unmapped_null {
+                        properties.push((PropertyKeyId(3), CanonicalScalar::Null.into()));
+                    }
+                }
+                db.write(&commit, batch).await.unwrap();
+                drop(db);
+                let mut db = Database::open_with_vfs(&commit, vfs, &path, keys())
+                    .await
+                    .unwrap();
+                let vertex = crate::gql_exec::source::find_vertex(
+                    &db.snapshot,
+                    VId(1),
+                    CommitSeq(1),
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap()
+                .unwrap();
+                let has_null = |properties: &[(PropertyKeyId, CanonicalPropertyValue)]| {
+                    properties.iter().any(|(key, value)| {
+                        *key == PropertyKeyId(2)
+                            && matches!(
+                                value,
+                                CanonicalPropertyValue::Scalar(CanonicalScalar::Null)
+                            )
+                    })
+                };
+                assert!(
+                    has_null(&vertex.props),
+                    "legacy vertex fixture must survive reopen"
+                );
+                let (block, row) = db
+                    .snapshot
+                    .adjacency_index()
+                    .statement_at_controlled(&db.snapshot.blocks, EId(1), CommitSeq(1), &mut |_| {
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    has_null(crate::gql_exec::source::edge_properties_at(
+                        &db.snapshot.block_props,
+                        block,
+                        row,
+                    )),
+                    "legacy edge fixture must survive reopen"
+                );
+
+                let names = GraphValue::List(
+                    vec![GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text("known").unwrap(),
+                    )]
+                    .into_boxed_slice(),
+                );
+                let expected = |value| {
+                    vec![
+                        GraphValue::map(vec![(
+                            "known".into(),
+                            GraphValue::Scalar(CanonicalScalar::Int(value)),
+                        )])
+                        .unwrap(),
+                        names.clone(),
+                    ]
+                };
+                let parameters = GqlParameters::new();
+                for (statement, value) in [
+                    (
+                        "MATCH (n:Thing) RETURN properties(n) AS props, keys(n) AS keys",
+                        7,
+                    ),
+                    (
+                        "MATCH ()-[r:R]->() RETURN properties(r) AS props, keys(r) AS keys",
+                        11,
+                    ),
+                ] {
+                    assert_eq!(
+                        cells(
+                            db.query(&cx, statement, &parameters, Symbols, policy())
+                                .unwrap()
+                        ),
+                        vec![expected(value)],
+                        "{statement}",
+                    );
+                }
+                let parameters = GqlParameters::new()
+                    .with_list(
+                        "refs",
+                        vec![GraphValue::Vertex(VId(1)), GraphValue::Edge(EId(1))],
+                    )
+                    .unwrap();
+                let actual = cells(
+                    db.query(
+                        &cx,
+                        "UNWIND $refs AS x RETURN properties(x) AS props, keys(x) AS keys",
+                        &parameters,
+                        Symbols,
+                        policy(),
+                    )
+                    .unwrap(),
+                );
+                assert_eq!(actual.len(), 2);
+                assert!(actual.contains(&expected(7)));
+                assert!(actual.contains(&expected(11)));
+                // Change both legacy-bearing elements: literal updated values
+                // prove these reads use the governed overlay, whose borrowed
+                // base still contains each stored NULL key.
+                let prepared = crate::PreparedNativeRead::prepare(
+                    "UNWIND $refs AS x RETURN properties(x) AS props, keys(x) AS keys",
+                    &parameters,
+                    Symbols,
+                )
+                .unwrap();
+                let txcx = contexts.txn();
+                let mut transaction = db.begin(&txcx).unwrap();
+                let mut staged = WriteBatch::new(RelationId(1));
+                staged.set_vertex_property(
+                    VId(1),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(13)),
+                );
+                staged.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(17)));
+                transaction.write(&mut db, staged).unwrap();
+                let staged_rows = cells(
+                    prepared
+                        .execute_in_transaction(&transaction, &db, &cx, &parameters, policy())
+                        .unwrap(),
+                );
+                assert_eq!(staged_rows.len(), 2);
+                assert!(staged_rows.contains(&expected(13)));
+                assert!(staged_rows.contains(&expected(17)));
+                transaction.abort();
+                assert_eq!(txcx.outstanding_obligations(), 0);
+                assert_eq!(
+                    cells(
+                        db.query(
+                            &cx,
+                            "RETURN keys({dead: NULL, known: 7}) AS keys",
+                            &GqlParameters::new(),
+                            Symbols,
+                            policy(),
+                        )
+                        .unwrap()
+                    ),
+                    vec![vec![GraphValue::List(
+                        vec![
+                            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("dead").unwrap()),
+                            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("known").unwrap()),
+                        ]
+                        .into_boxed_slice(),
+                    )]],
+                    "NULL is absent only at an element property, not a literal map entry",
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

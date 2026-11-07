@@ -416,7 +416,7 @@ fn resolve_call_catalog(
     let catalog = resolve.reverse_catalog().ok_or_else(|| {
         error(
             *at,
-            GraphPatternTextErrorKind::Expected("a complete reverse symbol catalog"),
+            GraphPatternTextErrorKind::Catalog("a complete reverse symbol catalog"),
         )
     })?;
     let mut symbols: Vec<_> = match kind {
@@ -437,7 +437,7 @@ fn resolve_call_catalog(
             .collect(),
     };
     crate::set_ops::canonicalize_catalog_symbols(&mut symbols)
-        .map_err(|expected| error(*at, GraphPatternTextErrorKind::Expected(expected)))?;
+        .map_err(|constraint| error(*at, GraphPatternTextErrorKind::Catalog(constraint)))?;
     *catalog_symbols = Some(symbols);
     Ok(())
 }

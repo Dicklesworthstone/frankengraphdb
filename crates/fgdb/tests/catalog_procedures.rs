@@ -351,17 +351,23 @@ fn forward_only_resolvers_refuse_discovery_instead_of_guessing_common_names() {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let db = empty(&c.commit()).await;
         let params = GqlParameters::new();
-        for (call, _, _) in CALLS {
-            let error = db
-                .query(
-                    &c.query(),
-                    call,
-                    &params,
-                    |kind, name: &str| Catalog::sample().resolve_symbol(kind, name),
-                    policy(),
-                )
-                .expect_err("incomplete discovery must not publish partial or empty success");
-            assert!(error.to_string().contains("catalog"), "{error:?}");
+        for (call, column, _) in CALLS {
+            for statement in [
+                call.to_owned(),
+                format!("{call} YIELD {column} RETURN {column}"),
+                format!("{call} YIELD {column} RETURN count(*) AS count"),
+            ] {
+                let error = db
+                    .query(
+                        &c.query(),
+                        &statement,
+                        &params,
+                        |kind, name: &str| Catalog::sample().resolve_symbol(kind, name),
+                        policy(),
+                    )
+                    .expect_err("incomplete discovery must not publish partial or empty success");
+                assert!(error.to_string().contains("catalog"), "{error:?}");
+            }
         }
         for (call, column, _) in CALLS {
             assert_eq!(
@@ -377,6 +383,59 @@ fn forward_only_resolvers_refuse_discovery_instead_of_guessing_common_names() {
                 "an explicitly empty catalog is complete",
             );
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn catalog_binding_refusals_preserve_host_constraints_through_composition() {
+    let ((), report) = run_async_under_lab(0xca0c, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = empty(&c.commit()).await;
+        let params = GqlParameters::new();
+        let before = db.frontier().unwrap();
+        let oversized = "x".repeat(fgdb_types::MAX_CANONICAL_TEXT_BYTES + 1);
+        for ((call, column, _), kind) in CALLS.into_iter().zip([
+            GraphSymbolKind::Label,
+            GraphSymbolKind::Relation,
+            GraphSymbolKind::Property,
+        ]) {
+            for (entries, constraint) in [
+                (vec![(1, "same"), (2, "same")], "distinct catalog names"),
+                (vec![(1, oversized.as_str())], "canonical text bound"),
+            ] {
+                let mut catalog = ReverseSymbolCatalog::new();
+                for (id, name) in entries {
+                    match kind {
+                        GraphSymbolKind::Label => catalog.insert_label(LabelId(id), name),
+                        GraphSymbolKind::Relation => catalog.insert_relation(RelationId(id), name),
+                        GraphSymbolKind::Property => {
+                            catalog.insert_property(PropertyKeyId(id), name)
+                        }
+                    }
+                }
+                for statement in [
+                    call.to_owned(),
+                    format!("{call} YIELD {column} RETURN {column}"),
+                    format!("{call} YIELD {column} RETURN count(*) AS count"),
+                ] {
+                    let error = db
+                        .query(
+                            &c.query(),
+                            &statement,
+                            &params,
+                            Catalog(catalog.clone()),
+                            policy(),
+                        )
+                        .expect_err("an invalid catalog must retain its binding refusal");
+                    assert!(
+                        error.to_string().contains(constraint),
+                        "{statement}: {error:?}",
+                    );
+                }
+            }
+        }
+        assert_eq!(db.frontier().unwrap(), before);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

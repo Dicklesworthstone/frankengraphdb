@@ -269,6 +269,31 @@ fn optional_relationships_have_null_safe_endpoints_and_refuse_invalid_scope() {
                 "{statement}: {result:?}"
             );
         }
+        // Keep the original single-column inputs: they must use the nullable
+        // relationship even when no other RETURN expression forces a pipeline.
+        for (statement, expected) in [
+            (
+                "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R]->(b) RETURN startNode(r) AS s",
+                vec![VId(1), VId(1), VId(1), VId(2)],
+            ),
+            (
+                "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R]->(b) RETURN endNode(r) AS s",
+                vec![VId(2), VId(2), VId(3), VId(3)],
+            ),
+        ] {
+            let mut expected: Vec<_> = expected
+                .into_iter()
+                .map(|vertex| vec![GraphValue::Vertex(vertex)])
+                .collect();
+            expected.extend([vec![null()], vec![null()]]);
+            assert_eq!(
+                bag(cells(
+                    db.query(cx, statement, &params, symbols, policy()).unwrap()
+                )),
+                bag(expected),
+                "{statement}",
+            );
+        }
         // Endpoint functions use the nullable relationship value. A missing
         // witness must not expose the still-bound starting vertex a.
         for statement in [

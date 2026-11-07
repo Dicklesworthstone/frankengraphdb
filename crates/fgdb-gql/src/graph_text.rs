@@ -258,6 +258,9 @@ pub enum GraphPatternTextErrorKind {
     InvalidToken,
     NameTooLong,
     Expected(&'static str),
+    /// Syntax was accepted, but a native catalog CALL cannot bind the host's
+    /// missing or invalid complete reverse catalog.
+    Catalog(&'static str),
     IntegerOutOfRange,
     /// A bound pagination expression must produce a nonnegative integer.
     InvalidPageValue,
@@ -339,6 +342,7 @@ impl core::fmt::Display for GraphPatternTextErrorKind {
             Self::InvalidToken => f.write_str("invalid token"),
             Self::NameTooLong => f.write_str("name is too long"),
             Self::Expected(item) => write_expected(f, item),
+            Self::Catalog(constraint) => write!(f, "catalog requires {constraint}"),
             Self::IntegerOutOfRange => f.write_str("integer literal is out of range"),
             Self::InvalidPageValue => {
                 f.write_str("page expression must evaluate to a nonnegative integer")
@@ -407,6 +411,7 @@ impl GraphPatternTextErrorKind {
             | Self::ParameterTypeMismatch { .. }
             | Self::UnexpectedArguments => C::InvalidValue,
             Self::DefinitionTooLarge
+            | Self::Catalog(_)
             | Self::PageExpressionLimit
             | Self::TooManyTokens
             | Self::NameTooLong
