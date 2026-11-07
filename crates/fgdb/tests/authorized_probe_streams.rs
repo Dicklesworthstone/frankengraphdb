@@ -1,5 +1,8 @@
 //! Real Warden sessions drive the existing indexed probe cursor over committed
 //! MemVfs generations. These tests do not establish physical noninterference.
+#[path = "support/mixed_trail.rs"]
+mod mixed_trail;
+
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryError, QueryResult, QueryValue, WriteBatch};
@@ -2712,4 +2715,273 @@ fn nested_collection_filters_keep_all_child_reads_inside_the_authorized_graph() 
             }
         }
     }
+}
+
+#[test]
+fn mixed_trail_collections_keep_masks_identity_domains_and_scoped_charges() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let slim = runtime.block_on(collection_database(&commit, false));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let edges: Vec<_> = COLLECTION_EDGES
+        .iter()
+        .map(|&(eid, from, to, _)| (EId(eid), VId(from), VId(to)))
+        .collect();
+    let calls = Cell::new(0_u64);
+    let clock = || {
+        calls.set(calls.get() + 1);
+        100
+    };
+    let mut scoped = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    let mut visible = slim
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    for edge_root in [false, true] {
+        let (head, prefix) = if edge_root {
+            ("MATCH (x)-[r]->(a)", "r,x,a")
+        } else {
+            ("MATCH (a)", "a")
+        };
+        for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+            .into_iter()
+            .enumerate()
+        {
+            for (variable, atoms) in [(0, 2), (1, 2), (1, 3)] {
+                for bounds in [(0, 0), (0, 2)] {
+                    let names = ["a", "b", "c", "d"];
+                    let end = names[atoms];
+                    let mut pattern = String::from("(a)");
+                    for atom in 0..atoms {
+                        let hops = if atom == variable {
+                            format!("*{}..{}", bounds.0, bounds.1)
+                        } else {
+                            String::new()
+                        };
+                        pattern.push_str(&format!("{left}[:R{hops}]{right}({})", names[atom + 1]));
+                    }
+                    for filter in [0, 1, 2] {
+                        let predicate = match filter {
+                            0 => String::new(),
+                            1 => format!("WHERE NOT EXISTS {{ MATCH ({end})-[:S]->(z) }}"),
+                            _ => format!(
+                                "WHERE EXISTS {{ MATCH ({end})-[child:R]->(z) WHERE child.hidden IS NULL }}"
+                            ),
+                        };
+                        let text = format!(
+                            "{head} RETURN {prefix}, [p = {pattern} {predicate} | [p,nodes(p),relationships(p),length(p),{end},{end}.p,{end}.hidden]] AS routes"
+                        );
+                        let values = |anchor| {
+                            mixed_trail::values(
+                                mixed_trail::routes(
+                                    &edges, anchor, direction, variable, atoms, bounds,
+                                )
+                                .into_iter()
+                                .filter(|path| {
+                                    filter != 2
+                                        || edges.iter().any(|&(_, source, _)| {
+                                            source == mixed_trail::endpoint(path)
+                                        })
+                                }),
+                                |id| id.0 as i64 * 10,
+                            )
+                        };
+                        let expected: Vec<_> = if edge_root {
+                            edges
+                                .iter()
+                                .map(|&(r, x, a)| {
+                                    GraphValueRow::from_owned_values(vec![
+                                        GraphValue::Edge(r),
+                                        GraphValue::Vertex(x),
+                                        GraphValue::Vertex(a),
+                                        values(a),
+                                    ])
+                                })
+                                .collect()
+                        } else {
+                            [1_u128, 3, 4]
+                                .into_iter()
+                                .map(|a| {
+                                    GraphValueRow::from_owned_values(vec![
+                                        GraphValue::Vertex(VId(a)),
+                                        values(VId(a)),
+                                    ])
+                                })
+                                .collect()
+                        };
+                        let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+                        let eager = scoped.execute(&cx, &prepared, &args).unwrap();
+                        let before = calls.get();
+                        let mut cursor = scoped.stream(&cx, &prepared, &args).unwrap();
+                        let columns = cursor.columns().to_vec();
+                        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                        let checkpoints = calls.get() - before;
+                        assert_eq!(rows, expected, "{text}");
+                        assert_eq!(native(columns, &rows), eager, "{text}");
+                        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                        assert!(cursor.next().is_none());
+                        drop(cursor);
+                        let prepared = visible.prepare(&cx, &text, &args).unwrap();
+                        let before = calls.get();
+                        assert_eq!(
+                            visible
+                                .stream(&cx, &prepared, &args)
+                                .unwrap()
+                                .collect::<Result<Vec<_>, _>>()
+                                .unwrap(),
+                            expected,
+                            "{text}"
+                        );
+                        assert_eq!(
+                            calls.get() - before,
+                            checkpoints,
+                            "hidden graph changed logical charges: {text}"
+                        );
+                        let mut send = db
+                            .authorized_read_session(
+                                &cx,
+                                &authority,
+                                &token,
+                                BRANCH,
+                                symbols,
+                                policy(),
+                                || 100,
+                            )
+                            .unwrap();
+                        let prepared = send.prepare(&cx, &text, &args).unwrap();
+                        let cursor = send.stream_send(&cx, &prepared, &args).unwrap();
+                        fn assert_send<T: Send>(_: &T) {}
+                        assert_send(&cursor);
+                        assert_eq!(
+                            cursor.collect::<Result<Vec<_>, _>>().unwrap(),
+                            expected,
+                            "{text}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // A denied variable relation permits its zero-hop witness between visible
+    // fixed atoms, but must never contribute a hidden edge or endpoint.
+    for minimum in [0, 1] {
+        let text = format!(
+            "MATCH (a) RETURN a,[p = (a)-[:R]->(b)-[:S*{minimum}..2]->(c)-[:R]->(d) | [p,nodes(p),relationships(p),length(p),d,d.p,d.hidden]] AS routes"
+        );
+        let expected: Vec<_> = [1_u128, 3, 4]
+            .into_iter()
+            .map(|a| {
+                let paths = if minimum == 0 {
+                    mixed_trail::routes(&edges, VId(a), 0, 1, 3, (0, 0))
+                } else {
+                    Vec::new()
+                };
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(a)),
+                    mixed_trail::values(paths, |id| id.0 as i64 * 10),
+                ])
+            })
+            .collect();
+        let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+        let mut cursor = scoped.stream(&cx, &prepared, &args).unwrap();
+        let columns = cursor.columns().to_vec();
+        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows, expected, "{text}");
+        drop(cursor);
+        assert_eq!(
+            native(columns, &rows),
+            scoped.execute(&cx, &prepared, &args).unwrap()
+        );
+    }
+}
+
+#[test]
+fn mixed_capture_lists_remain_private_until_the_authorized_row_is_complete() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let db = runtime.block_on(collection_database(&contexts.commit(), true));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let edges: Vec<_> = COLLECTION_EDGES
+        .iter()
+        .map(|&(eid, from, to, _)| (EId(eid), VId(from), VId(to)))
+        .collect();
+    let text = "MATCH (a) RETURN a,[p = (a)-[:R]->(b)-[:R*0..2]->(c)-[:R]->(d) | [p,nodes(p),relationships(p),length(p),d,d.p,d.hidden]] AS routes";
+    let expected = GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(1)),
+        mixed_trail::values(mixed_trail::routes(&edges, VId(1), 0, 1, 3, (0, 2)), |id| {
+            id.0 as i64 * 10
+        }),
+    ]);
+    let active = Cell::new(false);
+    let calls = Cell::new(0_usize);
+    let stop = Cell::new(usize::MAX);
+    let clock = || {
+        if active.get() {
+            calls.set(calls.get() + 1);
+        }
+        if active.get() && calls.get() == stop.get() {
+            1000
+        } else {
+            100
+        }
+    };
+    let first_row_calls = {
+        let mut session = db
+            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+            .unwrap();
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        active.set(true);
+        assert_eq!(cursor.next().unwrap().unwrap(), expected);
+        active.set(false);
+        calls.get()
+    };
+    assert!(first_row_calls > 3);
+    for cut in [1, first_row_calls / 2, first_row_calls] {
+        calls.set(0);
+        stop.set(cut);
+        let mut session = db
+            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+            .unwrap();
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        active.set(true);
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Authorization(Error::Expired)))
+        ));
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().is_none());
+        assert_eq!(calls.get(), cut);
+        active.set(false);
+        drop(cursor);
+        assert!(session.is_closed());
+    }
+    let mut session = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
+        .unwrap();
+    let prepared = session.prepare(&cx, text, &args).unwrap();
+    let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+    assert_eq!(cursor.next().unwrap().unwrap(), expected);
+    root.set_cancel_reason(
+        asupersync::CancelReason::new(asupersync::CancelKind::User)
+            .with_message("cancel after one complete mixed path list"),
+    );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(QueryError::Pattern(GqlQueryError::Interrupted(_))))
+    ));
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(cursor.next().is_none());
 }

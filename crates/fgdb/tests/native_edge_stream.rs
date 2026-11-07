@@ -1,4 +1,7 @@
 //! Native text must reach the existing edge operator, not a materialized bag.
+#[path = "support/mixed_trail.rs"]
+mod mixed_trail;
+
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
     Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryError, QueryResult, ReadError,
@@ -2580,6 +2583,173 @@ fn reached_child_errors_never_publish_a_partial_collection() {
         cursor.close();
         assert!(cursor.next().is_none());
         assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), stopped);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn mixed_trail_collections_match_path_products_and_keep_the_pinned_generation() {
+    let ((), report) = run_async_under_lab(0x6e65_0030, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = seed();
+        batch.add_edge(EId(1), VId(0), WIDE, vec![(P, CanonicalScalar::Int(13))]);
+        let basis = db.write(&commit, batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let args = GqlParameters::new();
+        let edges = [
+            (EId(0), WIDE, VId(0)),
+            (EId(1), VId(0), WIDE),
+            (EId(2), WIDE, VId(0)),
+            (EId(3), WIDE, WIDE),
+            (EId(u128::MAX), VId(0), VId(u128::MAX)),
+        ];
+        let property = |id| {
+            if id == WIDE {
+                7
+            } else if id == VId(0) {
+                3
+            } else {
+                11
+            }
+        };
+        for edge_root in [false, true] {
+            let (head, prefix, kind) = if edge_root {
+                ("MATCH (x)-[r:R]->(a)", "r,x,a", ScanKind::Edge)
+            } else {
+                ("MATCH (a)", "a", ScanKind::Vertex)
+            };
+            for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+                .into_iter()
+                .enumerate()
+            {
+                for (variable, atoms) in [(0, 2), (1, 2), (1, 3)] {
+                    for bounds in [(0, 0), (0, 2), (2, 2)] {
+                        let names = ["a", "b", "c", "d"];
+                        let end = names[atoms];
+                        let mut pattern = String::from("(a)");
+                        for atom in 0..atoms {
+                            let hops = if atom == variable {
+                                format!("*{}..{}", bounds.0, bounds.1)
+                            } else {
+                                String::new()
+                            };
+                            pattern
+                                .push_str(&format!("{left}[:R{hops}]{right}({})", names[atom + 1]));
+                        }
+                        for child in [false, true] {
+                            let filter = if child {
+                                format!("WHERE EXISTS {{ MATCH ({end})-[:R]->(z) }}")
+                            } else {
+                                String::new()
+                            };
+                            let text = format!(
+                                "{head} RETURN {prefix}, [p = {pattern} {filter} | [p,nodes(p),relationships(p),length(p),{end},{end}.p,NULL]] AS routes"
+                            );
+                            let values = |anchor| {
+                                mixed_trail::values(
+                                    mixed_trail::routes(
+                                        &edges, anchor, direction, variable, atoms, bounds,
+                                    )
+                                    .into_iter()
+                                    .filter(|path| {
+                                        !child
+                                            || edges.iter().any(|&(_, source, _)| {
+                                                source == mixed_trail::endpoint(path)
+                                            })
+                                    }),
+                                    property,
+                                )
+                            };
+                            let expected: Vec<_> = if edge_root {
+                                // The collection's EId domain excludes neither its outer
+                                // root edge nor identities in its terminal child probe.
+                                edges
+                                    .iter()
+                                    .map(|&(r, x, a)| {
+                                        GraphValueRow::from_owned_values(vec![
+                                            GraphValue::Edge(r),
+                                            GraphValue::Vertex(x),
+                                            GraphValue::Vertex(a),
+                                            values(a),
+                                        ])
+                                    })
+                                    .collect()
+                            } else {
+                                [VId(0), WIDE, VId(u128::MAX)]
+                                    .into_iter()
+                                    .map(|a| {
+                                        GraphValueRow::from_owned_values(vec![
+                                            GraphValue::Vertex(a),
+                                            values(a),
+                                        ])
+                                    })
+                                    .collect()
+                            };
+                            let prepared =
+                                PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+                            let (columns, mut cursor) =
+                                prepared.stream(&db, &cx, &args, policy()).unwrap();
+                            assert_eq!(cursor.kind(), kind);
+                            assert_eq!(cursor.snapshot_seq(), basis);
+                            let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                            assert_eq!(actual, expected, "{text}");
+                            assert_eq!(
+                                result(columns, actual),
+                                prepared.execute(&db, &cx, &args, policy()).unwrap(),
+                                "{text}"
+                            );
+                            assert_eq!(cursor.state(), ScanState::Exhausted);
+                            assert!(cursor.next().is_none());
+                        }
+                    }
+                }
+            }
+        }
+
+        let text = "MATCH (a) RETURN a,[p = (a)-[:R]->(b)-[:R*0..2]->(c)-[:R]->(d) | [p,nodes(p),relationships(p),length(p),d,d.p,NULL]] AS routes";
+        let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+        let expected: Vec<_> = [VId(0), WIDE, VId(u128::MAX)]
+            .into_iter()
+            .map(|a| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(a),
+                    mixed_trail::values(mixed_trail::routes(&edges, a, 0, 1, 3, (0, 2)), property),
+                ])
+            })
+            .collect();
+        let (_, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        let mut actual = vec![cursor.next().unwrap().unwrap()];
+        let mut edit = WriteBatch::new(R);
+        edit.delete_edge(EId(0));
+        edit.add_edge(EId(99), VId(u128::MAX), WIDE, vec![]);
+        edit.set_vertex_property(VId(u128::MAX), P, Some(CanonicalScalar::Int(31)));
+        db.write(&commit, edit).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        actual.extend(cursor.collect::<Result<Vec<_>, _>>().unwrap());
+        assert_eq!(actual, expected);
+        let (_, old) = prepared
+            .stream_in_view(&view, &cx, &args, policy())
+            .unwrap();
+        assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        let temporal = text.replacen(
+            "MATCH (a)",
+            &format!("MATCH (a) FOR SYSTEM_TIME AS OF SEQ {}", basis.0),
+            1,
+        );
+        let historical = PreparedNativeRead::prepare(&temporal, &args, symbols).unwrap();
+        let (_, old) = historical.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(old.snapshot_seq(), basis);
+        assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        let (columns, fresh) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        let fresh = fresh.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_ne!(fresh, expected);
+        assert_eq!(
+            result(columns, fresh),
+            prepared.execute(&db, &cx, &args, policy()).unwrap()
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
