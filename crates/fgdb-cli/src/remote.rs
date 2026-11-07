@@ -1085,18 +1085,21 @@ fn human(value: &WireValue) -> String {
 
 /// `x,y,...` as packed little-endian f32 bytes, each coordinate finite.
 pub(crate) fn packed_vector(text: &str) -> Result<Vec<u8>, Failure> {
-    let mut bytes = Vec::new();
-    for raw in text.split(',') {
-        let value: f32 = raw
-            .trim()
-            .parse()
-            .map_err(|_| Failure::usage("vector: is comma-separated numbers"))?;
-        if !value.is_finite() {
-            return Err(Failure::usage("vector: coordinates must be finite f32"));
-        }
-        bytes.extend_from_slice(&value.to_le_bytes());
+    use crate::binding_control::{BindingControl, ControlledError};
+    let mut poll = || Ok::<(), std::convert::Infallible>(());
+    match packed_vector_controlled(text, &mut BindingControl::new(&mut poll)) {
+        Ok(bytes) => Ok(bytes),
+        Err(ControlledError::Invalid(error)) => Err(error),
+        Err(ControlledError::Interrupted(never)) => match never {},
     }
-    Ok(bytes)
+}
+
+pub(crate) fn packed_vector_controlled<C>(
+    text: &str,
+    control: &mut crate::binding_control::BindingControl<'_, C>,
+) -> Result<Vec<u8>, crate::binding_control::ControlledError<Failure, C>> {
+    crate::binding_control::packed_vector(text, control)
+        .map_err(|error| error.map_invalid(Failure::usage))
 }
 
 #[cfg(test)]

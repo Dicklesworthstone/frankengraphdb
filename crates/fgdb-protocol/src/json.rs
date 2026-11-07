@@ -544,8 +544,29 @@ pub fn argument(json: &Json) -> Result<WireValue, String> {
 
 /// Bytes from even-length hexadecimal text.
 pub fn bytes_from_hex(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+    match bytes_from_hex_controlled(hex, |_| Ok::<(), std::convert::Infallible>(())) {
+        Ok(bytes) => Ok(bytes),
+        Err(JsonParseError::Invalid(message)) => Err(message),
+        Err(JsonParseError::Interrupted(never)) => match never {},
+    }
+}
+
+/// Decode the same hexadecimal scalar, admitting each real validation and
+/// decoding run before work. A run contains at most JSON_PARSE_RUN_BYTES
+/// source bytes. Validation still finishes before allocation/decoding, so an
+/// ordinary malformed value has the same error as [`bytes_from_hex`].
+pub fn bytes_from_hex_controlled<C>(
+    hex: &str,
+    mut control: impl FnMut(usize) -> Result<(), C>,
+) -> Result<Vec<u8>, JsonParseError<C>> {
+    if !hex.len().is_multiple_of(2) {
         return Err("$bytes must be even-length hexadecimal".into());
+    }
+    for chunk in hex.as_bytes().chunks(JSON_PARSE_RUN_BYTES) {
+        control(chunk.len()).map_err(JsonParseError::Interrupted)?;
+        if !chunk.iter().all(u8::is_ascii_hexdigit) {
+            return Err("$bytes must be even-length hexadecimal".into());
+        }
     }
     let digit = |b: u8| {
         if b.is_ascii_digit() {
@@ -554,13 +575,19 @@ pub fn bytes_from_hex(hex: &str) -> Result<Vec<u8>, String> {
             b.to_ascii_lowercase() - b'a' + 10
         }
     };
-    Ok(hex
-        .as_bytes()
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| (digit(pair[0]) << 4) | digit(pair[1]))
-        .collect())
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for chunk in hex.as_bytes().chunks(JSON_PARSE_RUN_BYTES) {
+        control(chunk.len()).map_err(JsonParseError::Interrupted)?;
+        // Both the run size and the validated total length are even.
+        bytes.extend(
+            chunk
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| (digit(pair[0]) << 4) | digit(pair[1])),
+        );
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -952,5 +979,98 @@ mod parse_control_tests {
             parse_json_controlled(&input, usize::MAX, input.len(), |_| Ok::<(), Infallible>(())),
             Ok(Json::String(text)) if text == "🦀".repeat(JSON_PARSE_RUN_BYTES)
         ));
+    }
+}
+
+#[cfg(test)]
+mod controlled_hex_tests {
+    use super::*;
+    use std::convert::Infallible;
+    use std::rc::Rc;
+
+    #[test]
+    fn controlled_hex_keeps_values_and_validation_precedence() {
+        for byte in 0..=255_u8 {
+            for text in [format!("{byte:02x}"), format!("{byte:02X}")] {
+                assert_eq!(bytes_from_hex(&text), Ok(vec![byte]));
+            }
+        }
+        for text in ["", "0", "xyz", "gg", "é", "🦀", "0x00", " 0", "00\n0"] {
+            let expected = if text.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Err("$bytes must be even-length hexadecimal".to_owned())
+            };
+            assert_eq!(bytes_from_hex(text), expected, "{text:?}");
+        }
+        let mut calls = 0;
+        assert_eq!(
+            bytes_from_hex_controlled("0", |_| {
+                calls += 1;
+                Ok::<(), Infallible>(())
+            }),
+            Err(JsonParseError::Invalid(
+                "$bytes must be even-length hexadecimal".into()
+            ))
+        );
+        assert_eq!(calls, 0, "odd length is refused before scanning");
+
+        let invalid = "aB".repeat(JSON_PARSE_RUN_BYTES) + "xz";
+        let mut runs = Vec::new();
+        assert_eq!(
+            bytes_from_hex_controlled(&invalid, |bytes| {
+                runs.push(bytes);
+                Ok::<(), Infallible>(())
+            }),
+            Err(JsonParseError::Invalid(
+                "$bytes must be even-length hexadecimal".into()
+            ))
+        );
+        assert_eq!(
+            runs,
+            [JSON_PARSE_RUN_BYTES, JSON_PARSE_RUN_BYTES, 2],
+            "all callbacks are validation runs; decoding never starts"
+        );
+    }
+
+    #[test]
+    fn every_validation_and_decode_run_preserves_non_send_cancellation() {
+        let text = "aB".repeat(JSON_PARSE_RUN_BYTES + 7);
+        let mut runs = Vec::new();
+        let bytes = bytes_from_hex_controlled(&text, |bytes| {
+            runs.push(bytes);
+            Ok::<(), Infallible>(())
+        })
+        .unwrap();
+        assert_eq!(bytes, vec![0xab; JSON_PARSE_RUN_BYTES + 7]);
+        assert_eq!(
+            runs,
+            [
+                JSON_PARSE_RUN_BYTES,
+                JSON_PARSE_RUN_BYTES,
+                14,
+                JSON_PARSE_RUN_BYTES,
+                JSON_PARSE_RUN_BYTES,
+                14
+            ]
+        );
+        for cancel in 1..=runs.len() {
+            let token = Rc::new(cancel);
+            let mut seen = 0;
+            let error = bytes_from_hex_controlled(&text, |_| {
+                seen += 1;
+                if seen == cancel {
+                    Err(token.clone())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+            let JsonParseError::Interrupted(error) = error else {
+                panic!("lost cancellation")
+            };
+            assert!(Rc::ptr_eq(&error, &token));
+            assert_eq!(seen, cancel);
+        }
     }
 }
