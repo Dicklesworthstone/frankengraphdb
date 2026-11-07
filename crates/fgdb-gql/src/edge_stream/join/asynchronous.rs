@@ -35,7 +35,10 @@ pub type AsyncIncidentCandidateResult<Record, Error, Control> =
 /// Each record owns its source payload reservation. reserve_join_output admits
 /// the full copied projection, including repeated fields/path cells from ANY
 /// retained record, before the shared projector allocates. Its output guard
-/// outlives every source record. Explicit () guards declare no byte bound.
+/// outlives every source record. A collected projection additionally forwards
+/// every native allocation event to join_output_event before allocation: its
+/// variable witness payload cannot be bounded by the active record slice.
+/// Explicit () guards declare no byte bound.
 pub trait AsyncEdgeJoinSource: AsyncEdgeScanSource {
     type TraversalGuard: Send;
 
@@ -62,13 +65,32 @@ pub trait AsyncEdgeJoinSource: AsyncEdgeScanSource {
         columns: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Self::OutputGuard, EdgeScanSourceError<Self::Error, C>>;
+
+    /// Admit native projection temporaries and copied collection cells against
+    /// the independent output owner, before each allocation. ScratchEntry
+    /// covers a value cell or GRAPH_VALUE_PAYLOAD_UNIT_BYTES payload quantum;
+    /// the host must also cover vector growth/temporary copies as its ordinary
+    /// evaluation_event contract does. The guard retains this charge through
+    /// delivery, including after every source/traversal record is released.
+    /// Work remains a cancellation observation, not a second logical debit.
+    fn join_output_event(
+        &self,
+        guard: &mut Self::OutputGuard,
+        event: GlaExecutionEvent,
+    ) -> Result<(), Self::Error>;
 }
 
 /// The ordinary fixed-hop compiler with awaitable correlated semi/anti probes.
 /// Its identity prefix proves canonical order and DISTINCT without a seen set.
 /// Probe bindings copy outer values or expand indexed fixed/variable-length
-/// edges through the same native endpoint-support semantics. Independent vertex
-/// scans, OPTIONAL and returned variable-length paths remain typed refusals;
+/// edges through the same native endpoint-support semantics. Correlated fixed
+/// collections exhaust the same witness driver, retaining native identity,
+/// path and tuple elements under their outer record's allocation owner.
+/// Prepare these scopes with GraphPatternBuilder::prepare_values_with_clauses
+/// and GraphMatchClause::collect/collect_tuple; each collection is complete
+/// before its containing row can be delivered.
+/// Independent vertex scans, variable collection atoms, nested collection
+/// probes, OPTIONAL and returned variable-length paths remain typed refusals;
 /// missing indexes and interrupted reads never establish existential absence.
 #[derive(Clone)]
 pub struct AsyncEdgeJoinPlan {
@@ -120,12 +142,34 @@ impl AsyncEdgeJoinPlan {
     }
 
     fn check_access(plan: &GlaPlan<GraphValueRow>) -> Result<(), EdgeScanBuildError> {
-        if let Some(operator) = plan
-            .operators()
-            .iter()
-            .position(|op| matches!(op, GlaOperator::ScanVertices | GlaOperator::Collect { .. }))
-        {
-            return Err(EdgeScanBuildError { operator });
+        let ops = plan.operators();
+        for (operator, op) in ops.iter().enumerate() {
+            match op {
+                GlaOperator::ScanVertices => return Err(EdgeScanBuildError { operator }),
+                GlaOperator::Collect { end, .. } => {
+                    let end = *end as usize;
+                    let body = ops
+                        .get(operator + 1..end)
+                        .ok_or(EdgeScanBuildError { operator })?;
+                    // One correlated fixed-hop profile, sealed before source
+                    // construction even at LIMIT zero. The shared compiler
+                    // still validates scope widths, captures and projections.
+                    if let Some(offset) = body.iter().position(|op| {
+                        matches!(
+                            op,
+                            GlaOperator::ScanVertices
+                                | GlaOperator::VarLengthExpand { .. }
+                                | GlaOperator::Probe { .. }
+                                | GlaOperator::Collect { .. }
+                        )
+                    }) {
+                        return Err(EdgeScanBuildError {
+                            operator: operator + 1 + offset,
+                        });
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -447,7 +491,7 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
             });
             frame.traversal.bindings.push(Some(to));
             frame.records.push(record);
-            let paths = test_async_stage(
+            let values = test_async_stage(
                 &plan.stages[depth],
                 &frame.traversal,
                 &mut frame.records,
@@ -456,7 +500,7 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                 self.seq,
             )
             .await?;
-            let Some(paths) = paths else {
+            let Some(values) = values else {
                 frame.pop();
                 continue;
             };
@@ -466,8 +510,9 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
             }
             if self.skip != 0 {
                 self.skip -= 1;
-                // Path allocations are charged to the record popped below.
-                drop(paths);
+                // Captures and collection payloads are charged to the record
+                // popped below, never to an already released child candidate.
+                drop(values);
                 frame.pop();
                 continue;
             }
@@ -476,7 +521,7 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
             } else {
                 None
             };
-            let guard = flatten(source.reserve_join_output(
+            let mut guard = flatten(source.reserve_join_output(
                 &frame.records,
                 self.plan.columns,
                 &mut |event| meter.event(event),
@@ -487,16 +532,20 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                 seq: self.seq,
                 error: core::marker::PhantomData,
             };
-            let row = project(
+            let row = project_collected(
                 &self.plan.inner.projection,
                 &frame.traversal.bindings,
-                &paths,
+                &values.paths,
+                &values.collected,
                 &local,
                 &mut |event| {
                     meter.event(event)?;
-                    source
-                        .evaluation_event(&frame.records[depth], event)
-                        .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
+                    let observed = if values.collected.is_empty() {
+                        source.evaluation_event(&frame.records[depth], event)
+                    } else {
+                        source.join_output_event(&mut guard, event)
+                    };
+                    observed.map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
                 },
             )?;
             if let Some(count) = count {
@@ -654,12 +703,13 @@ async fn test_async_stage<S: AsyncEdgeJoinSource, F, C>(
     source: &mut S,
     meter: &mut Meter<F>,
     seq: CommitSeq,
-) -> ScanResult<Option<Vec<Option<GraphPath>>>, S::Error, C>
+) -> ScanResult<Option<StageValues>, S::Error, C>
 where
     F: FnMut() -> Result<(), C> + Send,
     C: Send,
 {
     let mut paths = Vec::new();
+    let mut collected = Vec::new();
     for instruction in ops {
         meter.event(GlaExecutionEvent::Work)?;
         source
@@ -677,8 +727,22 @@ where
                     return Ok(None);
                 }
             }
-            Instruction::Collect(_) => {
-                unreachable!("async admission requires a collection output reservation")
+            Instruction::Collect(collection) => {
+                while collected.len() <= collection.group {
+                    meter.event(GlaExecutionEvent::ScratchEntry)?;
+                    source
+                        .evaluation_event(
+                            records.last().expect("active collection record"),
+                            GlaExecutionEvent::ScratchEntry,
+                        )
+                        .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))?;
+                    collected.push(None);
+                }
+                collected[collection.group] = Some(
+                    collection
+                        .evaluate_async(traversal, records, source, meter, seq)
+                        .await?,
+                );
             }
             Instruction::Native(op) => {
                 let local = FrameSource::<_, S::Error> {
@@ -698,7 +762,7 @@ where
             }
         }
     }
-    Ok(Some(paths))
+    Ok(Some(StageValues { paths, collected }))
 }
 
 pub(super) fn admit<F: FnMut() -> Result<(), C>, E, C>(

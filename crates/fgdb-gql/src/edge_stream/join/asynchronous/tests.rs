@@ -341,6 +341,10 @@ impl AsyncEdgeJoinSource for Source {
         self.counts.output_columns.store(columns, Ordering::SeqCst);
         self.guard(control)
     }
+
+    fn join_output_event(&self, _: &mut Guard, _: GlaExecutionEvent) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 fn atom(name: &str, end: &str, direction: GlaDirection, any: bool) -> String {
     let relation = if any { "" } else { ":R" };

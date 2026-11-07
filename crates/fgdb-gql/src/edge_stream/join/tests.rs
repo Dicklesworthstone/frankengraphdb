@@ -2700,11 +2700,12 @@ mod collections {
             assert!(cursor.next().is_none());
             assert_eq!(dropped.load(Ordering::SeqCst), 1);
         }
-        // Async byte guards do not yet reserve retained collection payloads.
-        // Preparation must continue to refuse, even at LIMIT zero.
+        // Async collection admission now reserves both the retained witness
+        // payload and independently delivered clone. LIMIT zero still opens
+        // no root, while the complete fixed collection profile is checked.
         let query = definition(GlaDirection::Forward, GlaDirection::Forward, 0, Some(0));
-        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
-        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_ok());
+        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_ok());
         let fixture = Fixture::small(63);
         let roots = fixture.roots.clone();
         let mut cursor = EdgeScanCursor::new(

@@ -129,6 +129,22 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
             .map_err(BufferedReadError::Memory)
             .map_err(EdgeScanSourceError::Source)
     }
+
+    fn join_output_event(
+        &self,
+        guard: &mut MemoryCharge,
+        event: GlaExecutionEvent,
+    ) -> Result<(), BufferedReadError> {
+        if event == GlaExecutionEvent::ScratchEntry {
+            // The native clone visits every list/tuple/path cell and payload
+            // quantum before copying it. Use the same conservative allocation
+            // unit as record-local evaluation, but retain it with the delivered
+            // row rather than with a candidate that backtracking may release.
+            let bytes = 8 * core::mem::size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+            guard.grow(self.cx, bytes)?;
+        }
+        Ok(())
+    }
 }
 
 impl<V: Vfs + Clone> BufferedReadView<V> {
@@ -148,6 +164,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// record before allocation. Zero hops reuse the admitted seed; transit
     /// payloads are released before the next incidence read, while selected
     /// endpoints retain their property records through local predicates.
+    /// Correlated fixed-hop collections retain every accepted occurrence in
+    /// strict incidence order, including parallel edges and declared path
+    /// orientation. Their identity/path/tuple payload is admitted against the
+    /// outer record before collection, and against an independent result guard
+    /// before projection. No partial list is delivered on failure or cancel.
     ///
     /// One bounded source record per active hop is retained. Authenticated block
     /// directories, decode workspaces, traversal and copied results all use this
@@ -167,7 +188,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// The view/context are borrowed, but the prepared definition is not.
     /// Initial admission/recovery retain their existing bounds. Owner-level API:
     /// no Warden grant, durable result lease, OPTIONAL, independent probe scans,
-    /// nested probes or captured/returned variable-length traversal. These profiles
+    /// nested probes, variable-length collections or captured/returned
+    /// variable-length traversal. These profiles
     /// refuse during physical preparation, never as an empty neighborhood.
     // The cursor's source and checkpoint are opaque, and stable Rust cannot
     // name an opaque type in an alias, so this and the three join openers

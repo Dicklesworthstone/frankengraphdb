@@ -284,6 +284,10 @@ impl AsyncEdgeJoinSource for Source {
     ) -> Result<Guard, EdgeScanSourceError<&'static str, C>> {
         self.guard(control)
     }
+
+    fn join_output_event(&self, _: &mut Guard, _: GlaExecutionEvent) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 fn released(counts: &Counts) {
     assert_eq!(counts.sources.load(Ordering::SeqCst), 0);
