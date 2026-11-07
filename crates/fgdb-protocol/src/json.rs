@@ -28,60 +28,129 @@ pub enum Json {
 /// One bounded JSON document: at most `values` values and `token_bytes`
 /// bytes per string or number token, nested at most 32 deep.
 pub fn parse_json(input: &str, values: usize, token_bytes: usize) -> Result<Json, String> {
-    JsonParser::parse_limited(input, values, token_bytes)
+    match parse_json_controlled(input, values, token_bytes, |_| {
+        Ok::<(), std::convert::Infallible>(())
+    }) {
+        Ok(value) => Ok(value),
+        Err(JsonParseError::Invalid(message)) => Err(message),
+        Err(JsonParseError::Interrupted(never)) => match never {},
+    }
 }
-struct JsonParser<'a> {
+
+/// Source bytes consumed between live control checks. Characters and JSON
+/// literals remain indivisible, so a check can occur just before this bound.
+pub const JSON_PARSE_RUN_BYTES: usize = 64 * 1024;
+
+/// JSON grammar/limit errors retain their ordinary message; interruption is
+/// a separate typed outcome and never a malformed document or a partial value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JsonParseError<C> {
+    Invalid(String),
+    Interrupted(C),
+}
+
+impl<C> From<String> for JsonParseError<C> {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+
+impl<C> From<&str> for JsonParseError<C> {
+    fn from(message: &str) -> Self {
+        Self::Invalid(message.to_owned())
+    }
+}
+
+/// Parse the same bounded document as [`parse_json`], with live control before
+/// parsing, between at most [`JSON_PARSE_RUN_BYTES`] consumed source bytes,
+/// and before returning a complete value. The callback receives the consumed
+/// byte offset, always at a UTF-8 boundary. It and its error need not be `Send`.
+/// The bound covers source scanning; allocation, map operations and cleanup
+/// remain subject to the caller's admitted document and token limits.
+pub fn parse_json_controlled<C>(
+    input: &str,
+    values: usize,
+    token_bytes: usize,
+    control: impl FnMut(usize) -> Result<(), C>,
+) -> Result<Json, JsonParseError<C>> {
+    JsonParser::parse_limited(input, values, token_bytes, control)
+}
+
+struct JsonParser<'a, F> {
     input: &'a str,
     offset: usize,
     depth: usize,
     remaining_values: usize,
     max_token_bytes: usize,
+    remaining_bytes: usize,
+    control: F,
 }
-impl<'a> JsonParser<'a> {
-    fn parse_limited(input: &'a str, values: usize, token_bytes: usize) -> Result<Json, String> {
+impl<'a, C, F: FnMut(usize) -> Result<(), C>> JsonParser<'a, F> {
+    fn parse_limited(
+        input: &'a str,
+        values: usize,
+        token_bytes: usize,
+        control: F,
+    ) -> Result<Json, JsonParseError<C>> {
         let mut parser = Self {
             input,
             offset: 0,
             depth: 0,
             remaining_values: values,
             max_token_bytes: token_bytes,
+            remaining_bytes: JSON_PARSE_RUN_BYTES,
+            control,
         };
+        parser.checkpoint()?;
         let value = parser.value()?;
-        parser.whitespace();
+        parser.whitespace()?;
         if parser.offset != input.len() {
-            return Err(format!("trailing JSON bytes at {}", parser.offset));
+            return Err(format!("trailing JSON bytes at {}", parser.offset).into());
         }
+        parser.checkpoint()?;
         Ok(value)
+    }
+    fn checkpoint(&mut self) -> Result<(), JsonParseError<C>> {
+        (self.control)(self.offset).map_err(JsonParseError::Interrupted)?;
+        self.remaining_bytes = JSON_PARSE_RUN_BYTES;
+        Ok(())
+    }
+    fn advance(&mut self, bytes: usize) -> Result<(), JsonParseError<C>> {
+        // Each caller consumes at most one UTF-8 character, one ASCII byte,
+        // or a five-byte literal. Admit the next piece before consuming it.
+        if bytes > self.remaining_bytes {
+            self.checkpoint()?;
+        }
+        self.offset += bytes;
+        self.remaining_bytes -= bytes;
+        Ok(())
     }
     fn peek(&self) -> Option<u8> {
         self.input.as_bytes().get(self.offset).copied()
     }
-    fn consume(&mut self, byte: u8) -> bool {
+    fn consume(&mut self, byte: u8) -> Result<bool, JsonParseError<C>> {
         if self.peek() == Some(byte) {
-            self.offset += 1;
-            true
+            self.advance(1)?;
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
-    fn expect(&mut self, byte: u8) -> Result<(), String> {
-        if self.consume(byte) {
+    fn expect(&mut self, byte: u8) -> Result<(), JsonParseError<C>> {
+        if self.consume(byte)? {
             Ok(())
         } else {
-            Err(format!(
-                "expected {:?} at {}",
-                char::from(byte),
-                self.offset
-            ))
+            Err(format!("expected {:?} at {}", char::from(byte), self.offset).into())
         }
     }
-    fn whitespace(&mut self) {
+    fn whitespace(&mut self) -> Result<(), JsonParseError<C>> {
         while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
-            self.offset += 1;
+            self.advance(1)?;
         }
+        Ok(())
     }
-    fn value(&mut self) -> Result<Json, String> {
-        self.whitespace();
+    fn value(&mut self) -> Result<Json, JsonParseError<C>> {
+        self.whitespace()?;
         if self.remaining_values == 0 {
             return Err("JSON value limit exceeded".into());
         }
@@ -98,83 +167,83 @@ impl<'a> JsonParser<'a> {
             Some(b'f') => self.literal("false", Json::Bool(false)),
             Some(b'n') => self.literal("null", Json::Null),
             Some(b'-' | b'0'..=b'9') => self.number(),
-            _ => Err(format!("expected JSON value at {}", self.offset)),
+            _ => Err(format!("expected JSON value at {}", self.offset).into()),
         };
         self.depth -= 1;
         result
     }
-    fn literal(&mut self, text: &str, value: Json) -> Result<Json, String> {
+    fn literal(&mut self, text: &str, value: Json) -> Result<Json, JsonParseError<C>> {
         if !self.input[self.offset..].starts_with(text) {
             return Err("invalid JSON literal".into());
         }
-        self.offset += text.len();
+        self.advance(text.len())?;
         Ok(value)
     }
-    fn object(&mut self) -> Result<Json, String> {
+    fn object(&mut self) -> Result<Json, JsonParseError<C>> {
         self.expect(b'{')?;
-        self.whitespace();
+        self.whitespace()?;
         let mut fields = BTreeMap::new();
-        if self.consume(b'}') {
+        if self.consume(b'}')? {
             return Ok(Json::Object(fields));
         }
         loop {
-            self.whitespace();
+            self.whitespace()?;
             let name = self.string()?;
-            self.whitespace();
+            self.whitespace()?;
             self.expect(b':')?;
             let value = self.value()?;
             if fields.insert(name, value).is_some() {
                 return Err("duplicate JSON object field".into());
             }
-            self.whitespace();
-            if self.consume(b'}') {
+            self.whitespace()?;
+            if self.consume(b'}')? {
                 return Ok(Json::Object(fields));
             }
             self.expect(b',')?;
         }
     }
-    fn array(&mut self) -> Result<Json, String> {
+    fn array(&mut self) -> Result<Json, JsonParseError<C>> {
         self.expect(b'[')?;
-        self.whitespace();
+        self.whitespace()?;
         let mut values = Vec::new();
-        if self.consume(b']') {
+        if self.consume(b']')? {
             return Ok(Json::Array(values));
         }
         loop {
             values.push(self.value()?);
-            self.whitespace();
-            if self.consume(b']') {
+            self.whitespace()?;
+            if self.consume(b']')? {
                 return Ok(Json::Array(values));
             }
             self.expect(b',')?;
         }
     }
-    fn hex_quad(&mut self) -> Result<u32, String> {
+    fn hex_quad(&mut self) -> Result<u32, JsonParseError<C>> {
         let mut value = 0;
         for _ in 0..4 {
             let digit = self
                 .peek()
                 .and_then(|byte| char::from(byte).to_digit(16))
                 .ok_or("invalid Unicode escape")?;
-            self.offset += 1;
+            self.advance(1)?;
             value = value * 16 + digit;
         }
         Ok(value)
     }
-    fn string(&mut self) -> Result<String, String> {
+    fn string(&mut self) -> Result<String, JsonParseError<C>> {
         self.expect(b'"')?;
         let mut text = String::new();
         loop {
             match self.peek() {
                 None => return Err("unterminated JSON string".into()),
                 Some(b'"') => {
-                    self.offset += 1;
+                    self.advance(1)?;
                     return Ok(text);
                 }
                 Some(b'\\') => {
-                    self.offset += 1;
+                    self.advance(1)?;
                     let escape = self.peek().ok_or("unterminated JSON escape")?;
-                    self.offset += 1;
+                    self.advance(1)?;
                     let ch = match escape {
                         b'"' => '"',
                         b'\\' => '\\',
@@ -209,13 +278,13 @@ impl<'a> JsonParser<'a> {
                         .chars()
                         .next()
                         .expect("remaining character");
-                    self.offset += ch.len_utf8();
+                    self.advance(ch.len_utf8())?;
                     self.push_character(&mut text, ch)?;
                 }
             }
         }
     }
-    fn push_character(&self, text: &mut String, ch: char) -> Result<(), String> {
+    fn push_character(&self, text: &mut String, ch: char) -> Result<(), JsonParseError<C>> {
         if text
             .len()
             .checked_add(ch.len_utf8())
@@ -226,10 +295,10 @@ impl<'a> JsonParser<'a> {
         text.push(ch);
         Ok(())
     }
-    fn digits(&mut self) -> Result<(), String> {
+    fn digits(&mut self) -> Result<(), JsonParseError<C>> {
         let start = self.offset;
         while matches!(self.peek(), Some(b'0'..=b'9')) {
-            self.offset += 1;
+            self.advance(1)?;
         }
         if self.offset == start {
             Err("expected digit".into())
@@ -237,18 +306,18 @@ impl<'a> JsonParser<'a> {
             Ok(())
         }
     }
-    fn number(&mut self) -> Result<Json, String> {
+    fn number(&mut self) -> Result<Json, JsonParseError<C>> {
         let start = self.offset;
-        self.consume(b'-');
-        if !self.consume(b'0') {
+        self.consume(b'-')?;
+        if !self.consume(b'0')? {
             self.digits()?;
         }
-        if self.consume(b'.') {
+        if self.consume(b'.')? {
             self.digits()?;
         }
-        if self.consume(b'e') || self.consume(b'E') {
-            if !self.consume(b'+') {
-                self.consume(b'-');
+        if self.consume(b'e')? || self.consume(b'E')? {
+            if !self.consume(b'+')? {
+                self.consume(b'-')?;
             }
             self.digits()?;
         }
@@ -256,6 +325,153 @@ impl<'a> JsonParser<'a> {
             return Err("JSON number limit exceeded".into());
         }
         Ok(Json::Number(self.input[start..self.offset].to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod parse_control_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::convert::Infallible;
+    use std::rc::Rc;
+
+    #[test]
+    fn controlled_json_preserves_values_and_existing_error_messages() {
+        for (input, values, bytes, expected) in [
+            ("null", 1, 0, Json::Null),
+            ("[]", 1, 0, Json::Array(Vec::new())),
+            (r#""é""#, 1, 2, Json::String("é".into())),
+            (r#""\uD834\uDD1E""#, 1, 4, Json::String("𝄞".into())),
+            ("1.25e+30", 1, 8, Json::Number("1.25e+30".into())),
+            (
+                r#"{"x":0,"y":false}"#,
+                3,
+                1,
+                Json::Object(BTreeMap::from([
+                    ("x".into(), Json::Number("0".into())),
+                    ("y".into(), Json::Bool(false)),
+                ])),
+            ),
+        ] {
+            assert_eq!(parse_json(input, values, bytes), Ok(expected.clone()));
+            assert_eq!(
+                parse_json_controlled(input, values, bytes, |_| Ok::<(), Infallible>(())),
+                Ok(expected)
+            );
+        }
+        for (input, values, bytes, message) in [
+            ("[0]", 1, 10, "JSON value limit exceeded"),
+            (r#""é""#, 1, 1, "JSON string limit exceeded"),
+            (r#""\uD834\uDD1E""#, 1, 3, "JSON string limit exceeded"),
+            ("1.25e+30", 1, 7, "JSON number limit exceeded"),
+            (r#"{"x":0,"x":1}"#, 3, 10, "duplicate JSON object field"),
+            (r#"{"x":0,"x":}"#, 3, 10, "expected JSON value at 11"),
+            ("00", 1, 10, "trailing JSON bytes at 1"),
+            ("[true,]", 3, 10, "expected JSON value at 6"),
+            (r#""\uD834\u0000""#, 1, 10, "invalid low surrogate"),
+            (r#""\uDD1E""#, 1, 10, "invalid Unicode scalar"),
+            (r#""\uZZZZ""#, 1, 10, "invalid Unicode escape"),
+            (r#""\q""#, 1, 10, "invalid JSON escape"),
+            ("-", 1, 10, "expected digit"),
+            (" \t\r\n", 1, 10, "expected JSON value at 4"),
+        ] {
+            assert_eq!(parse_json(input, values, bytes), Err(message.into()));
+            assert_eq!(
+                parse_json_controlled(input, values, bytes, |_| Ok::<(), Infallible>(())),
+                Err(JsonParseError::Invalid(message.into()))
+            );
+        }
+        let too_deep = format!("{}0{}", "[".repeat(32), "]".repeat(32));
+        assert_eq!(
+            parse_json_controlled(&too_deep, 100, 100, |_| Ok::<(), Infallible>(())),
+            Err(JsonParseError::Invalid(
+                "JSON nesting limit exceeded".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn controlled_json_bounds_source_runs_and_interrupts_every_checkpoint() {
+        let run = JSON_PARSE_RUN_BYTES;
+        let mut documents = vec![
+            format!("{}null", " ".repeat(3 * run + 5)),
+            format!("null{}", " \n\t\r".repeat(run)),
+            format!("-1.{}e+37", "7".repeat(3 * run + 1)),
+            format!("\"{}\"", "x".repeat(1024 * 1024 - 2)),
+            format!("\"{}\"", r"\uD834\uDD1E".repeat(run / 3)),
+            format!("[{}0]", "0,".repeat(2 * run)),
+            format!(r#"{{"{}":0,"tail":true}}"#, "k".repeat(3 * run)),
+            format!("null{}!", " ".repeat(3 * run + 3)),
+        ];
+        // Place each multi-byte scalar and surrogate pair across the first
+        // source window at every possible byte alignment around that boundary.
+        for padding in 0..12 {
+            for text in ["é", "€", "🦀", r"\uD834\uDD1E"] {
+                documents.push(format!("\"{}{}tail\"", "a".repeat(run - padding - 1), text));
+            }
+        }
+        for input in documents {
+            let expected = parse_json(&input, usize::MAX, input.len());
+            let mut offsets = Vec::new();
+            let result = parse_json_controlled(&input, usize::MAX, input.len(), |offset| {
+                assert!(input.is_char_boundary(offset));
+                offsets.push(offset);
+                Ok::<(), Infallible>(())
+            });
+            assert_eq!(
+                result,
+                expected.map_err(JsonParseError::<Infallible>::Invalid)
+            );
+            assert_eq!(offsets.first(), Some(&0));
+            assert!(offsets.len() >= 2);
+            for pair in offsets.windows(2) {
+                assert!(pair[1] > pair[0]);
+                assert!(pair[1] - pair[0] <= run);
+            }
+            for stop in 0..offsets.len() {
+                let token = Rc::new(Cell::new(usize::MAX));
+                let mut observed = Vec::new();
+                let interrupted =
+                    parse_json_controlled(&input, usize::MAX, input.len(), |offset| {
+                        observed.push(offset);
+                        if observed.len() == stop + 1 {
+                            token.set(offset);
+                            Err(Rc::clone(&token))
+                        } else {
+                            Ok(())
+                        }
+                    });
+                let Err(JsonParseError::Interrupted(error)) = interrupted else {
+                    panic!("every visited checkpoint must retain its typed interruption")
+                };
+                assert!(Rc::ptr_eq(&error, &token));
+                assert_eq!(token.get(), offsets[stop]);
+                assert_eq!(observed, offsets[..=stop]);
+            }
+        }
+    }
+
+    #[test]
+    fn controlled_json_unwinds_inside_a_token_and_next_parse_starts_clean() {
+        let input = format!("\"{}\"", "🦀".repeat(JSON_PARSE_RUN_BYTES));
+        let stopped = Rc::new(Cell::new(0));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parse_json_controlled(&input, usize::MAX, input.len(), |offset| {
+                if offset != 0 {
+                    stopped.set(offset);
+                    std::panic::resume_unwind(Box::new("inside JSON token"));
+                }
+                Ok::<(), Infallible>(())
+            })
+        }));
+        assert!(result.is_err());
+        assert!(stopped.get() > 0);
+        assert!(stopped.get() <= JSON_PARSE_RUN_BYTES);
+        assert!(stopped.get() < input.len());
+        assert!(matches!(
+            parse_json_controlled(&input, usize::MAX, input.len(), |_| Ok::<(), Infallible>(())),
+            Ok(Json::String(text)) if text == "🦀".repeat(JSON_PARSE_RUN_BYTES)
+        ));
     }
 }
 
