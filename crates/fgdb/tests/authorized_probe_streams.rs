@@ -2985,3 +2985,211 @@ fn mixed_capture_lists_remain_private_until_the_authorized_row_is_complete() {
     assert_eq!(cursor.state(), VertexScanState::Failed);
     assert!(cursor.next().is_none());
 }
+
+#[test]
+fn multiple_trail_collections_keep_every_route_inside_the_authorized_graph() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let slim = runtime.block_on(collection_database(&commit, false));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let edges: Vec<_> = COLLECTION_EDGES
+        .iter()
+        .map(|&(eid, from, to, _)| (EId(eid), VId(from), VId(to)))
+        .collect();
+    let calls = Cell::new(0_u64);
+    let clock = || {
+        calls.set(calls.get() + 1);
+        100
+    };
+    let mut scoped = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    let mut visible = slim
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    let shapes: &[(&[&str], &[(usize, usize)])] = &[
+        (&["*0..1", "*0..2"], &[(0, 1), (0, 2)]),
+        (&["*0..2", "", "*0..2"], &[(0, 2), (1, 1), (0, 2)]),
+        (&["*0..1", "*0..1", "*1..2"], &[(0, 1), (0, 1), (1, 2)]),
+        (&["*0..0", "*0..0"], &[(0, 0), (0, 0)]),
+    ];
+    for edge_root in [false, true] {
+        let (head, prefix) = if edge_root {
+            ("MATCH (x)-[r]->(a)", "r,x,a")
+        } else {
+            ("MATCH (a)", "a")
+        };
+        for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+            .into_iter()
+            .enumerate()
+        {
+            for &(spellings, bounds) in shapes {
+                let names = ["a", "b", "c", "d"];
+                let end = names[spellings.len()];
+                let mut pattern = String::from("(a)");
+                for (at, spelling) in spellings.iter().enumerate() {
+                    pattern.push_str(&format!("{left}[:R{spelling}]{right}({})", names[at + 1]));
+                }
+                for child in [false, true] {
+                    let predicate = if child {
+                        format!(
+                            "WHERE EXISTS {{ MATCH ({end})-[child:R]->(z) WHERE child.hidden IS NULL }} AND NOT EXISTS {{ MATCH ({end})-[:S]->(private) }}"
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let text = format!(
+                        "{head} RETURN {prefix}, [p = {pattern} {predicate} | [p,nodes(p),relationships(p),length(p),{end},{end}.p,{end}.hidden]] AS routes"
+                    );
+                    let values = |anchor| {
+                        mixed_trail::values(
+                            mixed_trail::routes_for_bounds(&edges, anchor, direction, bounds)
+                                .into_iter()
+                                .filter(|path| {
+                                    !child
+                                        || edges.iter().any(|&(_, from, _)| {
+                                            from == mixed_trail::endpoint(path)
+                                        })
+                                }),
+                            |id| id.0 as i64 * 10,
+                        )
+                    };
+                    let expected: Vec<_> = if edge_root {
+                        edges
+                            .iter()
+                            .map(|&(r, x, a)| {
+                                GraphValueRow::from_owned_values(vec![
+                                    GraphValue::Edge(r),
+                                    GraphValue::Vertex(x),
+                                    GraphValue::Vertex(a),
+                                    values(a),
+                                ])
+                            })
+                            .collect()
+                    } else {
+                        [1_u128, 3, 4]
+                            .into_iter()
+                            .map(|a| {
+                                GraphValueRow::from_owned_values(vec![
+                                    GraphValue::Vertex(VId(a)),
+                                    values(VId(a)),
+                                ])
+                            })
+                            .collect()
+                    };
+                    let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+                    let eager = scoped.execute(&cx, &prepared, &args).unwrap();
+                    let before = calls.get();
+                    let mut cursor = scoped.stream(&cx, &prepared, &args).unwrap();
+                    let columns = cursor.columns().to_vec();
+                    let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    let checkpoints = calls.get() - before;
+                    assert_eq!(rows, expected, "{text}");
+                    assert_eq!(native(columns, &rows), eager, "{text}");
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    assert!(cursor.next().is_none());
+                    drop(cursor);
+                    let prepared = visible.prepare(&cx, &text, &args).unwrap();
+                    let before = calls.get();
+                    assert_eq!(
+                        visible
+                            .stream(&cx, &prepared, &args)
+                            .unwrap()
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap(),
+                        expected,
+                        "{text}"
+                    );
+                    assert_eq!(
+                        calls.get() - before,
+                        checkpoints,
+                        "private graph changed logical charges: {text}"
+                    );
+                    let mut send = db
+                        .authorized_read_session(
+                            &cx,
+                            &authority,
+                            &token,
+                            BRANCH,
+                            symbols,
+                            policy(),
+                            || 100,
+                        )
+                        .unwrap();
+                    let prepared = send.prepare(&cx, &text, &args).unwrap();
+                    let cursor = send.stream_send(&cx, &prepared, &args).unwrap();
+                    fn assert_send<T: Send>(_: &T) {}
+                    assert_send(&cursor);
+                    assert_eq!(
+                        cursor.collect::<Result<Vec<_>, _>>().unwrap(),
+                        expected,
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+    // A denied second trail still contributes exactly its visible zero-hop
+    // choice. It cannot expose hidden edge20 or its property.
+    for minimum in [0, 1] {
+        let text = format!(
+            "MATCH (a) RETURN a,[p = (a)-[:R*0..2]->(b)-[:S*{minimum}..2]->(c) | [p,nodes(p),relationships(p),length(p),c,c.p,c.hidden]] AS routes"
+        );
+        let expected: Vec<_> = [1_u128, 3, 4]
+            .into_iter()
+            .map(|a| {
+                let paths = if minimum == 0 {
+                    mixed_trail::routes_for_bounds(&edges, VId(a), 0, &[(0, 2), (0, 0)])
+                } else {
+                    Vec::new()
+                };
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(a)),
+                    mixed_trail::values(paths, |id| id.0 as i64 * 10),
+                ])
+            })
+            .collect();
+        let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+        assert_eq!(
+            scoped
+                .stream(&cx, &prepared, &args)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected,
+            "{text}"
+        );
+    }
+    drop(scoped);
+    drop(visible);
+    let text = "MATCH (a) RETURN a,[p = (a)-[:R*0..1]->(b)-[:R*0..2]->(c) | [p,nodes(p),relationships(p),length(p),c,c.p,c.hidden]] AS routes";
+    let expected = GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(1)),
+        mixed_trail::values(
+            mixed_trail::routes_for_bounds(&edges, VId(1), 0, &[(0, 1), (0, 2)]),
+            |id| id.0 as i64 * 10,
+        ),
+    ]);
+    let mut session = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
+        .unwrap();
+    let prepared = session.prepare(&cx, text, &args).unwrap();
+    let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+    assert_eq!(cursor.next().unwrap().unwrap(), expected);
+    root.set_cancel_reason(
+        asupersync::CancelReason::new(asupersync::CancelKind::User)
+            .with_message("cancel after one complete multiple-trail list"),
+    );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(QueryError::Pattern(GqlQueryError::Interrupted(_))))
+    ));
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(cursor.next().is_none());
+}

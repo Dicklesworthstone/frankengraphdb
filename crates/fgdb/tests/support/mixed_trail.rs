@@ -12,9 +12,22 @@ pub(super) fn routes(
     atoms: usize,
     bounds: (usize, usize),
 ) -> Vec<GraphPath> {
+    let bounds: Vec<_> = (0..atoms)
+        .map(|atom| if atom == variable { bounds } else { (1, 1) })
+        .collect();
+    routes_for_bounds(edges, anchor, direction, &bounds)
+}
+
+/// Every atom contributes its own ordered choice. Equal flattened paths from
+/// different segment boundaries remain separate occurrences in the product.
+pub(super) fn routes_for_bounds(
+    edges: &[(EId, VId, VId)],
+    anchor: VId,
+    direction: usize,
+    bounds: &[(usize, usize)],
+) -> Vec<GraphPath> {
     let mut prefixes = vec![(Vec::<(EId, VId)>::new(), anchor)];
-    for atom in 0..atoms {
-        let (minimum, maximum) = if atom == variable { bounds } else { (1, 1) };
+    for &(minimum, maximum) in bounds {
         let mut next_prefixes = Vec::new();
         for (prefix, start) in prefixes {
             let mut frontier = vec![(Vec::<(EId, VId)>::new(), start)];

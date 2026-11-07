@@ -72,9 +72,9 @@ pub(crate) struct Probe {
     steps: Vec<Step>,
 }
 
-/// A bounded Collect scope over fixed hops and at most one finite TRAIL atom.
-/// A standalone TRAIL may have one independent start. The shared probe kernel
-/// emits one value per complete witness; only exhaustion emits a list.
+/// A bounded Collect scope over fixed hops and finite TRAIL atoms. A standalone
+/// TRAIL may have one independent start. The shared probe kernel emits one
+/// value per complete witness; only exhaustion emits a list.
 pub(crate) struct Collection {
     pub(crate) group: usize,
     probe: Probe,
@@ -620,56 +620,66 @@ impl Probe {
                     match ids[expansion.source] {
                         None => None, // Even *0 cannot turn a NULL correlation into a vertex.
                         Some(from) => {
-                            let walk = match walks.entry(depth) {
-                                std::collections::btree_map::Entry::Occupied(slot) => {
-                                    slot.into_mut()
-                                }
-                                std::collections::btree_map::Entry::Vacant(slot) => {
-                                    let mut cursor = match emission {
-                                        walk::Emission::Support => walk::Endpoints::new(
-                                            from, bounds, search, source, control,
-                                        )?,
-                                        walk::Emission::TrailOccurrences => {
-                                            debug_assert_eq!(search, GraphWalkSearch::Trail);
-                                            walk::Endpoints::trail_occurrences(
-                                                from, bounds, source, control,
-                                            )?
-                                        }
-                                    };
-                                    if emission == walk::Emission::TrailOccurrences {
-                                        // Prune earlier fixed identities before
-                                        // descending this TRAIL, as eager GLA
-                                        // does. Filtering only its endpoints
-                                        // would still visit forbidden suffixes.
-                                        if let Some(GlaOperator::DifferentEdges { segments }) =
-                                            step.predicates.iter().find(|predicate| {
-                                                !matches!(
-                                                    predicate,
-                                                    GlaOperator::VertexIdentity { .. }
-                                                )
-                                            })
-                                            && segments.last().is_some_and(|slot| {
-                                                slot.ordinal() as usize == self.outer_width + depth
-                                            })
-                                        {
-                                            for slot in &segments[..segments.len() - 1] {
-                                                let local =
-                                                    slot.ordinal() as usize - self.outer_width;
-                                                let Position::Edge(Some(eid)) = frames[local]
-                                                else {
+                            if let Some(walk) = walks.get_mut(&depth) {
+                                walk.next(expansion, source, control, record)?.map(Some)
+                            } else {
+                                // Build outside the map's mutable entry borrow:
+                                // earlier live routes supply this atom's domain.
+                                let mut cursor = match emission {
+                                    walk::Emission::Support => {
+                                        walk::Endpoints::new(from, bounds, search, source, control)?
+                                    }
+                                    walk::Emission::TrailOccurrences => {
+                                        debug_assert_eq!(search, GraphWalkSearch::Trail);
+                                        walk::Endpoints::trail_occurrences(
+                                            from, bounds, source, control,
+                                        )?
+                                    }
+                                };
+                                if emission == walk::Emission::TrailOccurrences {
+                                    // Prune earlier segment identities before
+                                    // descending this TRAIL, as eager GLA
+                                    // does. Filtering only its endpoints
+                                    // would still visit forbidden suffixes.
+                                    if let Some(GlaOperator::DifferentEdges { segments }) =
+                                        step.predicates.iter().find(|predicate| {
+                                            !matches!(predicate, GlaOperator::VertexIdentity { .. })
+                                        })
+                                        && segments.last().is_some_and(|slot| {
+                                            slot.ordinal() as usize == self.outer_width + depth
+                                        })
+                                    {
+                                        for slot in &segments[..segments.len() - 1] {
+                                            let local = slot.ordinal() as usize - self.outer_width;
+                                            match frames[local] {
+                                                Position::Edge(Some(eid)) => {
+                                                    cursor.forbid(eid, control)?;
+                                                }
+                                                Position::Walk => {
+                                                    let previous =
+                                                        walks.get(&local).ok_or_else(|| {
+                                                            GqlQueryError::Source(
+                                                                EdgeScanError::BoundEdgeUnavailable,
+                                                            )
+                                                        })?;
+                                                    cursor.forbid_route(previous, control)?;
+                                                }
+                                                _ => {
                                                     return Err(GqlQueryError::Source(
                                                         EdgeScanError::BoundEdgeUnavailable,
                                                     ));
-                                                };
-                                                cursor.forbid(eid, control)?;
+                                                }
                                             }
                                         }
                                     }
-                                    control(GlaExecutionEvent::ScratchEntry)?;
-                                    slot.insert(cursor)
                                 }
-                            };
-                            walk.next(expansion, source, control, record)?.map(Some)
+                                control(GlaExecutionEvent::ScratchEntry)?;
+                                walks
+                                    .entry(depth)
+                                    .or_insert(cursor)
+                                    .next(expansion, source, control, record)?
+                                    .map(Some)
+                            }
                         }
                     }
                 }
@@ -765,6 +775,18 @@ impl Probe {
                                     })?
                                     .contains_edge(eid)
                             }
+                            (Position::Walk, Position::Walk) => {
+                                let routes = walks.ok_or_else(|| {
+                                    GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable)
+                                })?;
+                                let current = routes.get(&local).ok_or_else(|| {
+                                    GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable)
+                                })?;
+                                let previous = routes.get(&prior).ok_or_else(|| {
+                                    GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable)
+                                })?;
+                                current.shares_edge(previous, control)?
+                            }
                             _ => {
                                 return Err(GqlQueryError::Source(
                                     EdgeScanError::BoundEdgeUnavailable,
@@ -801,7 +823,7 @@ impl Probe {
                 let local = segments[0].ordinal() as usize - self.outer_width;
                 if segments.len() == 1 && matches!(self.steps[local].binding, Binding::Walk { .. })
                 {
-                    // Collection admission keeps this as one finite TRAIL
+                    // This capture owns exactly one admitted finite TRAIL
                     // atom. The offered occurrence still owns its exact route;
                     // endpoint support and async probes cannot supply it.
                     debug_assert_eq!(segments.len(), 1);
@@ -912,9 +934,11 @@ impl Collection {
         // Fixed scopes advance each local scan in VId order, then fixed hops
         // in EId order, like identified eager scopes. Disconnected components
         // keep separate positions even with copied outer predicate operands.
-        // One correlated finite TRAIL atom preserves DFS route occurrences,
-        // interleaved with fixed EId choices. A standalone TRAIL may instead
-        // start at one independent scan; mixed atoms keep their correlated root.
+        // Correlated finite TRAIL atoms preserve nested DFS route occurrences,
+        // interleaved with fixed EId choices. Each complete earlier occurrence
+        // explores the following atoms before advancing. A standalone TRAIL
+        // may instead start at one independent scan; mixed/multiple atoms keep
+        // their correlated root.
         // Fixed parents may have terminal child probes. Only direct parent
         // scans and expansion atoms determine the collection profile; child
         // finite walks keep their existing endpoint-support EXISTS semantics.
@@ -944,9 +968,8 @@ impl Collection {
             at += 1;
         }
         if (fixed == 0 && walks == 0)
-            || fixed > MAX_PATTERN_EDGES
-            || walks > 1
-            || (walks != 0 && scans != 0 && (fixed != 0 || scans > 1))
+            || fixed + walks > MAX_PATTERN_EDGES
+            || (walks != 0 && scans != 0 && (fixed != 0 || walks != 1 || scans > 1))
         {
             return Err(bad());
         }

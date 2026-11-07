@@ -1215,8 +1215,26 @@ fn mixed_collection_admission_refuses_foreign_domains_and_invalid_capture_kinds_
         GqlQueryPolicy::new(0, 0, 0, 0),
         || Ok::<_, ()>(()),
     );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Evaluator(exceeded)))
+            if exceeded.dimension == crate::GlaLimitDimension::WorkUnits
+                && exceeded.limit == 0 && exceeded.observed == 1
+    ));
+    assert_eq!(cursor.state(), EdgeScanState::Failed);
+    assert_eq!(cursor.row_stats().snapshot_records, 0);
+    let mut source = Source::small(63);
+    source.bad = Some(EId(0));
+    source.unavailable = true;
+    let mut cursor = EdgeScanCursor::new(
+        source,
+        EdgeScanPlan::compile(query.plan()).unwrap(),
+        GqlQueryPolicy::new(0, 0, 1, 0),
+        || Ok::<_, ()>(()),
+    );
     assert!(cursor.next().is_none());
     assert_eq!(cursor.row_stats().snapshot_records, 0);
+    assert_eq!(cursor.evaluator_stats().work_units, 1);
 }
 
 // Generate every bounded walk by length, then filter complete routes for
@@ -2084,8 +2102,13 @@ fn trail_collection_admission_keeps_unproved_profiles_refused_before_reads() {
                     value: CanonicalScalar::Int(1).into(),
                 });
             }
-            4..=5 => {
+            3..=5 => {
                 let addition = match profile {
+                    3 => GlaOperator::Expand {
+                        source: BindingSlot(3),
+                        relation: R.into(),
+                        direction: GlaDirection::Forward,
+                    },
                     4 => GlaOperator::VarLengthExpand {
                         source: BindingSlot(3),
                         relation: R.into(),
@@ -2137,7 +2160,7 @@ fn trail_collection_admission_keeps_unproved_profiles_refused_before_reads() {
         }
         assert_eq!(
             Collection::compile(&ops, start, 2).is_ok(),
-            matches!(profile, 1 | 3),
+            matches!(profile, 1 | 3 | 4),
             "profile {profile}"
         );
     }
@@ -2220,4 +2243,875 @@ fn trail_collection_failures_discard_private_witnesses_and_never_truncate_a_list
     assert_eq!(cursor.state(), EdgeScanState::Failed);
     assert!(cursor.source.is_none() && cursor.traversal.is_none());
     assert!(cursor.next().is_none());
+}
+
+fn multi_trail_collection_plan(
+    atoms: &[(GlaDirection, Option<GraphWalkBounds>)],
+    reverse: bool,
+    different: bool,
+    count: Option<u64>,
+) -> crate::algebra::PreparedGraphPattern<GraphValueRow> {
+    use crate::algebra::{
+        GraphColumn, GraphMatchClause, GraphMatchMode, GraphPathFunction, GraphPatternBuilder,
+    };
+
+    let mut outer = GraphPatternBuilder::new();
+    outer.vertex("a").unwrap().vertex("b").unwrap();
+    outer.edge("a", R, GlaDirection::Forward, "b").unwrap();
+    outer.capture_edge("r", 0).unwrap();
+    let names = if reverse {
+        &["w", "x", "y", "b"][3 - atoms.len()..]
+    } else {
+        &["b", "x", "y", "z"][..=atoms.len()]
+    };
+    let mut inner = GraphPatternBuilder::new();
+    for &name in names {
+        inner.vertex(name).unwrap();
+    }
+    if different {
+        inner.match_mode(GraphMatchMode::DifferentEdges);
+    }
+    for (at, &(direction, bounds)) in atoms.iter().enumerate() {
+        match bounds {
+            None => {
+                inner.edge(names[at], R, direction, names[at + 1]).unwrap();
+            }
+            Some(bounds) if different => {
+                inner
+                    .walk(names[at], R, direction, names[at + 1], bounds)
+                    .unwrap();
+            }
+            Some(bounds) => {
+                inner
+                    .trail_walk(names[at], R, direction, names[at + 1], bounds)
+                    .unwrap();
+            }
+        }
+    }
+    inner.capture_path("p").unwrap();
+    outer
+        .prepare_values_with_clauses(
+            &[
+                GraphMatchClause::collect(&inner, Some("p")),
+                GraphMatchClause::collect_tuple(
+                    &inner,
+                    vec!["p", names[0], names[1], names[atoms.len()]],
+                ),
+            ],
+            &[
+                GraphColumn::path("r", "r", GraphPathFunction::Edge),
+                GraphColumn::vertex("a", "a"),
+                GraphColumn::vertex("b", "b"),
+                GraphColumn::collection("paths", 0),
+                GraphColumn::collection("tuples", 1),
+            ],
+            0,
+            count,
+        )
+        .unwrap()
+}
+
+// Enumerate complete bounded WALK products, then apply each atom's own TRAIL
+// law and optional whole-clause uniqueness. Atom boundaries remain present:
+// two segmentations of the same captured path are two collection occurrences.
+fn multi_trail_product_oracle(
+    source: &Source,
+    anchor: VId,
+    atoms: &[(GlaDirection, Option<GraphWalkBounds>)],
+    reverse: bool,
+    different: bool,
+) -> Vec<(GraphPath, [VId; 3])> {
+    let mut products: Vec<Vec<GraphPath>> = vec![Vec::new()];
+    for position in 0..atoms.len() {
+        let atom = if reverse {
+            atoms.len() - 1 - position
+        } else {
+            position
+        };
+        let (mut direction, bounds) = atoms[atom];
+        if reverse {
+            direction = match direction {
+                GlaDirection::Forward => GlaDirection::Reverse,
+                GlaDirection::Reverse => GlaDirection::Forward,
+                GlaDirection::Undirected => GlaDirection::Undirected,
+            };
+        }
+        let (minimum, maximum) = bounds.map_or((1, 1), |b| (b.minimum(), b.maximum()));
+        let mut next = Vec::new();
+        for prefix in products {
+            let start = prefix
+                .last()
+                .map_or(anchor, |path| path.nodes().last().unwrap());
+            for path in complete_routes(source, start, direction, minimum, maximum) {
+                let mut product = prefix.clone();
+                product.push(path);
+                next.push(product);
+            }
+        }
+        products = next;
+    }
+    products
+        .into_iter()
+        .filter(|segments| {
+            for (position, path) in segments.iter().enumerate() {
+                let atom = if reverse {
+                    atoms.len() - 1 - position
+                } else {
+                    position
+                };
+                if atoms[atom].1.is_some()
+                    && path.edges().collect::<BTreeSet<_>>().len() != path.len()
+                {
+                    return false;
+                }
+            }
+            !different
+                || segments
+                    .iter()
+                    .flat_map(GraphPath::edges)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == segments.iter().map(GraphPath::len).sum::<usize>()
+        })
+        .map(|mut segments| {
+            if reverse {
+                segments.reverse();
+            }
+            let first = &segments[0];
+            let last = segments.last().unwrap();
+            let vertices = if reverse {
+                [first.nodes().last().unwrap(), first.start(), last.start()]
+            } else {
+                [
+                    first.start(),
+                    first.nodes().last().unwrap(),
+                    last.nodes().last().unwrap(),
+                ]
+            };
+            let start = vertices[0];
+            let mut endpoint = start;
+            let mut steps = Vec::new();
+            for segment in segments {
+                // Eager capture prefers the retained forward orientation when a
+                // segment is closed, even during a reversed containing traversal.
+                if segment.start() == endpoint {
+                    steps.extend_from_slice(segment.steps());
+                } else {
+                    let nodes: Vec<_> = segment.nodes().collect();
+                    steps.extend(segment.steps().iter().map(|step| step.0).zip(nodes).rev());
+                }
+                endpoint = steps.last().map_or(start, |step| step.1);
+            }
+            (GraphPath::new(start, steps.into_boxed_slice()), vertices)
+        })
+        .collect()
+}
+
+#[test]
+fn multiple_trail_collections_match_complete_products_and_eager_captures() {
+    use GlaDirection::{Forward as F, Reverse as R, Undirected as U};
+
+    for mask in 0..64 {
+        for directions in [[F, F, F], [R, U, F], [U, R, U]] {
+            for shape in 0..5 {
+                for varied in [false, true] {
+                    let bounds = if varied {
+                        [(1, 2), (0, 1), (1, 1)]
+                    } else {
+                        [(0, 1); 3]
+                    };
+                    let mut variable = 0;
+                    let atoms: Vec<_> = directions[..if shape == 0 { 2 } else { 3 }]
+                        .iter()
+                        .enumerate()
+                        .map(|(at, &direction)| {
+                            let fixed = match shape {
+                                1 => at == 0,
+                                2 => at == 1,
+                                3 => at == 2,
+                                _ => false,
+                            };
+                            let bounds = if fixed {
+                                None
+                            } else {
+                                let (minimum, maximum) = bounds[variable];
+                                variable += 1;
+                                Some(GraphWalkBounds::new(minimum, maximum).unwrap())
+                            };
+                            (direction, bounds)
+                        })
+                        .collect();
+                    for reverse in [false, true] {
+                        for different in [false, true] {
+                            let query =
+                                multi_trail_collection_plan(&atoms, reverse, different, None);
+                            let source = Source::small(mask);
+                            let expected = eager(query.plan(), &source);
+                            for row in &expected {
+                                let GraphValue::Vertex(anchor) = row.values()[2] else {
+                                    panic!("outer endpoint")
+                                };
+                                let witnesses = multi_trail_product_oracle(
+                                    &source, anchor, &atoms, reverse, different,
+                                );
+                                assert_eq!(
+                                    row.values()[3],
+                                    list(
+                                        witnesses
+                                            .iter()
+                                            .map(|(path, _)| GraphValue::Path(path.clone()))
+                                    ),
+                                    "mask={mask}, atoms={atoms:?}, reverse={reverse}, different={different}"
+                                );
+                                assert_eq!(
+                                    row.values()[4],
+                                    list(witnesses.into_iter().map(|(path, vertices)| {
+                                        list(
+                                            std::iter::once(GraphValue::Path(path)).chain(
+                                                vertices.into_iter().map(GraphValue::Vertex),
+                                            ),
+                                        )
+                                    }))
+                                );
+                            }
+                            let mut cursor = EdgeScanCursor::new(
+                                source,
+                                EdgeScanPlan::compile(query.plan()).unwrap(),
+                                wide(),
+                                || Ok::<_, ()>(()),
+                            );
+                            let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                            assert_eq!(
+                                actual, expected,
+                                "mask={mask}, atoms={atoms:?}, reverse={reverse}, different={different}"
+                            );
+                            assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                            assert!(cursor.next().is_none());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn adjacent_trails_keep_distinct_segmentations_of_the_same_path() {
+    let plan = collection_text(
+        "MATCH (a)-[r:R]->(b) RETURN r,a,b,[p = (b)-[:R*0..1]->(x)-[:R*0..1]->(y) | p] AS paths",
+    );
+    let source = Source::new([(0, 0, 1), (1, 0, 1), (10, 3, 0)]);
+    let expected = eager(&plan, &source);
+    let path = |eid| GraphValue::Path(GraphPath::new(VId(0), vec![(EId(eid), VId(1))].into()));
+    assert_eq!(
+        expected[2].values()[3],
+        list([
+            GraphValue::Path(GraphPath::new(VId(0), Box::new([]))),
+            path(0),
+            path(1),
+            path(0),
+            path(1),
+        ])
+    );
+    assert_eq!(
+        EdgeScanCursor::new(
+            source,
+            EdgeScanPlan::compile(&plan).unwrap(),
+            wide(),
+            || Ok::<_, ()>(())
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn later_trails_exclude_every_prior_identity_before_entering_forbidden_suffixes() {
+    let plan = collection_text(
+        "MATCH (a)-[r:R]->(b) RETURN r,a,b,[p = (b)<-[:R*2..2]-(x)-[:R*0..3]->(y) | p] AS paths LIMIT 1",
+    );
+    let mut source = Source::new([(0, 3, 0), (1, 1, 0), (2, 2, 1), (3, 2, 1)]);
+    let expected = eager(&plan, &source);
+    let path = |steps: &[(u128, u128)]| {
+        GraphValue::Path(GraphPath::new(
+            VId(0),
+            steps
+                .iter()
+                .map(|&(edge, vertex)| (EId(edge), VId(vertex)))
+                .collect(),
+        ))
+    };
+    assert_eq!(
+        expected[0].values()[3],
+        list([
+            path(&[(1, 1), (2, 2)]),
+            path(&[(1, 1), (2, 2), (3, 1)]),
+            path(&[(1, 1), (3, 2)]),
+            path(&[(1, 1), (3, 2), (2, 1)]),
+        ])
+    );
+    // The first atom reads reverse incidence at vertex0. Reusing its EARLIER
+    // EId1 after a different parallel EId in the second atom would reach the
+    // poisoned forward incidence. Final-witness filtering cannot prevent it.
+    source.bad_incidence = Some((VId(0), GlaDirection::Forward));
+    assert_eq!(
+        EdgeScanCursor::new(
+            source,
+            EdgeScanPlan::compile(&plan).unwrap(),
+            wide(),
+            || Ok::<_, ()>(())
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn multiple_trail_children_keep_parent_captures_and_separate_identity_domains() {
+    let body = "MATCH (a)-[r:R]->(b) RETURN r,a,b,[p = (b)-[:R*0..2]-(x)-[:R*1..2]-(y)";
+    let suffix = " | p] AS paths";
+    let baseline = collection_text(&format!("{body}{suffix}"));
+    let expected = eager(&baseline, &Source::small(63));
+    assert!(
+        expected
+            .iter()
+            .any(|row| !row.values()[3].as_list().unwrap().is_empty())
+    );
+    for anti in [false, true] {
+        let guard = if anti { "NOT EXISTS" } else { "EXISTS" };
+        let plan = collection_text(&format!(
+            "{body} WHERE {guard} {{ MATCH (y)-[:R*1..2]-(x) }} AND NOT EXISTS {{ MATCH (y)-[:R]->(z) WHERE z.p > 9 }}{suffix}"
+        ));
+        let rows = eager(&plan, &Source::small(63));
+        if anti {
+            assert!(
+                rows.iter()
+                    .all(|row| row.values()[3].as_list().unwrap().is_empty())
+            );
+        } else {
+            // The last parent trail proves a reverse child even though all of
+            // those identities are excluded from later atoms in its own clause.
+            assert_eq!(rows, expected);
+        }
+        assert_eq!(
+            EdgeScanCursor::new(
+                Source::small(63),
+                EdgeScanPlan::compile(&plan).unwrap(),
+                wide(),
+                || Ok::<_, ()>(())
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+            rows
+        );
+    }
+}
+
+#[test]
+fn multiple_trail_captures_share_every_checkpoint_and_exact_allowance() {
+    let bounds = Some(GraphWalkBounds::new(0, 2).unwrap());
+    let atoms = [
+        (GlaDirection::Undirected, bounds),
+        (GlaDirection::Forward, None),
+        (GlaDirection::Reverse, bounds),
+    ];
+    for reverse in [false, true] {
+        let query = multi_trail_collection_plan(&atoms, reverse, true, Some(1));
+        trail_checkpoint_law(&query);
+    }
+}
+
+#[test]
+fn late_multiple_trail_failures_publish_no_partial_path_list() {
+    let atoms = [
+        (
+            GlaDirection::Forward,
+            Some(GraphWalkBounds::new(0, 1).unwrap()),
+        ),
+        (
+            GlaDirection::Forward,
+            Some(GraphWalkBounds::new(0, 2).unwrap()),
+        ),
+    ];
+    let query = multi_trail_collection_plan(&atoms, false, true, None);
+    let mut source = Source::new([(0, 0, 1), (1, 1, 2), (2, 2, 3), (3, 3, 4)]);
+    assert!(
+        eager(query.plan(), &source)[0].values()[3]
+            .as_list()
+            .unwrap()
+            .len()
+            > 3
+    );
+    source.bad = Some(EId(3));
+    let mut cursor = EdgeScanCursor::new(
+        source,
+        EdgeScanPlan::compile(query.plan()).unwrap(),
+        wide(),
+        || Ok::<_, ()>(()),
+    );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Source(EdgeScanError::Source(
+            "edge refused"
+        ))))
+    ));
+    assert_eq!(cursor.row_stats().result_rows, 0);
+    assert_eq!(cursor.state(), EdgeScanState::Failed);
+    assert!(cursor.source.is_none() && cursor.traversal.is_none());
+    assert!(cursor.next().is_none());
+}
+
+#[test]
+fn multiple_trail_admission_requires_finite_correlated_immediate_identity_domains() {
+    use crate::algebra::{BindingSlot, GraphPathFunction, ValueProjection};
+
+    let atoms = [
+        (
+            GlaDirection::Forward,
+            Some(GraphWalkBounds::new(0, 2).unwrap()),
+        ),
+        (
+            GlaDirection::Reverse,
+            Some(GraphWalkBounds::new(0, 2).unwrap()),
+        ),
+    ];
+    let query = multi_trail_collection_plan(&atoms, false, true, Some(0));
+    let original = query.plan().operators();
+    let start = original
+        .iter()
+        .position(|op| matches!(op, GlaOperator::Collect { .. }))
+        .unwrap();
+    let (_, end) = Collection::compile(original, start, 2).unwrap();
+    let walks: Vec<_> = (start + 1..end)
+        .filter(|&at| matches!(original[at], GlaOperator::VarLengthExpand { .. }))
+        .collect();
+    let domains: Vec<_> = (start + 1..end)
+        .filter(|&at| matches!(original[at], GlaOperator::DifferentEdges { .. }))
+        .collect();
+    assert_eq!(walks.len(), 2);
+    assert_eq!(domains.len(), 2);
+    for malformed in 0..10 {
+        let mut ops = original[..=end].to_vec();
+        let mut adjustment = 0_i32;
+        match malformed {
+            0 => ops[start + 1] = GlaOperator::ScanVertices,
+            1 | 2 => {
+                let GlaOperator::VarLengthExpand { bounds, .. } = &mut ops[walks[malformed - 1]]
+                else {
+                    unreachable!()
+                };
+                *bounds = GraphWalkBounds::unbounded(0).unwrap();
+            }
+            3 => {
+                // The second domain cannot retroactively impose TRAIL on an
+                // earlier ALL atom whose own immediate domain is missing.
+                ops.remove(domains[0]);
+                adjustment = -1;
+            }
+            4 | 5 => {
+                let GlaOperator::DifferentEdges { segments } = &ops[domains[1]] else {
+                    unreachable!()
+                };
+                let current = *segments.last().unwrap();
+                ops.insert(
+                    domains[1],
+                    if malformed == 4 {
+                        GlaOperator::Select {
+                            slot: current,
+                            predicates: Vec::new(),
+                        }
+                    } else {
+                        GlaOperator::DifferentEdges {
+                            segments: vec![current],
+                        }
+                    },
+                );
+                adjustment = 1;
+            }
+            6..=8 => {
+                let GlaOperator::DifferentEdges { segments } = &mut ops[domains[1]] else {
+                    unreachable!()
+                };
+                match malformed {
+                    6 => segments.swap(0, 1),
+                    7 => segments[0] = BindingSlot(1), // Outer edge is outside this clause.
+                    _ => segments.push(segments[0]),
+                }
+            }
+            9 => {
+                let GlaOperator::CollectEnd { value, .. } = &mut ops[end] else {
+                    unreachable!()
+                };
+                let Some(ValueProjection::Path { function, .. }) = value else {
+                    unreachable!()
+                };
+                *function = GraphPathFunction::Edge;
+            }
+            _ => unreachable!(),
+        }
+        let GlaOperator::Collect { end, .. } = &mut ops[start] else {
+            unreachable!()
+        };
+        *end = (*end as i32 + adjustment) as u32;
+        assert!(
+            Collection::compile(&ops, start, 2).is_err(),
+            "profile {malformed}"
+        );
+    }
+
+    // Explicit per-atom TRAIL does not acquire a clause-wide identity domain;
+    // each unsupported mode remains refused even beside an admitted TRAIL.
+    let explicit = multi_trail_collection_plan(&atoms, false, false, Some(0));
+    let explicit_ops = explicit.plan().operators();
+    let explicit_walks: Vec<_> = explicit_ops
+        .iter()
+        .enumerate()
+        .filter_map(|(at, op)| matches!(op, GlaOperator::VarLengthExpand { .. }).then_some(at))
+        .take(2)
+        .collect();
+    for &at in &explicit_walks {
+        for mode in MODES {
+            let mut ops = explicit_ops.to_vec();
+            let GlaOperator::VarLengthExpand { search, .. } = &mut ops[at] else {
+                unreachable!()
+            };
+            *search = mode;
+            assert_eq!(
+                EdgeScanPlan::compile(&GlaPlan::from_operators(ops)).is_ok(),
+                mode == GraphWalkSearch::Trail,
+                "walk {at}, {mode:?}",
+            );
+        }
+    }
+    assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
+    assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+
+    // The cursor itself owes its first Work checkpoint before LIMIT 0. Once
+    // admitted, no atom, capture, or source read occurs for the empty window.
+    for work in [0, 1] {
+        let mut source = Source::small(63);
+        source.bad = Some(EId(0));
+        source.unavailable = true;
+        let mut cursor = EdgeScanCursor::new(
+            source,
+            EdgeScanPlan::compile(query.plan()).unwrap(),
+            GqlQueryPolicy::new(0, 0, work, 0),
+            || Ok::<_, ()>(()),
+        );
+        if work == 0 {
+            assert!(matches!(
+                cursor.next(),
+                Some(Err(GqlQueryError::Evaluator(exceeded)))
+                    if exceeded.dimension == crate::GlaLimitDimension::WorkUnits
+                        && exceeded.limit == 0 && exceeded.observed == 1
+            ));
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+        } else {
+            assert!(cursor.next().is_none());
+            assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+        }
+        assert_eq!(cursor.row_stats().snapshot_records, 0);
+        assert_eq!(cursor.evaluator_stats().work_units, work);
+        assert!(cursor.next().is_none());
+    }
+}
+
+#[test]
+fn branched_trails_and_two_correlated_roots_keep_each_prefix_and_identity_domain() {
+    use crate::algebra::{
+        GraphColumn, GraphMatchClause, GraphMatchMode, GraphPathFunction, GraphPatternBuilder,
+    };
+
+    for separate_root in [false, true] {
+        for different in [false, true] {
+            let mut outer = GraphPatternBuilder::new();
+            outer.vertex("a").unwrap().vertex("b").unwrap();
+            outer.edge("a", R, GlaDirection::Forward, "b").unwrap();
+            outer.capture_edge("r", 0).unwrap();
+            let mut inner = GraphPatternBuilder::new();
+            inner.vertex("b").unwrap().vertex("x").unwrap();
+            let second = if separate_root {
+                inner.vertex("a").unwrap();
+                "a"
+            } else {
+                "b"
+            };
+            inner.vertex("y").unwrap();
+            if different {
+                inner.match_mode(GraphMatchMode::DifferentEdges);
+            }
+            for (from, direction, to, bounds) in [
+                (
+                    "b",
+                    GlaDirection::Undirected,
+                    "x",
+                    GraphWalkBounds::new(0, 2).unwrap(),
+                ),
+                (
+                    second,
+                    GlaDirection::Forward,
+                    "y",
+                    GraphWalkBounds::new(1, 2).unwrap(),
+                ),
+            ] {
+                if different {
+                    inner.walk(from, R, direction, to, bounds).unwrap();
+                } else {
+                    inner.trail_walk(from, R, direction, to, bounds).unwrap();
+                }
+            }
+            inner.capture_edge("first", 0).unwrap();
+            inner.capture_edge("second", 1).unwrap();
+            let query = outer
+                .prepare_values_with_clauses(
+                    &[GraphMatchClause::collect_tuple(
+                        &inner,
+                        vec!["first", "second", "x", "y"],
+                    )],
+                    &[
+                        GraphColumn::path("r", "r", GraphPathFunction::Edge),
+                        GraphColumn::vertex("a", "a"),
+                        GraphColumn::vertex("b", "b"),
+                        GraphColumn::collection("branches", 0),
+                    ],
+                    0,
+                    None,
+                )
+                .unwrap();
+            let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+            for mask in 0..64 {
+                let source = Source::small(mask);
+                let expected = eager(query.plan(), &source);
+                for row in &expected {
+                    let GraphValue::Vertex(first_start) = row.values()[2] else {
+                        unreachable!()
+                    };
+                    let GraphValue::Vertex(second_start) =
+                        row.values()[if separate_root { 1 } else { 2 }]
+                    else {
+                        unreachable!()
+                    };
+                    let mut products = Vec::new();
+                    for first in
+                        complete_routes(&source, first_start, GlaDirection::Undirected, 0, 2)
+                    {
+                        if first.edges().collect::<BTreeSet<_>>().len() != first.len() {
+                            continue;
+                        }
+                        for second in
+                            complete_routes(&source, second_start, GlaDirection::Forward, 1, 2)
+                        {
+                            if second.edges().collect::<BTreeSet<_>>().len() != second.len()
+                                || (different
+                                    && first
+                                        .edges()
+                                        .any(|edge| second.edges().any(|other| edge == other)))
+                            {
+                                continue;
+                            }
+                            products.push((
+                                first.clone(),
+                                second.clone(),
+                                first.nodes().last().unwrap(),
+                                second.nodes().last().unwrap(),
+                            ));
+                        }
+                    }
+                    let mut actual: Vec<_> = row.values()[3]
+                        .as_list()
+                        .unwrap()
+                        .iter()
+                        .map(|value| {
+                            let [
+                                GraphValue::Path(first),
+                                GraphValue::Path(second),
+                                GraphValue::Vertex(x),
+                                GraphValue::Vertex(y),
+                            ] = value.as_list().unwrap()
+                            else {
+                                panic!("two exact route captures and their endpoints")
+                            };
+                            (first.clone(), second.clone(), *x, *y)
+                        })
+                        .collect();
+                    // The independent oracle retains all multiplicities; the
+                    // cursor/eager comparison below separately checks order.
+                    actual.sort_unstable();
+                    products.sort_unstable();
+                    assert_eq!(
+                        actual, products,
+                        "mask={mask}, separate_root={separate_root}, different={different}"
+                    );
+                }
+                assert_eq!(
+                    EdgeScanCursor::new(source, plan.clone(), wide(), || Ok::<_, ()>(()))
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+mod retained_multitrail {
+    use super::*;
+
+    fn route(edges: &[u128]) -> Endpoints {
+        let mut cursor = Endpoints::from_admitted_start(
+            VId(0),
+            GraphWalkBounds::new(0, edges.len() as u32).unwrap(),
+            GraphWalkSearch::Trail,
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
+        cursor.emission = Emission::TrailOccurrences;
+        for (at, &edge) in edges.iter().enumerate() {
+            cursor
+                .push(VId(at as u128 + 1), Some(EId(edge)), &mut |_| {
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+        }
+        cursor.stack.last_mut().unwrap().offered = true;
+        cursor
+    }
+
+    #[test]
+    fn prior_route_exclusions_copy_live_identities_without_inheriting_other_domains() {
+        let mut prior = route(&[0, u128::MAX, 5]);
+        prior.forbid(EId(99), &mut |_| Ok::<_, ()>(())).unwrap();
+        let mut later = route(&[]);
+        later.forbid(EId(5), &mut |_| Ok::<_, ()>(())).unwrap();
+        let mut events = Vec::new();
+        later
+            .forbid_route(&prior, &mut |event| {
+                events.push(event);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(later.forbidden, [EId(0), EId(5), EId(u128::MAX)].into());
+        assert_eq!(
+            events,
+            [
+                GlaExecutionEvent::Work,
+                GlaExecutionEvent::Work,
+                GlaExecutionEvent::ScratchEntry,
+                GlaExecutionEvent::Work,
+                GlaExecutionEvent::Work,
+                GlaExecutionEvent::ScratchEntry,
+            ]
+        );
+        assert!(!later.forbidden.contains(&EId(99)));
+        assert_eq!(prior.edges.len(), 3);
+        assert_eq!(prior.forbidden, [EId(99)].into());
+
+        // Backtracking the previous atom makes the next prefix's exclusion
+        // fresh; the already constructed cursor keeps its selected snapshot.
+        prior.pop(&mut |_| Ok::<_, ()>(())).unwrap();
+        let mut fresh = route(&[]);
+        fresh
+            .forbid_route(&prior, &mut |_| Ok::<_, ()>(()))
+            .unwrap();
+        assert!(!fresh.forbidden.contains(&EId(5)));
+        assert!(later.forbidden.contains(&EId(5)));
+        events.clear();
+        fresh
+            .forbid_route(&route(&[]), &mut |event| {
+                events.push(event);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(events, [GlaExecutionEvent::Work]);
+    }
+
+    #[test]
+    fn copying_prior_routes_stops_before_each_uncharged_insertion() {
+        let prior = route(&[0, 5, u128::MAX]);
+        let mut events = Vec::new();
+        route(&[])
+            .forbid_route(&prior, &mut |event| {
+                events.push(event);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(events.len(), 7);
+        for stop in 1..=events.len() {
+            let mut later = route(&[]);
+            let mut calls = 0;
+            let result = later.forbid_route(&prior, &mut |_| {
+                calls += 1;
+                if calls == stop { Err(stop) } else { Ok(()) }
+            });
+            assert_eq!(result, Err(stop));
+            assert_eq!(calls, stop);
+            let admitted = events[..stop - 1]
+                .iter()
+                .filter(|&&event| event == GlaExecutionEvent::ScratchEntry)
+                .count();
+            assert_eq!(later.forbidden.len(), admitted);
+            assert_eq!(prior.edges.len(), 3);
+        }
+    }
+
+    #[test]
+    fn route_overlap_checks_only_the_smaller_live_set_at_governed_checkpoints() {
+        let identities = [0, 1, 7, 11, 19, u128::MAX];
+        for left_mask in 0..64 {
+            let left_ids: Vec<_> = identities
+                .iter()
+                .enumerate()
+                .filter(|(at, _)| left_mask & (1 << at) != 0)
+                .map(|(_, &id)| id)
+                .collect();
+            let mut left = route(&left_ids);
+            left.forbid(EId(77), &mut |_| Ok::<_, ()>(())).unwrap();
+            for right_mask in 0..64 {
+                let right_ids: Vec<_> = identities
+                    .iter()
+                    .enumerate()
+                    .filter(|(at, _)| right_mask & (1 << at) != 0)
+                    .map(|(_, &id)| id)
+                    .collect();
+                let right = route(&right_ids);
+                let mut events = Vec::new();
+                let actual = left
+                    .shares_edge(&right, &mut |event| {
+                        events.push(event);
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                assert_eq!(actual, left_ids.iter().any(|id| right_ids.contains(id)));
+                let (smaller, larger) = if left_ids.len() <= right_ids.len() {
+                    (&left_ids, &right_ids)
+                } else {
+                    (&right_ids, &left_ids)
+                };
+                let probes = smaller
+                    .iter()
+                    .position(|id| larger.contains(id))
+                    .map_or(smaller.len(), |at| at + 1);
+                assert_eq!(events, vec![GlaExecutionEvent::Work; probes]);
+                for stop in 1..=probes {
+                    let mut calls = 0;
+                    assert_eq!(
+                        left.shares_edge(&right, &mut |_| {
+                            calls += 1;
+                            if calls == stop { Err(stop) } else { Ok(()) }
+                        }),
+                        Err(stop)
+                    );
+                    assert_eq!(calls, stop);
+                }
+            }
+            // Exclusions from another domain are never route occurrences.
+            assert!(
+                !left
+                    .shares_edge(&route(&[77]), &mut |_| Ok::<_, ()>(()))
+                    .unwrap()
+            );
+        }
+    }
 }
