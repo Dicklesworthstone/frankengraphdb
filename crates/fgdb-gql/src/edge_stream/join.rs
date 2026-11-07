@@ -14,7 +14,7 @@ pub use asynchronous::{
 };
 
 mod probe;
-pub(crate) use probe::Probe;
+pub(crate) use probe::{Collection, Probe};
 
 enum Instruction {
     Native(GlaOperator),

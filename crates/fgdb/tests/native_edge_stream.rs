@@ -226,6 +226,320 @@ fn streamed_pattern_collections_preserve_parallel_witnesses_and_the_pinned_gener
 }
 
 #[test]
+fn vertex_rooted_collections_keep_incidence_order_tuples_and_null_placeholders() {
+    let ((), report) = run_async_under_lab(0x6e65_0012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        let integer = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let property = |id| match id {
+            VId(0) => 3,
+            WIDE => 7,
+            VId(u128::MAX) => 11,
+            _ => panic!("the independent fixture names exactly three vertices"),
+        };
+        // Enumerate the written incidences independently of every GLA or
+        // database traversal. Edge identity, not neighbor identity, orders the
+        // witnesses. An undirected self-loop contributes one occurrence.
+        let edges = [
+            (EId(0), WIDE, VId(0), 4),
+            (EId(2), WIDE, VId(0), 5),
+            (EId(3), WIDE, WIDE, 8),
+            (EId(u128::MAX), VId(0), VId(u128::MAX), -1),
+        ];
+        for (left, right) in [("-", "->"), ("<-", "-"), ("-", "-")] {
+            let atom = format!("(a){left}[r:R]{right}(b)");
+            let text = format!(
+                "MATCH (a) RETURN a, [{atom} | b] AS neighbors, \
+                 [{atom} | [r.p,b.p]] AS details, \
+                 [{atom} | CASE WHEN r.p=5 THEN null ELSE b.p END] AS holes"
+            );
+            let expected: Vec<_> = [VId(0), WIDE, VId(u128::MAX)]
+                .into_iter()
+                .map(|anchor| {
+                    let witnesses: Vec<_> = edges
+                        .iter()
+                        .filter_map(|&(_, from, to, weight)| {
+                            if left == "-" && from == anchor {
+                                Some((to, weight))
+                            } else if right == "-" && to == anchor {
+                                Some((from, weight))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(anchor),
+                        GraphValue::List(
+                            witnesses
+                                .iter()
+                                .map(|&(neighbor, _)| GraphValue::Vertex(neighbor))
+                                .collect(),
+                        ),
+                        GraphValue::List(
+                            witnesses
+                                .iter()
+                                .map(|&(neighbor, weight)| {
+                                    GraphValue::List(
+                                        vec![integer(weight), integer(property(neighbor))].into(),
+                                    )
+                                })
+                                .collect(),
+                        ),
+                        GraphValue::List(
+                            witnesses
+                                .iter()
+                                .map(|&(neighbor, weight)| {
+                                    if weight == 5 {
+                                        GraphValue::Scalar(CanonicalScalar::Null)
+                                    } else {
+                                        integer(property(neighbor))
+                                    }
+                                })
+                                .collect(),
+                        ),
+                    ])
+                })
+                .collect();
+            let prepared = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+            let (columns, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+            assert_eq!(cursor.kind(), ScanKind::Vertex);
+            assert_eq!(cursor.row_stats().snapshot_records, 0);
+            assert_eq!(cursor.evaluator_stats().work_units, 0);
+            let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(actual, expected, "{text}");
+            assert_eq!(
+                result(columns, actual),
+                prepared.execute(&db, &cx, &args, policy()).unwrap(),
+                "{text}",
+            );
+            assert_eq!(cursor.state(), ScanState::Exhausted);
+            assert!(cursor.next().is_none());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn vertex_rooted_collections_keep_their_snapshot_across_paused_pulls() {
+    let ((), report) = run_async_under_lab(0x6e65_0013, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.write(&commit, seed()).await.unwrap();
+        let view = db.read_session().unwrap();
+        let args = GqlParameters::new();
+        let text = "MATCH (a) RETURN a, [(a)-[r:R]->(b) | b.p] AS neighbors, \
+                    [(a)-[r:R]->(b) | r.p] AS weights";
+        let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+        let expected = prepared.execute(&db, &cx, &args, policy()).unwrap();
+        let (columns, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(cursor.kind(), ScanKind::Vertex);
+        assert_eq!(cursor.snapshot_seq(), basis);
+        let first = cursor.next().unwrap().unwrap();
+        assert_eq!(first.values()[0], GraphValue::Vertex(VId(0)));
+        assert_eq!(
+            first.values()[1],
+            GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(11))].into()),
+        );
+
+        let mut update = WriteBatch::new(R);
+        update.set_vertex_property(VId(0), P, Some(CanonicalScalar::Int(31)));
+        update.delete_edge(EId(0));
+        update.add_edge(
+            EId(99),
+            VId(u128::MAX),
+            WIDE,
+            vec![(P, CanonicalScalar::Int(21))],
+        );
+        let current = db.write(&commit, update).await.unwrap();
+        let mut actual = vec![first];
+        actual.extend(cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap());
+        assert_eq!(result(columns, actual), expected);
+        assert_eq!(cursor.state(), ScanState::Exhausted);
+        assert!(cursor.next().is_none());
+
+        let (columns, cursor) = prepared
+            .stream_in_view(&view, &cx, &args, policy())
+            .unwrap();
+        assert_eq!(cursor.snapshot_seq(), basis);
+        assert_eq!(
+            result(columns, cursor.collect::<Result<Vec<_>, _>>().unwrap()),
+            expected,
+        );
+        let (columns, cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(cursor.snapshot_seq(), current);
+        let fresh = result(columns, cursor.collect::<Result<Vec<_>, _>>().unwrap());
+        assert_ne!(fresh, expected);
+        assert_eq!(fresh, prepared.execute(&db, &cx, &args, policy()).unwrap());
+
+        let historical = PreparedNativeRead::prepare(
+            &format!(
+                "MATCH (a) FOR SYSTEM_TIME AS OF SEQ {} \
+                 RETURN a, [(a)-[r:R]->(b) | b.p] AS neighbors, \
+                 [(a)-[r:R]->(b) | r.p] AS weights",
+                basis.0,
+            ),
+            &args,
+            symbols,
+        )
+        .unwrap();
+        let (columns, cursor) = historical.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(cursor.snapshot_seq(), basis);
+        assert_eq!(
+            result(columns, cursor.collect::<Result<Vec<_>, _>>().unwrap()),
+            expected,
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn vertex_rooted_collection_budgets_and_late_errors_preserve_complete_prefixes() {
+    let ((), report) = run_async_under_lab(0x6e65_0014, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        let text = "MATCH (a) RETURN a, [(a)-[r:R]->(b) | [r.p,b.p]] AS details";
+        let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+        let (_, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        let expected = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let rows = cursor.row_stats();
+        let events = cursor.evaluator_stats();
+        assert_eq!(rows.result_rows, 3);
+        assert!(rows.snapshot_records > 3);
+        assert!(events.work_units > 0);
+        assert!(events.scratch_entries > 0);
+        let exact = GqlQueryPolicy::new(
+            rows.snapshot_records,
+            rows.result_rows,
+            events.work_units,
+            events.scratch_entries,
+        );
+        let (_, mut retry) = prepared.stream(&db, &cx, &args, exact).unwrap();
+        assert_eq!(
+            retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+            expected,
+        );
+        assert_eq!((retry.row_stats(), retry.evaluator_stats()), (rows, events));
+        for allowance in [
+            GqlQueryPolicy::new(rows.snapshot_records - 1, u64::MAX, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(u64::MAX, rows.result_rows - 1, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, events.work_units - 1, u64::MAX),
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, events.scratch_entries - 1),
+        ] {
+            let (_, mut refused) = prepared.stream(&db, &cx, &args, allowance).unwrap();
+            let mut prefix = Vec::new();
+            loop {
+                match refused.next() {
+                    Some(Ok(row)) => prefix.push(row),
+                    Some(Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))) => break,
+                    other => panic!("collection budget lost by vertex dispatch: {other:?}"),
+                }
+            }
+            assert_eq!(prefix, expected[..prefix.len()]);
+            assert_eq!(refused.row_stats().result_rows, prefix.len() as u64);
+            assert_eq!(refused.state(), ScanState::Failed);
+            let stopped = (refused.row_stats(), refused.evaluator_stats());
+            assert!(refused.next().is_none());
+            assert!(refused.next().is_none());
+            refused.close();
+            assert!(refused.next().is_none());
+            assert_eq!((refused.row_stats(), refused.evaluator_stats()), stopped);
+        }
+
+        // Anonymous hops use endpoint order in the eager evaluator. The
+        // incidence cursor cannot promise that order from EIds, so reject this
+        // profile before opening a source, including an otherwise empty page.
+        for page in ["", " LIMIT 0"] {
+            let text = format!("MATCH (a) RETURN a, [(a)-[:R]->(b) | b] AS neighbors{page}");
+            let anonymous = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+            assert!(matches!(
+                anonymous.stream(&db, &cx, &args, GqlQueryPolicy::new(0, 0, 0, 0)),
+                Err(QueryError::Stream(GqlQueryError::Source(
+                    fgdb_gql::stream::VertexScanError::Plan(_)
+                )))
+            ));
+        }
+
+        // LIMIT and close preserve backpressure even though each selected
+        // root needs its own complete collection before it can be delivered.
+        let zero = PreparedNativeRead::prepare(
+            "MATCH (a) RETURN a, [(a)-[r:R]->(b) | b] AS neighbors LIMIT 0",
+            &args,
+            symbols,
+        )
+        .unwrap();
+        let (_, mut untouched) = zero
+            .stream(&db, &cx, &args, GqlQueryPolicy::new(0, 0, 0, 0))
+            .unwrap();
+        assert!(untouched.next().is_none());
+        assert_eq!(untouched.row_stats().snapshot_records, 0);
+        assert_eq!(untouched.evaluator_stats().work_units, 0);
+        assert_eq!(untouched.evaluator_stats().scratch_entries, 0);
+        let limited = PreparedNativeRead::prepare(
+            "MATCH (a) RETURN a, [(a)-[r:R]->(b) | b] AS neighbors LIMIT 1",
+            &args,
+            symbols,
+        )
+        .unwrap();
+        let (_, mut limited) = limited
+            .stream(&db, &cx, &args, GqlQueryPolicy::new(2, 1, 10_000, 10_000))
+            .unwrap();
+        let first = limited.next().unwrap().unwrap();
+        assert_eq!(first.values()[0], GraphValue::Vertex(VId(0)));
+        assert_eq!(
+            first.values()[1],
+            GraphValue::List(vec![GraphValue::Vertex(VId(u128::MAX))].into()),
+        );
+        assert!(limited.next().is_none());
+        assert_eq!(limited.row_stats().snapshot_records, 2);
+        let (_, mut closed) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+        closed.next().unwrap().unwrap();
+        let stopped = (closed.row_stats(), closed.evaluator_stats());
+        closed.close();
+        closed.close();
+        assert_eq!(closed.state(), ScanState::Closed);
+        assert!(closed.next().is_none());
+        assert_eq!((closed.row_stats(), closed.evaluator_stats()), stopped);
+
+        // VId(0)'s only witness is safe. WIDE's second parallel edge divides
+        // by zero: the first mapped element must not escape as a partial row.
+        let broken = PreparedNativeRead::prepare(
+            "MATCH (a) RETURN a, [(a)-[r:R]->(b) | 1/(r.p-5)] AS values",
+            &args,
+            symbols,
+        )
+        .unwrap();
+        let (_, mut broken) = broken.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(
+            broken.next().unwrap().unwrap().values()[0],
+            GraphValue::Vertex(VId(0)),
+        );
+        assert!(matches!(
+            broken.next(),
+            Some(Err(GqlQueryError::Source(
+                fgdb_gql::scan_stream::ScanError::Projection { row: 1, column: 1, error }
+            ))) if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+        ));
+        assert_eq!(broken.row_stats().result_rows, 1);
+        assert_eq!(broken.state(), ScanState::Failed);
+        let stopped = (broken.row_stats(), broken.evaluator_stats());
+        assert!(broken.next().is_none());
+        assert_eq!((broken.row_stats(), broken.evaluator_stats()), stopped);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn projected_edge_streams_share_budgets_and_publish_only_complete_rows() {
     let ((), report) = run_async_under_lab(0x6e65_0011, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

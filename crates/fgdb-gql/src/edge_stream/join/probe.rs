@@ -64,8 +64,8 @@ pub(crate) struct Probe {
 /// A bounded, correlated Collect scope over the same fixed-hop traversal and
 /// predicate kernel as a probe. Only its completion rule differs: every
 /// witness contributes one value, and only successful exhaustion emits a list.
-pub(super) struct Collection {
-    pub(super) group: usize,
+pub(crate) struct Collection {
+    pub(crate) group: usize,
     probe: Probe,
     value: Option<ValueProjection>,
     tuple: Option<Vec<ValueProjection>>,
@@ -588,7 +588,7 @@ impl Probe {
 }
 
 impl Collection {
-    pub(super) fn compile(
+    pub(crate) fn compile(
         ops: &[GlaOperator],
         start: usize,
         outer_width: usize,
@@ -675,7 +675,7 @@ impl Collection {
         ))
     }
 
-    pub(super) fn evaluate<S: EdgeScanSource, C>(
+    pub(crate) fn evaluate<S: EdgeScanSource, C>(
         &self,
         outer: &[Option<VId>],
         source: &S,

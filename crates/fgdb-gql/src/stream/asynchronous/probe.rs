@@ -8,6 +8,8 @@ use crate::edge_stream::{AsyncGraphWalkSource, EdgeScanError, EdgeScanSourceErro
 /// finite variable-length atoms reuse the native probe compiler and endpoint
 /// support kernel. Independent scans, nested/optional scopes, unbounded walks
 /// and unsupported captured paths refuse before a source is constructed.
+/// Collections also refuse: this source contract does not reserve their
+/// retained witness payloads across awaited reads.
 #[derive(Clone)]
 pub struct AsyncVertexProbePlan<Row = VId> {
     inner: VertexScanPlan<Row>,
@@ -34,7 +36,7 @@ impl<Row: VertexScanOutput> AsyncVertexProbePlan<Row> {
             .enumerate()
             .skip(1)
             .find_map(|(at, op)| match op {
-                GlaOperator::ScanVertices => Some(at),
+                GlaOperator::ScanVertices | GlaOperator::Collect { .. } => Some(at),
                 GlaOperator::VarLengthExpand { bounds, .. } if !bounds.is_bounded() => Some(at),
                 _ => None,
             })
@@ -260,6 +262,7 @@ impl<S: AsyncGraphWalkSource, F, Row: VertexScanOutput> AsyncVertexProbeCursor<S
             if let Some((row, guard)) = self.plan.inner.project_accepted::<true, _, _, _, _>(
                 candidate.vid,
                 record.as_row(),
+                &[],
                 &mut self.skip,
                 meter,
                 (

@@ -675,4 +675,323 @@ fn unsupported_scopes_and_outputs_refuse_even_at_limit_zero_without_driving_a_so
     }
 }
 
+fn collection_pattern(
+    direction: GlaDirection,
+    count: Option<u64>,
+) -> PreparedGraphPattern<GraphValueRow> {
+    use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder};
+
+    let mut outer = GraphPatternBuilder::new();
+    outer.vertex("a").unwrap();
+    let mut inner = GraphPatternBuilder::new();
+    inner.vertex("a").unwrap().vertex("b").unwrap();
+    inner.edge("a", R, direction, "b").unwrap();
+    inner.capture_edge("r", 0).unwrap();
+    inner.capture_path("walk").unwrap();
+    outer
+        .prepare_values_with_clauses(
+            &[
+                GraphMatchClause::collect(&inner, Some("b")),
+                GraphMatchClause::collect(&inner, Some("r")),
+                GraphMatchClause::collect(&inner, Some("walk")),
+                GraphMatchClause::collect_tuple(&inner, vec!["a", "r", "b", "walk"]),
+                GraphMatchClause::collect(&inner, None),
+            ],
+            &[
+                GraphColumn::vertex("id", "a"),
+                GraphColumn::collection("vertices", 0),
+                GraphColumn::collection("edges", 1),
+                GraphColumn::collection("paths", 2),
+                GraphColumn::collection("tuples", 3),
+                GraphColumn::collection("nulls", 4),
+            ],
+            0,
+            count,
+        )
+        .unwrap()
+}
+
+fn collected_list(values: impl IntoIterator<Item = GraphValue>) -> GraphValue {
+    GraphValue::List(values.into_iter().collect::<Vec<_>>().into_boxed_slice())
+}
+
+// Enumerate the complete physical relation independently. Every EId is a
+// witness; a self-loop contributes once in the undirected case. No production
+// incidence iterator, Collection evaluator or path capture builds this oracle.
+fn expected_collections(fixture: &Fixture, direction: GlaDirection) -> Vec<Vec<GraphValue>> {
+    fixture
+        .vertices
+        .iter()
+        .map(|&root| {
+            let witnesses: Vec<_> = fixture
+                .edges
+                .iter()
+                .filter_map(|(&eid, &(from, to))| {
+                    let target = match direction {
+                        GlaDirection::Forward if from == root => to,
+                        GlaDirection::Reverse if to == root => from,
+                        GlaDirection::Undirected if from == root => to,
+                        GlaDirection::Undirected if to == root => from,
+                        _ => return None,
+                    };
+                    Some((eid, target))
+                })
+                .collect();
+            let path = |eid, target| {
+                GraphValue::Path(crate::algebra::GraphPath::new(
+                    root,
+                    vec![(eid, target)].into_boxed_slice(),
+                ))
+            };
+            vec![
+                GraphValue::Vertex(root),
+                collected_list(witnesses.iter().map(|&(_, to)| GraphValue::Vertex(to))),
+                collected_list(witnesses.iter().map(|&(eid, _)| GraphValue::Edge(eid))),
+                collected_list(witnesses.iter().map(|&(eid, to)| path(eid, to))),
+                collected_list(witnesses.iter().map(|&(eid, to)| {
+                    collected_list([
+                        GraphValue::Vertex(root),
+                        GraphValue::Edge(eid),
+                        GraphValue::Vertex(to),
+                        path(eid, to),
+                    ])
+                })),
+                collected_list(
+                    witnesses
+                        .iter()
+                        .map(|_| GraphValue::Scalar(CanonicalScalar::Null)),
+                ),
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn vertex_collections_preserve_every_witness_capture_and_empty_root() {
+    for mask in 0..64 {
+        for direction in [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ] {
+            let pattern = collection_pattern(direction, None);
+            let identity = pattern.plan().canonical_bytes();
+            let fixture = Fixture::small(mask);
+            let expected = expected_collections(&fixture, direction);
+            let plan = VertexScanPlan::compile(pattern.plan()).unwrap();
+            assert!(plan.has_graph_probes());
+            let mut cursor =
+                VertexScanCursor::new(fixture, plan, policy(), || Ok::<_, ()>(()));
+            let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(plain(&actual), expected, "mask={mask}, {direction:?}");
+            assert_eq!(cursor.row_stats().result_rows, 5);
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            assert!(cursor.next().is_none());
+            assert_eq!(pattern.plan().canonical_bytes(), identity);
+        }
+    }
+}
+
+#[test]
+fn every_collection_checkpoint_keeps_complete_prefixes_and_releases_the_source() {
+    // Root zero has an empty list; root one has a witness. Interruption must
+    // preserve that first complete root, never a partial second list.
+    let pattern = collection_pattern(GlaDirection::Forward, Some(2));
+    let plan = VertexScanPlan::compile(pattern.plan()).unwrap();
+    let mut total = 0;
+    let mut baseline = VertexScanCursor::new(Fixture::small(8), plan.clone(), policy(), || {
+        total += 1;
+        Ok::<_, usize>(())
+    });
+    let expected = baseline.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(expected.len(), 2);
+    drop(baseline);
+    assert!(total > 0);
+    for stop in 1..=total {
+        let fixture = Fixture::small(8);
+        let drops = fixture.drops.clone();
+        let mut calls = 0;
+        let mut cursor = VertexScanCursor::new(fixture, plan.clone(), policy(), || {
+            calls += 1;
+            if calls == stop { Err(stop) } else { Ok(()) }
+        });
+        let mut delivered = Vec::new();
+        loop {
+            match cursor.next() {
+                Some(Ok(row)) => delivered.push(row),
+                Some(Err(GqlQueryError::Interrupted(at))) => {
+                    assert_eq!(at, stop);
+                    break;
+                }
+                other => panic!("collection interruption became {other:?}"),
+            }
+        }
+        assert_eq!(delivered, expected[..delivered.len()]);
+        assert_eq!(cursor.row_stats().result_rows, delivered.len() as u64);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        let frozen = (cursor.row_stats(), cursor.evaluator_stats());
+        assert!(cursor.next().is_none());
+        assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), frozen);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(cursor);
+        assert_eq!(calls, stop);
+    }
+    let retry = VertexScanCursor::new(Fixture::small(8), plan, policy(), || Ok::<_, usize>(()));
+    assert_eq!(retry.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+}
+
+#[test]
+fn collection_source_failures_never_become_absence_or_publish_partial_rows() {
+    let pattern = collection_pattern(GlaDirection::Forward, None);
+    let plan = VertexScanPlan::compile(pattern.plan()).unwrap();
+    let mut fixture = Fixture::small(63);
+    let expected = expected_collections(&fixture, GlaDirection::Forward);
+    fixture.fail_edge = Some(EId(3));
+    let drops = fixture.drops.clone();
+    let mut cursor =
+        VertexScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
+    assert_eq!(cursor.next().unwrap().unwrap().values(), expected[0]);
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Source(VertexScanError::Source(
+            "edge read denied"
+        ))))
+    ));
+    assert_eq!(cursor.row_stats().result_rows, 1);
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(cursor.next().is_none());
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    let mut fixture = Fixture::small(63);
+    fixture.repeat = true;
+    let mut cursor =
+        VertexScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Source(VertexScanError::Probe(
+            EdgeScanError::NonIncreasingIdentity
+        ))))
+    ));
+    assert_eq!(cursor.row_stats().result_rows, 0);
+    assert!(cursor.next().is_none());
+
+    let mut cursor = VertexScanCursor::new(
+        NoLookup(Fixture::small(63)),
+        plan,
+        policy(),
+        || Ok::<_, ()>(()),
+    );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Source(VertexScanError::Probe(
+            EdgeScanError::ExpansionUnavailable
+        ))))
+    ));
+    assert_eq!(cursor.row_stats().result_rows, 0);
+    assert!(cursor.next().is_none());
+}
+
+#[test]
+fn anonymous_collections_preserve_the_existing_neighbor_order_by_refusing_streaming() {
+    use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder};
+
+    let mut outer = GraphPatternBuilder::new();
+    outer.vertex("a").unwrap();
+    let mut inner = GraphPatternBuilder::new();
+    inner.vertex("a").unwrap().vertex("b").unwrap();
+    inner.edge("a", R, GlaDirection::Forward, "b").unwrap();
+    for count in [None, Some(0)] {
+        let pattern = outer
+            .prepare_values_with_clauses(
+                &[GraphMatchClause::collect(&inner, Some("b"))],
+                &[
+                    GraphColumn::vertex("id", "a"),
+                    GraphColumn::collection("neighbors", 0),
+                ],
+                0,
+                count,
+            )
+            .unwrap();
+        assert!(!pattern.plan().requires_identified_edges());
+        if count.is_none() {
+            // EId order would be [2, 1, 1]. The existing anonymous lane
+            // deliberately produces [1, 1, 2], preserving both parallel edges.
+            let eager = pattern
+                .plan()
+                .execute_governed_with_element_properties(
+                    6,
+                    [VId(0), VId(1), VId(2)],
+                    [
+                        (EId(0), VId(0), R, VId(2)),
+                        (EId(1), VId(0), R, VId(1)),
+                        (EId(2), VId(0), R, VId(1)),
+                    ],
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    |_, _| Ok(None),
+                    policy(),
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap();
+            assert_eq!(
+                eager.value[0].values(),
+                &[
+                    GraphValue::Vertex(VId(0)),
+                    collected_list([1, 1, 2].map(|id| GraphValue::Vertex(VId(id)))),
+                ],
+            );
+        }
+        let operator = pattern
+            .plan()
+            .operators()
+            .iter()
+            .position(|operator| matches!(operator, GlaOperator::Collect { .. }))
+            .unwrap();
+        assert_eq!(
+            VertexScanPlan::compile(pattern.plan()).unwrap_err(),
+            VertexScanBuildError { operator },
+        );
+    }
+}
+
+#[test]
+fn collection_async_profiles_still_refuse_before_source_construction() {
+    use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder};
+    use crate::stream::{AsyncVertexProbePlan, AsyncVertexScanPlan};
+
+    let pattern = collection_pattern(GlaDirection::Forward, Some(0));
+    assert!(AsyncVertexScanPlan::compile(pattern.plan()).is_err());
+    let mut outer = GraphPatternBuilder::new();
+    outer.vertex("a").unwrap();
+    let mut inner = GraphPatternBuilder::new();
+    inner.vertex("a").unwrap().vertex("b").unwrap();
+    inner.edge("a", R, GlaDirection::Forward, "b").unwrap();
+    inner.capture_edge("r", 0).unwrap();
+    let pattern = outer
+        .prepare_values_with_clauses(
+            &[
+                GraphMatchClause::exists(&inner),
+                GraphMatchClause::collect(&inner, Some("b")),
+            ],
+            &[
+                GraphColumn::vertex("id", "a"),
+                GraphColumn::collection("neighbors", 1),
+            ],
+            0,
+            Some(0),
+        )
+        .unwrap();
+    assert!(VertexScanPlan::compile(pattern.plan()).is_ok());
+    let operator = pattern
+        .plan()
+        .operators()
+        .iter()
+        .position(|operator| matches!(operator, GlaOperator::Collect { .. }))
+        .unwrap();
+    assert_eq!(
+        AsyncVertexProbePlan::compile(pattern.plan()).unwrap_err(),
+        VertexScanBuildError { operator },
+    );
+}
+
 mod independent;

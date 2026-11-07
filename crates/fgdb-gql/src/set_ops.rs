@@ -1671,6 +1671,70 @@ impl PreparedGraphSet {
         Some(pull)
     }
 
+    /// A property-aware projection over an ordered vertex-rooted graph cursor.
+    ///
+    /// The native vertex compiler owns every predicate and fixed-edge Collect
+    /// scope. Both the source and final projection retain the root identity as
+    /// their leading cell, so canonical order needs no sort or seen set.
+    /// Dynamic properties must be read through that cursor's admitted source;
+    /// metadata, randomness, pages and relational barriers remain outside this
+    /// profile. The row-only row_pull/ordered_row_pull contracts stay narrow
+    /// for hosts that have not supplied an element reader.
+    #[must_use]
+    pub fn vertex_graph_row_pull(&self) -> Option<GraphSetRowPull> {
+        if !self.order.is_empty() || self.offset != 0 || self.count.is_some() {
+            return None;
+        }
+        let SetNode::Project {
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
+            preserve_order: false,
+        } = &self.node
+        else {
+            return None;
+        };
+        if !input.order.is_empty() || input.offset != 0 || input.count.is_some() {
+            return None;
+        }
+        let SetNode::Pattern(pattern) = &input.node else {
+            return None;
+        };
+        let operators = pattern.plan().operators();
+        if pattern.plan().visible_columns.is_some()
+            || !matches!(
+                operators.get(operators.len().checked_sub(2)?),
+                Some(crate::algebra::GlaOperator::OrderByValues)
+            )
+            || !matches!(
+                operators.last(),
+                Some(crate::algebra::GlaOperator::Limit {
+                    offset: 0,
+                    count: None,
+                })
+            )
+            || !projection
+                .iter()
+                .all(|cell| cell.value().is_element_scan_local())
+        {
+            return None;
+        }
+        crate::stream::VertexScanPlan::compile(pattern.plan()).ok()?;
+        let GraphSetValue::Column(column) = *projection.first()?.value() else {
+            return None;
+        };
+        if !matches!(
+            pattern.value_columns().get(column),
+            Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0
+        ) {
+            return None;
+        }
+        Some(GraphSetRowPull {
+            pattern: pattern.clone(),
+            projection: projection.clone(),
+        })
+    }
+
     /// A property-aware projection over an ordered fixed-edge cursor.
     ///
     /// The source and final output both retain their complete unique traversal
@@ -1840,8 +1904,8 @@ impl PreparedGraphSet {
 }
 
 /// A relation that pulls row by row: one checked source pattern and the
-/// projection each of its rows takes. The accessor selects the vertex-only or
-/// property-aware fixed-edge profile; it does not grant source capabilities.
+/// projection each of its rows takes. The accessor selects a row-local or
+/// property-aware graph profile; it does not grant source capabilities.
 #[derive(Clone)]
 pub struct GraphSetRowPull {
     pattern: PreparedGraphPattern<GraphValueRow>,

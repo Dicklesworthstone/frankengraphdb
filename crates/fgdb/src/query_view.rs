@@ -375,11 +375,13 @@ impl PreparedNativeRead {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::SetText)?;
-                let pull = query.row_pull().or_else(|| query.edge_row_pull()).ok_or(
-                    QueryError::StreamingUnsupported {
+                let pull = query
+                    .row_pull()
+                    .or_else(|| query.vertex_graph_row_pull())
+                    .or_else(|| query.edge_row_pull())
+                    .ok_or(QueryError::StreamingUnsupported {
                         facade: self.facade_class(),
-                    },
-                )?;
+                    })?;
                 (pull, query.columns().to_vec(), view.frontier())
             }
             Self::TemporalSet(prepared) => {
@@ -389,6 +391,7 @@ impl PreparedNativeRead {
                 let pull = query
                     .query()
                     .row_pull()
+                    .or_else(|| query.query().vertex_graph_row_pull())
                     .or_else(|| query.query().edge_row_pull())
                     .ok_or(QueryError::StreamingUnsupported {
                         facade: self.facade_class(),

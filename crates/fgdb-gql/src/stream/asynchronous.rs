@@ -87,8 +87,8 @@ pub trait AsyncVertexScanSource: Send {
     ) -> Result<(), Self::Error>;
 }
 
-/// The ordinary compiler's ordered, vertex-local physical profile. Probes are
-/// refused before source construction: their nested readers need a separate
+/// The ordinary compiler's ordered, vertex-local physical profile. Probes and
+/// collections refuse before source construction: nested readers need a separate
 /// asynchronous access contract. Alternate ordering and blocking operators
 /// retain the ordinary compiler's explicit refusal, without an eager fallback.
 #[derive(Clone)]
@@ -115,7 +115,9 @@ impl<Row: VertexScanOutput> AsyncVertexScanPlan<Row> {
         if let Some(operator) = plan
             .operators()
             .iter()
-            .position(|operator| matches!(operator, GlaOperator::Probe { .. }))
+            .position(|operator| {
+                matches!(operator, GlaOperator::Probe { .. } | GlaOperator::Collect { .. })
+            })
         {
             return Err(VertexScanBuildError { operator });
         }

@@ -12,6 +12,18 @@ impl VertexSpillAggregatePlan {
     pub(crate) fn compile(
         definition: SpillAggregateDefinition,
     ) -> Result<Self, VertexScanBuildError> {
+        // Keep the aggregate input contract closed until collected witnesses
+        // are supported by its computed projection and external reduction.
+        if let Some(operator) = definition
+            .aggregate
+            .input_pattern()
+            .plan()
+            .operators()
+            .iter()
+            .position(|operator| matches!(operator, GlaOperator::Collect { .. }))
+        {
+            return Err(VertexScanBuildError { operator });
+        }
         let input = VertexScanPlan::compile_with_projection(
             definition.aggregate.input_pattern().plan(),
             None,

@@ -12,6 +12,9 @@
 //! including its eager operands and governed scalar-expression scratch.
 //! Correlated/independent fixed-hop EXISTS/NOT EXISTS share the probe kernel;
 //! their private bindings neither multiply nor change the ordered outer row.
+//! Correlated fixed-edge Collect scopes with identified witness order reuse
+//! that same indexed traversal and retain one bounded, metered witness list
+//! per group until row projection.
 //! Unsupported operators refuse before a source is driven; there is no eager
 //! fallback, AST interpreter, alternate property semantics or storage model.
 //!
@@ -20,7 +23,7 @@
 //! or dropping provides backpressure without scanning the unused suffix. This
 //! does not promise a server lease, restart token, spill, or byte-memory limit.
 
-use crate::algebra::{GlaOperator, GlaPlan, ValueProjection, VertexPredicate};
+use crate::algebra::{GlaOperator, GlaPlan, GraphValue, ValueProjection, VertexPredicate};
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
     GqlQueryPolicy,
@@ -65,6 +68,7 @@ enum Test {
     Identity(bool),
     Binding(GlaOperator),
     Probe(Arc<crate::edge_stream::Probe>),
+    Collect(Arc<crate::edge_stream::Collection>),
 }
 
 /// Checked physical specialization of an existing GLA definition.
@@ -89,10 +93,12 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
     /// Whether execution needs independently positioned graph reads. A host
     /// can retain its indexed source for these plans while using a lazy patch
     /// merge for a plain scan, without repeatedly seeking every source patch
-    /// for each correlated or independent probe.
+    /// for each correlated or independent probe or collected neighborhood.
     #[must_use]
     pub fn has_graph_probes(&self) -> bool {
-        self.tests.iter().any(|test| matches!(test, Test::Probe(_)))
+        self.tests
+            .iter()
+            .any(|test| matches!(test, Test::Probe(_) | Test::Collect(_)))
     }
 
     /// Whether the compiled local evaluator may inspect a property payload.
@@ -105,7 +111,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
     pub fn requires_properties(&self) -> bool {
         if self.tests.iter().any(|test| match test {
             Test::Predicate(VertexPredicate::HasLabel(_)) | Test::Identity(_) => false,
-            Test::Predicate(_) | Test::Binding(_) | Test::Probe(_) => true,
+            Test::Predicate(_) | Test::Binding(_) | Test::Probe(_) | Test::Collect(_) => true,
         }) {
             return true;
         }
@@ -202,6 +208,25 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                     tests.push(Test::Probe(Arc::new(probe)));
                     at = end;
                 }
+                Some(GlaOperator::Collect { .. }) => {
+                    // The eager endpoint-only lane sorts neighbors by VId.
+                    // This indexed walker visits EIds. Only an identified-edge
+                    // plan gives both executors the same witness/list order.
+                    if !plan.requires_identified_edges() {
+                        return Err(VertexScanBuildError { operator: at });
+                    }
+                    let (collection, end) = crate::edge_stream::Collection::compile(operators, at, 1)
+                        .map_err(|error| VertexScanBuildError {
+                            operator: error.operator,
+                        })?;
+                    if tests.iter().any(|test| {
+                        matches!(test, Test::Collect(prior) if prior.group == collection.group)
+                    }) {
+                        return Err(VertexScanBuildError { operator: at });
+                    }
+                    tests.push(Test::Collect(Arc::new(collection)));
+                    at = end;
+                }
                 Some(GlaOperator::Select { slot, predicates }) if slot.ordinal() == 0 => {
                     tests.extend(predicates.iter().cloned().map(Test::Predicate));
                 }
@@ -235,6 +260,16 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             at += 1;
         }
         let projection_at = at;
+        if let GlaOperator::ProjectValues { columns } = &operators[projection_at]
+            && columns.iter().any(|column| {
+                matches!(column, ValueProjection::Collected { group }
+                    if !tests.iter().any(|test| {
+                        matches!(test, Test::Collect(collection) if collection.group == *group as usize)
+                    }))
+            })
+        {
+            return Err(VertexScanBuildError { operator: projection_at });
+        }
         at += 1;
         let distinct = matches!(operators.get(at), Some(GlaOperator::Distinct));
         if distinct {
@@ -288,20 +323,30 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         source: &S,
         control: &mut impl FnMut(VertexScanEvent) -> ScanResult<(), S::Error, C>,
         record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
-    ) -> ScanResult<bool, S::Error, C> {
+    ) -> ScanResult<Option<Vec<Option<GraphValue>>>, S::Error, C> {
+        let mut collected = Vec::new();
         for test in self.tests.iter() {
             control(VertexScanEvent::Work)?;
             match test {
                 Test::Probe(probe) => {
                     if !self::probe::accepts(probe, vid, source, control, record)? {
-                        return Ok(false);
+                        return Ok(None);
                     }
                 }
-                native if !accepts_native_test(native, vid, row, control)? => return Ok(false),
+                Test::Collect(collection) => {
+                    while collected.len() <= collection.group {
+                        control(VertexScanEvent::ScratchEntry)?;
+                        collected.push(None);
+                    }
+                    collected[collection.group] = Some(self::probe::collect(
+                        collection, vid, source, control, record,
+                    )?);
+                }
+                native if !accepts_native_test(native, vid, row, control)? => return Ok(None),
                 _ => {}
             }
         }
-        Ok(true)
+        Ok(Some(collected))
     }
 
     // The synchronous and asynchronous source drivers enter this SAME row
@@ -341,10 +386,12 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                 &mut || metered.borrow_mut().record(),
             )?
         };
-        if !accepted {
+        let Some(collected) = accepted else {
             return Ok(None);
-        }
-        self.project_accepted::<EMIT, _, _, _, _>(vid, row, skip, meter, (reserve, observe))
+        };
+        self.project_accepted::<EMIT, _, _, _, _>(
+            vid, row, &collected, skip, meter, (reserve, observe),
+        )
     }
 
     // Both asynchronous intake contracts reuse this exact post-predicate
@@ -353,6 +400,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         &self,
         vid: VId,
         row: VertexScanRow<'_>,
+        collected: &[Option<GraphValue>],
         skip: &mut u64,
         meter: &mut Meter<F>,
         controls: (
@@ -373,7 +421,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             let _ = meter.next_result_count()?;
         }
         let guard = reserve(meter)?;
-        let value = Row::project(vid, row, &self.projection, &mut |event| {
+        let value = Row::project(vid, row, &self.projection, collected, &mut |event| {
             row_event(meter, &mut observe, event)
         })?;
         if EMIT {
@@ -411,7 +459,9 @@ fn accepts_native_test<E, C>(
             };
             Ok(predicate.matches_borrowed(label, property))
         }
-        Test::Probe(_) => unreachable!("the selected source contract owns graph probes"),
+        Test::Probe(_) | Test::Collect(_) => {
+            unreachable!("the selected source contract owns graph reads")
+        }
     }
 }
 

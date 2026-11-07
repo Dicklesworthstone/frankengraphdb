@@ -6,7 +6,7 @@
 
 use super::{VertexScanEvent, VertexScanRow, seek};
 use crate::GlaExecutionEvent;
-use crate::algebra::{GlaOperator, GlaOutput, GraphValueRow, ValueProjection};
+use crate::algebra::{GlaOperator, GlaOutput, GraphValue, GraphValueRow, ValueProjection};
 use crate::algebra_exec::ProjectedRows;
 use fgdb_types::VId;
 
@@ -53,6 +53,7 @@ impl super::VertexScanPlan<GraphValueRow> {
                     ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
                         slot.ordinal() == 0
                     }
+                    ValueProjection::Collected { .. } => true,
                     _ => false,
                 })
             })?;
@@ -72,7 +73,9 @@ impl<S: super::VertexScanSource, F> super::VertexScanCursor<S, F, GraphValueRow>
     /// ResultRows. Its zero-based ordinal therefore survives successive pulls
     /// without a second counter. Every projection event is charged immediately,
     /// before the VM performs the corresponding work or allocation. Private
-    /// projection events never increment the public result count.
+    /// projection events never increment the public result count. Properties
+    /// of collected elements use this same source at the retained cut, with
+    /// history admission and payload-copy charges before the lookup/copy.
     ///
     /// `scan` preserves the host's native source/control error mapping;
     /// `arithmetic` retains the projection's row, column and typed data error.
@@ -98,21 +101,39 @@ impl<S: super::VertexScanSource, F> super::VertexScanCursor<S, F, GraphValueRow>
             };
             let ordinal = self.meter.rows.result_rows;
             self.meter.next_result_count().map_err(&mut scan)?;
-            let projected = pull.project(
-                &row,
-                ordinal,
-                &mut |event| {
-                    self.meter
-                        .event(match event {
-                            GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
-                            GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => {
-                                VertexScanEvent::Work
-                            }
+            let projected = {
+                let source = self.source.as_ref().expect("open cursor owns its source");
+                // Projection checkpoints and dynamic property reads execute
+                // serially against the same admitted source and live meter.
+                let meter = std::cell::RefCell::new(&mut self.meter);
+                let mapping = std::cell::RefCell::new(&mut scan);
+                pull.project_with_properties(
+                    &row,
+                    ordinal,
+                    &mut |event| {
+                        meter
+                            .borrow_mut()
+                            .event(match event {
+                                GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+                                GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => {
+                                    VertexScanEvent::Work
+                                }
+                            })
+                            .map_err(&mut **mapping.borrow_mut())
+                    },
+                    &mut |element, key| {
+                        meter
+                            .borrow_mut()
+                            .record()
+                            .map_err(&mut **mapping.borrow_mut())?;
+                        super::probe::element_property(source, element, key, &mut |event| {
+                            meter.borrow_mut().event(event)
                         })
-                        .map_err(&mut scan)
-                },
-                |column, error| arithmetic(ordinal, column, error),
-            )?;
+                        .map_err(&mut **mapping.borrow_mut())
+                    },
+                    |column, error| arithmetic(ordinal, column, error),
+                )?
+            };
             self.meter.emit().map_err(&mut scan)?;
             Ok(Some(projected))
         })();
@@ -157,6 +178,7 @@ mod sealed {
             vid: VId,
             row: VertexScanRow<'_>,
             projection: &GlaOperator,
+            collected: &[Option<GraphValue>],
             control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
         ) -> Result<Self, E>;
     }
@@ -169,6 +191,7 @@ mod sealed {
             vid: VId,
             _row: VertexScanRow<'_>,
             _projection: &GlaOperator,
+            _collected: &[Option<GraphValue>],
             _control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
         ) -> Result<Self, E> {
             Ok(vid)
@@ -188,6 +211,7 @@ mod sealed {
                 ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
                     slot.ordinal() == 0
                 }
+                ValueProjection::Collected { .. } => true,
                 _ => false,
             }) && crate::scan_stream::identity_ordered_projection(
                 projection,
@@ -209,6 +233,7 @@ mod sealed {
                     ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
                         slot.ordinal() == 0
                     }
+                    ValueProjection::Collected { .. } => true,
                     _ => false,
                 })
         }
@@ -216,9 +241,10 @@ mod sealed {
             vid: VId,
             row: VertexScanRow<'_>,
             projection: &GlaOperator,
+            collected: &[Option<GraphValue>],
             control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
         ) -> Result<Self, E> {
-            collect_one::<Self, E>(vid, row, projection, control)
+            collect_one::<Self, E>(vid, row, projection, collected, control)
         }
     }
 }
@@ -227,6 +253,7 @@ fn collect_one<Row: GlaOutput, E: From<crate::GraphIntegerError>>(
     vid: VId,
     row: VertexScanRow<'_>,
     projection: &GlaOperator,
+    collected: &[Option<GraphValue>],
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
 ) -> Result<Row, E> {
     // These callbacks are invoked serially by the sealed GLA collector. A
@@ -234,9 +261,11 @@ fn collect_one<Row: GlaOutput, E: From<crate::GraphIntegerError>>(
     // debit the SAME caller meter, without a second budget or deferred charge.
     let control = std::cell::RefCell::new(control);
     let mut projected = ProjectedRows::new(true);
-    Row::collect_properties(
+    Row::collect_properties_with_paths(
         projection,
         &[Some(vid)],
+        &[],
+        collected,
         &mut projected,
         &mut |asked, key| {
             debug_assert_eq!(asked, vid, "the checked projection names only slot zero");

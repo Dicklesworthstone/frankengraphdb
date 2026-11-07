@@ -28,6 +28,60 @@ pub(super) fn accepts<S: VertexScanSource, C>(
         .map_err(|error| error.map_source(unpack))
 }
 
+pub(super) fn collect<S: VertexScanSource, C>(
+    collection: &crate::edge_stream::Collection,
+    vid: VId,
+    source: &S,
+    control: &mut impl FnMut(VertexScanEvent) -> ScanResult<(), S::Error, C>,
+    record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
+) -> ScanResult<crate::algebra::GraphValue, S::Error, C> {
+    collection
+        .evaluate(
+            &[Some(vid)],
+            &Lookup(source),
+            &mut |event| {
+                control(vertex_event(event))
+                    .map_err(|error| error.map_source(EdgeScanError::Source))
+            },
+            &mut || record().map_err(|error| error.map_source(EdgeScanError::Source)),
+        )
+        .map_err(|error| error.map_source(unpack))
+}
+
+/// Dynamic values in a collected witness use the same admitted property
+/// routes as predicates. The caller charges the history before this lookup;
+/// charge the complete retained value before cloning its payload.
+pub(super) fn element_property<S: VertexScanSource, C>(
+    source: &S,
+    element: fgdb_delta_types::ElementId,
+    key: PropertyKeyId,
+    control: &mut impl FnMut(VertexScanEvent) -> ScanResult<(), S::Error, C>,
+) -> ScanResult<Option<CanonicalPropertyValue>, S::Error, C> {
+    let lookup = Lookup(source);
+    let mut events = |event| control(vertex_event(event));
+    let value = match element {
+        fgdb_delta_types::ElementId::Vertex(vid) => {
+            lookup.vertex_property(vid, key, &mut events)
+        }
+        fgdb_delta_types::ElementId::Edge(eid) => {
+            lookup.edge_property(eid, key, &mut events)
+        }
+    }
+    .map_err(|error| match error {
+        EdgeScanSourceError::Source(error) => GqlQueryError::Source(error),
+        EdgeScanSourceError::Control(error) => error,
+    })?
+    .flatten();
+    value
+        .map(|value| {
+            crate::algebra::GraphValue::charge_property_value(value, &mut |event| {
+                control(vertex_event(event))
+            })?;
+            Ok(value.clone())
+        })
+        .transpose()
+}
+
 fn vertex_event(event: GlaExecutionEvent) -> VertexScanEvent {
     match event {
         GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,

@@ -15,7 +15,7 @@ pub use asynchronous::{
     AsyncEdgeSpillAggregatePlan,
 };
 mod join;
-pub(crate) use join::Probe;
+pub(crate) use join::{Collection, Probe};
 pub use join::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
     AsyncIncidentCandidateResult,
