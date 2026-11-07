@@ -2164,9 +2164,14 @@ impl<'a> Parser<'a> {
                     PatternLimitDimension::Columns,
                 )?;
                 let at = self.current.at;
-                let expression = self.name()?;
+                let (expression, collect) = match self.named_pattern_comprehension_column()? {
+                    Some((element, scope)) => (element, Some(scope)),
+                    None => (self.name()?, None),
+                };
                 let start = expression.text.eq_ignore_ascii_case("startNode");
-                let (variable, property, path) = if self.is_punct(b'(')
+                let (variable, property, path) = if collect.is_some() {
+                    (expression, None, None)
+                } else if self.is_punct(b'(')
                     && (start || expression.text.eq_ignore_ascii_case("endNode"))
                 {
                     // openCypher startNode(r)/endNode(r): the bound endpoint.
@@ -2244,7 +2249,7 @@ impl<'a> Parser<'a> {
                     property,
                     path,
                     alias,
-                    collect: None,
+                    collect,
                 });
                 if !self.take(b',')? {
                     break;

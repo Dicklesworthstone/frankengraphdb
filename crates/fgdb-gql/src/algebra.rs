@@ -727,16 +727,20 @@ impl<Row> GlaPlan<Row> {
         // two-table admission path so isolates, intermediate values, snapshot
         // budgets and transaction scan observations all share the same source.
         // Expanding the root adds no binding slot: ScanEdges already bound two.
-        let mut probe_depth = 0usize;
+        // Private witness/list bodies admit their own vertex domain. Their
+        // scans must not change the outer row's edge-driven traversal order.
+        let mut private_scope_depth = 0usize;
         let mut normalize = false;
         for op in &operators {
             match op {
-                GlaOperator::Probe { .. } => probe_depth += 1,
-                GlaOperator::ProbeEnd { .. } => {
-                    probe_depth = probe_depth.saturating_sub(1);
+                GlaOperator::Probe { .. } | GlaOperator::Collect { .. } => {
+                    private_scope_depth += 1;
+                }
+                GlaOperator::ProbeEnd { .. } | GlaOperator::CollectEnd { .. } => {
+                    private_scope_depth = private_scope_depth.saturating_sub(1);
                 }
                 GlaOperator::VarLengthExpand { .. } | GlaOperator::ScanVertices
-                    if probe_depth == 0 =>
+                    if private_scope_depth == 0 =>
                 {
                     normalize = true;
                     break;

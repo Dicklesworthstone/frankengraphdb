@@ -4115,6 +4115,37 @@ impl<'a> Parser<'a> {
         pattern_comprehension_follows(self.current.kind, &self.lexer)
     }
 
+    /// A named witness value in the plain prepared-pattern column surface.
+    /// Reuse the row compiler's lexical proof and scoped pattern/predicate
+    /// parser; only the projection is restricted to one declared binding.
+    pub(in crate::graph_text) fn named_pattern_comprehension_column(
+        &mut self,
+    ) -> Result<Option<(Name<'a>, usize)>, GraphPatternTextError> {
+        if !self.starts_pattern_comprehension()? {
+            return Ok(None);
+        }
+        let scope = self.syntax.scopes.len();
+        self.advance()?;
+        self.scope(ScopeKind::Collect, ScopeForm::Comprehension)?;
+        self.punct(b'|', "| before a pattern comprehension value")?;
+        let element = self.name()?;
+        let body = &self.syntax.scopes[scope].body;
+        if !body.variables.iter().any(|name| name.text == element.text)
+            && !body
+                .edges
+                .iter()
+                .any(|edge| edge.variable.is_some_and(|name| name.text == element.text))
+            && !body.filters.iter().any(
+                |filter| matches!(filter, Filter::PathCapture(name) if name.text == element.text),
+            )
+        {
+            return Err(error(element.at, GraphPatternTextErrorKind::UnknownVariable));
+        }
+        self.syntax.scopes[scope].element = Some(element);
+        self.punct(b']', "] after a pattern comprehension")?;
+        Ok(Some((element, scope)))
+    }
+
     /// Whether a pattern count starts here: `COUNT {`, a count subquery, or
     /// an existence test read as a value, `EXISTS {` or `exists(` and a
     /// pattern (`RETURN exists((n)-->()) AS out`). `size((n)-->())`, the
