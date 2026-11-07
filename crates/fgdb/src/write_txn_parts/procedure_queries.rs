@@ -44,8 +44,8 @@ mod procedures {
                 .query_snapshot(database)
                 .map_err(GqlQueryError::Source)?;
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            if let Some(catalog) = call.catalog_projection() {
-                return crate::query::catalog_procedure(catalog, policy, None, |_| cx.checkpoint())
+            if crate::query::is_catalog(call) {
+                return crate::query::catalog_procedure_privileged(call, arguments, policy, cx)
                     .map_err(|error| error.map_source(WriteTxnError::Gql));
             }
             if crate::query::is_hybrid(call) {

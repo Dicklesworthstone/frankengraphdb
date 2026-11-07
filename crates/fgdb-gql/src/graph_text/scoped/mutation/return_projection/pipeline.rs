@@ -2659,36 +2659,40 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        let catalog_kind = crate::ProcedureCatalogKind::from_call(namespace.text, name.text);
-        if catalog_kind.is_some() && !arguments.is_empty() {
-            return Err(expected(at, "a catalog procedure without arguments"));
+        let catalog = crate::set_ops::catalog_procedure_output(namespace.text, name.text);
+        if catalog.is_some() && !arguments.is_empty() {
+            return Err(expected(at, "a catalog procedure with no arguments"));
         }
         let explicit_yield = self.take_word("YIELD")?;
-        if !explicit_yield && catalog_kind.is_none() {
+        if !explicit_yield && catalog.is_none() {
             return Err(expected(self.current.at, "YIELD"));
         }
+        let default_output = catalog.map(|(_, output)| output);
+        let yield_all = explicit_yield && default_output.is_some() && self.take(b'*')?;
         let mut outputs = Vec::new();
         loop {
-            let mut output = if explicit_yield {
-                self.name()?
-            } else {
-                let Some(kind) = catalog_kind else {
-                    return Err(expected(self.current.at, "YIELD"));
-                };
+            let output = if !explicit_yield || yield_all {
                 Name {
-                    text: kind.output_name(),
-                    at: name.at,
+                    text: default_output.expect("only catalog procedures imply outputs"),
+                    at,
                 }
+            } else {
+                self.name()?
             };
-            if let Some(kind) = catalog_kind {
-                if !output.text.eq_ignore_ascii_case(kind.output_name()) {
-                    return Err(expected(output.at, kind.output_name()));
+            let output = if let Some(expected_output) = default_output {
+                if !output.text.eq_ignore_ascii_case(expected_output) {
+                    return Err(expected(output.at, "the catalog procedure's output column"));
                 }
-                // The established Bolt schema profile folds these registered
-                // names and exposes the canonical output spelling.
-                output.text = kind.output_name();
-            }
-            let alias = if explicit_yield && self.take_word("AS")? {
+                // Registered output names have one spelling; an explicit AS
+                // alias below still keeps exactly the author's spelling.
+                Name {
+                    text: expected_output,
+                    at: output.at,
+                }
+            } else {
+                output
+            };
+            let alias = if explicit_yield && !yield_all && self.take_word("AS")? {
                 self.name()?
             } else {
                 output
@@ -2701,34 +2705,23 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_VERTICES,
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
-            let kind = if catalog_kind.is_some() {
-                GraphSetColumnType::Scalar
-            } else {
-                GraphSetColumnType::Any
-            };
-            schema.push((alias, kind));
+            schema.push((
+                alias,
+                if catalog.is_some() {
+                    GraphSetColumnType::Scalar
+                } else {
+                    GraphSetColumnType::Any
+                },
+            ));
             outputs.push((output.text.to_owned(), alias.text.to_owned()));
-            if !explicit_yield || !self.take(b',')? {
+            if !explicit_yield || yield_all || !self.take(b',')? {
                 break;
-            }
-            if catalog_kind.is_some() {
-                return Err(expected(
-                    self.current.at,
-                    "one catalog procedure YIELD column",
-                ));
             }
         }
         Ok(ReadStageTemplate::Call {
             at,
-            namespace: if catalog_kind.is_some() {
-                "db"
-            } else {
-                namespace.text
-            }
-            .to_owned(),
-            name: catalog_kind
-                .map_or(name.text, crate::ProcedureCatalogKind::procedure_name)
-                .to_owned(),
+            namespace: namespace.text.to_owned(),
+            name: name.text.to_owned(),
             arguments,
             names,
             offsets,
@@ -2736,7 +2729,7 @@ impl<'a> Parser<'a> {
             // A following MATCH (written or implied) marks its vertex uses.
             vertices: Vec::new(),
             graph_projection: None,
-            catalog_projection: None,
+            catalog_symbols: None,
         })
     }
 

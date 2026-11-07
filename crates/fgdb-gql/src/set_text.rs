@@ -935,12 +935,12 @@ impl ReadStageTemplate {
                 outputs,
                 vertices,
                 graph_projection,
-                catalog_projection,
+                catalog_symbols,
                 ..
             } => {
                 // A named call has its own tag, so every positional call keeps
                 // its exact template bytes.
-                bytes.push(if catalog_projection.is_some() {
+                bytes.push(if catalog_symbols.is_some() {
                     10
                 } else if graph_projection.is_some() {
                     8
@@ -956,8 +956,8 @@ impl ReadStageTemplate {
                 if let Some(projection) = graph_projection {
                     projection.append_transcript(bytes);
                 }
-                if let Some(projection) = catalog_projection {
-                    projection.append_transcript(bytes);
+                if let Some(symbols) = catalog_symbols {
+                    crate::set_ops::append_catalog_transcript(symbols, bytes);
                 }
                 bytes.extend_from_slice(&(arguments.len() as u64).to_be_bytes());
                 for (index, argument) in arguments.iter().enumerate() {
@@ -1195,8 +1195,8 @@ pub(crate) enum ReadStageTemplate {
         /// The first positional fnx map after its literal schema names have
         /// been resolved. It is not an algorithm argument at execution.
         graph_projection: Option<crate::ProcedureGraphProjection>,
-        /// The complete host catalog relation, frozen during name resolution.
-        catalog_projection: Option<crate::ProcedureCatalogProjection>,
+        /// A complete catalog domain captured before parameter binding.
+        catalog_symbols: Option<Vec<(crate::GraphSymbol, String)>>,
     },
     Unwind {
         at: usize,

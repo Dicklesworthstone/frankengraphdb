@@ -181,7 +181,9 @@ pub use beacon::{
     MaintainedBeaconIndex, MaintainedBeaconStatus, PinnedIndex, RefreshReport, ResidentIndex,
     ResidentIndexError,
 };
-pub(crate) use catalog::catalog_procedure;
+pub(crate) use catalog::{
+    catalog_procedure, is_catalog, privileged as catalog_procedure_privileged,
+};
 pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 use explain::{explain_prefix, explain_result};
 pub(crate) use prism::{

@@ -4737,7 +4737,7 @@ pub(super) fn bind_stages(
                 outputs,
                 vertices,
                 graph_projection,
-                catalog_projection,
+                catalog_symbols,
                 ..
             } => {
                 let mut bound = Vec::with_capacity(arguments.len());
@@ -4753,7 +4753,7 @@ pub(super) fn bind_stages(
                         outputs.clone(),
                         vertices.clone(),
                         *graph_projection,
-                        catalog_projection.clone(),
+                        catalog_symbols.clone(),
                     )
                     .map_err(|kind| GraphSetTextError {
                         offset: *at,

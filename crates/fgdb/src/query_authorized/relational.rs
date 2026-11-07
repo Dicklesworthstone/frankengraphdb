@@ -301,6 +301,9 @@ fn set_execution_in_runs<Clock: FnMut() -> u64>(
                     procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
                 },
                 |call, arguments, remaining| {
+                    if crate::query::is_catalog(call) {
+                        return None;
+                    }
                     Some(procedure_rows_at(
                         snapshot,
                         at,
@@ -369,15 +372,19 @@ fn procedure_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     remaining: GqlQueryPolicy,
 ) -> Result<fgdb_gql::GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, QueryError>> {
-    if let Some(catalog) = call.catalog_projection() {
-        return crate::query::catalog_procedure(catalog, remaining, Some(scope), |units| {
-            let mut live = execution.borrow_mut();
-            if units == 0 {
-                live.poll()
-            } else {
-                live.reserve_work(units)
-            }
-        });
+    if crate::query::is_catalog(call) {
+        return crate::query::catalog_procedure(
+            call,
+            arguments,
+            remaining,
+            |symbol| match symbol {
+                fgdb_gql::GraphSymbol::Label(id) => scope.allows_label(id),
+                fgdb_gql::GraphSymbol::Relation(id) => scope.allows_relation(id),
+                fgdb_gql::GraphSymbol::Property(id) => scope.allows_property(id),
+            },
+            || execution.borrow_mut().poll(),
+            |units| execution.borrow_mut().work_units(units),
+        );
     }
     if crate::query::is_hybrid(call) {
         return super::beacon::hybrid_at(
@@ -547,6 +554,9 @@ fn aggregate_execution_at<Clock: FnMut() -> u64>(
                     procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
                 },
                 |call, arguments, remaining| {
+                    if crate::query::is_catalog(call) {
+                        return None;
+                    }
                     Some(procedure_rows_at(
                         snapshot,
                         at,

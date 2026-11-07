@@ -82,12 +82,9 @@ mod set_aggregate_queries {
                                 ))
                             },
                             |call, arguments, remaining| {
-                                if let Some(catalog) = call.catalog_projection() {
-                                    return crate::query::catalog_procedure(
-                                        catalog,
-                                        remaining,
-                                        None,
-                                        |_| cx.checkpoint(),
+                                if crate::query::is_catalog(call) {
+                                    return crate::query::catalog_procedure_privileged(
+                                        call, arguments, remaining, cx,
                                     );
                                 }
                                 if crate::query::is_hybrid(call) {
@@ -113,6 +110,9 @@ mod set_aggregate_queries {
                                 )
                             },
                             |call, arguments, remaining| {
+                                if crate::query::is_catalog(call) {
+                                    return None;
+                                }
                                 Some(crate::query::fnx_procedure_rows(
                                     call,
                                     arguments,
@@ -184,12 +184,9 @@ mod set_aggregate_queries {
                                 ))
                             },
                             |call, arguments, remaining| {
-                                if let Some(catalog) = call.catalog_projection() {
-                                    return crate::query::catalog_procedure(
-                                        catalog,
-                                        remaining,
-                                        None,
-                                        |_| cx.checkpoint(),
+                                if crate::query::is_catalog(call) {
+                                    return crate::query::catalog_procedure_privileged(
+                                        call, arguments, remaining, cx,
                                     );
                                 }
                                 if crate::query::is_hybrid(call) {
@@ -215,6 +212,9 @@ mod set_aggregate_queries {
                                 )
                             },
                             |call, arguments, remaining| {
+                                if crate::query::is_catalog(call) {
+                                    return None;
+                                }
                                 Some(crate::query::fnx_procedure_rows(
                                     call,
                                     arguments,

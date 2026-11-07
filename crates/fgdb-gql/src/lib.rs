@@ -238,11 +238,10 @@ pub use set_ops::{
     GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
     GraphSetProjectionError, GraphSetQuantifier, GraphSetRowPull, GraphSetSource, GraphSetValue,
     GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS,
-    PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall, ProcedureCatalogKind,
-    ProcedureCatalogProjection, ProcedureGraphDirection, ProcedureGraphProjection,
-    ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
-    WithElementMetadata, WithElementReads, WithProcedureRows, WithProcedures, WithSeededPatterns,
-    procedure_row_source, with_element_metadata,
+    PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops, WithElementMetadata, WithElementReads, WithProcedureRows, WithProcedures,
+    WithSeededPatterns, procedure_row_source, with_element_metadata,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;
