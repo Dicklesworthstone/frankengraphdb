@@ -718,36 +718,42 @@ fn compile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<RowPlan, Que
 }
 
 fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<(), QueryError> {
-    // Admit private single-edge probe captures, not arbitrary captured paths
-    // or outer capture export. The native compiler still proves fixed-edge
-    // producers, operand domains, scope-local IDs and the full output profile.
+    // Admit private single-edge captures in probes and pattern collections,
+    // not arbitrary captured paths or outer capture export. Both producers use
+    // the same scoped incidence, edge and endpoint readers; collection fields
+    // are read through the separately admitted property routes at this cut.
+    // The native compiler still proves fixed-edge collection producers,
+    // operand domains, scope-local IDs and the complete output profile.
     // Keep this source fence shared by row and aggregate factories.
     let operators = pattern.plan().operators();
-    let mut probe_end = None;
+    let mut scope_end = None;
     for (operator, op) in operators.iter().enumerate() {
-        if probe_end == Some(operator) {
-            probe_end = None;
+        if scope_end == Some(operator) {
+            scope_end = None;
         }
         match op {
-            GlaOperator::Probe { group, end, .. } => {
+            GlaOperator::Probe { group, end, .. }
+            | GlaOperator::Collect { group, end, .. } => {
                 let end = *end as usize;
-                if probe_end.is_some()
-                    || end <= operator
-                    || !matches!(operators.get(end), Some(GlaOperator::ProbeEnd { group: close }) if close == group)
-                {
+                let closes = match (op, operators.get(end)) {
+                    (
+                        GlaOperator::Probe { .. },
+                        Some(GlaOperator::ProbeEnd { group: close }),
+                    )
+                    | (
+                        GlaOperator::Collect { .. },
+                        Some(GlaOperator::CollectEnd { group: close, .. }),
+                    ) => close == group,
+                    _ => false,
+                };
+                if scope_end.is_some() || end <= operator || !closes {
                     return Err(plan_error(VertexScanBuildError { operator }));
                 }
-                probe_end = Some(end);
+                scope_end = Some(end);
             }
             GlaOperator::CapturePath { segments, .. }
-                if probe_end.is_none() || segments.len() != 1 =>
+                if scope_end.is_none() || segments.len() != 1 =>
             {
-                return Err(plan_error(VertexScanBuildError { operator }));
-            }
-            // A pattern comprehension (fgdb-7nwox) is not admitted under a
-            // capability: its collected elements would need their own
-            // admission before any value reads them.
-            GlaOperator::Collect { .. } | GlaOperator::CollectEnd { .. } => {
                 return Err(plan_error(VertexScanBuildError { operator }));
             }
             _ => {}
@@ -766,6 +772,7 @@ fn bind_projected_rows(
 ) -> Result<BoundRows, QueryError> {
     let pull = query
         .row_pull()
+        .or_else(|| query.vertex_graph_row_pull())
         .or_else(|| query.edge_row_pull())
         .ok_or(QueryError::StreamingUnsupported { facade })?;
     let plan = compile(pull.pattern())?;

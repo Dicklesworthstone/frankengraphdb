@@ -980,3 +980,222 @@ fn projected_collections_keep_live_expiry_and_cancellation_at_the_source_boundar
     assert_eq!(cursor.state(), VertexScanState::Failed);
     assert!(cursor.next().is_none());
 }
+
+
+fn vertex_collection_expected(direction: usize) -> Vec<GraphValueRow> {
+    [1_u128, 3, 4]
+        .into_iter()
+        .map(|a| {
+            let witnesses: Vec<_> = COLLECTION_EDGES
+                .iter()
+                .filter_map(|&(_, from, to, weight)| {
+                    let target = match direction {
+                        0 if from == a => to,
+                        1 if to == a => from,
+                        2 if from == a => to,
+                        2 if to == a => from,
+                        _ => return None,
+                    };
+                    Some((target, weight))
+                })
+                .collect();
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(a)),
+                collection_scalar(Some(a as i64 * 10)),
+                collection_list(
+                    witnesses
+                        .iter()
+                        .map(|&(target, _)| collection_scalar(Some(target as i64 * 10))),
+                ),
+                collection_list(witnesses.iter().map(|&(_, weight)| collection_scalar(weight))),
+                collection_list(witnesses.iter().map(|_| collection_scalar(None))),
+                collection_list(witnesses.iter().map(|_| collection_scalar(None))),
+            ])
+        })
+        .collect()
+}
+
+const VERTEX_COLLECTION_TEXT: &str = "MATCH (a) RETURN a,a.p,\
+    [(a)-[s]->(b) | b.p] AS values,\
+    [(a)-[s]->(b) | s.p] AS weights,\
+    [(a)-[s]->(b) | b.hidden] AS hidden_vertices,\
+    [(a)-[s]->(b) | s.hidden] AS hidden_edges";
+
+#[test]
+fn authorized_vertex_collections_admit_every_endpoint_and_field_before_projection() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let slim = runtime.block_on(collection_database(&commit, false));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let calls = Cell::new(0_u64);
+    let clock = || {
+        calls.set(calls.get() + 1);
+        100
+    };
+    let mut scoped = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    let mut visible = slim
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    for (direction, pattern) in [
+        (0, "(a)-[s]->(b)"),
+        (1, "(a)<-[s]-(b)"),
+        (2, "(a)-[s]-(b)"),
+    ] {
+        let text = format!(
+            "MATCH (a) RETURN a,a.p,\
+             [{pattern} | b.p] AS values,[{pattern} | s.p] AS weights,\
+             [{pattern} | b.hidden] AS hidden_vertices,\
+             [{pattern} | s.hidden] AS hidden_edges"
+        );
+        let expected = vertex_collection_expected(direction);
+        let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+        let eager = scoped.execute(&cx, &prepared, &args).unwrap();
+        let before = calls.get();
+        let mut cursor = scoped.stream(&cx, &prepared, &args).unwrap();
+        let columns = cursor.columns().to_vec();
+        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let checkpoints = calls.get() - before;
+        assert_eq!(rows, expected, "{text}");
+        assert_eq!(native(columns, &rows), eager, "{text}");
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(cursor.next().is_none());
+        drop(cursor);
+        let prepared = visible.prepare(&cx, &text, &args).unwrap();
+        let before = calls.get();
+        let mut cursor = visible.stream(&cx, &prepared, &args).unwrap();
+        assert_eq!(
+            cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+            expected,
+            "{text}"
+        );
+        assert_eq!(calls.get() - before, checkpoints, "{text}");
+    }
+    // Probe and collection captures have separate local identities. Neither
+    // the probe's success nor a captured edge is cached authorization.
+    let text = "MATCH (a) WHERE EXISTS { MATCH (a)-[r]->(b) WHERE r.hidden IS NULL } \
+                RETURN a,[(a)-[s]->(b) | s] AS edges";
+    let prepared = scoped.prepare(&cx, text, &args).unwrap();
+    let rows = scoped
+        .stream(&cx, &prepared, &args)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let expected: Vec<_> = [1_u128, 3]
+        .into_iter()
+        .map(|a| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(a)),
+                collection_list(
+                    COLLECTION_EDGES
+                        .iter()
+                        .filter(|(_, from, _, _)| *from == a)
+                        .map(|&(eid, ..)| GraphValue::Edge(EId(eid))),
+                ),
+            ])
+        })
+        .collect();
+    assert_eq!(rows, expected);
+    for collected in [
+        "[(a)-[s:R]->(b:H) | b.p]",
+        "[(a)-[s:S]->(b) | b.p]",
+        "[(a)-[s:R]->(b) WHERE b.hidden = 999 | b.p]",
+        "[(a)-[s:R]->(b) WHERE s.hidden = 999 | s.p]",
+    ] {
+        let text = format!("MATCH (a) RETURN a,{collected} AS values");
+        let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+        assert_eq!(
+            scoped
+                .stream(&cx, &prepared, &args)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            [1_u128, 3, 4].map(|a| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(a)),
+                collection_list([]),
+            ])),
+            "{text}"
+        );
+    }
+    let mut limited = db
+        .authorized_read_session(
+            &cx,
+            &authority,
+            &token,
+            BRANCH,
+            symbols,
+            GqlQueryPolicy::new(1, 1000, 10_000_000, 10_000_000),
+            || 100,
+        )
+        .unwrap();
+    let prepared = limited.prepare(&cx, VERTEX_COLLECTION_TEXT, &args).unwrap();
+    let mut cursor = limited.stream(&cx, &prepared, &args).unwrap();
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(QueryError::Stream(GqlQueryError::Rows(_))))
+    ));
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(cursor.next().is_none());
+}
+
+#[test]
+fn authorized_collection_property_reads_keep_the_pinned_generation_after_writes_and_compaction() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let mut db = runtime.block_on(collection_database(&commit, true));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let mut session = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
+        .unwrap();
+    let prepared = session.prepare(&cx, VERTEX_COLLECTION_TEXT, &args).unwrap();
+    let mut paused = session.stream_send(&cx, &prepared, &args).unwrap();
+    let basis = paused.snapshot_seq();
+    let mut edit = WriteBatch::new(RelationId(1));
+    edit.set_vertex_property(
+        VId(3),
+        PropertyKeyId(1),
+        Some(CanonicalScalar::Int(300)),
+    );
+    edit.add_edge(
+        EId(30),
+        VId(4),
+        VId(1),
+        vec![(PropertyKeyId(1), CanonicalScalar::Int(32))],
+    );
+    runtime.block_on(db.write(&commit, edit)).unwrap();
+    runtime.block_on(db.compact(&commit)).unwrap();
+    {
+        let mut current = db
+            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
+            .unwrap();
+        let query = current.prepare(&cx, VERTEX_COLLECTION_TEXT, &args).unwrap();
+        assert_ne!(
+            current
+                .stream(&cx, &query, &args)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            vertex_collection_expected(0)
+        );
+    }
+    drop(db);
+    assert_eq!(paused.snapshot_seq(), basis);
+    assert_eq!(
+        paused.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        vertex_collection_expected(0)
+    );
+    assert_eq!(paused.state(), VertexScanState::Exhausted);
+    assert!(paused.next().is_none());
+}
