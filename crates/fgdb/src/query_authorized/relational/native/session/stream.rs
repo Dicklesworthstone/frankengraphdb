@@ -718,22 +718,24 @@ fn compile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<RowPlan, Que
 }
 
 fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<(), QueryError> {
-    // Collection paths retain only compiler-proven local fixed hops. Probe
-    // captures remain single-edge; outer and nested capture export refuses.
-    // Both producers use the same scoped incidence, edge and endpoint readers;
-    // collection fields use the separately admitted property routes at this cut.
-    // The native compiler still proves connected fixed paths, operand domains,
-    // scope-local IDs, capture bounds and the complete output profile.
-    // Keep this source fence shared by row and aggregate factories.
+    // Collection paths retain only compiler-proven local fixed hops. Terminal
+    // child probes constrain complete witnesses through the same scoped
+    // incidence, edge, endpoint and property readers. Their captures stay
+    // single-edge and local; neither a child nor an outer capture is exported.
+    // The native compiler proves the terminal layout, operand domains, local
+    // identities, capture bounds and complete output profile. This shared
+    // row/aggregate fence admits only Collect -> Probe nesting, at depth two.
     let operators = pattern.plan().operators();
-    let mut scope: Option<(usize, bool)> = None;
+    let mut scopes = [(0_usize, false); 2];
+    let mut depth = 0_usize;
     for (operator, op) in operators.iter().enumerate() {
-        if scope.is_some_and(|(end, _)| end == operator) {
-            scope = None;
+        if depth != 0 && scopes[depth - 1].0 == operator {
+            depth -= 1;
         }
         match op {
             GlaOperator::Probe { group, end, .. } | GlaOperator::Collect { group, end, .. } => {
                 let end = *end as usize;
+                let collect = matches!(op, GlaOperator::Collect { .. });
                 let closes = match (op, operators.get(end)) {
                     (GlaOperator::Probe { .. }, Some(GlaOperator::ProbeEnd { group: close }))
                     | (
@@ -742,15 +744,23 @@ fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result
                     ) => close == group,
                     _ => false,
                 };
-                if scope.is_some() || end <= operator || !closes {
+                let within_parent = match depth {
+                    0 => true,
+                    1 => scopes[0].1 && !collect && end < scopes[0].0,
+                    _ => false,
+                };
+                if !within_parent || end <= operator || !closes {
                     return Err(plan_error(VertexScanBuildError { operator }));
                 }
-                scope = Some((end, matches!(op, GlaOperator::Collect { .. })));
+                scopes[depth] = (end, collect);
+                depth += 1;
             }
             GlaOperator::CapturePath { segments, .. }
                 if segments.is_empty()
                     || segments.len() > fgdb_gql::algebra::MAX_PATTERN_EDGES
-                    || scope.is_none_or(|(_, collect)| !collect && segments.len() != 1) =>
+                    || depth
+                        .checked_sub(1)
+                        .is_none_or(|index| !scopes[index].1 && segments.len() != 1) =>
             {
                 return Err(plan_error(VertexScanBuildError { operator }));
             }

@@ -1937,3 +1937,198 @@ fn root_edge_scan_work_is_linear_and_every_public_allowance_preserves_prefixes()
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn native_nested_collection_filters_keep_parent_witnesses_and_capture_frames() {
+    fn expected(edge_root: bool, direction: usize, predicate: usize) -> Vec<GraphValueRow> {
+        let edges = [
+            (0, WIDE, VId(0), 4),
+            (2, WIDE, VId(0), 5),
+            (3, WIDE, WIDE, 8),
+            (u128::MAX, VId(0), VId(u128::MAX), -1),
+        ];
+        let property = |id| {
+            if id == VId(0) {
+                3
+            } else if id == WIDE {
+                7
+            } else {
+                11
+            }
+        };
+        let values = |anchor| {
+            let mut values = Vec::new();
+            for (eid, from, to, weight) in edges {
+                let target = match direction {
+                    0 if from == anchor => to,
+                    1 if to == anchor => from,
+                    2 if from == anchor => to,
+                    2 if to == anchor => from,
+                    _ => continue,
+                };
+                // Each accepted parent contributes once, even when several
+                // child relationships satisfy EXISTS. Child and parent edge
+                // reuse domains are separate, including the self-loop.
+                let qualifying_child = edges
+                    .iter()
+                    .any(|&(_, start, _, weight)| start == target && weight > 3);
+                let accepted = match predicate {
+                    0 => qualifying_child,
+                    1 => !qualifying_child,
+                    _ => {
+                        edges.iter().any(|&(_, start, _, _)| start == target)
+                            && !edges.iter().any(|&(_, start, end, _)| {
+                                start == target && property(end) == 7
+                            })
+                    }
+                };
+                if accepted {
+                    values.push(GraphValue::List(
+                        vec![
+                            GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                                anchor,
+                                vec![(EId(eid), target)].into_boxed_slice(),
+                            )),
+                            GraphValue::Edge(EId(eid)),
+                            GraphValue::Vertex(target),
+                            GraphValue::Scalar(CanonicalScalar::Int(weight)),
+                            GraphValue::Scalar(CanonicalScalar::Int(property(target))),
+                        ]
+                        .into_boxed_slice(),
+                    ));
+                }
+            }
+            GraphValue::List(values.into_boxed_slice())
+        };
+        if edge_root {
+            edges
+                .into_iter()
+                .map(|(eid, from, to, _)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Edge(EId(eid)),
+                        GraphValue::Vertex(from),
+                        GraphValue::Vertex(to),
+                        values(to),
+                    ])
+                })
+                .collect()
+        } else {
+            [VId(0), WIDE, VId(u128::MAX)]
+                .into_iter()
+                .map(|id| {
+                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(id), values(id)])
+                })
+                .collect()
+        }
+    }
+
+    let ((), report) = run_async_under_lab(0x6e65_0025, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        for edge_root in [false, true] {
+            let (head, prefix, kind) = if edge_root {
+                ("MATCH (x)-[r:R]->(a)", "r,x,a", ScanKind::Edge)
+            } else {
+                ("MATCH (a)", "a", ScanKind::Vertex)
+            };
+            for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+                .into_iter()
+                .enumerate()
+            {
+                for (predicate, filter) in [
+                    "EXISTS { MATCH (b)-[t:R]->(c) WHERE t.p > 3 }",
+                    "NOT EXISTS { MATCH (b)-[t:R]->(c) WHERE t.p > 3 }",
+                    "EXISTS { MATCH (b)-[t:R]->(c) } \
+                     AND NOT EXISTS { MATCH (b)-[u:R]->(d) WHERE d.p = 7 }",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let text = format!(
+                        "{head} RETURN {prefix}, \
+                         [p = (a){left}[s:R]{right}(b) WHERE {filter} | \
+                         [p,s,b,s.p,b.p]] AS values"
+                    );
+                    let query = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+                    let (columns, mut cursor) = query.stream(&db, &cx, &args, policy()).unwrap();
+                    assert_eq!(cursor.kind(), kind);
+                    let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(rows, expected(edge_root, direction, predicate), "{text}");
+                    assert_eq!(
+                        result(columns, rows.clone()),
+                        query.execute(&db, &cx, &args, policy()).unwrap(),
+                        "{text}",
+                    );
+                    assert_eq!(cursor.state(), ScanState::Exhausted);
+                    assert_eq!(cursor.row_stats().result_rows, rows.len() as u64);
+                    assert!(cursor.next().is_none());
+                    if !edge_root && direction == 0 && predicate == 0 {
+                        let stats = cursor.row_stats();
+                        let evaluator = cursor.evaluator_stats();
+                        let exact = GqlQueryPolicy::new(
+                            stats.snapshot_records,
+                            stats.result_rows,
+                            evaluator.work_units,
+                            evaluator.scratch_entries,
+                        );
+                        let (_, mut retry) = query.stream(&db, &cx, &args, exact).unwrap();
+                        assert_eq!(
+                            retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                            rows,
+                        );
+                        assert_eq!(retry.row_stats(), stats);
+                        assert_eq!(retry.evaluator_stats(), evaluator);
+                    }
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn reached_child_errors_never_publish_a_partial_collection() {
+    let ((), report) = run_async_under_lab(0x6e65_0026, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        let query = PreparedNativeRead::prepare(
+            "MATCH (a) RETURN a, \
+             [(a)-[s:R]->(b) WHERE EXISTS { \
+             MATCH (b)-[t:R]->(c) WHERE 1/(t.p-5) > 0 } | s] AS values",
+            &args,
+            symbols,
+        )
+        .unwrap();
+        assert!(query.execute(&db, &cx, &args, policy()).is_err());
+        let (_, mut cursor) = query.stream(&db, &cx, &args, policy()).unwrap();
+        assert_eq!(
+            cursor.next().unwrap().unwrap().values(),
+            &[
+                GraphValue::Vertex(VId(0)),
+                GraphValue::List(Vec::new().into_boxed_slice()),
+            ],
+        );
+        // At WIDE the loop reaches a child whose first candidate is false
+        // and whose second divides by zero. No partial WIDE list escapes.
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Data(error)))
+                if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 1);
+        assert_eq!(cursor.state(), ScanState::Failed);
+        let stopped = (cursor.row_stats(), cursor.evaluator_stats());
+        cursor.close();
+        assert!(cursor.next().is_none());
+        assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), stopped);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

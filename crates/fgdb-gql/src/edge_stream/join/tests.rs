@@ -1412,6 +1412,427 @@ mod collections {
         assert!(crate::stream::VertexScanPlan::compile(query.plan()).is_err());
     }
 
+
+    #[derive(Clone, Copy, Debug)]
+    enum NestedProbeKind {
+        Correlated,
+        Independent,
+        FiniteWalk,
+    }
+
+    fn nested_definition(
+        directions: [GlaDirection; 2],
+        anti: bool,
+        kind: NestedProbeKind,
+        sibling: bool,
+        count: Option<u64>,
+    ) -> PreparedGraphPattern<GraphValueRow> {
+        let mut outer = GraphPatternBuilder::new();
+        outer.vertex("a").unwrap().vertex("b").unwrap();
+        outer.edge("a", R, GlaDirection::Forward, "b").unwrap();
+        outer.capture_edge("r", 0).unwrap();
+        let mut inner = GraphPatternBuilder::new();
+        inner.vertex("b").unwrap().vertex("c").unwrap();
+        inner.edge("b", R, directions[0], "c").unwrap();
+        inner.capture_edge("s", 0).unwrap();
+        inner.capture_path("p").unwrap();
+        let mut child = GraphPatternBuilder::new();
+        child.match_mode(GraphMatchMode::RepeatableElements);
+        let (start, target) = match kind {
+            NestedProbeKind::Independent => ("x", "c"),
+            _ => ("c", "b"),
+        };
+        child.vertex(start).unwrap().vertex("d").unwrap();
+        child.outer_vertex(target).unwrap();
+        if matches!(kind, NestedProbeKind::FiniteWalk) {
+            child
+                .walk(
+                    start,
+                    R,
+                    directions[1],
+                    "d",
+                    crate::GraphWalkBounds::new(2, 2).unwrap(),
+                )
+                .unwrap();
+        } else {
+            child.edge(start, R, directions[1], "d").unwrap();
+            child.capture_edge("t", 0).unwrap();
+        }
+        child.identity("d", target, true).unwrap();
+        let mut guard = GraphPatternBuilder::new();
+        guard.vertex("c").unwrap();
+        guard.edge("c", R, GlaDirection::Forward, "c").unwrap();
+        guard.capture_edge("u", 0).unwrap();
+        let mut collect =
+            GraphMatchClause::collect_tuple(&inner, vec!["b", "s", "c", "p"]);
+        collect.nested.push(if anti {
+            GraphMatchClause::not_exists(&child)
+        } else {
+            GraphMatchClause::exists(&child)
+        });
+        if sibling {
+            collect.nested.push(GraphMatchClause::not_exists(&guard));
+        }
+        outer
+            .prepare_values_with_clauses(
+                &[collect],
+                &[
+                    GraphColumn::path("r", "r", GraphPathFunction::Edge),
+                    GraphColumn::vertex("a", "a"),
+                    GraphColumn::vertex("b", "b"),
+                    GraphColumn::collection("tuples", 0),
+                ],
+                0,
+                count,
+            )
+            .unwrap()
+    }
+
+    // Child witnesses only decide a Boolean. Enumerate their complete edge
+    // products here without sharing cursor state, captures or incidence; the
+    // parent bag preserves its own parallel edges, paths and EId order.
+    fn nested_expected(
+        fixture: &Fixture,
+        directions: [GlaDirection; 2],
+        anti: bool,
+        kind: NestedProbeKind,
+        sibling: bool,
+    ) -> Vec<GraphValueRow> {
+        let child_edges: Vec<_> = fixture
+            .edges
+            .iter()
+            .flat_map(|(&eid, (a, b, _))| {
+                orientations(*a, *b, directions[1])
+                    .into_iter()
+                    .map(move |(a, b)| (eid, a, b))
+            })
+            .collect();
+        let mut rows = Vec::new();
+        for (&r, (a, b, _)) in &fixture.edges {
+            let mut tuples = Vec::new();
+            for (&s, (from, to, _)) in &fixture.edges {
+                for (start, c) in orientations(*from, *to, directions[0]) {
+                    if start != *b {
+                        continue;
+                    }
+                    let found = match kind {
+                        NestedProbeKind::Correlated => child_edges
+                            .iter()
+                            .any(|&(_, from, to)| from == c && to == *b),
+                        NestedProbeKind::Independent => {
+                            child_edges.iter().any(|&(_, _, to)| to == c)
+                        }
+                        NestedProbeKind::FiniteWalk => child_edges.iter().any(|&(_, from, mid)| {
+                            from == c
+                                && child_edges
+                                    .iter()
+                                    .any(|&(_, from, to)| from == mid && to == *b)
+                        }),
+                    };
+                    let blocked = sibling
+                        && fixture
+                            .edges
+                            .values()
+                            .any(|(from, to, _)| *from == c && *to == c);
+                    if found == anti || blocked {
+                        continue;
+                    }
+                    tuples.push(list(vec![
+                        GraphValue::Vertex(*b),
+                        GraphValue::Edge(s),
+                        GraphValue::Vertex(c),
+                        GraphValue::Path(GraphPath::new(*b, vec![(s, c)].into_boxed_slice())),
+                    ]));
+                }
+            }
+            rows.push(GraphValueRow::from_owned_values(vec![
+                GraphValue::Edge(r),
+                GraphValue::Vertex(*a),
+                GraphValue::Vertex(*b),
+                list(tuples),
+            ]));
+        }
+        rows
+    }
+
+    #[test]
+    fn nested_collection_probes_filter_complete_witnesses_without_multiplying_paths() {
+        use GlaDirection::{Forward as F, Reverse as R, Undirected as U};
+
+        for directions in [[F, F], [R, U], [U, R]] {
+            for kind in [
+                NestedProbeKind::Correlated,
+                NestedProbeKind::Independent,
+                NestedProbeKind::FiniteWalk,
+            ] {
+                for anti in [false, true] {
+                    for sibling in [false, true] {
+                        let query = nested_definition(directions, anti, kind, sibling, None);
+                        let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+                        for mask in [0, 3, 7, 11, 31, 63] {
+                            let mut fixture = Fixture::small(mask);
+                            fixture.vertices.insert(VId(u128::MAX));
+                            let expected =
+                                nested_expected(&fixture, directions, anti, kind, sibling);
+                            assert_eq!(eager(&query, &fixture), expected, "eager");
+                            let actual = EdgeScanCursor::new(
+                                fixture,
+                                plan.clone(),
+                                policy(),
+                                || Ok::<_, ()>(()),
+                            )
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap();
+                            assert_eq!(
+                                actual, expected,
+                                "{directions:?}/{kind:?}; anti={anti}; sibling={sibling}; mask={mask}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_collection_probe_failures_are_not_absence_or_partial_lists() {
+        for anti in [false, true] {
+            let query = nested_definition(
+                [GlaDirection::Forward; 2],
+                anti,
+                NestedProbeKind::Correlated,
+                false,
+                Some(1),
+            );
+            let edges = [
+                (0, 9, 0),
+                (1, 0, 1),
+                (2, 0, 2),
+                (3, 1, if anti { 3 } else { 0 }),
+                (4, 2, 0),
+            ];
+            let mut fixture = Fixture::from_edges(edges);
+            let expected = nested_expected(
+                &fixture,
+                [GlaDirection::Forward; 2],
+                anti,
+                NestedProbeKind::Correlated,
+                false,
+            );
+            assert!(!expected[0].values()[3].as_list().unwrap().is_empty());
+            // Parent edge 1 was accepted before parent edge 2 reaches this
+            // fallible child read. NOT EXISTS must propagate the same error.
+            fixture.fail_edge = Some(EId(4));
+            let drops = fixture.drops.clone();
+            let mut cursor = EdgeScanCursor::new(
+                fixture,
+                EdgeScanPlan::compile(query.plan()).unwrap(),
+                policy(),
+                || Ok::<_, ()>(()),
+            );
+            assert!(matches!(
+                cursor.next(),
+                Some(Err(GqlQueryError::Source(EdgeScanError::Source(
+                    "edge history unreadable"
+                ))))
+            ));
+            assert_eq!(cursor.row_stats().result_rows, 0);
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+            assert!(cursor.source.is_none());
+            assert!(cursor.traversal.is_none());
+            assert!(cursor.next().is_none());
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+
+        // A complete TRUE child witness stops before a later unreadable
+        // sibling edge, while the containing collection continues normally.
+        let query = nested_definition(
+            [GlaDirection::Forward; 2],
+            false,
+            NestedProbeKind::Correlated,
+            false,
+            Some(1),
+        );
+        let mut fixture = Fixture::from_edges([(0, 9, 0), (1, 0, 1), (2, 1, 0), (3, 1, 2)]);
+        let expected = nested_expected(
+            &fixture,
+            [GlaDirection::Forward; 2],
+            false,
+            NestedProbeKind::Correlated,
+            false,
+        );
+        fixture.fail_edge = Some(EId(3));
+        let mut cursor = EdgeScanCursor::new(
+            fixture,
+            EdgeScanPlan::compile(query.plan()).unwrap(),
+            policy(),
+            || Ok::<_, ()>(()),
+        );
+        assert_eq!(cursor.next().unwrap().unwrap(), expected[0]);
+        assert!(cursor.next().is_none());
+    }
+
+    #[test]
+    fn nested_collection_admission_requires_a_bounded_terminal_probe_tail() {
+        use crate::algebra::BindingSlot;
+
+        let query = nested_definition(
+            [GlaDirection::Forward; 2],
+            false,
+            NestedProbeKind::Correlated,
+            true,
+            Some(0),
+        );
+        let original = query.plan().operators();
+        let start = original
+            .iter()
+            .position(|op| matches!(op, GlaOperator::Collect { .. }))
+            .unwrap();
+        let (_, end) = probe::Collection::compile(original, start, 2).unwrap();
+        let children: Vec<_> = (start + 1..end)
+            .filter(|&at| matches!(original[at], GlaOperator::Probe { .. }))
+            .collect();
+        assert_eq!(children.len(), 2);
+        let GlaOperator::Probe {
+            group: first_group,
+            end: first_end,
+            ..
+        } = original[children[0]]
+        else {
+            unreachable!("the collection has two child probes")
+        };
+        let first_capture = (children[0] + 1..first_end as usize)
+            .find(|&at| matches!(original[at], GlaOperator::CapturePath { .. }))
+            .unwrap();
+        let parent_expansion = (start + 1..children[0])
+            .find(|&at| matches!(original[at], GlaOperator::Expand { .. }))
+            .unwrap();
+        for corruption in 0..7 {
+            let mut ops = original.to_vec();
+            match corruption {
+                0 => {
+                    let GlaOperator::Probe { end: close, .. } = &mut ops[children[0]] else {
+                        unreachable!()
+                    };
+                    *close = end as u32;
+                }
+                1 => {
+                    let GlaOperator::Probe { end: close, .. } = &mut ops[children[0]] else {
+                        unreachable!()
+                    };
+                    *close -= 1;
+                }
+                2 => {
+                    let GlaOperator::Probe { group, end, .. } = &mut ops[children[1]] else {
+                        unreachable!()
+                    };
+                    *group = first_group;
+                    let close = *end as usize;
+                    ops[close] = GlaOperator::ProbeEnd { group: first_group };
+                }
+                3 => {
+                    ops[children[1]] = GlaOperator::BindVertex { source: BindingSlot(0) };
+                }
+                4 => {
+                    let GlaOperator::CapturePath { segments, .. } = &mut ops[first_capture] else {
+                        unreachable!()
+                    };
+                    // This is a parent binding, not a child-local EId frame.
+                    segments[0] = BindingSlot(3);
+                }
+                5 => {
+                    ops[children[0]] = GlaOperator::Collect {
+                        group: first_group,
+                        end: first_end,
+                        slots: 0,
+                    };
+                    ops[first_end as usize] = GlaOperator::CollectEnd {
+                        group: first_group,
+                        value: None,
+                        tuple: None,
+                    };
+                }
+                6 => {
+                    // Child hops never satisfy the containing list's required
+                    // positive fixed hop.
+                    ops[parent_expansion] = GlaOperator::BindVertex { source: BindingSlot(0) };
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                probe::Collection::compile(&ops, start, 2).is_err(),
+                "malformed nested scope {corruption}"
+            );
+        }
+        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
+        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+
+        // A real compiler-produced grandchild also refuses; moving its bounds
+        // cannot turn it into a sibling or bypass the explicit depth limit.
+        let mut outer = GraphPatternBuilder::new();
+        outer.vertex("a").unwrap().vertex("b").unwrap();
+        outer.edge("a", R, GlaDirection::Forward, "b").unwrap();
+        outer.capture_edge("r", 0).unwrap();
+        let mut inner = GraphPatternBuilder::new();
+        inner.vertex("b").unwrap().vertex("c").unwrap();
+        inner.edge("b", R, GlaDirection::Forward, "c").unwrap();
+        let mut child = GraphMatchClause::exists(&inner);
+        child.nested.push(GraphMatchClause::exists(&inner));
+        let mut collect = GraphMatchClause::collect(&inner, Some("c"));
+        collect.nested.push(child);
+        let query = outer
+            .prepare_values_with_clauses(
+                &[collect],
+                &[
+                    GraphColumn::path("r", "r", GraphPathFunction::Edge),
+                    GraphColumn::vertex("a", "a"),
+                    GraphColumn::vertex("b", "b"),
+                    GraphColumn::collection("cs", 0),
+                ],
+                0,
+                Some(0),
+            )
+            .unwrap();
+        assert!(EdgeScanPlan::compile(query.plan()).is_err());
+
+        // Preserve the independently shipped bounded-TRAIL collection lane.
+        // This increment admits child constraints only on fixed-hop parents.
+        let mut walk = GraphPatternBuilder::new();
+        walk.match_mode(GraphMatchMode::DifferentEdges);
+        walk.vertex("b").unwrap().vertex("c").unwrap();
+        walk.walk(
+            "b",
+            R,
+            GlaDirection::Forward,
+            "c",
+            crate::GraphWalkBounds::new(1, 2).unwrap(),
+        )
+        .unwrap();
+        let mut child = GraphPatternBuilder::new();
+        child.vertex("c").unwrap().vertex("d").unwrap();
+        child.edge("c", R, GlaDirection::Forward, "d").unwrap();
+        for nested in [false, true] {
+            let mut collect = GraphMatchClause::collect(&walk, Some("c"));
+            if nested {
+                collect.nested.push(GraphMatchClause::exists(&child));
+            }
+            let query = outer
+                .prepare_values_with_clauses(
+                    &[collect],
+                    &[
+                        GraphColumn::path("r", "r", GraphPathFunction::Edge),
+                        GraphColumn::vertex("a", "a"),
+                        GraphColumn::vertex("b", "b"),
+                        GraphColumn::collection("cs", 0),
+                    ],
+                    0,
+                    Some(0),
+                )
+                .unwrap();
+            assert_eq!(EdgeScanPlan::compile(query.plan()).is_ok(), !nested);
+        }
+    }
+
     fn multi_hop_definition(
         directions: [GlaDirection; 2],
         mode: GraphMatchMode,
@@ -2158,6 +2579,20 @@ mod collections {
             independent_definition(
                 &[GlaDirection::Forward],
                 GraphMatchMode::DifferentEdges,
+                false,
+                Some(2),
+            ),
+            nested_definition(
+                [GlaDirection::Forward; 2],
+                false,
+                NestedProbeKind::Independent,
+                true,
+                Some(2),
+            ),
+            nested_definition(
+                [GlaDirection::Forward; 2],
+                true,
+                NestedProbeKind::FiniteWalk,
                 false,
                 Some(2),
             ),

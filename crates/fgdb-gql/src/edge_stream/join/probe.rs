@@ -53,6 +53,9 @@ mod tests;
 struct Step {
     binding: Binding,
     predicates: Vec<GlaOperator>,
+    // Collection-only terminal semi/anti joins. Their bindings and capture
+    // frames remain private; every accepted parent still contributes once.
+    probes: Vec<Probe>,
 }
 
 #[derive(Clone, Copy)]
@@ -141,14 +144,52 @@ impl Probe {
         // Translate only declarations inside THIS scope to compact local slots.
         // A reference to an outer or undeclared capture must never become NULL.
         let mut capture_slots = BTreeMap::<u32, LocalCapture>::new();
-        for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
+        let mut probe_groups = Vec::new();
+        let mut operators = ops.iter().enumerate().take(end).skip(start + 1);
+        while let Some((at, op)) = operators.next() {
             let bad = || EdgeScanBuildError { operator: at };
+            if let GlaOperator::Probe {
+                group,
+                end: child_end,
+                ..
+            } = op
+                && compound_captures
+            {
+                // The canonical scope compiler emits nested constraints only
+                // after a complete positive witness. A child uses the existing
+                // probe compiler, which refuses deeper nesting and foreign
+                // capture operands; no alternate matcher or truth cache runs.
+                if *child_end as usize <= at + 1
+                    || *child_end as usize >= end
+                    || *group as usize >= crate::algebra::MAX_PATTERN_IDENTITIES
+                    || probe_groups.contains(group)
+                    || matches!(ops[start], GlaOperator::Collect { group: parent, .. } if parent == *group)
+                {
+                    return Err(bad());
+                }
+                let step = steps.last_mut().ok_or_else(bad)?;
+                let (probe, child_end) = Self::compile(ops, at, width)?;
+                step.probes.push(probe);
+                probe_groups.push(*group);
+                for (nested, _) in operators.by_ref() {
+                    if nested == child_end {
+                        break;
+                    }
+                }
+                continue;
+            }
+            // Nothing except another complete sibling probe may follow the
+            // terminal tail. This also rejects malformed/interleaved bindings.
+            if !probe_groups.is_empty() {
+                return Err(bad());
+            }
             if let GlaOperator::DifferentEdges { segments } = op
                 && let [segment] = segments.as_slice()
                 && segment.ordinal() as usize == width - 1
                 && let Some(Step {
                     binding: Binding::Walk { search, .. },
                     predicates,
+                    ..
                 }) = steps.last_mut()
                 && predicates
                     .iter()
@@ -336,6 +377,7 @@ impl Probe {
                 steps.push(Step {
                     binding,
                     predicates: Vec::new(),
+                    probes: Vec::new(),
                 });
             } else {
                 steps
@@ -557,6 +599,18 @@ impl Probe {
                 ids.pop();
                 continue;
             };
+            let mut accepted = true;
+            for probe in &step.probes {
+                control(GlaExecutionEvent::Work)?;
+                if !probe.accepts(&ids, source, control, record)? {
+                    accepted = false;
+                    break;
+                }
+            }
+            if !accepted {
+                ids.pop();
+                continue;
+            }
             depth += 1;
             if depth == self.steps.len() {
                 control(GlaExecutionEvent::Work)?;
@@ -702,25 +756,39 @@ impl Collection {
         // keep separate positions even with copied outer predicate operands.
         // One correlated finite TRAIL atom preserves DFS route occurrences,
         // not endpoint support. It cannot mix scans or other expansion atoms.
-        // compile_body also rejects nested scopes and malformed path captures.
+        // Fixed parents may have terminal child probes. Only direct parent
+        // scans and expansion atoms determine the collection profile; child
+        // finite walks keep their existing endpoint-support EXISTS semantics.
+        // Nested constraints on a variable-length parent remain outside this
+        // profile until their route/error ordering has its own proof.
         let mut fixed = 0;
         let mut walks = 0;
         let mut scans = false;
-        for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
-            match op {
+        let mut probes = false;
+        let mut at = start + 1;
+        while at < end {
+            match &ops[at] {
                 GlaOperator::Expand { .. } => fixed += 1,
                 GlaOperator::ScanVertices => scans = true,
                 GlaOperator::VarLengthExpand { bounds, .. } if bounds.is_bounded() => walks += 1,
                 GlaOperator::VarLengthExpand { .. } => {
                     return Err(EdgeScanBuildError { operator: at });
                 }
+                GlaOperator::Probe { end: child_end, .. } => {
+                    if *child_end as usize <= at + 1 || *child_end as usize >= end {
+                        return Err(EdgeScanBuildError { operator: at });
+                    }
+                    probes = true;
+                    at = *child_end as usize;
+                }
                 _ => {}
             }
+            at += 1;
         }
         if (fixed == 0 && walks == 0)
             || fixed > MAX_PATTERN_EDGES
             || walks > 1
-            || (walks != 0 && (fixed != 0 || scans))
+            || (walks != 0 && (fixed != 0 || scans || probes))
         {
             return Err(bad());
         }
