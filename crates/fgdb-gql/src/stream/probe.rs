@@ -28,14 +28,35 @@ pub(super) fn accepts<S: VertexScanSource, C>(
         .map_err(|error| error.map_source(unpack))
 }
 
+// With one anonymous expansion, every raw field is the constant root,
+// the same single varying endpoint, or NULL. Canonical raw-value ordering
+// therefore preserves the eager VId witness order, including tuple fields
+// and duplicate edges. Infallible predicates may filter before normalization;
+// fallible Boolean/property comparisons must keep their original visit order.
+pub(super) fn endpoint_ordered_collection(operators: &[GlaOperator]) -> bool {
+    let mut expansions = 0;
+    for operator in operators {
+        match operator {
+            GlaOperator::Expand { .. } => expansions += 1,
+            GlaOperator::BindVertex { .. }
+            | GlaOperator::BindOuterVertex { .. }
+            | GlaOperator::Select { .. }
+            | GlaOperator::VertexIdentity { .. } => {}
+            _ => return false,
+        }
+    }
+    expansions == 1
+}
+
 pub(super) fn collect<S: VertexScanSource, C>(
     collection: &crate::edge_stream::Collection,
+    endpoint_ordered: bool,
     vid: VId,
     source: &S,
     control: &mut impl FnMut(VertexScanEvent) -> ScanResult<(), S::Error, C>,
     record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
 ) -> ScanResult<crate::algebra::GraphValue, S::Error, C> {
-    collection
+    let mut value = collection
         .evaluate(
             &[Some(vid)],
             &Lookup(source),
@@ -45,7 +66,16 @@ pub(super) fn collect<S: VertexScanSource, C>(
             },
             &mut || record().map_err(|error| error.map_source(EdgeScanError::Source)),
         )
-        .map_err(|error| error.map_source(unpack))
+        .map_err(|error| error.map_source(unpack))?;
+    if endpoint_ordered
+        && let GraphValue::List(values) = &mut value
+    {
+        // Reuse the governed, allocation-free sorter on the list we already
+        // retain. Normalize before the row VM reads properties or evaluates
+        // computed elements, whose order can affect visible expression errors.
+        crate::set_ops::sort_canonical_values(values, &mut |event| control(vertex_event(event)))?;
+    }
+    Ok(value)
 }
 
 /// Dynamic values in a collected witness use the same admitted property

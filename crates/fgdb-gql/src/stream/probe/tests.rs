@@ -891,41 +891,117 @@ fn collection_source_failures_never_become_absence_or_publish_partial_rows() {
     assert!(cursor.next().is_none());
 }
 
-#[test]
-fn anonymous_collections_preserve_the_existing_neighbor_order_by_refusing_streaming() {
+fn anonymous_collection_pattern(
+    direction: GlaDirection,
+    count: Option<u64>,
+) -> PreparedGraphPattern<GraphValueRow> {
     use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder};
 
     let mut outer = GraphPatternBuilder::new();
     outer.vertex("a").unwrap();
     let mut inner = GraphPatternBuilder::new();
     inner.vertex("a").unwrap().vertex("b").unwrap();
-    inner.edge("a", R, GlaDirection::Forward, "b").unwrap();
-    for count in [None, Some(0)] {
-        let pattern = outer
-            .prepare_values_with_clauses(
-                &[GraphMatchClause::collect(&inner, Some("b"))],
-                &[
-                    GraphColumn::vertex("id", "a"),
-                    GraphColumn::collection("neighbors", 0),
-                ],
-                0,
-                count,
-            )
-            .unwrap();
-        assert!(!pattern.plan().requires_identified_edges());
-        if count.is_none() {
-            // EId order would be [2, 1, 1]. The existing anonymous lane
-            // deliberately produces [1, 1, 2], preserving both parallel edges.
+    inner.edge("a", R, direction, "b").unwrap();
+    outer
+        .prepare_values_with_clauses(
+            &[
+                GraphMatchClause::collect(&inner, Some("b")),
+                GraphMatchClause::collect_tuple(&inner, vec!["b", "a", "b"]),
+                GraphMatchClause::collect(&inner, Some("a")),
+                GraphMatchClause::collect(&inner, None),
+            ],
+            &[
+                GraphColumn::vertex("id", "a"),
+                GraphColumn::collection("neighbors", 0),
+                GraphColumn::collection("tuples", 1),
+                GraphColumn::collection("roots", 2),
+                GraphColumn::collection("nulls", 3),
+            ],
+            0,
+            count,
+        )
+        .unwrap()
+}
+
+fn anonymous_collection_fixture(mask: usize) -> Fixture {
+    let mut fixture = Fixture::from_edges(
+        [
+            (0, 0, 2),
+            (1, 0, 1),
+            (2, 0, 1),
+            (3, 2, 0),
+            (4, 0, 0),
+            (u128::MAX, 2, 2),
+        ]
+        .into_iter()
+        .enumerate()
+        .filter(|(at, _)| mask & (1 << at) != 0)
+        .map(|(_, edge)| edge),
+    );
+    fixture
+        .vertices
+        .extend([VId(0), VId(1), VId(2), VId(3), VId(u128::MAX)]);
+    fixture
+}
+
+#[test]
+fn anonymous_collections_keep_endpoint_order_tuples_and_parallel_multiplicity() {
+    for mask in 0..64 {
+        for direction in [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ] {
+            let pattern = anonymous_collection_pattern(direction, None);
+            assert!(!pattern.plan().requires_identified_edges());
+            let fixture = anonymous_collection_fixture(mask);
+            // Complete physical relation, independent of the indexed walker
+            // and its governed sorter. EId order deliberately disagrees with
+            // endpoint order; parallel edges and self-loops remain witnesses.
+            let expected: Vec<_> = fixture
+                .vertices
+                .iter()
+                .map(|&root| {
+                    let mut endpoints: Vec<_> = fixture
+                        .edges
+                        .values()
+                        .filter_map(|&(from, to)| match direction {
+                            GlaDirection::Forward if from == root => Some(to),
+                            GlaDirection::Reverse if to == root => Some(from),
+                            GlaDirection::Undirected if from == root => Some(to),
+                            GlaDirection::Undirected if to == root => Some(from),
+                            _ => None,
+                        })
+                        .collect();
+                    endpoints.sort_unstable();
+                    vec![
+                        GraphValue::Vertex(root),
+                        collected_list(endpoints.iter().copied().map(GraphValue::Vertex)),
+                        collected_list(endpoints.iter().map(|&to| {
+                            collected_list([
+                                GraphValue::Vertex(to),
+                                GraphValue::Vertex(root),
+                                GraphValue::Vertex(to),
+                            ])
+                        })),
+                        collected_list(endpoints.iter().map(|_| GraphValue::Vertex(root))),
+                        collected_list(
+                            endpoints
+                                .iter()
+                                .map(|_| GraphValue::Scalar(CanonicalScalar::Null)),
+                        ),
+                    ]
+                })
+                .collect();
             let eager = pattern
                 .plan()
                 .execute_governed_with_element_properties(
-                    6,
-                    [VId(0), VId(1), VId(2)],
-                    [
-                        (EId(0), VId(0), R, VId(2)),
-                        (EId(1), VId(0), R, VId(1)),
-                        (EId(2), VId(0), R, VId(1)),
-                    ],
+                    (fixture.vertices.len() + fixture.edges.len()) as u64,
+                    fixture.vertices.iter().copied(),
+                    fixture
+                        .edges
+                        .iter()
+                        .map(|(&eid, &(from, to))| (eid, from, R, to)),
                     |_, _| Ok::<_, ()>(true),
                     |_, _| Ok(None),
                     |_, _| Ok(None),
@@ -933,14 +1009,171 @@ fn anonymous_collections_preserve_the_existing_neighbor_order_by_refusing_stream
                     || Ok::<_, ()>(()),
                 )
                 .unwrap();
-            assert_eq!(
-                eager.value[0].values(),
-                &[
-                    GraphValue::Vertex(VId(0)),
-                    collected_list([1, 1, 2].map(|id| GraphValue::Vertex(VId(id)))),
-                ],
+            assert_eq!(plain(&eager.value), expected, "eager mask={mask}, {direction:?}");
+            let mut cursor = VertexScanCursor::new(
+                fixture,
+                VertexScanPlan::compile(pattern.plan()).unwrap(),
+                policy(),
+                || Ok::<_, ()>(()),
             );
+            assert_eq!(
+                plain(&cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap()),
+                expected,
+                "stream mask={mask}, {direction:?}"
+            );
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            assert_eq!(cursor.row_stats().result_rows, 5);
         }
+    }
+}
+
+#[test]
+fn anonymous_collection_normalization_keeps_one_meter_and_terminal_prefixes() {
+    let pattern = anonymous_collection_pattern(GlaDirection::Forward, Some(2));
+    let plan = VertexScanPlan::compile(pattern.plan()).unwrap();
+    let mut total = 0;
+    let mut baseline =
+        VertexScanCursor::new(anonymous_collection_fixture(63), plan.clone(), policy(), || {
+            total += 1;
+            Ok::<_, usize>(())
+        });
+    let expected = baseline.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    let rows = baseline.row_stats();
+    let evaluator = baseline.evaluator_stats();
+    drop(baseline);
+    assert_eq!(expected.len(), 2);
+    for stop in 1..=total {
+        let fixture = anonymous_collection_fixture(63);
+        let drops = fixture.drops.clone();
+        let mut calls = 0;
+        let mut cursor = VertexScanCursor::new(fixture, plan.clone(), policy(), || {
+            calls += 1;
+            if calls == stop { Err(stop) } else { Ok(()) }
+        });
+        let mut delivered = Vec::new();
+        loop {
+            match cursor.next() {
+                Some(Ok(row)) => delivered.push(row),
+                Some(Err(GqlQueryError::Interrupted(at))) => {
+                    assert_eq!(at, stop);
+                    break;
+                }
+                other => panic!("anonymous normalization interruption became {other:?}"),
+            }
+        }
+        assert_eq!(delivered, expected[..delivered.len()]);
+        assert_eq!(cursor.row_stats().result_rows, delivered.len() as u64);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        let frozen = (cursor.row_stats(), cursor.evaluator_stats());
+        assert!(cursor.next().is_none());
+        assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), frozen);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(cursor);
+        assert_eq!(calls, stop);
+    }
+    let run = |budget| {
+        VertexScanCursor::new(
+            anonymous_collection_fixture(63),
+            plan.clone(),
+            budget,
+            || Ok::<_, usize>(()),
+        )
+    };
+    let exact = GqlQueryPolicy::new(
+        rows.snapshot_records,
+        rows.result_rows,
+        evaluator.work_units,
+        evaluator.scratch_entries,
+    );
+    let mut retry = run(exact);
+    assert_eq!(retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), expected);
+    assert_eq!((retry.row_stats(), retry.evaluator_stats()), (rows, evaluator));
+    for budget in [
+        GqlQueryPolicy::new(rows.snapshot_records - 1, u64::MAX, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, rows.result_rows - 1, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, u64::MAX, evaluator.work_units - 1, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, evaluator.scratch_entries - 1),
+    ] {
+        let mut cursor = run(budget);
+        let mut delivered = Vec::new();
+        loop {
+            match cursor.next() {
+                Some(Ok(row)) => delivered.push(row),
+                Some(Err(_)) => break,
+                None => panic!("one-short anonymous collection budget succeeded"),
+            }
+        }
+        assert_eq!(delivered, expected[..delivered.len()]);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().is_none());
+    }
+    let zero = anonymous_collection_pattern(GlaDirection::Forward, Some(0));
+    let fixture = anonymous_collection_fixture(63);
+    let roots = fixture.roots.clone();
+    let seeks = fixture.seeks.clone();
+    let mut cursor = VertexScanCursor::new(
+        fixture,
+        VertexScanPlan::compile(zero.plan()).unwrap(),
+        GqlQueryPolicy::new(0, 0, 0, 0),
+        || Ok::<_, ()>(()),
+    );
+    assert!(cursor.next().is_none());
+    assert_eq!(roots.load(Ordering::SeqCst), 0);
+    assert_eq!(seeks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn collection_order_uses_the_whole_plan_identity_profile() {
+    use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder};
+
+    let mut outer = GraphPatternBuilder::new();
+    outer.vertex("a").unwrap();
+    let mut anonymous = GraphPatternBuilder::new();
+    anonymous.vertex("a").unwrap().vertex("b").unwrap();
+    anonymous.edge("a", R, GlaDirection::Forward, "b").unwrap();
+    let mut identified = anonymous.clone();
+    identified.capture_edge("r", 0).unwrap();
+    let pattern = outer
+        .prepare_values_with_clauses(
+            &[
+                GraphMatchClause::collect(&anonymous, Some("b")),
+                GraphMatchClause::collect(&identified, Some("r")),
+            ],
+            &[
+                GraphColumn::vertex("id", "a"),
+                GraphColumn::collection("neighbors", 0),
+                GraphColumn::collection("edges", 1),
+            ],
+            0,
+            Some(1),
+        )
+        .unwrap();
+    assert!(pattern.plan().requires_identified_edges());
+    let mut cursor = VertexScanCursor::new(
+        anonymous_collection_fixture(63),
+        VertexScanPlan::compile(pattern.plan()).unwrap(),
+        policy(),
+        || Ok::<_, ()>(()),
+    );
+    assert_eq!(
+        cursor.next().unwrap().unwrap().values(),
+        &[
+            GraphValue::Vertex(VId(0)),
+            collected_list([2, 1, 1, 0].map(|id| GraphValue::Vertex(VId(id)))),
+            collected_list([0, 1, 2, 4].map(|id| GraphValue::Edge(EId(id)))),
+        ],
+    );
+    assert!(cursor.next().is_none());
+}
+
+#[test]
+fn anonymous_fallible_predicates_keep_their_typed_pre_source_refusal() {
+    for page in ["", " LIMIT 0"] {
+        let pattern = prepare(&format!(
+            "MATCH (a) RETURN a, \
+             [(a)-[:R]->(b) WHERE b.p / 0 = 1 | b] AS neighbors{page}"
+        ));
+        assert!(!pattern.plan().requires_identified_edges());
         let operator = pattern
             .plan()
             .operators()

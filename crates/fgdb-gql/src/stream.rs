@@ -12,9 +12,10 @@
 //! including its eager operands and governed scalar-expression scratch.
 //! Correlated/independent fixed-hop EXISTS/NOT EXISTS share the probe kernel;
 //! their private bindings neither multiply nor change the ordered outer row.
-//! Correlated fixed-edge Collect scopes with identified witness order reuse
-//! that same indexed traversal and retain one bounded, metered witness list
-//! per group until row projection.
+//! Correlated fixed-edge Collect scopes reuse that same indexed traversal
+//! and retain one bounded, metered witness list per group until projection.
+//! Identified scopes keep EId witness order. Anonymous single-hop scopes with
+//! infallible predicates normalize raw values to the eager endpoint order.
 //! Unsupported operators refuse before a source is driven; there is no eager
 //! fallback, AST interpreter, alternate property semantics or storage model.
 //!
@@ -80,6 +81,8 @@ pub struct VertexScanPlan<Row = VId> {
     offset: u64,
     count: Option<u64>,
     projection: Arc<GlaOperator>,
+    // Anonymous single-hop scopes use the eager lane's endpoint order.
+    endpoint_ordered_collections: bool,
     // Public rows trim only after the complete governed projection. Blocking
     // consumers retain every evaluation cell for their own terminal clauses.
     visible_columns: Option<usize>,
@@ -209,16 +212,19 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                     at = end;
                 }
                 Some(GlaOperator::Collect { .. }) => {
-                    // The eager endpoint-only lane sorts neighbors by VId.
-                    // This indexed walker visits EIds. Only an identified-edge
-                    // plan gives both executors the same witness/list order.
-                    if !plan.requires_identified_edges() {
-                        return Err(VertexScanBuildError { operator: at });
-                    }
                     let (collection, end) = crate::edge_stream::Collection::compile(operators, at, 1)
                         .map_err(|error| VertexScanBuildError {
                             operator: error.operator,
                         })?;
+                    // Identified plans keep the walker's EId witness order.
+                    // A single anonymous hop can normalize its retained raw
+                    // values before any fallible computed projection. Other
+                    // endpoint-only bodies remain outside this profile.
+                    if !plan.requires_identified_edges()
+                        && !probe::endpoint_ordered_collection(&operators[at + 1..end])
+                    {
+                        return Err(VertexScanBuildError { operator: at });
+                    }
                     if tests.iter().any(|test| {
                         matches!(test, Test::Collect(prior) if prior.group == collection.group)
                     }) {
@@ -307,6 +313,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             offset: *offset,
             count: *count,
             projection: Arc::new(operators[projection_at].clone()),
+            endpoint_ordered_collections: !plan.requires_identified_edges(),
             visible_columns: if public_rows {
                 plan.visible_columns
             } else {
@@ -339,7 +346,12 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                         collected.push(None);
                     }
                     collected[collection.group] = Some(self::probe::collect(
-                        collection, vid, source, control, record,
+                        collection,
+                        self.endpoint_ordered_collections,
+                        vid,
+                        source,
+                        control,
+                        record,
                     )?);
                 }
                 native if !accepts_native_test(native, vid, row, control)? => return Ok(None),

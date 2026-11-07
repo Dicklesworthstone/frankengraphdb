@@ -582,14 +582,60 @@ fn vertex_rooted_collection_budgets_and_late_errors_preserve_complete_prefixes()
             assert_eq!((refused.row_stats(), refused.evaluator_stats()), stopped);
         }
 
-        // Anonymous hops use endpoint order in the eager evaluator. The
-        // incidence cursor cannot promise that order from EIds, so reject this
-        // profile before opening a source, including an otherwise empty page.
+        // Anonymous hops retain eager endpoint order even when EId order
+        // disagrees and parallel edges contribute duplicate endpoints.
+        let mut opposed = WriteBatch::new(R);
+        opposed.add_edge(
+            EId(1),
+            WIDE,
+            VId(u128::MAX),
+            vec![(P, CanonicalScalar::Int(13))],
+        );
+        db.write(&commit, opposed).await.unwrap();
+        for value in ["b", "b.p"] {
+            for page in ["", " LIMIT 0"] {
+                let text = format!(
+                    "MATCH (a) RETURN a, [(a)-[:R]->(b) | {value}] AS neighbors{page}"
+                );
+                let anonymous = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+                let (columns, mut cursor) = anonymous.stream(&db, &cx, &args, policy()).unwrap();
+                let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                if page.is_empty() {
+                    let ordered = if value == "b" {
+                        [VId(0), VId(0), WIDE, VId(u128::MAX)]
+                            .map(GraphValue::Vertex)
+                    } else {
+                        [3, 3, 7, 11]
+                            .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                    };
+                    assert_eq!(rows[1].values()[1], GraphValue::List(ordered.into()));
+                } else {
+                    assert!(rows.is_empty());
+                    if value == "b" {
+                        assert_eq!(cursor.row_stats().snapshot_records, 0);
+                        assert_eq!(cursor.evaluator_stats().work_units, 0);
+                    } else {
+                        // A mapped Set page evaluates before selection.
+                        assert!(cursor.row_stats().snapshot_records > 3);
+                    }
+                }
+                assert_eq!(
+                    result(columns, rows),
+                    anonymous.execute(&db, &cx, &args, policy()).unwrap(),
+                );
+                assert_eq!(cursor.state(), ScanState::Exhausted);
+                assert!(cursor.next().is_none());
+            }
+        }
+        // Sorting completed endpoints cannot preserve the first failure of a
+        // fallible witness predicate evaluated in a different order.
         for page in ["", " LIMIT 0"] {
-            let text = format!("MATCH (a) RETURN a, [(a)-[:R]->(b) | b] AS neighbors{page}");
-            let anonymous = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+            let text = format!(
+                "MATCH (a) RETURN a, [(a)-[:R]->(b) WHERE b.p / 0 = 1 | b] AS neighbors{page}"
+            );
+            let fallible = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
             assert!(matches!(
-                anonymous.stream(&db, &cx, &args, GqlQueryPolicy::new(0, 0, 0, 0)),
+                fallible.stream(&db, &cx, &args, GqlQueryPolicy::new(0, 0, 0, 0)),
                 Err(QueryError::Stream(GqlQueryError::Source(
                     fgdb_gql::stream::VertexScanError::Plan(_)
                 )))
