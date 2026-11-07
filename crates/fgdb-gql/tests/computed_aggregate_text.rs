@@ -477,6 +477,80 @@ fn aggregate_arguments_cannot_depend_on_output_element_scopes() {
 }
 
 #[test]
+fn endpoint_aggregate_inputs_refuse_enclosing_locals_before_catalog_resolution() {
+    for text in [
+        "MATCH (a)-[r:R]->(b) RETURN [r IN collect(a.p) | count(startNode(r))] AS values",
+        "MATCH (a)-[r:R]->(b) RETURN [r IN collect(a.p) | count(endNode(r))] AS values",
+        "MATCH (a)-[r:R]->(b) RETURN [x IN collect(r) | count(startNode(x))] AS values",
+        "MATCH (a)-[r:R]->(b) RETURN [x IN collect(r) | count(startNode([x][0]))] AS values",
+        "MATCH (a)-[r:R]->(b) RETURN [x IN collect([r]) | count(startNode(x[0]))] AS values",
+        "MATCH (a)-[r:R]->(b) RETURN [x IN collect(r) | count(startNode(x).p)] AS values",
+        "MATCH (a)-[r:R]->(b) RETURN [x IN collect(r) | count([y IN [1] | startNode(x)])] AS values",
+        "MATCH (a)-[r:R]->(b) RETURN [x IN collect(r) | count(CASE WHEN true THEN startNode(x) ELSE NULL END)] AS values",
+        "MATCH (n) RETURN [x IN collect([1]) | count(x[0])] AS values",
+        "MATCH (n) RETURN [x IN collect([1]) | count(x < [2])] AS values",
+        "MATCH (n) RETURN [x IN collect({p: 1}) | count(x.p)] AS values",
+        "MATCH (n) RETURN [x IN collect(n.p) | percentileDisc(x, 0.5)] AS values",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphAggregateText::prepare(text, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+}
+
+#[test]
+fn aggregate_inputs_keep_their_own_nested_element_scopes() {
+    use fgdb_gql::GraphAggregateValue;
+    use fgdb_gql::algebra::GraphValue;
+
+    let vertices = [VId(1), VId(2), VId(3), VId(4)];
+    let props = properties();
+    for (text, expected) in [
+        (
+            "MATCH (n) RETURN [n IN collect(n.p) | count([n IN [1, 2] | n])] AS values",
+            4,
+        ),
+        (
+            "MATCH (n) RETURN [x IN collect(n.p) | sum(reduce(total=0, x IN [1, 2] | total+x))] AS values",
+            12,
+        ),
+        (
+            "MATCH (n) RETURN [x IN collect(n.p) | count([r IN [NULL] | startNode(r)])] AS values",
+            4,
+        ),
+        (
+            "MATCH (n) RETURN [x IN collect(n.p) | count([r IN [NULL] | endNode(r)])] AS values",
+            4,
+        ),
+    ] {
+        let plan = prepare(text);
+        let frozen = plan.canonical_bytes();
+        for (input, values) in [(&vertices[..], vec![expected; 4]), (&[][..], vec![])] {
+            let rows = run(&plan, input, &[], &props).unwrap().value;
+            assert_eq!(rows.len(), 1, "{text}");
+            assert_eq!(
+                rows[0].values(),
+                &[GraphAggregateValue::Value(GraphValue::List(
+                    values
+                        .into_iter()
+                        .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                        .collect()
+                ))],
+                "{text}"
+            );
+        }
+        assert_eq!(plan.canonical_bytes(), frozen, "{text}");
+    }
+}
+
+#[test]
 fn aggregate_list_predicates_keep_three_valued_empty_and_null_laws() {
     use fgdb_gql::GraphAggregateValue;
     use fgdb_gql::algebra::GraphValue;

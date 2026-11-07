@@ -1177,9 +1177,11 @@ struct Parser<'a> {
     grouped_comprehensions: Option<HoistedReads>,
     /// The rand() calls read so far: the next call's site (fgdb-13l85).
     random_sites: u32,
-    /// An aggregate function's argument is being read. openCypher refuses a
-    /// non-constant rand() there (Return6 [15], NonConstantExpression).
-    aggregate_argument: bool,
+    /// An aggregate argument is being read: enclosing element locals below
+    /// this index exist only after aggregation and cannot be input operands.
+    /// Locals introduced inside the argument remain legal. Also refuses a
+    /// non-constant rand() (Return6 [15], NonConstantExpression).
+    aggregate_argument: Option<usize>,
     /// The value reader asks the resolver for a percentile's collected
     /// argument (fgdb-qbaex): a resolver that registers a hidden collect of
     /// the expression here clears it, and one that leaves it set refuses.
@@ -1338,7 +1340,7 @@ impl<'a> Parser<'a> {
             comprehension_reads: None,
             grouped_comprehensions: None,
             random_sites: 0,
-            aggregate_argument: false,
+            aggregate_argument: None,
             percentile_leaf: false,
             collected_scalar_calls: 0,
             having_operand: false,
@@ -1552,6 +1554,20 @@ impl<'a> Parser<'a> {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
         Ok(())
+    }
+
+    /// Resolve a lexical element without capturing a post-aggregate local
+    /// into an input expression evaluated before that local exists.
+    fn element_offset(&self, binding: usize, at: usize) -> Result<usize, GraphPatternTextError> {
+        if self.aggregate_argument.is_some_and(|base| binding < base) {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Expected(
+                    "an aggregate argument independent of enclosing element locals",
+                ),
+            ));
+        }
+        Ok(self.elements.len() - 1 - binding)
     }
 
     fn variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {

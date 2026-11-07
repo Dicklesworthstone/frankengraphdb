@@ -598,7 +598,7 @@ impl<'a> Parser<'a> {
         aggregates: &mut Vec<ReadAggregateSpec>,
     ) -> Result<usize, GraphSetTextError> {
         // rand() in the argument is a non-constant expression.
-        let outer = core::mem::replace(&mut self.aggregate_argument, true);
+        let outer = self.aggregate_argument.replace(self.elements.len());
         let input = self.with_input(schema, inputs);
         self.aggregate_argument = outer;
         let (column, _, _) = input?;
@@ -635,7 +635,7 @@ impl<'a> Parser<'a> {
             (None, GraphSetColumnType::Scalar)
         } else {
             // rand() in the argument is a non-constant expression.
-            let outer = core::mem::replace(&mut self.aggregate_argument, true);
+            let outer = self.aggregate_argument.replace(self.elements.len());
             let input = self.with_input(schema, inputs);
             self.aggregate_argument = outer;
             let (column, kind, _) = input?;

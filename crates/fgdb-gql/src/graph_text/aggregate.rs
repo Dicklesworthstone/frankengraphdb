@@ -1683,7 +1683,7 @@ impl<'a> Parser<'a> {
                 ),
             ));
         }
-        let outer = core::mem::replace(&mut self.aggregate_argument, true);
+        let outer = self.aggregate_argument.replace(self.elements.len());
         let argument = self.aggregate_expression(computed);
         self.aggregate_argument = outer;
         argument

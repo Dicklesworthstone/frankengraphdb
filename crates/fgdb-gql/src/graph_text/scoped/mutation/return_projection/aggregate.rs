@@ -246,7 +246,7 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         // The call's own argument: rand() there is a non-constant expression
         // (Return6 [15]), as in the graph aggregate's arguments.
-        let outer = core::mem::replace(&mut self.aggregate_argument, true);
+        let outer = self.aggregate_argument.replace(self.elements.len());
         let column = inputs.read(self, schema);
         self.aggregate_argument = outer;
         let column = column?;
@@ -418,7 +418,7 @@ impl PreparedGraphPipelineAggregateText {
                         // which the value reader applies the percentile to
                         // (fgdb-qbaex).
                         if core::mem::take(&mut parser.percentile_leaf) {
-                            let outer = core::mem::replace(&mut parser.aggregate_argument, true);
+                            let outer = parser.aggregate_argument.replace(parser.elements.len());
                             let column = inputs.read(parser, &schema);
                             parser.aggregate_argument = outer;
                             let column = match column {

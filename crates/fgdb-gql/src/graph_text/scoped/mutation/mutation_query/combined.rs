@@ -252,7 +252,7 @@ impl<'a> Parser<'a> {
         } else {
             // Raw leaves cannot resolve another summary: nested aggregates
             // refuse, and volatile-argument admission keeps its normal flag.
-            let outer = core::mem::replace(&mut self.aggregate_argument, true);
+            let outer = self.aggregate_argument.replace(self.elements.len());
             let value = self.read_write_value(raw, 0);
             self.aggregate_argument = outer;
             let value = value?;

@@ -938,8 +938,9 @@ impl<'a> Parser<'a> {
                     TokenKind::Punct(b'.' | b'(' | b'[')
                 )
             {
+                let offset = self.element_offset(binding, at)?;
                 self.advance()?;
-                return Ok(ReadValueTemplate::Local(self.elements.len() - 1 - binding));
+                return Ok(ReadValueTemplate::Local(offset));
             }
         } else if let Some(column) = self.row_any_column(self.routing_row(columns))?
             && !tighter
@@ -2525,7 +2526,7 @@ impl<'a> Parser<'a> {
         };
         match self.lexer.clone().next()?.kind {
             TokenKind::Punct(b'.') if self.lets.is_some() => {
-                let element = ReadValueTemplate::Local(self.elements.len() - 1 - binding);
+                let element = ReadValueTemplate::Local(self.element_offset(binding, at)?);
                 self.advance()?;
                 let value = self.map_entries(element)?;
                 self.let_slot(program, value, at)?;
@@ -2540,8 +2541,8 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Punct(b'(') => return Ok(false),
             _ => {
+                let offset = self.element_offset(binding, at)?;
                 self.advance()?;
-                let offset = self.elements.len() - 1 - binding;
                 emit(program, ParsedOp::Bound(GraphIntegerOp::Local(offset)), at)?;
             }
         }

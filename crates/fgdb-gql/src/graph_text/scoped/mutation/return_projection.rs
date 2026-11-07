@@ -2985,8 +2985,9 @@ impl<'a> Parser<'a> {
             if let TokenKind::Word(word) = self.current.kind
                 && let Some(binding) = self.elements.iter().rposition(|name| *name == word)
             {
+                let offset = self.element_offset(binding, at)?;
                 self.advance()?;
-                ReadValueTemplate::Local(self.elements.len() - 1 - binding)
+                ReadValueTemplate::Local(offset)
             } else if let Some(resolve) = resolve.as_mut() {
                 let operand = match resolve.leaf(self)? {
                     Some(column) => Operand::Column(column),
@@ -3600,7 +3601,7 @@ impl<'a> Parser<'a> {
     #[inline(never)]
     fn random_value(&mut self) -> Result<ReadValueTemplate, GraphSetTextError> {
         let at = self.current.at;
-        if self.aggregate_argument {
+        if self.aggregate_argument.is_some() {
             return Err(GraphSetTextError {
                 offset: at,
                 kind: GraphSetTextErrorKind::Expected(

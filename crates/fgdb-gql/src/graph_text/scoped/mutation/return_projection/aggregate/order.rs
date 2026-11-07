@@ -47,7 +47,7 @@ fn expression<'a>(
             scoped: Vec::new(),
         });
         let summary = if core::mem::take(&mut parser.percentile_leaf) {
-            let outer = core::mem::replace(&mut parser.aggregate_argument, true);
+            let outer = parser.aggregate_argument.replace(parser.elements.len());
             let column = inputs.read(parser, schema);
             parser.aggregate_argument = outer;
             Some(column.map(|column| (GraphAggregateFunction::Collect, Some(column))))

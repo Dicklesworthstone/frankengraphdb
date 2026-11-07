@@ -171,7 +171,7 @@ impl<'a> Parser<'a> {
                     )
                 } else {
                     // rand() in the argument is a non-constant expression.
-                    let outer = core::mem::replace(&mut self.aggregate_argument, true);
+                    let outer = self.aggregate_argument.replace(self.elements.len());
                     let value = self.read_write_value(leaves, 0);
                     self.aggregate_argument = outer;
                     value?
