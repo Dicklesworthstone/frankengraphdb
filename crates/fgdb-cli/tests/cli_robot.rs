@@ -3586,8 +3586,10 @@ fn sealed_prism_cli_preflights_before_writable_open() {
                 "KNOWS",
                 "CALL fnx.eigenvector_centrality() YIELD vertex,score",
             ],
-            3,
-            "query",
+            // Directed eigenvector is implemented at signature epoch 29.
+            // The exact original argv now reaches the read-only opener.
+            4,
+            "open",
         ),
         (
             &[
@@ -3727,6 +3729,18 @@ fn sealed_prism_cli_preflights_before_writable_open() {
     // These registered compressed procedures pass graph-kind preflight and
     // reach the read-only open. A missing database still must not be created.
     for (direction, call) in [
+        (
+            "directed",
+            "CALL fnx.eigenvector_centrality() YIELD vertex,score",
+        ),
+        (
+            "reversed",
+            "CALL fnx.eigenvector_centrality() YIELD vertex,score",
+        ),
+        (
+            "undirected",
+            "CALL fnx.eigenvector_centrality() YIELD vertex,score",
+        ),
         (
             "directed",
             "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",

@@ -799,7 +799,11 @@ impl std::fmt::Display for RowError {
             RowErrorDetail::Read(error) => std::fmt::Display::fmt(error, f),
             RowErrorDetail::Decode(error) => f.write_str(error),
             RowErrorDetail::Interrupted(error) => {
-                write!(f, "load parsing interrupted: {error}")
+                write!(f, "load parsing interrupted: {error}")?;
+                if let Some(reason) = error.cancel_reason() {
+                    write!(f, ": {reason}")?;
+                }
+                Ok(())
             }
         }
     }
@@ -816,7 +820,10 @@ impl std::error::Error for RowError {
 impl RowError {
     fn failure(&self) -> Failure {
         match &self.detail {
-            RowErrorDetail::Interrupted(error) => super::execution_failure(error.clone()),
+            RowErrorDetail::Interrupted(error) => Failure {
+                message: self.to_string(),
+                ..super::execution_failure(error.clone())
+            },
             _ => line_error(self.line, "MalformedRow", self),
         }
     }

@@ -865,10 +865,24 @@ fn projected_vertex_pulls_preserve_temporal_cuts_budgets_and_late_errors() {
         assert_eq!(cursor.state(), VertexScanState::Failed);
         assert!(cursor.next().is_none());
 
+        // This exact source-order window now has a native pull plan. Keep
+        // the original input and require a complete, empty pinned result.
+        let zero = PreparedNativeRead::prepare(
+            "MATCH (n) RETURN n AS id,n.p+1 AS p LIMIT 0",
+            &empty,
+            symbols,
+        )
+        .unwrap();
+        let (_, mut cursor) = zero.stream(&db, &cx, &empty, policy()).unwrap();
+        assert_eq!(cursor.snapshot_seq(), CommitSeq(2));
+        assert!(cursor.next().is_none());
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(cursor.next().is_none());
+
         for text in [
             "MATCH (n) RETURN n.p+1 AS p",
             "MATCH (n) RETURN n AS id,n.p+1 AS p ORDER BY p",
-            "MATCH (n) RETURN n AS id,n.p+1 AS p LIMIT 0",
             "MATCH (n) RETURN n AS id,1 AS p UNION ALL MATCH (m) RETURN m AS id,2 AS p",
         ] {
             let query = PreparedNativeRead::prepare(text, &empty, symbols).unwrap();

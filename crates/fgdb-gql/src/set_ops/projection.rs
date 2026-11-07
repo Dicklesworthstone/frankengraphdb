@@ -3023,7 +3023,7 @@ where
                 let members = list_members(&list, control)
                     .map_err(ProjectionFailure::Control)?
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
-                let mut scope = element_scope(row, 1, control)?;
+                let mut scope = element_scope(row.values(), 1, control)?;
                 let mut kept = Vec::new();
                 for member in members.iter() {
                     scope.set_from_end(
@@ -3078,7 +3078,7 @@ where
                 let members = list_members(&list, control)
                     .map_err(ProjectionFailure::Control)?
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
-                let mut scope = element_scope(row, 1, control)?;
+                let mut scope = element_scope(row.values(), 1, control)?;
                 let mut results = Vec::new();
                 for member in members.iter() {
                     scope.set_from_end(
@@ -3168,7 +3168,7 @@ where
                 let members = list_members(&list, control)
                     .map_err(ProjectionFailure::Control)?
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
-                let mut scope = element_scope(row, 2, control)?;
+                let mut scope = element_scope(row.values(), 2, control)?;
                 for member in members.iter() {
                     scope.set_from_end(1, accumulator);
                     scope.set_from_end(
@@ -3404,7 +3404,17 @@ where
                     evaluate_value_at(value, row, column, control, depth + 1, nodes, reserve)
                 )?);
             }
-            let mut scope = element_scope(row, computed.len(), control)?;
+            // Tuple maps often read only these new locals. Copying their
+            // enclosing collection once per member makes linear projection
+            // quadratic. Retain the prefix whenever any body path may read it.
+            let prefix = if scope_reads_prefix(body, computed.len(), control)
+                .map_err(ProjectionFailure::Control)?
+            {
+                row.values()
+            } else {
+                &[]
+            };
+            let mut scope = element_scope(prefix, computed.len(), control)?;
             for (slot, value) in computed.into_iter().rev().enumerate() {
                 scope.set_from_end(slot, value);
             }
@@ -4377,15 +4387,128 @@ pub(crate) fn map_keys<E>(
     Ok(texts.into_boxed_slice())
 }
 
-/// Copy `row` into a list-comprehension element scope, under the same
+/// Whether a checked expression can read before its `locals` innermost slots.
+/// Inspect lazy branches too, without evaluating them or reading graph data.
+/// Random draws conservatively retain their complete original lexical frame.
+fn scope_reads_prefix<E>(
+    value: &GraphSetValue,
+    locals: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<bool, E> {
+    fn any<'a, E>(
+        values: impl IntoIterator<Item = &'a GraphSetValue>,
+        locals: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        for value in values {
+            if scope_reads_prefix(value, locals, control)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    control(GlaExecutionEvent::Work)?;
+    Ok(match value {
+        GraphSetValue::Column(_) | GraphSetValue::Random { .. } => true,
+        GraphSetValue::Local(offset) => *offset >= locals,
+        GraphSetValue::Literal(_) | GraphSetValue::TypedNull(_) | GraphSetValue::Value(_) => false,
+        GraphSetValue::Integer(expression) => {
+            // Reserve both checked-bytecode scans before inspecting references.
+            for _ in 0..expression.instruction_count() {
+                control(GlaExecutionEvent::Work)?;
+                control(GlaExecutionEvent::Work)?;
+            }
+            expression.referenced_columns().next().is_some()
+                || expression
+                    .referenced_locals()
+                    .any(|offset| offset >= locals)
+        }
+        GraphSetValue::List(values) => any(values, locals, control)?,
+        GraphSetValue::Size(value)
+        | GraphSetValue::Keys(value)
+        | GraphSetValue::MapGet { map: value, .. }
+        | GraphSetValue::ElementMetadata { value, .. }
+        | GraphSetValue::Temporal {
+            argument: value, ..
+        }
+        | GraphSetValue::Function {
+            argument: value, ..
+        } => scope_reads_prefix(value, locals, control)?,
+        GraphSetValue::Index {
+            list: left,
+            index: right,
+        }
+        | GraphSetValue::In {
+            value: left,
+            list: right,
+        }
+        | GraphSetValue::Equal { left, right }
+        | GraphSetValue::Ordered { left, right, .. } => {
+            scope_reads_prefix(left, locals, control)?
+                || scope_reads_prefix(right, locals, control)?
+        }
+        GraphSetValue::Comprehension { list, filter, map } => {
+            scope_reads_prefix(list, locals, control)?
+                || any(
+                    filter.as_deref().into_iter().chain(map.as_deref()),
+                    locals + 1,
+                    control,
+                )?
+        }
+        GraphSetValue::Quantifier {
+            list, predicate, ..
+        } => {
+            scope_reads_prefix(list, locals, control)?
+                || scope_reads_prefix(predicate, locals + 1, control)?
+        }
+        GraphSetValue::Slice { list, from, to } => {
+            scope_reads_prefix(list, locals, control)?
+                || any(
+                    from.as_deref().into_iter().chain(to.as_deref()),
+                    locals,
+                    control,
+                )?
+        }
+        GraphSetValue::Range { start, end, step } => {
+            scope_reads_prefix(start, locals, control)?
+                || scope_reads_prefix(end, locals, control)?
+                || any(step.as_deref(), locals, control)?
+        }
+        GraphSetValue::Reduce { init, list, expr } => {
+            scope_reads_prefix(init, locals, control)?
+                || scope_reads_prefix(list, locals, control)?
+                || scope_reads_prefix(expr, locals + 2, control)?
+        }
+        GraphSetValue::MapLiteral { values, guard, .. } => {
+            any(values.iter().chain(guard.as_deref()), locals, control)?
+        }
+        GraphSetValue::MapOverlay { base, values, .. } => {
+            scope_reads_prefix(base, locals, control)? || any(values, locals, control)?
+        }
+        GraphSetValue::Let { values, body } => {
+            any(values, locals, control)?
+                || scope_reads_prefix(body, locals + values.len(), control)?
+        }
+        GraphSetValue::Case { arms, otherwise } => any(
+            arms.iter()
+                .flat_map(|(condition, value)| [condition, value])
+                .chain(otherwise.as_deref()),
+            locals,
+            control,
+        )?,
+    })
+}
+
+/// Copy `values` into a list-comprehension element scope, under the same
 /// per-value reservations as any other row copy.
 fn element_scope<E>(
-    row: &GraphValueRow,
+    prefix: &[GraphValue],
     slots: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<GraphValueRow, ProjectionFailure<E>> {
     let mut values = Vec::new();
-    for value in row.values() {
+    for value in prefix {
         control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
         values.push(copy_value(value, control).map_err(ProjectionFailure::Control)?);
     }
@@ -4468,6 +4591,140 @@ mod path_function_tests {
     use super::*;
     use crate::algebra::GraphPath;
     use fgdb_types::{EId, VId};
+
+    #[test]
+    fn tuple_let_scopes_keep_lexical_captures_and_linear_collection_work() {
+        let field = |index| GraphSetValue::Index {
+            list: Box::new(GraphSetValue::Local(0)),
+            index: Box::new(GraphSetValue::Literal(
+                GqlScalarParameter::new(CanonicalScalar::Int(index)).unwrap(),
+            )),
+        };
+        let expression = GraphSetValue::Comprehension {
+            list: Box::new(GraphSetValue::Column(0)),
+            filter: None,
+            map: Some(Box::new(GraphSetValue::Let {
+                values: vec![field(0), field(1)],
+                body: Box::new(GraphSetValue::List(vec![
+                    GraphSetValue::Local(1),
+                    GraphSetValue::Function {
+                        function: GraphValueFunction::PathNodes,
+                        argument: Box::new(GraphSetValue::Local(1)),
+                    },
+                    GraphSetValue::Function {
+                        function: GraphValueFunction::PathRelationships,
+                        argument: Box::new(GraphSetValue::Local(1)),
+                    },
+                    GraphSetValue::Local(0),
+                ])),
+            })),
+        };
+        for count in [0, 1, 8, 64, 128] {
+            let mut members = Vec::new();
+            let mut expected = Vec::new();
+            for ordinal in 0..count {
+                let start = VId((1_u128 << 100) + ordinal as u128 * 3);
+                let path = GraphPath::new(
+                    start,
+                    vec![
+                        (EId(start.0), VId(start.0 + 1)),
+                        (EId(start.0 + 1), VId(start.0 + 2)),
+                    ]
+                    .into_boxed_slice(),
+                );
+                let endpoint = GraphValue::Vertex(VId(start.0 + 2));
+                members.push(GraphValue::List(
+                    vec![GraphValue::Path(path.clone()), endpoint.clone()].into_boxed_slice(),
+                ));
+                expected.push(GraphValue::List(
+                    vec![
+                        GraphValue::Path(path.clone()),
+                        GraphValue::Vertices(path.nodes().collect()),
+                        GraphValue::Edges(path.edges().collect()),
+                        endpoint,
+                    ]
+                    .into_boxed_slice(),
+                ));
+            }
+            let row = GraphValueRow::from_owned_values(vec![GraphValue::List(
+                members.into_boxed_slice(),
+            )]);
+            let unchanged = row.clone();
+            let expected = GraphValue::List(expected.into_boxed_slice());
+            // One list pass and bounded work per two-edge tuple. Copying the
+            // complete collection for every tuple exceeds this linear bound.
+            let limit = 200 * count + 100;
+            let mut work = 0;
+            let mut events = 0;
+            let result = evaluate_value(&expression, &row, 0, &mut |event| {
+                events += 1;
+                if event == GlaExecutionEvent::Work {
+                    work += 1;
+                }
+                if work > limit { Err(work) } else { Ok(()) }
+            });
+            assert_eq!(
+                result.unwrap_or_else(|error| panic!("{count} tuples, limit {limit}: {error:?}")),
+                expected
+            );
+            assert_eq!(row, unchanged);
+            if count == 1 {
+                for stop in 0..events {
+                    let mut seen = 0;
+                    let result = evaluate_value(&expression, &row, 0, &mut |_| {
+                        let at = seen;
+                        seen += 1;
+                        if at == stop { Err(stop) } else { Ok(()) }
+                    });
+                    assert!(matches!(result, Err(ProjectionFailure::Control(at)) if at == stop));
+                    assert_eq!(seen, stop + 1);
+                    assert_eq!(row, unchanged);
+                }
+            }
+        }
+        let literal = |value| {
+            GraphSetValue::Literal(GqlScalarParameter::new(CanonicalScalar::Int(value)).unwrap())
+        };
+        let row =
+            GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(42))]);
+        for (expression, expected) in [
+            (
+                GraphSetValue::Let {
+                    values: vec![literal(7)],
+                    body: Box::new(GraphSetValue::List(vec![
+                        GraphSetValue::Local(0),
+                        GraphSetValue::Column(0),
+                    ])),
+                },
+                vec![7, 42],
+            ),
+            (
+                GraphSetValue::Let {
+                    values: vec![literal(7), literal(9)],
+                    body: Box::new(GraphSetValue::Let {
+                        values: vec![GraphSetValue::Local(0)],
+                        body: Box::new(GraphSetValue::List(vec![
+                            GraphSetValue::Local(1),
+                            GraphSetValue::Local(2),
+                            GraphSetValue::Local(0),
+                        ])),
+                    }),
+                },
+                vec![9, 7, 9],
+            ),
+        ] {
+            let actual = evaluate_value(&expression, &row, 0, &mut |_| Ok::<_, ()>(())).unwrap();
+            assert_eq!(
+                actual,
+                GraphValue::List(
+                    expected
+                        .into_iter()
+                        .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                        .collect()
+                )
+            );
+        }
+    }
 
     #[test]
     fn reversed_text_admits_both_payload_copies_and_preserves_every_refusal() {

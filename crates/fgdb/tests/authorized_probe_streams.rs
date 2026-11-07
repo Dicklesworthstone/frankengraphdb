@@ -1156,59 +1156,52 @@ fn captured_visible_trails(
     reverse: bool,
     closed: bool,
 ) -> GraphValue {
-    // Enumerate the finite visible product independently of the production DFS.
-    // Intermediate vertices must be visible too, not just a route's endpoints.
-    let mut frontier = vec![(Vec::<(EId, VId)>::new(), VId(anchor))];
-    let mut accepted = frontier.clone();
-    for _ in 1..=3 {
-        let mut next = Vec::new();
-        for (path, from) in frontier {
-            for &(eid, source, target, _) in &COLLECTION_EDGES {
-                if path.iter().any(|&(used, _)| used == EId(eid)) {
-                    continue;
+    // Enumerate complete visible products from their declared starts. Far-end
+    // correlation filters those products; it does not reverse their paths or
+    // move the correlated vertex ahead of other starts. All transits are visible.
+    let starts = if reverse && !closed {
+        vec![VId(1), VId(3), VId(4)]
+    } else {
+        vec![VId(anchor)]
+    };
+    let mut accepted = Vec::new();
+    for start in starts {
+        let mut frontier = vec![(Vec::<(EId, VId)>::new(), start)];
+        accepted.push((start, Vec::new(), start));
+        for _ in 1..=3 {
+            let mut next = Vec::new();
+            for (path, from) in frontier {
+                for &(eid, source, target, _) in &COLLECTION_EDGES {
+                    if path.iter().any(|&(used, _)| used == EId(eid)) {
+                        continue;
+                    }
+                    let to = match direction {
+                        0 if VId(source) == from => VId(target),
+                        1 if VId(target) == from => VId(source),
+                        2 if VId(source) == from => VId(target),
+                        2 if VId(target) == from => VId(source),
+                        _ => continue,
+                    };
+                    let mut extended = path.clone();
+                    extended.push((EId(eid), to));
+                    next.push((extended, to));
                 }
-                let to = match direction {
-                    0 if VId(source) == from => VId(target),
-                    1 if VId(target) == from => VId(source),
-                    2 if VId(source) == from => VId(target),
-                    2 if VId(target) == from => VId(source),
-                    _ => continue,
-                };
-                let mut extended = path.clone();
-                extended.push((EId(eid), to));
-                next.push((extended, to));
             }
+            accepted.extend(next.iter().map(|(path, end)| (start, path.clone(), *end)));
+            frontier = next;
         }
-        accepted.extend(next.iter().cloned());
-        frontier = next;
     }
+    accepted.retain(|(_, _, end)| (!reverse && !closed) || *end == VId(anchor));
     accepted.sort_unstable_by(|left, right| {
-        left.0
-            .iter()
-            .map(|step| step.0)
-            .cmp(right.0.iter().map(|step| step.0))
+        left.0.cmp(&right.0).then_with(|| {
+            left.1
+                .iter()
+                .map(|step| step.0)
+                .cmp(right.1.iter().map(|step| step.0))
+        })
     });
-    collection_list(accepted.into_iter().filter_map(|(steps, endpoint)| {
-        if closed && endpoint != VId(anchor) {
-            return None;
-        }
-        let vertices: Vec<_> = std::iter::once(VId(anchor))
-            .chain(steps.iter().map(|step| step.1))
-            .collect();
-        // Match the eager forward preference when a reversed route is closed.
-        let (start, steps) = if reverse && endpoint != VId(anchor) {
-            (
-                endpoint,
-                steps
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .map(|(at, &(eid, _))| (eid, vertices[at]))
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            (VId(anchor), steps)
-        };
+    collection_list(accepted.into_iter().map(|(start, steps, end)| {
+        let endpoint = if reverse { start } else { end };
         let nodes = std::iter::once(start)
             .chain(steps.iter().map(|step| step.1))
             .collect::<Vec<_>>()
@@ -1218,7 +1211,7 @@ fn captured_visible_trails(
             .map(|step| step.0)
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Some(collection_list([
+        collection_list([
             GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
                 start,
                 steps.into_boxed_slice(),
@@ -1228,12 +1221,50 @@ fn captured_visible_trails(
             GraphValue::Vertex(endpoint),
             collection_scalar(Some(endpoint.0 as i64 * 10)),
             collection_scalar(None),
-        ]))
+        ])
     }))
 }
 
 #[test]
 fn captured_trail_paths_apply_masks_to_every_retained_identity_and_scoped_charge() {
+    // Literal cycles retain their forward direction even when the local start
+    // equals the correlated end. Starts 1 and 3 keep their declaration order.
+    let literal = [
+        (1, vec![]),
+        (1, vec![(12, 3), (14, 1)]),
+        (1, vec![(12, 3), (15, 3), (14, 1)]),
+        (1, vec![(13, 3), (14, 1)]),
+        (1, vec![(13, 3), (15, 3), (14, 1)]),
+        (3, vec![(14, 1)]),
+        (3, vec![(15, 3), (14, 1)]),
+    ]
+    .into_iter()
+    .map(|(start, steps)| {
+        (
+            GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                VId(start),
+                steps
+                    .into_iter()
+                    .map(|(edge, to)| (EId(edge), VId(to)))
+                    .collect(),
+            )),
+            GraphValue::Vertex(VId(start)),
+        )
+    })
+    .collect::<Vec<_>>();
+    let routes = captured_visible_trails(1, 0, true, false);
+    assert_eq!(
+        routes
+            .as_list()
+            .unwrap()
+            .iter()
+            .map(|route| {
+                let cells = route.as_list().unwrap();
+                (cells[0].clone(), cells[3].clone())
+            })
+            .collect::<Vec<_>>(),
+        literal,
+    );
     let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -1276,12 +1307,7 @@ fn captured_trail_paths_apply_masks_to_every_retained_identity_and_scoped_charge
                     "{head} RETURN {prefix}, [p = ({start}){left}[:R*0..3]{right}({end}) | \
                      [p,nodes(p),relationships(p),{endpoint},{endpoint}.p,{endpoint}.hidden]] AS routes"
                 );
-                let walk_direction = if reverse && direction < 2 {
-                    1 - direction
-                } else {
-                    direction
-                };
-                let values = |a| captured_visible_trails(a, walk_direction, reverse, closed);
+                let values = |a| captured_visible_trails(a, direction, reverse, closed);
                 let expected: Vec<_> = if edge_root {
                     COLLECTION_EDGES
                         .iter()

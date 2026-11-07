@@ -107,7 +107,9 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 28);
+    // Epoch 29 adds explicit directed/reversed eigenvector semantics without
+    // widening the graph law of core number or load centrality.
+    assert_eq!(FnxSignatureRegistry::version(), 29);
     assert_eq!(FnxSignatureRegistry::signatures().len(), 27);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
@@ -166,6 +168,20 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
     assert_eq!(katz.execution_kernel, "fgdb-prism/katz-csr-source-order-v1");
     assert!(FnxSignatureRegistry::lookup("fnx.katz_centrality_unknown").is_none());
     assert!(FnxSignatureRegistry::lookup("pagerank").is_none());
+    let eigenvector = FnxSignatureRegistry::lookup("fnx.eigenvector_centrality").unwrap();
+    assert_eq!(eigenvector.graph_kind, FnxGraphKind::Any);
+    assert_eq!(eigenvector.outputs, &[FnxOutput::Vertex, FnxOutput::Score]);
+    assert!(eigenvector.parameters.is_empty());
+    assert_eq!(
+        eigenvector.execution_kernel,
+        "fgdb-prism/eigenvector-csr-gather-v1"
+    );
+    for name in ["fnx.core_number", "fnx.load_centrality"] {
+        assert_eq!(
+            FnxSignatureRegistry::lookup(name).unwrap().graph_kind,
+            FnxGraphKind::Undirected
+        );
+    }
 }
 
 #[test]

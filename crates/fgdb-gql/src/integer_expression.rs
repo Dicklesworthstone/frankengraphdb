@@ -863,6 +863,12 @@ impl GraphIntegerExpression {
         })
     }
 
+    /// Bound preparation-time or governed dependency inspection without
+    /// materializing this program's canonical transcript.
+    pub(crate) fn instruction_count(&self) -> usize {
+        self.code.len()
+    }
+
     /// Whether a `+` here may join a List (fgdb-bqri3): an Add or a text
     /// Concat, which evaluate_value_with_control applies to a List input.
     pub fn joins_values(&self) -> bool {

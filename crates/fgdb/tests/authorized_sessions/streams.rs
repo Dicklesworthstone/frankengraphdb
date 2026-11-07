@@ -442,8 +442,8 @@ fn denied_aggregate_equality_keeps_the_same_quota_refusal_in_every_driver() {
 /// fgdb-7xqxb: a set whose canonical order is its one vertex scan's order
 /// (the vertex first, then columns, constants and parameters) pulls through
 /// that scan's native cursor, projecting each row exactly as the eager set
-/// does. Every other set shape still refuses streaming; nothing falls back
-/// to an eager result.
+/// does, including source-order windows. Unsupported set shapes still refuse
+/// streaming; nothing falls back to an eager result.
 #[test]
 fn a_vertex_set_with_constant_columns_pulls_through_its_scan() {
     let ((), report) = run_async_under_lab(0x5ec0_6011, |root| async move {
@@ -455,9 +455,24 @@ fn a_vertex_set_with_constant_columns_pulls_through_its_scan() {
         let mut session = db
             .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
             .unwrap();
-        for text in [
-            "MATCH (n) RETURN n AS id, $value AS value",
-            "MATCH (n) RETURN n AS id, 7 AS seven, n.p AS p, $value AS value",
+        for (text, identities) in [
+            (
+                "MATCH (n) RETURN n AS id, $value AS value",
+                &[1_u128, 3][..],
+            ),
+            (
+                "MATCH (n) RETURN n AS id, 7 AS seven, n.p AS p, $value AS value",
+                &[1_u128, 3][..],
+            ),
+            (
+                "MATCH (n) RETURN n AS id, $value AS value LIMIT 1",
+                &[1_u128][..],
+            ),
+            (
+                "MATCH (n) RETURN n AS id, $value AS value SKIP 1 LIMIT 1",
+                &[3_u128][..],
+            ),
+            ("MATCH (n) RETURN n AS id, $value AS value LIMIT 0", &[][..]),
         ] {
             let parse = GqlParameters::new().with_int64("value", 1).unwrap();
             let prepared = session.prepare(&cx, text, &parse).unwrap();
@@ -468,7 +483,17 @@ fn a_vertex_set_with_constant_columns_pulls_through_its_scan() {
                 let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
                 let columns = cursor.columns().to_vec();
                 let streamed = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
-                assert!(!streamed.is_empty(), "{text}");
+                assert_eq!(
+                    streamed
+                        .iter()
+                        .map(|row| row.values()[0].clone())
+                        .collect::<Vec<_>>(),
+                    identities
+                        .iter()
+                        .map(|&id| GraphValue::Vertex(VId(id)))
+                        .collect::<Vec<_>>(),
+                    "{text}"
+                );
                 assert!(streamed.iter().all(|row| {
                     row.values().last() == Some(&GraphValue::Scalar(CanonicalScalar::Int(value)))
                 }));
@@ -481,7 +506,6 @@ fn a_vertex_set_with_constant_columns_pulls_through_its_scan() {
         for text in [
             "MATCH (n) RETURN $value AS value, n AS id",
             "MATCH (n) RETURN DISTINCT n AS id, $value AS value",
-            "MATCH (n) RETURN n AS id, $value AS value LIMIT 1",
             "MATCH (n) RETURN n AS id, $value AS value ORDER BY value",
         ] {
             let prepared = session.prepare(&cx, text, &args).unwrap();

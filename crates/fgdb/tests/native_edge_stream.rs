@@ -1207,70 +1207,59 @@ fn captured_trail_collections_keep_exact_routes_orientation_and_pinned_generatio
             (EId(3), WIDE, WIDE),
             (EId(u128::MAX), VId(0), VId(u128::MAX)),
         ];
-        let routes = |anchor, direction, reverse, closed, minimum, maximum| {
-            // Enumerate complete products by length, independently of the
-            // production DFS, then sort identity sequences with prefixes first.
-            let mut frontier = vec![(Vec::<(EId, VId)>::new(), anchor)];
-            let mut accepted = if minimum == 0 {
-                frontier.clone()
+        let routes = |anchor, direction, reverse, closed: bool, minimum, maximum| {
+            // Enumerate products from declared starts, then constrain their
+            // far ends. Correlation preserves both path direction and root order.
+            let starts = if reverse && !closed {
+                vec![VId(0), WIDE, VId(u128::MAX)]
             } else {
-                Vec::new()
+                vec![anchor]
             };
-            for length in 1..=maximum {
-                let mut next = Vec::new();
-                for (path, at) in frontier {
-                    for &(eid, source, target) in &edges {
-                        if path.iter().any(|&(used, _)| used == eid) {
-                            continue;
+            let mut accepted = Vec::new();
+            for start in starts {
+                let mut frontier = vec![(Vec::<(EId, VId)>::new(), start)];
+                if minimum == 0 {
+                    accepted.push((start, Vec::new(), start));
+                }
+                for length in 1..=maximum {
+                    let mut next = Vec::new();
+                    for (path, at) in frontier {
+                        for &(eid, source, target) in &edges {
+                            if path.iter().any(|&(used, _)| used == eid) {
+                                continue;
+                            }
+                            let to = match direction {
+                                0 if source == at => target,
+                                1 if target == at => source,
+                                2 if source == at => target,
+                                2 if target == at => source,
+                                _ => continue,
+                            };
+                            let mut extended = path.clone();
+                            extended.push((eid, to));
+                            next.push((extended, to));
                         }
-                        let to = match direction {
-                            0 if source == at => target,
-                            1 if target == at => source,
-                            2 if source == at => target,
-                            2 if target == at => source,
-                            _ => continue,
-                        };
-                        let mut extended = path.clone();
-                        extended.push((eid, to));
-                        next.push((extended, to));
                     }
+                    if length >= minimum {
+                        accepted.extend(next.iter().map(|(path, end)| (start, path.clone(), *end)));
+                    }
+                    frontier = next;
                 }
-                if length >= minimum {
-                    accepted.extend(next.iter().cloned());
-                }
-                frontier = next;
             }
+            accepted.retain(|(_, _, end)| (!reverse && !closed) || *end == anchor);
             accepted.sort_unstable_by(|left, right| {
-                left.0
-                    .iter()
-                    .map(|step| step.0)
-                    .cmp(right.0.iter().map(|step| step.0))
+                left.0.cmp(&right.0).then_with(|| {
+                    left.1
+                        .iter()
+                        .map(|step| step.0)
+                        .cmp(right.1.iter().map(|step| step.0))
+                })
             });
             GraphValue::List(
                 accepted
                     .into_iter()
-                    .filter_map(|(steps, endpoint)| {
-                        if closed && endpoint != anchor {
-                            return None;
-                        }
-                        let vertices: Vec<_> = std::iter::once(anchor)
-                            .chain(steps.iter().map(|step| step.1))
-                            .collect();
-                        // The eager capture contract prefers forward orientation when
-                        // both ends equal the declared start, including closed routes.
-                        let (start, steps) = if reverse && endpoint != anchor {
-                            (
-                                endpoint,
-                                steps
-                                    .iter()
-                                    .enumerate()
-                                    .rev()
-                                    .map(|(at, &(eid, _))| (eid, vertices[at]))
-                                    .collect::<Vec<_>>(),
-                            )
-                        } else {
-                            (anchor, steps)
-                        };
+                    .map(|(start, steps, end)| {
+                        let endpoint = if reverse { start } else { end };
                         let nodes = std::iter::once(start)
                             .chain(steps.iter().map(|step| step.1))
                             .collect::<Vec<_>>()
@@ -1288,7 +1277,7 @@ fn captured_trail_collections_keep_exact_routes_orientation_and_pinned_generatio
                         } else {
                             11
                         };
-                        Some(GraphValue::List(
+                        GraphValue::List(
                             vec![
                                 GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
                                     start,
@@ -1301,7 +1290,7 @@ fn captured_trail_collections_keep_exact_routes_orientation_and_pinned_generatio
                                 GraphValue::Scalar(CanonicalScalar::Int(property)),
                             ]
                             .into_boxed_slice(),
-                        ))
+                        )
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
@@ -1329,13 +1318,7 @@ fn captured_trail_collections_keep_exact_routes_orientation_and_pinned_generatio
                             "{head} RETURN {prefix}, [p = ({start}){left}[:R*{minimum}..{maximum}]{right}({end}) | \
                              [p,nodes(p),relationships(p),length(p),{endpoint},{endpoint}.p]] AS routes"
                         );
-                        let walk_direction = if reverse && direction < 2 {
-                            1 - direction
-                        } else {
-                            direction
-                        };
-                        let values =
-                            |at| routes(at, walk_direction, reverse, closed, minimum, maximum);
+                        let values = |at| routes(at, direction, reverse, closed, minimum, maximum);
                         let expected: Vec<_> = if edge_root {
                             edges
                                 .iter()
@@ -2857,11 +2840,11 @@ fn multiple_trail_collections_keep_segment_products_and_pinned_captures() {
                             prepared.stream(&db, &cx, &args, policy()).unwrap();
                         assert_eq!(cursor.kind(), kind);
                         assert_eq!(cursor.snapshot_seq(), basis);
-                        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().expect(&text);
                         assert_eq!(rows, expected, "{text}");
                         assert_eq!(
                             result(columns, rows),
-                            prepared.execute(&db, &cx, &args, policy()).unwrap(),
+                            prepared.execute(&db, &cx, &args, policy()).expect(&text),
                             "{text}"
                         );
                         assert_eq!(cursor.state(), ScanState::Exhausted);
