@@ -38,6 +38,32 @@ impl RawWriteSummary {
     }
 }
 
+/// Exact raw facts for a supported, source-ordered mixed-relation prefix.
+/// Every identity-addressed edge was resolved by a declaration or the pinned
+/// writer. A later declaration therefore cannot reroute an earlier no-op.
+/// Canonical rows alone cannot supply this proof or these source-work counts.
+#[derive(Clone)]
+pub(super) struct RawOrderedSummary {
+    pub(super) batches: usize,
+    pub(super) visits: u64,
+    pub(super) vertices: u64,
+    pub(super) batch_relations: BTreeSet<crate::RelationId>,
+    pub(super) edge_relations: BTreeSet<crate::RelationId>,
+    pub(super) declarations: IndexMap<crate::EId, crate::RelationId>,
+}
+
+impl core::fmt::Debug for RawOrderedSummary {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RawOrderedSummary")
+            .field("batches", &self.batches)
+            .field("visits", &self.visits)
+            .field("vertices", &self.vertices)
+            .field("declared_edges", &self.declarations.len())
+            .field("identities", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Captures keep the ordinary mutable set until a prepared prefix is shared.
 /// Later observations copy only AVL search paths, preserving pinned prefixes.
 #[derive(Clone)]
@@ -384,6 +410,7 @@ impl<V: Vfs + Clone> Database<V> {
             dependencies,
             replay_row_allowance,
             raw_input: None,
+            raw_ordered: None,
             authorization_decision_digest: None,
         })
     }
@@ -411,6 +438,7 @@ impl<V: Vfs + Clone> Database<V> {
             dependencies,
             replay_row_allowance,
             raw_input,
+            raw_ordered: None,
             authorization_decision_digest: None,
         })
     }

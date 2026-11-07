@@ -1348,6 +1348,9 @@ pub struct PreparedWrite {
     // Provenance of an ordinary single-relation raw input, before normalization
     // removes no-ops. Immutable with the prepared prefix, including savepoints.
     raw_input: Option<prepared_write::RawWriteSummary>,
+    // Stable raw routing for a checked source-ordered mixed-relation prefix.
+    // Persistent declarations remain shared with retained savepoints.
+    raw_ordered: Option<prepared_write::RawOrderedSummary>,
     pub(crate) authorization_decision_digest: Option<Digest>,
 }
 

@@ -32,9 +32,27 @@ impl WriteTxn {
         if batches.is_empty() || batches.iter().any(WriteBatch::is_empty) {
             return Err(WriteError::EmptyBatch.into());
         }
-        if let Err(error) = database
-            .admit_ordered_write_rows(self.staged.iter().chain(batches.iter()), max_expanded_rows)
-        {
+        let admission = match self.prepared.as_deref() {
+            Some(previous) if self.prepared_source_ordered => database
+                .admit_cached_ordered_write_suffix(
+                    previous,
+                    self.staged.len(),
+                    &batches,
+                    max_expanded_rows,
+                ),
+            _ => Ok(false),
+        }
+        .and_then(|cached| {
+            if cached {
+                Ok(())
+            } else {
+                database.admit_ordered_write_rows(
+                    self.staged.iter().chain(batches.iter()),
+                    max_expanded_rows,
+                )
+            }
+        });
+        if let Err(error) = admission {
             // Routing may have observed an existing edge's actual relation.
             // Do not let discarding the attempted suffix discard that read.
             // This intentionally retains conservative dependencies even when
@@ -245,6 +263,93 @@ mod bounded_ordered_tests {
             ));
             assert!(txn.pin.is_none());
             assert!(txn.staged.is_empty());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn cached_raw_prefix_preserves_budget_boundaries_conflicts_and_savepoints() {
+        let ((), report) = run_async_under_lab(0x6f62_1005, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let mut db = seeded(&cx).await;
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            txn.write_ordered_bounded(&mut db, vec![prefix(), suffix()], 6)
+                .unwrap();
+            let previous = std::sync::Arc::clone(txn.prepared.as_ref().unwrap());
+            let summary = previous.raw_ordered.as_ref().unwrap();
+            assert_eq!(
+                (summary.batches, summary.visits, summary.vertices),
+                (2, 4, 2)
+            );
+            txn.savepoint(&db, "cached").unwrap();
+
+            let mut next = WriteBatch::new(RelationId(1));
+            next.ensure_vertex(VId(1), vec![], vec![]);
+            next.set_edge_property(EId(50), P, Some(CanonicalScalar::Int(9)));
+            for limit in [0, 5, 6, 11, 12, 13] {
+                let cached = db
+                    .admit_cached_ordered_write_suffix(&previous, 2, &[next.clone()], limit)
+                    .map(|used| assert!(used));
+                let complete = db.admit_ordered_write_rows(
+                    txn.staged.iter().chain(std::iter::once(&next)),
+                    limit,
+                );
+                assert_eq!(format!("{cached:?}"), format!("{complete:?}"));
+            }
+            for (limit, required) in [(5, 6), (6, 12), (11, 12)] {
+                assert!(matches!(
+                    txn.write_ordered_bounded(&mut db, vec![next.clone()], limit),
+                    Err(WriteTxnError::OrderedWriteBudgetExceeded {
+                        limit: actual_limit,
+                        required: actual_required,
+                    }) if actual_limit == limit && actual_required == required
+                ));
+                assert!(std::sync::Arc::ptr_eq(
+                    txn.prepared.as_ref().unwrap(),
+                    &previous
+                ));
+            }
+
+            // Raw-row admission still wins before ownership admission. Once
+            // raw rows fit, the same first conflicting declaration must win.
+            let mut conflict = WriteBatch::new(RelationId(1));
+            conflict.add_edge(EId(50), VId(1), VId(2), vec![]);
+            for limit in [4, 5, 100] {
+                let cached =
+                    db.admit_cached_ordered_write_suffix(&previous, 2, &[conflict.clone()], limit);
+                let complete = db.admit_ordered_write_rows(
+                    txn.staged.iter().chain(std::iter::once(&conflict)),
+                    limit,
+                );
+                assert_eq!(
+                    format!("{:?}", cached.unwrap_err()),
+                    format!("{:?}", complete.unwrap_err())
+                );
+            }
+
+            txn.write_ordered_bounded(&mut db, vec![next.clone()], 12)
+                .unwrap();
+            let accepted = txn.prepared.as_ref().unwrap().template.canonical_bytes();
+            assert_eq!(
+                txn.prepared.as_ref().unwrap().replay_row_allowance,
+                Some(12)
+            );
+            txn.rollback_to_savepoint(&db, "cached").unwrap();
+            assert!(std::sync::Arc::ptr_eq(
+                txn.prepared.as_ref().unwrap(),
+                &previous
+            ));
+            txn.write_ordered_bounded(&mut db, vec![next], 12).unwrap();
+            assert_eq!(
+                txn.prepared.as_ref().unwrap().template.canonical_bytes(),
+                accepted
+            );
+            txn.commit(&mut db, &cx).await.unwrap();
+            assert_eq!(
+                db.edge(EId(50)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(9).into())]
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

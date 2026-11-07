@@ -85,13 +85,17 @@ pub(crate) fn without_terminator(text: &str) -> &str {
 }
 
 impl PreparedNativeRead {
-    /// Classify using native parsers, from more specific grammars to general ones.
+    /// Classify using native parsers, accepting a complete ordinary pattern
+    /// before probing the temporal, aggregate and composed grammars. Its
+    /// grammar cannot consume their required selector, summary or set tail,
+    /// so a successful pattern retains the original facade and certificate.
     /// Resolution, including misses, is frozen across all grammar probes.
     /// Refusals select the largest typed byte offset. Ties prefer temporal
     /// pattern, aggregate, then set when the native selector parser recognizes
     /// a system-time clause; otherwise pattern, aggregate, pipeline, then set.
-    /// MissingSystemTimeClause is not a candidate. Successful probe order is
-    /// unchanged, and selection never parses diagnostic strings.
+    /// MissingSystemTimeClause is not a candidate. A failed pattern probe is
+    /// retained at its original refusal priority, and selection never parses
+    /// diagnostic strings. Other successful probes keep their original order.
     /// A validated UNION schema or quantifier conflict is authoritative: an
     /// unrelated grammar stopping at the same set token cannot replace it.
     pub fn prepare(
@@ -115,6 +119,21 @@ impl PreparedNativeRead {
                 )
             })
             .collect();
+        // The ordinary pattern grammar validates its complete syntax before
+        // catalog resolution. Both aggregate grammars require a real summary,
+        // even when HAVING or ORDER BY supplies it, and temporal grammars need
+        // a selector that this grammar cannot consume. A successful pattern
+        // thus skips five unsuccessful grammar probes without changing its
+        // facade or certificate. Keep its exact error for the original refusal
+        // slot below: neither syntax nor catalog misses are retried.
+        let pattern_error = match PreparedGraphText::prepare_with_parameter_types_and_resolver(
+            text,
+            &declarations,
+            &mut resolve,
+        ) {
+            Ok(prepared) => return Ok(Self::Pattern(prepared)),
+            Err(error) => error,
+        };
         let mut best = None;
         let mut consider = |offset, priority, facade, source| {
             if best
@@ -238,19 +257,12 @@ impl PreparedNativeRead {
                 QueryError::PatternText(error),
             ),
         }
-        match PreparedGraphText::prepare_with_parameter_types_and_resolver(
-            text,
-            &declarations,
-            &mut resolve,
-        ) {
-            Ok(prepared) => return Ok(Self::Pattern(prepared)),
-            Err(error) => consider(
-                error.offset,
-                3,
-                NativeReadClass::Pattern,
-                QueryError::PatternText(error),
-            ),
-        }
+        consider(
+            pattern_error.offset,
+            3,
+            NativeReadClass::Pattern,
+            QueryError::PatternText(pattern_error),
+        );
         match PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
             text,
             &declarations,
@@ -1109,6 +1121,480 @@ mod temporal_aggregate_resolver_tests {
             let prepared =
                 PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(3600))).unwrap();
             assert!(certificate.unwrap().verifies_at(&prepared, CommitSeq(7)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use std::cell::{Cell, RefCell};
+
+    // The pre-change dispatcher is retained as the test oracle. Its grammar
+    // order, typed refusal filtering and UNION authority rules are independent
+    // of the common-pattern-first path under test.
+    fn legacy(
+        text: &str,
+        params: &GqlParameters,
+        mut resolver: impl GraphSymbolResolver,
+    ) -> Result<PreparedNativeRead, QueryError> {
+        let text = without_terminator(text);
+        let mut resolve = CachingResolver {
+            resolver: &mut resolver,
+            symbols: BTreeMap::new(),
+        };
+        // Numeric arguments keep native inference; explicit scalar and list
+        // declarations reach every prepare_with_parameter_types facade.
+        let declarations: Vec<(&str, GqlParameterType)> = params
+            .parameter_types()
+            .filter(|(_, kind)| {
+                matches!(
+                    kind,
+                    GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+                )
+            })
+            .collect();
+        let mut best = None;
+        let mut consider = |offset, priority, facade, source| {
+            if best
+                .as_ref()
+                .is_none_or(|(old_offset, old_priority, _, _)| {
+                    offset > *old_offset || (offset == *old_offset && priority < *old_priority)
+                })
+            {
+                best = Some((offset, priority, facade, source));
+            }
+        };
+        match PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
+            text,
+            &declarations,
+            &mut resolve,
+        ) {
+            Ok(prepared) => return Ok(PreparedNativeRead::TemporalAggregate(prepared)),
+            Err(error) => {
+                if !matches!(
+                    error.kind,
+                    GraphTemporalTextErrorKind::MissingSystemTimeClause
+                        | GraphTemporalTextErrorKind::Query(
+                            GraphPatternTextErrorKind::DefinitionTooLarge
+                                | GraphPatternTextErrorKind::TooManyTokens
+                        )
+                ) {
+                    consider(
+                        error.offset,
+                        1,
+                        NativeReadClass::TemporalAggregate,
+                        QueryError::TemporalText(error),
+                    );
+                }
+            }
+        }
+        match PreparedTemporalGraphText::prepare_with_parameter_types_and_resolver(
+            text,
+            &declarations,
+            &mut resolve,
+        ) {
+            Ok(prepared) => return Ok(PreparedNativeRead::TemporalPattern(prepared)),
+            Err(error) => {
+                if !matches!(
+                    error.kind,
+                    GraphTemporalTextErrorKind::MissingSystemTimeClause
+                        | GraphTemporalTextErrorKind::Query(
+                            GraphPatternTextErrorKind::DefinitionTooLarge
+                                | GraphPatternTextErrorKind::TooManyTokens
+                        )
+                ) {
+                    consider(
+                        error.offset,
+                        0,
+                        NativeReadClass::TemporalPattern,
+                        QueryError::TemporalText(error),
+                    );
+                }
+            }
+        }
+        match PreparedTemporalGraphSetText::prepare_with_parameter_types_and_resolver(
+            text,
+            &declarations,
+            &mut resolve,
+        ) {
+            Ok(prepared) => return Ok(PreparedNativeRead::TemporalSet(prepared)),
+            Err(error)
+                if matches!(
+                    error.kind,
+                    GraphTemporalSetTextErrorKind::Set(
+                        GraphSetTextErrorKind::DifferentColumnsInUnion
+                            | GraphSetTextErrorKind::InvalidClauseComposition
+                    )
+                ) =>
+            {
+                return Err(QueryError::Refused {
+                    facade: NativeReadClass::TemporalSet,
+                    source: Box::new(QueryError::TemporalSetText(error)),
+                });
+            }
+            Err(error) => {
+                if !matches!(
+                    error.kind,
+                    GraphTemporalSetTextErrorKind::MissingSystemTimeClause
+                        | GraphTemporalSetTextErrorKind::Set(GraphSetTextErrorKind::Pattern(
+                            GraphPatternTextErrorKind::DefinitionTooLarge
+                                | GraphPatternTextErrorKind::TooManyTokens
+                        ))
+                ) {
+                    consider(
+                        error.offset,
+                        2,
+                        NativeReadClass::TemporalSet,
+                        QueryError::TemporalSetText(error),
+                    );
+                }
+            }
+        }
+        match PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
+            text,
+            &declarations,
+            &mut resolve,
+        ) {
+            Ok(prepared) => return Ok(PreparedNativeRead::PipelineAggregate(Box::new(prepared))),
+            Err(error) => consider(
+                error.offset,
+                5,
+                NativeReadClass::PipelineAggregate,
+                QueryError::PipelineText(error),
+            ),
+        }
+        match PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
+            text,
+            &declarations,
+            &mut resolve,
+        ) {
+            Ok(prepared) => return Ok(PreparedNativeRead::Aggregate(prepared)),
+            Err(error) => consider(
+                error.offset,
+                4,
+                NativeReadClass::Aggregate,
+                QueryError::PatternText(error),
+            ),
+        }
+        match PreparedGraphText::prepare_with_parameter_types_and_resolver(
+            text,
+            &declarations,
+            &mut resolve,
+        ) {
+            Ok(prepared) => return Ok(PreparedNativeRead::Pattern(prepared)),
+            Err(error) => consider(
+                error.offset,
+                3,
+                NativeReadClass::Pattern,
+                QueryError::PatternText(error),
+            ),
+        }
+        match PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            text,
+            &declarations,
+            &mut resolve,
+        ) {
+            Ok(prepared) => return Ok(PreparedNativeRead::Set(prepared)),
+            Err(error)
+                if matches!(
+                    error.kind,
+                    GraphSetTextErrorKind::DifferentColumnsInUnion
+                        | GraphSetTextErrorKind::InvalidClauseComposition
+                ) =>
+            {
+                return Err(QueryError::Refused {
+                    facade: NativeReadClass::Set,
+                    source: Box::new(QueryError::SetText(error)),
+                });
+            }
+            Err(error) => consider(
+                error.offset,
+                6,
+                NativeReadClass::Set,
+                QueryError::SetText(error),
+            ),
+        }
+        let (_, _, facade, source) = best.expect("non-temporal parsers always supply a refusal");
+        Err(QueryError::Refused {
+            facade,
+            source: Box::new(source),
+        })
+    }
+
+    #[derive(Clone, Copy)]
+    enum Catalog {
+        Present,
+        Missing,
+        WrongKind,
+    }
+
+    struct Resolver<'a> {
+        catalog: Catalog,
+        calls: &'a RefCell<Vec<(GraphSymbolKind, String)>>,
+        zone_reads: &'a Cell<usize>,
+    }
+
+    impl GraphSymbolResolver for Resolver<'_> {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            self.calls.borrow_mut().push((kind, name.to_owned()));
+            match self.catalog {
+                Catalog::Present => symbols(kind, name),
+                Catalog::Missing => None,
+                Catalog::WrongKind => Some(match kind {
+                    GraphSymbolKind::Label | GraphSymbolKind::Relation => {
+                        GraphSymbol::Property(PropertyKeyId(1))
+                    }
+                    GraphSymbolKind::Property => GraphSymbol::Label(LabelId(1)),
+                }),
+            }
+        }
+
+        fn time_zones(&self) -> Option<GqlTimeZones> {
+            self.zone_reads.set(self.zone_reads.get() + 1);
+            None
+        }
+    }
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            _ => None,
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        Prepared(NativeReadClass, Vec<u8>),
+        Refused(String, String),
+    }
+
+    fn outcome(result: Result<PreparedNativeRead, QueryError>) -> Outcome {
+        match result {
+            Ok(prepared) => Outcome::Prepared(
+                prepared.facade_class(),
+                NativeExplainCertificate::new(&prepared, CommitSeq(7)).canonical_bytes(),
+            ),
+            Err(error) => Outcome::Refused(format!("{error:?}"), error.to_string()),
+        }
+    }
+
+    fn compare(text: &str, params: &GqlParameters, catalog: Catalog) -> (Outcome, usize, usize) {
+        let (calls, old_calls) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
+        let (zone_reads, old_zone_reads) = (Cell::new(0), Cell::new(0));
+        let current = outcome(PreparedNativeRead::prepare(
+            text,
+            params,
+            Resolver {
+                catalog,
+                calls: &calls,
+                zone_reads: &zone_reads,
+            },
+        ));
+        let original = outcome(legacy(
+            text,
+            params,
+            Resolver {
+                catalog,
+                calls: &old_calls,
+                zone_reads: &old_zone_reads,
+            },
+        ));
+        assert_eq!(current, original, "{text}");
+        assert_eq!(
+            *calls.borrow(),
+            *old_calls.borrow(),
+            "{text}: catalog order"
+        );
+        let calls = calls.into_inner();
+        let unique: std::collections::BTreeSet<_> = calls.iter().collect();
+        assert_eq!(calls.len(), unique.len(), "{text}: retried catalog lookup");
+        (current, zone_reads.get(), old_zone_reads.get())
+    }
+
+    const PATTERNS: &[&str] = &[
+        "MATCH (n) RETURN n",
+        "MATCH (n:L) RETURN DISTINCT n.p AS p ORDER BY p DESC SKIP 1 LIMIT 2",
+        "MATCH (a:L)-[r:R]->(b:L) RETURN a.p AS p, b.p AS q",
+        "MATCH (n:L {p: 'count(*) FOR SYSTEM_TIME UNION'}) RETURN n",
+        "/* FOR SYSTEM_TIME */ MATCH (n:L) // count(*)\n RETURN n",
+        "MATCH (n:L) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n",
+        "MATCH (n:L) OPTIONAL MATCH (n)-[:R]->(m) RETURN n, m",
+        "MATCH p = (a:L)-[:R*0..2]->(b) RETURN p",
+        "MATCH (n:L) RETURN [(n)-[r:R]->(m) | r] AS rows",
+    ];
+
+    #[test]
+    fn complete_patterns_are_disjoint_from_earlier_successful_facades() {
+        let params = GqlParameters::new();
+        for &text in PATTERNS {
+            assert!(
+                PreparedGraphText::prepare_with_parameter_types_and_resolver(text, &[], symbols)
+                    .is_ok(),
+                "{text}: expected a complete native pattern"
+            );
+            assert_eq!(
+                [
+                    PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
+                        text,
+                        &[],
+                        symbols,
+                    )
+                    .is_ok(),
+                    PreparedTemporalGraphText::prepare_with_parameter_types_and_resolver(
+                        text,
+                        &[],
+                        symbols,
+                    )
+                    .is_ok(),
+                    PreparedTemporalGraphSetText::prepare_with_parameter_types_and_resolver(
+                        text,
+                        &[],
+                        &mut symbols,
+                    )
+                    .is_ok(),
+                    PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
+                        text,
+                        &[],
+                        symbols,
+                    )
+                    .is_ok(),
+                    PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
+                        text,
+                        &[],
+                        symbols,
+                    )
+                    .is_ok(),
+                ],
+                [false; 5],
+                "{text}: an earlier facade would change precedence"
+            );
+            let (result, current, original) = compare(text, &params, Catalog::Present);
+            assert!(matches!(
+                result,
+                Outcome::Prepared(NativeReadClass::Pattern, _)
+            ));
+            // Each real grammar attempt asks for its parsing environment.
+            // Ordinary success now reaches exactly one native parser.
+            assert_eq!(current, 1, "{text}: additional grammar attempt");
+            assert!(
+                original >= 3,
+                "{text}: oracle did not exercise the old probes"
+            );
+        }
+    }
+
+    #[test]
+    fn every_native_family_keeps_its_facade_and_template_certificate() {
+        let params = GqlParameters::new();
+        for (text, class) in [
+            (
+                "MATCH (n) RETURN n.p AS p ORDER BY p",
+                NativeReadClass::Pattern,
+            ),
+            (
+                "MATCH (n) RETURN COUNT(*) AS total, SUM(n.p) AS amount",
+                NativeReadClass::Aggregate,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p RETURN COUNT(*) AS total, SUM(p) AS amount",
+                NativeReadClass::PipelineAggregate,
+            ),
+            (
+                "MATCH (n) RETURN n.p AS p UNION ALL MATCH (m) RETURN m.p AS p",
+                NativeReadClass::Set,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p ORDER BY p",
+                NativeReadClass::TemporalPattern,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN COUNT(*) AS total, SUM(n.p) AS amount",
+                NativeReadClass::TemporalAggregate,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p UNION ALL MATCH (m) RETURN m.p AS p",
+                NativeReadClass::TemporalSet,
+            ),
+        ] {
+            let (result, _, _) = compare(text, &params, Catalog::Present);
+            assert!(
+                matches!(result, Outcome::Prepared(found, _) if found == class),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_summaries_cannot_be_misclassified_as_plain_patterns() {
+        let params = GqlParameters::new();
+        for text in [
+            "MATCH (n) RETURN n GROUP BY n HAVING COUNT(*) > 0",
+            "MATCH (n) RETURN n GROUP BY n ORDER BY COUNT(*) DESC",
+            "MATCH (n) RETURN n HAVING COUNT(*) > 0",
+            "MATCH (n) RETURN n ORDER BY COUNT(*) DESC",
+            "MATCH (n) WITH n AS n RETURN n HAVING COUNT(*) > 0",
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n GROUP BY n HAVING COUNT(*) > 0",
+        ] {
+            assert!(
+                PreparedGraphText::prepare_with_parameter_types_and_resolver(text, &[], symbols)
+                    .is_err(),
+                "{text}: pattern parser consumed a hidden summary"
+            );
+            let (result, _, _) = compare(text, &params, Catalog::Present);
+            assert!(!matches!(
+                result,
+                Outcome::Prepared(NativeReadClass::Pattern, _)
+            ));
+        }
+    }
+
+    #[test]
+    fn refusals_keep_offsets_ties_union_authority_and_catalog_misses() {
+        let params = GqlParameters::new();
+        for text in [
+            "",
+            "MATCH",
+            "MATCH (n:L) RETURN",
+            "MATCH (n:L) RETURN n, n",
+            "MATCH (n:L) RETURN n HAVING",
+            "MATCH (n:L {p: 'unterminated}) RETURN n",
+            "MATCH (n:L) RETURN n;;",
+            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ RETURN n",
+            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN",
+            "MATCH (n:L) RETURN n AS x UNION MATCH (m:L) RETURN m AS y",
+            "MATCH (n:L) RETURN n AS x UNION ALL MATCH (m:L) RETURN m AS x UNION MATCH (k:L) RETURN k AS x",
+            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n AS x UNION MATCH (m:L) RETURN m AS y",
+        ] {
+            let (result, _, _) = compare(text, &params, Catalog::Present);
+            assert!(matches!(result, Outcome::Refused(_, _)), "{text}");
+        }
+        for catalog in [Catalog::Missing, Catalog::WrongKind] {
+            for &text in PATTERNS.iter().filter(|text| text.contains(":L")) {
+                let (result, _, _) = compare(text, &params, catalog);
+                assert!(matches!(result, Outcome::Refused(_, _)), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn parameter_declarations_and_statement_terminators_keep_native_dispatch() {
+        let params = GqlParameters::new()
+            .with_scalar("value", fgdb_types::CanonicalScalar::Bool(true))
+            .unwrap();
+        for text in [
+            "MATCH (n:L {p: $value}) RETURN n.p AS p",
+            "MATCH (n:L {p: $value}) RETURN n.p AS p; \n",
+            "MATCH (n:L {p: $value}) RETURN COUNT(*) AS total",
+            "MATCH (n:L {p: $value}) WITH n.p AS p RETURN COUNT(*) AS total",
+            "MATCH (n:L {p: $value}) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p",
+            "MATCH (n:L) RETURN n",
+        ] {
+            compare(text, &params, Catalog::Present);
         }
     }
 }

@@ -72,9 +72,9 @@ pub(crate) struct Probe {
     steps: Vec<Step>,
 }
 
-/// A bounded Collect scope over fixed-hop traversal or one finite TRAIL atom
-/// with a correlated or independent start, using the probe's shared kernel. Every
-/// complete witness contributes one value; only exhaustion emits a list.
+/// A bounded Collect scope over fixed hops and at most one finite TRAIL atom.
+/// A standalone TRAIL may have one independent start. The shared probe kernel
+/// emits one value per complete witness; only exhaustion emits a list.
 pub(crate) struct Collection {
     pub(crate) group: usize,
     probe: Probe,
@@ -147,6 +147,9 @@ impl Probe {
         // A reference to an outer or undeclared capture must never become NULL.
         let mut capture_slots = BTreeMap::<u32, LocalCapture>::new();
         let mut probe_groups = Vec::new();
+        // Even a consumed singleton domain stops eager expansion lookahead.
+        // Do not let a second constraint become an earlier route exclusion.
+        let mut identity_domain_seen = false;
         let mut operators = ops.iter().enumerate().take(end).skip(start + 1);
         while let Some((at, op)) = operators.next() {
             let bad = || EdgeScanBuildError { operator: at };
@@ -200,13 +203,14 @@ impl Probe {
                 // One atom's identity domain is exactly a TRAIL. Its traversal
                 // checks EIds before descent. Probes coalesce endpoint support;
                 // collections emit every route occurrence from the same stack.
-                // A later cross-atom domain still refuses below: no discarded
-                // route is reconstructed.
+                // Only collections can retain this route for a later cross-atom
+                // domain. Ordinary probes keep their endpoint-support profile.
                 match search {
                     GraphWalkSearch::All => *search = GraphWalkSearch::Trail,
                     GraphWalkSearch::Trail | GraphWalkSearch::Acyclic => {}
                     _ => return Err(bad()),
                 }
+                identity_domain_seen = true;
                 continue;
             }
             let mut predicate = None;
@@ -274,18 +278,63 @@ impl Probe {
                 {
                     None
                 }
-                GlaOperator::DifferentEdges { segments }
-                    if !segments.is_empty()
-                        && segments.len() <= MAX_PATTERN_EDGES
-                        && segments.iter().all(|slot| {
-                            (slot.ordinal() as usize)
-                                .checked_sub(outer_width)
-                                .and_then(|local| steps.get(local))
-                                .is_some_and(|step| matches!(step.binding, Binding::Expand(_)))
-                        }) =>
-                {
-                    // A multi-atom domain needs every constituent route. Only
-                    // fixed choices retain those EIds in this physical lane.
+                GlaOperator::DifferentEdges { segments } => {
+                    if segments.is_empty() || segments.len() > MAX_PATTERN_EDGES {
+                        return Err(bad());
+                    }
+                    let has_walk = segments.iter().any(|slot| {
+                        (slot.ordinal() as usize)
+                            .checked_sub(outer_width)
+                            .and_then(|local| steps.get(local))
+                            .is_some_and(|step| matches!(step.binding, Binding::Walk { .. }))
+                    });
+                    if has_walk
+                        && (identity_domain_seen
+                            || segments
+                                .last()
+                                .is_none_or(|slot| slot.ordinal() as usize != width - 1)
+                            || steps.last().is_none_or(|step| {
+                                !step.predicates.iter().all(|predicate| {
+                                    matches!(predicate, GlaOperator::VertexIdentity { .. })
+                                })
+                            }))
+                    {
+                        // Match eager for_expansion exactly: only identities
+                        // may intervene before the first domain, and its last
+                        // segment must be this expansion. A later constraint
+                        // must not change which prefixes or failures are read.
+                        return Err(bad());
+                    }
+                    for (at, slot) in segments.iter().enumerate() {
+                        let step = (slot.ordinal() as usize)
+                            .checked_sub(outer_width)
+                            .and_then(|local| steps.get_mut(local))
+                            .ok_or_else(bad)?;
+                        if compound_captures && segments[..at].contains(slot) {
+                            return Err(bad());
+                        }
+                        match &mut step.binding {
+                            Binding::Expand(_) => {}
+                            Binding::Walk { bounds, search, .. }
+                                if compound_captures && bounds.is_bounded() =>
+                            {
+                                // A collection retains every live occurrence.
+                                // DifferentEdges makes this atom a TRAIL even
+                                // when an earlier fixed atom shares its domain.
+                                match search {
+                                    GraphWalkSearch::All
+                                        if slot.ordinal() as usize == width - 1 =>
+                                    {
+                                        *search = GraphWalkSearch::Trail;
+                                    }
+                                    GraphWalkSearch::Trail => {}
+                                    _ => return Err(bad()),
+                                }
+                            }
+                            _ => return Err(bad()),
+                        }
+                    }
+                    identity_domain_seen = true;
                     None
                 }
                 GlaOperator::CapturePath {
@@ -317,10 +366,7 @@ impl Probe {
                                 expansion,
                                 bounds,
                                 search: GraphWalkSearch::Trail,
-                            } if compound_captures
-                                && segments.len() == 1
-                                && bounds.is_bounded() =>
-                            {
+                            } if compound_captures && bounds.is_bounded() => {
                                 single_edge = false;
                                 expansion
                             }
@@ -389,6 +435,7 @@ impl Probe {
                     aliases[width] = aliases[source];
                 }
                 width += 1;
+                identity_domain_seen = false;
                 steps.push(Step {
                     binding,
                     predicates: Vec::new(),
@@ -578,7 +625,7 @@ impl Probe {
                                     slot.into_mut()
                                 }
                                 std::collections::btree_map::Entry::Vacant(slot) => {
-                                    let cursor = match emission {
+                                    let mut cursor = match emission {
                                         walk::Emission::Support => walk::Endpoints::new(
                                             from, bounds, search, source, control,
                                         )?,
@@ -589,6 +636,35 @@ impl Probe {
                                             )?
                                         }
                                     };
+                                    if emission == walk::Emission::TrailOccurrences {
+                                        // Prune earlier fixed identities before
+                                        // descending this TRAIL, as eager GLA
+                                        // does. Filtering only its endpoints
+                                        // would still visit forbidden suffixes.
+                                        if let Some(GlaOperator::DifferentEdges { segments }) =
+                                            step.predicates.iter().find(|predicate| {
+                                                !matches!(
+                                                    predicate,
+                                                    GlaOperator::VertexIdentity { .. }
+                                                )
+                                            })
+                                            && segments.last().is_some_and(|slot| {
+                                                slot.ordinal() as usize == self.outer_width + depth
+                                            })
+                                        {
+                                            for slot in &segments[..segments.len() - 1] {
+                                                let local =
+                                                    slot.ordinal() as usize - self.outer_width;
+                                                let Position::Edge(Some(eid)) = frames[local]
+                                                else {
+                                                    return Err(GqlQueryError::Source(
+                                                        EdgeScanError::BoundEdgeUnavailable,
+                                                    ));
+                                                };
+                                                cursor.forbid(eid, control)?;
+                                            }
+                                        }
+                                    }
                                     control(GlaExecutionEvent::ScratchEntry)?;
                                     slot.insert(cursor)
                                 }
@@ -664,17 +740,38 @@ impl Probe {
             control(GlaExecutionEvent::Work)?;
             if let GlaOperator::DifferentEdges { segments } = predicate {
                 for (index, slot) in segments.iter().enumerate() {
-                    let Position::Edge(Some(eid)) =
-                        frames[slot.ordinal() as usize - self.outer_width]
-                    else {
+                    let local = slot.ordinal() as usize - self.outer_width;
+                    if !matches!(frames[local], Position::Edge(Some(_)) | Position::Walk) {
                         return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
-                    };
+                    }
                     for prior in &segments[..index] {
                         control(GlaExecutionEvent::Work)?;
-                        if matches!(
-                            frames[prior.ordinal() as usize - self.outer_width],
-                            Position::Edge(Some(previous)) if previous == eid
-                        ) {
+                        let prior = prior.ordinal() as usize - self.outer_width;
+                        let repeated = match (frames[local], frames[prior]) {
+                            (Position::Edge(Some(eid)), Position::Edge(Some(previous))) => {
+                                previous == eid
+                            }
+                            (Position::Walk, Position::Edge(Some(eid)))
+                            | (Position::Edge(Some(eid)), Position::Walk) => {
+                                let route = if matches!(frames[local], Position::Walk) {
+                                    local
+                                } else {
+                                    prior
+                                };
+                                walks
+                                    .and_then(|walks| walks.get(&route))
+                                    .ok_or_else(|| {
+                                        GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable)
+                                    })?
+                                    .contains_edge(eid)
+                            }
+                            _ => {
+                                return Err(GqlQueryError::Source(
+                                    EdgeScanError::BoundEdgeUnavailable,
+                                ));
+                            }
+                        };
+                        if repeated {
                             passed = false;
                             break;
                         }
@@ -702,7 +799,8 @@ impl Probe {
                 };
                 debug_assert_eq!(*capture as usize, paths.len());
                 let local = segments[0].ordinal() as usize - self.outer_width;
-                if matches!(self.steps[local].binding, Binding::Walk { .. }) {
+                if segments.len() == 1 && matches!(self.steps[local].binding, Binding::Walk { .. })
+                {
                     // Collection admission keeps this as one finite TRAIL
                     // atom. The offered occurrence still owns its exact route;
                     // endpoint support and async probes cannot supply it.
@@ -716,12 +814,28 @@ impl Probe {
                 // Charge the path slot and every step before reserving payload.
                 // A one-edge capture retains its original three scratch events.
                 control(GlaExecutionEvent::ScratchEntry)?;
-                for _ in segments {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    control(GlaExecutionEvent::ScratchEntry)?;
+                let mut count = 0;
+                for segment in segments {
+                    let local = segment.ordinal() as usize - self.outer_width;
+                    let length = if matches!(self.steps[local].binding, Binding::Walk { .. }) {
+                        control(GlaExecutionEvent::Work)?;
+                        walks
+                            .and_then(|walks| walks.get(&local))
+                            .ok_or_else(|| {
+                                GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable)
+                            })?
+                            .capture_len()
+                    } else {
+                        1
+                    };
+                    count += length;
+                    for _ in 0..length {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                    }
                 }
                 let mut endpoint = *start;
-                let mut steps = Vec::with_capacity(segments.len());
+                let mut steps = Vec::with_capacity(count);
                 for (at, segment) in segments.iter().enumerate() {
                     // The predicate checkpoint already accounts for step zero.
                     if at != 0 {
@@ -729,8 +843,18 @@ impl Probe {
                     }
                     let target = segment.ordinal() as usize;
                     let local = target - self.outer_width;
-                    let Binding::Expand(expansion) = self.steps[local].binding else {
-                        unreachable!("the compiler admitted only local fixed segments")
+                    let expansion = match self.steps[local].binding {
+                        Binding::Expand(expansion) => expansion,
+                        Binding::Walk { .. } => {
+                            endpoint = walks
+                                .and_then(|walks| walks.get(&local))
+                                .ok_or_else(|| {
+                                    GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable)
+                                })?
+                                .append_capture(endpoint, &mut steps, control)?;
+                            continue;
+                        }
+                        _ => unreachable!("the compiler admitted only local expansion segments"),
                     };
                     let (Some(Position::Edge(Some(eid))), Some(Some(from)), Some(Some(to))) = (
                         frames.get(local),
@@ -788,9 +912,9 @@ impl Collection {
         // Fixed scopes advance each local scan in VId order, then fixed hops
         // in EId order, like identified eager scopes. Disconnected components
         // keep separate positions even with copied outer predicate operands.
-        // One finite TRAIL atom preserves DFS route occurrences, not endpoint
-        // support. Its start is correlated or one independent vertex scan;
-        // additional independent roots and mixed expansion atoms still refuse.
+        // One correlated finite TRAIL atom preserves DFS route occurrences,
+        // interleaved with fixed EId choices. A standalone TRAIL may instead
+        // start at one independent scan; mixed atoms keep their correlated root.
         // Fixed parents may have terminal child probes. Only direct parent
         // scans and expansion atoms determine the collection profile; child
         // finite walks keep their existing endpoint-support EXISTS semantics.
@@ -822,14 +946,14 @@ impl Collection {
         if (fixed == 0 && walks == 0)
             || fixed > MAX_PATTERN_EDGES
             || walks > 1
-            || (walks != 0 && (fixed != 0 || scans > 1))
+            || (walks != 0 && scans != 0 && (fixed != 0 || scans > 1))
         {
             return Err(bad());
         }
         let (steps, captures) = Probe::compile_body(ops, start, end, outer_width, true)?;
-        // Ordinary openCypher DifferentEdges lowers a single ALL atom to
-        // TRAIL in compile_body. Other modes have different multiplicity or
-        // enumeration order. Captures snapshot this atom's live route only.
+        // Ordinary openCypher DifferentEdges lowers an ALL atom to TRAIL in
+        // compile_body, including mixed domains. Other modes have different
+        // multiplicity or enumeration order. Captures use the live route.
         if walks != 0
             && steps.iter().any(|step| {
                 matches!(step.binding, Binding::Walk { search, .. }

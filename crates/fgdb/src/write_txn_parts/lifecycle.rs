@@ -79,16 +79,22 @@ impl WriteTxn {
                 live,
             });
         }
+        let mixed_prefix = self
+            .prepared
+            .as_ref()
+            .and_then(|prepared| prepared.raw_ordered.as_ref())
+            .is_some_and(|summary| summary.batches == self.staged.len());
         if let Some(first) = self.staged.first()
-            && ((!self
-                .prepared
-                .as_ref()
-                .and_then(|prepared| prepared.raw_input)
-                .is_some_and(|summary| summary.relation == first.relation)
-                && self
-                    .staged
-                    .iter()
-                    .any(|staged| staged.relation != first.relation))
+            && (mixed_prefix
+                || (!self
+                    .prepared
+                    .as_ref()
+                    .and_then(|prepared| prepared.raw_input)
+                    .is_some_and(|summary| summary.relation == first.relation)
+                    && self
+                        .staged
+                        .iter()
+                        .any(|staged| staged.relation != first.relation))
                 || (self.program_multi_relation && batch.relation != first.relation))
         {
             // Mixed programs promise that each step sees its predecessor.
@@ -231,15 +237,18 @@ impl WriteTxn {
                 // that result once through the ordinary ordered evaluator.
                 _ => Ok(None),
             };
-            // An ordered suffix must not renumber births the prefix already
-            // exposed. Atomic groups stay canonical instead: relation order
-            // assigns births on every call, so a new group may move them.
-            incremental
-                .and_then(|prepared| match prepared {
-                    Some(prepared) => Ok(prepared),
-                    None => database.prepare_ordered_writes(self.staged.clone()),
-                })
-                .and_then(|prepared| prepared.retain_birth_ordinals(self.prepared.as_deref()))
+            incremental.and_then(|prepared| match prepared {
+                // Incremental preparation restores selected births from the
+                // retained prefix and copies untouched births verbatim. Do
+                // not collect every old birth and clone the complete new
+                // template again merely to restore the same ordinals.
+                Some(prepared) => Ok(prepared),
+                // Full source-order preparation can renumber births exposed
+                // by independent groups. Only this fallback needs the repair.
+                None => database
+                    .prepare_ordered_writes(self.staged.clone())
+                    .and_then(|prepared| prepared.retain_birth_ordinals(self.prepared.as_deref())),
+            })
         } else {
             database.prepare_atomic_writes(self.staged.clone())
         };
@@ -1041,6 +1050,121 @@ mod ordered_staging_tests {
             assert_eq!([birth(&txn, &db, 5), birth(&txn, &db, 6)], births);
             txn.commit(&mut db, &cx).await.unwrap();
             for (id, expected) in [(5, births[0]), (6, births[1]), (7, seventh)] {
+                assert_eq!(db.vertex(VId(id)).unwrap().unwrap().birth_ordinal, expected);
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn incremental_births_after_atomic_reordering_survive_failure_and_rollback() {
+        let ((), report) = run_async_under_lab(0x6f74_0009, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = seeded(&cx).await;
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut high = WriteBatch::new(RelationId(9));
+            high.create_vertex(VId(5), vec![], vec![(P, CanonicalScalar::Int(1))]);
+            let mut low = WriteBatch::new(RelationId(2));
+            low.create_vertex(VId(6), vec![], vec![(P, CanonicalScalar::Int(2))]);
+            txn.write_atomic(&mut db, vec![high, low]).unwrap();
+            let birth = |txn: &WriteTxn, db: &Database<MemVfs>, id| {
+                txn.vertex(db, VId(id)).unwrap().unwrap().birth_ordinal
+            };
+            let retained_births = [birth(&txn, &db, 5), birth(&txn, &db, 6)];
+            assert!(retained_births[1] < retained_births[0]);
+
+            // This first continuation needs full source-order preparation and
+            // restoration of the already observed relation-order births.
+            let mut transition = WriteBatch::new(RelationId(4));
+            transition.set_vertex_property(VId(5), P, Some(CanonicalScalar::Int(3)));
+            transition.add_edge(EId(50), VId(5), VId(6), vec![]);
+            txn.write_ordered(&mut db, vec![transition]).unwrap();
+            assert!(txn.prepared_source_ordered);
+            assert_eq!([birth(&txn, &db, 5), birth(&txn, &db, 6)], retained_births);
+            let saved = std::sync::Arc::clone(txn.prepared.as_ref().unwrap());
+            txn.savepoint(&db, "ordered").unwrap();
+
+            // The first suffix seeds an old edge and its reversed-birth
+            // endpoints. The second moves the shared vertex backbone to a
+            // lower coordinate. Neither may reinterpret those old ordinals.
+            let mut stable = WriteBatch::new(RelationId(2));
+            stable.set_edge_property(EId(50), P, Some(CanonicalScalar::Int(7)));
+            stable.create_vertex(VId(7), vec![], vec![]);
+            let mut moved = WriteBatch::new(RelationId(1));
+            moved.set_vertex_property(VId(6), P, Some(CanonicalScalar::Int(4)));
+            moved.create_vertex(VId(8), vec![], vec![]);
+            moved.add_edge(EId(80), VId(7), VId(8), vec![]);
+            let suffixes = [stable, moved];
+            let mut complete = None;
+            for round in 0..2 {
+                for suffix in &suffixes {
+                    let previous = std::sync::Arc::clone(txn.prepared.as_ref().unwrap());
+                    let mut raw = txn.staged.clone();
+                    raw.push(suffix.clone());
+                    let expected = db
+                        .prepare_ordered_writes(raw)
+                        .unwrap()
+                        .retain_birth_ordinals(Some(&previous))
+                        .unwrap();
+                    txn.write_ordered(&mut db, vec![suffix.clone()]).unwrap();
+                    let actual = txn.prepared.as_ref().unwrap();
+                    assert_eq!(
+                        actual.template.canonical_bytes(),
+                        expected.template.canonical_bytes()
+                    );
+                    assert_eq!(
+                        actual.dependencies.observations().collect::<Vec<_>>(),
+                        expected.dependencies.observations().collect::<Vec<_>>()
+                    );
+                    assert_eq!(actual.replay_row_allowance, expected.replay_row_allowance);
+                    assert_eq!([birth(&txn, &db, 5), birth(&txn, &db, 6)], retained_births);
+                }
+                let actual = std::sync::Arc::clone(txn.prepared.as_ref().unwrap());
+                if let Some(expected) = &complete {
+                    assert_eq!(&actual.template.canonical_bytes(), expected);
+                } else {
+                    complete = Some(actual.template.canonical_bytes());
+                }
+                let mut refused = WriteBatch::new(RelationId(1));
+                refused.compare_and_set_vertex_property(
+                    VId(5),
+                    P,
+                    Some(CanonicalScalar::Int(999)),
+                    CanonicalScalar::Int(9),
+                    WriteMismatchPolicy::AbortWrite,
+                );
+                assert!(matches!(
+                    txn.write_ordered(&mut db, vec![refused]),
+                    Err(WriteTxnError::Write(WriteError::CompareAndSetMismatch(_)))
+                ));
+                assert!(std::sync::Arc::ptr_eq(
+                    txn.prepared.as_ref().unwrap(),
+                    &actual
+                ));
+                assert_eq!(db.frontier().unwrap(), basis);
+                if round == 0 {
+                    txn.rollback_to_savepoint(&db, "ordered").unwrap();
+                    assert!(std::sync::Arc::ptr_eq(
+                        txn.prepared.as_ref().unwrap(),
+                        &saved
+                    ));
+                    assert!(txn.prepared_source_ordered);
+                    assert!(txn.vertex(&db, VId(7)).unwrap().is_none());
+                    assert!(txn.vertex(&db, VId(8)).unwrap().is_none());
+                }
+            }
+            let births = [5, 6, 7, 8].map(|id| (id, birth(&txn, &db, id)));
+            assert!(births[2].1 > retained_births[0].max(retained_births[1]));
+            assert!(births[3].1 > births[2].1);
+            assert_eq!(
+                txn.commit(&mut db, &cx).await.unwrap(),
+                CommitSeq(basis.0 + 1)
+            );
+            for (id, expected) in births {
                 assert_eq!(db.vertex(VId(id)).unwrap().unwrap().birth_ordinal, expected);
             }
             assert_eq!(txcx.outstanding_obligations(), 0);

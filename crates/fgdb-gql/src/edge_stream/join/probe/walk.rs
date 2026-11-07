@@ -11,8 +11,9 @@
 //! dominance. They use iterative backtracking and can take exponential work.
 //! Support coalescing never changes these laws. All sets, frames, index reads,
 //! and endpoint deliveries share the outer query's control and record meter.
-//! A finite single-atom TRAIL collection uses the same active-edge traversal
-//! but emits every route occurrence, without allocating endpoint support.
+//! A finite TRAIL collection uses the same active-edge traversal but emits
+//! every route occurrence, without allocating endpoint support. Prior fixed
+//! atoms in its DifferentEdges domain are excluded before route descent.
 //! A collection capture snapshots that exact live route only when requested.
 //! This is not a graph store, spill or byte-memory bound.
 
@@ -41,6 +42,7 @@ pub(super) struct Endpoints {
     visited: BTreeSet<(usize, VId)>,
     emitted: BTreeSet<VId>,
     edges: BTreeSet<EId>,
+    forbidden: BTreeSet<EId>,
     vertices: BTreeSet<VId>,
 }
 impl Endpoints {
@@ -72,6 +74,35 @@ impl Endpoints {
         Ok(cursor)
     }
 
+    /// A preceding fixed choice in this atom's clause-local identity domain.
+    /// The owning collection charges each retained identity before insertion;
+    /// it never includes outer or child-probe relationship identities here.
+    pub(super) fn forbid<E>(
+        &mut self,
+        edge: EId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        debug_assert_eq!(self.emission, Emission::TrailOccurrences);
+        control(GlaExecutionEvent::Work)?;
+        if !self.forbidden.contains(&edge) {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            self.forbidden.insert(edge);
+        }
+        Ok(())
+    }
+
+    /// The selected occurrence's identities, including every transit edge.
+    /// No path value or adjacency lookup is needed for a later fixed atom.
+    pub(super) fn contains_edge(&self, edge: EId) -> bool {
+        debug_assert_eq!(self.emission, Emission::TrailOccurrences);
+        self.edges.contains(&edge)
+    }
+
+    pub(super) fn capture_len(&self) -> usize {
+        debug_assert_eq!(self.emission, Emission::TrailOccurrences);
+        self.stack.len().saturating_sub(1)
+    }
+
     /// Own the currently offered occurrence without resolving any edge again.
     /// A normalized expansion may run opposite the declared capture. Reverse
     /// its retained EIds and vertices in that case, matching eager capture's
@@ -84,15 +115,8 @@ impl Endpoints {
     ) -> ScanResult<GraphPath, E, C> {
         debug_assert_eq!(self.emission, Emission::TrailOccurrences);
         debug_assert!(self.bounds.is_bounded());
-        let Some(last) = self.stack.last() else {
-            return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
-        };
-        let forward = self.start == start;
-        if !forward && last.vertex != start {
-            return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
-        }
-        debug_assert!(last.offered);
-        let count = self.stack.len() - 1;
+        self.capture_direction(start)?;
+        let count = self.capture_len();
         control(GlaExecutionEvent::Work)?;
         control(GlaExecutionEvent::ScratchEntry)?;
         for _ in 0..count {
@@ -103,6 +127,34 @@ impl Endpoints {
         // cancellation while copying each frame. Uncaptured lists pay neither
         // these events nor a path allocation.
         let mut steps = Vec::with_capacity(count);
+        self.append_capture(start, &mut steps, control)?;
+        Ok(GraphPath::new(start, steps.into_boxed_slice()))
+    }
+
+    fn capture_direction<E, C>(&self, start: VId) -> ScanResult<bool, E, C> {
+        let Some(last) = self.stack.last() else {
+            return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
+        };
+        let forward = self.start == start;
+        if !forward && last.vertex != start {
+            return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
+        }
+        debug_assert!(last.offered);
+        Ok(forward)
+    }
+
+    /// Append into a capture whose complete payload has already been charged.
+    /// Mixed captures reuse this orientation law without an intermediate path.
+    pub(super) fn append_capture<E, C>(
+        &self,
+        start: VId,
+        steps: &mut Vec<(EId, VId)>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), E, C>,
+    ) -> ScanResult<VId, E, C> {
+        debug_assert_eq!(self.emission, Emission::TrailOccurrences);
+        let forward = self.capture_direction(start)?;
+        let count = self.capture_len();
+        let mut endpoint = start;
         for index in 0..count {
             control(GlaExecutionEvent::Work)?;
             let at = if forward { index + 1 } else { count - index };
@@ -116,8 +168,9 @@ impl Endpoints {
                 self.stack[at - 1].vertex
             };
             steps.push((eid, target));
+            endpoint = target;
         }
-        Ok(GraphPath::new(start, steps.into_boxed_slice()))
+        Ok(endpoint)
     }
 
     /// The async owner proves this vertex from an already admitted binding
@@ -138,6 +191,7 @@ impl Endpoints {
             visited: BTreeSet::new(),
             emitted: BTreeSet::new(),
             edges: BTreeSet::new(),
+            forbidden: BTreeSet::new(),
             vertices: BTreeSet::new(),
         };
         cursor.push(start, None, control)?;
@@ -168,7 +222,9 @@ impl Endpoints {
             GraphWalkSearch::All | GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest => {
                 !self.visited.contains(&(self.depth_class(depth), vertex))
             }
-            GraphWalkSearch::Trail => !self.edges.contains(&edge),
+            GraphWalkSearch::Trail => {
+                !self.edges.contains(&edge) && !self.forbidden.contains(&edge)
+            }
             GraphWalkSearch::Acyclic => !self.vertices.contains(&vertex),
             GraphWalkSearch::Simple => vertex == self.start || !self.vertices.contains(&vertex),
         }
