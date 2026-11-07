@@ -434,6 +434,12 @@ const PARSE_BATCH: usize = 16_384;
 /// At most this many threads parse one batch; fewer lines parse inline.
 const PARSE_WORKERS: usize = 8;
 const PARSE_INLINE_BELOW: usize = 1_024;
+/// Live control bounds a decoding run by both rows and source bytes. A single
+/// larger record is indivisible in the shared JSON parser and has already
+/// passed the input's 1 MiB record limit. It runs alone, never behind a full
+/// run of other records. These limits do not change source or engine admission.
+const PARSE_RUN_ROWS: usize = 64;
+const PARSE_RUN_BYTES: usize = 64 * 1024;
 
 /// Cloneable decoder over independently positioned, verified input blocks.
 /// Only the owned row/error escapes next(); no borrowed source payload reaches
@@ -467,6 +473,10 @@ enum After {
         line: usize,
         error: std::sync::Arc<io::Error>,
     },
+    Interrupted {
+        line: usize,
+        error: std::sync::Arc<asupersync::error::Error>,
+    },
 }
 impl<'a> Rows<'a> {
     fn new(
@@ -489,6 +499,14 @@ impl<'a> Rows<'a> {
     /// Read up to [`PARSE_BATCH`] lines, parse them, and queue the rows up
     /// to the first error in source order, which becomes `after`.
     fn refill(&mut self) {
+        let cx = self.cx;
+        self.refill_with_control(|| cx.checkpoint());
+    }
+
+    fn refill_with_control(
+        &mut self,
+        control: impl FnMut() -> Result<(), Box<asupersync::error::Error>>,
+    ) {
         let mut lines = Vec::new();
         let mut after = After::More;
         while lines.len() < PARSE_BATCH {
@@ -508,7 +526,19 @@ impl<'a> Rows<'a> {
                 }
             }
         }
-        let parsed = parse_rows(&lines, self.options, self.resolver);
+        let parsed = match parse_rows(&lines, self.options, self.resolver, control) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                // No decoded prefix from an interrupted batch escapes. This
+                // retains the typed cause, rather than reporting cancellation
+                // as malformed input or a successful end of the source.
+                self.after = After::Interrupted {
+                    line: lines.first().map_or(self.reader.line(), |(line, _)| *line),
+                    error: error.into(),
+                };
+                return;
+            }
+        };
         for ((line, _), result) in lines.iter().zip(parsed) {
             match result {
                 Ok(row) => self.ready.push_back(row),
@@ -526,40 +556,190 @@ impl<'a> Rows<'a> {
 }
 
 /// `parse_row` over every line, in order, across up to [`PARSE_WORKERS`]
-/// scoped threads. A worker's panic resumes on the calling thread.
-fn parse_rows(
+/// scoped threads. Live control and its error stay on the calling thread;
+/// all workers join before a result, interruption or panic escapes.
+fn parse_rows<C>(
     lines: &[(usize, String)],
     options: &Options,
     resolver: Option<&fgdb::PinnedTzdb>,
-) -> Vec<Result<BulkRow, String>> {
+    control: impl FnMut() -> Result<(), C>,
+) -> Result<Vec<Result<BulkRow, String>>, C> {
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(PARSE_WORKERS);
-    if workers < 2 || lines.len() < PARSE_INLINE_BELOW {
-        return lines
-            .iter()
-            .map(|(_, text)| parse_row(text, options, resolver))
-            .collect();
+    parse_rows_controlled(
+        lines,
+        workers,
+        |text| parse_row(text, options, resolver),
+        control,
+    )
+}
+
+fn parse_run_length(lines: &[(usize, String)]) -> usize {
+    let mut bytes = 0usize;
+    let mut rows = 0;
+    for (_, text) in lines.iter().take(PARSE_RUN_ROWS) {
+        if rows != 0
+            && (bytes >= PARSE_RUN_BYTES || text.len() > PARSE_RUN_BYTES.saturating_sub(bytes))
+        {
+            break;
+        }
+        bytes = bytes.saturating_add(text.len());
+        rows += 1;
     }
-    let share = lines.len().div_ceil(workers);
+    rows
+}
+
+fn parse_wait(spins: &mut usize) {
+    if *spins < 64 {
+        *spins += 1;
+        std::hint::spin_loop();
+    } else {
+        std::thread::yield_now();
+    }
+}
+
+// Worker-owned progress lines avoid one contended counter in the decode loop.
+#[repr(align(64))]
+struct ParseWorker {
+    requested: std::sync::atomic::AtomicUsize,
+    admitted: std::sync::atomic::AtomicUsize,
+    done: std::sync::atomic::AtomicBool,
+}
+
+fn parse_rows_controlled<C>(
+    lines: &[(usize, String)],
+    workers: usize,
+    parse: impl Fn(&str) -> Result<BulkRow, String> + Sync,
+    mut control: impl FnMut() -> Result<(), C>,
+) -> Result<Vec<Result<BulkRow, String>>, C> {
+    let workers = workers.clamp(1, PARSE_WORKERS);
+    if workers < 2 || lines.len() < PARSE_INLINE_BELOW {
+        let mut parsed = Vec::with_capacity(lines.len());
+        let mut remaining = lines;
+        while !remaining.is_empty() {
+            control()?;
+            let (run, rest) = remaining.split_at(parse_run_length(remaining));
+            parsed.extend(run.iter().map(|(_, text)| parse(text)));
+            remaining = rest;
+        }
+        control()?;
+        return Ok(parsed);
+    }
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    control()?;
+    let stop = AtomicBool::new(false);
+    let progress: [ParseWorker; PARSE_WORKERS] = std::array::from_fn(|_| ParseWorker {
+        requested: AtomicUsize::new(0),
+        admitted: AtomicUsize::new(0),
+        done: AtomicBool::new(false),
+    });
+    struct StopOnDrop<'a>(&'a AtomicBool);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    struct DoneOnDrop<'a> {
+        done: &'a AtomicBool,
+        stop: &'a AtomicBool,
+    }
+    impl Drop for DoneOnDrop<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.stop.store(true, Ordering::Release);
+            }
+            self.done.store(true, Ordering::Release);
+        }
+    }
     std::thread::scope(|scope| {
+        // Drop inside the scope closure, BEFORE scope joins on a host error
+        // or unwind. Otherwise a worker awaiting admission could wait forever.
+        let _stop_on_exit = StopOnDrop(&stop);
+        let share = lines.len().div_ceil(workers);
         let parts: Vec<_> = lines
             .chunks(share)
-            .map(|part| {
+            .zip(&progress)
+            .map(|(part, worker)| {
+                let parse = &parse;
+                let stop = &stop;
                 scope.spawn(move || {
-                    part.iter()
-                        .map(|(_, text)| parse_row(text, options, resolver))
-                        .collect::<Vec<_>>()
+                    let _done_on_exit = DoneOnDrop {
+                        done: &worker.done,
+                        stop,
+                    };
+                    let mut parsed = Vec::with_capacity(part.len());
+                    let mut remaining = part;
+                    let mut requested = 0;
+                    while !remaining.is_empty() {
+                        if stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        requested += 1;
+                        worker.requested.store(requested, Ordering::Release);
+                        let mut spins = 0;
+                        while worker.admitted.load(Ordering::Acquire) < requested {
+                            if stop.load(Ordering::Acquire) {
+                                return parsed;
+                            }
+                            parse_wait(&mut spins);
+                        }
+                        let (run, rest) = remaining.split_at(parse_run_length(remaining));
+                        for (_, text) in run {
+                            if stop.load(Ordering::Acquire) {
+                                return parsed;
+                            }
+                            parsed.push(parse(text));
+                        }
+                        remaining = rest;
+                    }
+                    parsed
                 })
             })
             .collect();
-        parts
+
+        let mut admitted = [0; PARSE_WORKERS];
+        let mut idle_spins = 0;
+        loop {
+            let mut requested = [0; PARSE_WORKERS];
+            let mut pending = false;
+            let mut done = true;
+            for (at, worker) in progress[..parts.len()].iter().enumerate() {
+                requested[at] = worker.requested.load(Ordering::Acquire);
+                pending |= requested[at] != admitted[at];
+                done &= worker.done.load(Ordering::Acquire);
+            }
+            if pending || done {
+                idle_spins = 0;
+                control()?;
+                // Only requests observed BEFORE this live poll are granted.
+                // New requests must wait for the next checkpoint, not inherit
+                // an acknowledgement from before their preceding decode run.
+                for (at, worker) in progress[..parts.len()].iter().enumerate() {
+                    worker.admitted.store(requested[at], Ordering::Release);
+                    admitted[at] = requested[at];
+                }
+            }
+            if done {
+                break;
+            }
+            if !pending {
+                parse_wait(&mut idle_spins);
+            }
+        }
+
+        // A partial worker result exists only after a parent interruption
+        // (which returned above) or a peer panic (which is rethrown here).
+        // Source order, including the first malformed row, is unchanged.
+        Ok(parts
             .into_iter()
             .flat_map(|part| {
                 part.join()
                     .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
             })
-            .collect()
+            .collect())
     })
 }
 #[derive(Debug)]
@@ -571,12 +751,16 @@ struct RowError {
 enum RowErrorDetail {
     Read(io::Error),
     Decode(String),
+    Interrupted(std::sync::Arc<asupersync::error::Error>),
 }
 impl std::fmt::Display for RowError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.detail {
             RowErrorDetail::Read(error) => std::fmt::Display::fmt(error, f),
             RowErrorDetail::Decode(error) => f.write_str(error),
+            RowErrorDetail::Interrupted(error) => {
+                write!(f, "load parsing interrupted: {error}")
+            }
         }
     }
 }
@@ -584,13 +768,17 @@ impl std::error::Error for RowError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.detail {
             RowErrorDetail::Read(error) => Some(error),
+            RowErrorDetail::Interrupted(error) => Some(error.as_ref()),
             _ => None,
         }
     }
 }
 impl RowError {
     fn failure(&self) -> Failure {
-        line_error(self.line, "MalformedRow", self)
+        match &self.detail {
+            RowErrorDetail::Interrupted(error) => super::execution_failure(error.clone()),
+            _ => line_error(self.line, "MalformedRow", self),
+        }
     }
 }
 impl Iterator for Rows<'_> {
@@ -623,6 +811,13 @@ impl Iterator for Rows<'_> {
                     return Some(Err(RowError {
                         line,
                         detail: RowErrorDetail::Read(error),
+                    }));
+                }
+                After::Interrupted { line, error } => {
+                    self.failed = true;
+                    return Some(Err(RowError {
+                        line,
+                        detail: RowErrorDetail::Interrupted(error),
                     }));
                 }
             }
@@ -1064,4 +1259,364 @@ fn number(json: &Json) -> Result<u64, String> {
 }
 fn field<'a>(fields: &'a BTreeMap<String, Json>, name: &str) -> Result<&'a Json, String> {
     fields.get(name).ok_or_else(|| format!("missing {name}"))
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::convert::Infallible;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+    fn options() -> Options {
+        crate::parse(
+            &[
+                "--db",
+                "unused",
+                "--key-file",
+                "unused",
+                "--input",
+                "unused",
+                "--label",
+                "Node=4294967298",
+                "--label",
+                "Person=1",
+                "--relation",
+                "R=18446744073709551615",
+                "--property",
+                "name=18446744073709551615",
+                "--property",
+                "age=7",
+            ]
+            .map(str::to_owned),
+            "load",
+        )
+        .unwrap()
+    }
+
+    fn lines(count: usize) -> Vec<(usize, String)> {
+        (0..count)
+            .map(|i| {
+                let text = if i % 2 == 0 {
+                    format!(
+                        r#"{{"kind":"vertex","key":"v{i}","labels":["Node","Person"],"props":{{"name":"text:λ\"\n💡","age":"int:-{i}"}}}}"#
+                    )
+                } else {
+                    format!(
+                        r#"{{"kind":"edge","key":"e{i}","source":"v0","destination":{{"label":"Person","property":"age","value":"int:0"}},"relation":"R","props":{{"name":"text:edge {i}"}}}}"#
+                    )
+                };
+                (i + 1, text)
+            })
+            .collect()
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Captured {
+        Vertex(String, Vec<LabelId>, Vec<(PropertyKeyId, Vec<u8>)>),
+        Edge(
+            String,
+            BulkEndpoint,
+            BulkEndpoint,
+            RelationId,
+            Vec<(PropertyKeyId, Vec<u8>)>,
+        ),
+    }
+
+    fn captured(row: Result<BulkRow, String>) -> Result<Captured, String> {
+        let properties = |props: Vec<(PropertyKeyId, CanonicalPropertyValue)>| {
+            props
+                .into_iter()
+                .map(|(key, value)| (key, value.encode().unwrap()))
+                .collect()
+        };
+        row.map(|row| match row {
+            BulkRow::Vertex(v) => Captured::Vertex(v.key, v.labels, properties(v.props)),
+            BulkRow::Edge(e) => Captured::Edge(
+                e.key,
+                e.source,
+                e.destination,
+                e.relation,
+                properties(e.props),
+            ),
+        })
+    }
+
+    #[test]
+    fn parallel_decoding_keeps_scalar_rows_canonical_bytes_and_error_order() {
+        let options = options();
+        for count in [0, 1, 63, 64, 65, 1023, 1024, 1031, 4097] {
+            let mut source = lines(count);
+            for (at, malformed) in [
+                (11, r#"{"kind":"vertex","kind":"edge"}"#),
+                (64, r#"{"kind":"vertex","key":"bad","labels":["missing"]}"#),
+                (1024, r#"{"kind":"edge","key":"broken"}"#),
+            ] {
+                if let Some((_, text)) = source.get_mut(at) {
+                    *text = malformed.to_owned();
+                }
+            }
+            let expected = source
+                .iter()
+                .map(|(_, text)| captured(parse_row(text, &options, None)))
+                .collect::<Vec<_>>();
+            for workers in [1, 2, 3, PARSE_WORKERS] {
+                let actual = parse_rows_controlled(
+                    &source,
+                    workers,
+                    |text| parse_row(text, &options, None),
+                    || Ok::<_, Infallible>(()),
+                )
+                .unwrap()
+                .into_iter()
+                .map(captured)
+                .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "rows={count}, workers={workers}");
+            }
+            if count > 11 {
+                assert_eq!(
+                    expected.iter().position(Result::is_err),
+                    Some(11),
+                    "later parallel errors must not replace the first source error"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_decode_runs_bound_both_rows_and_bytes_and_isolate_large_records() {
+        let options = options();
+        let mut source = lines(PARSE_RUN_ROWS * 3);
+        for (index, size) in [
+            (2, PARSE_RUN_BYTES - 7),
+            (3, PARSE_RUN_BYTES),
+            (4, input::MAX_RECORD_BYTES),
+        ] {
+            let text = &mut source[index].1;
+            text.push_str(&" ".repeat(size - text.len()));
+        }
+        let rows = AtomicUsize::new(0);
+        let bytes = AtomicUsize::new(0);
+        let mut previous = (0, 0);
+        let mut oversized = 0;
+        let result = parse_rows_controlled(
+            &source,
+            1,
+            |text| {
+                let row = parse_row(text, &options, None);
+                assert!(row.is_ok());
+                rows.fetch_add(1, Ordering::Relaxed);
+                bytes.fetch_add(text.len(), Ordering::Relaxed);
+                row
+            },
+            || {
+                let now = (rows.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
+                let delta = (now.0 - previous.0, now.1 - previous.1);
+                assert!(delta.0 <= PARSE_RUN_ROWS);
+                if delta.1 > PARSE_RUN_BYTES {
+                    assert_eq!(delta, (1, input::MAX_RECORD_BYTES));
+                    oversized += 1;
+                }
+                previous = now;
+                Ok::<_, Infallible>(())
+            },
+        )
+        .unwrap();
+        assert_eq!(result.len(), source.len());
+        assert_eq!(previous.0, source.len(), "final work is polled too");
+        assert_eq!(oversized, 1);
+    }
+
+    struct Active<'a>(&'a AtomicUsize);
+    impl<'a> Active<'a> {
+        fn new(active: &'a AtomicUsize) -> Self {
+            active.fetch_add(1, Ordering::AcqRel);
+            Self(active)
+        }
+    }
+    impl Drop for Active<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn cancellation_after_real_decoding_keeps_non_send_control_on_parent_and_joins() {
+        let options = options();
+        let source = lines(PARSE_BATCH);
+        for workers in [1, 2, PARSE_WORKERS] {
+            let active = AtomicUsize::new(0);
+            let completed = AtomicUsize::new(0);
+            let cause = Rc::new(Cell::new(0));
+            let parent = std::thread::current().id();
+            let result = parse_rows_controlled(
+                &source,
+                workers,
+                |text| {
+                    let _active = Active::new(&active);
+                    let row = parse_row(text, &options, None);
+                    assert!(row.is_ok());
+                    completed.fetch_add(1, Ordering::Release);
+                    row
+                },
+                || {
+                    assert_eq!(std::thread::current().id(), parent);
+                    let seen = completed.load(Ordering::Acquire);
+                    if seen >= PARSE_RUN_ROWS {
+                        cause.set(seen);
+                        Err(cause.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            let error = result.expect_err("actual decoded work must observe cancellation");
+            assert!(Rc::ptr_eq(&error, &cause), "preserve the original cause");
+            assert_eq!(active.load(Ordering::Acquire), 0, "all decoders joined");
+            let after = completed.load(Ordering::Acquire);
+            assert!(after >= PARSE_RUN_ROWS);
+            assert!(after <= cause.get() + workers * PARSE_RUN_ROWS);
+            assert!(
+                after < source.len(),
+                "the rest of the batch was not decoded"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_workers_join_and_stop_peers_on_parent_or_worker_unwind() {
+        let options = options();
+        let source = lines(PARSE_BATCH);
+        for host_panics in [true, false] {
+            let active = AtomicUsize::new(0);
+            let completed = AtomicUsize::new(0);
+            let panicked = AtomicBool::new(false);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse_rows_controlled(
+                    &source,
+                    PARSE_WORKERS,
+                    |text| {
+                        let _active = Active::new(&active);
+                        let row = parse_row(text, &options, None);
+                        assert!(row.is_ok());
+                        let seen = completed.fetch_add(1, Ordering::AcqRel) + 1;
+                        if !host_panics
+                            && seen >= PARSE_RUN_ROWS
+                            && !panicked.swap(true, Ordering::AcqRel)
+                        {
+                            std::panic::resume_unwind(Box::new("worker decode panic"));
+                        }
+                        row
+                    },
+                    || {
+                        if host_panics && completed.load(Ordering::Acquire) >= PARSE_RUN_ROWS {
+                            std::panic::resume_unwind(Box::new("host decode panic"));
+                        }
+                        Ok::<_, Infallible>(())
+                    },
+                )
+            }));
+            let panic = result.expect_err("the originating panic must escape");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&if host_panics {
+                    "host decode panic"
+                } else {
+                    "worker decode panic"
+                })
+            );
+            assert_eq!(active.load(Ordering::Acquire), 0);
+            assert!(completed.load(Ordering::Acquire) < source.len());
+        }
+    }
+
+    fn input(source: &[(usize, String)], cx: &fgdb_types::QueryCx) -> input::Input {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "fgdb-parse-control-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        for (_, text) in source {
+            writeln!(file, "{text}").unwrap();
+        }
+        drop(file);
+        input::Input::open(cx, &path, b"parse control", source.len()).unwrap()
+    }
+
+    #[test]
+    fn row_decoder_returns_first_source_error_then_fuses() {
+        let runtime = fgdb::runtime_builder().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let options = options();
+        let mut source = lines(4097);
+        source[13].1 = r#"{"kind":"vertex","key":"bad","labels":["missing"]}"#.to_owned();
+        source[2049].1 = "{broken}".to_owned();
+        let input = input(&source, &cx);
+        let mut rows = Rows::new(input.reader(), &cx, &options, None);
+        for (_, text) in &source[..13] {
+            assert_eq!(
+                captured(Ok(rows.next().unwrap().unwrap())),
+                captured(parse_row(text, &options, None))
+            );
+        }
+        let error = rows.next().unwrap().unwrap_err();
+        assert_eq!(error.line, 14);
+        assert_eq!(error.to_string(), "UnknownBinding: label missing");
+        assert!(
+            error
+                .failure()
+                .message
+                .starts_with("line 14: MalformedRow:")
+        );
+        assert!(rows.next().is_none());
+        assert!(rows.clone().next().is_none());
+    }
+
+    #[test]
+    fn interrupted_refill_discards_private_rows_retains_typed_cause_and_fuses() {
+        use std::error::Error as _;
+
+        let runtime = fgdb::runtime_builder().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let options = options();
+        let source = lines(2 * PARSE_RUN_ROWS);
+        let input = input(&source, &cx);
+        let mut rows = Rows::new(input.reader(), &cx, &options, None);
+        let mut polls = 0;
+        rows.refill_with_control(|| {
+            polls += 1;
+            if polls == 2 {
+                // Inline parsing has completed the first real 64-row run.
+                root.set_cancel_reason(asupersync::types::CancelReason::user(
+                    "cancel during loader decoding",
+                ));
+            }
+            cx.checkpoint()
+        });
+        assert_eq!(polls, 2);
+        assert!(
+            rows.ready.is_empty(),
+            "no interrupted prefix is publishable"
+        );
+        let mut cloned = rows.clone();
+        for rows in [&mut rows, &mut cloned] {
+            let error = rows.next().unwrap().unwrap_err();
+            assert!(matches!(&error.detail, RowErrorDetail::Interrupted(_)));
+            assert!(error.source().unwrap().is::<asupersync::error::Error>());
+            let failure = error.failure();
+            assert_eq!(failure.code, 3);
+            assert!(failure.message.contains("cancel during loader decoding"));
+            assert!(!failure.message.contains("MalformedRow"));
+            assert!(rows.next().is_none());
+        }
+    }
 }
