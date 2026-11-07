@@ -766,16 +766,10 @@ fn bind_projected_rows(
 ) -> Result<BoundRows, QueryError> {
     let pull = query
         .row_pull()
+        .or_else(|| query.edge_row_pull())
         .ok_or(QueryError::StreamingUnsupported { facade })?;
-    let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
-        unreachable!("a row pull is rooted at its one vertex scan")
-    };
-    Ok((
-        RowPlan::Vertex(plan),
-        at,
-        query.columns().to_vec(),
-        Some(pull),
-    ))
+    let plan = compile(pull.pattern())?;
+    Ok((plan, at, query.columns().to_vec(), Some(pull)))
 }
 
 fn bind(
@@ -928,7 +922,7 @@ fn build_rows<'q, C: FnMut() -> u64>(
     let (plan, at, columns, pull) = selected;
     let driver: Pull<'q, GraphValueRow> = match plan {
         RowPlan::Edge(plan) => Box::new(aggregate::edge::row_driver(
-            plan, at, view, cx, execution, policy,
+            plan, pull, at, view, cx, execution, policy,
         )?),
         RowPlan::Vertex(plan) => {
             Box::new(vertex_driver(plan, pull, at, view, cx, execution, policy)?)
@@ -949,7 +943,7 @@ fn build_send_rows<'q, C: FnMut() -> u64 + Send>(
     // native physical driver, source masks, signed permit and terminal guard.
     let driver: SendPull<'q, GraphValueRow> = match plan {
         RowPlan::Edge(plan) => Box::new(aggregate::edge::row_driver(
-            plan, at, view, cx, execution, policy,
+            plan, pull, at, view, cx, execution, policy,
         )?),
         RowPlan::Vertex(plan) => {
             Box::new(vertex_driver(plan, pull, at, view, cx, execution, policy)?)
