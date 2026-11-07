@@ -64,8 +64,8 @@ Source added 2026-11-07 for `fgdb-hne`: `CALL db.labels()`,
 `CALL db.relationshipTypes()` and `CALL db.propertyKeys()` use the shared native
 read pipeline in embedded databases, pinned read views, transactions, the CLI
 and authorized server sessions. Their default output names are `label`,
-`relationshipType` and `propertyKey`; explicit `YIELD`, aliases, filters,
-projection and aggregation compose normally. For example:
+`relationshipType` and `propertyKey`; explicit `YIELD`, `YIELD *`, aliases,
+filters, joins, projection and aggregation compose normally. For example:
 
 ```cypher
 CALL db.labels() YIELD label
@@ -82,11 +82,13 @@ apply the live label, relationship and property scope before charging, copying
 or returning a name. Visible work and payload scratch share the enclosing query
 allowance; hidden entries receive cancellation polls without visible charges.
 The former Bolt execution shortcut is removed while its standalone no-bookmark
-response metadata is preserved.
+response metadata is preserved. Specialized streaming, standing-query and
+prepared-index profiles retain their existing explicit procedure restrictions.
 
 Regression sources: `fgdb-gql/tests/procedure_calls.rs`,
-`fgdb/tests/catalog_procedures.rs`, `fgdb-cli/tests/cli.rs` and the Bolt loopback
-tests. Compilation and runtime qualification are pending for this source slice;
+`fgdb/tests/catalog_procedures.rs`, `fgdb-cli/tests/cli.rs`,
+`fgdb-cli/tests/cli_robot.rs` and FGP, HTTP and Bolt loopback tests.
+Compilation and runtime qualification are pending for this source slice;
 the bead remains open until its required verification completes.
 
 ### Relationship endpoint values

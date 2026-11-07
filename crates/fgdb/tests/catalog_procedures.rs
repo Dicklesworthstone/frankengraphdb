@@ -12,7 +12,7 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GlaLimitDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
-    GraphSymbolResolver, ReverseSymbolCatalog,
+    GraphSymbolResolver, PreparedGraphSetText, ReverseSymbolCatalog,
 };
 use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, PurposeContexts, VId};
@@ -243,6 +243,102 @@ fn catalog_yields_compose_with_filters_aggregates_union_and_graph_match() {
                     .unwrap(),
                 expected,
                 "{statement}",
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn catalog_intermediates_preserve_final_row_limits_and_share_cumulative_execution_budgets() {
+    let ((), report) = run_async_under_lab(0xca0b, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = empty(&c.commit()).await;
+        let params = GqlParameters::new();
+        let statement = "CALL db.labels() YIELD label RETURN count(*) AS count";
+        let one_row = GqlQueryPolicy::new(0, 1, 100_000, 100_000);
+        let expected = rows(&["count"], vec![vec![QueryValue::Count(3)]]);
+        let view = db.pinned_read_view().unwrap();
+        let txcx = c.txn();
+        let transaction = db.begin(&txcx).unwrap();
+        // The three private catalog rows are inputs to a single result row,
+        // not three deliveries against the caller's one-row allowance.
+        for actual in [
+            db.query(&c.query(), statement, &params, Catalog::sample(), one_row),
+            view.query(&c.query(), statement, &params, Catalog::sample(), one_row),
+            transaction.query(
+                &db,
+                &c.query(),
+                statement,
+                &params,
+                Catalog::sample(),
+                one_row,
+            ),
+        ] {
+            assert_eq!(actual.unwrap(), expected);
+        }
+        transaction.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+        let issuer = authority(0xca0b);
+        let mut all = grant();
+        all.labels = Scope::All;
+        all.limits.max_nodes = 0;
+        all.limits.max_rows = 1;
+        let token = issuer.issue_at(&all, 100).unwrap();
+        assert_eq!(
+            db.query_authorized(
+                &c.query(),
+                &issuer,
+                &token,
+                "main",
+                statement,
+                &params,
+                Catalog::sample(),
+                one_row,
+                || 100,
+            )
+            .unwrap(),
+            expected,
+        );
+
+        let query = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            "CALL db.labels() YIELD label CALL db.relationshipTypes() YIELD relationshipType RETURN label, relationshipType",
+            &[], &mut Catalog::sample(),
+        ).unwrap().bind_parameters(&params).unwrap();
+        let execution = db
+            .execute_graph_set_governed(&c.query(), &query, policy())
+            .unwrap();
+        assert_eq!(execution.rows.snapshot_records, 0);
+        assert_eq!(execution.rows.result_rows, 9);
+        assert_eq!(execution.value.len(), 9);
+        // Each source and the relational operators share one allowance. A
+        // fresh allowance for the second CALL would admit an incomplete bill.
+        let exact = GqlQueryPolicy::new(
+            0,
+            9,
+            execution.evaluator.work_units,
+            execution.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            db.execute_graph_set_governed(&c.query(), &query, exact)
+                .unwrap(),
+            execution
+        );
+        for dimension in [
+            GlaLimitDimension::WorkUnits,
+            GlaLimitDimension::ScratchEntries,
+        ] {
+            let mut short = exact;
+            match dimension {
+                GlaLimitDimension::WorkUnits => short.evaluator.max_work_units -= 1,
+                GlaLimitDimension::ScratchEntries => short.evaluator.max_scratch_entries -= 1,
+            }
+            let error = db
+                .execute_graph_set_governed(&c.query(), &query, short)
+                .unwrap_err();
+            assert!(
+                matches!(error, GqlQueryError::Evaluator(limit) if limit.dimension == dimension),
+                "{error:?}"
             );
         }
     });

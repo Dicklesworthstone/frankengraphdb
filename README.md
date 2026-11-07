@@ -424,6 +424,19 @@ d = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=bearer_auth(open("token")
 print(d.execute_query("MATCH (p:Person) RETURN p LIMIT 3").records)'
 ```
 
+**Composable catalog discovery.** `CALL db.labels()`, `CALL db.relationshipTypes()` and `CALL db.propertyKeys()` enumerate the host's declared symbol bindings in name order, including declarations not yet used by graph data. Their default columns are `label`, `relationshipType` and `propertyKey`. Bare calls, `YIELD *`, aliases, filters, joins, aggregation and parameterized prepared reads use the native query pipeline in the embedded API, CLI, FGP, HTTP and Bolt:
+
+```cypher
+CALL db.labels() YIELD label
+WITH label WHERE label STARTS WITH 'P'
+RETURN collect(label) AS labels
+
+CALL db.propertyKeys() YIELD propertyKey AS key
+RETURN key ORDER BY key LIMIT 10
+```
+
+Embedded hosts must supply a complete `GraphSymbolResolver::reverse_catalog()`; a forward-only resolver is refused rather than guessed to be an empty catalog. CLI bindings and the server symbol catalog provide this enumeration. Preparation freezes the names and typed identities into the plan, and authorized execution filters them through the current capability before exposing rows or charging visible work. Catalog enumeration consumes no graph snapshot-record budget; ordinary work, scratch, result and cancellation limits still apply. Bare Bolt schema calls retain their existing no-bookmark response.
+
 **Filtered hybrid retrieval.** Native `CALL hybrid.search(..., eligible => [101,205])` accepts vertex identities or nonnegative integer IDs, including a list supplied through a query parameter. The standalone `search --eligible <vid,...>` option accepts full-width unsigned vertex IDs, with at most 100,000 input occurrences before duplicate removal. Eligibility applies before each text, vector and graph candidate limit and before fusion. It preserves the selected corpus, BM25 statistics, ANN routing and graph transit: a path may reach an eligible result through excluded vertices. Omission is unrestricted; native `NULL` is also unrestricted, while native `[]` and CLI `--eligible ''` select no results. Empty eligibility still validates the request and observes its source and work limits.
 
 The same native argument works inside `transaction --query`, where staged properties and topology are visible and search observations remain conflict dependencies across savepoint rollback. Immutable and `--as-of` searches retain their pinned sequence. Standalone graph search uses indexed expansion from the supplied seeds, so adding an endpoint restriction does not require scanning disconnected edges. These are candidate-limited exact-RRF results; filtering does not turn ANN or candidate fusion into exhaustive search.
