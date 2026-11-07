@@ -907,7 +907,7 @@ fn mixed_product_oracle(
                     .flat_map(GraphPath::edges)
                     .collect::<BTreeSet<_>>()
                     .len()
-                    == segments.iter().map(GraphPath::len).sum()
+                    == segments.iter().map(GraphPath::len).sum::<usize>()
         })
         .map(|mut segments| {
             if reverse {

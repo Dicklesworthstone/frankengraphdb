@@ -129,20 +129,21 @@ fn assert_same(actual: &PreparedWrite, expected: &PreparedWrite) {
     );
     assert_eq!(actual.replay_row_allowance, expected.replay_row_allowance);
     assert_eq!(actual.basis(), expected.basis());
-    match (&actual.raw_ordered, &expected.raw_ordered) {
-        (Some(actual), Some(expected)) => {
-            assert_eq!(actual.batches, expected.batches);
-            assert_eq!(actual.visits, expected.visits);
-            assert_eq!(actual.vertices, expected.vertices);
-            assert_eq!(actual.batch_relations, expected.batch_relations);
-            assert_eq!(actual.edge_relations, expected.edge_relations);
-            assert_eq!(
-                actual.declarations.iter().collect::<Vec<_>>(),
-                expected.declarations.iter().collect::<Vec<_>>()
-            );
-        }
-        (None, None) => {}
-        _ => panic!("raw routing provenance must match complete preparation"),
+    assert_eq!(
+        actual.raw_ordered.is_some(),
+        expected.raw_ordered.is_some(),
+        "raw routing provenance must match complete preparation"
+    );
+    if let (Some(actual), Some(expected)) = (&actual.raw_ordered, &expected.raw_ordered) {
+        assert_eq!(actual.batches, expected.batches);
+        assert_eq!(actual.visits, expected.visits);
+        assert_eq!(actual.vertices, expected.vertices);
+        assert_eq!(actual.batch_relations, expected.batch_relations);
+        assert_eq!(actual.edge_relations, expected.edge_relations);
+        assert_eq!(
+            actual.declarations.iter().collect::<Vec<_>>(),
+            expected.declarations.iter().collect::<Vec<_>>()
+        );
     }
 }
 
