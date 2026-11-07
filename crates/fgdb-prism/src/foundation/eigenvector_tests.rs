@@ -39,6 +39,15 @@ fn identities(n: usize) -> Vec<VId> {
 }
 
 fn view_with_ids(ids: &[VId], pairs: &[(usize, usize)]) -> SnapshotGraphView {
+    view_with_options(ids, pairs, Directedness::Undirected, 1.0)
+}
+
+fn view_with_options(
+    ids: &[VId],
+    pairs: &[(usize, usize)],
+    directedness: Directedness,
+    weight: f64,
+) -> SnapshotGraphView {
     let edges: Vec<ProjectionEdge> = pairs
         .iter()
         .enumerate()
@@ -46,7 +55,7 @@ fn view_with_ids(ids: &[VId], pairs: &[(usize, usize)]) -> SnapshotGraphView {
             eid: EId((1u128 << 112) | (i as u128 + 1)),
             source: ids[source],
             target: ids[target],
-            weight: 1.0,
+            weight,
         })
         .collect();
     SnapshotGraphView::build(
@@ -57,7 +66,7 @@ fn view_with_ids(ids: &[VId], pairs: &[(usize, usize)]) -> SnapshotGraphView {
         ids,
         &edges,
         ProjectionSpec {
-            directedness: Directedness::Undirected,
+            directedness,
             parallel_edges: ParallelEdgePolicy::Reject,
             self_loops: SelfLoopPolicy::Keep,
         },
@@ -80,22 +89,39 @@ fn view(n: usize, pairs: &[(usize, usize)]) -> SnapshotGraphView {
 /// gather and uses the actual pinned Graph and algorithm implementation.
 fn oracle(graph: &SnapshotGraphView) -> (Vec<f64>, ComplexityWitness, bool) {
     let names = graph.nodes_ordered();
-    let mut copy = fnx_classes::Graph::strict();
-    for name in &names {
-        copy.add_node(*name);
-    }
-    for source in 0..names.len() {
-        for &target in graph.neighbors_indices(source).unwrap() {
-            if source < target {
+    let (result, converged) = if graph.is_directed() {
+        let mut copy = fnx_classes::DiGraph::strict();
+        for name in &names {
+            copy.add_node(*name);
+        }
+        for source in 0..names.len() {
+            for &target in graph.neighbors_indices(source).unwrap() {
                 copy.add_edge(names[source], names[target]).unwrap();
             }
         }
-    }
-    let (result, converged) = fnx_algorithms::eigenvector_centrality_with_params(
-        &copy,
-        EIGENVECTOR_MAX_ITERATIONS,
-        EIGENVECTOR_TOLERANCE,
-    );
+        fnx_algorithms::eigenvector_centrality_directed_with_params(
+            &copy,
+            EIGENVECTOR_MAX_ITERATIONS,
+            EIGENVECTOR_TOLERANCE,
+        )
+    } else {
+        let mut copy = fnx_classes::Graph::strict();
+        for name in &names {
+            copy.add_node(*name);
+        }
+        for source in 0..names.len() {
+            for &target in graph.neighbors_indices(source).unwrap() {
+                if source < target {
+                    copy.add_edge(names[source], names[target]).unwrap();
+                }
+            }
+        }
+        fnx_algorithms::eigenvector_centrality_with_params(
+            &copy,
+            EIGENVECTOR_MAX_ITERATIONS,
+            EIGENVECTOR_TOLERANCE,
+        )
+    };
     let by_name: BTreeMap<String, f64> = result
         .scores
         .into_iter()
@@ -189,6 +215,81 @@ fn disconnected_bipartite_and_skewed_graphs_keep_exact_convergence_and_refusal()
 }
 
 #[test]
+fn every_loopless_digraph_through_four_vertices_matches_pinned_directed_fnx() {
+    for n in 0..=4 {
+        let ids = identities(n);
+        let possible: Vec<_> = (0..n)
+            .flat_map(|source| {
+                (0..n)
+                    .filter(move |&target| target != source)
+                    .map(move |target| (source, target))
+            })
+            .collect();
+        for mask in 0..(1usize << possible.len()) {
+            let pairs: Vec<_> = possible
+                .iter()
+                .enumerate()
+                .filter_map(|(bit, &edge)| (mask & (1usize << bit) != 0).then_some(edge))
+                .collect();
+            for direction in [Directedness::Directed, Directedness::Reversed] {
+                assert_oracle(&view_with_options(&ids, &pairs, direction, -7.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn incoming_scores_reverse_with_the_projection_and_ignore_finite_signed_weights() {
+    let pairs = [(0, 1), (1, 2), (2, 0), (0, 2), (2, 3), (3, 2)];
+    let ids = identities(5); // A retained isolate must not disappear.
+    let mut directed = None;
+    for direction in [Directedness::Directed, Directedness::Reversed] {
+        let mut previous = None;
+        for weight in [f64::MIN, -7.0, 0.0, 1.0, f64::MAX] {
+            let graph = view_with_options(&ids, &pairs, direction, weight);
+            assert!(assert_oracle(&graph));
+            let (scores, _, converged) = oracle(&graph);
+            assert!(converged);
+            let bits: Vec<_> = scores.iter().map(|score| score.to_bits()).collect();
+            if let Some(previous) = &previous {
+                assert_eq!(&bits, previous);
+            }
+            previous = Some(bits);
+        }
+        if let Some(directed) = &directed {
+            assert_ne!(
+                &previous, directed,
+                "reversal must change asymmetric influence"
+            );
+        }
+        directed = Some(previous);
+    }
+}
+
+#[test]
+fn directed_singleton_and_larger_loops_are_refused_before_scores_escape() {
+    let call = crate::FnxCallSpec::bind(
+        "CALL fnx.eigenvector_centrality() YIELD vertex,score",
+        &crate::FnxParameters::new(),
+    )
+    .unwrap();
+    let limits = crate::FnxExecutionLimits {
+        max_iterations: 0, // Fixed signature settings, not a caller override.
+        max_result_rows: 3,
+        max_estimated_work: 1 << 20,
+    };
+    for n in [1, 3] {
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let graph = view_with_options(&identities(n), &[(0, 0)], direction, -1.0);
+            assert!(matches!(
+                call.execute(&graph, limits, || Ok::<(), std::convert::Infallible>(())),
+                Err(FnxExecutionError::SelfLoopRefused)
+            ));
+        }
+    }
+}
+
+#[test]
 fn empty_singleton_and_edgeless_profiles_keep_pinned_special_cases() {
     assert_oracle(&view(0, &[]));
     assert_oracle(&view(1, &[]));
@@ -214,33 +315,39 @@ fn gathering_adds_in_the_pinned_canonical_source_order_without_reassociation() {
                 .map(move |target| (source, target))
         })
         .collect();
-    let graph = view(n, &edges);
-    // A wide exponent range makes changing the order of source additions
-    // visible; a uniform starting vector alone would not expose that bug.
-    let scores: Vec<f64> = (0..n)
-        .map(|i| f64::from_bits((((i * 37) % 96 + 975) as u64) << 52 | i as u64))
-        .collect();
-    let mut scatter = scores.clone();
-    for (source, &score) in scores.iter().enumerate() {
-        for &target in graph.neighbors_indices(source).unwrap() {
-            scatter[target] += score;
+    for direction in [
+        Directedness::Undirected,
+        Directedness::Directed,
+        Directedness::Reversed,
+    ] {
+        let graph = view_with_options(&identities(n), &edges, direction, 1.0);
+        // A wide exponent range makes changing the order of source additions
+        // visible; a uniform starting vector alone would not expose that bug.
+        let scores: Vec<f64> = (0..n)
+            .map(|i| f64::from_bits((((i * 37) % 96 + 975) as u64) << 52 | i as u64))
+            .collect();
+        let mut scatter = scores.clone();
+        for (source, &score) in scores.iter().enumerate() {
+            for &target in graph.neighbors_indices(source).unwrap() {
+                scatter[target] += score;
+            }
         }
+        let mut gathered = vec![f64::NAN; n];
+        let mut meter = Polls::default();
+        let mut arithmetic = Arithmetic::new(&mut meter);
+        gather(&graph, &scores, &mut gathered, &mut arithmetic).unwrap();
+        arithmetic.finish::<usize>().unwrap();
+        assert_eq!(
+            gathered
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            scatter
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
     }
-    let mut gathered = vec![f64::NAN; n];
-    let mut meter = Polls::default();
-    let mut arithmetic = Arithmetic::new(&mut meter);
-    gather(&graph, &scores, &mut gathered, &mut arithmetic).unwrap();
-    arithmetic.finish::<usize>().unwrap();
-    assert_eq!(
-        gathered
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<Vec<_>>(),
-        scatter
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<Vec<_>>()
-    );
 }
 
 #[test]
@@ -249,28 +356,47 @@ fn live_cancellation_interrupts_inside_the_first_hub_row() {
     // The center is canonical ordinal zero and its single row spans more
     // than two 4096-step live-control intervals.
     let ids: Vec<VId> = (0..n).map(|i| VId((1u128 << 120) | i as u128)).collect();
-    let pairs: Vec<(usize, usize)> = (1..n).map(|i| (0, i)).collect();
-    let graph = view_with_ids(&ids, &pairs);
-    let scores = vec![1.0 / n as f64; n];
-    let mut next = vec![f64::NAN; n];
-    let mut meter = Polls {
-        calls: 0,
-        refuse_at: Some(2),
-    };
-    let mut arithmetic = Arithmetic::new(&mut meter);
-    let result = gather(&graph, &scores, &mut next, &mut arithmetic);
-    assert!(matches!(result, Err(FnxExecutionError::Cancelled(2))));
-    assert!(
-        next.iter().all(|value| value.is_nan()),
-        "the second poll must interrupt the first row before any destination is written"
-    );
+    for direction in [
+        Directedness::Undirected,
+        Directedness::Directed,
+        Directedness::Reversed,
+    ] {
+        let pairs: Vec<(usize, usize)> = (1..n)
+            .map(|i| {
+                if direction == Directedness::Directed {
+                    (i, 0)
+                } else {
+                    (0, i)
+                }
+            })
+            .collect();
+        let graph = view_with_options(&ids, &pairs, direction, -7.0);
+        let scores = vec![1.0 / n as f64; n];
+        let mut next = vec![f64::NAN; n];
+        let mut meter = Polls {
+            calls: 0,
+            refuse_at: Some(2),
+        };
+        let mut arithmetic = Arithmetic::new(&mut meter);
+        let result = gather(&graph, &scores, &mut next, &mut arithmetic);
+        assert!(matches!(result, Err(FnxExecutionError::Cancelled(2))));
+        assert!(
+            next.iter().all(|value| value.is_nan()),
+            "the second poll must interrupt the first row before any destination is written"
+        );
+    }
 }
 
 #[test]
 fn every_live_poll_can_cancel_successful_and_nonconvergent_iterations() {
     let star: Vec<(usize, usize)> = (1..65).map(|i| (0, i)).collect();
     let path: Vec<(usize, usize)> = (1..129).map(|i| (i - 1, i)).collect();
-    for graph in [view(65, &star), view(129, &path)] {
+    for graph in [
+        view(65, &star),
+        view(129, &path),
+        view_with_options(&identities(65), &star, Directedness::Directed, -7.0),
+        view_with_options(&identities(129), &path, Directedness::Reversed, -7.0),
+    ] {
         let mut counter = Polls::default();
         let baseline = run(&graph, &mut counter);
         assert!(

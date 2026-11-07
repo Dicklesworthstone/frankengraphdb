@@ -2,9 +2,9 @@
 //!
 //! The fnx catalog sorts fixed-width lowercase vertex names before scattering
 //! each source score. Those names have the same order as Prism's full-width
-//! vertex ordinals. On the admitted simple undirected graph, row t is exactly
-//! the ascending list of sources that contribute to destination t. Gathering
-//! that row, starting with x[t], therefore reproduces every destination's
+//! vertex ordinals. On the admitted simple projection, incoming row t is
+//! exactly the ascending list of sources that contribute to destination t.
+//! Gathering that row, starting with x[t], reproduces every destination's
 //! sequence of floating-point additions in fnx's (I + A) * x scatter.
 //!
 //! Only the two score buffers are owned here. Neither a string-keyed Graph nor
@@ -18,7 +18,7 @@ use crate::execute::{KernelOutput, KernelValues, reserve};
 use crate::{FnxExecutionError, FnxMeter, SnapshotGraphView};
 use fnx_algorithms::{ComplexityWitness, GraphView};
 
-/// The parent has already admitted the undirected simple projection, refused
+/// The parent has already admitted the simple projection, refused
 /// self-loops, and charged the legacy foundation checkpoints. Arithmetic only
 /// polls live control; it never spends the same logical work a second time.
 pub(super) fn run<C>(
@@ -128,7 +128,8 @@ pub(super) fn run<C>(
     })
 }
 
-/// On this undirected projection, an outgoing row is also the incoming row.
+/// Incoming rows borrow the admitted CSR, sharing outgoing rows when undirected.
+/// Reversed projections therefore gather the original graph's outgoing face.
 /// Each accumulator remains local until its whole row has been admitted by
 /// live polls. This includes polls inside a single high-degree row.
 fn gather<C>(
@@ -141,7 +142,7 @@ fn gather<C>(
         arithmetic.step()?;
         let mut sum = scores[target];
         let sources = graph
-            .neighbors_indices(target)
+            .in_neighbors_indices(target)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
         for &source in sources {
             arithmetic.step()?;

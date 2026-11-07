@@ -1,18 +1,21 @@
 //! Exact eigenvector power iteration over fallible compressed adjacency.
 //!
-//! On the admitted simple undirected graph, the ascending sources in a row
-//! reproduce the pinned FNX `(I + A) * x` scatter addition for addition. Two
-//! score vectors suffice; neither a row nor a second graph is materialized.
+//! The ascending sources in each incoming row reproduce the pinned FNX
+//! `(I + A) * x` scatter addition for addition. Undirected input borrows its
+//! ordinary rows; directed input uses the admitted opposite incidence face.
+//! Two score vectors suffice, plus any charged compressed opposite index;
+//! neither a decoded row nor a second graph is materialized.
 //! One scalar state machine carries each accumulator across synchronous
 //! checkpoints and cooperative yields, including norm and convergence passes.
 
 use super::{
-    ComplexityWitness, Cursor, Delivery, ExecutionError, Finished, FnxCallSpec, FnxExecutionLimits,
-    FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, Rows, SealedGraphView,
-    SealedRows, add, admit, checkpoint, directional_pass_work, finish, finish_encoded, mul,
-    require_loop_free_degree, reserve,
+    ComplexityWitness, Cursor, Delivery, Directedness, ExecutionError, Finished, FnxCallSpec,
+    FnxExecutionLimits, FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, Rows,
+    SealedGraphView, SealedRows, add, admit, checkpoint, directional_pass_work, finish,
+    finish_encoded, mul, require_loop_free_degree, reserve,
 };
 use crate::foundation::{EIGENVECTOR_MAX_ITERATIONS, EIGENVECTOR_TOLERANCE};
+use crate::sealed::SealedRowSource;
 use crate::sealed_control::{Control, Guard};
 use std::future::Future;
 use std::mem::size_of;
@@ -272,23 +275,66 @@ fn prepare(
 ) -> Result<usize> {
     let n = graph.node_count();
     admission.rows(n)?;
-    let pass = directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
-    let estimated = work(n, graph.adjacency_entry_count(), pass, call.outputs().len())?;
+    let direction = graph.spec().directedness;
+    let directed = direction != Directedness::Undirected;
+    let retained = graph.scan_incidence_bound();
+    let (pass, setup) = if directed && n > 1 {
+        let opposite = if direction == Directedness::Directed {
+            Directedness::Reversed
+        } else {
+            Directedness::Directed
+        };
+        let incoming = directional_pass_work(n, retained, opposite)?;
+        // Admit the opposite face's authentication, sort and compressed
+        // index construction before any allocation or cooperative yield.
+        let height = (usize::BITS - retained.leading_zeros()) as usize;
+        let index = mul(retained, add(32, mul(height, 4)?)?)?;
+        let setup = add(mul(incoming, 2)?, add(index, mul(n, 8)?)?)?;
+        (incoming, setup)
+    } else {
+        (directional_pass_work(n, retained, direction)?, 0)
+    };
+    let estimated = add(
+        work(n, graph.adjacency_entry_count(), pass, call.outputs().len())?,
+        setup,
+    )?;
     admit("estimated work", estimated, limits.max_estimated_work)?;
     admit(
         "kernel workspace bytes",
         workspace(n)?,
         memory.max_kernel_workspace_bytes,
     )?;
-    require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+    if !directed {
+        require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+    } else if n == 1 && graph.edge_count() != 0 {
+        // The singleton oracle returns before visiting adjacency. Its only
+        // possible selected edge is a loop, which this signature refuses.
+        return Err(ExecutionError::SelfLoopRefused.into());
+    }
+    // Every incoming row is visited in the first iteration for n > 1;
+    // visit() refuses a directed loop before any private scores escape.
     Ok(estimated)
 }
 
-fn compressed_witness(output: &mut KernelOutput) {
+fn kernel(directed: bool, cooperative: bool) -> &'static str {
+    match (directed, cooperative) {
+        (false, false) => "fgdb-prism/sealed-eigenvector-gather-v1",
+        (false, true) => "fgdb-prism/sealed-eigenvector-gather-cooperative-v1",
+        (true, false) => "fgdb-prism/sealed-eigenvector-incoming-gather-v1",
+        (true, true) => "fgdb-prism/sealed-eigenvector-incoming-gather-cooperative-v1",
+    }
+}
+
+fn compressed_witness(output: &mut KernelOutput, directed: bool) {
     output
         .witness
         .complexity_claim
         .push_str(" plus O(k * (|V| log(1+H) + H log(1+|V|))) compressed row visits");
+    if directed {
+        output.witness.complexity_claim.push_str(
+            " plus admitted opposite-face construction; O(|V|) scalar workspace plus any owned compressed index",
+        );
+    }
 }
 
 pub(super) fn execute(
@@ -300,15 +346,37 @@ pub(super) fn execute(
     admission: &ResultAdmission,
 ) -> Result<Finished> {
     let estimated = prepare(call, graph, limits, memory, admission)?;
-    let rows = SealedRows { cx, graph };
+    let directed = graph.spec().directedness != Directedness::Undirected;
+    let reverse = if directed && graph.node_count() > 1 {
+        let remaining = memory
+            .max_kernel_workspace_bytes
+            .checked_sub(workspace(graph.node_count())?)
+            .ok_or(ExecutionError::SizeOverflow)?;
+        Some(graph.reverse_projection_controlled(cx, remaining)?)
+    } else {
+        None
+    };
+    let auxiliary = reverse
+        .as_ref()
+        .map_or(0, |face| face.charged_workspace_bytes());
+    let remaining = memory
+        .max_kernel_workspace_bytes
+        .checked_sub(auxiliary)
+        .ok_or(ExecutionError::SizeOverflow)?;
+    let face = reverse
+        .as_ref()
+        .map_or_else(|| graph.row_view(), SealedRowSource::row_view);
+    let rows = SealedRows { cx, graph: &face };
     let mut control = || checkpoint(cx);
-    let (mut output, peak) = run(&rows, memory.max_kernel_workspace_bytes, &mut control)?;
-    compressed_witness(&mut output);
+    let (mut output, peak) = run(&rows, remaining, &mut control)?;
+    let peak = add(peak, auxiliary)?;
+    drop(reverse);
+    compressed_witness(&mut output, directed);
     finish(
         call,
         graph,
         output,
-        "fgdb-prism/sealed-eigenvector-gather-v1",
+        kernel(directed, false),
         estimated,
         peak,
         admission,
@@ -333,10 +401,30 @@ where
     control.tick().await?;
     let n = graph.node_count();
     let mut state = Iteration::new(n, memory.max_kernel_workspace_bytes)?;
+    let directed = graph.spec().directedness != Directedness::Undirected;
+    let reverse = if directed && n > 1 {
+        let remaining = memory
+            .max_kernel_workspace_bytes
+            .checked_sub(state.peak)
+            .ok_or(ExecutionError::SizeOverflow)?;
+        let reverse = control.reverse_projection(graph, remaining).await?;
+        state.peak = add(state.peak, reverse.charged_workspace_bytes())?;
+        admit(
+            "kernel workspace bytes",
+            state.peak,
+            memory.max_kernel_workspace_bytes,
+        )?;
+        Some(reverse)
+    } else {
+        None
+    };
+    let incoming = reverse
+        .as_ref()
+        .map_or_else(|| graph.row_view(), SealedRowSource::row_view);
     while !state.complete() {
         control.tick().await?;
         if let Some(vertex) = state.row() {
-            let mut row = graph.neighbor_cursor_controlled(control.cx, vertex, None)?;
+            let mut row = incoming.neighbor_cursor_controlled(control.cx, vertex, None)?;
             while let Some((neighbor, _)) = control.next(&mut row).await? {
                 control.tick().await?;
                 state.visit(neighbor)?;
@@ -348,7 +436,8 @@ where
     }
     control.tick().await?;
     let (mut output, peak) = state.finish();
-    compressed_witness(&mut output);
+    drop(reverse);
+    compressed_witness(&mut output, directed);
     let mut encoded = super::EncodedRows::new(call, n, &admission)?;
     for vertex in 0..n {
         control.tick().await?;
@@ -363,7 +452,7 @@ where
         encoded,
         output.values,
         output.witness,
-        "fgdb-prism/sealed-eigenvector-gather-cooperative-v1",
+        kernel(directed, true),
         estimated,
         peak,
         &mut || checkpoint(control.cx),
@@ -392,6 +481,10 @@ mod tests {
 
     impl Fixture {
         fn new(n: usize, pairs: &[(usize, usize)]) -> Self {
+            Self::with_direction(n, pairs, Directedness::Undirected)
+        }
+
+        fn with_direction(n: usize, pairs: &[(usize, usize)], directedness: Directedness) -> Self {
             // Deliberately reverse input identities, with nonzero high bits.
             // Canonical FNX names and dense ordinals must keep the same order.
             let vertices: Vec<_> = (0..n)
@@ -417,7 +510,7 @@ mod tests {
                 &vertices,
                 &edges,
                 ProjectionSpec {
-                    directedness: Directedness::Undirected,
+                    directedness,
                     parallel_edges: ParallelEdgePolicy::Reject,
                     self_loops: SelfLoopPolicy::Keep,
                 },
@@ -469,7 +562,7 @@ mod tests {
         }
 
         fn degree(&self, source: usize) -> Option<usize> {
-            self.graph.neighbors_indices(source).map(<[_]>::len)
+            self.graph.in_neighbors_indices(source).map(<[_]>::len)
         }
 
         fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
@@ -477,7 +570,7 @@ mod tests {
             self.opens[source].set(self.opens[source].get() + 1);
             Ok(Row {
                 fixture: self,
-                targets: self.graph.neighbors_indices(source).unwrap().iter(),
+                targets: self.graph.in_neighbors_indices(source).unwrap().iter(),
             })
         }
     }
@@ -494,22 +587,39 @@ mod tests {
 
     fn compare(fixture: &Fixture) -> bool {
         let names = fixture.graph.nodes_ordered();
-        let mut oracle = fnx_classes::Graph::strict();
-        for name in &names {
-            oracle.add_node(*name);
-        }
-        for source in 0..names.len() {
-            for &target in fixture.graph.neighbors_indices(source).unwrap() {
-                if source < target {
+        let (expected, converged) = if fixture.graph.is_directed() {
+            let mut oracle = fnx_classes::DiGraph::strict();
+            for name in &names {
+                oracle.add_node(*name);
+            }
+            for source in 0..names.len() {
+                for &target in fixture.graph.neighbors_indices(source).unwrap() {
                     oracle.add_edge(names[source], names[target]).unwrap();
                 }
             }
-        }
-        let (expected, converged) = fnx_algorithms::eigenvector_centrality_with_params(
-            &oracle,
-            EIGENVECTOR_MAX_ITERATIONS,
-            EIGENVECTOR_TOLERANCE,
-        );
+            fnx_algorithms::eigenvector_centrality_directed_with_params(
+                &oracle,
+                EIGENVECTOR_MAX_ITERATIONS,
+                EIGENVECTOR_TOLERANCE,
+            )
+        } else {
+            let mut oracle = fnx_classes::Graph::strict();
+            for name in &names {
+                oracle.add_node(*name);
+            }
+            for source in 0..names.len() {
+                for &target in fixture.graph.neighbors_indices(source).unwrap() {
+                    if source < target {
+                        oracle.add_edge(names[source], names[target]).unwrap();
+                    }
+                }
+            }
+            fnx_algorithms::eigenvector_centrality_with_params(
+                &oracle,
+                EIGENVECTOR_MAX_ITERATIONS,
+                EIGENVECTOR_TOLERANCE,
+            )
+        };
         let call = FnxCallSpec::bind(
             "CALL fnx.eigenvector_centrality() YIELD vertex,score",
             &FnxParameters::new(),
@@ -628,6 +738,29 @@ mod tests {
     }
 
     #[test]
+    fn every_loopless_three_node_digraph_matches_the_pinned_directed_oracle() {
+        for n in 0..=3 {
+            let possible: Vec<_> = (0..n)
+                .flat_map(|source| {
+                    (0..n)
+                        .filter(move |&target| source != target)
+                        .map(move |target| (source, target))
+                })
+                .collect();
+            for mask in 0..(1usize << possible.len()) {
+                let pairs: Vec<_> = possible
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(bit, &pair)| (mask & (1usize << bit) != 0).then_some(pair))
+                    .collect();
+                for direction in [Directedness::Directed, Directedness::Reversed] {
+                    compare(&Fixture::with_direction(n, &pairs, direction));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn canonical_gather_keeps_adversarial_score_additions_without_reassociation() {
         let n = 73;
         let pairs: Vec<_> = (0..n)
@@ -637,74 +770,86 @@ mod tests {
                     .map(move |target| (source, target))
             })
             .collect();
-        let fixture = Fixture::new(n, &pairs);
-        let mut state = Iteration::new(n, usize::MAX).unwrap();
-        while state.row().is_none() {
-            state.scalar_step().unwrap();
-        }
-        for (i, score) in state.scores.iter_mut().enumerate() {
-            *score = f64::from_bits((((i * 37) % 96 + 975) as u64) << 52 | i as u64);
-        }
-        let mut scatter = state.scores.clone();
-        for (source, &score) in state.scores.iter().enumerate() {
-            for &target in fixture.graph.neighbors_indices(source).unwrap() {
-                scatter[target] += score;
+        for direction in [
+            Directedness::Undirected,
+            Directedness::Directed,
+            Directedness::Reversed,
+        ] {
+            let fixture = Fixture::with_direction(n, &pairs, direction);
+            let mut state = Iteration::new(n, usize::MAX).unwrap();
+            while state.row().is_none() {
+                state.scalar_step().unwrap();
             }
-        }
-        state.phase = Phase::Gather {
-            vertex: 0,
-            sum: state.scores[0],
-        };
-        while let Some(vertex) = state.row() {
-            let mut row = fixture.open(vertex).unwrap();
-            while let Some((neighbor, _)) = row.next().unwrap() {
-                state.visit(neighbor).unwrap();
+            for (i, score) in state.scores.iter_mut().enumerate() {
+                *score = f64::from_bits((((i * 37) % 96 + 975) as u64) << 52 | i as u64);
             }
-            state.end_row().unwrap();
+            let mut scatter = state.scores.clone();
+            for (source, &score) in state.scores.iter().enumerate() {
+                for &target in fixture.graph.neighbors_indices(source).unwrap() {
+                    scatter[target] += score;
+                }
+            }
+            state.phase = Phase::Gather {
+                vertex: 0,
+                sum: state.scores[0],
+            };
+            while let Some(vertex) = state.row() {
+                let mut row = fixture.open(vertex).unwrap();
+                while let Some((neighbor, _)) = row.next().unwrap() {
+                    state.visit(neighbor).unwrap();
+                }
+                state.end_row().unwrap();
+            }
+            assert_eq!(
+                state
+                    .next_scores
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                scatter.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
         }
-        assert_eq!(
-            state
-                .next_scores
-                .iter()
-                .map(|x| x.to_bits())
-                .collect::<Vec<_>>(),
-            scatter.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
-        );
     }
 
     #[test]
     fn every_scalar_and_source_refusal_discards_the_partial_iteration() {
-        let fixture = Fixture::new(3, &[(0, 1), (1, 2)]);
-        let mut checkpoints = 0;
-        run(&fixture, usize::MAX, &mut || {
-            checkpoints += 1;
-            Ok(())
-        })
-        .unwrap();
-        let source_steps = fixture.source_steps.get();
-        for stop in 1..=checkpoints {
-            let mut seen = 0;
-            let actual = run(&fixture, usize::MAX, &mut || {
-                seen += 1;
-                if seen == stop {
-                    Err(super::super::Error::Source(
-                        SealedProjectionError::UnknownOrdinal(stop),
-                    ))
-                } else {
-                    Ok(())
-                }
-            });
-            assert!(matches!(actual, Err(super::super::Error::Source(
+        for direction in [
+            Directedness::Undirected,
+            Directedness::Directed,
+            Directedness::Reversed,
+        ] {
+            let fixture = Fixture::with_direction(4, &[(0, 1), (1, 2), (2, 0), (2, 3)], direction);
+            let mut checkpoints = 0;
+            run(&fixture, usize::MAX, &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+            let source_steps = fixture.source_steps.get();
+            for stop in 1..=checkpoints {
+                let mut seen = 0;
+                let actual = run(&fixture, usize::MAX, &mut || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(super::super::Error::Source(
+                            SealedProjectionError::UnknownOrdinal(stop),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert!(matches!(actual, Err(super::super::Error::Source(
                 SealedProjectionError::UnknownOrdinal(at))) if at == stop));
-            assert_eq!(seen, stop);
-        }
-        for stop in 1..=source_steps {
-            fixture.source_steps.set(0);
-            fixture.fail_at.set(stop);
-            let actual = run(&fixture, usize::MAX, &mut || Ok(()));
-            assert!(matches!(actual, Err(super::super::Error::Source(
+                assert_eq!(seen, stop);
+            }
+            for stop in 1..=source_steps {
+                fixture.source_steps.set(0);
+                fixture.fail_at.set(stop);
+                let actual = run(&fixture, usize::MAX, &mut || Ok(()));
+                assert!(matches!(actual, Err(super::super::Error::Source(
                 SealedProjectionError::UnknownOrdinal(at))) if at == stop));
-            assert_eq!(fixture.source_steps.get(), stop);
+                assert_eq!(fixture.source_steps.get(), stop);
+            }
         }
     }
 

@@ -3722,6 +3722,11 @@ mod tests {
             for call in [
                 FnxCallSpec::pagerank(PageRankOptions::default()),
                 bfs_call(VId(0), None),
+                FnxCallSpec::bind(
+                    "CALL fnx.eigenvector_centrality() YIELD vertex,score",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
             ] {
                 call.validate_sealed_projection(direction).unwrap();
             }
@@ -3740,11 +3745,6 @@ mod tests {
                 .unwrap(),
                 FnxCallSpec::bind(
                     "CALL fnx.core_number() YIELD vertex,core",
-                    &FnxParameters::new(),
-                )
-                .unwrap(),
-                FnxCallSpec::bind(
-                    "CALL fnx.eigenvector_centrality() YIELD vertex,score",
                     &FnxParameters::new(),
                 )
                 .unwrap(),

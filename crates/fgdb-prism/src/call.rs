@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 28;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 29;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -389,13 +389,16 @@ const SIGNATURES: &[FnxSignature] = &[
         complexity: "O(|V| * |E|)",
         execution_kernel: "fgdb-prism/brandes-csr-source-order-v4",
     },
-    foundation(
-        "fnx.eigenvector_centrality",
-        FnxOutput::Score,
-        "explicit undirected simple projection; unweighted; self-loops refused; power iteration, at most 100 steps to tolerance 1e-6; non-convergence refuses",
-        "O(100 * (|V| + |E|))",
-        "fgdb-prism/eigenvector-csr-gather-v1",
-    ),
+    FnxSignature {
+        graph_kind: FnxGraphKind::Any,
+        ..foundation(
+            "fnx.eigenvector_centrality",
+            FnxOutput::Score,
+            "unqualified whole-graph input defaults to undirected; explicit directed, reversed or undirected simple projection; unweighted; self-loops refused; incoming eigenvector scores from canonical (I+A) power iteration, at most 100 steps to tolerance 1e-6; reversed input measures stored outgoing influence; non-convergence refuses",
+            "O(100 * (|V| + |E|))",
+            "fgdb-prism/eigenvector-csr-gather-v1",
+        )
+    },
     foundation(
         "fnx.core_number",
         FnxOutput::Core,

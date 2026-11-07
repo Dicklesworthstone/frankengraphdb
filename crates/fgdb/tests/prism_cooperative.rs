@@ -263,9 +263,17 @@ fn all_registered_sealed_families_retain_exact_rows_certificates_and_control_cad
     runtime.block_on(async {
         let cx = contexts.query();
         let db = small_database(&contexts.commit(), 3, false).await;
+        let mut eigenvector_db = small_database(&contexts.commit(), 3, false).await;
+        let mut cycle = WriteBatch::new(RelationId(1));
+        cycle.add_edge(
+            EId(3), VId(2), VId(0),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(2))],
+        );
+        eigenvector_db.write(&contexts.commit(), cycle).await.unwrap();
         for direction in [Directedness::Directed, Directedness::Reversed, Directedness::Undirected] {
             let opt = options(direction);
             let graph = projection(&db, &cx, opt).await;
+            let eigenvector_graph = projection(&eigenvector_db, &cx, opt).await;
             for call in retained_calls() {
                 let compatible = match call.signature().graph_kind {
                     FnxGraphKind::Any => true,
@@ -273,6 +281,17 @@ fn all_registered_sealed_families_retain_exact_rows_certificates_and_control_cad
                     FnxGraphKind::Undirected => direction == Directedness::Undirected,
                 };
                 if !compatible { continue; }
+                // The directed path has no eigenvector convergence within the
+                // pinned 100 rounds. Keep it for the other families, while
+                // checking both new eigenvector orientations on a real cycle.
+                let graph = if direction != Directedness::Undirected
+                    && matches!(call.algorithm(), FnxAlgorithm::Foundation(
+                        fgdb_prism::FoundationAlgorithm::EigenvectorCentrality))
+                {
+                    eigenvector_graph.clone()
+                } else {
+                    graph.clone()
+                };
                 assert!(call.supports_sealed_execution());
                 assert!(call.supports_cooperative_sealed_execution());
                 let collected_checks = Cell::new(0);
