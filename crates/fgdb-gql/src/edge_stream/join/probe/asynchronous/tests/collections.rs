@@ -380,9 +380,9 @@ fn collection_profiles_are_sealed_before_zero_limit_source_access() {
             inner.edge(start, S, GlaDirection::Forward, "c").unwrap();
         }
         inner.capture_path("p").unwrap();
+        let mut child = GraphPatternBuilder::new();
         let mut clause = GraphMatchClause::collect(&inner, Some("p"));
         if mode == 2 {
-            let mut child = GraphPatternBuilder::new();
             child.vertex("c").unwrap().vertex("d").unwrap();
             child.edge("c", S, GlaDirection::Forward, "d").unwrap();
             clause.nested.push(GraphMatchClause::exists(&child));

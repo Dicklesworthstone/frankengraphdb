@@ -588,7 +588,7 @@ mod tests {
     fn compare(fixture: &Fixture) -> bool {
         let names = fixture.graph.nodes_ordered();
         let (expected, converged) = if fixture.graph.is_directed() {
-            let mut oracle = fnx_classes::DiGraph::strict();
+            let mut oracle = fnx_classes::digraph::DiGraph::strict();
             for name in &names {
                 oracle.add_node(*name);
             }
@@ -813,12 +813,16 @@ mod tests {
 
     #[test]
     fn every_scalar_and_source_refusal_discards_the_partial_iteration() {
-        for direction in [
-            Directedness::Undirected,
-            Directedness::Directed,
-            Directedness::Reversed,
+        for fixture in [
+            Fixture::new(3, &[(0, 1), (1, 2)]),
+            Fixture::with_direction(
+                4,
+                &[(0, 1), (1, 2), (2, 0), (2, 3)],
+                Directedness::Undirected,
+            ),
+            Fixture::with_direction(4, &[(0, 1), (1, 2), (2, 0), (2, 3)], Directedness::Directed),
+            Fixture::with_direction(4, &[(0, 1), (1, 2), (2, 0), (2, 3)], Directedness::Reversed),
         ] {
-            let fixture = Fixture::with_direction(4, &[(0, 1), (1, 2), (2, 0), (2, 3)], direction);
             let mut checkpoints = 0;
             run(&fixture, usize::MAX, &mut || {
                 checkpoints += 1;

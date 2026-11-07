@@ -2117,7 +2117,8 @@ mod collections {
                 "malformed path {corruption}"
             );
         }
-        // No compound path enters the existing probe or async byte profile.
+        // Probe does not project compound paths. Async collections own their
+        // complete output through the source's independent reservation.
         let mut ops = original.to_vec();
         let GlaOperator::Collect { group, .. } = ops[start] else {
             unreachable!("collection opening")
@@ -2129,8 +2130,8 @@ mod collections {
         };
         ops[end] = GlaOperator::ProbeEnd { group };
         assert!(probe::Probe::compile(&ops, start, 2).is_err());
-        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
-        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_ok());
+        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_ok());
     }
 
     #[test]
@@ -2472,10 +2473,10 @@ mod collections {
                 "unsupported or malformed scope {corruption}",
             );
         }
-        // Multi-hop output still needs an owned byte reservation before any
-        // awaitable physical lane can admit it.
-        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
-        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+        // The valid fixed-hop collection uses the async source's independently
+        // owned output reservation; all corrupted scopes above remain refused.
+        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_ok());
+        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_ok());
     }
 
     #[test]

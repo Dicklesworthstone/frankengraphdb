@@ -192,6 +192,116 @@ fn computed_graph_collections_spill_before_order_distinct_and_final_pages() {
 }
 
 #[test]
+fn buffered_scalar_collections_spill_before_order_distinct_and_final_pages() {
+    let ((), report) = run_async_under_lab(0xe50a_0014, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = multigraph(&contexts.commit()).await;
+        let source_pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &contexts.commit(),
+            db.vfs.clone(),
+            db.vfs.database_dir(),
+            db.keys.clone(),
+            source_pool.clone(),
+            crate::BufferedReadLimits {
+                max_root_bytes: 8192,
+                max_source_bytes: 16_000_000,
+                max_blocks: 128,
+                max_vertex_patches: 128,
+                max_work: 100_000_000,
+                buffer: crate::BufferLimits {
+                    max_frames: 1,
+                    max_ghost_entries: 2,
+                    max_extent_bytes: 16 * 1024,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let params = GqlParameters::new();
+        // Canonical descending list order is [3,3], [3,-3,-3], []. The
+        // literal multiplicities include parallel edges and the self-loop.
+        for (head, counts) in [
+            ("MATCH (a)-[r:R]->(b)", [0, 3, 2]),
+            ("MATCH (a)<-[r:R]-(b)", [2, 3, 0]),
+            ("MATCH (a)-[r:R]-(b)", [2, 5, 2]),
+        ] {
+            for distinct in [false, true] {
+                let mut all = Vec::new();
+                for (values, count) in [&[3, 3][..], &[3, -3, -3], &[]].into_iter().zip(counts) {
+                    let bytes = GraphValueRow::from_owned_values(vec![
+                        GraphValue::Scalar(CanonicalScalar::Int(2)),
+                        GraphValue::List(
+                            values
+                                .iter()
+                                .map(|&value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                                .collect(),
+                        ),
+                    ])
+                    .canonical_bytes()
+                    .unwrap();
+                    for _ in 0..if distinct { count.min(1) } else { count } {
+                        all.push(bytes.clone());
+                    }
+                }
+                for (page, offset, limit) in [
+                    ("", 0, usize::MAX),
+                    (" SKIP 1 LIMIT 2", 1, 2),
+                    (" LIMIT 0", 0, 0),
+                ] {
+                    let text = format!(
+                        "{head} RETURN {}size([r,a]) AS width, [(b)-[s:R]->(c) | c.p] AS neighbors ORDER BY neighbors DESC{page}",
+                        if distinct { "DISTINCT " } else { "" },
+                    );
+                    let prepared = plan(&text).prepare_buffered_order(&params).unwrap();
+                    let wanted: Vec<_> = all.iter().skip(offset).take(limit).cloned().collect();
+                    let mut allowance = policy();
+                    allowance.rows = GqlExecutionBudget::new(1000, wanted.len() as u64);
+                    let (mut scratch, _) = file(&cx, &pool).await;
+                    let (mut destination, _) = file(&cx, &pool).await;
+                    let (mut auxiliary, _) = file(&cx, &pool).await;
+                    let (spool, _) = prepared
+                        .spool_in_view(
+                            &mut view,
+                            &cx,
+                            allowance,
+                            &mut scratch,
+                            &mut destination,
+                            &mut auxiliary,
+                            8,
+                            128,
+                            1,
+                            32,
+                            127,
+                            4096,
+                            counts.iter().sum::<usize>() as u64,
+                            1_000_000,
+                        )
+                        .await
+                        .expect(&text);
+                    assert_eq!(spool.kind(), ScanKind::Edge);
+                    assert_eq!(spool.columns(), &["width", "neighbors"]);
+                    assert_eq!(spool.row_count(), wanted.len() as u64);
+                    assert_eq!(spool.snapshot_seq(), view.frontier());
+                    assert_eq!(spool.row_stats().result_rows, wanted.len() as u64);
+                    assert_eq!(
+                        contents(&spool, &mut destination, &cx).await,
+                        wanted,
+                        "{text}"
+                    );
+                    assert_eq!(pool.used(), 0);
+                }
+            }
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn ordered_computed_collections_pin_their_graph_and_dynamic_properties_before_await() {
     let ((), report) = run_async_under_lab(0xe50a_0011, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

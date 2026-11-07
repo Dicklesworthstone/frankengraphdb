@@ -92,6 +92,7 @@ struct Counts {
     traversal_reservations: AtomicUsize,
     traversal_hops: AtomicUsize,
     traversal_peak_hops: AtomicUsize,
+    join_output_events: AtomicUsize,
 }
 struct Data {
     edges: Vec<(EId, VId, VId)>,
@@ -267,6 +268,11 @@ impl Source {
 }
 impl Drop for Source {
     fn drop(&mut self) {
+        assert_eq!(
+            self.counts.join_output_events.load(Ordering::SeqCst),
+            0,
+            "walk fixtures must never request edge-join collection output"
+        );
         self.counts.drops.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -409,7 +415,10 @@ impl AsyncEdgeJoinSource for Source {
     }
 
     fn join_output_event(&self, _: &mut Guard, _: GlaExecutionEvent) -> Result<(), Self::Error> {
-        panic!("walk fixture never projects an edge-join collection")
+        self.counts
+            .join_output_events
+            .fetch_add(1, Ordering::SeqCst);
+        Err("walk fixture does not own edge-join collection output")
     }
 }
 impl AsyncGraphWalkSource for Source {

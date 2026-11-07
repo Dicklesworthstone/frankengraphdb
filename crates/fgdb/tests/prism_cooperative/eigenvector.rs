@@ -191,18 +191,20 @@ fn compressed_eigenvector_admits_exact_workspace_work_and_output_before_iteratio
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
         let cx = contexts.query();
-        let mut db = small_database(&contexts.commit(), 3, true).await;
+        let db = small_database(&contexts.commit(), 3, true).await;
+        let mut directed_db = small_database(&contexts.commit(), 3, true).await;
         let mut cycle = WriteBatch::new(RelationId(1));
         cycle.add_edge(EId(3), VId(2), VId(0),
             vec![(PropertyKeyId(1), CanonicalScalar::Int(-7))]);
-        db.write(&contexts.commit(), cycle).await.unwrap();
+        directed_db.write(&contexts.commit(), cycle).await.unwrap();
         for direction in [
             Directedness::Undirected,
             Directedness::Directed,
             Directedness::Reversed,
         ] {
+        let db = if direction == Directedness::Undirected { &db } else { &directed_db };
         let opt = options(direction);
-        let graph = projection(&db, &cx, opt).await;
+        let graph = projection(db, &cx, opt).await;
         let call = eigenvector_call();
         let expected = call.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
         let columns = call.outputs().len() * size_of::<String>()
@@ -220,7 +222,7 @@ fn compressed_eigenvector_admits_exact_workspace_work_and_output_before_iteratio
         };
         let scalar = 2 * graph.node_count() * size_of::<f64>();
         let incoming = if direction == Directedness::Directed {
-            projection(&db, &cx, options(Directedness::Reversed)).await
+            projection(db, &cx, options(Directedness::Reversed)).await
                 .incoming_index_stats().unwrap().charged_workspace_bytes
         } else {
             0

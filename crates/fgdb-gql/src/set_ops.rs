@@ -2192,9 +2192,14 @@ mod pulled_projection_tests {
                             count: None,
                         })
                     ));
-                    // Cold intake still needs a separate witness-payload
-                    // reservation; resident admission must not widen it.
-                    assert!(crate::spill_set::AsyncSpillSetPlan::compile(&query).is_err());
+                    // Edge joins retain an independent output-byte owner into
+                    // spill encoding. Vertex-root collection intake remains
+                    // outside that physical profile.
+                    assert_eq!(
+                        crate::spill_set::AsyncSpillSetPlan::compile(&query).is_ok(),
+                        anchor == "b",
+                        "{text}"
+                    );
                 }
             }
         }

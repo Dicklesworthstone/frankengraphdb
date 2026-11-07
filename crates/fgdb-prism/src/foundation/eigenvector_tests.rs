@@ -90,7 +90,7 @@ fn view(n: usize, pairs: &[(usize, usize)]) -> SnapshotGraphView {
 fn oracle(graph: &SnapshotGraphView) -> (Vec<f64>, ComplexityWitness, bool) {
     let names = graph.nodes_ordered();
     let (result, converged) = if graph.is_directed() {
-        let mut copy = fnx_classes::DiGraph::strict();
+        let mut copy = fnx_classes::digraph::DiGraph::strict();
         for name in &names {
             copy.add_node(*name);
         }
