@@ -89,6 +89,22 @@ impl<'a> ReturnLeaves<'a> for InsertLeaves<'_, 'a> {
             .iter()
             .any(|vertex| vertex.name.is_some_and(|name| name.text == source.text));
         let created_labels = parser.is_word("LABELS") && created_vertex;
+        let endpoint = parser.is_word("STARTNODE") || parser.is_word("ENDNODE");
+        if endpoint {
+            let created_edge = self
+                .syntax
+                .edges
+                .iter()
+                .any(|edge| edge.name.is_some_and(|name| name.text == source.text));
+            if created_edge
+                || parser
+                    .edge_endpoint(source, parser.is_word("STARTNODE"))
+                    .is_ok()
+            {
+                return self.leaf(parser);
+            }
+            return Ok(None);
+        }
         // A created element's complete map is its frozen CREATE map.
         let created_map = (parser.is_word("PROPERTIES") || parser.is_word("KEYS"))
             && (created_vertex
@@ -512,7 +528,17 @@ impl<'a> ParsedReturn<'a> {
             parser.punct(b')', ")")?;
             match if start { edge.source } else { edge.destination } {
                 GraphInsertEndpoint::Column(column) => Binding::Input(column),
-                GraphInsertEndpoint::CreatedVertex(vertex) => Binding::Vertex(vertex),
+                GraphInsertEndpoint::CreatedVertex(vertex) => {
+                    if parser.take(b'.')? {
+                        let key = parser.schema_name()?;
+                        return self.column(
+                            Binding::VertexProperty(vertex, key),
+                            key,
+                            GraphSetColumnType::Stored,
+                        );
+                    }
+                    Binding::Vertex(vertex)
+                }
             }
         } else {
             // Reuse the ordinary MATCH direction/domain checks rather than
@@ -520,6 +546,16 @@ impl<'a> ParsedReturn<'a> {
             let edge = parser.edge_variable()?;
             parser.punct(b')', ")")?;
             let vertex = parser.edge_endpoint(edge, start)?;
+            let property = if parser.take(b'.')? {
+                Some(parser.schema_name()?)
+            } else {
+                None
+            };
+            if let Some(key) = property {
+                let column = imported_width
+                    + parser.mutation_projection(&mut syntax.projections, vertex, Some(key))?;
+                return self.column(Binding::Input(column), key, GraphSetColumnType::Stored);
+            }
             Binding::Input(
                 imported_width
                     + parser.mutation_projection(&mut syntax.projections, vertex, None)?,

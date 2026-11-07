@@ -672,6 +672,45 @@ const CATALOG: [&str; 4] = [
 ];
 
 #[test]
+fn native_catalog_procedures_enumerate_declared_bindings_and_compose_in_fresh_processes() {
+    let fixture = Fixture::new("catalog-procedures");
+    let created = succeeded(&fixture.robot("create", &[]), "created");
+    for (statement, expected) in [
+        ("CALL db.labels()", vec!["Company", "Person"]),
+        (
+            "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType",
+            vec!["KNOWS"],
+        ),
+        ("CALL db.propertyKeys()", vec!["id", "name"]),
+        (
+            "CALL db.labels() YIELD label WITH label WHERE label STARTS WITH 'P' RETURN label",
+            vec!["Person"],
+        ),
+    ] {
+        let answer = fixture.robot(
+            "query",
+            &[
+                "--label",
+                "Company=7",
+                "--relation",
+                "KNOWS=1",
+                "--property",
+                "name=2",
+                statement,
+            ],
+        );
+        assert_eq!(succeeded(&answer, "rows"), created);
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|name| {
+                format!(r#"{{"v":1,"event":"row","cells":[{{"type":"text","value":"{name}"}}]}}"#)
+            })
+            .collect();
+        assert_eq!(rows(&answer), expected, "{statement}");
+    }
+}
+
+#[test]
 fn library_writes_are_read_by_cli_processes_with_catalog_reflection() {
     let fixture = Fixture::new("library");
     succeeded(&fixture.robot("create", &[]), "created");

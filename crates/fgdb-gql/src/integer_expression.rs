@@ -1069,7 +1069,19 @@ impl GraphIntegerExpression {
                     let column = width
                         .checked_sub(offset + 1)
                         .ok_or_else(|| failure(GraphIntegerErrorKind::MissingColumn))?;
-                    stack.push(load(column).map_err(failure)?);
+                    let value = match load(column) {
+                        // A computed endpoint may be a vertex, but an
+                        // immediate NULL test observes only its presence.
+                        // Keep every other consumer's scalar-domain check;
+                        // the local's producer is still evaluated once.
+                        Err(GraphIntegerErrorKind::NonScalar)
+                            if matches!(self.code.get(at + 1), Some(Instruction::IsNull(_))) =>
+                        {
+                            CanonicalScalar::Bool(true).into()
+                        }
+                        value => value.map_err(failure)?,
+                    };
+                    stack.push(value);
                 }
                 Instruction::IdentityColumn { column, text } => {
                     let value = match load_element(*column).map_err(failure)? {

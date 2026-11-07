@@ -983,6 +983,8 @@ impl<'a> Parser<'a> {
                         "relationships",
                         "labels",
                         "type",
+                        "startNode",
+                        "endNode",
                         "keys",
                         "reduce",
                         "head",

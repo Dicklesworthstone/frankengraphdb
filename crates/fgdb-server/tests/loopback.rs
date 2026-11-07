@@ -176,6 +176,103 @@ fn server_code(error: ClientError) -> ErrorCode {
 }
 
 #[test]
+fn fgp_catalog_discovery_composes_and_prepares_under_the_original_capability() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "catalog-procedures").await;
+        let mut permitted = grant(Rights::Read);
+        permitted.labels = Scope::only([LabelId(1)]);
+        permitted.relations = Scope::only([RelationId(1)]);
+        permitted.properties = Scope::only([PropertyKeyId(1)]);
+        // Catalog declarations exist before the first graph record. Native
+        // discovery must not scan a graph or spend a graph-node allowance.
+        permitted.limits.max_nodes = 0;
+        permitted.limits.max_rows = 1;
+        let mut client = Client::connect(cx, addr, token(&permitted)).await.unwrap();
+        client.select(cx, "social").await.unwrap();
+        for (statement, column, value) in [
+            ("CALL db.labels()", "label", "Person"),
+            (
+                "CALL db.relationshipTypes() YIELD relationshipType AS kind RETURN kind",
+                "kind",
+                "KNOWS",
+            ),
+            (
+                "CALL db.propertyKeys() YIELD propertyKey AS key WHERE key <> 'age' RETURN key",
+                "key",
+                "name",
+            ),
+        ] {
+            let answer = client
+                .execute(cx, ExecuteMode::Read, statement, vec![])
+                .await
+                .unwrap();
+            assert_eq!(answer.columns, [column]);
+            assert_eq!(answer.rows, [vec![text(value)]]);
+            assert_eq!(answer.outcome, Outcome::Rows { seq: 0 });
+        }
+        let count = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "CALL db.labels() YIELD label RETURN count(*) AS labels",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(count.rows, [[WireValue::Count(1)]]);
+
+        let statement =
+            "CALL db.propertyKeys() YIELD propertyKey AS key WHERE key = $name RETURN key";
+        let handle = client
+            .prepare_read(cx, statement, vec![("name".into(), text("name"))])
+            .await
+            .unwrap();
+        for (name, expected) in [
+            ("name", vec![vec![text("name")]]),
+            ("age", vec![]),
+            ("name", vec![vec![text("name")]]),
+        ] {
+            let answer = client
+                .execute_prepared(cx, handle, vec![("name".into(), text(name))])
+                .await
+                .unwrap();
+            assert_eq!(answer.columns, ["key"]);
+            assert_eq!(answer.rows, expected);
+            assert_eq!(answer.outcome, Outcome::Rows { seq: 0 });
+        }
+        client.release_prepared(cx, handle).await.unwrap();
+
+        let mut zero_rows = permitted;
+        zero_rows.limits.max_rows = 0;
+        let mut limited = Client::connect(cx, addr, token(&zero_rows)).await.unwrap();
+        limited.select(cx, "social").await.unwrap();
+        assert_eq!(
+            server_code(
+                limited
+                    .execute(cx, ExecuteMode::Read, "CALL db.labels()", vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Budget,
+        );
+        let hidden = limited
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "CALL db.labels() YIELD label WHERE label = 'Company' RETURN label",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(hidden.rows.is_empty());
+        limited.close(cx).await.unwrap();
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn fgp_atomic_parameter_batches_share_one_commit_and_refuse_without_a_prefix() {
     run(async |cx| {
         let (addr, shutdown, mut task) = start(cx, "atomic-parameter-batch").await;
@@ -2074,6 +2171,35 @@ fn http_adapter_serves_the_same_authorized_statements() {
         let (status, _) = http(addr, "GET", "/v1/databases/social/schema", host, None, "").await;
         assert_eq!(status, 401);
 
+        // The same declared names are a composable native query source, with
+        // the same capability mask as the schema endpoint, even at sequence 0.
+        for (request, expected) in [
+            (
+                r#"{"statement":"CALL db.labels()"}"#,
+                r#"{"v":1,"columns":["label"],"rows":[[{"type":"text","value":"Person"}]],"seq":0}"#,
+            ),
+            (
+                r#"{"statement":"CALL db.relationshipTypes() YIELD relationshipType AS kind WHERE kind = $kind RETURN kind","parameters":{"kind":"KNOWS"}}"#,
+                r#"{"v":1,"columns":["kind"],"rows":[[{"type":"text","value":"KNOWS"}]],"seq":0}"#,
+            ),
+            (
+                r#"{"statement":"CALL db.propertyKeys() YIELD propertyKey RETURN count(*) AS keys"}"#,
+                r#"{"v":1,"columns":["keys"],"rows":[[{"type":"count","value":"1"}]],"seq":0}"#,
+            ),
+        ] {
+            let (status, body) = http(
+                addr,
+                "POST",
+                "/v1/databases/social/query",
+                host,
+                Some(&scoped),
+                request,
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body, expected);
+        }
+
         let (status, body) = http(
             addr,
             "POST",
@@ -3315,6 +3441,60 @@ fn bolt_drivers_read_hydrated_nodes_in_pinned_transactions_and_writes_refuse() {
         assert_eq!(
             scoped.pull_all().await.0,
             [[Value::string("Company")], [Value::string("Person")]]
+        );
+        // Composed discovery uses the same native source as FGP/HTTP. Aliases,
+        // parameters, WHERE, ordering and aggregation must retain the token's
+        // property mask instead of falling back to an unrestricted catalog.
+        let composed = scoped
+            .expect(
+                0x10,
+                run_message(
+                    "CALL db.propertyKeys() YIELD propertyKey AS key WHERE key = $name RETURN key ORDER BY key",
+                    vec![("name".into(), Value::string("name"))],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(
+            get(&composed, "fields"),
+            Some(&Value::List(vec![Value::string("key")]))
+        );
+        assert_eq!(scoped.pull_all().await.0, [[Value::string("name")]]);
+        scoped
+            .expect(
+                0x10,
+                run_message(
+                    "CALL db.propertyKeys() YIELD propertyKey RETURN count(*) AS keys",
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(scoped.pull_all().await.0, [[Value::Int(1)]]);
+        scoped
+            .expect(
+                0x10,
+                run_message(
+                    "CALL db.labels() YIELD label WITH label WHERE label STARTS WITH 'P' RETURN label",
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(scoped.pull_all().await.0, [[Value::string("Person")]]);
+        scoped
+            .expect(
+                0x10,
+                run_message(
+                    "CALL db.propertyKeys() YIELD propertyKey RETURN collect(propertyKey) AS fields",
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(
+            scoped.pull_all().await.0,
+            [[Value::List(vec![Value::string("name")])]],
         );
 
         // Deleting the current edge must not erase historical path metadata.

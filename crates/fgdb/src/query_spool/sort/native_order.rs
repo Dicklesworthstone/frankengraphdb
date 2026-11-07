@@ -341,14 +341,17 @@ impl<'s> AsyncSpillElementSource for ResidentElements<'s> {
                     else {
                         return Ok(None);
                     };
-                    MetadataRecord::Edge(
-                        snapshot.blocks[block][row].relation,
-                        crate::gql_exec::source::edge_properties_at(
+                    let edge = &snapshot.blocks[block][row];
+                    MetadataRecord::Edge {
+                        relation: edge.relation,
+                        source: edge.src,
+                        destination: edge.dst,
+                        properties: crate::gql_exec::source::edge_properties_at(
                             &snapshot.block_props,
                             block,
                             row,
                         ),
-                    )
+                    }
                 }
             };
             property_maps::metadata(

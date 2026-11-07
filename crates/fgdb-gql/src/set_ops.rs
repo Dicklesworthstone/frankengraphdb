@@ -36,6 +36,9 @@ pub use procedure::{
     WithElementReads, WithProcedureRows, WithProcedures, WithSeededPatterns, procedure_row_source,
     with_element_metadata,
 };
+pub(crate) use procedure::{
+    append_catalog_transcript, canonicalize_catalog_symbols, catalog_procedure_output,
+};
 pub(crate) use projection::{
     ElementRead, ProjectionFailure, UnwindRows, construct_temporal, evaluate_equality,
     evaluate_membership, evaluate_order, evaluate_value, evaluate_value_reading, map_keys,
@@ -679,6 +682,53 @@ impl PreparedGraphSet {
         vertices: Vec<usize>,
         graph_projection: Option<ProcedureGraphProjection>,
     ) -> Result<Self, GraphSetProjectionError> {
+        self.procedure_call_with_catalog(
+            namespace,
+            name,
+            arguments,
+            names,
+            outputs,
+            vertices,
+            graph_projection,
+            None,
+        )
+    }
+
+    /// Bind a complete catalog enumeration into a procedure source. Catalog
+    /// entries retain their typed identities so each executing host can apply
+    /// its authority. A catalog call accepts no runtime arguments or vertex
+    /// outputs, and its result columns have the scalar domain. Names must fit
+    /// canonical text and be unique across different symbol identities.
+    #[allow(clippy::too_many_arguments)]
+    pub fn procedure_call_with_catalog(
+        self,
+        namespace: String,
+        name: String,
+        arguments: Vec<GraphSetValue>,
+        names: Vec<String>,
+        outputs: Vec<(String, String)>,
+        vertices: Vec<usize>,
+        graph_projection: Option<ProcedureGraphProjection>,
+        mut catalog_symbols: Option<Vec<(crate::GraphSymbol, String)>>,
+    ) -> Result<Self, GraphSetProjectionError> {
+        if let Some(symbols) = &mut catalog_symbols {
+            let Some((kind, output)) = catalog_procedure_output(&namespace, &name) else {
+                return Err(GraphSetProjectionError::InvalidValue { column: 0 });
+            };
+            if !arguments.is_empty()
+                || !names.is_empty()
+                || !vertices.is_empty()
+                || graph_projection.is_some()
+                || outputs
+                    .iter()
+                    .any(|(name, _)| !name.eq_ignore_ascii_case(output))
+                || symbols.iter().any(|(symbol, _)| symbol.kind() != kind)
+            {
+                return Err(GraphSetProjectionError::InvalidValue { column: 0 });
+            }
+            canonicalize_catalog_symbols(symbols)
+                .map_err(|_| GraphSetProjectionError::InvalidValue { column: 0 })?;
+        }
         self.procedure_call_in_frame(
             namespace,
             name,
@@ -687,6 +737,7 @@ impl PreparedGraphSet {
             outputs,
             vertices,
             graph_projection,
+            catalog_symbols,
             Vec::new(),
         )
     }
@@ -701,6 +752,7 @@ impl PreparedGraphSet {
         outputs: Vec<(String, String)>,
         vertices: Vec<usize>,
         graph_projection: Option<ProcedureGraphProjection>,
+        catalog_symbols: Option<Vec<(crate::GraphSymbol, String)>>,
         input_types: Vec<GraphSetColumnType>,
     ) -> Result<Self, GraphSetProjectionError> {
         use GraphSetProjectionError as Error;
@@ -746,6 +798,7 @@ impl PreparedGraphSet {
                 outputs,
                 vertices,
                 graph_projection,
+                catalog_symbols,
                 frame_types,
             )?;
             if correlated {
@@ -801,7 +854,12 @@ impl PreparedGraphSet {
                 observed: operands,
             }));
         }
-        let types = vec![GraphSetColumnType::Any; columns.len()];
+        let output_type = if catalog_symbols.is_some() {
+            GraphSetColumnType::Scalar
+        } else {
+            GraphSetColumnType::Any
+        };
+        let types = vec![output_type; columns.len()];
         Ok(Self {
             node: SetNode::ProcedureCall(Box::new(PreparedProcedureCall {
                 namespace,
@@ -810,6 +868,7 @@ impl PreparedGraphSet {
                 input_types,
                 names,
                 graph_projection,
+                catalog_symbols,
                 outputs: output_names,
                 vertices,
             })),

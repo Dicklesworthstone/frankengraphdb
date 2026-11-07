@@ -2659,11 +2659,40 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        self.word("YIELD")?;
+        let catalog = crate::set_ops::catalog_procedure_output(namespace.text, name.text);
+        if catalog.is_some() && !arguments.is_empty() {
+            return Err(expected(at, "a catalog procedure with no arguments"));
+        }
+        let explicit_yield = self.take_word("YIELD")?;
+        if !explicit_yield && catalog.is_none() {
+            return Err(expected(self.current.at, "YIELD"));
+        }
+        let default_output = catalog.map(|(_, output)| output);
+        let yield_all = explicit_yield && default_output.is_some() && self.take(b'*')?;
         let mut outputs = Vec::new();
         loop {
-            let output = self.name()?;
-            let alias = if self.take_word("AS")? {
+            let output = if !explicit_yield || yield_all {
+                Name {
+                    text: default_output.expect("only catalog procedures imply outputs"),
+                    at,
+                }
+            } else {
+                self.name()?
+            };
+            let output = if let Some(expected_output) = default_output {
+                if !output.text.eq_ignore_ascii_case(expected_output) {
+                    return Err(expected(output.at, "the catalog procedure's output column"));
+                }
+                // Registered output names have one spelling; an explicit AS
+                // alias below still keeps exactly the author's spelling.
+                Name {
+                    text: expected_output,
+                    at: output.at,
+                }
+            } else {
+                output
+            };
+            let alias = if explicit_yield && !yield_all && self.take_word("AS")? {
                 self.name()?
             } else {
                 output
@@ -2676,9 +2705,16 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_VERTICES,
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
-            schema.push((alias, GraphSetColumnType::Any));
+            schema.push((
+                alias,
+                if catalog.is_some() {
+                    GraphSetColumnType::Scalar
+                } else {
+                    GraphSetColumnType::Any
+                },
+            ));
             outputs.push((output.text.to_owned(), alias.text.to_owned()));
-            if !self.take(b',')? {
+            if !explicit_yield || yield_all || !self.take(b',')? {
                 break;
             }
         }
@@ -2693,6 +2729,7 @@ impl<'a> Parser<'a> {
             // A following MATCH (written or implied) marks its vertex uses.
             vertices: Vec::new(),
             graph_projection: None,
+            catalog_symbols: None,
         })
     }
 

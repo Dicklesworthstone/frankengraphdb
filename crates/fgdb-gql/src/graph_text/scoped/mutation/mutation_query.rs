@@ -357,6 +357,16 @@ impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
         parser: &mut Parser<'a>,
         source: Name<'a>,
     ) -> Result<Option<usize>, GraphPatternTextError> {
+        if parser.is_word("STARTNODE") || parser.is_word("ENDNODE") {
+            if self.row.is_none()
+                && parser
+                    .edge_endpoint(source, parser.is_word("STARTNODE"))
+                    .is_ok()
+            {
+                return self.leaf(parser);
+            }
+            return Ok(None);
+        }
         if self.row.is_none_or(|row| {
             row.iter().any(|(name, kind)| {
                 name.text == source.text

@@ -731,6 +731,103 @@ mod tests {
     }
 
     #[test]
+    fn local_null_tests_observe_presence_without_coercing_graph_values() {
+        for value in [
+            GraphValue::Vertex(fgdb_types::VId(u128::MAX)),
+            GraphValue::Edge(fgdb_types::EId(u128::MAX)),
+            GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Null)].into_boxed_slice()),
+            GraphValue::Scalar(CanonicalScalar::Bool(false)),
+            GraphValue::Scalar(CanonicalScalar::Int(0)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+        ] {
+            let null = matches!(value, GraphValue::Scalar(CanonicalScalar::Null));
+            // The local is addressed from the row's end, including a
+            // nonzero offset among other computed slots.
+            let row = [value, GraphValue::Scalar(CanonicalScalar::Int(7))];
+            for is_null in [false, true] {
+                let expression = prepare_scalar(&[Op::Local(1), Op::IsNull(is_null)]).unwrap();
+                let expected = CanonicalScalar::Bool(null == is_null);
+                assert_eq!(
+                    expression
+                        .evaluate_scalar_with_control(&row, &mut |_| Ok::<_, ()>(()))
+                        .unwrap(),
+                    expected,
+                );
+                assert_eq!(
+                    expression
+                        .evaluate_value_with_control(&row, &mut |_| Ok::<_, ()>(()))
+                        .unwrap(),
+                    GraphValue::Scalar(expected),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn local_presence_reads_once_and_preserves_other_refusals() {
+        let expression = prepare_scalar(&[Op::Local(0), Op::IsNull(true)]).unwrap();
+        let mut reads = 0;
+        let result = expression
+            .evaluate_loaded_with_control(
+                1,
+                |_| {
+                    reads += 1;
+                    Err(GraphIntegerErrorKind::NonScalar)
+                },
+                |_| panic!("a NULL test does not read an element identity"),
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            ExpressionCell::Scalar(value) if *value == CanonicalScalar::Bool(false)
+        ));
+        assert_eq!(reads, 1);
+        for kind in [
+            GraphIntegerErrorKind::MissingColumn,
+            GraphIntegerErrorKind::Overflow,
+        ] {
+            let mut reads = 0;
+            let result = expression.evaluate_loaded_with_control(
+                1,
+                |_| {
+                    reads += 1;
+                    Err(kind)
+                },
+                |_| panic!("a NULL test does not read an element identity"),
+                &mut |_| Ok::<_, ()>(()),
+            );
+            assert!(matches!(
+                result,
+                Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
+                    kind: observed,
+                    ..
+                })) if observed == kind
+            ));
+            assert_eq!(reads, 1);
+        }
+        let row = [GraphValue::Vertex(fgdb_types::VId(1))];
+        for ops in [
+            vec![Op::Local(0)],
+            vec![Op::Local(0), Op::ToText, Op::IsNull(true)],
+            vec![
+                Op::Local(0),
+                Op::Literal(Some(1)),
+                Op::Compare(IntegerComparison::Equal),
+            ],
+        ] {
+            let expression = prepare_scalar(&ops).unwrap();
+            assert!(matches!(
+                expression.evaluate_scalar_with_control(&row, &mut |_| Ok::<_, ()>(())),
+                Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
+                    kind: GraphIntegerErrorKind::NonScalar,
+                    ..
+                }))
+            ));
+        }
+    }
+
+    #[test]
     fn mixed_numeric_scalar_comparisons_are_exact_for_literals_and_columns() {
         for (integer, float, order) in [
             (7, 7.0, core::cmp::Ordering::Equal),

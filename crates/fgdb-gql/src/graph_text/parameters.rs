@@ -184,11 +184,23 @@ impl UnresolvedGraphText<'_> {
                 names.truncate(computed.visible);
                 types.truncate(computed.visible);
             }
-            // A CALL source appends each YIELD alias, all Any, as UNWIND does.
-            if let ReadStageTemplate::Call { outputs, .. } = stage {
+            // Catalog names are scalars; other procedures retain open output
+            // domains until their executing host validates the signature.
+            if let ReadStageTemplate::Call {
+                outputs,
+                namespace,
+                name,
+                ..
+            } = stage
+            {
+                let kind = if crate::set_ops::catalog_procedure_output(namespace, name).is_some() {
+                    crate::GraphSetColumnType::Scalar
+                } else {
+                    crate::GraphSetColumnType::Any
+                };
                 for (_, alias) in outputs {
                     names.push(alias.clone());
-                    types.push(crate::GraphSetColumnType::Any);
+                    types.push(kind);
                 }
             }
         }
@@ -225,6 +237,7 @@ impl UnresolvedGraphText<'_> {
             .element_catalog
             .resolve(&mut resolve, self.statement);
         for stage in self.leading.iter_mut().chain(self.pipeline.iter_mut()) {
+            resolve_call_catalog(stage, &resolve)?;
             resolve_call_symbols(stage, &mut |kind, name| resolve.resolve_symbol(kind, name))?;
         }
         // Every `x.key` read binds its key now, so an element operand reads
@@ -378,6 +391,55 @@ impl UnresolvedGraphText<'_> {
             owned: None,
         })
     }
+}
+
+/// Catalog discovery requires explicit, complete reverse names. The fallback
+/// used by metadata expressions only sees known spellings and cannot prove a
+/// complete catalog, even when it happens to find every current symbol.
+fn resolve_call_catalog(
+    stage: &mut ReadStageTemplate,
+    resolve: &impl GraphSymbolResolver,
+) -> Result<(), GraphPatternTextError> {
+    let ReadStageTemplate::Call {
+        at,
+        namespace,
+        name,
+        catalog_symbols,
+        ..
+    } = stage
+    else {
+        return Ok(());
+    };
+    let Some((kind, _)) = crate::set_ops::catalog_procedure_output(namespace, name) else {
+        return Ok(());
+    };
+    let catalog = resolve.reverse_catalog().ok_or_else(|| {
+        error(
+            *at,
+            GraphPatternTextErrorKind::Expected("a complete reverse symbol catalog"),
+        )
+    })?;
+    let mut symbols: Vec<_> = match kind {
+        GraphSymbolKind::Label => catalog
+            .labels
+            .into_iter()
+            .map(|(id, name)| (GraphSymbol::Label(id), name))
+            .collect(),
+        GraphSymbolKind::Relation => catalog
+            .relations
+            .into_iter()
+            .map(|(id, name)| (GraphSymbol::Relation(id), name))
+            .collect(),
+        GraphSymbolKind::Property => catalog
+            .properties
+            .into_iter()
+            .map(|(id, name)| (GraphSymbol::Property(id), name))
+            .collect(),
+    };
+    crate::set_ops::canonicalize_catalog_symbols(&mut symbols)
+        .map_err(|expected| error(*at, GraphPatternTextErrorKind::Expected(expected)))?;
+    *catalog_symbols = Some(symbols);
+    Ok(())
 }
 
 impl<'a> Parser<'a> {

@@ -371,6 +371,9 @@ impl Fixture {
                     .collect::<Result<Vec<_>, ()>>()?,
             )
             .ok_or(())?,
+            // This property-value fixture cannot encode graph identities.
+            // Endpoint hosts are exercised by list_values and embedded reads.
+            GraphElementMetadata::StartNode | GraphElementMetadata::EndNode => return Err(()),
         };
         value.to_property_value().map(Some).ok_or(())
     }

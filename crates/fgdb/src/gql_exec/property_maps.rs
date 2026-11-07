@@ -20,7 +20,12 @@ pub(crate) struct PropertyMaps {
 /// view; field masking still precedes every catalog lookup and allocation.
 pub(crate) enum MetadataRecord<'a> {
     Vertex(&'a VertexRow),
-    Edge(RelationId, &'a [(PropertyKeyId, CanonicalPropertyValue)]),
+    Edge {
+        relation: RelationId,
+        source: VId,
+        destination: VId,
+        properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
+    },
 }
 
 /// Materialize metadata through the caller's cumulative control. Reusing the
@@ -39,7 +44,7 @@ pub(crate) fn metadata<E>(
         (GraphElementMetadata::Properties, record) => {
             let properties = match record {
                 MetadataRecord::Vertex(row) => row.props.as_slice(),
-                MetadataRecord::Edge(_, properties) => properties,
+                MetadataRecord::Edge { properties, .. } => properties,
             };
             collect(
                 properties.iter().map(|(key, value)| (*key, value)),
@@ -52,7 +57,7 @@ pub(crate) fn metadata<E>(
         (GraphElementMetadata::Keys, record) => {
             let properties = match record {
                 MetadataRecord::Vertex(row) => row.props.as_slice(),
-                MetadataRecord::Edge(_, properties) => properties,
+                MetadataRecord::Edge { properties, .. } => properties,
             };
             collect_keys(
                 properties.iter().map(|(key, _)| *key),
@@ -69,13 +74,30 @@ pub(crate) fn metadata<E>(
             control,
             failure,
         ),
-        (GraphElementMetadata::Type, MetadataRecord::Edge(relation, _)) => {
+        (GraphElementMetadata::Type, MetadataRecord::Edge { relation, .. }) => {
             relation_type(relation, catalog, control, failure)
+        }
+        (GraphElementMetadata::StartNode, MetadataRecord::Edge { source, .. }) => {
+            endpoint(source, control)
+        }
+        (GraphElementMetadata::EndNode, MetadataRecord::Edge { destination, .. }) => {
+            endpoint(destination, control)
         }
         // The value evaluator rejects these domains before calling its host.
         // Retain a typed failure if a host invokes this helper independently.
         _ => Err(failure(ReadError::InvalidPropertyMap)),
     }
+}
+
+/// Endpoints have already passed the host's element and both-endpoint masks.
+/// Returning one identity observes neither fields nor the ambient catalog.
+pub(crate) fn endpoint<E>(
+    vertex: VId,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<GraphValue, E> {
+    control(SourceEvent::Work)?;
+    control(SourceEvent::ScratchEntry)?;
+    Ok(GraphValue::Vertex(vertex))
 }
 
 /// The same bounded key collector also accepts a borrowed canonical overlay.
@@ -384,11 +406,23 @@ mod tests {
             GraphElementMetadata::Type,
             GraphElementMetadata::Properties,
             GraphElementMetadata::Keys,
+            GraphElementMetadata::StartNode,
+            GraphElementMetadata::EndNode,
         ] {
             let execute = |stop| {
                 let mut calls = 0;
-                let record = if kind == GraphElementMetadata::Type {
-                    MetadataRecord::Edge(RelationId(1), &visible.props)
+                let record = if matches!(
+                    kind,
+                    GraphElementMetadata::Type
+                        | GraphElementMetadata::StartNode
+                        | GraphElementMetadata::EndNode
+                ) {
+                    MetadataRecord::Edge {
+                        relation: RelationId(1),
+                        source: VId(1),
+                        destination: VId(2),
+                        properties: &visible.props,
+                    }
                 } else {
                     MetadataRecord::Vertex(&visible)
                 };

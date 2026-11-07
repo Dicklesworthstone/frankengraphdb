@@ -407,7 +407,7 @@ impl<V: Vfs + Clone> Database<V> {
     }
 }
 
-/// Why a native read's `CALL fnx.*` stage was refused.
+/// Why a native read's registered procedure stage was refused.
 #[derive(Debug)]
 pub enum ProcedureError {
     /// No registered signature accepts this name, argument or YIELD item.
@@ -437,6 +437,9 @@ pub enum ProcedureError {
     ResultDomain,
     /// A `CALL hybrid.search` refused its arguments or its retrieval.
     Search(crate::query::HybridCallError),
+    /// A catalog procedure has an invalid signature or no complete frozen
+    /// host catalog. A missing catalog is never reported as an empty schema.
+    Catalog(&'static str),
 }
 impl core::fmt::Display for ProcedureError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -450,6 +453,7 @@ impl core::fmt::Display for ProcedureError {
             }
             Self::ResultDomain => f.write_str("Prism count exceeds the Int64 domain"),
             Self::Search(error) => error.fmt(f),
+            Self::Catalog(reason) => write!(f, "catalog procedure: {reason}"),
         }
     }
 }
@@ -460,7 +464,10 @@ impl core::error::Error for ProcedureError {
             Self::Search(error) => Some(error),
             Self::SealedRead(error) => Some(error),
             Self::BufferedSealedRead(error) => Some(error),
-            Self::Read(_) | Self::ResultDomain | Self::SealedRelationMismatch { .. } => None,
+            Self::Read(_)
+            | Self::ResultDomain
+            | Self::SealedRelationMismatch { .. }
+            | Self::Catalog(_) => None,
         }
     }
 }
@@ -471,7 +478,7 @@ impl ProcedureError {
     #[must_use]
     pub fn is_statement_refusal(&self) -> bool {
         match self {
-            Self::Bind(_) => true,
+            Self::Bind(_) | Self::Catalog(_) => true,
             Self::Read(error) => matches!(
                 **error,
                 FnxReadError::Execution(fgdb_prism::FnxExecutionError::GraphKind { .. })

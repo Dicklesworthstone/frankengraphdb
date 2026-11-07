@@ -210,10 +210,12 @@ fn scoped_element_metadata<Clock: FnMut() -> u64>(
             // Both predicates precede every logical source charge. A hidden
             // destination cannot change visible usage or expose a relation.
             execution.borrow_mut().node().map_err(&retain)?;
-            MetadataRecord::Edge(
-                edge.relation,
-                source::edge_properties_at(&snapshot.block_props, block, row),
-            )
+            MetadataRecord::Edge {
+                relation: edge.relation,
+                source: edge.src,
+                destination: edge.dst,
+                properties: source::edge_properties_at(&snapshot.block_props, block, row),
+            }
         }
     };
     property_maps::metadata(
@@ -299,6 +301,9 @@ fn set_execution_in_runs<Clock: FnMut() -> u64>(
                     procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
                 },
                 |call, arguments, remaining| {
+                    if crate::query::is_catalog(call) {
+                        return None;
+                    }
                     Some(procedure_rows_at(
                         snapshot,
                         at,
@@ -367,6 +372,20 @@ fn procedure_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     remaining: GqlQueryPolicy,
 ) -> Result<fgdb_gql::GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, QueryError>> {
+    if crate::query::is_catalog(call) {
+        return crate::query::catalog_procedure(
+            call,
+            arguments,
+            remaining,
+            |symbol| match symbol {
+                fgdb_gql::GraphSymbol::Label(id) => scope.allows_label(id),
+                fgdb_gql::GraphSymbol::Relation(id) => scope.allows_relation(id),
+                fgdb_gql::GraphSymbol::Property(id) => scope.allows_property(id),
+            },
+            || execution.borrow_mut().poll(),
+            |units| execution.borrow_mut().work_units(units),
+        );
+    }
     if crate::query::is_hybrid(call) {
         return super::beacon::hybrid_at(
             snapshot, at, call, arguments, scope, execution, remaining,
@@ -535,6 +554,9 @@ fn aggregate_execution_at<Clock: FnMut() -> u64>(
                     procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
                 },
                 |call, arguments, remaining| {
+                    if crate::query::is_catalog(call) {
+                        return None;
+                    }
                     Some(procedure_rows_at(
                         snapshot,
                         at,

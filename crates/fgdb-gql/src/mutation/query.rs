@@ -888,14 +888,14 @@ impl<E> PostWriteReads<'_, '_, '_, E> {
         control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), MetadataOverlayError>,
     ) -> Result<crate::algebra::GraphValue, MetadataOverlayError> {
         use crate::GlaExecutionEvent::{ScratchEntry, Work};
-        use crate::GraphElementMetadata::{Keys, Labels, Properties, Type};
+        use crate::GraphElementMetadata::{EndNode, Keys, Labels, Properties, StartNode, Type};
         use crate::algebra::GraphValue;
         if !crate::set_ops::projection::metadata_value_valid(kind, &value) {
             return Err(MetadataOverlayError::Invalid);
         }
         control(Work)?;
         match kind {
-            Type => Ok(value),
+            Type | StartNode | EndNode => Ok(value),
             Labels => {
                 let ElementId::Vertex(vertex) = element else {
                     return Err(MetadataOverlayError::Invalid);

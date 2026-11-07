@@ -657,9 +657,10 @@ impl<'s> Connection<'s> {
             causal::in_transaction(extra, &transaction.name, transaction.seq)?;
             transaction.cursors.check_admission()?;
         }
-        if let Some((column, kind)) = schema_procedure(query) {
-            return self.schema_rows(cx, extra, column, kind).await;
-        }
+        // Retain the legacy standalone schema response's lack of a bookmark.
+        // Execution and authorization now belong to the ordinary native CALL
+        // path, including for these forms; this hint grants no authority.
+        let schema_metadata = self.transaction.is_none() && schema_procedure(query).is_some();
         let arguments = statement_parameters(parameters)?;
         if let Some(metadata) =
             self.queue_autocommit_write(cx, query, parameters, &arguments, extra)?
@@ -722,7 +723,7 @@ impl<'s> Connection<'s> {
                 rows,
                 database: name,
                 db,
-                seq: Some(seq),
+                seq: (!schema_metadata).then_some(seq),
                 generation,
                 write: None,
             },
@@ -819,74 +820,6 @@ impl<'s> Connection<'s> {
         Ok(metadata)
     }
 
-    /// `CALL db.labels()` and its siblings: the schema names this token may
-    /// see, the same filtered answer as HTTP's schema route.
-    async fn schema_rows(
-        &mut self,
-        cx: &Cx,
-        extra: &Map,
-        column: &str,
-        kind: SchemaKind,
-    ) -> Result<Map, Failure> {
-        // Do not retain a shared borrow of the session across the autocommit
-        // await. Only these owned coordinates survive the branch selection.
-        let transaction = self.transaction.as_ref().map(|transaction| {
-            (
-                transaction.name.clone(),
-                transaction.db,
-                Some(transaction.seq),
-                transaction.session.generation(),
-            )
-        });
-        let (name, db, seq, generation) = match transaction {
-            Some(pinned) => pinned,
-            None => {
-                let (name, db) = self.database(extra)?;
-                self.output_database = Some(db);
-                let token = self.token.as_ref().expect("authenticated");
-                let generation = causal::schema_generation(cx, db, token, &name, extra).await?;
-                (name, db, None, generation)
-            }
-        };
-        self.output_database = Some(db);
-        generation
-            .check()
-            .map_err(|error| Failure::from_refusal(error.into()))?;
-        self.output_generation = Some(generation.clone());
-        let token = self.token.as_ref().expect("authenticated");
-        let schema = crate::execute::schema(db, token).map_err(Failure::from_refusal)?;
-        let names = match kind {
-            SchemaKind::Labels => schema.labels,
-            SchemaKind::Relations => schema.relations,
-            SchemaKind::Properties => schema.properties,
-        };
-        let qid = self.buffer_result(
-            cx,
-            Pending {
-                rows: names
-                    .into_iter()
-                    .map(|name| vec![Value::String(name)])
-                    .collect(),
-                database: name,
-                db,
-                seq,
-                generation,
-                write: None,
-            },
-        )?;
-        let mut metadata = vec![
-            (
-                "fields".to_owned(),
-                Value::List(vec![Value::string(column)]),
-            ),
-            ("t_first".to_owned(), Value::Int(0)),
-        ];
-        if let Some(qid) = qid {
-            metadata.push(("qid".to_owned(), Value::Int(qid)));
-        }
-        Ok(metadata)
-    }
-
     /// A single-server routing table, so `neo4j://` URIs work: this server
     /// is every role. Only autocommit writes are admitted here;
     /// explicit transactions remain read-only even when routed as WRITE.
@@ -933,8 +866,10 @@ enum SchemaKind {
     Properties,
 }
 
-/// The Neo4j schema procedures drivers and tools call, in their plain
-/// forms: `CALL db.labels()`, optionally `YIELD label`, and likewise for
+/// Recognize the legacy schema response's no-bookmark metadata, never an
+/// execution shortcut. The native compiler and authorized session execute
+/// every call, including these plain forms: `CALL db.labels()`, optionally
+/// `YIELD label`, and likewise for
 /// `db.relationshipTypes()` / `relationshipType` and `db.propertyKeys()` /
 /// `propertyKey`. Case-insensitive, whitespace-tolerant, one optional `;`.
 fn schema_procedure(query: &str) -> Option<(&'static str, SchemaKind)> {

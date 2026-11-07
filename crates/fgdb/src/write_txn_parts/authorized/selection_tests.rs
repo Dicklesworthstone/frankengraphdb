@@ -501,32 +501,36 @@ fn carried_metadata_charges_each_visible_node_and_unique_edge_endpoint() {
             (
                 ElementId::Vertex(VId(1)),
                 1,
-                [
+                &[
                     GraphElementMetadata::Labels,
                     GraphElementMetadata::Keys,
                     GraphElementMetadata::Properties,
-                ],
+                ][..],
             ),
             (
                 ElementId::Edge(EId(1)),
                 2,
-                [
+                &[
                     GraphElementMetadata::Type,
                     GraphElementMetadata::Keys,
                     GraphElementMetadata::Properties,
-                ],
+                    GraphElementMetadata::StartNode,
+                    GraphElementMetadata::EndNode,
+                ][..],
             ),
             (
                 ElementId::Edge(EId(2)),
                 1,
-                [
+                &[
                     GraphElementMetadata::Type,
                     GraphElementMetadata::Keys,
                     GraphElementMetadata::Properties,
-                ],
+                    GraphElementMetadata::StartNode,
+                    GraphElementMetadata::EndNode,
+                ][..],
             ),
         ] {
-            for kind in kinds {
+            for &kind in kinds {
                 for max_nodes in [nodes - 1, nodes] {
                     let token = authority.issue_at(&metadata_grant(max_nodes), 100).unwrap();
                     let verified = authority.verify_at(&token, "main", 100).unwrap();

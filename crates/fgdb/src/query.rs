@@ -148,6 +148,8 @@ mod aggregate_stream;
 pub(crate) mod authorized;
 #[path = "query_beacon.rs"]
 mod beacon;
+#[path = "query_catalog.rs"]
+mod catalog;
 #[path = "query_diff.rs"]
 mod diff;
 #[path = "query_explain.rs"]
@@ -178,6 +180,9 @@ pub use beacon::{
     MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
     MaintainedBeaconIndex, MaintainedBeaconStatus, PinnedIndex, RefreshReport, ResidentIndex,
     ResidentIndexError,
+};
+pub(crate) use catalog::{
+    catalog_procedure, is_catalog, privileged as catalog_procedure_privileged,
 };
 pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 use explain::{explain_prefix, explain_result};

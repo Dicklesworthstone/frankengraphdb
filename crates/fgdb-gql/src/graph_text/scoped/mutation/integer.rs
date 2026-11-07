@@ -948,9 +948,18 @@ impl<'a> Parser<'a> {
         }
         // A later MATCH can supply an element absent from the incoming row.
         // Resolve it here once: the scalar fallback would rediscover this
-        // same comparison without consuming the element name.
+        // same comparison without consuming the element name. Native write
+        // leaves own created names outside both routing schemas, so the
+        // resolver admits their bare names here as well.
+        let write_name = self.write_leaves
+            && matches!(self.current.kind, TokenKind::Word(word)
+                if !["TRUE", "FALSE", "NULL"].iter().any(|literal| word.eq_ignore_ascii_case(literal)))
+            && !matches!(
+                self.lexer.clone().next()?.kind,
+                TokenKind::Punct(b'.' | b'(' | b'[' | b':')
+            );
         if !tighter
-            && element_column_at(self.current, &self.lexer, self.route(columns))?
+            && (write_name || element_column_at(self.current, &self.lexer, self.route(columns))?)
             && let ExpressionColumns::Resolved(resolve) = columns
         {
             let column = resolve(self)?

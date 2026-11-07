@@ -514,6 +514,11 @@ impl<V: Vfs + Clone> Database<V> {
                             ))
                         },
                         |call, arguments, remaining| {
+                            if crate::query::is_catalog(call) {
+                                return crate::query::catalog_procedure_privileged(
+                                    call, arguments, remaining, cx,
+                                );
+                            }
                             if crate::query::is_hybrid(call) {
                                 return crate::query::hybrid_procedure_with_registry(
                                     &self.snapshot,
@@ -537,6 +542,9 @@ impl<V: Vfs + Clone> Database<V> {
                             )
                         },
                         |call, arguments, remaining| {
+                            if crate::query::is_catalog(call) {
+                                return None;
+                            }
                             Some(crate::query::fnx_procedure_rows(
                                 call,
                                 arguments,
@@ -618,6 +626,11 @@ impl EmbeddedReadView {
                             ))
                         },
                         |call, arguments, remaining| {
+                            if crate::query::is_catalog(call) {
+                                return crate::query::catalog_procedure_privileged(
+                                    call, arguments, remaining, cx,
+                                );
+                            }
                             if crate::query::is_hybrid(call) {
                                 return crate::query::hybrid_procedure(
                                     &self.snapshot,
@@ -641,6 +654,9 @@ impl EmbeddedReadView {
                             )
                         },
                         |call, arguments, remaining| {
+                            if crate::query::is_catalog(call) {
+                                return None;
+                            }
                             Some(crate::query::fnx_procedure_rows(
                                 call,
                                 arguments,

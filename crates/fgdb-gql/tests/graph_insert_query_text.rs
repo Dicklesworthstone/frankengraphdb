@@ -1728,22 +1728,23 @@ fn imported_map_return_reads_its_entries_and_no_other_leaf_does() {
     // UNWIND types its column Any, so a non-map element fails when read, as
     // openCypher's property access on an integer does.
     assert!(run(&prepare("UNWIND [1] AS row CREATE (c) RETURN row.p AS p")).is_err());
-    // Only the imported leaf reads `.key`: a later endpoint in the same RETURN
-    // still refuses before the catalog, and a scalar WITH import still refuses.
-    for text in [
-        "UNWIND [{p:1}] AS row CREATE (a)-[e:R]->(b) RETURN row.p AS p,startNode(e).p",
-        "UNWIND [{p:1}] AS row CREATE (a)-[e:R]->(b) RETURN startNode(e).p,row.p AS p",
+    // Imported maps and endpoint fields retain their own source when they
+    // share a RETURN, regardless of which leaf was encountered first.
+    for (text, expected) in [
+        (
+            "UNWIND [{p:1}] AS row CREATE (a {p:7})-[e:R]->(b) RETURN row.p AS p,startNode(e).p",
+            vec![int(1), int(7)],
+        ),
+        (
+            "UNWIND [{p:1}] AS row CREATE (a {p:7})-[e:R]->(b) RETURN startNode(e).p,row.p AS p",
+            vec![int(7), int(1)],
+        ),
     ] {
-        let calls = Cell::new(0);
-        assert!(
-            PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
-                calls.set(calls.get() + 1);
-                symbols(kind, name)
-            })
-            .is_err(),
+        assert_eq!(
+            values(&run(&prepare(text)).unwrap()),
+            vec![expected],
             "{text}"
         );
-        assert_eq!(calls.get(), 0, "{text}");
     }
     assert!(
         PreparedGraphInsertQueryText::prepare("WITH 1 AS x CREATE (c) RETURN x.p", R, symbols)

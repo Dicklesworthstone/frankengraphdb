@@ -7,7 +7,7 @@
 //! A future local bookmark refuses promptly; this adapter has no causal wait
 //! queue and never silently drops a requested timeout or impersonated identity.
 
-use super::{CommitSeq, Cx, Failure, Generation, Map, ReadSession, Served, Value, get};
+use super::{CommitSeq, Cx, Failure, Map, ReadSession, Served, Value, get};
 use fgdb_warden::CapabilityToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,31 +109,6 @@ pub(super) async fn session<'s>(
         .map_err(|error| Failure::from_refusal(error.into()))?;
     require_frontier(frontier, minimum)?;
     Ok((session, frontier))
-}
-
-/// Schema procedures enumerate scoped operator bindings rather than graph
-/// records. Preserve that source and its no-bookmark response; a nonzero
-/// incoming bookmark still requires causal admission on an authorized session.
-/// Without a positive floor, preserve the existing graph-free schema path.
-pub(super) async fn schema_generation(
-    cx: &Cx,
-    db: &Served,
-    token: &CapabilityToken,
-    database: &str,
-    extra: &Map,
-) -> Result<Generation, Failure> {
-    let minimum = options(extra, database)?.minimum_seq;
-    if minimum == CommitSeq(0) {
-        return db
-            .db
-            .generation()
-            .map_err(|error| Failure::from_refusal(error.into()));
-    }
-    let (session, frontier) = super::read_session(cx, db, token)
-        .await
-        .map_err(Failure::from_refusal)?;
-    require_frontier(frontier, minimum)?;
-    Ok(session.generation())
 }
 
 /// Bolt normally sends an empty extra map for RUN inside BEGIN. For existing

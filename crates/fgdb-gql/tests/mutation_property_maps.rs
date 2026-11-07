@@ -559,6 +559,9 @@ mod dynamic_metadata {
                     GraphElementMetadata::Type => &relation,
                     GraphElementMetadata::Properties => map,
                     GraphElementMetadata::Keys => unreachable!(),
+                    GraphElementMetadata::StartNode | GraphElementMetadata::EndNode => {
+                        return Err(GraphElementMetadataError::Source(()));
+                    }
                 };
                 value.copy_with_control(&mut charge).map(Some)
             },

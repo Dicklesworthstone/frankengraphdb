@@ -782,14 +782,29 @@ fn expression<'g>(
                     (
                         crate::GraphElementMetadata::Type
                         | crate::GraphElementMetadata::Properties
-                        | crate::GraphElementMetadata::Keys,
+                        | crate::GraphElementMetadata::Keys
+                        | crate::GraphElementMetadata::StartNode
+                        | crate::GraphElementMetadata::EndNode,
                         Cell::Value(ValueRef::Edge(id)),
                     ) => ElementId::Edge(id),
                     _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
                 };
-                let catalog = catalog
-                    .as_deref()
-                    .ok_or_else(|| failure(column, GraphIntegerErrorKind::IncompatibleOperands))?;
+                let empty_catalog;
+                let catalog = match catalog.as_deref() {
+                    Some(catalog) => catalog,
+                    None if matches!(
+                        kind,
+                        crate::GraphElementMetadata::StartNode
+                            | crate::GraphElementMetadata::EndNode
+                    ) =>
+                    {
+                        empty_catalog = crate::ReverseSymbolCatalog::default();
+                        &empty_catalog
+                    }
+                    None => {
+                        return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
+                    }
+                };
                 control(GlaExecutionEvent::Work)?;
                 let result = crate::set_ops::projection::read_metadata(
                     &mut crate::set_ops::projection::MappedElements {

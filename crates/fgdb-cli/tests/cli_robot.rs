@@ -950,6 +950,58 @@ fn assert_rows(output: &Outcome, expected: &str) {
 }
 
 #[test]
+fn catalog_procedures_reopen_through_the_native_cli_query_surface() {
+    let db = TestDb::new("catalog-procedures");
+    let created = db.create();
+    for (statement, column, expected) in [
+        (
+            "CALL db.labels()",
+            "label",
+            r#"[[{"type":"text","value":"Person"}]]"#,
+        ),
+        (
+            "CALL db.relationshipTypes()",
+            "relationshipType",
+            r#"[[{"type":"text","value":"KNOWS"}]]"#,
+        ),
+        (
+            "CALL db.propertyKeys()",
+            "propertyKey",
+            r#"[[{"type":"text","value":"active"}],[{"type":"text","value":"born"}],[{"type":"text","value":"name"}],[{"type":"text","value":"nullable"}],[{"type":"text","value":"team"}]]"#,
+        ),
+        (
+            "CALL db.propertyKeys() YIELD propertyKey AS name WHERE name STARTS WITH 'n' RETURN name ORDER BY name DESC",
+            "name",
+            r#"[[{"type":"text","value":"nullable"}],[{"type":"text","value":"name"}]]"#,
+        ),
+        (
+            "CALL db.propertyKeys() YIELD propertyKey RETURN count(*) AS keys",
+            "keys",
+            r#"[[{"type":"count","value":"5"}]]"#,
+        ),
+    ] {
+        let result = db.command("query", &["--max-snapshot-records", "0", statement]);
+        assert_rows(&result, expected);
+        assert_eq!(
+            result.sequence("rows"),
+            created,
+            "catalog reads must not advance the database"
+        );
+        assert_eq!(
+            result.events[1].get("columns"),
+            &Json::Array(vec![Json::String(column.into())])
+        );
+    }
+
+    let statement = "CALL db.labels() YIELD label AS name WHERE name = $name RETURN name";
+    let filtered = db.command("query", &["--param", "name=text:Person", statement]);
+    assert_rows(&filtered, r#"[[{"type":"text","value":"Person"}]]"#);
+    let absent = db.command("query", &["--param", "name=text:Missing", statement]);
+    assert_rows(&absent, "[]");
+    assert_eq!(absent.sequence("rows"), created);
+}
+
+#[test]
 fn json_reader_handles_nested_escaping_and_rejects_malformed_documents() {
     let document = json(
         r#" {"escaped":"\"\\\/\b\f\n\r\t\u0000\u00e9\ud83d\ude00","nested":[null,true,false,-12.5e+2,{"raw":"é"}]} "#,

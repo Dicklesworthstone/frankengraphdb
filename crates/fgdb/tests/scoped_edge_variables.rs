@@ -250,15 +250,12 @@ fn optional_relationships_aggregate_and_cross_with() {
 }
 
 #[test]
-fn optional_relationship_forms_without_a_null_safe_meaning_refuse() {
+fn optional_relationships_have_null_safe_endpoints_and_refuse_invalid_scope() {
     run(async |commit, cx, _| {
         let mut db = Database::open_memory(commit, keys()).await.unwrap();
         db.write(commit, graph()).await.unwrap();
         let params = GqlParameters::new();
         for statement in [
-            // startNode(r) would read a's bound endpoint on a NULL-r row.
-            "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R]->(b) RETURN startNode(r) AS s",
-            "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R]->(b) RETURN endNode(r) AS s",
             // Reusing a name would correlate relationships, which is
             // unsupported, or rebind a relationship as a vertex.
             "MATCH (x)-[r:R]->(y) OPTIONAL MATCH (y)-[r:R]->(z) RETURN x AS x",
@@ -272,6 +269,59 @@ fn optional_relationship_forms_without_a_null_safe_meaning_refuse() {
                 "{statement}: {result:?}"
             );
         }
+        // Endpoint functions use the nullable relationship value. A missing
+        // witness must not expose the still-bound starting vertex a.
+        for statement in [
+            "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R]->(b) \
+             RETURN a.name AS a, startNode(r) AS source, endNode(r) AS target",
+            "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R]->(b) WITH a, r AS kept \
+             RETURN a.name AS a, startNode(kept) AS source, endNode(kept) AS target",
+        ] {
+            assert_eq!(
+                bag(cells(
+                    db.query(cx, statement, &params, symbols, policy()).unwrap()
+                )),
+                bag(vec![
+                    vec![
+                        text("a"),
+                        GraphValue::Vertex(VId(1)),
+                        GraphValue::Vertex(VId(2))
+                    ],
+                    vec![
+                        text("a"),
+                        GraphValue::Vertex(VId(1)),
+                        GraphValue::Vertex(VId(2))
+                    ],
+                    vec![
+                        text("a"),
+                        GraphValue::Vertex(VId(1)),
+                        GraphValue::Vertex(VId(3))
+                    ],
+                    vec![
+                        text("b"),
+                        GraphValue::Vertex(VId(2)),
+                        GraphValue::Vertex(VId(3))
+                    ],
+                    vec![text("c"), null(), null()],
+                    vec![text("d"), null(), null()],
+                ]),
+                "{statement}",
+            );
+        }
+        assert_eq!(
+            bag(cells(
+                db.query(
+                    cx,
+                    "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R]->(b) WITH a, r AS kept \
+                 WHERE startNode(kept) IS NULL AND endNode(kept) IS NULL RETURN a.name AS a",
+                    &params,
+                    symbols,
+                    policy(),
+                )
+                .unwrap()
+            )),
+            bag(vec![vec![text("c")], vec![text("d")]]),
+        );
         // A quantified OPTIONAL edge binds the list of its relationships
         // (named variable-length relationships, landed with lane37), and NULL
         // where a has no path. Enumerated by hand over graph(): from a, the
