@@ -773,7 +773,9 @@ fn unsupported_sources_bad_order_and_invalid_plan_prefixes_never_silently_change
 
 mod collections {
     use super::*;
-    use crate::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder, GraphValueOrder};
+    use crate::algebra::{
+        GraphColumn, GraphMatchClause, GraphMatchMode, GraphPatternBuilder, GraphValueOrder,
+    };
 
     type ProjectedResult<C> =
         Result<GraphValueRow, GqlQueryError<crate::scan_stream::ScanError<&'static str>, C>>;
@@ -929,7 +931,10 @@ mod collections {
 
     #[test]
     fn projected_collections_share_every_checkpoint_and_exact_cumulative_allowance() {
-        let pull = projected("MATCH (a)-[r:R]->(b) RETURN r,a,b,[(b)-[s:R]->(c) | s.p] AS weights");
+        let pull = projected(
+            "MATCH (a)-[r:R]->(b) RETURN r,a,b,\
+             [(b)-[s:R]->(c)-[t:R]->(d) | s.p+t.p] AS weights",
+        );
         let plan = EdgeScanPlan::compile(pull.pattern().plan()).unwrap();
         let mut checkpoints = 0;
         let mut cursor = EdgeScanCursor::new(Fixture::small(63), plan.clone(), policy(), || {
@@ -1125,6 +1130,48 @@ mod collections {
             .unwrap()
     }
 
+    fn multi_hop_definition(
+        directions: [GlaDirection; 2],
+        mode: GraphMatchMode,
+        branch: bool,
+    ) -> PreparedGraphPattern<GraphValueRow> {
+        let mut outer = GraphPatternBuilder::new();
+        outer.vertex("a").unwrap().vertex("b").unwrap();
+        outer.edge("a", R, GlaDirection::Forward, "b").unwrap();
+        outer.capture_edge("r", 0).unwrap();
+        let mut inner = GraphPatternBuilder::new();
+        inner
+            .vertex("b")
+            .unwrap()
+            .vertex("c")
+            .unwrap()
+            .vertex("d")
+            .unwrap();
+        inner.edge("b", R, directions[0], "c").unwrap();
+        inner
+            .edge(if branch { "b" } else { "c" }, R, directions[1], "d")
+            .unwrap();
+        inner.capture_edge("s", 0).unwrap();
+        inner.capture_edge("t", 1).unwrap();
+        inner.match_mode(mode);
+        outer
+            .prepare_values_with_clauses(
+                &[GraphMatchClause::collect_tuple(
+                    &inner,
+                    vec!["b", "s", "c", "t", "d", "c"],
+                )],
+                &[
+                    GraphColumn::path("r", "r", GraphPathFunction::Edge),
+                    GraphColumn::vertex("a", "a"),
+                    GraphColumn::vertex("b", "b"),
+                    GraphColumn::collection("tuples", 0),
+                ],
+                0,
+                None,
+            )
+            .unwrap()
+    }
+
     fn list(values: Vec<GraphValue>) -> GraphValue {
         GraphValue::List(values.into_boxed_slice())
     }
@@ -1242,10 +1289,220 @@ mod collections {
     }
 
     #[test]
+    fn collected_fixed_hop_chains_and_branches_match_complete_edge_products() {
+        let directions = [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ];
+        for branch in [false, true] {
+            for first in directions {
+                for second in directions {
+                    for mode in [
+                        GraphMatchMode::RepeatableElements,
+                        GraphMatchMode::DifferentEdges,
+                    ] {
+                        let query = multi_hop_definition([first, second], mode, branch);
+                        let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+                        for mask in 0..64 {
+                            let fixture = Fixture::small(mask);
+                            let mut expected = Vec::new();
+                            // Enumerate the complete three-edge product without
+                            // using the native cursor or eager traversal helpers.
+                            for (&r, (a, b, _)) in &fixture.edges {
+                                let mut tuples = Vec::new();
+                                for (&s, (from, to, _)) in &fixture.edges {
+                                    for (start, c) in orientations(*from, *to, first) {
+                                        if start != *b {
+                                            continue;
+                                        }
+                                        for (&t, (from, to, _)) in &fixture.edges {
+                                            if mode == GraphMatchMode::DifferentEdges && s == t {
+                                                continue;
+                                            }
+                                            for (start, d) in orientations(*from, *to, second) {
+                                                if start != if branch { *b } else { c } {
+                                                    continue;
+                                                }
+                                                // A collection has its own edge domain:
+                                                // reusing the outer r remains legal.
+                                                tuples.push(list(vec![
+                                                    GraphValue::Vertex(*b),
+                                                    GraphValue::Edge(s),
+                                                    GraphValue::Vertex(c),
+                                                    GraphValue::Edge(t),
+                                                    GraphValue::Vertex(d),
+                                                    GraphValue::Vertex(c),
+                                                ]));
+                                            }
+                                        }
+                                    }
+                                }
+                                expected.push(GraphValueRow::from_owned_values(vec![
+                                    GraphValue::Edge(r),
+                                    GraphValue::Vertex(*a),
+                                    GraphValue::Vertex(*b),
+                                    list(tuples),
+                                ]));
+                            }
+                            expected.sort();
+                            assert_eq!(
+                                eager(&query, &fixture),
+                                expected,
+                                "eager {first:?}/{second:?}; {mode:?}; branch={branch}; mask={mask}",
+                            );
+                            let actual =
+                                EdgeScanCursor::new(fixture, plan.clone(), policy(), || {
+                                    Ok::<_, ()>(())
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                                .unwrap();
+                            assert_eq!(
+                                actual, expected,
+                                "native {first:?}/{second:?}; {mode:?}; branch={branch}; mask={mask}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_hop_collection_admission_preserves_scope_and_capture_refusals() {
+        use crate::algebra::{BindingSlot, GraphWalkSearch, ValueProjection};
+
+        let query = multi_hop_definition(
+            [GlaDirection::Forward; 2],
+            GraphMatchMode::DifferentEdges,
+            false,
+        );
+        let original = query.plan().operators();
+        let start = original
+            .iter()
+            .position(|op| matches!(op, GlaOperator::Collect { .. }))
+            .unwrap();
+        let (_, end) = probe::Collection::compile(original, start, 2).unwrap();
+        let expansions: Vec<_> = (start + 1..end)
+            .filter(|&at| matches!(original[at], GlaOperator::Expand { .. }))
+            .collect();
+        let captures: Vec<_> = (start + 1..end)
+            .filter(|&at| matches!(original[at], GlaOperator::CapturePath { .. }))
+            .collect();
+        assert_eq!(expansions.len(), 2);
+        assert_eq!(captures.len(), 2);
+        for corruption in 0..6 {
+            let mut ops = original.to_vec();
+            match corruption {
+                0 => ops[start + 1] = GlaOperator::ScanVertices,
+                1 => {
+                    for &at in &expansions {
+                        ops[at] = GlaOperator::BindVertex {
+                            source: BindingSlot(0),
+                        };
+                    }
+                }
+                2 => {
+                    let GlaOperator::Expand {
+                        source,
+                        relation,
+                        direction,
+                    } = ops[expansions[0]].clone()
+                    else {
+                        unreachable!("the fixture includes two fixed expansions")
+                    };
+                    ops[expansions[0]] = GlaOperator::VarLengthExpand {
+                        source,
+                        relation,
+                        direction,
+                        bounds: crate::GraphWalkBounds::new(1, 2).unwrap(),
+                        search: GraphWalkSearch::All,
+                        edge_predicates: Vec::new(),
+                    };
+                }
+                3 => {
+                    ops[captures[0]] = GlaOperator::Probe {
+                        group: 1,
+                        end: end as u32,
+                        anti: false,
+                    };
+                }
+                4 => {
+                    let GlaOperator::CapturePath { segments, .. } = ops[captures[1]].clone() else {
+                        unreachable!("the fixture captures both relationships")
+                    };
+                    let GlaOperator::CapturePath {
+                        segments: first, ..
+                    } = &mut ops[captures[0]]
+                    else {
+                        unreachable!("the fixture captures both relationships")
+                    };
+                    first.extend(segments);
+                }
+                5 => {
+                    let GlaOperator::CollectEnd { value, tuple, .. } = &mut ops[end] else {
+                        unreachable!("the fixture closes its collection")
+                    };
+                    *value = Some(ValueProjection::Path {
+                        capture: 0, // The outer r must not become a local edge or NULL.
+                        function: GraphPathFunction::Edge,
+                    });
+                    *tuple = None;
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                probe::Collection::compile(&ops, start, 2).is_err(),
+                "unsupported or malformed scope {corruption}",
+            );
+        }
+        // Multi-hop output still needs an owned byte reservation before any
+        // awaitable physical lane can admit it.
+        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
+        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+    }
+
+    #[test]
+    fn later_collection_hop_failure_discards_already_collected_witnesses() {
+        let query = multi_hop_definition(
+            [GlaDirection::Forward; 2],
+            GraphMatchMode::DifferentEdges,
+            false,
+        );
+        let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+        let mut fixture = Fixture::from_edges([(0, 0, 1), (1, 1, 2), (2, 2, 3), (3, 2, 4)]);
+        assert_eq!(
+            eager(&query, &fixture)[0].values()[3]
+                .as_list()
+                .unwrap()
+                .len(),
+            2,
+        );
+        // Edge 2 completes the first private witness. Edge 3 fails only
+        // when advancing the second hop, before the outer row can publish.
+        fixture.fail_edge = Some(EId(3));
+        let drops = fixture.drops.clone();
+        let mut cursor = EdgeScanCursor::new(fixture, plan, policy(), || Ok::<_, ()>(()));
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(EdgeScanError::Source(
+                "edge history unreadable"
+            ))))
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(cursor.source.is_none());
+        assert!(cursor.traversal.is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(cursor.next().is_none());
+    }
+
+    #[test]
     fn collection_scope_predicates_keep_captured_edges_and_outer_values_distinct() {
         let query = crate::PreparedGraphSetText::prepare(
             "MATCH (a)-[r:R]->(b) RETURN r,a,b,\
-             [(b)-[s:R]->(c) WHERE s.p >= 0 AND c <> a | c] AS matches",
+             [(b)-[s:R]->(c)-[t:R]->(d) \
+              WHERE s.p >= 0 AND t.p < 2 AND d <> a | d] AS matches",
             symbols,
         )
         .unwrap()

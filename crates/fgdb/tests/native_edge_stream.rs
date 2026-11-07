@@ -70,6 +70,132 @@ fn statement(left: &str, right: &str, filter: &str, distinct: &str, page: &str) 
 }
 
 #[test]
+fn multihop_collections_keep_local_witnesses_properties_and_historical_cuts() {
+    let ((), report) = run_async_under_lab(0x6e65_0021, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let args = GqlParameters::new();
+        // An independent finite witness list for seed(): two parallel first
+        // edges reach the last edge, and the self-loop can precede either
+        // parallel edge. Reusing the self-loop twice is forbidden locally.
+        let witnesses: Vec<_> = [
+            (0, u128::MAX, VId(0), VId(u128::MAX), 3, 11, 4, -1),
+            (2, u128::MAX, VId(0), VId(u128::MAX), 3, 11, 5, -1),
+            (3, 0, WIDE, VId(0), 7, 3, 8, 4),
+            (3, 2, WIDE, VId(0), 7, 3, 8, 5),
+        ]
+        .into_iter()
+        .map(|(s, t, c, d, cp, dp, sp, tp)| {
+            GraphValue::List(
+                vec![
+                    GraphValue::Edge(EId(s)),
+                    GraphValue::Edge(EId(t)),
+                    GraphValue::Vertex(c),
+                    GraphValue::Vertex(d),
+                    GraphValue::Scalar(CanonicalScalar::Int(cp)),
+                    GraphValue::Scalar(CanonicalScalar::Int(dp)),
+                    GraphValue::Scalar(CanonicalScalar::Int(sp)),
+                    GraphValue::Scalar(CanonicalScalar::Int(tp)),
+                ]
+                .into_boxed_slice(),
+            )
+        })
+        .collect();
+        for edge_root in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.write(&commit, seed()).await.unwrap();
+            let view = db.read_session().unwrap();
+            let (head, prefix, anchor, kind) = if edge_root {
+                ("MATCH (a)-[r:R]->(b)", "r,a,b", "b", ScanKind::Edge)
+            } else {
+                ("MATCH (a)", "a", "a", ScanKind::Vertex)
+            };
+            let projection = format!(
+                "RETURN {prefix}, [({anchor})-[s:R]->(c)-[t:R]->(d) | \
+                 [s,t,c,d,c.p,d.p,s.p,t.p]] AS routes"
+            );
+            let text = format!("{head} {projection}");
+            let list = |at| {
+                GraphValue::List(
+                    if at == WIDE {
+                        witnesses.clone()
+                    } else {
+                        Vec::new()
+                    }
+                    .into_boxed_slice(),
+                )
+            };
+            let expected: Vec<_> = if edge_root {
+                [
+                    (0, WIDE, VId(0)),
+                    (2, WIDE, VId(0)),
+                    (3, WIDE, WIDE),
+                    (u128::MAX, VId(0), VId(u128::MAX)),
+                ]
+                .into_iter()
+                .map(|(r, a, b)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Edge(EId(r)),
+                        GraphValue::Vertex(a),
+                        GraphValue::Vertex(b),
+                        list(b),
+                    ])
+                })
+                .collect()
+            } else {
+                [VId(0), WIDE, VId(u128::MAX)]
+                    .into_iter()
+                    .map(|a| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(a), list(a)]))
+                    .collect()
+            };
+            let query = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+            let eager = query.execute(&db, &cx, &args, policy()).unwrap();
+            let (columns, mut paused) = query.stream(&db, &cx, &args, policy()).unwrap();
+            assert_eq!(paused.kind(), kind);
+            assert_eq!(paused.snapshot_seq(), basis);
+            assert_eq!(result(columns, expected.clone()), eager);
+            let mut actual = vec![paused.next().unwrap().unwrap()];
+
+            // Change values on both hops and the witness set while the first
+            // generation is still held by the cursor and the separate view.
+            let mut edit = WriteBatch::new(R);
+            edit.set_vertex_property(VId(u128::MAX), P, Some(CanonicalScalar::Int(31)));
+            edit.set_edge_property(EId(u128::MAX), P, Some(CanonicalScalar::Int(41)));
+            edit.delete_edge(EId(0));
+            edit.add_edge(
+                EId(99),
+                VId(u128::MAX),
+                WIDE,
+                vec![(P, CanonicalScalar::Int(21))],
+            );
+            db.write(&commit, edit).await.unwrap();
+            db.compact(&commit).await.unwrap();
+            actual.extend(paused.by_ref().collect::<Result<Vec<_>, _>>().unwrap());
+            assert_eq!(actual, expected, "{text}");
+            assert_eq!(paused.state(), ScanState::Exhausted);
+            assert!(paused.next().is_none());
+            let (_, old) = query.stream_in_view(&view, &cx, &args, policy()).unwrap();
+            assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+
+            let temporal = format!("{head} FOR SYSTEM_TIME AS OF SEQ {} {projection}", basis.0);
+            let historical = PreparedNativeRead::prepare(&temporal, &args, symbols).unwrap();
+            let (_, old) = historical.stream(&db, &cx, &args, policy()).unwrap();
+            assert_eq!(old.snapshot_seq(), basis);
+            assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+            let (columns, fresh) = query.stream(&db, &cx, &args, policy()).unwrap();
+            let fresh = fresh.collect::<Result<Vec<_>, _>>().unwrap();
+            assert_ne!(fresh, expected);
+            assert_eq!(
+                result(columns, fresh),
+                query.execute(&db, &cx, &args, policy()).unwrap()
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn native_dispatch_matches_existing_edge_cursors_and_eager_rows_in_every_direction() {
     let ((), report) = run_async_under_lab(0x6e65_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

@@ -612,8 +612,10 @@ impl Collection {
         if close != group {
             return Err(bad());
         }
-        // This slice admits a correlated fixed hop only. Independent scans,
-        // multiple hops, walks and nested scopes remain explicit refusals.
+        // Fixed-hop witnesses use the same increasing-EId, depth-first order
+        // as identified eager expansion, including multiple local bindings.
+        // Keep independent scans and walks fenced here; compile_body also
+        // rejects nested scopes, nonlocal captures and compound path captures.
         let mut expansions = 0;
         for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
             match op {
@@ -624,7 +626,7 @@ impl Collection {
                 _ => {}
             }
         }
-        if expansions != 1 {
+        if expansions == 0 || expansions > MAX_PATTERN_EDGES {
             return Err(bad());
         }
         let (steps, captures) = Probe::compile_body(ops, start, end, outer_width)?;

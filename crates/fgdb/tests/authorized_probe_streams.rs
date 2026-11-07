@@ -548,7 +548,6 @@ fn nested_existence_applies_capability_masks_at_every_scope() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 // Each visible edge is a distinct witness, including parallel edges and a
 // self-loop. The slim database is built without private records or fields;
 // its oracle never invokes the production authorization mask.
@@ -648,7 +647,11 @@ fn collection_expected(outer: usize, inner: usize) -> Vec<GraphValueRow> {
                         .iter()
                         .map(|&(target, _)| collection_scalar(Some(target as i64 * 10))),
                 ),
-                collection_list(witnesses.iter().map(|&(_, weight)| collection_scalar(weight))),
+                collection_list(
+                    witnesses
+                        .iter()
+                        .map(|&(_, weight)| collection_scalar(weight)),
+                ),
                 collection_list(witnesses.iter().map(|_| collection_scalar(None))),
                 collection_list(witnesses.iter().map(|_| collection_scalar(None))),
             ]));
@@ -686,16 +689,8 @@ fn authorized_projected_collections_match_a_physically_masked_graph_in_every_dir
     let mut visible = slim
         .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
         .unwrap();
-    for (outer, root_pattern) in [
-        (0, "(a)-[r]->(b)"),
-        (1, "(a)<-[r]-(b)"),
-        (2, "(a)-[r]-(b)"),
-    ] {
-        for (inner, pattern) in [
-            (0, "(b)-[s]->(c)"),
-            (1, "(b)<-[s]-(c)"),
-            (2, "(b)-[s]-(c)"),
-        ] {
+    for (outer, root_pattern) in [(0, "(a)-[r]->(b)"), (1, "(a)<-[r]-(b)"), (2, "(a)-[r]-(b)")] {
+        for (inner, pattern) in [(0, "(b)-[s]->(c)"), (1, "(b)<-[s]-(c)"), (2, "(b)-[s]-(c)")] {
             let text = format!(
                 "MATCH {root_pattern} RETURN r,a,b,\
                  [{pattern} | c.p] AS values,[{pattern} | s.p] AS weights,\
@@ -934,7 +929,10 @@ fn projected_collections_keep_live_expiry_and_cancellation_at_the_source_boundar
         let prepared = session.prepare(&cx, COLLECTION_TEXT, &args).unwrap();
         let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
         active.set(true);
-        assert_eq!(cursor.next().unwrap().unwrap(), collection_expected(0, 0)[0]);
+        assert_eq!(
+            cursor.next().unwrap().unwrap(),
+            collection_expected(0, 0)[0]
+        );
         active.set(false);
         calls.get()
     };
@@ -968,7 +966,10 @@ fn projected_collections_keep_live_expiry_and_cancellation_at_the_source_boundar
         .unwrap();
     let prepared = session.prepare(&cx, COLLECTION_TEXT, &args).unwrap();
     let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
-    assert_eq!(cursor.next().unwrap().unwrap(), collection_expected(0, 0)[0]);
+    assert_eq!(
+        cursor.next().unwrap().unwrap(),
+        collection_expected(0, 0)[0]
+    );
     root.set_cancel_reason(
         asupersync::CancelReason::new(asupersync::CancelKind::User)
             .with_message("cancel projected collection after its first complete row"),
@@ -980,7 +981,6 @@ fn projected_collections_keep_live_expiry_and_cancellation_at_the_source_boundar
     assert_eq!(cursor.state(), VertexScanState::Failed);
     assert!(cursor.next().is_none());
 }
-
 
 fn vertex_collection_expected(direction: usize) -> Vec<GraphValueRow> {
     [1_u128, 3, 4]
@@ -1007,7 +1007,11 @@ fn vertex_collection_expected(direction: usize) -> Vec<GraphValueRow> {
                         .iter()
                         .map(|&(target, _)| collection_scalar(Some(target as i64 * 10))),
                 ),
-                collection_list(witnesses.iter().map(|&(_, weight)| collection_scalar(weight))),
+                collection_list(
+                    witnesses
+                        .iter()
+                        .map(|&(_, weight)| collection_scalar(weight)),
+                ),
                 collection_list(witnesses.iter().map(|_| collection_scalar(None))),
                 collection_list(witnesses.iter().map(|_| collection_scalar(None))),
             ])
@@ -1020,6 +1024,177 @@ const VERTEX_COLLECTION_TEXT: &str = "MATCH (a) RETURN a,a.p,\
     [(a)-[s]->(b) | s.p] AS weights,\
     [(a)-[s]->(b) | b.hidden] AS hidden_vertices,\
     [(a)-[s]->(b) | s.hidden] AS hidden_edges";
+
+#[test]
+fn authorized_multihop_collections_match_visible_witness_products_and_scoped_charges() {
+    fn incident(from: u128, direction: usize) -> Vec<(u128, u128, Option<i64>)> {
+        COLLECTION_EDGES
+            .iter()
+            .filter_map(|&(eid, source, target, weight)| {
+                let to = match direction {
+                    0 if source == from => target,
+                    1 if target == from => source,
+                    2 if source == from => target,
+                    2 if target == from => source,
+                    _ => return None,
+                };
+                Some((eid, to, weight))
+            })
+            .collect()
+    }
+    fn routes(anchor: u128, first: usize, second: usize) -> GraphValue {
+        let mut values = Vec::new();
+        // Independent finite product over the visible fixture, in EId order.
+        // Only the two inner edges share a DifferentEdges domain. An outer
+        // relationship may occur again inside its correlated collection.
+        for (s, c, sp) in incident(anchor, first) {
+            for (t, d, tp) in incident(c, second) {
+                if s != t {
+                    values.push(collection_list([
+                        GraphValue::Vertex(VId(c)),
+                        GraphValue::Vertex(VId(d)),
+                        GraphValue::Edge(EId(s)),
+                        GraphValue::Edge(EId(t)),
+                        collection_scalar(Some(c as i64 * 10)),
+                        collection_scalar(Some(d as i64 * 10)),
+                        collection_scalar(sp),
+                        collection_scalar(tp),
+                        collection_scalar(None),
+                        collection_scalar(None),
+                    ]));
+                }
+            }
+        }
+        collection_list(values)
+    }
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let slim = runtime.block_on(collection_database(&commit, false));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let calls = Cell::new(0_u64);
+    let clock = || {
+        calls.set(calls.get() + 1);
+        100
+    };
+    let mut scoped = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    let mut visible = slim
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    let directions = [("-", "->"), ("<-", "-"), ("-", "-")];
+    for edge_root in [false, true] {
+        let (head, prefix, anchor) = if edge_root {
+            ("MATCH (a)-[r]->(b)", "r,a,b", "b")
+        } else {
+            ("MATCH (a)", "a", "a")
+        };
+        for (first, (left, right)) in directions.into_iter().enumerate() {
+            for (second, (next_left, next_right)) in directions.into_iter().enumerate() {
+                let text = format!(
+                    "{head} RETURN {prefix}, \
+                     [({anchor}){left}[s]{right}(c){next_left}[t]{next_right}(d) | \
+                     [c,d,s,t,c.p,d.p,s.p,t.p,c.hidden,t.hidden]] AS routes"
+                );
+                let expected: Vec<_> = if edge_root {
+                    COLLECTION_EDGES
+                        .iter()
+                        .map(|&(r, a, b, _)| {
+                            GraphValueRow::from_owned_values(vec![
+                                GraphValue::Edge(EId(r)),
+                                GraphValue::Vertex(VId(a)),
+                                GraphValue::Vertex(VId(b)),
+                                routes(b, first, second),
+                            ])
+                        })
+                        .collect()
+                } else {
+                    [1_u128, 3, 4]
+                        .into_iter()
+                        .map(|a| {
+                            GraphValueRow::from_owned_values(vec![
+                                GraphValue::Vertex(VId(a)),
+                                routes(a, first, second),
+                            ])
+                        })
+                        .collect()
+                };
+                let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+                let eager = scoped.execute(&cx, &prepared, &args).unwrap();
+                let before = calls.get();
+                let mut cursor = scoped.stream(&cx, &prepared, &args).unwrap();
+                let columns = cursor.columns().to_vec();
+                let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                let checkpoints = calls.get() - before;
+                assert_eq!(actual, expected, "{text}");
+                assert_eq!(native(columns, &actual), eager, "{text}");
+                assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                assert!(cursor.next().is_none());
+                drop(cursor);
+
+                let slim_query = visible.prepare(&cx, &text, &args).unwrap();
+                let before = calls.get();
+                assert_eq!(
+                    visible
+                        .stream(&cx, &slim_query, &args)
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap(),
+                    expected,
+                    "{text}"
+                );
+                assert_eq!(calls.get() - before, checkpoints, "{text}");
+                // The Send adapter must use the same masked source on each
+                // hop and when the row VM reads both local relationships.
+                let mut send = db
+                    .authorized_read_session(
+                        &cx,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        symbols,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap();
+                let query = send.prepare(&cx, &text, &args).unwrap();
+                let cursor = send.stream_send(&cx, &query, &args).unwrap();
+                fn assert_send<T: Send>(_: &T) {}
+                assert_send(&cursor);
+                assert_eq!(cursor.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+            }
+        }
+    }
+    // Hidden intermediate vertices cannot be traversed to reach a visible
+    // second endpoint. A denied second relationship or predicate field also
+    // contributes no witness, even though that payload exists physically.
+    for pattern in [
+        "(a)-[s:R]->(c:H)-[t:R]->(d)",
+        "(a)-[s:R]->(c)-[t:S]->(d)",
+        "(a)-[s:R]->(c)-[t:R]->(d) WHERE t.hidden = 999",
+    ] {
+        let text = format!("MATCH (a) RETURN a,[{pattern} | d.p] AS values");
+        let query = scoped.prepare(&cx, &text, &args).unwrap();
+        assert_eq!(
+            scoped
+                .stream(&cx, &query, &args)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            [1_u128, 3, 4].map(|a| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(a)),
+                collection_list([]),
+            ])),
+            "{text}"
+        );
+    }
+}
 
 #[test]
 fn authorized_vertex_collections_admit_every_endpoint_and_field_before_projection() {
@@ -1044,11 +1219,7 @@ fn authorized_vertex_collections_admit_every_endpoint_and_field_before_projectio
     let mut visible = slim
         .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
         .unwrap();
-    for (direction, pattern) in [
-        (0, "(a)-[s]->(b)"),
-        (1, "(a)<-[s]-(b)"),
-        (2, "(a)-[s]-(b)"),
-    ] {
+    for (direction, pattern) in [(0, "(a)-[s]->(b)"), (1, "(a)<-[s]-(b)"), (2, "(a)-[s]-(b)")] {
         let text = format!(
             "MATCH (a) RETURN a,a.p,\
              [{pattern} | b.p] AS values,[{pattern} | s.p] AS weights,\
@@ -1163,11 +1334,7 @@ fn authorized_collection_property_reads_keep_the_pinned_generation_after_writes_
     let mut paused = session.stream_send(&cx, &prepared, &args).unwrap();
     let basis = paused.snapshot_seq();
     let mut edit = WriteBatch::new(RelationId(1));
-    edit.set_vertex_property(
-        VId(3),
-        PropertyKeyId(1),
-        Some(CanonicalScalar::Int(300)),
-    );
+    edit.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(300)));
     edit.add_edge(
         EId(30),
         VId(4),
