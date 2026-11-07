@@ -1846,6 +1846,84 @@ impl PreparedGraphSet {
         Some((pull, tail))
     }
 
+    /// A property-aware graph projection for a blocking external order.
+    ///
+    /// The unpaged pattern must already have the canonical identity prefix
+    /// proved by its native vertex or fixed-edge cursor. Projection therefore
+    /// observes the same source order and failure ordinals as eager execution,
+    /// including the source's collected witness order. The final projection
+    /// need not retain that prefix: the returned tail orders its complete
+    /// rows, applies DISTINCT, and selects the final page exactly once.
+    ///
+    /// The host must use the cursor's admitted element readers and original
+    /// meter for every expression, then exhaust the input before publishing
+    /// the ordered result. This accessor does not grant asynchronous source
+    /// access or change the row-only contract of [`Self::ordered_row_pull`].
+    #[must_use]
+    pub fn ordered_graph_row_pull(
+        &self,
+    ) -> Option<(GraphSetRowPull, crate::scan_stream::ScanSortTail)> {
+        let SetNode::Project {
+            input,
+            projection,
+            quantifier,
+            preserve_order: false,
+        } = &self.node
+        else {
+            return None;
+        };
+        if !input.order.is_empty() || input.offset != 0 || input.count.is_some() {
+            return None;
+        }
+        let SetNode::Pattern(pattern) = &input.node else {
+            return None;
+        };
+        let operators = pattern.plan().operators();
+        if pattern.plan().visible_columns.is_some()
+            || !matches!(
+                operators.get(operators.len().checked_sub(2)?),
+                Some(crate::algebra::GlaOperator::OrderByValues)
+            )
+            || !matches!(
+                operators.last(),
+                Some(crate::algebra::GlaOperator::Limit {
+                    offset: 0,
+                    count: None,
+                })
+            )
+            || !projection
+                .iter()
+                .all(|cell| cell.value().is_element_scan_local())
+        {
+            return None;
+        }
+        match operators.first()? {
+            crate::algebra::GlaOperator::ScanVertices => {
+                crate::stream::VertexScanPlan::compile(pattern.plan()).ok()?;
+            }
+            crate::algebra::GlaOperator::ScanEdges { .. } => {
+                crate::edge_stream::EdgeScanPlan::compile(pattern.plan()).ok()?;
+            }
+            _ => return None,
+        }
+        let tail = crate::scan_stream::ScanSortTail::for_relation(
+            projection.len(),
+            self.order.clone(),
+            *quantifier,
+            self.offset,
+            self.count,
+        )?;
+        Some((
+            GraphSetRowPull {
+                pattern: pattern.clone(),
+                projection: projection.clone(),
+                offset: 0,
+                count: None,
+            },
+            tail,
+        ))
+    }
+
     /// A projection over one vertex-rooted, relationship-free pattern with
     /// no inner order or page, whose every cell a pull can evaluate: a column,
     /// a bound constant or integer arithmetic over columns.
@@ -2060,6 +2138,103 @@ mod pulled_projection_tests {
             "MATCH (a)-[r:R]->(b) RETURN r,a,b,rand() AS draw",
         ] {
             assert!(prepare(text).edge_row_pull().is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn ordered_graph_pulls_keep_source_order_and_defer_every_final_clause() {
+        let prepare = |text: &str| {
+            crate::PreparedGraphSetText::prepare(text, |kind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => {
+                    Some(GraphSymbol::Relation(fgdb_delta_types::RelationId(1)))
+                }
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                _ => None,
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+        };
+        for (head, width, anchor) in [
+            ("MATCH (a)", "size([a])", "a"),
+            ("MATCH (a)-[r:R]->(b)", "size([r,a])", "b"),
+            ("MATCH (a)<-[r:R]-(b)", "size([r,a])", "b"),
+            ("MATCH (a)-[r:R]-(b)", "size([r,a])", "b"),
+        ] {
+            for distinct in [false, true] {
+                for (page, offset, count) in [
+                    ("", 0, None),
+                    (" SKIP 1 LIMIT 2", 1, Some(2)),
+                    (" LIMIT 0", 0, Some(0)),
+                ] {
+                    let text = format!(
+                        "{head} RETURN {}{width} AS width, [({anchor})-[s:R]->(c) | c.p] AS neighbors ORDER BY neighbors DESC{page}",
+                        if distinct { "DISTINCT " } else { "" },
+                    );
+                    let query = prepare(&text);
+                    let frozen = query.canonical_bytes();
+                    let (pull, tail) = query.ordered_graph_row_pull().expect(&text);
+                    assert!(query.ordered_row_pull().is_none(), "{text}");
+                    assert_eq!(query.canonical_bytes(), frozen);
+                    assert!(pull.selects_row(0));
+                    assert!(pull.selects_row(u64::MAX));
+                    assert_eq!((tail.offset(), tail.count()), (offset, count));
+                    assert_eq!(tail.distinct(), distinct);
+                    assert_eq!(tail.order(), &[GraphValueOrder::descending(1)]);
+                    assert_eq!((tail.evaluation_width(), tail.visible_width()), (2, 2));
+                    assert!(matches!(
+                        pull.pattern().plan().operators().last(),
+                        Some(crate::algebra::GlaOperator::Limit {
+                            offset: 0,
+                            count: None,
+                        })
+                    ));
+                    // Cold intake still needs a separate witness-payload
+                    // reservation; resident admission must not widen it.
+                    assert!(crate::spill_set::AsyncSpillSetPlan::compile(&query).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_graph_pulls_refuse_unproved_source_order_and_hidden_effects() {
+        let source = input("MATCH (n) RETURN n AS id,n.p AS p");
+        for child in [
+            source.clone().with_page(0, Some(0)),
+            source.clone().with_page(1, None),
+            source.clone().nested().unwrap(),
+            input("MATCH (n) RETURN n.p AS p,n AS id"),
+        ] {
+            let query = child
+                .project(
+                    vec![GraphSetProjection::new("first", GraphSetValue::Column(0))],
+                    GraphSetQuantifier::All,
+                )
+                .unwrap()
+                .with_page(0, Some(0));
+            assert!(query.ordered_graph_row_pull().is_none());
+        }
+        for hidden in [
+            GraphSetValue::Random { site: 0, scope: 0 },
+            GraphSetValue::ElementMetadata {
+                kind: crate::GraphElementMetadata::Properties,
+                value: Box::new(GraphSetValue::Column(0)),
+                catalog: None,
+            },
+        ] {
+            let query = source
+                .clone()
+                .project(
+                    vec![GraphSetProjection::new(
+                        "hidden",
+                        GraphSetValue::List(vec![GraphSetValue::Column(0), hidden]),
+                    )],
+                    GraphSetQuantifier::All,
+                )
+                .unwrap()
+                .with_page(0, Some(0));
+            assert!(query.ordered_graph_row_pull().is_none());
         }
     }
 

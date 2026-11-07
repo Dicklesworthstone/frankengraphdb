@@ -102,7 +102,10 @@ fn open<'q>(
         view.snapshot.check_frontier(as_of).map_err(|error| {
             QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(error)))
         })?;
-        if let Some((pull, tail)) = set.ordered_row_pull() {
+        if let Some((pull, tail)) = set
+            .ordered_row_pull()
+            .or_else(|| set.ordered_graph_row_pull())
+        {
             // This compiler proof permits projection directly in source order.
             // In particular, it also covers a constant over a zero-column
             // pattern without manufacturing a public identity column.
@@ -147,19 +150,24 @@ fn open<'q>(
         let source = view
             .edge_scan_source(cx, as_of)
             .map_err(|e| QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Source(e))))?;
-        let (plan, tail) = EdgeScanPlan::compile_sort_input(query.plan())
-            .map_err(|e| QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(e))))?;
+        let (plan, tail) = match projected_tail {
+            Some(tail) => EdgeScanPlan::compile(query.plan()).map(|plan| (plan, tail)),
+            None => EdgeScanPlan::compile_sort_input(query.plan()),
+        }
+        .map_err(|e| QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(e))))?;
         cx.with_restriction(|| cx.checkpoint())
             .map_err(|e| QueryError::EdgeStream(GqlQueryError::Interrupted(e)))?;
-        (
-            ScanCursor::Edge(Box::new(EdgeScanCursor::new(
-                source,
-                plan,
-                input_policy(policy, max_input_rows),
-                move || cx.with_restriction(|| cx.checkpoint()),
-            ))),
-            tail,
-        )
+        let cursor = EdgeScanCursor::new(
+            source,
+            plan,
+            input_policy(policy, max_input_rows),
+            move || cx.with_restriction(|| cx.checkpoint()),
+        );
+        let cursor = match projection {
+            Some(pull) => ScanCursor::ProjectedEdge(Box::new((cursor, pull))),
+            None => ScanCursor::Edge(Box::new(cursor)),
+        };
+        (cursor, tail)
     } else {
         let source = view
             .vertex_scan_source(cx, as_of)

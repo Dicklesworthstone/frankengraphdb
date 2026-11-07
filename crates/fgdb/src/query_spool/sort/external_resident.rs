@@ -46,7 +46,7 @@ pub(super) fn open<'q>(
     view.snapshot.check_frontier(snapshot).map_err(|error| {
         QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(error)))
     })?;
-    if set.ordered_row_pull().is_some() {
+    if set.ordered_row_pull().is_some() || set.ordered_graph_row_pull().is_some() {
         // Retain the native compiler's proven projection fusion and its exact
         // source counters for already admitted linear plans. Binding remains
         // a single synchronous operation; only nonfusible relations recurse.

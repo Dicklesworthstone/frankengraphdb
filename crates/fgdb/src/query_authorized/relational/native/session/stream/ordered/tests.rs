@@ -240,6 +240,294 @@ fn refusal<T>(result: Result<T>, expected: AuthorizationError) {
         if matches!(*error, QueryError::Authorization(actual) if actual == expected)));
 }
 
+
+// The ordinary fixture includes a hidden endpoint and masked fields. Its
+// physically reduced counterpart contains only the three visible edges and
+// five visible vertices; an additional forbidden relation joins visible nodes.
+async fn projected_collection_database(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
+    if hidden {
+        let mut db = database(cx).await;
+        let mut forbidden = WriteBatch::new(RelationId(2));
+        forbidden.add_edge(
+            EId(14),
+            VId(3),
+            VId(4),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(999))],
+        );
+        db.write(cx, forbidden).await.unwrap();
+        return db;
+    }
+    let mut db = Database::open_memory(cx, DatabaseKeys::new([0x16; 32], NS, [0x26; 32]))
+        .await
+        .unwrap();
+    let mut batch = WriteBatch::new(RelationId(1));
+    for (id, p) in [(1, 3), (2, 1), (3, 3), (4, -1), (5, 2)] {
+        batch.create_vertex(
+            VId(id),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(p))],
+        );
+    }
+    for (id, from, to, p) in [(10, 1, 2, 7), (11, 1, 2, 9), (12, 2, 3, 5)] {
+        batch.add_edge(
+            EId(id),
+            VId(from),
+            VId(to),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(p))],
+        );
+    }
+    db.write(cx, batch).await.unwrap();
+    db
+}
+
+#[test]
+fn projected_graph_collections_sort_masked_values_before_distinct_and_final_windows() {
+    let ((), report) = run_async_under_lab(0x8600_0090, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let db = projected_collection_database(&commit, true).await;
+        let slim = projected_collection_database(&commit, false).await;
+        let issuer = authority();
+        let reference_token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut reference = db
+            .authorized_read_session(
+                &cx,
+                &issuer,
+                &reference_token,
+                "main",
+                symbols as Resolver,
+                policy(),
+                || 100,
+            )
+            .unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let params = GqlParameters::new();
+        let list = |values: Vec<GraphValue>| GraphValue::List(values.into_boxed_slice());
+        // Literal visible witnesses, independent of both scoped source adapters.
+        // Repeated outer endpoints must remain repeated complete rows until
+        // the final DISTINCT. The output deliberately omits graph identities.
+        let neighbors = |at| match at {
+            1 => list(vec![
+                list(vec![scalar(1), scalar(7), null(), null()]),
+                list(vec![scalar(1), scalar(9), null(), null()]),
+            ]),
+            2 => list(vec![list(vec![scalar(3), scalar(5), null(), null()])]),
+            _ => list(vec![]),
+        };
+        for (head, identity, anchor, width, roots) in [
+            ("MATCH (a)", "size([a])", "a", 1, vec![1, 2, 3, 4, 5]),
+            (
+                "MATCH (a)-[r]->(b)",
+                "size([r,a])",
+                "b",
+                2,
+                vec![2, 2, 3],
+            ),
+            (
+                "MATCH (a)<-[r]-(b)",
+                "size([r,a])",
+                "b",
+                2,
+                vec![1, 1, 2],
+            ),
+            (
+                "MATCH (a)-[r]-(b)",
+                "size([r,a])",
+                "b",
+                2,
+                vec![2, 1, 2, 1, 3, 2],
+            ),
+        ] {
+            for distinct in [false, true] {
+                for (skip, count) in [(0, 100), (1, 2), (0, 0), (64, 2)] {
+                    let modifier = if distinct { "DISTINCT " } else { "" };
+                    let text = format!(
+                        "{head} RETURN {modifier}{identity} AS width, \
+                         [({anchor})-[s]->(c) | [c.p,s.p,c.hidden,s.hidden]] AS neighbors \
+                         ORDER BY neighbors DESC SKIP {skip} LIMIT {count}"
+                    );
+                    let mut expected: Vec<_> = roots
+                        .iter()
+                        .map(|&at| vec![scalar(width), neighbors(at)])
+                        .collect();
+                    expected.sort_by(|left, right| {
+                        right[1].cmp(&left[1]).then_with(|| left.cmp(right))
+                    });
+                    if distinct {
+                        expected.dedup();
+                    }
+                    let expected: Vec<_> = expected.into_iter().skip(skip).take(count).collect();
+                    let prepared = reference.prepare(&cx, &text, &params).unwrap();
+                    let eager = reference.execute(&cx, &prepared, &params).unwrap();
+                    assert_eq!(
+                        eager,
+                        QueryResult::Rows {
+                            columns: vec!["width".to_owned(), "neighbors".to_owned()],
+                            rows: expected
+                                .iter()
+                                .map(|row| row.iter().cloned().map(QueryValue::Value).collect())
+                                .collect(),
+                        },
+                        "{text}",
+                    );
+
+                    let mut allowed = grant();
+                    allowed.limits.max_rows = expected.len() as u64;
+                    let token = issuer.issue_at(&allowed, 100).unwrap();
+                    let mut physical = limits();
+                    physical.run_rows = 1;
+                    physical.max_input_rows = roots.len() as u64;
+                    let calls = AtomicU64::new(0);
+                    let clock = || {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        100
+                    };
+                    let mut visible_cost = None;
+                    for (graph, at) in [(&db, CommitSeq(2)), (&slim, CommitSeq(1))] {
+                        let (scratch, _) = file(&cx, &pool).await;
+                        let (destination, _) = file(&cx, &pool).await;
+                        let (auxiliary, _) = file(&cx, &pool).await;
+                        let mut ordered = graph
+                            .authorized_ordered_read_session(
+                                &cx,
+                                &issuer,
+                                &token,
+                                "main",
+                                symbols as Resolver,
+                                GqlQueryPolicy::new(
+                                    100_000,
+                                    expected.len() as u64,
+                                    1_000_000,
+                                    1_000_000,
+                                ),
+                                clock,
+                                scratch,
+                                destination,
+                                auxiliary,
+                                physical,
+                            )
+                            .unwrap();
+                        let prepared = ordered.prepare(&cx, &text, &params).unwrap();
+                        let before = calls.load(Ordering::Relaxed);
+                        let mut cursor = ordered
+                            .execute_ordered(&cx, &prepared, &params)
+                            .unwrap()
+                            .await
+                            .unwrap();
+                        assert_eq!(cursor.snapshot_seq(), at);
+                        assert_eq!(values(&mut cursor).await, expected, "{text}");
+                        let cost = calls.load(Ordering::Relaxed) - before;
+                        if let Some(prior) = visible_cost {
+                            assert_eq!(cost, prior, "hidden data changed signed work: {text}");
+                        } else {
+                            visible_cost = Some(cost);
+                        }
+                        drop(cursor);
+                        assert!(!ordered.is_closed());
+                        assert_eq!(pool.used(), 0);
+                    }
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn projected_graph_ordering_keeps_late_errors_and_private_input_limits_at_empty_pages() {
+    let ((), report) = run_async_under_lab(0x8600_0091, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = projected_collection_database(&contexts.commit(), true).await;
+        let issuer = authority();
+        let mut allowed = grant();
+        allowed.limits.max_rows = 0;
+        let token = issuer.issue_at(&allowed, 100).unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let params = GqlParameters::new();
+        for (edge_root, head, identity, ordinal, input_rows) in [
+            (false, "MATCH (a)", "size([a])", 1, 5),
+            (true, "MATCH (a)-[r]->(b)", "size([r,a,b])", 2, 3),
+        ] {
+            for count in [0, 1] {
+                let text = format!(
+                    "{head} RETURN {identity} AS width, \
+                     [(a)-[s]->(c) | [c.p,s.p,1/(c.p-3)]] AS neighbors \
+                     ORDER BY neighbors DESC LIMIT {count}"
+                );
+                let (scratch, _) = file(&cx, &pool).await;
+                let (destination, _) = file(&cx, &pool).await;
+                let mut physical = limits();
+                physical.run_rows = 1;
+                let mut ordered = db
+                    .authorized_ordered_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        symbols as Resolver,
+                        GqlQueryPolicy::new(100_000, 0, 1_000_000, 1_000_000),
+                        || 100,
+                        scratch,
+                        destination,
+                        file(&cx, &pool).await.0,
+                        physical,
+                    )
+                    .unwrap();
+                let prepared = ordered.prepare(&cx, &text, &params).unwrap();
+                let error = ordered
+                    .execute_ordered(&cx, &prepared, &params)
+                    .unwrap()
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(error, NativeSpoolError::Authorized(error)
+                        if matches!(*error, QueryError::Set(GqlQueryError::Source(
+                            GraphSetExecutionError::Projection { row, column: 1, error }))
+                            if row == ordinal
+                                && error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)),
+                    "{text}",
+                );
+                assert!(!ordered.is_closed());
+                assert_eq!(pool.used(), 0);
+            }
+
+            // A final empty page cannot suppress the complete private input
+            // or spend the signed/native final-result allowance on that input.
+            let text = format!(
+                "{head} RETURN {identity} AS width, \
+                 [(a)-[s]->(c) | [c.p,s.p]] AS neighbors \
+                 ORDER BY neighbors DESC LIMIT 0"
+            );
+            let mut physical = limits();
+            physical.max_input_rows = input_rows - 1;
+            let (mut ordered, _, _) =
+                session(&db, &cx, &issuer, &token, &pool, || 100, physical).await;
+            let prepared = ordered.prepare(&cx, &text, &params).unwrap();
+            let error = ordered
+                .execute_ordered(&cx, &prepared, &params)
+                .unwrap()
+                .await
+                .unwrap_err();
+            let NativeSpoolError::Authorized(error) = error else {
+                panic!("private source refusal lost its authorized error surface");
+            };
+            let budget = match (edge_root, *error) {
+                (false, QueryError::Stream(GqlQueryError::Rows(error)))
+                | (true, QueryError::EdgeStream(GqlQueryError::Rows(error))) => error,
+                other => panic!("unexpected private input refusal: {other:?}"),
+            };
+            assert_eq!(budget.dimension, GqlBudgetDimension::ResultRows);
+            assert_eq!(budget.limit, input_rows - 1);
+            assert_eq!(budget.observed, input_rows);
+            assert!(!ordered.is_closed());
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn prepared_map_fields_keep_keyed_ordered_sources_with_rebound_values() {
     let ((), report) = run_async_under_lab(0x8600_0081, |root| async move {
