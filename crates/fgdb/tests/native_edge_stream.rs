@@ -627,6 +627,33 @@ fn vertex_rooted_collection_budgets_and_late_errors_preserve_complete_prefixes()
                 assert!(cursor.next().is_none());
             }
         }
+        // Value mapping must begin only after endpoint ordering. VId(0) is
+        // safe, WIDE overflows, and VMAX divides by zero; EId order would
+        // observe VMAX's different exception before WIDE's exception.
+        let error_order = PreparedNativeRead::prepare(
+            "MATCH (a) WHERE a.p = 7 RETURN a, [(a)-[:R]->(b) | \
+             1/(11-b.p) + (9223372036854775807 + (b.p-3))] AS values",
+            &args,
+            symbols,
+        )
+        .unwrap();
+        assert!(matches!(
+            error_order.execute(&db, &cx, &args, policy()),
+            Err(QueryError::Set(GqlQueryError::Source(
+                fgdb_gql::GraphSetExecutionError::Projection { row: 0, column: 1, error }
+            ))) if error.kind == fgdb_gql::GraphIntegerErrorKind::Overflow
+        ));
+        let (_, mut ordered) = error_order.stream(&db, &cx, &args, policy()).unwrap();
+        assert!(matches!(
+            ordered.next(),
+            Some(Err(GqlQueryError::Source(
+                fgdb_gql::scan_stream::ScanError::Projection { row: 0, column: 1, error }
+            ))) if error.kind == fgdb_gql::GraphIntegerErrorKind::Overflow
+        ));
+        assert_eq!(ordered.row_stats().result_rows, 0);
+        assert_eq!(ordered.state(), ScanState::Failed);
+        assert!(ordered.next().is_none());
+
         // Sorting completed endpoints cannot preserve the first failure of a
         // fallible witness predicate evaluated in a different order.
         for page in ["", " LIMIT 0"] {
@@ -707,6 +734,125 @@ fn vertex_rooted_collection_budgets_and_late_errors_preserve_complete_prefixes()
         let stopped = (broken.row_stats(), broken.evaluator_stats());
         assert!(broken.next().is_none());
         assert_eq!((broken.row_stats(), broken.evaluator_stats()), stopped);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn collected_fixed_paths_keep_oriented_segments_locals_and_closed_endpoints() {
+    let ((), report) = run_async_under_lab(0x6e65_0017, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = seed();
+        batch.add_edge(
+            EId(1),
+            VId(0),
+            WIDE,
+            vec![(P, CanonicalScalar::Int(13))],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let args = GqlParameters::new();
+        let edges = [
+            (0, WIDE, VId(0), 4),
+            (1, VId(0), WIDE, 13),
+            (2, WIDE, VId(0), 5),
+            (3, WIDE, WIDE, 8),
+            (u128::MAX, VId(0), VId(u128::MAX), -1),
+        ];
+        let vertex_property = |id| {
+            if id == VId(0) { 3 } else if id == WIDE { 7 } else { 11 }
+        };
+        for (edge_root, direction, closed) in [
+            (false, 0, false),
+            (false, 1, false),
+            (false, 2, true),
+            (true, 0, false),
+        ] {
+            let (left, right) = match direction {
+                0 => ("-", "->"),
+                1 => ("<-", "-"),
+                _ => ("-", "-"),
+            };
+            let end_name = if closed { "a" } else { "c" };
+            let body = format!(
+                "[p = (a){left}[s:R]{right}(b){left}[t:R]{right}({end_name}) | \
+                 [p,b,{end_name},s,t,nodes(p),relationships(p),b.p,{end_name}.p,s.p,t.p]] AS routes"
+            );
+            let text = if edge_root {
+                format!("MATCH (x)-[r:R]->(a) RETURN r,x,a,{body}")
+            } else {
+                format!("MATCH (a) RETURN a,{body}")
+            };
+            // A literal pair enumeration is independent of the compiled
+            // traversal/capture maps. A self-loop occurs once and DIFFERENT
+            // EDGES rejects only reuse of the same relationship identity.
+            let routes = |start| {
+                let target = |at, from, to| match direction {
+                    0 if from == at => Some(to),
+                    1 if to == at => Some(from),
+                    2 if from == at => Some(to),
+                    2 if to == at => Some(from),
+                    _ => None,
+                };
+                let mut values = Vec::new();
+                for &(s, from, to, s_property) in &edges {
+                    let Some(middle) = target(start, from, to) else { continue };
+                    for &(t, from, to, t_property) in &edges {
+                        if s == t { continue; }
+                        let Some(end) = target(middle, from, to) else { continue };
+                        if closed && end != start { continue; }
+                        values.push(GraphValue::List(vec![
+                            GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                                start,
+                                vec![(EId(s), middle), (EId(t), end)].into_boxed_slice(),
+                            )),
+                            GraphValue::Vertex(middle),
+                            GraphValue::Vertex(end),
+                            GraphValue::Edge(EId(s)),
+                            GraphValue::Edge(EId(t)),
+                            GraphValue::Vertices([start, middle, end].into()),
+                            GraphValue::Edges([EId(s), EId(t)].into()),
+                            GraphValue::Scalar(CanonicalScalar::Int(vertex_property(middle))),
+                            GraphValue::Scalar(CanonicalScalar::Int(vertex_property(end))),
+                            GraphValue::Scalar(CanonicalScalar::Int(s_property)),
+                            GraphValue::Scalar(CanonicalScalar::Int(t_property)),
+                        ].into_boxed_slice()));
+                    }
+                }
+                GraphValue::List(values.into_boxed_slice())
+            };
+            let expected: Vec<_> = if edge_root {
+                edges.iter().map(|&(id, from, to, _)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Edge(EId(id)),
+                        GraphValue::Vertex(from),
+                        GraphValue::Vertex(to),
+                        routes(to),
+                    ])
+                }).collect()
+            } else {
+                [VId(0), WIDE, VId(u128::MAX)].into_iter().map(|id| {
+                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(id), routes(id)])
+                }).collect()
+            };
+            assert!(expected.iter().any(|row| match row.values().last() {
+                Some(GraphValue::List(routes)) => !routes.is_empty(),
+                _ => false,
+            }), "{text}");
+            let prepared = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+            let (columns, mut cursor) = prepared.stream(&db, &cx, &args, policy()).unwrap();
+            let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(actual, expected, "{text}");
+            assert_eq!(
+                result(columns, actual),
+                prepared.execute(&db, &cx, &args, policy()).unwrap(),
+                "{text}",
+            );
+            assert_eq!(cursor.state(), ScanState::Exhausted);
+            assert!(cursor.next().is_none());
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

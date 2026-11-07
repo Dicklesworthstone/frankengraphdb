@@ -55,6 +55,12 @@ struct Step {
     predicates: Vec<GlaOperator>,
 }
 
+#[derive(Clone, Copy)]
+struct LocalCapture {
+    slot: u32,
+    edges: usize,
+}
+
 pub(crate) struct Probe {
     anti: bool,
     outer_width: usize,
@@ -92,7 +98,7 @@ impl Probe {
         {
             return Err(EdgeScanBuildError { operator: start });
         }
-        let (steps, _) = Self::compile_body(ops, start, end, outer_width)?;
+        let (steps, _) = Self::compile_body(ops, start, end, outer_width, false)?;
         Ok((
             Self {
                 anti: *anti,
@@ -108,15 +114,18 @@ impl Probe {
         start: usize,
         end: usize,
         outer_width: usize,
-    ) -> Result<(Vec<Step>, BTreeMap<u32, u32>), EdgeScanBuildError> {
-        if !matches!(
-            ops.get(start + 1),
-            Some(
-                GlaOperator::ScanVertices
-                    | GlaOperator::BindVertex { .. }
-                    | GlaOperator::BindOuterVertex { .. }
+        compound_captures: bool,
+    ) -> Result<(Vec<Step>, BTreeMap<u32, LocalCapture>), EdgeScanBuildError> {
+        if outer_width > MAX_PATTERN_BINDINGS
+            || !matches!(
+                ops.get(start + 1),
+                Some(
+                    GlaOperator::ScanVertices
+                        | GlaOperator::BindVertex { .. }
+                        | GlaOperator::BindOuterVertex { .. }
+                )
             )
-        ) {
+        {
             return Err(EdgeScanBuildError {
                 operator: start + 1,
             });
@@ -124,10 +133,14 @@ impl Probe {
         let mut steps: Vec<Step> = Vec::new();
         let mut width = outer_width;
         let mut expansions = 0;
+        // A closing edge can bind a fresh slot equal to an earlier vertex.
+        // Keep those proved aliases, including outer copies, so captures can
+        // follow their declared route through cycles or reversed expansions.
+        let mut aliases: [usize; MAX_PATTERN_BINDINGS] = std::array::from_fn(|slot| slot);
         // Canonical capture ordinals include the containing pattern's captures.
         // Translate only declarations inside THIS scope to compact local slots.
         // A reference to an outer or undeclared capture must never become NULL.
-        let mut capture_slots = BTreeMap::<u32, u32>::new();
+        let mut capture_slots = BTreeMap::<u32, LocalCapture>::new();
         for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
             let bad = || EdgeScanBuildError { operator: at };
             if let GlaOperator::DifferentEdges { segments } = op
@@ -198,8 +211,21 @@ impl Probe {
                     })
                 }
                 GlaOperator::Select { slot, .. } if (slot.ordinal() as usize) < width => None,
-                GlaOperator::VertexIdentity { left, right, .. }
-                | GlaOperator::CompareProperties { left, right, .. }
+                GlaOperator::VertexIdentity { left, right, equal }
+                    if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width =>
+                {
+                    if *equal {
+                        let keep = aliases[left.ordinal() as usize];
+                        let merged = aliases[right.ordinal() as usize];
+                        for alias in aliases.iter_mut().take(width) {
+                            if *alias == merged {
+                                *alias = keep;
+                            }
+                        }
+                    }
+                    None
+                }
+                GlaOperator::CompareProperties { left, right, .. }
                     if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width =>
                 {
                     None
@@ -223,25 +249,47 @@ impl Probe {
                     start,
                     segments,
                 } => {
-                    let [segment] = segments.as_slice() else {
-                        return Err(bad());
-                    };
-                    let local = (segment.ordinal() as usize).checked_sub(outer_width);
-                    let expansion = local
-                        .and_then(|at| steps.get(at))
-                        .and_then(|step| match step.binding {
-                            Binding::Expand(expansion) => Some(expansion),
-                            _ => None,
-                        });
-                    if expansion
-                        .is_none_or(|expansion| expansion.source != start.ordinal() as usize)
+                    if segments.is_empty()
+                        || segments.len() > MAX_PATTERN_EDGES
+                        || (!compound_captures && segments.len() != 1)
+                        || start.ordinal() as usize >= width
                         || *capture as usize >= crate::algebra::MAX_PATTERN_IDENTITIES
                         || capture_slots.contains_key(capture)
                     {
                         return Err(bad());
                     }
+                    let mut endpoint = aliases[start.ordinal() as usize];
+                    for (at, segment) in segments.iter().enumerate() {
+                        let target = segment.ordinal() as usize;
+                        let expansion = target
+                            .checked_sub(outer_width)
+                            .and_then(|local| steps.get(local))
+                            .and_then(|step| match step.binding {
+                                Binding::Expand(expansion) => Some(expansion),
+                                _ => None,
+                            })
+                            .ok_or_else(bad)?;
+                        if segments[..at].contains(segment) {
+                            return Err(bad());
+                        }
+                        let from = aliases[expansion.source];
+                        let to = aliases[target];
+                        if from == endpoint {
+                            endpoint = to;
+                        } else if compound_captures && to == endpoint {
+                            endpoint = from;
+                        } else {
+                            return Err(bad());
+                        }
+                    }
                     let local = capture_slots.len() as u32;
-                    capture_slots.insert(*capture, local);
+                    capture_slots.insert(
+                        *capture,
+                        LocalCapture {
+                            slot: local,
+                            edges: segments.len(),
+                        },
+                    );
                     predicate = Some(GlaOperator::CapturePath {
                         capture: local,
                         start: *start,
@@ -258,8 +306,8 @@ impl Probe {
                             slot
                         },
                         |capture| match capture_slots.get(&capture) {
-                            Some(local) => *local,
-                            None => {
+                            Some(local) if local.edges == 1 => local.slot,
+                            _ => {
                                 captures_valid = false;
                                 capture
                             }
@@ -279,6 +327,9 @@ impl Probe {
                 // candidate; it never becomes stale across another expansion.
                 if width >= MAX_PATTERN_BINDINGS || !capture_slots.is_empty() {
                     return Err(bad());
+                }
+                if let Binding::Copy { source, .. } = binding {
+                    aliases[width] = aliases[source];
                 }
                 width += 1;
                 steps.push(Step {
@@ -550,32 +601,49 @@ impl Probe {
                 segments,
             } = predicate
             {
-                // Fixed expansions already retain their chosen EId in the
-                // backtracking frame. Never reconstruct an edge by endpoints:
-                // parallel relationships can have different property values.
-                let frame = segments.first().and_then(|slot| {
-                    (slot.ordinal() as usize)
-                        .checked_sub(self.outer_width)
-                        .and_then(|at| frames.get(at))
-                });
-                let target = segments
-                    .first()
-                    .and_then(|slot| ids.get(slot.ordinal() as usize));
-                let (Some(Position::Edge(Some(eid))), Some(Some(target)), Some(Some(start))) =
-                    (frame, target, ids.get(start.ordinal() as usize))
-                else {
+                // Retain each chosen EId, never reconstruct a relationship by
+                // endpoints. The declared path can traverse an expansion in
+                // reverse, including an edge closing onto an existing slot.
+                let Some(Some(start)) = ids.get(start.ordinal() as usize) else {
                     return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
                 };
                 debug_assert_eq!(*capture as usize, paths.len());
-                // Same path-slot and step charges as the outer capture
-                // stage, before either the vector or boxed step is allocated.
-                for _ in 0..3 {
+                // Charge the path slot and every step before reserving payload.
+                // A one-edge capture retains its original three scratch events.
+                control(GlaExecutionEvent::ScratchEntry)?;
+                for _ in segments {
+                    control(GlaExecutionEvent::ScratchEntry)?;
                     control(GlaExecutionEvent::ScratchEntry)?;
                 }
-                paths.push(Some(GraphPath::new(
-                    *start,
-                    vec![(*eid, *target)].into_boxed_slice(),
-                )));
+                let mut endpoint = *start;
+                let mut steps = Vec::with_capacity(segments.len());
+                for (at, segment) in segments.iter().enumerate() {
+                    // The predicate checkpoint already accounts for step zero.
+                    if at != 0 {
+                        control(GlaExecutionEvent::Work)?;
+                    }
+                    let target = segment.ordinal() as usize;
+                    let local = target - self.outer_width;
+                    let Binding::Expand(expansion) = self.steps[local].binding else {
+                        unreachable!("the compiler admitted only local fixed segments")
+                    };
+                    let (Some(Position::Edge(Some(eid))), Some(Some(from)), Some(Some(to))) = (
+                        frames.get(local),
+                        ids.get(expansion.source),
+                        ids.get(target),
+                    ) else {
+                        return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
+                    };
+                    endpoint = if *from == endpoint {
+                        *to
+                    } else if *to == endpoint {
+                        *from
+                    } else {
+                        return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
+                    };
+                    steps.push((*eid, endpoint));
+                }
+                paths.push(Some(GraphPath::new(*start, steps.into_boxed_slice())));
                 continue;
             }
             if !super::accepts(predicate, ids, &paths, source, control)? {
@@ -615,7 +683,7 @@ impl Collection {
         // Fixed-hop witnesses use the same increasing-EId, depth-first order
         // as identified eager expansion, including multiple local bindings.
         // Keep independent scans and walks fenced here; compile_body also
-        // rejects nested scopes, nonlocal captures and compound path captures.
+        // rejects nested scopes and nonlocal or disconnected path captures.
         let mut expansions = 0;
         for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
             match op {
@@ -629,7 +697,7 @@ impl Collection {
         if expansions == 0 || expansions > MAX_PATTERN_EDGES {
             return Err(bad());
         }
-        let (steps, captures) = Probe::compile_body(ops, start, end, outer_width)?;
+        let (steps, captures) = Probe::compile_body(ops, start, end, outer_width, true)?;
         if *slots as usize != steps.len() {
             return Err(bad());
         }
@@ -641,8 +709,9 @@ impl Collection {
             {
                 captures
                     .get(&capture)
+                    .filter(|capture| function != GraphPathFunction::Edge || capture.edges == 1)
                     .map(|capture| ValueProjection::Path {
-                        capture: *capture,
+                        capture: capture.slot,
                         function,
                     })
                     .ok_or_else(bad)

@@ -1172,6 +1172,294 @@ mod collections {
             .unwrap()
     }
 
+
+    fn captured_path_definition(
+        outer_direction: GlaDirection,
+        directions: &[GlaDirection],
+        mode: GraphMatchMode,
+        returning: bool,
+        count: Option<u64>,
+    ) -> PreparedGraphPattern<GraphValueRow> {
+        let mut outer = GraphPatternBuilder::new();
+        outer.vertex("a").unwrap().vertex("b").unwrap();
+        outer.edge("a", R, outer_direction, "b").unwrap();
+        outer.capture_edge("r", 0).unwrap();
+        let names = if returning {
+            ["b", "c", "b", "d"]
+        } else {
+            ["b", "c", "d", "e"]
+        };
+        let edge_names = ["s", "t", "u"];
+        let mut inner = GraphPatternBuilder::new();
+        inner.match_mode(mode);
+        for (at, name) in names.iter().take(directions.len() + 1).enumerate() {
+            if !names[..at].contains(name) {
+                inner.vertex(name).unwrap();
+            }
+        }
+        let mut tuple = vec!["p", "b"];
+        for (at, &direction) in directions.iter().enumerate() {
+            if returning && at == 1 {
+                // Both endpoints already exist. The compiler expands b -> c,
+                // while the declared path traverses that segment from c to b.
+                inner.edge("b", R, direction, "c").unwrap();
+            } else {
+                inner.edge(names[at], R, direction, names[at + 1]).unwrap();
+            }
+            inner.capture_edge(edge_names[at], at).unwrap();
+            tuple.extend([edge_names[at], names[at + 1]]);
+        }
+        inner.capture_path("p").unwrap();
+        outer
+            .prepare_values_with_clauses(
+                &[
+                    GraphMatchClause::collect(&inner, Some("p")),
+                    GraphMatchClause::collect_tuple(&inner, tuple),
+                    GraphMatchClause::collect(&inner, None),
+                ],
+                &[
+                    GraphColumn::path("r", "r", GraphPathFunction::Edge),
+                    GraphColumn::vertex("a", "a"),
+                    GraphColumn::vertex("b", "b"),
+                    GraphColumn::collection("paths", 0),
+                    GraphColumn::collection("tuples", 1),
+                    GraphColumn::collection("nulls", 2),
+                ],
+                0,
+                count,
+            )
+            .unwrap()
+    }
+
+    // Enumerate complete oriented edge products, then apply endpoint joins
+    // and relationship reuse. This oracle never follows incidence or calls
+    // either path assembler, and never sorts/deduplicates an inner list.
+    fn captured_path_expected(
+        fixture: &Fixture,
+        outer_direction: GlaDirection,
+        directions: &[GlaDirection],
+        mode: GraphMatchMode,
+        returning: bool,
+    ) -> Vec<GraphValueRow> {
+        let domains: Vec<Vec<_>> = directions
+            .iter()
+            .enumerate()
+            .map(|(at, &direction)| {
+                let direction = if returning && at == 1 {
+                    match direction {
+                        GlaDirection::Forward => GlaDirection::Reverse,
+                        GlaDirection::Reverse => GlaDirection::Forward,
+                        GlaDirection::Undirected => GlaDirection::Undirected,
+                    }
+                } else {
+                    direction
+                };
+                fixture
+                    .edges
+                    .iter()
+                    .flat_map(|(&eid, (a, b, _))| {
+                        orientations(*a, *b, direction)
+                            .into_iter()
+                            .map(move |(a, b)| (eid, a, b))
+                    })
+                    .collect()
+            })
+            .collect();
+        let product: usize = domains.iter().map(Vec::len).product();
+        let mut rows = Vec::new();
+        for (&r, (a, b, _)) in &fixture.edges {
+            for (a, b) in orientations(*a, *b, outer_direction) {
+                let mut paths = Vec::new();
+                let mut tuples = Vec::new();
+                let mut nulls = Vec::new();
+                for ordinal in 0..product {
+                    let mut remainder = ordinal;
+                    let mut choices = vec![(EId(0), VId(0), VId(0)); domains.len()];
+                    for (choice, domain) in choices.iter_mut().zip(&domains).rev() {
+                        *choice = domain[remainder % domain.len()];
+                        remainder /= domain.len();
+                    }
+                    if choices[0].1 != b
+                        || choices.windows(2).any(|pair| pair[0].2 != pair[1].1)
+                        || (returning && choices[1].2 != b)
+                        || (mode == GraphMatchMode::DifferentEdges
+                            && choices.iter().enumerate().any(|(at, choice)| {
+                                choices[..at].iter().any(|prior| prior.0 == choice.0)
+                            }))
+                    {
+                        continue;
+                    }
+                    let path = GraphValue::Path(GraphPath::new(
+                        b,
+                        choices.iter().map(|&(eid, _, to)| (eid, to)).collect(),
+                    ));
+                    let mut tuple = vec![path.clone(), GraphValue::Vertex(b)];
+                    for &(eid, _, to) in &choices {
+                        tuple.extend([GraphValue::Edge(eid), GraphValue::Vertex(to)]);
+                    }
+                    paths.push(path);
+                    tuples.push(list(tuple));
+                    nulls.push(GraphValue::Scalar(CanonicalScalar::Null));
+                }
+                rows.push(GraphValueRow::from_owned_values(vec![
+                    GraphValue::Edge(r),
+                    GraphValue::Vertex(a),
+                    GraphValue::Vertex(b),
+                    list(paths),
+                    list(tuples),
+                    list(nulls),
+                ]));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn collected_fixed_paths_keep_declared_routes_through_cycles_and_reversed_segments() {
+        use GlaDirection::{Forward as F, Reverse as R, Undirected as U};
+
+        for directions in [
+            vec![F, F],
+            vec![F, R],
+            vec![U, U],
+            vec![F, F, F],
+            vec![F, R, U],
+            vec![R, U, F],
+            vec![U, U, U],
+        ] {
+            for returning in [false, true] {
+                for mode in [GraphMatchMode::RepeatableElements, GraphMatchMode::DifferentEdges] {
+                    let query =
+                        captured_path_definition(U, &directions, mode, returning, None);
+                    let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+                    for mask in [0, 3, 31, 63] {
+                        let fixture = Fixture::small(mask);
+                        let expected =
+                            captured_path_expected(&fixture, U, &directions, mode, returning);
+                        assert_eq!(eager(&query, &fixture), expected, "eager");
+                        let actual = EdgeScanCursor::new(
+                            fixture,
+                            plan.clone(),
+                            policy(),
+                            || Ok::<_, ()>(()),
+                        )
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                        assert_eq!(
+                            actual, expected,
+                            "{directions:?}/{mode:?}; returning={returning}; mask={mask}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn collected_path_validation_rejects_foreign_disconnected_and_edge_typed_routes() {
+        use crate::algebra::BindingSlot;
+
+        let query = captured_path_definition(
+            GlaDirection::Forward,
+            &[GlaDirection::Forward; 3],
+            GraphMatchMode::DifferentEdges,
+            false,
+            None,
+        );
+        let original = query.plan().operators();
+        let start = original
+            .iter()
+            .position(|op| matches!(op, GlaOperator::Collect { .. }))
+            .unwrap();
+        let (_, end) = probe::Collection::compile(original, start, 2).unwrap();
+        let path = (start + 1..end)
+            .find(|&at| {
+                matches!(&original[at], GlaOperator::CapturePath { segments, .. } if segments.len() == 3)
+            })
+            .unwrap();
+        for corruption in 0..6 {
+            let mut ops = original.to_vec();
+            if corruption == 5 {
+                let GlaOperator::CollectEnd { value, .. } = &mut ops[end] else {
+                    unreachable!("collection terminator")
+                };
+                let Some(crate::algebra::ValueProjection::Path { function, .. }) = value else {
+                    unreachable!("the collection returns its complete path")
+                };
+                *function = GraphPathFunction::Edge;
+            } else {
+                let GlaOperator::CapturePath { start, segments, .. } = &mut ops[path] else {
+                    unreachable!("compound capture")
+                };
+                match corruption {
+                    0 => *start = BindingSlot(0),
+                    1 => segments[0] = BindingSlot(1),
+                    2 => segments[1] = segments[0],
+                    3 => segments.swap(0, 2),
+                    4 => segments[0] = BindingSlot(2),
+                    _ => unreachable!(),
+                }
+            }
+            assert!(
+                probe::Collection::compile(&ops, start, 2).is_err(),
+                "malformed path {corruption}"
+            );
+        }
+        // No compound path enters the existing probe or async byte profile.
+        let mut ops = original.to_vec();
+        let GlaOperator::Collect { group, .. } = ops[start] else {
+            unreachable!("collection opening")
+        };
+        ops[start] = GlaOperator::Probe { group, end: end as u32, anti: false };
+        ops[end] = GlaOperator::ProbeEnd { group };
+        assert!(probe::Probe::compile(&ops, start, 2).is_err());
+        assert!(AsyncEdgeJoinPlan::compile(query.plan()).is_err());
+        assert!(AsyncEdgeJoinPlan::compile_sort_input(query.plan()).is_err());
+    }
+
+    #[test]
+    fn failed_later_path_witness_never_publishes_a_partial_collection() {
+        let query = captured_path_definition(
+            GlaDirection::Forward,
+            &[GlaDirection::Forward; 3],
+            GraphMatchMode::DifferentEdges,
+            false,
+            Some(1),
+        );
+        let edges = [(0, 9, 0), (1, 0, 1), (2, 1, 2), (3, 1, 3), (4, 2, 4), (5, 3, 4)];
+        let fixture = Fixture::from_edges(edges);
+        let expected = captured_path_expected(
+            &fixture,
+            GlaDirection::Forward,
+            &[GlaDirection::Forward; 3],
+            GraphMatchMode::DifferentEdges,
+            false,
+        );
+        assert_eq!(expected[0].values()[3].as_list().unwrap().len(), 2);
+        let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+        let mut good = EdgeScanCursor::new(fixture, plan.clone(), policy(), || Ok::<_, ()>(()));
+        assert_eq!(good.next().unwrap().unwrap(), expected[0]);
+        assert!(good.next().is_none());
+
+        let mut fixture = Fixture::from_edges(edges);
+        fixture.fail_edge = Some(EId(5));
+        let drops = fixture.drops.clone();
+        let mut cursor = EdgeScanCursor::new(fixture, plan, policy(), || Ok::<_, ()>(()));
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(EdgeScanError::Source(
+                "edge history unreadable"
+            ))))
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(cursor.source.is_none());
+        assert!(cursor.traversal.is_none());
+        assert!(cursor.next().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
     fn list(values: Vec<GraphValue>) -> GraphValue {
         GraphValue::List(values.into_boxed_slice())
     }
@@ -1428,6 +1716,8 @@ mod collections {
                     };
                 }
                 4 => {
+                    // A compound path cannot satisfy the existing Edge-typed
+                    // tuple field, even when its segments connect correctly.
                     let GlaOperator::CapturePath { segments, .. } = ops[captures[1]].clone() else {
                         unreachable!("the fixture captures both relationships")
                     };
@@ -1561,77 +1851,87 @@ mod collections {
 
     #[test]
     fn every_collection_checkpoint_cancels_without_a_partial_row_and_retry_is_exact() {
-        let query = definition(GlaDirection::Forward, GlaDirection::Forward, 0, Some(2));
-        let plan = EdgeScanPlan::compile(query.plan()).unwrap();
-        let mut checkpoints = 0;
-        let mut cursor = EdgeScanCursor::new(Fixture::small(63), plan.clone(), policy(), || {
-            checkpoints += 1;
-            Ok::<_, usize>(())
-        });
-        let expected = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
-        let rows = cursor.row_stats();
-        let evaluator = cursor.evaluator_stats();
-        drop(cursor);
-        for stop in 1..=checkpoints {
-            let fixture = Fixture::small(63);
-            let drops = fixture.drops.clone();
-            let mut at = 0;
-            let mut cursor = EdgeScanCursor::new(fixture, plan.clone(), policy(), || {
-                at += 1;
-                if at == stop { Err(stop) } else { Ok(()) }
-            });
-            let mut prefix = Vec::new();
-            loop {
-                match cursor.next() {
-                    Some(Ok(row)) => prefix.push(row),
-                    Some(Err(GqlQueryError::Interrupted(reported))) => {
-                        assert_eq!(reported, stop);
-                        break;
-                    }
-                    other => panic!("checkpoint {stop} became {other:?}"),
-                }
-            }
-            assert_eq!(prefix, expected[..prefix.len()]);
-            assert_eq!(cursor.row_stats().result_rows, prefix.len() as u64);
-            assert_eq!(cursor.state(), EdgeScanState::Failed);
-            assert!(cursor.traversal.is_none());
-            assert_eq!(drops.load(Ordering::SeqCst), 1);
-            assert!(cursor.next().is_none());
-            drop(cursor);
-            assert_eq!(at, stop);
-        }
-        let exact = GqlQueryPolicy::new(
-            rows.snapshot_records,
-            rows.result_rows,
-            evaluator.work_units,
-            evaluator.scratch_entries,
-        );
-        let mut retry =
-            EdgeScanCursor::new(Fixture::small(63), plan.clone(), exact, || Ok::<_, ()>(()));
-        assert_eq!(
-            retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
-            expected
-        );
-        assert_eq!(
-            (retry.row_stats(), retry.evaluator_stats()),
-            (rows, evaluator)
-        );
-        for allowance in [
-            GqlQueryPolicy::new(rows.snapshot_records - 1, 100, u64::MAX, u64::MAX),
-            GqlQueryPolicy::new(1_000, rows.result_rows - 1, u64::MAX, u64::MAX),
-            GqlQueryPolicy::new(1_000, 100, evaluator.work_units - 1, u64::MAX),
-            GqlQueryPolicy::new(1_000, 100, u64::MAX, evaluator.scratch_entries - 1),
+        for query in [
+            definition(GlaDirection::Forward, GlaDirection::Forward, 0, Some(2)),
+            captured_path_definition(
+                GlaDirection::Forward,
+                &[GlaDirection::Forward; 3],
+                GraphMatchMode::DifferentEdges,
+                true,
+                Some(2),
+            ),
         ] {
-            let mut cursor =
-                EdgeScanCursor::new(Fixture::small(63), plan.clone(), allowance, || {
-                    Ok::<_, ()>(())
+            let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+            let mut checkpoints = 0;
+            let mut cursor = EdgeScanCursor::new(Fixture::small(63), plan.clone(), policy(), || {
+                checkpoints += 1;
+                Ok::<_, usize>(())
+            });
+            let expected = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            let rows = cursor.row_stats();
+            let evaluator = cursor.evaluator_stats();
+            drop(cursor);
+            for stop in 1..=checkpoints {
+                let fixture = Fixture::small(63);
+                let drops = fixture.drops.clone();
+                let mut at = 0;
+                let mut cursor = EdgeScanCursor::new(fixture, plan.clone(), policy(), || {
+                    at += 1;
+                    if at == stop { Err(stop) } else { Ok(()) }
                 });
-            assert!(matches!(
-                cursor.by_ref().collect::<Result<Vec<_>, _>>(),
-                Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
-            ));
-            assert_eq!(cursor.state(), EdgeScanState::Failed);
-            assert!(cursor.next().is_none());
+                let mut prefix = Vec::new();
+                loop {
+                    match cursor.next() {
+                        Some(Ok(row)) => prefix.push(row),
+                        Some(Err(GqlQueryError::Interrupted(reported))) => {
+                            assert_eq!(reported, stop);
+                            break;
+                        }
+                        other => panic!("checkpoint {stop} became {other:?}"),
+                    }
+                }
+                assert_eq!(prefix, expected[..prefix.len()]);
+                assert_eq!(cursor.row_stats().result_rows, prefix.len() as u64);
+                assert_eq!(cursor.state(), EdgeScanState::Failed);
+                assert!(cursor.traversal.is_none());
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert!(cursor.next().is_none());
+                drop(cursor);
+                assert_eq!(at, stop);
+            }
+            let exact = GqlQueryPolicy::new(
+                rows.snapshot_records,
+                rows.result_rows,
+                evaluator.work_units,
+                evaluator.scratch_entries,
+            );
+            let mut retry =
+                EdgeScanCursor::new(Fixture::small(63), plan.clone(), exact, || Ok::<_, ()>(()));
+            assert_eq!(
+                retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected
+            );
+            assert_eq!(
+                (retry.row_stats(), retry.evaluator_stats()),
+                (rows, evaluator)
+            );
+            for allowance in [
+                GqlQueryPolicy::new(rows.snapshot_records - 1, 100, u64::MAX, u64::MAX),
+                GqlQueryPolicy::new(1_000, rows.result_rows - 1, u64::MAX, u64::MAX),
+                GqlQueryPolicy::new(1_000, 100, evaluator.work_units - 1, u64::MAX),
+                GqlQueryPolicy::new(1_000, 100, u64::MAX, evaluator.scratch_entries - 1),
+            ] {
+                let mut cursor =
+                    EdgeScanCursor::new(Fixture::small(63), plan.clone(), allowance, || {
+                        Ok::<_, ()>(())
+                    });
+                assert!(matches!(
+                    cursor.by_ref().collect::<Result<Vec<_>, _>>(),
+                    Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
+                ));
+                assert_eq!(cursor.state(), EdgeScanState::Failed);
+                assert!(cursor.next().is_none());
+            }
         }
     }
 

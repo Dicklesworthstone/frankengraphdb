@@ -1484,3 +1484,138 @@ fn authorized_projected_page_suffixes_keep_live_expiry_and_cancellation() {
     assert_eq!(cursor.state(), VertexScanState::Failed);
     assert!(cursor.next().is_none());
 }
+
+#[test]
+fn authorized_collected_paths_keep_every_segment_inside_the_visible_graph() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let slim = runtime.block_on(collection_database(&commit, false));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    for (edge_root, direction, closed) in [
+        (false, 0, false),
+        (false, 1, false),
+        (false, 2, true),
+        (true, 0, false),
+    ] {
+        let (left, right) = match direction {
+            0 => ("-", "->"),
+            1 => ("<-", "-"),
+            _ => ("-", "-"),
+        };
+        let end_name = if closed { "a" } else { "c" };
+        let body = format!(
+            "[p = (a){left}[s]{right}(b){left}[t]{right}({end_name}) | \
+             [p,b,{end_name},s,t,nodes(p),relationships(p),b.p,{end_name}.p,s.p,t.p,\
+              b.hidden,{end_name}.hidden,s.hidden,t.hidden]] AS routes"
+        );
+        let text = if edge_root {
+            format!("MATCH (x)-[r]->(a) RETURN r,x,a,{body}")
+        } else {
+            format!("MATCH (a) RETURN a,{body}")
+        };
+        let routes = |start| {
+            let target = |at, from, to| match direction {
+                0 if from == at => Some(to),
+                1 if to == at => Some(from),
+                2 if from == at => Some(to),
+                2 if to == at => Some(from),
+                _ => None,
+            };
+            let mut values = Vec::new();
+            for &(s, from, to, s_property) in &COLLECTION_EDGES {
+                let Some(middle) = target(start, from, to) else { continue };
+                for &(t, from, to, t_property) in &COLLECTION_EDGES {
+                    if s == t { continue; }
+                    let Some(end) = target(middle, from, to) else { continue };
+                    if closed && end != start { continue; }
+                    values.push(collection_list([
+                        GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                            VId(start),
+                            vec![(EId(s), VId(middle)), (EId(t), VId(end))].into_boxed_slice(),
+                        )),
+                        GraphValue::Vertex(VId(middle)),
+                        GraphValue::Vertex(VId(end)),
+                        GraphValue::Edge(EId(s)),
+                        GraphValue::Edge(EId(t)),
+                        GraphValue::Vertices([VId(start), VId(middle), VId(end)].into()),
+                        GraphValue::Edges([EId(s), EId(t)].into()),
+                        collection_scalar(Some(middle as i64 * 10)),
+                        collection_scalar(Some(end as i64 * 10)),
+                        collection_scalar(s_property),
+                        collection_scalar(t_property),
+                        collection_scalar(None),
+                        collection_scalar(None),
+                        collection_scalar(None),
+                        collection_scalar(None),
+                    ]));
+                }
+            }
+            collection_list(values)
+        };
+        let expected: Vec<_> = if edge_root {
+            COLLECTION_EDGES.iter().map(|&(id, from, to, _)| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Edge(EId(id)),
+                    GraphValue::Vertex(VId(from)),
+                    GraphValue::Vertex(VId(to)),
+                    routes(to),
+                ])
+            }).collect()
+        } else {
+            [1_u128, 3, 4].into_iter().map(|id| {
+                GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(id)), routes(id)])
+            }).collect()
+        };
+        assert!(expected.iter().any(|row| match row.values().last() {
+            Some(GraphValue::List(routes)) => !routes.is_empty(),
+            _ => false,
+        }), "{text}");
+
+        // The additional graph contains hidden intermediate vertices, a
+        // forbidden relation, and masked fields on otherwise visible elements.
+        // A Send cursor still reads every path segment through the scoped source.
+        let calls = AtomicU64::new(0);
+        let clock = || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            100
+        };
+        let mut scoped = db
+            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+            .unwrap();
+        let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+        let eager = scoped.execute(&cx, &prepared, &args).unwrap();
+        let before = calls.load(Ordering::Relaxed);
+        let mut cursor = scoped.stream_send(&cx, &prepared, &args).unwrap();
+        let columns = cursor.columns().to_vec();
+        let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(actual, expected, "{text}");
+        assert_eq!(native(columns, &actual), eager, "{text}");
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        let checkpoints = calls.load(Ordering::Relaxed) - before;
+        assert!(cursor.next().is_none());
+        drop(cursor);
+
+        let mut visible = slim
+            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+            .unwrap();
+        let prepared = visible.prepare(&cx, &text, &args).unwrap();
+        let before = calls.load(Ordering::Relaxed);
+        let mut cursor = visible.stream_send(&cx, &prepared, &args).unwrap();
+        assert_eq!(
+            cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+            expected,
+            "{text}",
+        );
+        assert_eq!(calls.load(Ordering::Relaxed) - before, checkpoints, "{text}");
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(cursor.next().is_none());
+    }
+}

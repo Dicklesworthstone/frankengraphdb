@@ -718,18 +718,18 @@ fn compile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<RowPlan, Que
 }
 
 fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<(), QueryError> {
-    // Admit private single-edge captures in probes and pattern collections,
-    // not arbitrary captured paths or outer capture export. Both producers use
-    // the same scoped incidence, edge and endpoint readers; collection fields
-    // are read through the separately admitted property routes at this cut.
-    // The native compiler still proves fixed-edge collection producers,
-    // operand domains, scope-local IDs and the complete output profile.
+    // Collection paths retain only compiler-proven local fixed hops. Probe
+    // captures remain single-edge; outer and nested capture export refuses.
+    // Both producers use the same scoped incidence, edge and endpoint readers;
+    // collection fields use the separately admitted property routes at this cut.
+    // The native compiler still proves connected fixed paths, operand domains,
+    // scope-local IDs, capture bounds and the complete output profile.
     // Keep this source fence shared by row and aggregate factories.
     let operators = pattern.plan().operators();
-    let mut scope_end = None;
+    let mut scope: Option<(usize, bool)> = None;
     for (operator, op) in operators.iter().enumerate() {
-        if scope_end == Some(operator) {
-            scope_end = None;
+        if scope.is_some_and(|(end, _)| end == operator) {
+            scope = None;
         }
         match op {
             GlaOperator::Probe { group, end, .. }
@@ -746,13 +746,15 @@ fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result
                     ) => close == group,
                     _ => false,
                 };
-                if scope_end.is_some() || end <= operator || !closes {
+                if scope.is_some() || end <= operator || !closes {
                     return Err(plan_error(VertexScanBuildError { operator }));
                 }
-                scope_end = Some(end);
+                scope = Some((end, matches!(op, GlaOperator::Collect { .. })));
             }
             GlaOperator::CapturePath { segments, .. }
-                if scope_end.is_none() || segments.len() != 1 =>
+                if segments.is_empty()
+                    || segments.len() > fgdb_gql::algebra::MAX_PATTERN_EDGES
+                    || scope.is_none_or(|(_, collect)| !collect && segments.len() != 1) =>
             {
                 return Err(plan_error(VertexScanBuildError { operator }));
             }
@@ -761,6 +763,7 @@ fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result
     }
     Ok(())
 }
+
 /// A bound row plan: the physical plan, its cut, the output columns and,
 /// for a set that pulls row by row, the projection each source row takes.
 type BoundRows = (RowPlan, CommitSeq, Vec<String>, Option<GraphSetRowPull>);
