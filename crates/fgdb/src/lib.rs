@@ -1345,6 +1345,9 @@ pub struct PreparedWrite {
     // Exact evaluator-input rows admitted by raw/ordered preparation. Template
     // composition without that input accounting cannot authorize automatic replay.
     replay_row_allowance: Option<u64>,
+    // Provenance of an ordinary single-relation raw input, before normalization
+    // removes no-ops. Immutable with the prepared prefix, including savepoints.
+    raw_input: Option<prepared_write::RawWriteSummary>,
     pub(crate) authorization_decision_digest: Option<Digest>,
 }
 

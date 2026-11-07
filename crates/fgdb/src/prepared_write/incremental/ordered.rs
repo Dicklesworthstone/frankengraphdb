@@ -297,6 +297,7 @@ impl<V: Vfs + Clone> Database<V> {
             handle_owner: Arc::clone(&self.handle_owner),
             dependencies,
             replay_row_allowance,
+            raw_input: None,
             authorization_decision_digest: previous.authorization_decision_digest,
         }))
     }

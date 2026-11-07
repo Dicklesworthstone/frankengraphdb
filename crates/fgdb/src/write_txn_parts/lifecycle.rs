@@ -80,10 +80,15 @@ impl WriteTxn {
             });
         }
         if let Some(first) = self.staged.first()
-            && (self
-                .staged
-                .iter()
-                .any(|staged| staged.relation != first.relation)
+            && ((!self
+                .prepared
+                .as_ref()
+                .and_then(|prepared| prepared.raw_input)
+                .is_some_and(|summary| summary.relation == first.relation)
+                && self
+                    .staged
+                    .iter()
+                    .any(|staged| staged.relation != first.relation))
                 || (self.program_multi_relation && batch.relation != first.relation))
         {
             // Mixed programs promise that each step sees its predecessor.

@@ -115,10 +115,23 @@ fn every_incremental_cut_matches_full_native_preparation() {
                     rows: rows.to_vec(),
                 };
                 let prepared = match previous.as_ref() {
-                    Some(previous) => db
-                        .try_extend_prepared_write(previous, &staged, &batch)
-                        .unwrap()
-                        .expect("the mixed append/SET/CAS prefix must take the incremental lane"),
+                    Some(previous) => {
+                        let cached = db
+                            .try_extend_prepared_write(previous, &staged, &batch)
+                            .unwrap()
+                            .expect("the mixed append/SET/CAS prefix must take the incremental lane");
+                        // Withhold the optimization's raw-input proof and run
+                        // the original raw scan against the same exact prefix.
+                        let mut uncached = previous.clone();
+                        uncached.raw_input = None;
+                        let rescanned = db
+                            .try_extend_prepared_write(&uncached, &staged, &batch)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(cached.template, rescanned.template);
+                        assert_eq!(cached.raw_input, rescanned.raw_input);
+                        cached
+                    }
                     None => db.prepare_write(batch.clone()).unwrap(),
                 };
                 staged.push(batch);
@@ -132,6 +145,12 @@ fn every_incremental_cut_matches_full_native_preparation() {
                 assert_eq!(prepared.dependencies.elements, full.dependencies.elements);
                 assert_eq!(prepared.dependencies.adjacency, full.dependencies.adjacency);
                 assert_eq!(prepared.replay_row_allowance, full.replay_row_allowance);
+                assert_eq!(prepared.raw_input, full.raw_input);
+                assert_eq!(
+                    prepared.raw_input.unwrap().visits,
+                    staged.iter().map(|batch| batch.rows.len() as u64).sum::<u64>(),
+                    "no-op visits accumulate independently of the smaller seed"
+                );
                 assert_eq!(prepared.basis(), basis);
                 previous = Some(prepared);
             }
@@ -395,4 +414,306 @@ fn authority_and_withheld_replay_are_preserved_with_noop_dependencies() {
         )));
     });
     assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn savepoint_rollback_discards_raw_retirements_and_restores_original_birth_visits() {
+    let ((), report) = run_async_under_lab(0x6972_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txcx = contexts.txn();
+        let mut db = seeded(&cx).await;
+        let basis = db.frontier().unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.ensure_vertex(VId(1), vec![], vec![]);
+        prefix.create_vertex(VId(5), vec![LabelId(2)], vec![(P, int(5))]);
+        prefix.create_vertex(VId(6), vec![], vec![(P, int(6))]);
+        prefix.add_edge(EId(50), VId(5), VId(6), vec![(P, int(50))]);
+        prefix.set_vertex_property(VId(1), Q, Some(int(9)));
+        prefix.set_vertex_property(VId(1), Q, None);
+        let mut txn = db.begin(&txcx).unwrap();
+        txn.write(&mut db, prefix.clone()).unwrap();
+        txn.savepoint(&db, "supported").unwrap();
+        let saved = txn.staged_effect_digest().unwrap();
+
+        let mut retired = WriteBatch::new(R);
+        retired.create_vertex(VId(70), vec![], vec![]);
+        retired.delete_vertex(VId(70));
+        txn.write(&mut db, retired).unwrap();
+        assert_eq!(txn.staged_effect_digest().unwrap(), saved);
+        let mut reuse = WriteBatch::new(R);
+        reuse.create_vertex(VId(70), vec![], vec![]);
+        assert!(matches!(
+            txn.write(&mut db, reuse),
+            Err(WriteTxnError::Write(WriteError::IdentitySpent {
+                elem: ElementId::Vertex(VId(70))
+            }))
+        ));
+        assert_eq!(txn.staged_effect_digest().unwrap(), saved);
+
+        let mut suffix = WriteBatch::new(R);
+        suffix.ensure_vertex(VId(2), vec![], vec![]);
+        suffix.set_edge_property(EId(50), P, Some(int(51)));
+        suffix.set_vertex_label(VId(5), LabelId(3), true);
+        suffix.create_vertex(VId(70), vec![], vec![(Q, int(70))]);
+        let full_input = combined(&[prefix, suffix.clone()]);
+        let full = db.prepare_write(full_input.clone()).unwrap();
+        let mut oracle = db.begin(&txcx).unwrap();
+        oracle.write(&mut db, full_input).unwrap();
+
+        for _ in 0..2 {
+            txn.rollback_to_savepoint(&db, "supported").unwrap();
+            assert_eq!(txn.staged_effect_digest().unwrap(), saved);
+            txn.write(&mut db, suffix.clone()).unwrap();
+            assert_eq!(
+                txn.vertex(&db, VId(70)).unwrap().unwrap().birth_ordinal,
+                10,
+                "discarded visits must not survive rollback, but prefix no-ops must"
+            );
+            assert_eq!(
+                txn.staged_effect_digest().unwrap(),
+                oracle.staged_effect_digest().unwrap()
+            );
+            assert_eq!(txn.vertices(&db).unwrap(), oracle.vertices(&db).unwrap());
+            assert_eq!(txn.edges(&db).unwrap(), oracle.edges(&db).unwrap());
+        }
+        oracle.abort();
+        txn.commit(&mut db, &cx).await.unwrap();
+        let committed = db.delta_since(basis).unwrap().next().unwrap();
+        assert_eq!(
+            committed.coordinate_entries(),
+            full.template.coordinate_entries()
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn erased_mixed_relation_effects_cannot_establish_a_single_raw_relation() {
+    let ((), report) = run_async_under_lab(0x6972_0012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txcx = contexts.txn();
+        let mut db = seeded(&cx).await;
+        let mut first = WriteBatch::new(R);
+        first.set_edge_property(EId(10), P, Some(int(11)));
+        let mut second = WriteBatch::new(RelationId(9));
+        second.set_edge_property(EId(10), P, Some(int(10)));
+        let prefix = vec![first, second];
+        let prepared = db.prepare_ordered_writes(prefix.clone()).unwrap();
+        assert!(prepared.raw_input.is_none());
+        assert_eq!(prepared.template.coordinate_entries().len(), 1);
+        assert_eq!(prepared.template.rows().count(), 0);
+
+        let mut suffix = WriteBatch::new(R);
+        suffix.create_vertex(VId(5), vec![], vec![(P, int(5))]);
+        suffix.add_edge(EId(50), VId(5), VId(1), vec![(P, int(50))]);
+        assert!(
+            db.try_extend_prepared_write(&prepared, &prefix, &suffix)
+                .unwrap()
+                .is_none(),
+            "the empty normalized coordinate cannot erase mixed raw ownership"
+        );
+        let mut txn = db.begin(&txcx).unwrap();
+        txn.write_ordered(&mut db, prefix.clone()).unwrap();
+        txn.write(&mut db, suffix.clone()).unwrap();
+        assert_eq!(txn.vertex(&db, VId(5)).unwrap().unwrap().birth_ordinal, 3);
+
+        let mut foreign = WriteBatch::new(RelationId(7));
+        foreign.set_edge_property(EId(50), P, Some(int(51)));
+        txn.write(&mut db, foreign.clone()).unwrap();
+        let mut complete = prefix;
+        complete.extend([suffix, foreign]);
+        let mut oracle = db.begin(&txcx).unwrap();
+        oracle.write_ordered(&mut db, complete).unwrap();
+        assert_eq!(
+            txn.staged_effect_digest().unwrap(),
+            oracle.staged_effect_digest().unwrap()
+        );
+        assert_eq!(txn.vertices(&db).unwrap(), oracle.vertices(&db).unwrap());
+        assert_eq!(txn.edges(&db).unwrap(), oracle.edges(&db).unwrap());
+        assert_eq!(txn.edge(&db, EId(50)).unwrap().unwrap().entry.relation, R);
+        txn.abort();
+        oracle.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn selected_seed_ranges_match_a_full_scan_with_bounded_polls_and_refusals() {
+    fn canonical(rows: Vec<DeltaRow>) -> crate::LogicalDeltaTemplate {
+        crate::LogicalDeltaTemplate::build(
+            crate::intent_semantics_oid(),
+            [0; 32],
+            vec![crate::CoordinateEntry {
+                graph: crate::GRAPH,
+                branch: crate::BRANCH,
+                relation: R,
+                schema_epoch: crate::SchemaEpoch(0),
+                schema_transition: None,
+                rows,
+            }],
+        )
+        .unwrap()
+    }
+
+    let existing_vertex = VId(1_u128 << 127);
+    let existing_edge = EId((1_u128 << 96) + 1);
+    let requested = BTreeSet::from([
+        ElementId::Vertex(existing_vertex),
+        ElementId::Edge(existing_edge),
+        ElementId::Edge(EId(u128::MAX)),
+    ]);
+    for unrelated in [32_usize, 512, 8_192] {
+        let mut rows = Vec::new();
+        for (vid, birth_ordinal) in [(VId(0), 1), (VId(u128::MAX), 2)] {
+            rows.push(DeltaRow::CreateVertex {
+                vid,
+                birth_ordinal,
+                labels: vec![],
+                props: vec![],
+                valid_time: None,
+            });
+        }
+        rows.push(DeltaRow::CreateEdge {
+            eid: EId(u128::MAX),
+            birth_ordinal: 3,
+            src: VId(0),
+            relation: R,
+            dst: VId(u128::MAX),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        });
+        for field in [0, u64::MAX] {
+            rows.push(DeltaRow::LabelMembership {
+                vid: existing_vertex,
+                label: LabelId(field),
+                before: false,
+                after: true,
+            });
+            for elem in [
+                ElementId::Vertex(existing_vertex),
+                ElementId::Edge(existing_edge),
+            ] {
+                rows.push(DeltaRow::Property {
+                    elem,
+                    property: PropertyKeyId(field),
+                    before: Some(int(1).into()),
+                    after: Some(int(2).into()),
+                });
+            }
+        }
+        for id in 1..=unrelated {
+            rows.push(DeltaRow::CreateVertex {
+                vid: VId(id as u128),
+                birth_ordinal: id as u64 + 3,
+                labels: vec![],
+                props: vec![],
+                valid_time: None,
+            });
+            rows.push(DeltaRow::Property {
+                elem: ElementId::Vertex(VId((1_u128 << 64) + id as u128)),
+                property: P,
+                before: Some(int(0).into()),
+                after: Some(int(1).into()),
+            });
+        }
+        // The durable encoder supplies the order; neither the fixture nor
+        // the independent full-scan oracle uses the new binary selector.
+        rows.reverse();
+        let template = canonical(rows);
+        let rows = &template.coordinate_entries()[0].rows;
+        let expected_needed: BTreeSet<_> = requested
+            .iter()
+            .copied()
+            .chain([
+                ElementId::Vertex(VId(0)),
+                ElementId::Vertex(VId(u128::MAX)),
+            ])
+            .collect();
+        let expected: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                let element = match row {
+                    DeltaRow::CreateVertex { vid, .. }
+                    | DeltaRow::LabelMembership { vid, .. } => ElementId::Vertex(*vid),
+                    DeltaRow::CreateEdge { eid, .. } => ElementId::Edge(*eid),
+                    DeltaRow::Property { elem, .. } => *elem,
+                    _ => panic!("the positive fixture contains only supported families"),
+                };
+                expected_needed.contains(&element)
+            })
+            .collect();
+        assert_eq!(expected.len(), 9);
+        let mut needed = requested.clone();
+        let mut polls = 0_usize;
+        let selected = prefix_seed_rows(rows, &mut needed, &mut || {
+            polls += 1;
+            Ok::<(), usize>(())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected, expected);
+        assert_eq!(needed, expected_needed);
+        // Fixed requested identities and fixed output: each search comparison
+        // polls, so a linear scan of the growing unrelated prefix fails this
+        // logarithmic work bound without relying on wall-clock measurements.
+        let depth = rows.len().ilog2() as usize + 1;
+        assert!(
+            polls <= 40 * depth + 40,
+            "{} rows used {polls} polls",
+            rows.len()
+        );
+
+        for stop in [1, 2, 5, polls / 2, polls] {
+            let mut observed = 0_usize;
+            let result = prefix_seed_rows(rows, &mut requested.clone(), &mut || {
+                observed += 1;
+                if observed == stop {
+                    Err(stop)
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result, Err(stop));
+            assert_eq!(observed, stop, "no polling continues after a refusal");
+        }
+        for unsupported in [
+            DeltaRow::DeleteVertex {
+                vid: VId((1_u128 << 120) + 5),
+                before_version: fgdb_types::ObjectId([0x31; 32]),
+                sorted_retired_incident_edges: vec![],
+            },
+            DeltaRow::DeleteEdge {
+                eid: EId(5),
+                before_version: fgdb_types::ObjectId([0x32; 32]),
+            },
+            DeltaRow::ValidTime {
+                elem: ElementId::Vertex(VId(5)),
+                contract_id: fgdb_types::ObjectId([0x33; 32]),
+                before: None,
+                after: Some(fgdb_delta_types::ValidTimePeriod {
+                    start_micros: 10,
+                    end_micros: Some(20),
+                }),
+            },
+        ] {
+            let mut refused = rows.to_vec();
+            refused.push(unsupported);
+            let refused = canonical(refused);
+            assert!(
+                prefix_seed_rows(
+                    &refused.coordinate_entries()[0].rows,
+                    &mut requested.clone(),
+                    &mut || Ok::<(), usize>(()),
+                )
+                .unwrap()
+                .is_none(),
+                "an unrelated unsupported family must refuse before seeding"
+            );
+        }
+    }
 }
