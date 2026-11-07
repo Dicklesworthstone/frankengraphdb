@@ -10,7 +10,8 @@
 //! already delivered; their sequence numbers identify the same durable chunks.
 mod checkpoint;
 mod input;
-use super::{Failure, Options, emit, hex, parameter};
+use super::{Failure, Options, emit, hex, parameter_controlled};
+use crate::binding_control::{BindingControl, ControlledError};
 use asupersync::fs::Vfs;
 use fgdb::{
     BulkEdge, BulkEndpoint, BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow,
@@ -1152,14 +1153,27 @@ impl Saved {
 }
 
 /// One typed property value (`int:1`, `text:Ada`, ...) as a storable scalar.
-fn storable(value: &Json, resolver: Option<&fgdb::PinnedTzdb>) -> Result<CanonicalScalar, String> {
-    let value = parameter(string(value)?, resolver)
-        .map_err(|e| format!("InvalidProperty: {}", e.message))?;
+fn storable<C>(
+    value: &Json,
+    resolver: Option<&fgdb::PinnedTzdb>,
+    control: &mut BindingControl<'_, C>,
+) -> Result<CanonicalScalar, ControlledError<String, C>> {
+    let value = parameter_controlled(string(value)?, resolver, control)
+        .map_err(|error| error.map_invalid(|e| format!("InvalidProperty: {}", e.message)))?;
     match value {
         GqlParameterValue::Int64(value) => Ok(CanonicalScalar::Int(value)),
-        GqlParameterValue::Scalar(value) => Ok(value.value().clone()),
+        GqlParameterValue::Scalar(value) => {
+            // Canonical parameter admission has already bounded this copy to
+            // 64 KiB. Keep that admission and its errors before exporting it.
+            control
+                .bytes(value.canonical_bytes().len())
+                .map_err(ControlledError::Interrupted)?;
+            Ok(value.value().clone())
+        }
         GqlParameterValue::UInt64(_) | GqlParameterValue::List(_) | GqlParameterValue::Map(_) => {
-            Err("InvalidProperty: value is not a storable canonical scalar".into())
+            Err(ControlledError::Invalid(
+                "InvalidProperty: value is not a storable canonical scalar".into(),
+            ))
         }
     }
 }
@@ -1168,13 +1182,16 @@ fn storable(value: &Json, resolver: Option<&fgdb::PinnedTzdb>) -> Result<Canonic
 /// `{"label": <name>?, "property": <name>, "value": "<type>:<value>"}` naming
 /// the one vertex committed before this load that carries that label and
 /// property value.
-fn endpoint(
+fn endpoint<C>(
     json: &Json,
     options: &Options,
     resolver: Option<&fgdb::PinnedTzdb>,
-) -> Result<BulkEndpoint, String> {
+    control: &mut BindingControl<'_, C>,
+) -> Result<BulkEndpoint, ControlledError<String, C>> {
     if let Json::String(key) = json {
-        return Ok(BulkEndpoint::Key(key.clone()));
+        return Ok(BulkEndpoint::Key(
+            control.text(key).map_err(ControlledError::Interrupted)?,
+        ));
     }
     let fields =
         object(json).map_err(|_| "an endpoint is a key or {label?, property, value}".to_owned())?;
@@ -1195,9 +1212,11 @@ fn endpoint(
         .properties
         .get(name)
         .ok_or_else(|| format!("UnknownBinding: property {name}"))?;
-    let value = storable(field(fields, "value")?, resolver)?;
+    let value = storable(field(fields, "value")?, resolver, control)?;
     if matches!(value, CanonicalScalar::Null) {
-        return Err("InvalidEndpoint: a null value matches no vertex".into());
+        return Err(ControlledError::Invalid(
+            "InvalidEndpoint: a null value matches no vertex".into(),
+        ));
     }
     Ok(BulkEndpoint::matching(label, PropertyKeyId(*key), value))
 }
@@ -1219,7 +1238,17 @@ fn parse_row_controlled(
     poll: &mut dyn FnMut() -> bool,
 ) -> Result<BulkRow, JsonParseError<()>> {
     let json = parse_json_within_row(text, poll)?;
-    bind_row(&json, options, resolver).map_err(JsonParseError::Invalid)
+    let mut grant = || if poll() { Ok(()) } else { Err(()) };
+    bind_row_controlled(
+        &json,
+        options,
+        resolver,
+        &mut BindingControl::new(&mut grant),
+    )
+    .map_err(|error| match error {
+        ControlledError::Invalid(message) => JsonParseError::Invalid(message),
+        ControlledError::Interrupted(error) => JsonParseError::Interrupted(error),
+    })
 }
 
 fn parse_json_within_row(
@@ -1238,35 +1267,63 @@ fn parse_json_within_row(
     })
 }
 
+#[cfg(test)]
 fn bind_row(
     json: &Json,
     options: &Options,
     resolver: Option<&fgdb::PinnedTzdb>,
 ) -> Result<BulkRow, String> {
+    let mut poll = || Ok::<(), std::convert::Infallible>(());
+    match bind_row_controlled(json, options, resolver, &mut BindingControl::new(&mut poll)) {
+        Ok(row) => Ok(row),
+        Err(ControlledError::Invalid(message)) => Err(message),
+        Err(ControlledError::Interrupted(never)) => match never {},
+    }
+}
+
+fn bind_row_controlled<C>(
+    json: &Json,
+    options: &Options,
+    resolver: Option<&fgdb::PinnedTzdb>,
+    control: &mut BindingControl<'_, C>,
+) -> Result<BulkRow, ControlledError<String, C>> {
     let fields = object(json)?;
-    let key = string(field(fields, "key")?)?.to_owned();
+    let key = control
+        .text(string(field(fields, "key")?)?)
+        .map_err(ControlledError::Interrupted)?;
     if key.is_empty() {
-        return Err("caller key must not be empty".into());
+        return Err(ControlledError::Invalid(
+            "caller key must not be empty".into(),
+        ));
     }
     let mut props: Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)> = Vec::new();
     if let Some(values) = fields.get("props") {
         for (name, value) in object(values)? {
+            control.item().map_err(ControlledError::Interrupted)?;
             let id = options
                 .properties
                 .get(name)
                 .ok_or_else(|| format!("UnknownBinding: property {name}"))?;
-            props.push((PropertyKeyId(*id), storable(value, resolver)?.into()));
+            props.push((
+                PropertyKeyId(*id),
+                storable(value, resolver, control)?.into(),
+            ));
         }
     }
-    props.sort_by_key(|(id, _)| *id);
+    // CLI bindings have unique IDs per kind, so no successful row relies on
+    // stable ordering among equal property IDs.
+    control
+        .sort_by_key(&mut props, |(id, _)| *id)
+        .map_err(ControlledError::Interrupted)?;
     match string(field(fields, "kind")?)? {
         "vertex" => {
             reject_extra(fields, &["kind", "key", "labels", "props"])?;
             let Json::Array(names) = field(fields, "labels")? else {
-                return Err("labels must be an array".into());
+                return Err(ControlledError::Invalid("labels must be an array".into()));
             };
             let mut labels = Vec::new();
             for name in names {
+                control.item().map_err(ControlledError::Interrupted)?;
                 let name = string(name)?;
                 let id = options
                     .labels
@@ -1274,9 +1331,14 @@ fn bind_row(
                     .ok_or_else(|| format!("UnknownBinding: label {name}"))?;
                 labels.push(LabelId(*id));
             }
-            labels.sort();
-            if labels.windows(2).any(|w| w[0] == w[1]) {
-                return Err("duplicate label".into());
+            control
+                .sort_by_key(&mut labels, |id| *id)
+                .map_err(ControlledError::Interrupted)?;
+            for pair in labels.windows(2) {
+                control.item().map_err(ControlledError::Interrupted)?;
+                if pair[0] == pair[1] {
+                    return Err(ControlledError::Invalid("duplicate label".into()));
+                }
             }
             Ok(BulkRow::Vertex(BulkVertex { key, labels, props }))
         }
@@ -1292,13 +1354,15 @@ fn bind_row(
                 .ok_or_else(|| format!("UnknownBinding: relation {relation}"))?;
             Ok(BulkRow::Edge(BulkEdge {
                 key,
-                source: endpoint(field(fields, "source")?, options, resolver)?,
-                destination: endpoint(field(fields, "destination")?, options, resolver)?,
+                source: endpoint(field(fields, "source")?, options, resolver, control)?,
+                destination: endpoint(field(fields, "destination")?, options, resolver, control)?,
                 relation: RelationId(*relation),
                 props,
             }))
         }
-        _ => Err("kind must be vertex or edge".into()),
+        _ => Err(ControlledError::Invalid(
+            "kind must be vertex or edge".into(),
+        )),
     }
 }
 fn reject_extra(fields: &BTreeMap<String, Json>, names: &[&str]) -> Result<(), String> {
@@ -1917,5 +1981,170 @@ mod json_parse_tests {
             }
             assert_eq!(active.load(Ordering::Acquire), 0, "every decoder joined");
         }
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use std::convert::Infallible;
+    use std::rc::Rc;
+
+    fn options() -> Options {
+        crate::parse(
+            &[
+                "--db",
+                "unused",
+                "--key-file",
+                "unused",
+                "--input",
+                "unused",
+                "--label",
+                "N=1",
+                "--property",
+                "p=7",
+                "--relation",
+                "R=1",
+            ]
+            .map(str::to_owned),
+            "load",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn binding_keeps_property_validation_before_row_and_label_errors() {
+        let options = options();
+        for (value, message) in [
+            ("uint:bad", "InvalidProperty: invalid uint parameter"),
+            (
+                "uint:18446744073709551616",
+                "InvalidProperty: invalid uint parameter",
+            ),
+            (
+                "uint:18446744073709551615",
+                "InvalidProperty: value is not a storable canonical scalar",
+            ),
+            (
+                "json:[]",
+                "InvalidProperty: value is not a storable canonical scalar",
+            ),
+            (
+                "json:1",
+                "InvalidProperty: invalid json parameter: expected a JSON array or object",
+            ),
+            (
+                "json:[1e999,]",
+                "InvalidProperty: invalid json parameter: expected JSON value at 7",
+            ),
+            (
+                "json:[1e999]",
+                "InvalidProperty: invalid json parameter: float out of range",
+            ),
+            (
+                "vector:NaN,garbage",
+                "InvalidProperty: vector: coordinates must be finite f32",
+            ),
+            (
+                "vector:garbage,NaN",
+                "InvalidProperty: vector: is comma-separated numbers",
+            ),
+        ] {
+            let text = format!(r#"{{"key":"v","kind":"invalid","props":{{"p":"{value}"}}}}"#);
+            assert_eq!(parse_row(&text, &options, None).unwrap_err(), message);
+        }
+        assert_eq!(
+            parse_row(
+                r#"{"kind":"vertex","key":"v","labels":["N","N","missing"]}"#,
+                &options,
+                None
+            )
+            .unwrap_err(),
+            "UnknownBinding: label missing"
+        );
+        assert_eq!(parse_row(r#"{"kind":"edge","key":"e","relation":"R","source":{"property":"p","value":"null"},"destination":0}"#,
+            &options, None).unwrap_err(), "InvalidEndpoint: a null value matches no vertex");
+    }
+
+    #[test]
+    fn large_binding_orders_properties_and_labels_and_can_refuse_every_run() {
+        let mut options = options();
+        options.properties = BTreeMap::new();
+        options.labels = BTreeMap::new();
+        let mut properties = BTreeMap::new();
+        let mut labels = Vec::new();
+        for ordinal in 0..193 {
+            let property = format!("p{ordinal:03}");
+            let label = format!("l{ordinal:03}");
+            let id = 193 - ordinal;
+            options.properties.insert(property.clone(), id);
+            options.labels.insert(label.clone(), id);
+            properties.insert(property, Json::String(format!("int:{ordinal}")));
+            labels.push(Json::String(label));
+        }
+        let json = Json::Object(
+            [
+                ("key".into(), Json::String("v".into())),
+                ("kind".into(), Json::String("vertex".into())),
+                ("props".into(), Json::Object(properties)),
+                ("labels".into(), Json::Array(labels)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut polls = 0;
+        let mut poll = || {
+            polls += 1;
+            Ok::<(), Infallible>(())
+        };
+        let row = bind_row_controlled(&json, &options, None, &mut BindingControl::new(&mut poll))
+            .unwrap();
+        let BulkRow::Vertex(vertex) = row else {
+            panic!("wrong row kind")
+        };
+        assert_eq!(vertex.labels, (1..=193).map(LabelId).collect::<Vec<_>>());
+        assert_eq!(
+            vertex.props.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            (1..=193).map(PropertyKeyId).collect::<Vec<_>>()
+        );
+        for (id, value) in vertex.props {
+            let expected: CanonicalPropertyValue = CanonicalScalar::Int((193 - id.0) as i64).into();
+            assert_eq!(value.encode().unwrap(), expected.encode().unwrap());
+        }
+        assert!(polls > 6, "property, label and sort runs all stay governed");
+        for cancel in 1..=polls {
+            let token = Rc::new(cancel);
+            let mut seen = 0;
+            let mut poll = || {
+                seen += 1;
+                if seen == cancel {
+                    Err(token.clone())
+                } else {
+                    Ok(())
+                }
+            };
+            let error =
+                bind_row_controlled(&json, &options, None, &mut BindingControl::new(&mut poll))
+                    .unwrap_err();
+            let ControlledError::Interrupted(error) = error else {
+                panic!("lost cancellation")
+            };
+            assert!(Rc::ptr_eq(&error, &token));
+            assert_eq!(seen, cancel);
+        }
+    }
+
+    #[test]
+    fn a_short_row_keeps_the_existing_outer_run_cadence() {
+        let options = options();
+        let text = r#"{"kind":"vertex","key":"v","labels":["N"],"props":{"p":"text:Ada"}}"#;
+        let row =
+            parse_row_controlled(text, &options, None, &mut || panic!("extra row grant")).unwrap();
+        let BulkRow::Vertex(vertex) = row else {
+            panic!("wrong row kind")
+        };
+        assert_eq!(vertex.key, "v");
+        assert_eq!(vertex.labels, [LabelId(1)]);
+        assert_eq!(vertex.props.len(), 1);
     }
 }

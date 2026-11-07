@@ -5,6 +5,7 @@
 #![recursion_limit = "256"]
 #![forbid(unsafe_code)]
 
+mod binding_control;
 mod buffered;
 mod diff;
 mod fnx;
@@ -24,6 +25,7 @@ mod weighted_path;
 mod write_returning;
 
 use asupersync::Budget;
+use binding_control::{BindingControl, ControlledError};
 use fgdb::{Database, DatabaseKeys, QueryResult, QueryValue};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphPath, GraphValue};
@@ -1353,51 +1355,115 @@ fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParame
     if let Some(value) = raw.strip_prefix("json:") {
         return json_parameter(value);
     }
+    let mut poll = || Ok::<(), std::convert::Infallible>(());
+    match parameter_controlled(raw, resolver, &mut BindingControl::new(&mut poll)) {
+        Ok(value) => Ok(value),
+        Err(ControlledError::Invalid(error)) => Err(error),
+        Err(ControlledError::Interrupted(never)) => match never {},
+    }
+}
+
+fn parameter_controlled<C>(
+    raw: &str,
+    resolver: Option<&fgdb::PinnedTzdb>,
+    control: &mut BindingControl<'_, C>,
+) -> Result<GqlParameterValue, ControlledError<Failure, C>> {
+    if let Some(value) = raw.strip_prefix("json:") {
+        return json_parameter_controlled(value, control);
+    }
     if let Some(value) = raw.strip_prefix("int:") {
-        return value
+        control
+            .numeric_token(value)
+            .map_err(ControlledError::Interrupted)?;
+        let parsed = value
             .parse()
-            .map(GqlParameterValue::Int64)
-            .map_err(|_| Failure::usage("invalid int parameter"));
+            .map_err(|_| Failure::usage("invalid int parameter"))?;
+        control
+            .native_complete(value)
+            .map_err(ControlledError::Interrupted)?;
+        return Ok(GqlParameterValue::Int64(parsed));
     }
     if let Some(value) = raw.strip_prefix("uint:") {
-        return value
+        control
+            .numeric_token(value)
+            .map_err(ControlledError::Interrupted)?;
+        let parsed = value
             .parse()
-            .map(GqlParameterValue::UInt64)
-            .map_err(|_| Failure::usage("invalid uint parameter"));
+            .map_err(|_| Failure::usage("invalid uint parameter"))?;
+        control
+            .native_complete(value)
+            .map_err(ControlledError::Interrupted)?;
+        return Ok(GqlParameterValue::UInt64(parsed));
     }
     let scalar = if let Some(value) = raw.strip_prefix("text:") {
-        CanonicalScalar::ucs_basic_text(value).map_err(Failure::invalid_value)?
+        // Keep the canonical constructor and its original size/error rules.
+        // Construction is atomic; the 64 KiB predicate admission below occurs
+        // afterward, so oversized text can allocate before that refusal.
+        control
+            .numeric_token(value)
+            .map_err(ControlledError::Interrupted)?;
+        let scalar = CanonicalScalar::ucs_basic_text(value).map_err(Failure::invalid_value)?;
+        control
+            .native_complete(value)
+            .map_err(ControlledError::Interrupted)?;
+        scalar
     } else if let Some(value) = raw.strip_prefix("float:") {
-        let value: f64 = value
+        control
+            .numeric_token(value)
+            .map_err(ControlledError::Interrupted)?;
+        let parsed: f64 = value
             .parse()
             .map_err(|_| Failure::usage("invalid float parameter"))?;
-        if !value.is_finite() {
-            return Err(Failure::usage("a float parameter must be finite"));
+        control
+            .native_complete(value)
+            .map_err(ControlledError::Interrupted)?;
+        if !parsed.is_finite() {
+            return Err(Failure::usage("a float parameter must be finite").into());
         }
-        CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value))
+        CanonicalScalar::Float(fgdb_types::CanonicalF64::new(parsed))
     } else if let Some(value) = raw.strip_prefix("bytes:") {
-        let bytes = fgdb_protocol::json::bytes_from_hex(value).map_err(Failure::usage)?;
+        let bytes =
+            fgdb_protocol::json::bytes_from_hex_controlled(value, |bytes| control.bytes(bytes))
+                .map_err(|error| match error {
+                    fgdb_protocol::json::JsonParseError::Invalid(message) => {
+                        ControlledError::Invalid(Failure::usage(message))
+                    }
+                    fgdb_protocol::json::JsonParseError::Interrupted(error) => {
+                        ControlledError::Interrupted(error)
+                    }
+                })?;
         CanonicalScalar::bytes(bytes).map_err(Failure::invalid_value)?
     } else if let Some(value) = raw.strip_prefix("vector:") {
-        CanonicalScalar::bytes(remote::packed_vector(value)?).map_err(Failure::invalid_value)?
+        CanonicalScalar::bytes(remote::packed_vector_controlled(value, control)?)
+            .map_err(Failure::invalid_value)?
     } else if let Some(value) = raw.strip_prefix("timestamp:") {
-        let fields: Vec<_> = value.split(',').collect();
+        let fields = control
+            .comma_fields(value, 5)
+            .map_err(ControlledError::Interrupted)?;
         if fields.len() != 4 {
-            return Err(Failure::usage(
-                "timestamp requires nanos,offset,zone,tzdb-oid",
-            ));
+            return Err(Failure::usage("timestamp requires nanos,offset,zone,tzdb-oid").into());
         }
+        control
+            .numeric_token(fields[0])
+            .map_err(ControlledError::Interrupted)?;
         let instant = fields[0]
             .parse()
             .map_err(|_| Failure::usage("invalid timestamp nanos"))?;
+        control
+            .native_complete(fields[0])
+            .map_err(ControlledError::Interrupted)?;
+        control
+            .numeric_token(fields[1])
+            .map_err(ControlledError::Interrupted)?;
         let offset = fields[1]
             .parse()
             .map_err(|_| Failure::usage("invalid timestamp offset"))?;
+        control
+            .native_complete(fields[1])
+            .map_err(ControlledError::Interrupted)?;
         let oid = fields[3];
         if oid.len() != 64 || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(Failure::usage(
-                "tzdb OID requires 64 hexadecimal characters",
-            ));
+            return Err(Failure::usage("tzdb OID requires 64 hexadecimal characters").into());
         }
         let mut bytes = [0u8; 32];
         for (index, byte) in bytes.iter_mut().enumerate() {
@@ -1405,7 +1471,7 @@ fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParame
                 u8::from_str_radix(&oid[index * 2..index * 2 + 2], 16).map_err(Failure::usage)?;
         }
         let resolver = resolver.ok_or_else(|| Failure::usage("timestamp requires --tzdb-file"))?;
-        CanonicalScalar::Timestamp(
+        let scalar = CanonicalScalar::Timestamp(
             fgdb_types::CanonicalTimestamp::zoned(
                 instant,
                 offset,
@@ -1414,18 +1480,22 @@ fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParame
                 resolver,
             )
             .map_err(Failure::invalid_value)?,
-        )
+        );
+        control
+            .native_complete(value)
+            .map_err(ControlledError::Interrupted)?;
+        scalar
     } else {
         match raw {
             "bool:true" => CanonicalScalar::Bool(true),
             "bool:false" => CanonicalScalar::Bool(false),
             "null" => CanonicalScalar::Null,
-            _ => return Err(Failure::usage("invalid parameter type or value")),
+            _ => return Err(Failure::usage("invalid parameter type or value").into()),
         }
     };
     GqlScalarParameter::new(scalar)
         .map(GqlParameterValue::Scalar)
-        .map_err(Failure::invalid_value)
+        .map_err(|error| Failure::invalid_value(error).into())
 }
 /// Bounds on one `json:` parameter document, before the collection parameter's own
 /// canonical-size cap.
@@ -1437,54 +1507,124 @@ const MAX_JSON_PARAMETER_TOKEN_BYTES: usize = 65_536;
 /// strings text, integers int, other finite numbers float, true/false bool,
 /// null null. A top-level scalar uses the CLI's explicit scalar spellings.
 fn json_parameter(text: &str) -> Result<GqlParameterValue, Failure> {
-    let json = load::parse_json(
+    let mut poll = || Ok::<(), std::convert::Infallible>(());
+    match json_parameter_controlled(text, &mut BindingControl::new(&mut poll)) {
+        Ok(value) => Ok(value),
+        Err(ControlledError::Invalid(error)) => Err(error),
+        Err(ControlledError::Interrupted(never)) => match never {},
+    }
+}
+
+fn json_parameter_controlled<C>(
+    text: &str,
+    control: &mut BindingControl<'_, C>,
+) -> Result<GqlParameterValue, ControlledError<Failure, C>> {
+    let json = fgdb_protocol::json::parse_json_controlled(
         text,
         MAX_JSON_PARAMETER_VALUES,
         MAX_JSON_PARAMETER_TOKEN_BYTES,
+        |offset| {
+            if offset == text.len() {
+                Ok(())
+            } else {
+                control.bytes((text.len() - offset).min(binding_control::BINDING_RUN_BYTES))
+            }
+        },
     )
-    .map_err(|error| Failure::usage(format!("invalid json parameter: {error}")))?;
-    match json_value(&json)? {
+    .map_err(|error| match error {
+        fgdb_protocol::json::JsonParseError::Invalid(message) => {
+            ControlledError::Invalid(Failure::usage(format!("invalid json parameter: {message}")))
+        }
+        fgdb_protocol::json::JsonParseError::Interrupted(error) => {
+            ControlledError::Interrupted(error)
+        }
+    })?;
+    // These existing canonical constructors remain atomic and retain their
+    // original node/payload limits. Conversion loops below are governed; this
+    // does not turn canonical encoding itself into a resumable operation.
+    let value = match json_value_controlled(&json, control)? {
         GraphValue::List(values) => fgdb_gql::GqlListParameter::new(values.into_vec())
             .map(GqlParameterValue::List)
-            .map_err(Failure::usage),
+            .map_err(|error| ControlledError::Invalid(Failure::usage(error))),
         GraphValue::Map { keys, values } => {
-            fgdb_gql::GqlMapParameter::new(keys.into_vec().into_iter().zip(values).collect())
+            let mut entries = Vec::with_capacity(keys.len());
+            for entry in keys.into_vec().into_iter().zip(values) {
+                control.item().map_err(ControlledError::Interrupted)?;
+                entries.push(entry);
+            }
+            fgdb_gql::GqlMapParameter::new(entries)
                 .map(GqlParameterValue::Map)
-                .map_err(Failure::usage)
+                .map_err(|error| ControlledError::Invalid(Failure::usage(error)))
         }
-        _ => Err(Failure::usage(
+        _ => Err(ControlledError::Invalid(Failure::usage(
             "invalid json parameter: expected a JSON array or object",
-        )),
-    }
+        ))),
+    }?;
+    control
+        .native_complete(text)
+        .map_err(ControlledError::Interrupted)?;
+    Ok(value)
 }
 fn json_value(json: &load::Json) -> Result<GraphValue, Failure> {
+    let mut poll = || Ok::<(), std::convert::Infallible>(());
+    match json_value_controlled(json, &mut BindingControl::new(&mut poll)) {
+        Ok(value) => Ok(value),
+        Err(ControlledError::Invalid(error)) => Err(error),
+        Err(ControlledError::Interrupted(never)) => match never {},
+    }
+}
+
+fn json_value_controlled<C>(
+    json: &load::Json,
+    control: &mut BindingControl<'_, C>,
+) -> Result<GraphValue, ControlledError<Failure, C>> {
+    control.item().map_err(ControlledError::Interrupted)?;
     let bad = |detail: &str| Failure::usage(format!("invalid json parameter: {detail}"));
     Ok(match json {
         load::Json::Null => GraphValue::Scalar(CanonicalScalar::Null),
         load::Json::Bool(value) => GraphValue::Scalar(CanonicalScalar::Bool(*value)),
         load::Json::Number(text) if text.bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) => {
+            control
+                .numeric_token(text)
+                .map_err(ControlledError::Interrupted)?;
             let value: f64 = text.parse().map_err(|_| bad("number"))?;
             if !value.is_finite() {
-                return Err(bad("float out of range"));
+                return Err(bad("float out of range").into());
             }
             GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)))
         }
-        load::Json::Number(text) => GraphValue::Scalar(CanonicalScalar::Int(
-            text.parse().map_err(|_| bad("integer out of range"))?,
-        )),
+        load::Json::Number(text) => {
+            control
+                .numeric_token(text)
+                .map_err(ControlledError::Interrupted)?;
+            GraphValue::Scalar(CanonicalScalar::Int(
+                text.parse().map_err(|_| bad("integer out of range"))?,
+            ))
+        }
         load::Json::String(text) => {
+            control
+                .numeric_token(text)
+                .map_err(ControlledError::Interrupted)?;
             GraphValue::Scalar(CanonicalScalar::ucs_basic_text(text).map_err(Failure::usage)?)
         }
         load::Json::Array(items) => {
-            GraphValue::List(items.iter().map(json_value).collect::<Result<_, _>>()?)
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                values.push(json_value_controlled(item, control)?);
+            }
+            GraphValue::List(values.into_boxed_slice())
         }
-        load::Json::Object(fields) => GraphValue::map(
-            fields
-                .iter()
-                .map(|(key, value)| Ok((key.as_str().into(), json_value(value)?)))
-                .collect::<Result<Vec<_>, Failure>>()?,
-        )
-        .ok_or_else(|| bad("duplicate key"))?,
+        load::Json::Object(fields) => {
+            let mut entries = Vec::with_capacity(fields.len());
+            for (key, value) in fields {
+                let key = control
+                    .text(key)
+                    .map_err(ControlledError::Interrupted)?
+                    .into_boxed_str();
+                entries.push((key, json_value_controlled(value, control)?));
+            }
+            GraphValue::map(entries).ok_or_else(|| bad("duplicate key"))?
+        }
     })
 }
 
@@ -2982,6 +3122,178 @@ mod native_symbol_tests {
                 .is_err()
             );
             assert!(options(&[flag, "Native=18446744073709551615", flag, "Native=1"]).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod controlled_parameter_tests {
+    use super::*;
+    use std::convert::Infallible;
+    use std::rc::Rc;
+
+    #[test]
+    fn controlled_parameter_errors_keep_scalar_and_nested_json_precedence() {
+        for (raw, message) in [
+            ("int:9223372036854775808", "invalid int parameter"),
+            ("uint:18446744073709551616", "invalid uint parameter"),
+            ("uint:-1", "invalid uint parameter"),
+            ("float:NaN", "a float parameter must be finite"),
+            ("float:garbage", "invalid float parameter"),
+            ("bytes:0g", "$bytes must be even-length hexadecimal"),
+            ("vector:garbage,NaN", "vector: is comma-separated numbers"),
+            (
+                "vector:NaN,garbage",
+                "vector: coordinates must be finite f32",
+            ),
+            (
+                "timestamp:bad,also-bad,zone",
+                "timestamp requires nanos,offset,zone,tzdb-oid",
+            ),
+            ("timestamp:bad,also-bad,zone,oid", "invalid timestamp nanos"),
+            ("timestamp:0,bad,zone,oid", "invalid timestamp offset"),
+            (
+                "timestamp:0,0,zone,oid",
+                "tzdb OID requires 64 hexadecimal characters",
+            ),
+            (
+                "json:1",
+                "invalid json parameter: expected a JSON array or object",
+            ),
+            (
+                "json:9223372036854775808",
+                "invalid json parameter: integer out of range",
+            ),
+            ("json:[1e999]", "invalid json parameter: float out of range"),
+            (
+                "json:[1e999,]",
+                "invalid json parameter: expected JSON value at 7",
+            ),
+            (
+                r#"json:{"a":1e999,"a":1}"#,
+                "invalid json parameter: duplicate JSON object field",
+            ),
+        ] {
+            let ordinary = parameter(raw, None).unwrap_err();
+            assert_eq!(ordinary.message, message, "{raw}");
+            let mut poll = || Ok::<(), Infallible>(());
+            let error =
+                parameter_controlled(raw, None, &mut BindingControl::new(&mut poll)).unwrap_err();
+            let ControlledError::Invalid(error) = error else {
+                panic!("unexpected cancellation")
+            };
+            assert_eq!(
+                (
+                    error.code,
+                    error.class,
+                    error.refusal,
+                    error.offset,
+                    error.message
+                ),
+                (
+                    ordinary.code,
+                    ordinary.class,
+                    ordinary.refusal,
+                    ordinary.offset,
+                    ordinary.message
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn controlled_parameter_values_keep_native_numbers_and_canonical_size_admission() {
+        for raw in [
+            "int:-9223372036854775808",
+            "uint:18446744073709551615",
+            "float:-0",
+            "float:1.2345678901234567",
+            "text:λ\"🦀",
+            "bytes:00aBff",
+            "vector:0,-0,1e-45",
+            "bool:true",
+            "null",
+            r#"json:[1,{"x":[true,null,"λ"]}]"#,
+        ] {
+            let mut poll = || Ok::<(), Infallible>(());
+            assert_eq!(
+                parameter_controlled(raw, None, &mut BindingControl::new(&mut poll)).unwrap(),
+                parameter(raw, None).unwrap(),
+                "{raw}"
+            );
+        }
+        let long = "0".repeat(binding_control::BINDING_RUN_BYTES + 7) + "1";
+        for (prefix, expected) in [
+            ("int:", GqlParameterValue::Int64(1)),
+            ("uint:", GqlParameterValue::UInt64(1)),
+        ] {
+            let mut polls = 0;
+            let mut poll = || {
+                polls += 1;
+                Ok::<(), Infallible>(())
+            };
+            assert_eq!(
+                parameter_controlled(
+                    &(prefix.to_owned() + &long),
+                    None,
+                    &mut BindingControl::new(&mut poll)
+                )
+                .unwrap(),
+                expected
+            );
+            assert!(
+                polls >= 2,
+                "grant before and after the oversized native conversion"
+            );
+        }
+        for bytes in [32_768, 65_536] {
+            let text = "x".repeat(bytes);
+            let expected = GqlScalarParameter::new(CanonicalScalar::ucs_basic_text(&text).unwrap());
+            let raw = "text:".to_owned() + &text;
+            let mut poll = || Ok::<(), Infallible>(());
+            let actual = parameter_controlled(&raw, None, &mut BindingControl::new(&mut poll));
+            match (expected, actual) {
+                (Ok(expected), Ok(GqlParameterValue::Scalar(actual))) => {
+                    assert_eq!(actual, expected)
+                }
+                (Err(expected), Err(ControlledError::Invalid(actual))) => {
+                    assert_eq!(actual.message, Failure::invalid_value(expected).message);
+                }
+                other => panic!("canonical admission changed: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_large_json_conversion_grant_returns_the_original_non_send_error() {
+        // The document is smaller than one parser run, but conversion has many
+        // elements: refusal here proves control reaches the semantic walk.
+        let raw = "json:[".to_owned() + &["1"; 257].join(",") + "]";
+        let mut polls = 0;
+        let mut poll = || {
+            polls += 1;
+            Ok::<(), Infallible>(())
+        };
+        parameter_controlled(&raw, None, &mut BindingControl::new(&mut poll)).unwrap();
+        assert!(polls >= 4);
+        for cancel in 1..=polls {
+            let token = Rc::new(cancel);
+            let mut seen = 0;
+            let mut poll = || {
+                seen += 1;
+                if seen == cancel {
+                    Err(token.clone())
+                } else {
+                    Ok(())
+                }
+            };
+            let error =
+                parameter_controlled(&raw, None, &mut BindingControl::new(&mut poll)).unwrap_err();
+            let ControlledError::Interrupted(error) = error else {
+                panic!("lost cancellation")
+            };
+            assert!(Rc::ptr_eq(&error, &token));
+            assert_eq!(seen, cancel);
         }
     }
 }

@@ -1640,9 +1640,11 @@ fn trail_collection_admission_keeps_unproved_profiles_refused_before_reads() {
                     let GlaOperator::CollectEnd { value, .. } = &mut ops[close] else {
                         unreachable!("the fixture closes its collection")
                     };
+                    // A finite TRAIL capture is now a supported Path value,
+                    // but it must never masquerade as a fixed relationship.
                     *value = Some(ValueProjection::Path {
                         capture: 1,
-                        function: GraphPathFunction::Value,
+                        function: GraphPathFunction::Edge,
                     });
                 }
             }
