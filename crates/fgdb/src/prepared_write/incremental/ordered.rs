@@ -28,7 +28,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// evaluator input is a shared vertex instruction. This preserves native
     /// error precedence: a lower slice's CAS may refuse before a higher slice
     /// admits an invalid edge value. No slice is invented from normalized rows.
-    /// Raw-prefix routing and final canonical composition remain prefix-sized.
+    /// Unchanged coordinates retain their checked canonical rows and merge only
+    /// new effects. Raw-prefix routing and owned row copying remain prefix-sized.
     pub(crate) fn try_extend_prepared_ordered_writes(
         &mut self,
         previous: &PreparedWrite,
@@ -143,15 +144,44 @@ impl<V: Vfs + Clone> Database<V> {
                 }
             }
         }
-        for row in previous.template.rows() {
-            if target(row).is_none() {
-                return Ok(None);
-            }
-            if let DeltaRow::CreateEdge { eid, src, dst, .. } = row
-                && needed.contains(&ElementId::Edge(*eid))
-            {
-                needed.insert(ElementId::Vertex(*src));
-                needed.insert(ElementId::Vertex(*dst));
+        let vertex_owner = relations.first().copied();
+        let mut retain_canonical = prior_coordinates
+            .iter()
+            .map(|coordinate| coordinate.relation)
+            .eq(relations.iter().copied());
+        let edge_owner = |eid, relation| {
+            declarations
+                .get(&eid)
+                .copied()
+                .or_else(|| {
+                    self.writer
+                        .live_edge(eid)
+                        .map(|(_, relation, _, _)| relation)
+                })
+                .unwrap_or(relation)
+        };
+        for coordinate in prior_coordinates {
+            for row in &coordinate.rows {
+                let Some(element) = target(row) else {
+                    return Ok(None);
+                };
+                // Reusing a checked coordinate must never keep a foreign
+                // edge or the shared vertex backbone in its old owner. The
+                // existing complete composition handles such moves unchanged.
+                if retain_canonical {
+                    retain_canonical = match element {
+                        ElementId::Vertex(_) => Some(coordinate.relation) == vertex_owner,
+                        ElementId::Edge(eid) => {
+                            edge_owner(eid, coordinate.relation) == coordinate.relation
+                        }
+                    };
+                }
+                if let DeltaRow::CreateEdge { eid, src, dst, .. } = row
+                    && needed.contains(&ElementId::Edge(*eid))
+                {
+                    needed.insert(ElementId::Vertex(*src));
+                    needed.insert(ElementId::Vertex(*dst));
+                }
             }
         }
 
@@ -179,22 +209,17 @@ impl<V: Vfs + Clone> Database<V> {
                 let element = target(row).expect("supported prefix checked above");
                 let owner = match element {
                     ElementId::Vertex(_) => None,
-                    ElementId::Edge(eid) => Some(
-                        declarations
-                            .get(&eid)
-                            .copied()
-                            .or_else(|| {
-                                self.writer
-                                    .live_edge(eid)
-                                    .map(|(_, relation, _, _)| relation)
-                            })
-                            .unwrap_or(coordinate.relation),
-                    ),
+                    ElementId::Edge(eid) => Some(edge_owner(eid, coordinate.relation)),
                 };
                 if owner.is_some_and(|owner| !coordinates.contains_key(&owner)) {
                     return Ok(None);
                 }
                 if !needed.contains(&element) {
+                    if retain_canonical {
+                        // The final canonical merge borrows this checked row
+                        // directly; do not copy it into an intermediate slice.
+                        continue;
+                    }
                     if let Some(owner) = owner {
                         let Some(coordinate) = coordinates.get_mut(&owner) else {
                             return Ok(None);
@@ -285,12 +310,29 @@ impl<V: Vfs + Clone> Database<V> {
             let after = expanded_rows(visits, vertices, coordinates.len())?;
             previous_rows.checked_add(after.checked_sub(before)?)
         });
-        let template = LogicalDeltaTemplate::build(
-            previous.template.intent_semantics_oid(),
-            *previous.template.source_intent_root_digest(),
-            coordinates.into_values().collect(),
-        )
-        .map_err(WriteError::Canonical)?;
+        let template = if retain_canonical {
+            let additional = coordinates
+                .into_values()
+                .map(|coordinate| (coordinate.coordinate(), coordinate.rows))
+                .collect();
+            previous
+                .template
+                .replace_coordinate_rows_many(
+                    |_, row| {
+                        !needed.contains(&target(row).expect("supported prefix checked above"))
+                    },
+                    additional,
+                )
+                .map_err(WriteError::Canonical)?
+                .ok_or(WriteTxnError::UnsupportedAtomicMutation)?
+        } else {
+            LogicalDeltaTemplate::build(
+                previous.template.intent_semantics_oid(),
+                *previous.template.source_intent_root_digest(),
+                coordinates.into_values().collect(),
+            )
+            .map_err(WriteError::Canonical)?
+        };
         Ok(Some(PreparedWrite {
             template,
             basis: previous.basis,

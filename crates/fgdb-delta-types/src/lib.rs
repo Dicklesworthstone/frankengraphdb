@@ -329,6 +329,7 @@ impl LogicalDeltaTemplate {
         else {
             return Ok(None);
         };
+        let additional = canonical::canonical_row_additions(additional)?;
         let rows = canonical::replace_canonical_rows(
             &self.coordinate_entries[index].rows,
             retain,
@@ -355,6 +356,73 @@ impl LogicalDeltaTemplate {
             })
             .collect();
         coordinate_entries[index].rows = rows;
+        Ok(Some(Self {
+            format: delta_format_for(&coordinate_entries),
+            intent_semantics_oid: self.intent_semantics_oid,
+            source_intent_root_digest: self.source_intent_root_digest,
+            coordinate_entries,
+        }))
+    }
+
+    /// Replace rows in several existing coordinates with one composition pass.
+    ///
+    /// Each map key selects a coordinate whose old rows are filtered by
+    /// `retain` before adding its new net effects. Unselected coordinates and
+    /// every coordinate's metadata remain unchanged. Returns `None` if any key
+    /// is absent, before inspecting additions or calling `retain`.
+    ///
+    /// All additions are validated in canonical coordinate order before any
+    /// duplicate is reported, as in [`Self::build`] on that coordinate order.
+    /// Each selected coordinate then uses the same canonical merge as
+    /// [`Self::replace_coordinate_rows`]. Retained payloads are copied once,
+    /// rather than once per selected coordinate; only additions are sorted.
+    /// The caller must already have folded overlapping effects to net rows.
+    pub fn replace_coordinate_rows_many(
+        &self,
+        mut retain: impl FnMut((GraphId, BranchId, RelationId), &DeltaRow) -> bool,
+        additional: std::collections::BTreeMap<(GraphId, BranchId, RelationId), Vec<DeltaRow>>,
+    ) -> Result<Option<Self>, CanonicalError> {
+        if additional.keys().any(|coordinate| {
+            self.coordinate_entries
+                .binary_search_by_key(coordinate, CoordinateEntry::coordinate)
+                .is_err()
+        }) {
+            return Ok(None);
+        }
+        // Finish admission even when an earlier coordinate has duplicate
+        // additions or duplicates against retained rows. A malformed row in
+        // a later coordinate still owns the first error, exactly as in build.
+        let mut admitted = additional
+            .into_iter()
+            .map(|(coordinate, rows)| {
+                canonical::canonical_row_additions(rows).map(|rows| (coordinate, rows))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+        let coordinate_entries = self
+            .coordinate_entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let coordinate = entry.coordinate();
+                let rows = match admitted.remove(&coordinate) {
+                    Some(rows) => canonical::replace_canonical_rows(
+                        &entry.rows,
+                        |row| retain(coordinate, row),
+                        rows,
+                        index,
+                    )?,
+                    None => entry.rows.clone(),
+                };
+                Ok(CoordinateEntry {
+                    graph: entry.graph,
+                    branch: entry.branch,
+                    relation: entry.relation,
+                    schema_epoch: entry.schema_epoch,
+                    schema_transition: entry.schema_transition,
+                    rows,
+                })
+            })
+            .collect::<Result<Vec<_>, CanonicalError>>()?;
         Ok(Some(Self {
             format: delta_format_for(&coordinate_entries),
             intent_semantics_oid: self.intent_semantics_oid,
