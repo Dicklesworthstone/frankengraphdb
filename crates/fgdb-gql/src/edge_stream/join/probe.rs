@@ -67,9 +67,9 @@ pub(crate) struct Probe {
     steps: Vec<Step>,
 }
 
-/// A bounded Collect scope over the same fixed-hop traversal and
-/// predicate kernel as a probe. Only its completion rule differs: every
-/// witness contributes one value, and only successful exhaustion emits a list.
+/// A bounded Collect scope over fixed-hop traversal or one correlated finite
+/// TRAIL atom, using the same traversal and predicate kernel as a probe. Every
+/// complete witness contributes one value; only exhaustion emits a list.
 pub(crate) struct Collection {
     pub(crate) group: usize,
     probe: Probe,
@@ -154,10 +154,11 @@ impl Probe {
                     .iter()
                     .all(|predicate| matches!(predicate, GlaOperator::VertexIdentity { .. }))
             {
-                // One atom's identity domain is exactly a TRAIL. Its existing
-                // traversal owner checks EIds before descent, so retaining only
-                // endpoint support is sufficient. A later cross-atom domain
-                // still refuses below: no discarded route is reconstructed.
+                // One atom's identity domain is exactly a TRAIL. Its traversal
+                // checks EIds before descent. Probes coalesce endpoint support;
+                // collections emit every route occurrence from the same stack.
+                // A later cross-atom domain still refuses below: no discarded
+                // route is reconstructed.
                 match search {
                     GraphWalkSearch::All => *search = GraphWalkSearch::Trail,
                     GraphWalkSearch::Trail | GraphWalkSearch::Acyclic => {}
@@ -364,7 +365,14 @@ impl Probe {
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
         record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
     ) -> ScanResult<bool, S::Error, C> {
-        self.visit_witnesses(outer, source, control, record, &mut |_, _, _| Ok(true))
+        self.visit_witnesses(
+            outer,
+            source,
+            walk::Emission::Support,
+            control,
+            record,
+            &mut |_, _, _| Ok(true),
+        )
     }
 
     /// Visit complete witnesses in native identified-edge enumeration order.
@@ -374,6 +382,7 @@ impl Probe {
         &self,
         outer: &[Option<VId>],
         source: &S,
+        emission: walk::Emission,
         control: &mut F,
         record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
         visit: &mut impl FnMut(
@@ -512,9 +521,17 @@ impl Probe {
                                     slot.into_mut()
                                 }
                                 std::collections::btree_map::Entry::Vacant(slot) => {
-                                    let cursor = walk::Endpoints::new(
-                                        from, bounds, search, source, control,
-                                    )?;
+                                    let cursor = match emission {
+                                        walk::Emission::Support => walk::Endpoints::new(
+                                            from, bounds, search, source, control,
+                                        )?,
+                                        walk::Emission::TrailOccurrences => {
+                                            debug_assert_eq!(search, GraphWalkSearch::Trail);
+                                            walk::Endpoints::trail_occurrences(
+                                                from, bounds, source, control,
+                                            )?
+                                        }
+                                    };
                                     control(GlaExecutionEvent::ScratchEntry)?;
                                     slot.insert(cursor)
                                 }
@@ -680,26 +697,45 @@ impl Collection {
         if close != group {
             return Err(bad());
         }
-        // Local scans advance in VId order, then fixed hops in EId order, just
-        // like identified eager scopes. Each disconnected component owns its
-        // scan position, even with copied outer predicate operands in scope.
-        // Walks still refuse because their probe specialization
-        // keeps endpoint support rather than every relationship witness.
+        // Fixed scopes advance each local scan in VId order, then fixed hops
+        // in EId order, like identified eager scopes. Disconnected components
+        // keep separate positions even with copied outer predicate operands.
+        // One correlated finite TRAIL atom preserves DFS route occurrences,
+        // not endpoint support. It cannot mix scans or other expansion atoms.
         // compile_body also rejects nested scopes and malformed path captures.
-        let mut expansions = 0;
+        let mut fixed = 0;
+        let mut walks = 0;
+        let mut scans = false;
         for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
             match op {
-                GlaOperator::Expand { .. } => expansions += 1,
+                GlaOperator::Expand { .. } => fixed += 1,
+                GlaOperator::ScanVertices => scans = true,
+                GlaOperator::VarLengthExpand { bounds, .. } if bounds.is_bounded() => walks += 1,
                 GlaOperator::VarLengthExpand { .. } => {
                     return Err(EdgeScanBuildError { operator: at });
                 }
                 _ => {}
             }
         }
-        if expansions == 0 || expansions > MAX_PATTERN_EDGES {
+        if (fixed == 0 && walks == 0)
+            || fixed > MAX_PATTERN_EDGES
+            || walks > 1
+            || (walks != 0 && (fixed != 0 || scans))
+        {
             return Err(bad());
         }
         let (steps, captures) = Probe::compile_body(ops, start, end, outer_width, true)?;
+        // Ordinary openCypher DifferentEdges lowers a single ALL atom to
+        // TRAIL in compile_body. Other modes have different multiplicity or
+        // enumeration order, and captured walks need retained route payloads.
+        if walks != 0
+            && steps.iter().any(|step| {
+                matches!(step.binding, Binding::Walk { search, .. }
+                    if search != GraphWalkSearch::Trail)
+            })
+        {
+            return Err(bad());
+        }
         if *slots as usize != steps.len() {
             return Err(bad());
         }
@@ -763,6 +799,7 @@ impl Collection {
         self.probe.visit_witnesses(
             outer,
             source,
+            walk::Emission::TrailOccurrences,
             control,
             record,
             &mut |bindings, paths, control| {

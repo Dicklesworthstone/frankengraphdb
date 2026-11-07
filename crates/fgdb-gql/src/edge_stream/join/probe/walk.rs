@@ -1,4 +1,4 @@
-//! Endpoint-support specialization of an uncaptured VarLengthExpand.
+//! Indexed endpoint traversal for an uncaptured VarLengthExpand.
 //!
 //! Inside EXISTS, multiplicity and chosen route are unobservable. ALL,
 //! ALL SHORTEST and ANY SHORTEST have the same endpoint support: shortest is
@@ -11,6 +11,8 @@
 //! dominance. They use iterative backtracking and can take exponential work.
 //! Support coalescing never changes these laws. All sets, frames, index reads,
 //! and endpoint deliveries share the outer query's control and record meter.
+//! A finite single-atom TRAIL collection uses the same active-edge traversal
+//! but emits every route occurrence, without allocating endpoint support.
 //! This is not a captured-path selector, graph store, spill or byte-memory bound.
 
 use super::*;
@@ -23,10 +25,17 @@ struct Frame {
     offered: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Emission {
+    Support,
+    TrailOccurrences,
+}
+
 pub(super) struct Endpoints {
     start: VId,
     bounds: GraphWalkBounds,
     search: GraphWalkSearch,
+    emission: Emission,
     stack: Vec<Frame>,
     visited: BTreeSet<(usize, VId)>,
     emitted: BTreeSet<VId>,
@@ -47,6 +56,21 @@ impl Endpoints {
         Self::from_admitted_start(start, bounds, search, control)
     }
 
+    /// Collection admission proves one finite TRAIL atom with no path capture.
+    /// Retain its path-local edge membership but never settle an endpoint: two
+    /// routes to the same vertex contribute two list elements, in DFS order.
+    pub(super) fn trail_occurrences<S: EdgeScanSource, C>(
+        start: VId,
+        bounds: GraphWalkBounds,
+        source: &S,
+        control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
+    ) -> ScanResult<Self, S::Error, C> {
+        debug_assert!(bounds.is_bounded());
+        let mut cursor = Self::new(start, bounds, GraphWalkSearch::Trail, source, control)?;
+        cursor.emission = Emission::TrailOccurrences;
+        Ok(cursor)
+    }
+
     /// The async owner proves this vertex from an already admitted binding
     /// record. Keep initialization and mode history identical to the ordinary
     /// cursor; this method never establishes visibility by itself.
@@ -60,6 +84,7 @@ impl Endpoints {
             start,
             bounds,
             search,
+            emission: Emission::Support,
             stack: Vec::new(),
             visited: BTreeSet::new(),
             emitted: BTreeSet::new(),
@@ -163,9 +188,14 @@ impl Endpoints {
             let from = frame.vertex;
             if !frame.offered {
                 frame.offered = true;
-                if depth >= self.bounds.minimum() as usize && !self.emitted.contains(&from) {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    self.emitted.insert(from);
+                if depth >= self.bounds.minimum() as usize
+                    && (self.emission == Emission::TrailOccurrences
+                        || !self.emitted.contains(&from))
+                {
+                    if self.emission == Emission::Support {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        self.emitted.insert(from);
+                    }
                     return Ok(Some(from));
                 }
             }

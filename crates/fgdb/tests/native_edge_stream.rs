@@ -351,6 +351,161 @@ fn multihop_collections_keep_local_witnesses_properties_and_historical_cuts() {
 }
 
 #[test]
+fn bounded_trail_collections_preserve_route_occurrences_and_pinned_generations() {
+    let ((), report) = run_async_under_lab(0x6e65_0024, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let args = GqlParameters::new();
+        let last = VId(u128::MAX);
+        // Literal trail endpoint order for seed(), including the zero-hop
+        // prefix. Parallel edges are distinct witnesses. The self-loop can
+        // occur once in a route, then either parallel edge and the last edge.
+        let endpoints = |anchor| {
+            if anchor == WIDE {
+                vec![
+                    WIDE,
+                    VId(0),
+                    last,
+                    VId(0),
+                    last,
+                    WIDE,
+                    VId(0),
+                    last,
+                    VId(0),
+                    last,
+                ]
+            } else if anchor == VId(0) {
+                vec![VId(0), last]
+            } else {
+                vec![last]
+            }
+        };
+        let values = |anchor| {
+            GraphValue::List(
+                endpoints(anchor)
+                    .into_iter()
+                    .map(|id| {
+                        let property = if id == WIDE {
+                            7
+                        } else if id == VId(0) {
+                            3
+                        } else {
+                            11
+                        };
+                        GraphValue::List(
+                            vec![
+                                GraphValue::Vertex(id),
+                                GraphValue::Scalar(CanonicalScalar::Int(property)),
+                                GraphValue::Scalar(CanonicalScalar::Null),
+                            ]
+                            .into_boxed_slice(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )
+        };
+        let exactly_two = |anchor| {
+            GraphValue::List(
+                if anchor == WIDE {
+                    vec![last, last, VId(0), VId(0)]
+                } else {
+                    Vec::new()
+                }
+                .into_iter()
+                .map(GraphValue::Vertex)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            )
+        };
+        for edge_root in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.write(&commit, seed()).await.unwrap();
+            let view = db.read_session().unwrap();
+            let (head, prefix, anchor, kind) = if edge_root {
+                ("MATCH (a)-[r:R]->(b)", "r,a,b", "b", ScanKind::Edge)
+            } else {
+                ("MATCH (a)", "a", "a", ScanKind::Vertex)
+            };
+            let projection = format!(
+                "RETURN {prefix}, \
+                 [({anchor})-[:R*0..3]->(c) | [c,c.p,NULL]] AS routes, \
+                 [({anchor})-[:R*2..2]->(d) | d] AS two_hops"
+            );
+            let text = format!("{head} {projection}");
+            let expected: Vec<_> = if edge_root {
+                // The outer edge does not forbid that identity inside the
+                // collection's own trail: the self-loop root may use it again.
+                [
+                    (0, WIDE, VId(0)),
+                    (2, WIDE, VId(0)),
+                    (3, WIDE, WIDE),
+                    (u128::MAX, VId(0), last),
+                ]
+                .into_iter()
+                .map(|(r, a, b)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Edge(EId(r)),
+                        GraphValue::Vertex(a),
+                        GraphValue::Vertex(b),
+                        values(b),
+                        exactly_two(b),
+                    ])
+                })
+                .collect()
+            } else {
+                [VId(0), WIDE, last]
+                    .into_iter()
+                    .map(|a| {
+                        GraphValueRow::from_owned_values(vec![
+                            GraphValue::Vertex(a),
+                            values(a),
+                            exactly_two(a),
+                        ])
+                    })
+                    .collect()
+            };
+            let query = PreparedNativeRead::prepare(&text, &args, symbols).unwrap();
+            let (columns, mut cursor) = query.stream(&db, &cx, &args, policy()).unwrap();
+            assert_eq!(cursor.kind(), kind);
+            assert_eq!(cursor.snapshot_seq(), basis);
+            assert_eq!(
+                query.execute(&db, &cx, &args, policy()).unwrap(),
+                result(columns, expected.clone()),
+                "{text}"
+            );
+            let mut actual = vec![cursor.next().unwrap().unwrap()];
+            let mut edit = WriteBatch::new(R);
+            edit.delete_edge(EId(0));
+            edit.set_vertex_property(last, P, Some(CanonicalScalar::Int(31)));
+            edit.add_edge(EId(99), last, WIDE, vec![]);
+            db.write(&commit, edit).await.unwrap();
+            db.compact(&commit).await.unwrap();
+            actual.extend(cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap());
+            assert_eq!(actual, expected, "{text}");
+            assert_eq!(cursor.state(), ScanState::Exhausted);
+            assert!(cursor.next().is_none());
+            let (_, old) = query.stream_in_view(&view, &cx, &args, policy()).unwrap();
+            assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+            let temporal = format!("{head} FOR SYSTEM_TIME AS OF SEQ {} {projection}", basis.0);
+            let historical = PreparedNativeRead::prepare(&temporal, &args, symbols).unwrap();
+            let (_, old) = historical.stream(&db, &cx, &args, policy()).unwrap();
+            assert_eq!(old.snapshot_seq(), basis);
+            assert_eq!(old.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+            let (columns, fresh) = query.stream(&db, &cx, &args, policy()).unwrap();
+            let fresh = fresh.collect::<Result<Vec<_>, _>>().unwrap();
+            assert_ne!(fresh, expected);
+            assert_eq!(
+                result(columns, fresh),
+                query.execute(&db, &cx, &args, policy()).unwrap()
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn native_dispatch_matches_existing_edge_cursors_and_eager_rows_in_every_direction() {
     let ((), report) = run_async_under_lab(0x6e65_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

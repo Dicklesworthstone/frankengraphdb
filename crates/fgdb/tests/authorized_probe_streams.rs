@@ -1147,6 +1147,308 @@ const VERTEX_COLLECTION_TEXT: &str = "MATCH (a) RETURN a,a.p,\
     [(a)-[s]->(b) | b.hidden] AS hidden_vertices,\
     [(a)-[s]->(b) | s.hidden] AS hidden_edges";
 
+fn bounded_trail_collection(
+    anchor: u128,
+    direction: usize,
+    minimum: usize,
+    maximum: usize,
+    wanted: Option<u128>,
+) -> GraphValue {
+    // Enumerate the finite product by LENGTH, independently of the production
+    // DFS, then order complete identity sequences lexicographically. Prefixes
+    // precede descendants. Never collapse distinct paths with one endpoint.
+    let mut frontier = vec![(Vec::<u128>::new(), anchor)];
+    let mut accepted = if minimum == 0 {
+        frontier.clone()
+    } else {
+        Vec::new()
+    };
+    for length in 1..=maximum {
+        let mut next = Vec::new();
+        for (identities, from) in frontier {
+            for &(eid, source, target, _) in &COLLECTION_EDGES {
+                if identities.contains(&eid) {
+                    continue;
+                }
+                let to = match direction {
+                    0 if source == from => target,
+                    1 if target == from => source,
+                    2 if source == from => target,
+                    2 if target == from => source,
+                    _ => continue,
+                };
+                let mut path = identities.clone();
+                path.push(eid);
+                next.push((path, to));
+            }
+        }
+        if length >= minimum {
+            accepted.extend(next.iter().cloned());
+        }
+        frontier = next;
+    }
+    accepted.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    collection_list(
+        accepted
+            .into_iter()
+            .filter(|(_, endpoint)| wanted.is_none_or(|wanted| wanted == *endpoint))
+            .map(|(_, endpoint)| {
+                collection_list([
+                    GraphValue::Vertex(VId(endpoint)),
+                    collection_scalar(Some(endpoint as i64 * 10)),
+                    collection_scalar(None),
+                ])
+            }),
+    )
+}
+
+#[test]
+fn authorized_bounded_trail_collections_match_the_visible_path_product() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let db = runtime.block_on(collection_database(&commit, true));
+    let slim = runtime.block_on(collection_database(&commit, false));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let calls = Cell::new(0_u64);
+    let clock = || {
+        calls.set(calls.get() + 1);
+        100
+    };
+    let mut scoped = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    let mut visible = slim
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+        .unwrap();
+    for edge_root in [false, true] {
+        let (head, prefix, anchor) = if edge_root {
+            ("MATCH (a)-[r]->(b)", "r,a,b", "b")
+        } else {
+            ("MATCH (a)", "a", "a")
+        };
+        for (direction, (left, right)) in [("-", "->"), ("<-", "-"), ("-", "-")]
+            .into_iter()
+            .enumerate()
+        {
+            for (minimum, maximum) in [(0, 0), (0, 3), (1, 3), (2, 2)] {
+                for wanted in [None, Some(4)] {
+                    let predicate = if wanted.is_some() {
+                        "WHERE c.p = 40 AND c.hidden IS NULL"
+                    } else {
+                        ""
+                    };
+                    let text = format!(
+                        "{head} RETURN {prefix}, \
+                         [({anchor}){left}[:R*{minimum}..{maximum}]{right}(c) \
+                         {predicate} | [c,c.p,c.hidden]] AS routes"
+                    );
+                    let values =
+                        |at| bounded_trail_collection(at, direction, minimum, maximum, wanted);
+                    let expected: Vec<_> = if edge_root {
+                        COLLECTION_EDGES
+                            .iter()
+                            .map(|&(r, a, b, _)| {
+                                GraphValueRow::from_owned_values(vec![
+                                    GraphValue::Edge(EId(r)),
+                                    GraphValue::Vertex(VId(a)),
+                                    GraphValue::Vertex(VId(b)),
+                                    values(b),
+                                ])
+                            })
+                            .collect()
+                    } else {
+                        [1_u128, 3, 4]
+                            .into_iter()
+                            .map(|a| {
+                                GraphValueRow::from_owned_values(vec![
+                                    GraphValue::Vertex(VId(a)),
+                                    values(a),
+                                ])
+                            })
+                            .collect()
+                    };
+                    let query = scoped.prepare(&cx, &text, &args).unwrap();
+                    let eager = scoped.execute(&cx, &query, &args).unwrap();
+                    let before = calls.get();
+                    let mut cursor = scoped.stream(&cx, &query, &args).unwrap();
+                    let columns = cursor.columns().to_vec();
+                    let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    let checkpoints = calls.get() - before;
+                    assert_eq!(actual, expected, "{text}");
+                    assert_eq!(native(columns, &actual), eager, "{text}");
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    assert!(cursor.next().is_none());
+                    drop(cursor);
+                    let query = visible.prepare(&cx, &text, &args).unwrap();
+                    let before = calls.get();
+                    assert_eq!(
+                        visible
+                            .stream(&cx, &query, &args)
+                            .unwrap()
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap(),
+                        expected,
+                        "{text}"
+                    );
+                    // Invisible transit vertices, relationships and fields
+                    // cannot contribute logical work or authority clock calls.
+                    assert_eq!(calls.get() - before, checkpoints, "{text}");
+                    let mut send = db
+                        .authorized_read_session(
+                            &cx,
+                            &authority,
+                            &token,
+                            BRANCH,
+                            symbols,
+                            policy(),
+                            || 100,
+                        )
+                        .unwrap();
+                    let query = send.prepare(&cx, &text, &args).unwrap();
+                    let cursor = send.stream_send(&cx, &query, &args).unwrap();
+                    fn assert_send<T: Send>(_: &T) {}
+                    assert_send(&cursor);
+                    assert_eq!(cursor.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+                }
+            }
+        }
+    }
+    // A zero-hop witness uses no relationship authority. Positive lengths of
+    // the denied type have no witness, including hidden-to-visible shortcuts.
+    for (pattern, zero_hop) in [
+        ("(a)-[:S*0..0]->(c)", true),
+        ("(a)-[:S*0..3]->(c)", true),
+        ("(a)-[:S*1..3]->(c)", false),
+        ("(a)-[:R*0..3]->(c:H)", false),
+        ("(a)-[:R*0..3]->(c) WHERE c.hidden = 999", false),
+    ] {
+        let text = format!("MATCH (a) RETURN a,[{pattern} | [c,c.p,c.hidden]] AS routes");
+        let query = scoped.prepare(&cx, &text, &args).unwrap();
+        assert_eq!(
+            scoped
+                .stream(&cx, &query, &args)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            [1_u128, 3, 4].map(|a| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(a)),
+                if zero_hop {
+                    bounded_trail_collection(a, 0, 0, 0, None)
+                } else {
+                    collection_list([])
+                },
+            ])),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn bounded_trail_lists_do_not_escape_after_expiry_cancellation_or_a_late_value_error() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let db = runtime.block_on(collection_database(&contexts.commit(), true));
+    let authority = issuer();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let args = GqlParameters::new();
+    let text = "MATCH (a) RETURN a,[(a)-[:R*0..3]->(c) | [c,c.p,c.hidden]] AS routes";
+    let expected = GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(1)),
+        bounded_trail_collection(1, 0, 0, 3, None),
+    ]);
+    let active = Cell::new(false);
+    let calls = Cell::new(0_usize);
+    let stop = Cell::new(usize::MAX);
+    let clock = || {
+        if active.get() {
+            calls.set(calls.get() + 1);
+        }
+        if active.get() && calls.get() == stop.get() {
+            1000
+        } else {
+            100
+        }
+    };
+    let first_row_calls = {
+        let mut session = db
+            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+            .unwrap();
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        active.set(true);
+        assert_eq!(cursor.next().unwrap().unwrap(), expected);
+        active.set(false);
+        calls.get()
+    };
+    assert!(first_row_calls > 3);
+    // Early, interior and final authority checkpoints cover a live private
+    // trail list as well as its publication boundary. No partial list escapes.
+    for cut in [1, first_row_calls / 2, first_row_calls] {
+        calls.set(0);
+        stop.set(cut);
+        let mut session = db
+            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+            .unwrap();
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        active.set(true);
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Authorization(Error::Expired)))
+        ));
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().is_none());
+        assert_eq!(calls.get(), cut);
+        active.set(false);
+        drop(cursor);
+        assert!(session.is_closed());
+    }
+    let mut session = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
+        .unwrap();
+    let prepared = session
+        .prepare(
+            &cx,
+            "MATCH (a) RETURN a,[(a)-[:R*0..3]->(c) | 100 / (c.p - 40)] AS routes",
+            &args,
+        )
+        .unwrap();
+    let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(QueryError::Set(GqlQueryError::Source(
+            fgdb_gql::GraphSetExecutionError::Projection { row: 0, .. }
+        ))))
+    ));
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(cursor.next().is_none());
+    drop(cursor);
+
+    let mut session = db
+        .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
+        .unwrap();
+    let prepared = session.prepare(&cx, text, &args).unwrap();
+    let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+    assert_eq!(cursor.next().unwrap().unwrap(), expected);
+    root.set_cancel_reason(
+        asupersync::CancelReason::new(asupersync::CancelKind::User)
+            .with_message("cancel after the first complete bounded trail list"),
+    );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(QueryError::Pattern(GqlQueryError::Interrupted(_))))
+    ));
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(cursor.next().is_none());
+}
+
 #[test]
 fn authorized_multihop_collections_match_visible_witness_products_and_scoped_charges() {
     fn incident(from: u128, direction: usize) -> Vec<(u128, u128, Option<i64>)> {
