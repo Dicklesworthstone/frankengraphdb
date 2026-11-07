@@ -20,6 +20,7 @@ use fgdb_delta_types::{DeltaRow, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GqlParameterValue;
 /// The strict, dependency-free JSON grammar now lives with the wire codecs.
 pub(crate) use fgdb_protocol::json::{Json, parse_json};
+use fgdb_protocol::json::{JsonParseError, parse_json_controlled};
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, PurposeContexts, VId};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -435,9 +436,10 @@ const PARSE_BATCH: usize = 16_384;
 const PARSE_WORKERS: usize = 8;
 const PARSE_INLINE_BELOW: usize = 1_024;
 /// Live control bounds a decoding run by both rows and source bytes. A single
-/// larger record is indivisible in the shared JSON parser and has already
-/// passed the input's 1 MiB record limit. It runs alone, never behind a full
-/// run of other records. These limits do not change source or engine admission.
+/// larger record runs alone, never behind a full run of other records, and its
+/// JSON decoder requests fresh control within source-byte windows. Semantic
+/// row conversion retains the admitted 1 MiB record bound. These limits do not
+/// change source or engine admission.
 const PARSE_RUN_ROWS: usize = 64;
 const PARSE_RUN_BYTES: usize = 64 * 1024;
 
@@ -570,7 +572,7 @@ fn parse_rows<C>(
     parse_rows_controlled(
         lines,
         workers,
-        |text| parse_row(text, options, resolver),
+        |text, poll| parse_row_controlled(text, options, resolver, poll),
         control,
     )
 }
@@ -607,12 +609,12 @@ struct ParseWorker {
     done: std::sync::atomic::AtomicBool,
 }
 
-fn parse_rows_controlled<C>(
+fn parse_rows_controlled<T: Send, C>(
     lines: &[(usize, String)],
     workers: usize,
-    parse: impl Fn(&str) -> Result<BulkRow, String> + Sync,
+    parse: impl Fn(&str, &mut dyn FnMut() -> bool) -> Result<T, JsonParseError<()>> + Sync,
     mut control: impl FnMut() -> Result<(), C>,
-) -> Result<Vec<Result<BulkRow, String>>, C> {
+) -> Result<Vec<Result<T, String>>, C> {
     let workers = workers.clamp(1, PARSE_WORKERS);
     if workers < 2 || lines.len() < PARSE_INLINE_BELOW {
         let mut parsed = Vec::with_capacity(lines.len());
@@ -620,7 +622,31 @@ fn parse_rows_controlled<C>(
         while !remaining.is_empty() {
             control()?;
             let (run, rest) = remaining.split_at(parse_run_length(remaining));
-            parsed.extend(run.iter().map(|(_, text)| parse(text)));
+            for (_, text) in run {
+                let mut interrupted = None;
+                let result = parse(text, &mut || {
+                    if interrupted.is_some() {
+                        return false;
+                    }
+                    match control() {
+                        Ok(()) => true,
+                        Err(error) => {
+                            interrupted = Some(error);
+                            false
+                        }
+                    }
+                });
+                if let Some(error) = interrupted {
+                    return Err(error);
+                }
+                match result {
+                    Ok(row) => parsed.push(Ok(row)),
+                    Err(JsonParseError::Invalid(message)) => parsed.push(Err(message)),
+                    Err(JsonParseError::Interrupted(())) => {
+                        unreachable!("decoder interruption requires a refused control poll")
+                    }
+                }
+            }
             remaining = rest;
         }
         control()?;
@@ -673,25 +699,38 @@ fn parse_rows_controlled<C>(
                     let mut parsed = Vec::with_capacity(part.len());
                     let mut remaining = part;
                     let mut requested = 0;
-                    while !remaining.is_empty() {
+                    let mut poll = || {
                         if stop.load(Ordering::Acquire) {
-                            break;
+                            return false;
                         }
                         requested += 1;
                         worker.requested.store(requested, Ordering::Release);
                         let mut spins = 0;
                         while worker.admitted.load(Ordering::Acquire) < requested {
                             if stop.load(Ordering::Acquire) {
-                                return parsed;
+                                return false;
                             }
                             parse_wait(&mut spins);
+                        }
+                        !stop.load(Ordering::Acquire)
+                    };
+                    while !remaining.is_empty() {
+                        if !poll() {
+                            return parsed;
                         }
                         let (run, rest) = remaining.split_at(parse_run_length(remaining));
                         for (_, text) in run {
                             if stop.load(Ordering::Acquire) {
                                 return parsed;
                             }
-                            parsed.push(parse(text));
+                            match parse(text, &mut poll) {
+                                Ok(row) => parsed.push(Ok(row)),
+                                Err(JsonParseError::Invalid(message)) => parsed.push(Err(message)),
+                                Err(JsonParseError::Interrupted(())) => {
+                                    assert!(stop.load(Ordering::Acquire));
+                                    return parsed;
+                                }
+                            }
                         }
                         remaining = rest;
                     }
@@ -1163,13 +1202,48 @@ fn endpoint(
     Ok(BulkEndpoint::matching(label, PropertyKeyId(*key), value))
 }
 
+#[cfg(test)]
 fn parse_row(
     text: &str,
     options: &Options,
     resolver: Option<&fgdb::PinnedTzdb>,
 ) -> Result<BulkRow, String> {
     let json = parse_json(text, usize::MAX, text.len())?;
-    let fields = object(&json)?;
+    bind_row(&json, options, resolver)
+}
+
+fn parse_row_controlled(
+    text: &str,
+    options: &Options,
+    resolver: Option<&fgdb::PinnedTzdb>,
+    poll: &mut dyn FnMut() -> bool,
+) -> Result<BulkRow, JsonParseError<()>> {
+    let json = parse_json_within_row(text, poll)?;
+    bind_row(&json, options, resolver).map_err(JsonParseError::Invalid)
+}
+
+fn parse_json_within_row(
+    text: &str,
+    poll: &mut dyn FnMut() -> bool,
+) -> Result<Json, JsonParseError<()>> {
+    parse_json_controlled(text, usize::MAX, text.len(), |offset| {
+        // The containing row run was already admitted, and the next run (or
+        // final batch check) polls again. Avoid extra host polls per short row;
+        // every interior JSON checkpoint still needs a fresh live grant.
+        if offset == 0 || offset == text.len() || poll() {
+            Ok(())
+        } else {
+            Err(())
+        }
+    })
+}
+
+fn bind_row(
+    json: &Json,
+    options: &Options,
+    resolver: Option<&fgdb::PinnedTzdb>,
+) -> Result<BulkRow, String> {
+    let fields = object(json)?;
     let key = string(field(fields, "key")?)?.to_owned();
     if key.is_empty() {
         return Err("caller key must not be empty".into());
@@ -1365,7 +1439,7 @@ mod parse_tests {
                 let actual = parse_rows_controlled(
                     &source,
                     workers,
-                    |text| parse_row(text, &options, None),
+                    |text, poll| parse_row_controlled(text, &options, None, poll),
                     || Ok::<_, Infallible>(()),
                 )
                 .unwrap()
@@ -1403,8 +1477,8 @@ mod parse_tests {
         let result = parse_rows_controlled(
             &source,
             1,
-            |text| {
-                let row = parse_row(text, &options, None);
+            |text, poll| {
+                let row = parse_row_controlled(text, &options, None, poll);
                 assert!(row.is_ok());
                 rows.fetch_add(1, Ordering::Relaxed);
                 bytes.fetch_add(text.len(), Ordering::Relaxed);
@@ -1453,9 +1527,9 @@ mod parse_tests {
             let result = parse_rows_controlled(
                 &source,
                 workers,
-                |text| {
+                |text, poll| {
                     let _active = Active::new(&active);
-                    let row = parse_row(text, &options, None);
+                    let row = parse_row_controlled(text, &options, None, poll);
                     assert!(row.is_ok());
                     completed.fetch_add(1, Ordering::Release);
                     row
@@ -1496,9 +1570,9 @@ mod parse_tests {
                 parse_rows_controlled(
                     &source,
                     PARSE_WORKERS,
-                    |text| {
+                    |text, poll| {
                         let _active = Active::new(&active);
-                        let row = parse_row(text, &options, None);
+                        let row = parse_row_controlled(text, &options, None, poll);
                         assert!(row.is_ok());
                         let seen = completed.fetch_add(1, Ordering::AcqRel) + 1;
                         if !host_panics
@@ -1557,6 +1631,7 @@ mod parse_tests {
         let cx = PurposeContexts::narrow_runtime_root(&root).query();
         let options = options();
         let mut source = lines(4097);
+        source[11].1.insert_str(1, &" ".repeat(3 * PARSE_RUN_BYTES));
         source[13].1 = r#"{"kind":"vertex","key":"bad","labels":["missing"]}"#.to_owned();
         source[2049].1 = "{broken}".to_owned();
         let input = input(&source, &cx);
@@ -1578,6 +1653,51 @@ mod parse_tests {
         );
         assert!(rows.next().is_none());
         assert!(rows.clone().next().is_none());
+    }
+
+    #[test]
+    fn interrupted_large_json_refill_keeps_context_error_and_discards_every_private_row() {
+        use std::error::Error as _;
+
+        for malformed_prefix in [false, true] {
+            let runtime = fgdb::runtime_builder().build().unwrap();
+            let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+            let cx = PurposeContexts::narrow_runtime_root(&root).query();
+            let options = options();
+            let mut source = lines(3);
+            if malformed_prefix {
+                source[0].1 = "{broken}".into();
+            }
+            let padding = input::MAX_RECORD_BYTES - source[1].1.len();
+            source[1].1.insert_str(1, &" ".repeat(padding));
+            let input = input(&source, &cx);
+            let mut rows = Rows::new(input.reader(), &cx, &options, None);
+            let mut polls = 0;
+            rows.refill_with_control(|| {
+                polls += 1;
+                if polls == 3 {
+                    // First poll admits the preceding small row, second admits
+                    // the large row, and the third is inside that JSON record.
+                    root.set_cancel_reason(asupersync::types::CancelReason::user(
+                        "cancel inside loader JSON",
+                    ));
+                }
+                cx.checkpoint()
+            });
+            assert_eq!(polls, 3);
+            assert!(rows.ready.is_empty());
+            let mut cloned = rows.clone();
+            for rows in [&mut rows, &mut cloned] {
+                let error = rows.next().unwrap().unwrap_err();
+                assert!(matches!(&error.detail, RowErrorDetail::Interrupted(_)));
+                assert!(error.source().unwrap().is::<asupersync::error::Error>());
+                let failure = error.failure();
+                assert_eq!(failure.code, 3);
+                assert!(failure.message.contains("cancel inside loader JSON"));
+                assert!(!failure.message.contains("MalformedRow"));
+                assert!(rows.next().is_none());
+            }
+        }
     }
 
     #[test]
@@ -1617,6 +1737,185 @@ mod parse_tests {
             assert!(failure.message.contains("cancel during loader decoding"));
             assert!(!failure.message.contains("MalformedRow"));
             assert!(rows.next().is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod json_parse_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::convert::Infallible;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct Active<'a>(&'a AtomicUsize);
+    impl<'a> Active<'a> {
+        fn new(active: &'a AtomicUsize) -> Self {
+            active.fetch_add(1, Ordering::AcqRel);
+            Self(active)
+        }
+    }
+    impl Drop for Active<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn large_first_records(workers: usize) -> Vec<(usize, String)> {
+        let mut source: Vec<_> = (0..PARSE_INLINE_BELOW)
+            .map(|line| (line + 1, "null".to_owned()))
+            .collect();
+        let large = format!("\"{}\"", "é".repeat((1024 * 1024 - 2) / 2));
+        assert_eq!(large.len(), 1024 * 1024);
+        let share = source.len().div_ceil(workers);
+        for part in source.chunks_mut(share) {
+            part[0].1.clone_from(&large);
+        }
+        source
+    }
+
+    #[test]
+    fn json_batches_keep_values_and_first_error_order_across_worker_counts() {
+        let mut source: Vec<_> = (0..PARSE_INLINE_BELOW + 1)
+            .map(|row| (row + 1, format!(r#"{{"key":{row},"value":"é🦀"}}"#)))
+            .collect();
+        source[3].1 = "{broken}".into();
+        source[7].1 = format!("null{}?", " ".repeat(2 * PARSE_RUN_BYTES));
+        for (index, text) in [
+            (1, "é".repeat(PARSE_RUN_BYTES)),
+            (127, r"\uD834\uDD1E".repeat(PARSE_RUN_BYTES / 3)),
+            (512, "🦀".repeat(PARSE_RUN_BYTES)),
+            (1024, "x".repeat(1024 * 1024 - 2)),
+        ] {
+            source[index].1 = format!("\"{text}\"");
+        }
+        let expected: Vec<_> = source
+            .iter()
+            .map(|(_, text)| parse_json(text, usize::MAX, text.len()))
+            .collect();
+        assert_eq!(expected.iter().position(Result::is_err), Some(3));
+        for workers in [1, 2, 3, PARSE_WORKERS] {
+            let interior = AtomicUsize::new(0);
+            let polls = Rc::new(Cell::new(0));
+            let owner = std::thread::current().id();
+            let result = parse_rows_controlled(
+                &source,
+                workers,
+                |text, poll| {
+                    parse_json_within_row(text, &mut || {
+                        interior.fetch_add(1, Ordering::Relaxed);
+                        poll()
+                    })
+                },
+                || {
+                    assert_eq!(std::thread::current().id(), owner);
+                    polls.set(polls.get() + 1);
+                    Ok::<(), Infallible>(())
+                },
+            )
+            .unwrap();
+            assert_eq!(result, expected, "workers={workers}");
+            assert_eq!(result.iter().position(Result::is_err), Some(3));
+            assert!(interior.load(Ordering::Relaxed) > 0);
+            assert!(polls.get() > 0);
+        }
+    }
+
+    #[test]
+    fn json_cancellation_inside_first_record_keeps_parent_cause_and_joins() {
+        for workers in [1, 2, PARSE_WORKERS] {
+            let source = large_first_records(workers);
+            let active = AtomicUsize::new(0);
+            let interior = AtomicUsize::new(0);
+            let completed = AtomicUsize::new(0);
+            let cause = Rc::new(Cell::new(0));
+            let owner = std::thread::current().id();
+            let result = parse_rows_controlled(
+                &source,
+                workers,
+                |text, poll| {
+                    let _active = Active::new(&active);
+                    let parsed = parse_json_within_row(text, &mut || {
+                        interior.fetch_add(1, Ordering::Release);
+                        poll()
+                    });
+                    if parsed.is_ok() {
+                        completed.fetch_add(1, Ordering::Release);
+                    }
+                    parsed
+                },
+                || {
+                    assert_eq!(std::thread::current().id(), owner);
+                    let seen = interior.load(Ordering::Acquire);
+                    if seen == 0 {
+                        Ok(())
+                    } else {
+                        cause.set(seen);
+                        Err(Rc::clone(&cause))
+                    }
+                },
+            );
+            let error = result.expect_err("actual work inside the JSON record cancels");
+            assert!(Rc::ptr_eq(&error, &cause));
+            assert!(cause.get() > 0);
+            assert!(interior.load(Ordering::Acquire) <= workers);
+            assert_eq!(completed.load(Ordering::Acquire), 0);
+            assert_eq!(active.load(Ordering::Acquire), 0, "every decoder joined");
+        }
+    }
+
+    #[test]
+    fn json_workers_join_when_inside_record_control_or_decoder_unwinds() {
+        for host_panics in [true, false] {
+            let source = large_first_records(PARSE_WORKERS);
+            let active = AtomicUsize::new(0);
+            let interior = AtomicUsize::new(0);
+            let completed = AtomicUsize::new(0);
+            let worker_panicked = AtomicBool::new(false);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse_rows_controlled(
+                    &source,
+                    PARSE_WORKERS,
+                    |text, poll| {
+                        let _active = Active::new(&active);
+                        let parsed = parse_json_within_row(text, &mut || {
+                            interior.fetch_add(1, Ordering::Release);
+                            if !host_panics && !worker_panicked.swap(true, Ordering::AcqRel) {
+                                std::panic::resume_unwind(Box::new("inside JSON worker"));
+                            }
+                            poll()
+                        });
+                        if parsed.is_ok() {
+                            completed.fetch_add(1, Ordering::Release);
+                        }
+                        parsed
+                    },
+                    || {
+                        if host_panics && interior.load(Ordering::Acquire) != 0 {
+                            std::panic::resume_unwind(Box::new("inside JSON parent"));
+                        }
+                        Ok::<(), Infallible>(())
+                    },
+                )
+            }));
+            let error = result.expect_err("panic inside the record must escape after joins");
+            assert_eq!(
+                error.downcast_ref::<&str>(),
+                Some(&if host_panics {
+                    "inside JSON parent"
+                } else {
+                    "inside JSON worker"
+                })
+            );
+            assert!(interior.load(Ordering::Acquire) > 0);
+            if host_panics {
+                assert_eq!(completed.load(Ordering::Acquire), 0);
+            } else {
+                assert!(worker_panicked.load(Ordering::Acquire));
+                assert!(completed.load(Ordering::Acquire) < source.len());
+            }
+            assert_eq!(active.load(Ordering::Acquire), 0, "every decoder joined");
         }
     }
 }

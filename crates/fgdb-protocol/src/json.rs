@@ -328,153 +328,6 @@ impl<'a, C, F: FnMut(usize) -> Result<(), C>> JsonParser<'a, F> {
     }
 }
 
-#[cfg(test)]
-mod parse_control_tests {
-    use super::*;
-    use std::cell::Cell;
-    use std::convert::Infallible;
-    use std::rc::Rc;
-
-    #[test]
-    fn controlled_json_preserves_values_and_existing_error_messages() {
-        for (input, values, bytes, expected) in [
-            ("null", 1, 0, Json::Null),
-            ("[]", 1, 0, Json::Array(Vec::new())),
-            (r#""é""#, 1, 2, Json::String("é".into())),
-            (r#""\uD834\uDD1E""#, 1, 4, Json::String("𝄞".into())),
-            ("1.25e+30", 1, 8, Json::Number("1.25e+30".into())),
-            (
-                r#"{"x":0,"y":false}"#,
-                3,
-                1,
-                Json::Object(BTreeMap::from([
-                    ("x".into(), Json::Number("0".into())),
-                    ("y".into(), Json::Bool(false)),
-                ])),
-            ),
-        ] {
-            assert_eq!(parse_json(input, values, bytes), Ok(expected.clone()));
-            assert_eq!(
-                parse_json_controlled(input, values, bytes, |_| Ok::<(), Infallible>(())),
-                Ok(expected)
-            );
-        }
-        for (input, values, bytes, message) in [
-            ("[0]", 1, 10, "JSON value limit exceeded"),
-            (r#""é""#, 1, 1, "JSON string limit exceeded"),
-            (r#""\uD834\uDD1E""#, 1, 3, "JSON string limit exceeded"),
-            ("1.25e+30", 1, 7, "JSON number limit exceeded"),
-            (r#"{"x":0,"x":1}"#, 3, 10, "duplicate JSON object field"),
-            (r#"{"x":0,"x":}"#, 3, 10, "expected JSON value at 11"),
-            ("00", 1, 10, "trailing JSON bytes at 1"),
-            ("[true,]", 3, 10, "expected JSON value at 6"),
-            (r#""\uD834\u0000""#, 1, 10, "invalid low surrogate"),
-            (r#""\uDD1E""#, 1, 10, "invalid Unicode scalar"),
-            (r#""\uZZZZ""#, 1, 10, "invalid Unicode escape"),
-            (r#""\q""#, 1, 10, "invalid JSON escape"),
-            ("-", 1, 10, "expected digit"),
-            (" \t\r\n", 1, 10, "expected JSON value at 4"),
-        ] {
-            assert_eq!(parse_json(input, values, bytes), Err(message.into()));
-            assert_eq!(
-                parse_json_controlled(input, values, bytes, |_| Ok::<(), Infallible>(())),
-                Err(JsonParseError::Invalid(message.into()))
-            );
-        }
-        let too_deep = format!("{}0{}", "[".repeat(32), "]".repeat(32));
-        assert_eq!(
-            parse_json_controlled(&too_deep, 100, 100, |_| Ok::<(), Infallible>(())),
-            Err(JsonParseError::Invalid(
-                "JSON nesting limit exceeded".into()
-            ))
-        );
-    }
-
-    #[test]
-    fn controlled_json_bounds_source_runs_and_interrupts_every_checkpoint() {
-        let run = JSON_PARSE_RUN_BYTES;
-        let mut documents = vec![
-            format!("{}null", " ".repeat(3 * run + 5)),
-            format!("null{}", " \n\t\r".repeat(run)),
-            format!("-1.{}e+37", "7".repeat(3 * run + 1)),
-            format!("\"{}\"", "x".repeat(1024 * 1024 - 2)),
-            format!("\"{}\"", r"\uD834\uDD1E".repeat(run / 3)),
-            format!("[{}0]", "0,".repeat(2 * run)),
-            format!(r#"{{"{}":0,"tail":true}}"#, "k".repeat(3 * run)),
-            format!("null{}!", " ".repeat(3 * run + 3)),
-        ];
-        // Place each multi-byte scalar and surrogate pair across the first
-        // source window at every possible byte alignment around that boundary.
-        for padding in 0..12 {
-            for text in ["é", "€", "🦀", r"\uD834\uDD1E"] {
-                documents.push(format!("\"{}{}tail\"", "a".repeat(run - padding - 1), text));
-            }
-        }
-        for input in documents {
-            let expected = parse_json(&input, usize::MAX, input.len());
-            let mut offsets = Vec::new();
-            let result = parse_json_controlled(&input, usize::MAX, input.len(), |offset| {
-                assert!(input.is_char_boundary(offset));
-                offsets.push(offset);
-                Ok::<(), Infallible>(())
-            });
-            assert_eq!(
-                result,
-                expected.map_err(JsonParseError::<Infallible>::Invalid)
-            );
-            assert_eq!(offsets.first(), Some(&0));
-            assert!(offsets.len() >= 2);
-            for pair in offsets.windows(2) {
-                assert!(pair[1] > pair[0]);
-                assert!(pair[1] - pair[0] <= run);
-            }
-            for stop in 0..offsets.len() {
-                let token = Rc::new(Cell::new(usize::MAX));
-                let mut observed = Vec::new();
-                let interrupted =
-                    parse_json_controlled(&input, usize::MAX, input.len(), |offset| {
-                        observed.push(offset);
-                        if observed.len() == stop + 1 {
-                            token.set(offset);
-                            Err(Rc::clone(&token))
-                        } else {
-                            Ok(())
-                        }
-                    });
-                let Err(JsonParseError::Interrupted(error)) = interrupted else {
-                    panic!("every visited checkpoint must retain its typed interruption")
-                };
-                assert!(Rc::ptr_eq(&error, &token));
-                assert_eq!(token.get(), offsets[stop]);
-                assert_eq!(observed, offsets[..=stop]);
-            }
-        }
-    }
-
-    #[test]
-    fn controlled_json_unwinds_inside_a_token_and_next_parse_starts_clean() {
-        let input = format!("\"{}\"", "🦀".repeat(JSON_PARSE_RUN_BYTES));
-        let stopped = Rc::new(Cell::new(0));
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            parse_json_controlled(&input, usize::MAX, input.len(), |offset| {
-                if offset != 0 {
-                    stopped.set(offset);
-                    std::panic::resume_unwind(Box::new("inside JSON token"));
-                }
-                Ok::<(), Infallible>(())
-            })
-        }));
-        assert!(result.is_err());
-        assert!(stopped.get() > 0);
-        assert!(stopped.get() <= JSON_PARSE_RUN_BYTES);
-        assert!(stopped.get() < input.len());
-        assert!(matches!(
-            parse_json_controlled(&input, usize::MAX, input.len(), |_| Ok::<(), Infallible>(())),
-            Ok(Json::String(text)) if text == "🦀".repeat(JSON_PARSE_RUN_BYTES)
-        ));
-    }
-}
-
 /// A JSON string literal for `text`, escaping quotes, backslashes and every
 /// control character.
 #[must_use]
@@ -952,5 +805,152 @@ mod tests {
             cell(&WireValue::Duration("PT-1.999S".into())),
             r#"{"type":"duration","value":"PT-1.999S"}"#
         );
+    }
+}
+
+#[cfg(test)]
+mod parse_control_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::convert::Infallible;
+    use std::rc::Rc;
+
+    #[test]
+    fn controlled_json_preserves_values_and_existing_error_messages() {
+        for (input, values, bytes, expected) in [
+            ("null", 1, 0, Json::Null),
+            ("[]", 1, 0, Json::Array(Vec::new())),
+            (r#""é""#, 1, 2, Json::String("é".into())),
+            (r#""\uD834\uDD1E""#, 1, 4, Json::String("𝄞".into())),
+            ("1.25e+30", 1, 8, Json::Number("1.25e+30".into())),
+            (
+                r#"{"x":0,"y":false}"#,
+                3,
+                1,
+                Json::Object(BTreeMap::from([
+                    ("x".into(), Json::Number("0".into())),
+                    ("y".into(), Json::Bool(false)),
+                ])),
+            ),
+        ] {
+            assert_eq!(parse_json(input, values, bytes), Ok(expected.clone()));
+            assert_eq!(
+                parse_json_controlled(input, values, bytes, |_| Ok::<(), Infallible>(())),
+                Ok(expected)
+            );
+        }
+        for (input, values, bytes, message) in [
+            ("[0]", 1, 10, "JSON value limit exceeded"),
+            (r#""é""#, 1, 1, "JSON string limit exceeded"),
+            (r#""\uD834\uDD1E""#, 1, 3, "JSON string limit exceeded"),
+            ("1.25e+30", 1, 7, "JSON number limit exceeded"),
+            (r#"{"x":0,"x":1}"#, 3, 10, "duplicate JSON object field"),
+            (r#"{"x":0,"x":}"#, 3, 10, "expected JSON value at 11"),
+            ("00", 1, 10, "trailing JSON bytes at 1"),
+            ("[true,]", 3, 10, "expected JSON value at 6"),
+            (r#""\uD834\u0000""#, 1, 10, "invalid low surrogate"),
+            (r#""\uDD1E""#, 1, 10, "invalid Unicode scalar"),
+            (r#""\uZZZZ""#, 1, 10, "invalid Unicode escape"),
+            (r#""\q""#, 1, 10, "invalid JSON escape"),
+            ("-", 1, 10, "expected digit"),
+            (" \t\r\n", 1, 10, "expected JSON value at 4"),
+        ] {
+            assert_eq!(parse_json(input, values, bytes), Err(message.into()));
+            assert_eq!(
+                parse_json_controlled(input, values, bytes, |_| Ok::<(), Infallible>(())),
+                Err(JsonParseError::Invalid(message.into()))
+            );
+        }
+        let too_deep = format!("{}0{}", "[".repeat(32), "]".repeat(32));
+        assert_eq!(
+            parse_json_controlled(&too_deep, 100, 100, |_| Ok::<(), Infallible>(())),
+            Err(JsonParseError::Invalid(
+                "JSON nesting limit exceeded".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn controlled_json_bounds_source_runs_and_interrupts_every_checkpoint() {
+        let run = JSON_PARSE_RUN_BYTES;
+        let mut documents = vec![
+            format!("{}null", " ".repeat(3 * run + 5)),
+            format!("null{}", " \n\t\r".repeat(run)),
+            format!("-1.{}e+37", "7".repeat(3 * run + 1)),
+            format!("\"{}\"", "x".repeat(1024 * 1024 - 2)),
+            format!("\"{}\"", r"\uD834\uDD1E".repeat(run / 3)),
+            format!("[{}0]", "0,".repeat(2 * run)),
+            format!(r#"{{"{}":0,"tail":true}}"#, "k".repeat(3 * run)),
+            format!("null{}!", " ".repeat(3 * run + 3)),
+        ];
+        // Place each multi-byte scalar and surrogate pair across the first
+        // source window at every possible byte alignment around that boundary.
+        for padding in 0..12 {
+            for text in ["é", "€", "🦀", r"\uD834\uDD1E"] {
+                documents.push(format!("\"{}{}tail\"", "a".repeat(run - padding - 1), text));
+            }
+        }
+        for input in documents {
+            let expected = parse_json(&input, usize::MAX, input.len());
+            let mut offsets = Vec::new();
+            let result = parse_json_controlled(&input, usize::MAX, input.len(), |offset| {
+                assert!(input.is_char_boundary(offset));
+                offsets.push(offset);
+                Ok::<(), Infallible>(())
+            });
+            assert_eq!(
+                result,
+                expected.map_err(JsonParseError::<Infallible>::Invalid)
+            );
+            assert_eq!(offsets.first(), Some(&0));
+            assert!(offsets.len() >= 2);
+            for pair in offsets.windows(2) {
+                assert!(pair[1] > pair[0]);
+                assert!(pair[1] - pair[0] <= run);
+            }
+            for stop in 0..offsets.len() {
+                let token = Rc::new(Cell::new(usize::MAX));
+                let mut observed = Vec::new();
+                let interrupted =
+                    parse_json_controlled(&input, usize::MAX, input.len(), |offset| {
+                        observed.push(offset);
+                        if observed.len() == stop + 1 {
+                            token.set(offset);
+                            Err(Rc::clone(&token))
+                        } else {
+                            Ok(())
+                        }
+                    });
+                let Err(JsonParseError::Interrupted(error)) = interrupted else {
+                    panic!("every visited checkpoint must retain its typed interruption")
+                };
+                assert!(Rc::ptr_eq(&error, &token));
+                assert_eq!(token.get(), offsets[stop]);
+                assert_eq!(observed, offsets[..=stop]);
+            }
+        }
+    }
+
+    #[test]
+    fn controlled_json_unwinds_inside_a_token_and_next_parse_starts_clean() {
+        let input = format!("\"{}\"", "🦀".repeat(JSON_PARSE_RUN_BYTES));
+        let stopped = Rc::new(Cell::new(0));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parse_json_controlled(&input, usize::MAX, input.len(), |offset| {
+                if offset != 0 {
+                    stopped.set(offset);
+                    std::panic::resume_unwind(Box::new("inside JSON token"));
+                }
+                Ok::<(), Infallible>(())
+            })
+        }));
+        assert!(result.is_err());
+        assert!(stopped.get() > 0);
+        assert!(stopped.get() <= JSON_PARSE_RUN_BYTES);
+        assert!(stopped.get() < input.len());
+        assert!(matches!(
+            parse_json_controlled(&input, usize::MAX, input.len(), |_| Ok::<(), Infallible>(())),
+            Ok(Json::String(text)) if text == "🦀".repeat(JSON_PARSE_RUN_BYTES)
+        ));
     }
 }
