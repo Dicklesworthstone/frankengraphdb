@@ -2366,10 +2366,12 @@ fn nested_trail_filters_preserve_live_path_captures() {
                         if at == WIDE {
                             vec![
                                 GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
-                                    WIDE, Vec::new().into_boxed_slice(),
+                                    WIDE,
+                                    Vec::new().into_boxed_slice(),
                                 )),
                                 GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
-                                    WIDE, vec![(EId(3), WIDE)].into_boxed_slice(),
+                                    WIDE,
+                                    vec![(EId(3), WIDE)].into_boxed_slice(),
                                 )),
                             ]
                         } else {

@@ -2119,13 +2119,16 @@ mod pulled_projection_tests {
                 "[(b)-[s:R]->(c) | c.p] AS neighbors, [(b)-[s:R]->(c) | s.p] AS weights",
             ] {
                 for page in ["", " SKIP 1 LIMIT 2", " LIMIT 0"] {
-                    let text = format!("MATCH (a){left}[r:R]{right}(b) RETURN r,a,b,{suffix}{page}");
+                    let text =
+                        format!("MATCH (a){left}[r:R]{right}(b) RETURN r,a,b,{suffix}{page}");
                     let query = prepare(&text);
                     let frozen = query.canonical_bytes();
                     let pull = query.edge_row_pull().expect(&text);
                     assert!(query.row_pull().is_none(), "{text}");
                     assert!(query.ordered_row_pull().is_none(), "{text}");
-                    assert!(crate::edge_stream::EdgeScanPlan::compile(pull.pattern().plan()).is_ok());
+                    assert!(
+                        crate::edge_stream::EdgeScanPlan::compile(pull.pattern().plan()).is_ok()
+                    );
                     assert_eq!(query.canonical_bytes(), frozen);
                 }
             }

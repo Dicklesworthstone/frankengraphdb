@@ -908,7 +908,9 @@ fn filtered_trail_oracle(
                 TrailChild::Independent => children.iter().any(|&(_, to)| to == endpoint),
                 TrailChild::Walk => children.iter().any(|&(from, mid)| {
                     from == endpoint
-                        && children.iter().any(|&(from, to)| from == mid && to == start)
+                        && children
+                            .iter()
+                            .any(|&(from, to)| from == mid && to == start)
                 }),
             };
             found != anti
@@ -972,19 +974,17 @@ fn collected_trails_apply_child_truth_to_every_complete_route_occurrence() {
                                                 GraphValue::Vertex(to),
                                             ])
                                         })),
-                                        list(ends.iter().map(|_| {
-                                            GraphValue::Scalar(CanonicalScalar::Null)
-                                        })),
+                                        list(
+                                            ends.iter()
+                                                .map(|_| GraphValue::Scalar(CanonicalScalar::Null)),
+                                        ),
                                     ])
                                 })
                                 .collect();
                             assert_eq!(eager(query.plan(), &source), expected, "eager");
-                            let actual = EdgeScanCursor::new(
-                                source,
-                                plan.clone(),
-                                wide(),
-                                || Ok::<_, ()>(()),
-                            )
+                            let actual = EdgeScanCursor::new(source, plan.clone(), wide(), || {
+                                Ok::<_, ()>(())
+                            })
                             .collect::<Result<Vec<_>, _>>()
                             .unwrap();
                             assert_eq!(
@@ -1152,7 +1152,9 @@ fn trail_child_failures_preserve_prior_rows_but_never_partial_occurrence_lists()
         assert_eq!(cursor.next().unwrap().unwrap(), expected[0]);
         assert!(matches!(
             cursor.next(),
-            Some(Err(GqlQueryError::Source(EdgeScanError::Source("edge refused")))),
+            Some(Err(GqlQueryError::Source(EdgeScanError::Source(
+                "edge refused"
+            )))),
         ));
         assert_eq!(cursor.row_stats().result_rows, 1);
         assert_eq!(cursor.state(), EdgeScanState::Failed);
@@ -1497,16 +1499,16 @@ fn trail_checkpoint_law(query: &crate::algebra::PreparedGraphPattern<GraphValueR
             if at == stop { Err(stop) } else { Ok(()) }
         });
         let mut delivered = Vec::new();
-        loop {
+        let interruption = loop {
             match cursor.next() {
                 Some(Ok(row)) => delivered.push(row),
-                Some(Err(GqlQueryError::Interrupted(reported))) => {
-                    assert_eq!(reported, stop);
-                    break;
-                }
-                other => panic!("checkpoint {stop} became {other:?}"),
+                other => break other,
             }
-        }
+        };
+        assert!(
+            matches!(interruption, Some(Err(GqlQueryError::Interrupted(reported))) if reported == stop),
+            "checkpoint {stop} became {interruption:?}"
+        );
         assert_eq!(delivered, expected[..delivered.len()]);
         assert_eq!(cursor.row_stats().result_rows, delivered.len() as u64);
         assert_eq!(cursor.state(), EdgeScanState::Failed);

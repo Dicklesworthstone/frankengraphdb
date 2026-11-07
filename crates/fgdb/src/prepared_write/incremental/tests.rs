@@ -119,7 +119,9 @@ fn every_incremental_cut_matches_full_native_preparation() {
                         let cached = db
                             .try_extend_prepared_write(previous, &staged, &batch)
                             .unwrap()
-                            .expect("the mixed append/SET/CAS prefix must take the incremental lane");
+                            .expect(
+                                "the mixed append/SET/CAS prefix must take the incremental lane",
+                            );
                         // Withhold the optimization's raw-input proof and run
                         // the original raw scan against the same exact prefix.
                         let mut uncached = previous.clone();
@@ -148,7 +150,10 @@ fn every_incremental_cut_matches_full_native_preparation() {
                 assert_eq!(prepared.raw_input, full.raw_input);
                 assert_eq!(
                     prepared.raw_input.unwrap().visits,
-                    staged.iter().map(|batch| batch.rows.len() as u64).sum::<u64>(),
+                    staged
+                        .iter()
+                        .map(|batch| batch.rows.len() as u64)
+                        .sum::<u64>(),
                     "no-op visits accumulate independently of the smaller seed"
                 );
                 assert_eq!(prepared.basis(), basis);
@@ -629,24 +634,21 @@ fn selected_seed_ranges_match_a_full_scan_with_bounded_polls_and_refusals() {
         let expected_needed: BTreeSet<_> = requested
             .iter()
             .copied()
-            .chain([
-                ElementId::Vertex(VId(0)),
-                ElementId::Vertex(VId(u128::MAX)),
-            ])
+            .chain([ElementId::Vertex(VId(0)), ElementId::Vertex(VId(u128::MAX))])
             .collect();
-        let expected: Vec<_> = rows
-            .iter()
-            .filter(|row| {
-                let element = match row {
-                    DeltaRow::CreateVertex { vid, .. }
-                    | DeltaRow::LabelMembership { vid, .. } => ElementId::Vertex(*vid),
-                    DeltaRow::CreateEdge { eid, .. } => ElementId::Edge(*eid),
-                    DeltaRow::Property { elem, .. } => *elem,
-                    _ => panic!("the positive fixture contains only supported families"),
-                };
-                expected_needed.contains(&element)
-            })
-            .collect();
+        let expected: Vec<_> =
+            rows.iter()
+                .filter(|row| {
+                    let element = match row {
+                        DeltaRow::CreateVertex { vid, .. }
+                        | DeltaRow::LabelMembership { vid, .. } => ElementId::Vertex(*vid),
+                        DeltaRow::CreateEdge { eid, .. } => ElementId::Edge(*eid),
+                        DeltaRow::Property { elem, .. } => *elem,
+                        _ => panic!("the positive fixture contains only supported families"),
+                    };
+                    expected_needed.contains(&element)
+                })
+                .collect();
         assert_eq!(expected.len(), 9);
         let mut needed = requested.clone();
         let mut polls = 0_usize;
@@ -672,11 +674,7 @@ fn selected_seed_ranges_match_a_full_scan_with_bounded_polls_and_refusals() {
             let mut observed = 0_usize;
             let result = prefix_seed_rows(rows, &mut requested.clone(), &mut || {
                 observed += 1;
-                if observed == stop {
-                    Err(stop)
-                } else {
-                    Ok(())
-                }
+                if observed == stop { Err(stop) } else { Ok(()) }
             });
             assert_eq!(result, Err(stop));
             assert_eq!(observed, stop, "no polling continues after a refusal");

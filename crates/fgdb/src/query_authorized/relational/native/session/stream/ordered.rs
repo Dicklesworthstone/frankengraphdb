@@ -503,14 +503,7 @@ fn bind_projected_order(
         .or_else(|| query.ordered_graph_row_pull())
     {
         let plan = compile(pull.pattern())?;
-        return Ok((
-            plan,
-            tail,
-            at,
-            query.columns().to_vec(),
-            Some(pull),
-            None,
-        ));
+        return Ok((plan, tail, at, query.columns().to_vec(), Some(pull), None));
     }
     let unsupported = || QueryError::StreamingUnsupported { facade };
     let stages = AsyncSpillSetPlan::compile(query).map_err(|_| unsupported())?;
@@ -694,12 +687,9 @@ fn scoped_ordered_input<'q, C: FnMut() -> u64 + Send>(
         }
         RowPlan::Edge(plan) => {
             let source = aggregate::edge::ordered_source(at, view, cx, execution)?;
-            let rows = EdgeInput(EdgeScanCursor::new(
-                source,
-                plan,
-                policy,
-                move || control.borrow_mut().checkpoint(),
-            ));
+            let rows = EdgeInput(EdgeScanCursor::new(source, plan, policy, move || {
+                control.borrow_mut().checkpoint()
+            }));
             match pull {
                 Some(pull) => Box::new(EdgeSetInput { rows, pull }),
                 None => Box::new(rows),

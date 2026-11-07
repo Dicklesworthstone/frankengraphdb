@@ -240,7 +240,6 @@ fn refusal<T>(result: Result<T>, expected: AuthorizationError) {
         if matches!(*error, QueryError::Authorization(actual) if actual == expected)));
 }
 
-
 // The ordinary fixture includes a hidden endpoint and masked fields. Its
 // physically reduced counterpart contains only the three visible edges and
 // five visible vertices; an additional forbidden relation joins visible nodes.
@@ -317,20 +316,8 @@ fn projected_graph_collections_sort_masked_values_before_distinct_and_final_wind
         };
         for (head, identity, anchor, width, roots) in [
             ("MATCH (a)", "size([a])", "a", 1, vec![1, 2, 3, 4, 5]),
-            (
-                "MATCH (a)-[r]->(b)",
-                "size([r,a])",
-                "b",
-                2,
-                vec![2, 2, 3],
-            ),
-            (
-                "MATCH (a)<-[r]-(b)",
-                "size([r,a])",
-                "b",
-                2,
-                vec![1, 1, 2],
-            ),
+            ("MATCH (a)-[r]->(b)", "size([r,a])", "b", 2, vec![2, 2, 3]),
+            ("MATCH (a)<-[r]-(b)", "size([r,a])", "b", 2, vec![1, 1, 2]),
             (
                 "MATCH (a)-[r]-(b)",
                 "size([r,a])",

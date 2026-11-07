@@ -1412,7 +1412,6 @@ mod collections {
         assert!(crate::stream::VertexScanPlan::compile(query.plan()).is_err());
     }
 
-
     #[derive(Clone, Copy, Debug)]
     enum NestedProbeKind {
         Correlated,
@@ -1463,8 +1462,7 @@ mod collections {
         guard.vertex("c").unwrap();
         guard.edge("c", R, GlaDirection::Forward, "c").unwrap();
         guard.capture_edge("u", 0).unwrap();
-        let mut collect =
-            GraphMatchClause::collect_tuple(&inner, vec!["b", "s", "c", "p"]);
+        let mut collect = GraphMatchClause::collect_tuple(&inner, vec!["b", "s", "c", "p"]);
         collect.nested.push(if anti {
             GraphMatchClause::not_exists(&child)
         } else {
@@ -1575,14 +1573,12 @@ mod collections {
                             let expected =
                                 nested_expected(&fixture, directions, anti, kind, sibling);
                             assert_eq!(eager(&query, &fixture), expected, "eager");
-                            let actual = EdgeScanCursor::new(
-                                fixture,
-                                plan.clone(),
-                                policy(),
-                                || Ok::<_, ()>(()),
-                            )
-                            .collect::<Result<Vec<_>, _>>()
-                            .unwrap();
+                            let actual =
+                                EdgeScanCursor::new(fixture, plan.clone(), policy(), || {
+                                    Ok::<_, ()>(())
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                                .unwrap();
                             assert_eq!(
                                 actual, expected,
                                 "{directions:?}/{kind:?}; anti={anti}; sibling={sibling}; mask={mask}"
@@ -1731,7 +1727,9 @@ mod collections {
                     ops[close] = GlaOperator::ProbeEnd { group: first_group };
                 }
                 3 => {
-                    ops[children[1]] = GlaOperator::BindVertex { source: BindingSlot(0) };
+                    ops[children[1]] = GlaOperator::BindVertex {
+                        source: BindingSlot(0),
+                    };
                 }
                 4 => {
                     let GlaOperator::CapturePath { segments, .. } = &mut ops[first_capture] else {
@@ -1755,7 +1753,9 @@ mod collections {
                 6 => {
                     // Child hops never satisfy the containing list's required
                     // positive fixed hop.
-                    ops[parent_expansion] = GlaOperator::BindVertex { source: BindingSlot(0) };
+                    ops[parent_expansion] = GlaOperator::BindVertex {
+                        source: BindingSlot(0),
+                    };
                 }
                 _ => unreachable!(),
             }

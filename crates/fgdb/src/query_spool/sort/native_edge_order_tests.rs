@@ -71,7 +71,14 @@ fn computed_graph_collections_spill_before_order_distinct_and_final_pages() {
         // occurrence multiplicity. The self-loop has one undirected
         // orientation. These literal class counts do not use an executor.
         for (head, prefix, anchor, kind, width, counts) in [
-            ("MATCH (a)", "size([a])", "a", ScanKind::Vertex, 1, [1, 1, 6]),
+            (
+                "MATCH (a)",
+                "size([a])",
+                "a",
+                ScanKind::Vertex,
+                1,
+                [1, 1, 6],
+            ),
             (
                 "MATCH (a)-[r:R]->(b)",
                 "size([r,a])",
@@ -171,7 +178,11 @@ fn computed_graph_collections_spill_before_order_distinct_and_final_pages() {
                     let records = spool.row_stats().snapshot_records;
                     assert!(records > inputs as u64);
                     assert_eq!(*complete_records.get_or_insert(records), records, "{text}");
-                    assert_eq!(contents(&spool, &mut destination, &cx).await, wanted, "{text}");
+                    assert_eq!(
+                        contents(&spool, &mut destination, &cx).await,
+                        wanted,
+                        "{text}"
+                    );
                     assert_eq!(pool.used(), 0);
                 }
             }
@@ -230,7 +241,10 @@ fn ordered_computed_collections_pin_their_graph_and_dynamic_properties_before_aw
         assert!(weak.upgrade().is_none());
         assert_eq!(spool.snapshot_seq(), at);
         assert_eq!(contents(&spool, &mut destination, &cx).await, wanted);
-        let historical = plan(&format!("MATCH (a) FOR SYSTEM_TIME AS OF SEQ {} {body}", at.0));
+        let historical = plan(&format!(
+            "MATCH (a) FOR SYSTEM_TIME AS OF SEQ {} {body}",
+            at.0
+        ));
         let (spool, _) = historical
             .spool_ordered_in_view(
                 &newest,
@@ -287,15 +301,18 @@ fn ordered_computed_collection_failures_keep_eager_ordinals_even_for_empty_pages
                         policy(),
                     )
                     .unwrap_err();
-                assert!(matches!(
-                    &eager,
-                    GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Projection {
-                        row: actual_row,
-                        column: actual_column,
-                        error,
-                    }) if *actual_row == row && *actual_column == column
-                        && error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
-                ), "{text}: {eager:?}");
+                assert!(
+                    matches!(
+                        &eager,
+                        GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Projection {
+                            row: actual_row,
+                            column: actual_column,
+                            error,
+                        }) if *actual_row == row && *actual_column == column
+                            && error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+                    ),
+                    "{text}: {eager:?}"
+                );
                 let (mut scratch, _) = file(&cx, &pool).await;
                 let (mut destination, _) = file(&cx, &pool).await;
                 let (mut auxiliary, _) = file(&cx, &pool).await;
@@ -321,15 +338,18 @@ fn ordered_computed_collection_failures_keep_eager_ordinals_even_for_empty_pages
                     )
                     .await
                     .unwrap_err();
-                assert!(matches!(
-                    error.execution_error(),
-                    Some(GqlQueryError::Source(ScanError::Projection {
-                        row: actual_row,
-                        column: actual_column,
-                        error,
-                    })) if *actual_row == row as u64 && *actual_column == column
-                        && error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
-                ), "{text}: {error:?}");
+                assert!(
+                    matches!(
+                        error.execution_error(),
+                        Some(GqlQueryError::Source(ScanError::Projection {
+                            row: actual_row,
+                            column: actual_column,
+                            error,
+                        })) if *actual_row == row as u64 && *actual_column == column
+                            && error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+                    ),
+                    "{text}: {error:?}"
+                );
                 assert_eq!(destination.stats().published_runs, 0);
                 assert!(destination.is_poisoned());
                 assert_eq!(pool.used(), 0);
@@ -411,30 +431,39 @@ fn ordered_computed_collections_share_exact_source_and_projection_allowances() {
                             } else {
                                 (GqlBudgetDimension::ResultRows, inputs - 1)
                             };
-                            assert!(matches!(
-                                error.execution_error(),
-                                Some(GqlQueryError::Rows(exceeded))
-                                    if exceeded.dimension == dimension
-                                        && exceeded.limit == limit
-                                        && exceeded.observed == limit + 1
-                            ), "case {case}: {error:?}");
+                            assert!(
+                                matches!(
+                                    error.execution_error(),
+                                    Some(GqlQueryError::Rows(exceeded))
+                                        if exceeded.dimension == dimension
+                                            && exceeded.limit == limit
+                                            && exceeded.observed == limit + 1
+                                ),
+                                "case {case}: {error:?}"
+                            );
                         }
                         4 | 5 => {
                             let (dimension, limit) = if case == 4 {
-                                (fgdb_gql::GlaLimitDimension::WorkUnits, evaluator.work_units - 1)
+                                (
+                                    fgdb_gql::GlaLimitDimension::WorkUnits,
+                                    evaluator.work_units - 1,
+                                )
                             } else {
                                 (
                                     fgdb_gql::GlaLimitDimension::ScratchEntries,
                                     evaluator.scratch_entries - 1,
                                 )
                             };
-                            assert!(matches!(
-                                error.execution_error(),
-                                Some(GqlQueryError::Evaluator(exceeded))
-                                    if exceeded.dimension == dimension
-                                        && exceeded.limit == limit
-                                        && exceeded.observed == u128::from(limit) + 1
-                            ), "case {case}: {error:?}");
+                            assert!(
+                                matches!(
+                                    error.execution_error(),
+                                    Some(GqlQueryError::Evaluator(exceeded))
+                                        if exceeded.dimension == dimension
+                                            && exceeded.limit == limit
+                                            && exceeded.observed == u128::from(limit) + 1
+                                ),
+                                "case {case}: {error:?}"
+                            );
                         }
                         _ => unreachable!("bounded allowance cases"),
                     }
