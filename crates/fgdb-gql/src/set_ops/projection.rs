@@ -213,7 +213,7 @@ pub enum GraphElementKey {
     Property(PropertyKeyId),
 }
 
-/// The metadata requested by `labels`, `type`, `properties`, or `keys` on a value.
+/// Metadata and stored endpoints requested from an element value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphElementMetadata {
     Labels,
@@ -222,6 +222,10 @@ pub enum GraphElementMetadata {
     /// Visible property names only; reading keys must not copy property
     /// values or inspect their nested payloads.
     Keys,
+    /// The stored source of a relationship, independent of match direction.
+    StartNode,
+    /// The stored destination of a relationship, independent of match direction.
+    EndNode,
 }
 
 impl GraphElementMetadata {
@@ -231,6 +235,8 @@ impl GraphElementMetadata {
             Self::Type => 1,
             Self::Properties => 2,
             Self::Keys => 3,
+            Self::StartNode => 4,
+            Self::EndNode => 5,
         }
     }
 }
@@ -1368,6 +1374,9 @@ fn admit(
                 }
                 GraphElementMetadata::Type => GraphSetColumnType::Scalar,
                 GraphElementMetadata::Properties => GraphSetColumnType::Any,
+                GraphElementMetadata::StartNode | GraphElementMetadata::EndNode => {
+                    GraphSetColumnType::Vertex
+                }
             }
         }
         GraphSetValue::MapOverlay { base, keys, values } => {
@@ -1702,6 +1711,15 @@ pub(crate) fn append_metadata_catalog(
     catalog: Option<&crate::ReverseSymbolCatalog>,
     bytes: &mut Vec<u8>,
 ) {
+    // Endpoints carry full-width identities, never catalog names. Adding an
+    // unrelated symbol must not change their prepared or bound transcript.
+    if matches!(
+        kind,
+        GraphElementMetadata::StartNode | GraphElementMetadata::EndNode
+    ) {
+        bytes.push(0);
+        return;
+    }
     let Some(catalog) = catalog else {
         bytes.push(0);
         return;
@@ -1737,6 +1755,7 @@ pub(crate) fn append_metadata_catalog(
                 .map(|(id, name)| (id.0, name.as_str())),
             bytes,
         ),
+        GraphElementMetadata::StartNode | GraphElementMetadata::EndNode => unreachable!(),
     }
 }
 
@@ -2484,6 +2503,10 @@ pub(crate) fn metadata_value_valid(kind: GraphElementMetadata, value: &GraphValu
                 .all(|label| matches!(label, GraphValue::Scalar(CanonicalScalar::Text(_)))),
             (GraphElementMetadata::Type, GraphValue::Scalar(CanonicalScalar::Text(_))) => true,
             (GraphElementMetadata::Properties, GraphValue::Map { .. }) => true,
+            (
+                GraphElementMetadata::StartNode | GraphElementMetadata::EndNode,
+                GraphValue::Vertex(_),
+            ) => true,
             _ => false,
         }
 }
@@ -3329,10 +3352,18 @@ where
             } else {
                 let element = match (kind, value.as_ref()) {
                     (GraphElementMetadata::Labels | GraphElementMetadata::Properties | GraphElementMetadata::Keys, GraphValue::Vertex(id)) => ElementId::Vertex(*id),
-                    (GraphElementMetadata::Type | GraphElementMetadata::Properties | GraphElementMetadata::Keys, GraphValue::Edge(id)) => ElementId::Edge(*id),
+                    (GraphElementMetadata::Type | GraphElementMetadata::Properties | GraphElementMetadata::Keys | GraphElementMetadata::StartNode | GraphElementMetadata::EndNode, GraphValue::Edge(id)) => ElementId::Edge(*id),
                     _ => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
                 };
-                let catalog = catalog.as_deref().ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
+                let empty_catalog;
+                let catalog = match catalog.as_deref() {
+                    Some(catalog) => catalog,
+                    None if matches!(kind, GraphElementMetadata::StartNode | GraphElementMetadata::EndNode) => {
+                        empty_catalog = crate::ReverseSymbolCatalog::default();
+                        &empty_catalog
+                    }
+                    None => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
+                };
                 control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
                 let result = projection_await!(
                     $mode,

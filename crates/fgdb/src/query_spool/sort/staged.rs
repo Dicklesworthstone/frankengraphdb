@@ -168,7 +168,12 @@ impl<V: Vfs + Clone> AsyncSpillElementSource for ElementSource<'_, '_, V> {
                         return Ok(None);
                     };
                     property_maps::metadata(
-                        MetadataRecord::Edge(record.entry.relation, &record.props),
+                        MetadataRecord::Edge {
+                            relation: record.entry.relation,
+                            source: record.entry.src,
+                            destination: record.entry.dst,
+                            properties: &record.props,
+                        },
                         kind,
                         catalog,
                         |_| true,

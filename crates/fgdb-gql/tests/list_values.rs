@@ -290,8 +290,13 @@ mod element_metadata_values {
     struct Names(ReverseSymbolCatalog);
 
     impl GraphSymbolResolver for Names {
-        fn resolve_symbol(&mut self, _: GraphSymbolKind, _: &str) -> Option<GraphSymbol> {
-            None
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            match (kind, name) {
+                (GraphSymbolKind::Property, "name") => {
+                    Some(GraphSymbol::Property(PropertyKeyId(1)))
+                }
+                _ => None,
+            }
         }
         fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
             Some(self.0.clone())
@@ -345,6 +350,8 @@ mod element_metadata_values {
             (ElementId::Edge(R), GraphElementMetadata::Type) => {
                 text(&catalog.relations[&RelationId(1)])
             }
+            (ElementId::Edge(R), GraphElementMetadata::StartNode) => GraphValue::Vertex(A),
+            (ElementId::Edge(R), GraphElementMetadata::EndNode) => GraphValue::Vertex(B),
             (ElementId::Vertex(A), GraphElementMetadata::Properties) => map("Ada"),
             (ElementId::Vertex(B), GraphElementMetadata::Properties) => map("Paris"),
             (ElementId::Edge(R), GraphElementMetadata::Properties) => map("trip"),
@@ -381,6 +388,188 @@ mod element_metadata_values {
             .into_iter()
             .map(|row| row.values().to_vec())
             .collect()
+    }
+
+    #[test]
+    fn relationship_endpoint_values_keep_full_identity_in_rows_lists_and_comparisons() {
+        for (statement, values, expected) in [
+            (
+                "UNWIND $xs AS r RETURN startNode(r) AS source, endNode(r) AS target",
+                vec![GraphValue::Edge(R), null(), GraphValue::Edge(EId(9))],
+                vec![
+                    vec![GraphValue::Vertex(A), GraphValue::Vertex(B)],
+                    vec![null(), null()],
+                    vec![null(), null()],
+                ],
+            ),
+            (
+                "WITH $xs AS edges RETURN startNode(edges[0]) AS source, \
+                 [r IN edges | endNode(r)] AS targets",
+                vec![GraphValue::Edge(R), null()],
+                vec![vec![
+                    GraphValue::Vertex(A),
+                    list(vec![GraphValue::Vertex(B), null()]),
+                ]],
+            ),
+            (
+                "UNWIND $xs AS r RETURN startNode(r) IS NULL AS missing, \
+                 endNode(r) IS NOT NULL AS present",
+                vec![GraphValue::Edge(R), null(), GraphValue::Edge(EId(9))],
+                vec![
+                    vec![
+                        GraphValue::Scalar(CanonicalScalar::Bool(false)),
+                        GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                    ],
+                    vec![
+                        GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                        GraphValue::Scalar(CanonicalScalar::Bool(false)),
+                    ],
+                    vec![
+                        GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                        GraphValue::Scalar(CanonicalScalar::Bool(false)),
+                    ],
+                ],
+            ),
+            (
+                "WITH $xs AS xs RETURN startNode(xs[0]) = xs[1] AS same, \
+                 endNode(xs[0]) = xs[1] AS different, xs[1] = startNode(xs[0]) AS reversed",
+                vec![GraphValue::Edge(R), GraphValue::Vertex(A)],
+                vec![vec![
+                    GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(false)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                ]],
+            ),
+        ] {
+            assert_eq!(run(&prepare(statement, values)), expected, "{statement}");
+        }
+    }
+
+    #[test]
+    fn endpoint_property_reads_use_the_derived_vertex_not_the_relationship() {
+        let query = prepare(
+            "UNWIND $xs AS r RETURN startNode(r).name AS source, endNode(r).name AS target",
+            vec![GraphValue::Edge(R), null()],
+        );
+        let properties = Cell::new(0);
+        let result = query
+            .execute_governed_from_source(
+                policy(),
+                with_element_metadata(
+                    fgdb_gql::WithElementReads {
+                        source: no_pattern,
+                        elements: |element, key| {
+                            properties.set(properties.get() + 1);
+                            assert_eq!(key, PropertyKeyId(1));
+                            let name = match element {
+                                ElementId::Vertex(A) => "Ada",
+                                ElementId::Vertex(B) => "Paris",
+                                _ => panic!("endpoint field read must address its vertex"),
+                            };
+                            Ok::<_, &'static str>(Some(
+                                CanonicalScalar::ucs_basic_text(name).unwrap().into(),
+                            ))
+                        },
+                    },
+                    metadata,
+                ),
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+        assert_eq!(
+            properties.get(),
+            2,
+            "NULL endpoints perform no property reads"
+        );
+        assert_eq!(result.value[0].values(), &[text("Ada"), text("Paris")]);
+        assert_eq!(result.value[1].values(), &[null(), null()]);
+    }
+
+    #[test]
+    fn endpoint_null_wrong_domain_and_lazy_branches_preserve_read_boundaries() {
+        let null_query = PreparedGraphSetText::prepare(
+            "RETURN startNode(NULL) AS source, endNode(NULL) AS target",
+            |_, _| None,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let result = null_query
+            .execute_governed_from_source(policy(), no_pattern, || Ok::<_, usize>(()))
+            .unwrap();
+        assert_eq!(result.value[0].values(), &[null(), null()]);
+        for operand in [
+            GraphValue::Vertex(A),
+            int(7),
+            list(vec![GraphValue::Edge(R)]),
+        ] {
+            for function in ["startNode", "endNode"] {
+                let query = prepare(
+                    &format!("UNWIND $xs AS x RETURN {function}(x) AS endpoint"),
+                    vec![operand.clone()],
+                );
+                assert!(matches!(
+                    query.execute_governed_from_source(
+                        policy(),
+                        with_element_metadata(
+                            no_pattern,
+                            |_,
+                             _,
+                             _: &ReverseSymbolCatalog,
+                             _: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>| {
+                                panic!("wrong-domain endpoint operands must refuse before source access")
+                            },
+                        ),
+                        || Ok::<_, usize>(()),
+                    ),
+                    Err(GqlQueryError::Source(GraphSetExecutionError::Projection { .. }))
+                ));
+            }
+        }
+        for expression in [
+            "CASE WHEN false THEN startNode(x) ELSE x END",
+            "coalesce(x, endNode(x))",
+        ] {
+            let query = prepare(
+                &format!("UNWIND $xs AS x RETURN {expression} AS endpoint"),
+                vec![GraphValue::Vertex(A)],
+            );
+            let result = query
+                .execute_governed_from_source(policy(), no_pattern, || Ok::<_, usize>(()))
+                .unwrap();
+            assert_eq!(result.value[0].values(), &[GraphValue::Vertex(A)]);
+        }
+    }
+
+    #[test]
+    fn endpoint_plans_do_not_depend_on_unread_catalog_names() {
+        let statement =
+            "WITH $xs AS edges RETURN startNode(edges[0]) AS source, endNode(edges[0]) AS target";
+        let mut first = names();
+        let mut second = names();
+        second.0.insert_label(LabelId(1), "Changed");
+        second.0.insert_relation(RelationId(99), "Unrelated");
+        let a = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            statement,
+            &[("xs", GqlParameterType::List)],
+            &mut first,
+        )
+        .unwrap();
+        let b = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            statement,
+            &[("xs", GqlParameterType::List)],
+            &mut second,
+        )
+        .unwrap();
+        assert_eq!(a.canonical_template_bytes(), b.canonical_template_bytes());
+        assert_eq!(a.column_types(), [fgdb_gql::GraphSetColumnType::Vertex; 2]);
+        let args = GqlParameters::new()
+            .with_list("xs", vec![GraphValue::Edge(R)])
+            .unwrap();
+        assert_eq!(
+            a.bind_parameters(&args).unwrap().canonical_bytes(),
+            b.bind_parameters(&args).unwrap().canonical_bytes(),
+        );
     }
 
     #[test]
@@ -525,6 +714,37 @@ mod element_metadata_values {
         assert_eq!(result.value.len(), 1);
         let output = result.value[0].values();
         assert_eq!(output, &[fgdb_gql::GraphAggregateValue::Value(expected)]);
+    }
+
+    #[test]
+    fn endpoints_remain_graph_values_after_grouping_and_in_aggregate_output() {
+        let values = vec![GraphValue::Edge(R), GraphValue::Edge(R)];
+        let expected = list(vec![GraphValue::Vertex(B), GraphValue::Vertex(B)]);
+        let query = prepare(
+            "UNWIND $xs AS r WITH collect(r) AS edges RETURN [r IN edges | endNode(r)] AS targets",
+            values.clone(),
+        );
+        assert_eq!(run(&query), vec![vec![expected.clone()]]);
+        let query = PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
+            "UNWIND $xs AS r RETURN [r IN collect(r) | endNode(r)] AS targets",
+            &[("xs", GqlParameterType::List)],
+            names(),
+        )
+        .unwrap()
+        .bind_relation_parameters(&GqlParameters::new().with_list("xs", values).unwrap())
+        .unwrap();
+        let result = query
+            .execute_governed_from_source(
+                policy(),
+                with_element_metadata(no_pattern, metadata),
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(
+            result.value[0].values(),
+            &[fgdb_gql::GraphAggregateValue::Value(expected)],
+        );
     }
 
     #[test]

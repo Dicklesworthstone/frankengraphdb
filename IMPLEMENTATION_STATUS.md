@@ -89,6 +89,45 @@ Regression sources: `fgdb-gql/tests/procedure_calls.rs`,
 tests. Compilation and runtime qualification are pending for this source slice;
 the bead remains open until its required verification completes.
 
+### Relationship endpoint values
+
+Source added 2026-11-07 for `fgdb-udb`: `startNode(relationship)` and
+`endNode(relationship)` participate in native value expressions, including
+relationships carried through `WITH`, `UNWIND`, list subscripts and
+comprehensions. Endpoint values support identity comparisons, `IS NULL`,
+property access and direct `MATCH ... WHERE` predicates. For example:
+
+```cypher
+MATCH (a)-[r:KNOWS]-(b)
+WHERE a = startNode(r)
+RETURN startNode(r).name AS source, endNode(r).name AS target
+```
+
+The functions use the stored relationship direction, including for incoming
+and undirected pattern matches. A NULL relationship produces NULL endpoints;
+an unrelated value domain produces a typed refusal. Authorized readers admit
+the relationship and both endpoints before returning either identity or
+following its properties. Snapshot, transaction-overlay, aggregate and spill
+readers use the same endpoint metadata contract. Endpoint property projections
+on newly created relationships use their frozen write-row fields.
+
+Regression sources cover the GQL value, insertion and spill owners, native
+database/read-view/transaction execution, optional relationships, signed
+authorization and hidden endpoints. Runtime qualification is pending for this
+source slice; `fgdb-udb` remains open until its required verification completes.
+
+### Verification of the 2026-11-07 query additions
+
+`cargo fmt --all -- --check` and `git diff --check` passed. The pinned
+`nightly-2026-08-31` build, with one Cargo job, one compiler frontend thread
+and debug symbols disabled, reached the unchanged `asupersync` dependency at
+`3d0151aecae2443a735388e6ae4fbd387e78db2c`. Its compiler was killed by signal 9
+under sustained pressure at the shared 8 GiB memory limit. The check exited
+101 before compiling the changed GraphDB crates. Compilation of these source
+changes, runtime tests, Clippy and exact-tree proof therefore remain UNRUN.
+UBS was also unavailable. Neither bead is closed or claimed fully qualified.
+The dependency pins and required gates are unchanged.
+
 ### List predicates inside aggregates
 
 `COUNT(ALL(x IN values WHERE predicate))` and `COLLECT(ALL(...))` retain the list predicate through native read pipelines, aggregating `WITH`, and simple or computed write `RETURN` expressions (`fgdb-xv0sy`). All aggregate argument owners use the shared lexical lookahead that distinguishes the list predicate from an explicit set quantifier such as `COUNT(ALL n.p)`. Both forms compose, including `COUNT(ALL ALL(...))`; comments and keyword case follow the ordinary lexer. NULL predicates remain absent from COUNT/COLLECT, false remains a value, and an empty list retains ALL's vacuous truth. Regression sources are `fgdb-gql/tests/multipart_aggregates.rs` and `fgdb-gql/tests/write_return_aggregates.rs`.

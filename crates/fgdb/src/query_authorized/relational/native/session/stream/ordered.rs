@@ -1047,10 +1047,12 @@ impl<'s, C: FnMut() -> u64> ScopedElements<'s, '_, C> {
                 if let Some(dst) = dst {
                     self.admit_vertex(dst, control)?;
                 }
-                MetadataRecord::Edge(
-                    edge.relation,
-                    source::edge_properties_at(&snapshot.block_props, block, row),
-                )
+                MetadataRecord::Edge {
+                    relation: edge.relation,
+                    source: edge.src,
+                    destination: edge.dst,
+                    properties: source::edge_properties_at(&snapshot.block_props, block, row),
+                }
             }
         };
         let records = self

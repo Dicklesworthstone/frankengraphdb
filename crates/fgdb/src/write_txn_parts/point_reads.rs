@@ -106,7 +106,9 @@ impl PointMetadataRead {
                 };
                 Ok(Some(Self::Labels(visible)))
             }
-            GraphElementMetadata::Type => Ok(None),
+            GraphElementMetadata::Type
+            | GraphElementMetadata::StartNode
+            | GraphElementMetadata::EndNode => Ok(None),
         }
     }
 }

@@ -175,13 +175,13 @@ pub(crate) use beacon::procedure::{
     privileged_with_registry as hybrid_procedure_with_registry, refuse as hybrid_refusal,
 };
 pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
-pub(crate) use catalog::catalog_procedure;
 pub(crate) use beacon::{BeaconQueryIndexes, BeaconRegistry};
 pub use beacon::{
     MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
     MaintainedBeaconIndex, MaintainedBeaconStatus, PinnedIndex, RefreshReport, ResidentIndex,
     ResidentIndexError,
 };
+pub(crate) use catalog::catalog_procedure;
 pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 use explain::{explain_prefix, explain_result};
 pub(crate) use prism::{

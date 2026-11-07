@@ -211,12 +211,19 @@ impl WriteTxn {
                 ElementId::Edge(edge),
                 GraphElementMetadata::Properties
                 | GraphElementMetadata::Keys
-                | GraphElementMetadata::Type,
+                | GraphElementMetadata::Type
+                | GraphElementMetadata::StartNode
+                | GraphElementMetadata::EndNode,
             ) => {
                 let projected = self.edge_metadata_with_control(
                     database,
                     edge,
-                    &mut |key| kind != GraphElementMetadata::Type && visible_property(key),
+                    &mut |key| {
+                        matches!(
+                            kind,
+                            GraphElementMetadata::Properties | GraphElementMetadata::Keys
+                        ) && visible_property(key)
+                    },
                     &mut || (poll.borrow_mut())(),
                     &mut |event| match event {
                         SourceEvent::Work | SourceEvent::SnapshotRecord if scope.is_some() => {
@@ -246,6 +253,12 @@ impl WriteTxn {
                             control,
                             &read_error,
                         ),
+                        GraphElementMetadata::StartNode => {
+                            property_maps::endpoint(projected.source, control)
+                        }
+                        GraphElementMetadata::EndNode => {
+                            property_maps::endpoint(projected.destination, control)
+                        }
                         _ => property_maps::relation_type(
                             projected.relation,
                             catalog,

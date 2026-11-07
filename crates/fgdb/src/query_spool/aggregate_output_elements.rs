@@ -132,10 +132,13 @@ impl Elements<'_, '_> {
                 else {
                     return Ok(None);
                 };
-                Some(MetadataRecord::Edge(
-                    snapshot.blocks[block][row].relation,
-                    source::edge_properties_at(&snapshot.block_props, block, row),
-                ))
+                let edge = &snapshot.blocks[block][row];
+                Some(MetadataRecord::Edge {
+                    relation: edge.relation,
+                    source: edge.src,
+                    destination: edge.dst,
+                    properties: source::edge_properties_at(&snapshot.block_props, block, row),
+                })
             }
         })
     }
@@ -162,7 +165,7 @@ impl GraphElementReader<ControlledExecutionError> for Elements<'_, '_> {
         };
         let props = match record {
             MetadataRecord::Vertex(row) => row.props.as_slice(),
-            MetadataRecord::Edge(_, props) => props,
+            MetadataRecord::Edge { properties, .. } => properties,
         };
         let (mut low, mut high) = (0, props.len());
         while low < high {

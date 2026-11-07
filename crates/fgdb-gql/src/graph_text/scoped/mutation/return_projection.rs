@@ -345,9 +345,16 @@ fn composite_result_at(token: Token<'_>, lexer: &Lexer<'_>) -> Result<bool, Grap
         TokenKind::Punct(b'{') => true,
         TokenKind::Word(word) => match lexer.clone().next()?.kind {
             TokenKind::Punct(b'[') => true,
-            TokenKind::Punct(b'(') => ["LABELS", "TYPE", "PROPERTIES", "KEYS"]
-                .iter()
-                .any(|name| word.eq_ignore_ascii_case(name)),
+            TokenKind::Punct(b'(') => [
+                "LABELS",
+                "TYPE",
+                "PROPERTIES",
+                "KEYS",
+                "STARTNODE",
+                "ENDNODE",
+            ]
+            .iter()
+            .any(|name| word.eq_ignore_ascii_case(name)),
             _ => false,
         },
         _ => false,
@@ -465,7 +472,10 @@ fn map_capable(
         | ReadValueTemplate::Reduce { .. }
         | ReadValueTemplate::Temporal { .. } => true,
         ReadValueTemplate::ElementMetadata {
-            kind: crate::GraphElementMetadata::Properties,
+            kind:
+                crate::GraphElementMetadata::Properties
+                | crate::GraphElementMetadata::StartNode
+                | crate::GraphElementMetadata::EndNode,
             ..
         } => true,
         // A scalar column (a stored property, say) may hold a temporal value,
@@ -2004,6 +2014,7 @@ impl<'a> Parser<'a> {
         if self.list_quantifier()?.is_some()
             || self.list_function()?.is_some()
             || self.value_function()?.is_some()
+            || self.endpoint_call()?.is_some()
             || self.random_call()?
             || self.timestamp_call()?
         {
@@ -2124,7 +2135,11 @@ impl<'a> Parser<'a> {
         // Element metadata produces ordinary lists/maps. Compare the
         // complete value rather than coercing labels()/keys()/properties()
         // into a scalar let reference.
-        if (self.is_word("LABELS") || self.is_word("KEYS") || self.is_word("PROPERTIES"))
+        if (self.is_word("LABELS")
+            || self.is_word("KEYS")
+            || self.is_word("PROPERTIES")
+            || self.is_word("STARTNODE")
+            || self.is_word("ENDNODE"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
             let mut lexer = self.lexer.clone();
@@ -2306,25 +2321,33 @@ impl<'a> Parser<'a> {
         Ok(element(right, &lexer)? && !tighter_than_comparison(&mut lexer)?)
     }
 
-    /// Whole-value equality between a bare open/element value and a named
-    /// subscript, in either order. The subscript may yield a graph identity;
-    /// a scalar comparison cannot load it. This is lexical routing only:
-    /// the existing value parser validates the complete operands and indexes.
+    /// Whole-value equality involving an endpoint call or a bare
+    /// open/element value and a named subscript, in either order. These
+    /// expressions may yield graph identities, which scalar comparisons
+    /// cannot load. This is lexical routing only: the value parser validates
+    /// the complete operands and indexes.
     fn indexed_element_compared_at(
         &self,
         first: Token<'a>,
         lexer: &Lexer<'a>,
         route: Route<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
-        // Leave the lexer immediately after each admitted operand. At least
-        // one operand is indexed and the other is a bare dynamic/element
-        // value; scalar-only comparisons keep their existing compiler.
+        // Leave the lexer immediately after each admitted operand. The
+        // flags distinguish indexed and endpoint values from bare elements;
+        // scalar-only comparisons keep their existing compiler.
         let operand = |token: Token<'a>,
                        lexer: &mut Lexer<'a>|
-         -> Result<Option<bool>, GraphPatternTextError> {
+         -> Result<Option<(bool, bool)>, GraphPatternTextError> {
             let TokenKind::Word(word) = token.kind else {
                 return Ok(None);
             };
+            if (word.eq_ignore_ascii_case("STARTNODE") || word.eq_ignore_ascii_case("ENDNODE"))
+                && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+            {
+                lexer.next()?;
+                skip_group(lexer)?;
+                return Ok(Some((false, true)));
+            }
             let local = self.elements.contains(&word);
             let kind = route.row.and_then(|schema| {
                 schema[..self.visible_width(schema)]
@@ -2350,7 +2373,7 @@ impl<'a> Parser<'a> {
                     lexer.next()?;
                     skip_group(lexer)?;
                 }
-                return Ok(Some(true));
+                return Ok(Some((true, false)));
             }
             if matches!(
                 lexer.clone().next()?.kind,
@@ -2361,11 +2384,19 @@ impl<'a> Parser<'a> {
             let bare = local
                 || kind
                     .is_some_and(|kind| kind == GraphSetColumnType::Any || is_element_column(kind))
-                || (kind.is_none() && route.graph.is_some_and(|parser| parser.graph_element(word)));
-            Ok(bare.then_some(false))
+                || (kind.is_none() && route.graph.is_some_and(|parser| parser.graph_element(word)))
+                // Native write leaves own created names outside the incoming
+                // row. The actual resolver validates their scope and domain;
+                // lexical routing must still let them compare with endpoints.
+                || (kind.is_none()
+                    && self.write_leaves
+                    && !["TRUE", "FALSE", "NULL"]
+                        .iter()
+                        .any(|literal| word.eq_ignore_ascii_case(literal)));
+            Ok(bare.then_some((false, false)))
         };
         let mut lexer = lexer.clone();
-        let Some(left_indexed) = operand(first, &mut lexer)? else {
+        let Some((left_indexed, left_endpoint)) = operand(first, &mut lexer)? else {
             return Ok(false);
         };
         let equality = match lexer.next()?.kind {
@@ -2378,11 +2409,11 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         let right = lexer.next()?;
-        let Some(right_indexed) = operand(right, &mut lexer)? else {
+        let Some((right_indexed, right_endpoint)) = operand(right, &mut lexer)? else {
             return Ok(false);
         };
         let after = lexer.clone().next()?;
-        if left_indexed == right_indexed
+        if (left_indexed == right_indexed && !left_endpoint && !right_endpoint)
             || matches!(after.kind, TokenKind::Punct(b'(' | b'.' | b':' | b'['))
             || matches!(after.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT"))
         {
@@ -2813,9 +2844,16 @@ impl<'a> Parser<'a> {
                 // Metadata is a source read even when its result is scalar.
                 // Its let slots belong to the selected branch, including
                 // calls nested in scalar functions such as upper(type(x)).
-                if ["LABELS", "TYPE", "PROPERTIES", "KEYS"]
-                    .iter()
-                    .any(|name| word.eq_ignore_ascii_case(name))
+                if [
+                    "LABELS",
+                    "TYPE",
+                    "PROPERTIES",
+                    "KEYS",
+                    "STARTNODE",
+                    "ENDNODE",
+                ]
+                .iter()
+                .any(|name| word.eq_ignore_ascii_case(name))
                     && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
                 {
                     return Ok(true);
@@ -2887,10 +2925,13 @@ impl<'a> Parser<'a> {
                 || (inputs.is_none() && resolve.is_none() && self.at_hoisted_existence_value())
                 || (inputs.is_some()
                     && resolve.is_none()
-                    && self.element_compared(Route {
+                    && (self.element_compared(Route {
                         row: None,
                         graph: Some(self),
-                    })?));
+                    })? || self.open_element_compared(Route {
+                        row: None,
+                        graph: Some(self),
+                    })?)));
         let comprehension = self.is_punct(b'[') && {
             let mut lexer = self.lexer.clone();
             matches!(lexer.next()?.kind, TokenKind::Word(_))
@@ -2929,6 +2970,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let endpoint = self.endpoint_call()?.is_some();
         let mut value = if scalar && let Some(resolve) = resolve.as_mut() {
             self.resolved_scalar_value(resolve, depth, at)?
         } else if scalar {
@@ -3082,7 +3124,13 @@ impl<'a> Parser<'a> {
                 values,
                 guard: None,
             }
+        } else if let Some(column) = self.static_endpoint_read(inputs.as_deref_mut())? {
+            ReadValueTemplate::Column(column)
         } else if let Some(column) = self.resolved_write_metadata(resolve)? {
+            // Native CREATE endpoint cells are vertices. A postfix field
+            // reads their final staged values through the ordinary element
+            // reader; MERGE may already have consumed it as a native field.
+            graph_map = endpoint && self.is_punct(b'.');
             ReadValueTemplate::Column(column)
         } else if let Some(kind) = self.value_metadata_call(inputs.is_some(), schema)? {
             self.advance()?;
@@ -3093,7 +3141,15 @@ impl<'a> Parser<'a> {
             ReadValueTemplate::ElementMetadata {
                 kind,
                 value: Box::new(value),
-                catalog: self.syntax.element_catalog.request(),
+                catalog: if matches!(
+                    kind,
+                    crate::GraphElementMetadata::StartNode | crate::GraphElementMetadata::EndNode
+                ) {
+                    // A stored endpoint is an identity, not a catalog lookup.
+                    crate::set_text::ElementCatalogSlot::default()
+                } else {
+                    self.syntax.element_catalog.request()
+                },
             }
         } else if (self.is_word("KEYS") || self.is_word("PROPERTIES"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
@@ -3668,14 +3724,19 @@ impl<'a> Parser<'a> {
         &mut self,
         resolve: &mut Option<ValueResolver<'_, 'a>>,
     ) -> Result<Option<usize>, GraphPatternTextError> {
-        if !(self.is_word("LABELS") || self.is_word("TYPE")) {
+        let endpoint = self.endpoint_call()?.is_some();
+        if !(self.is_word("LABELS") || self.is_word("TYPE") || endpoint) {
             return Ok(None);
         }
         let TokenKind::Word(word) = self.current.kind else {
             return Ok(None);
         };
-        let Some((source, _)) = pipeline::metadata_source(word, self.current.at, &self.lexer)?
-        else {
+        let source = if endpoint {
+            self.endpoint_argument()?
+        } else {
+            pipeline::metadata_source(word, self.current.at, &self.lexer)?.map(|(source, _)| source)
+        };
+        let Some(source) = source else {
             return Ok(None);
         };
         if self.elements.contains(&source.text) {
@@ -3694,9 +3755,68 @@ impl<'a> Parser<'a> {
             // A graph binding keeps its resolver's native column, as
             // keys()/properties() do; a declining resolver leaves the
             // dynamic read.
-            Some(resolve) if self.graph_element(source.text) => resolve.leaf(self),
+            Some(resolve)
+                if self.graph_element(source.text)
+                    && (!endpoint
+                        || self
+                            .edge_endpoint(source, self.is_word("STARTNODE"))
+                            .is_ok()) =>
+            {
+                resolve.leaf(self)
+            }
             _ => Ok(None),
         }
+    }
+
+    /// Retain the zero-read projection of a directed, nonoptional MATCH
+    /// relationship. Other operands fall through to a stored-endpoint read.
+    fn static_endpoint_read(
+        &mut self,
+        columns: Option<&mut Vec<Projection<'a>>>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let Some(columns) = columns else {
+            return Ok(None);
+        };
+        let Some(source) = self.endpoint_argument()? else {
+            return Ok(None);
+        };
+        if self.elements.contains(&source.text) {
+            return Ok(None);
+        }
+        let Ok(vertex) = self.edge_endpoint(source, self.is_word("STARTNODE")) else {
+            return Ok(None);
+        };
+        self.advance()?;
+        self.punct(b'(', "(")?;
+        self.name()?;
+        self.punct(b')', ")")?;
+        let property = if self.take(b'.')? {
+            Some(self.schema_name()?)
+        } else {
+            None
+        };
+        self.mutation_projection(columns, vertex, property)
+            .map(Some)
+    }
+
+    /// A complete bare endpoint operand. Lookahead never consumes a token;
+    /// a list/subscript/local expression keeps its ordinary value grammar.
+    fn endpoint_argument(&self) -> Result<Option<Name<'a>>, GraphPatternTextError> {
+        if self.endpoint_call()?.is_none() {
+            return Ok(None);
+        }
+        let mut lexer = self.lexer.clone();
+        lexer.next()?;
+        let argument = lexer.next()?;
+        let TokenKind::Word(text) = argument.kind else {
+            return Ok(None);
+        };
+        Ok(
+            matches!(lexer.next()?.kind, TokenKind::Punct(b')')).then_some(Name {
+                text,
+                at: argument.at,
+            }),
+        )
     }
 
     /// Keep existing graph-column metadata reads where available. Every
@@ -3707,6 +3827,9 @@ impl<'a> Parser<'a> {
         graph: bool,
         schema: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Option<crate::GraphElementMetadata>, GraphPatternTextError> {
+        if let Some(endpoint) = self.endpoint_call()? {
+            return Ok(Some(endpoint));
+        }
         let (kind, function) = if self.is_word("LABELS") {
             (
                 crate::GraphElementMetadata::Labels,
@@ -3777,6 +3900,20 @@ impl<'a> Parser<'a> {
         Ok(Some(kind))
     }
 
+    /// Endpoint functions accept any relationship-valued expression. Their
+    /// direction comes from the record, including undirected matches and
+    /// relationships carried through lists, grouping or a write tail.
+    fn endpoint_call(&self) -> Result<Option<crate::GraphElementMetadata>, GraphPatternTextError> {
+        let kind = if self.is_word("STARTNODE") {
+            crate::GraphElementMetadata::StartNode
+        } else if self.is_word("ENDNODE") {
+            crate::GraphElementMetadata::EndNode
+        } else {
+            return Ok(None);
+        };
+        Ok(matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')).then_some(kind))
+    }
+
     /// REVERSE or SPLIT directly followed by `(` (fgdb-13l85).
     fn value_function(&self) -> Result<Option<crate::GraphValueFunction>, GraphPatternTextError> {
         let TokenKind::Word(word) = self.current.kind else {
@@ -3824,7 +3961,7 @@ impl<'a> Parser<'a> {
                 return Ok(true);
             }
             if matches!(token.kind, TokenKind::Word(word)
-                if ["LABELS", "TYPE", "PROPERTIES", "KEYS"]
+                if ["LABELS", "TYPE", "PROPERTIES", "KEYS", "STARTNODE", "ENDNODE"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name)))
                 && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))

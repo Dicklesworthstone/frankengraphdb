@@ -59,6 +59,8 @@ struct PointProperties<'a> {
 
 struct PointEdgeMetadata<'a> {
     relation: RelationId,
+    source: VId,
+    destination: VId,
     properties: PointProperties<'a>,
 }
 
@@ -450,6 +452,8 @@ impl WriteTxn {
                 let properties = edge_properties_at(&snapshot.block_props, block, row);
                 Some(PointEdgeMetadata {
                     relation: edge.relation,
+                    source: edge.src,
+                    destination: edge.dst,
                     properties: PointProperties::new(properties),
                 })
             }
@@ -482,6 +486,8 @@ impl WriteTxn {
                         endpoints = Some((*src, *dst));
                         projected = Some(PointEdgeMetadata {
                             relation: *relation,
+                            source: *src,
+                            destination: *dst,
                             properties: PointProperties::new(props),
                         });
                     }

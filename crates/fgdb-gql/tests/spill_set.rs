@@ -3189,6 +3189,8 @@ mod async_elements {
                         control(GlaExecutionEvent::ScratchEntry)?;
                         GraphValue::map(vec![(name.as_str().into(), scalar(number))]).unwrap()
                     }
+                    GraphElementMetadata::StartNode => GraphValue::Vertex(VId(1)),
+                    GraphElementMetadata::EndNode => GraphValue::Vertex(VId(u128::MAX)),
                 })
             })();
             let value = match value {
@@ -3730,9 +3732,27 @@ mod async_elements {
             ),
             (
                 "[x IN items | type(x)]",
-                list(vec![edge.clone(), null.clone(), edge]),
-                list(vec![text("LINK"), null, text("LINK")]),
+                list(vec![edge.clone(), null.clone(), edge.clone()]),
+                list(vec![text("LINK"), null.clone(), text("LINK")]),
                 GraphElementMetadata::Type,
+                2,
+            ),
+            (
+                "[x IN items | startNode(x)]",
+                list(vec![edge.clone(), null.clone(), edge.clone()]),
+                list(vec![v1.clone(), null.clone(), v1.clone()]),
+                GraphElementMetadata::StartNode,
+                2,
+            ),
+            (
+                "[x IN items | endNode(x)]",
+                list(vec![edge.clone(), null.clone(), edge]),
+                list(vec![
+                    GraphValue::Vertex(VId(u128::MAX)),
+                    null,
+                    GraphValue::Vertex(VId(u128::MAX)),
+                ]),
+                GraphElementMetadata::EndNode,
                 2,
             ),
             (

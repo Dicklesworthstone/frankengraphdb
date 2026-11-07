@@ -505,6 +505,9 @@ impl ReadValueTemplate {
                 }
                 crate::GraphElementMetadata::Type => GraphSetColumnType::Scalar,
                 crate::GraphElementMetadata::Properties => GraphSetColumnType::Any,
+                crate::GraphElementMetadata::StartNode | crate::GraphElementMetadata::EndNode => {
+                    GraphSetColumnType::Vertex
+                }
             },
             // reverse() is a list or a text; split() is a list; a sum with a
             // list operand is a list or, over scalars, a scalar.

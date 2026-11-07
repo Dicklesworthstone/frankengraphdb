@@ -210,10 +210,12 @@ fn scoped_element_metadata<Clock: FnMut() -> u64>(
             // Both predicates precede every logical source charge. A hidden
             // destination cannot change visible usage or expose a relation.
             execution.borrow_mut().node().map_err(&retain)?;
-            MetadataRecord::Edge(
-                edge.relation,
-                source::edge_properties_at(&snapshot.block_props, block, row),
-            )
+            MetadataRecord::Edge {
+                relation: edge.relation,
+                source: edge.src,
+                destination: edge.dst,
+                properties: source::edge_properties_at(&snapshot.block_props, block, row),
+            }
         }
     };
     property_maps::metadata(

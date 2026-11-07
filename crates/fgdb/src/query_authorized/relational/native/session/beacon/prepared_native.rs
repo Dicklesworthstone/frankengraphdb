@@ -112,10 +112,12 @@ fn admitted_record_at<'a>(
                     return Ok(None);
                 }
             }
-            Ok(Some(MetadataRecord::Edge(
-                edge.relation,
-                source::edge_properties_at(&view.snapshot.block_props, block, row),
-            )))
+            Ok(Some(MetadataRecord::Edge {
+                relation: edge.relation,
+                source: edge.src,
+                destination: edge.dst,
+                properties: source::edge_properties_at(&view.snapshot.block_props, block, row),
+            }))
         }
     }
 }
@@ -540,7 +542,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 Ok(record.and_then(|record| {
                     let properties = match record {
                         MetadataRecord::Vertex(row) => row.props.as_slice(),
-                        MetadataRecord::Edge(_, properties) => properties,
+                        MetadataRecord::Edge { properties, .. } => properties,
                     };
                     properties
                         .binary_search_by_key(&key, |(key, _)| *key)
@@ -572,7 +574,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 let Some(record) = record else {
                     return Ok(None);
                 };
-                property_maps::metadata(
+                let value = property_maps::metadata(
                     record,
                     kind,
                     catalog,
@@ -591,8 +593,19 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                         .map_err(|()| GraphElementMetadataError::Interrupted)
                     },
                     &|error| GraphElementMetadataError::Source(GqlError::Read(error)),
-                )
-                .map(Some)
+                )?;
+                // Endpoint metadata derives a new element from an admitted
+                // relationship. Its scope was checked above; preserve that
+                // provenance for a following startNode(r).property read.
+                if let GraphValue::Vertex(vertex) = &value {
+                    let element = ElementId::Vertex(*vertex);
+                    if !admitted_element(element, &retrieved, &derived) {
+                        control(fgdb_gql::GlaExecutionEvent::ScratchEntry)
+                            .map_err(|()| GraphElementMetadataError::Interrupted)?;
+                        derived.borrow_mut().insert(element);
+                    }
+                }
+                Ok(Some(value))
             };
             let mut checkpoint = || {
                 if let Some(error) = element_failure.borrow_mut().take() {

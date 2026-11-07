@@ -1943,6 +1943,17 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
         parser: &mut Parser<'a>,
         source: Name<'a>,
     ) -> Result<Option<usize>, GraphPatternTextError> {
+        if parser.is_word("STARTNODE") || parser.is_word("ENDNODE") {
+            if self.returning.is_relationship(source.text)
+                || (self.row.is_none()
+                    && parser
+                        .edge_endpoint(source, parser.is_word("STARTNODE"))
+                        .is_ok())
+            {
+                return self.leaf(parser);
+            }
+            return Ok(None);
+        }
         // A named MERGE path is never an element: its own leaf refuses
         // labels(p)/type(p) before catalog access (fgdb-at06q).
         if self

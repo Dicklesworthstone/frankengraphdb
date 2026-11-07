@@ -656,3 +656,226 @@ fn subscripted_metadata_and_list_properties_group_beside_aggregates() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn native_relationship_endpoints_keep_stored_direction_after_row_and_list_projection() {
+    let ((), report) = run_async_under_lab(0xa1b3_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit, false).await;
+        let parameters = GqlParameters::new();
+        let view = db.read_session().unwrap();
+        let transaction = db.begin(&txcx).unwrap();
+        let endpoints = vec![GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2))];
+        for (statement, expected) in [
+            (
+                "MATCH (a)-[r:R]-(b) RETURN startNode(r) AS source, endNode(r) AS target",
+                vec![endpoints.clone(), endpoints.clone()],
+            ),
+            (
+                "MATCH (a)<-[r:R]-(b) RETURN startNode(r).name AS source, endNode(r).name AS target",
+                vec![vec![text("one"), text("two")]],
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) WHERE startNode(r) = a AND endNode(r) = b \
+                 RETURN a.name AS source, b.name AS target",
+                vec![vec![text("one"), text("two")]],
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) WHERE a = startNode(r) AND b = endNode(r) \
+                 RETURN a.name AS source, b.name AS target",
+                vec![vec![text("one"), text("two")]],
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) WHERE startNode(r).name = 'one' \
+                 RETURN startNode(r).name AS source, endNode(r).name AS target",
+                vec![
+                    vec![text("one"), text("two")],
+                    vec![text("one"), text("two")],
+                ],
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) WITH a, b, r AS kept \
+                 WHERE startNode(kept) = a AND endNode(kept) = b \
+                 RETURN startNode(kept) AS source, endNode(kept) AS target",
+                vec![endpoints],
+            ),
+            (
+                "MATCH ()-[r:R]->() WITH collect(r) AS edges UNWIND edges AS kept \
+                 RETURN startNode(kept).name AS source, endNode(kept).name AS target",
+                vec![vec![text("one"), text("two")]],
+            ),
+            (
+                "MATCH p = (a)-[r:R]->(b) RETURN \
+                 [e IN relationships(p) | startNode(e).name] AS sources, \
+                 [e IN relationships(p) | endNode(e).name] AS targets",
+                vec![vec![names(&["one"]), names(&["two"])]],
+            ),
+        ] {
+            for actual in [
+                db.query(&cx, statement, &parameters, Catalog, policy()),
+                view.query(&cx, statement, &parameters, Catalog, policy()),
+                transaction.query(&db, &cx, statement, &parameters, Catalog, policy()),
+            ] {
+                assert_eq!(
+                    cells(actual.unwrap_or_else(|error| panic!("{statement}: {error:?}"))),
+                    expected,
+                    "{statement}",
+                );
+            }
+        }
+        transaction.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_relationship_endpoints_read_staged_edges_and_created_return_values() {
+    let ((), report) = run_async_under_lab(0xa1b3_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit, false).await;
+        let view = db.read_session().unwrap();
+        let parameters = GqlParameters::new()
+            .with_list(
+                "edges",
+                vec![GraphValue::Edge(EId(1)), GraphValue::Edge(EId(2))],
+            )
+            .unwrap();
+        let statement =
+            "UNWIND $edges AS r RETURN startNode(r).name AS source, endNode(r).name AS target";
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        let before = vec![vec![text("one"), text("two")], vec![null.clone(), null]];
+        let prepared = PreparedNativeRead::prepare(statement, &parameters, Catalog).unwrap();
+        assert_eq!(
+            cells(prepared.execute(&db, &cx, &parameters, policy()).unwrap()),
+            before,
+        );
+        let mut transaction = db.begin(&txcx).unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.add_edge(EId(2), VId(2), VId(1), vec![]);
+        batch.set_vertex_property(
+            VId(1),
+            NAME,
+            Some(CanonicalScalar::ucs_basic_text("changed").unwrap()),
+        );
+        transaction.write(&mut db, batch).unwrap();
+        let after = vec![
+            vec![text("changed"), text("two")],
+            vec![text("two"), text("changed")],
+        ];
+        assert_eq!(
+            cells(
+                prepared
+                    .execute_in_transaction(&transaction, &db, &cx, &parameters, policy())
+                    .unwrap()
+            ),
+            after,
+        );
+        assert_eq!(
+            cells(prepared.execute(&db, &cx, &parameters, policy()).unwrap()),
+            before,
+        );
+        let created = transaction.query_write_engine(
+            &mut db,
+            &cx,
+            "CREATE (a:Thing {name:'fresh source'})-[r:R]->(b:Thing {name:'fresh target'}) \
+             RETURN startNode(r).name AS source, endNode(r).name AS target, startNode(r) = a AS same",
+            &GqlParameters::new(),
+            Catalog,
+            R,
+            GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000),
+        ).unwrap();
+        assert_eq!(
+            cells(created),
+            vec![vec![
+                text("fresh source"),
+                text("fresh target"),
+                GraphValue::Scalar(CanonicalScalar::Bool(true))
+            ]]
+        );
+        transaction.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            cells(prepared.execute(&db, &cx, &parameters, policy()).unwrap()),
+            after,
+        );
+        assert_eq!(
+            cells(
+                view.query(&cx, statement, &parameters, Catalog, policy())
+                    .unwrap()
+            ),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_relationship_endpoints_do_not_disclose_either_end_of_hidden_edges() {
+    let ((), report) = run_async_under_lab(0xa1b3_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let mut hidden = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut removed = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut hidden, &commit, true).await;
+        seed(&mut removed, &commit, false).await;
+        let authority =
+            Authority::new(AuthKey::from_seed(0xa1b4), NS, "graph", SchemaEpoch(0), 1).unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1_000,
+            QueryLimits {
+                max_nodes: 100_000,
+                max_work: 1_000_000,
+                max_rows: 100,
+            },
+        );
+        grant.labels = Scope::only([THING, EXTRA]);
+        grant.relations = Scope::only([R]);
+        grant.properties = Scope::only([NAME]);
+        let token = authority.issue_at(&grant, 100).unwrap();
+        let parameters = GqlParameters::new()
+            .with_list(
+                "edges",
+                (1..=4).map(|id| GraphValue::Edge(EId(id))).collect(),
+            )
+            .unwrap();
+        let statement = "UNWIND $edges AS r RETURN startNode(r) AS source, endNode(r) AS target, \
+                         startNode(r).name AS source_name, endNode(r).name AS target_name";
+        let execute = |db: &Database<MemVfs>| {
+            cells(
+                db.query_authorized(
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    statement,
+                    &parameters,
+                    Catalog,
+                    policy(),
+                    || 100,
+                )
+                .unwrap(),
+            )
+        };
+        let null_row = vec![GraphValue::Scalar(CanonicalScalar::Null); 4];
+        let expected = vec![
+            vec![
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(2)),
+                text("one"),
+                text("two"),
+            ],
+            null_row.clone(),
+            null_row.clone(),
+            null_row,
+        ];
+        assert_eq!(execute(&hidden), expected);
+        assert_eq!(execute(&removed), expected);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

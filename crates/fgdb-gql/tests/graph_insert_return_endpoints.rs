@@ -276,18 +276,11 @@ fn empty_matched_and_unwind_endpoint_queries_create_and_return_nothing() {
 }
 
 #[test]
-fn endpoint_arguments_and_result_domains_are_checked_before_catalog_callbacks() {
+fn malformed_endpoint_calls_are_checked_before_catalog_callbacks() {
     for text in [
-        "CREATE (a)-[e:R]->(b) RETURN startNode(a)",
         "CREATE (a)-[e:R]->(b) RETURN endNode(missing)",
         "CREATE (a)-[e:R]->(b) RETURN startNode()",
         "CREATE (a)-[e:R]->(b) RETURN startNode(e,e)",
-        "CREATE (a)-[e:R]->(b) RETURN endNode($edge)",
-        "CREATE (a)-[e:R]->(b) RETURN startNode(e.p)",
-        "CREATE (a)-[e:R]->(b) RETURN startNode(e).p",
-        "CREATE (a)-[e:R]->(b) RETURN startNode(e)+1 AS bad",
-        "UNWIND [1] AS x CREATE (a)-[e:R]->(b) RETURN endNode(x)",
-        "MATCH (a) CREATE (n) RETURN startNode(a)",
     ] {
         let calls = Cell::new(0);
         let result = PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
@@ -301,6 +294,48 @@ fn endpoint_arguments_and_result_domains_are_checked_before_catalog_callbacks() 
             "catalog access before invalid endpoint refusal: {text}"
         );
     }
+}
+
+#[test]
+fn created_endpoint_properties_and_comparisons_use_the_frozen_occurrence() {
+    for (arrow, source, target) in [
+        ("(a {p:3})-[e:R]->(b {p:8})", 3, 8),
+        ("(a {p:3})<-[e:R]-(b {p:8})", 8, 3),
+    ] {
+        let statement = format!(
+            "CREATE {arrow} RETURN startNode(e).p AS source,endNode(e).p AS target,\
+             startNode(e)=a AS first,a=endNode(e) AS last"
+        );
+        let query = prepare(&statement);
+        assert_eq!(
+            values(&run(&query).unwrap()),
+            vec![vec![
+                GraphValue::Scalar(CanonicalScalar::Int(source)),
+                GraphValue::Scalar(CanonicalScalar::Int(target)),
+                GraphValue::Scalar(CanonicalScalar::Bool(source == 3)),
+                GraphValue::Scalar(CanonicalScalar::Bool(target == 3)),
+            ]],
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_endpoint_wrong_domains_fail_without_graph_access() {
+    for statement in [
+        "CREATE (a)-[e:R]->(b) RETURN startNode(a)",
+        "CREATE (a)-[e:R {p:7}]->(b) RETURN startNode(e.p)",
+        "CREATE (a)-[e:R]->(b) RETURN startNode(e)+1 AS bad",
+        "UNWIND [1] AS x CREATE (a)-[e:R]->(b) RETURN endNode(x)",
+    ] {
+        assert!(run(&prepare(statement)).is_err(), "{statement}");
+    }
+    let query =
+        prepare("CREATE (a)-[e:R]->(b) RETURN startNode(e.p) AS missing,endNode(NULL) AS absent");
+    assert_eq!(
+        values(&run(&query).unwrap()),
+        vec![vec![GraphValue::Scalar(CanonicalScalar::Null); 2]],
+    );
 }
 
 #[test]

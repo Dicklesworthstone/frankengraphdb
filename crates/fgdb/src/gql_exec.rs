@@ -160,10 +160,13 @@ pub(crate) fn element_metadata_at(
                 else {
                     return Ok(None);
                 };
-                MetadataRecord::Edge(
-                    snapshot.blocks[block][row].relation,
-                    source::edge_properties_at(&snapshot.block_props, block, row),
-                )
+                let edge = &snapshot.blocks[block][row];
+                MetadataRecord::Edge {
+                    relation: edge.relation,
+                    source: edge.src,
+                    destination: edge.dst,
+                    properties: source::edge_properties_at(&snapshot.block_props, block, row),
+                }
             }
         };
         return property_maps::metadata(
@@ -201,7 +204,12 @@ pub(crate) fn element_metadata_at(
             .map_err(failure)?
             .map(|row| {
                 property_maps::metadata(
-                    MetadataRecord::Edge(row.entry.relation, &row.props),
+                    MetadataRecord::Edge {
+                        relation: row.entry.relation,
+                        source: row.entry.src,
+                        destination: row.entry.dst,
+                        properties: &row.props,
+                    },
                     kind,
                     catalog,
                     |_| true,

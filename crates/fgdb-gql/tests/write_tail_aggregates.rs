@@ -470,6 +470,9 @@ fn final_metadata_reader_survives_write_projection_grouping_and_with_tails() {
                     GraphElementMetadata::Properties => &properties,
                     GraphElementMetadata::Keys => &keys,
                     GraphElementMetadata::Labels => panic!("edge cannot have vertex labels"),
+                    GraphElementMetadata::StartNode | GraphElementMetadata::EndNode => {
+                        return Err(GraphElementMetadataError::Source(()));
+                    }
                 };
                 value
                     .copy_with_control(&mut |event| control(event))
