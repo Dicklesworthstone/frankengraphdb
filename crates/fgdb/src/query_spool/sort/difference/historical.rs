@@ -42,7 +42,7 @@ impl<'q> PendingInput<'q> {
                 let cursor = VertexScanCursor::new(source, plan, policy, checkpoint);
                 match projection {
                     Some(projection) => ScanCursor::ProjectedVertex(Box::new((cursor, projection))),
-                    None => ScanCursor::Vertex(cursor),
+                    None => ScanCursor::Vertex(Box::new(cursor)),
                 }
             }
             Self::Edge(pending) => {

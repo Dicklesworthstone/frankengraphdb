@@ -72,8 +72,8 @@ pub(crate) struct Probe {
     steps: Vec<Step>,
 }
 
-/// A bounded Collect scope over fixed-hop traversal or one correlated finite
-/// TRAIL atom, using the same traversal and predicate kernel as a probe. Every
+/// A bounded Collect scope over fixed-hop traversal or one finite TRAIL atom
+/// with a correlated or independent start, using the probe's shared kernel. Every
 /// complete witness contributes one value; only exhaustion emits a list.
 pub(crate) struct Collection {
     pub(crate) group: usize,
@@ -788,8 +788,9 @@ impl Collection {
         // Fixed scopes advance each local scan in VId order, then fixed hops
         // in EId order, like identified eager scopes. Disconnected components
         // keep separate positions even with copied outer predicate operands.
-        // One correlated finite TRAIL atom preserves DFS route occurrences,
-        // not endpoint support. It cannot mix scans or other expansion atoms.
+        // One finite TRAIL atom preserves DFS route occurrences, not endpoint
+        // support. Its start is correlated or one independent vertex scan;
+        // additional independent roots and mixed expansion atoms still refuse.
         // Fixed parents may have terminal child probes. Only direct parent
         // scans and expansion atoms determine the collection profile; child
         // finite walks keep their existing endpoint-support EXISTS semantics.
@@ -798,12 +799,12 @@ impl Collection {
         // route; every accepted route still contributes one list element.
         let mut fixed = 0;
         let mut walks = 0;
-        let mut scans = false;
+        let mut scans = 0;
         let mut at = start + 1;
         while at < end {
             match &ops[at] {
                 GlaOperator::Expand { .. } => fixed += 1,
-                GlaOperator::ScanVertices => scans = true,
+                GlaOperator::ScanVertices => scans += 1,
                 GlaOperator::VarLengthExpand { bounds, .. } if bounds.is_bounded() => walks += 1,
                 GlaOperator::VarLengthExpand { .. } => {
                     return Err(EdgeScanBuildError { operator: at });
@@ -821,7 +822,7 @@ impl Collection {
         if (fixed == 0 && walks == 0)
             || fixed > MAX_PATTERN_EDGES
             || walks > 1
-            || (walks != 0 && (fixed != 0 || scans))
+            || (walks != 0 && (fixed != 0 || scans > 1))
         {
             return Err(bad());
         }

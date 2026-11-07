@@ -4139,7 +4139,10 @@ impl<'a> Parser<'a> {
                 |filter| matches!(filter, Filter::PathCapture(name) if name.text == element.text),
             )
         {
-            return Err(error(element.at, GraphPatternTextErrorKind::UnknownVariable));
+            return Err(error(
+                element.at,
+                GraphPatternTextErrorKind::UnknownVariable,
+            ));
         }
         self.syntax.scopes[scope].element = Some(element);
         self.punct(b']', "] after a pattern comprehension")?;

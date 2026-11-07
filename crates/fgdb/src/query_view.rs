@@ -406,7 +406,7 @@ impl PreparedNativeRead {
         };
         let (_, cursor) = open_pattern_stream(view, cx, pull.pattern(), as_of, policy)?;
         let cursor = match cursor {
-            ScanCursor::Vertex(cursor) => ScanCursor::ProjectedVertex(Box::new((cursor, pull))),
+            ScanCursor::Vertex(cursor) => ScanCursor::ProjectedVertex(Box::new((*cursor, pull))),
             ScanCursor::Edge(cursor) => ScanCursor::ProjectedEdge(Box::new((*cursor, pull))),
             _ => {
                 return Err(QueryError::StreamingUnsupported {
@@ -449,10 +449,10 @@ fn open_pattern_stream<'q>(
                 .map_err(QueryError::EdgeStream)?,
         ))
     } else {
-        ScanCursor::Vertex(
+        ScanCursor::Vertex(Box::new(
             view.stream_graph_values_governed_at(cx, query, as_of, policy)
                 .map_err(QueryError::Stream)?,
-        )
+        ))
     };
     Ok((query.columns().to_vec(), cursor))
 }

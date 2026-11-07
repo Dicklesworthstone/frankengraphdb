@@ -209,12 +209,12 @@ impl ExternalOrderHost for ResidentHost {
                             ScanError::Vertex(VertexScanError::Plan(error)),
                         )))
                     })?;
-                ScanCursor::Vertex(VertexScanCursor::new(
+                ScanCursor::Vertex(Box::new(VertexScanCursor::new(
                     source,
                     source_plan,
                     policy,
                     move || cx.with_restriction(|| cx.checkpoint()),
-                ))
+                )))
             };
             ordered_input(
                 cx,

@@ -187,7 +187,7 @@ fn open<'q>(
         );
         let cursor = match projection {
             Some(pull) => ScanCursor::ProjectedVertex(Box::new((cursor, pull))),
-            None => ScanCursor::Vertex(cursor),
+            None => ScanCursor::Vertex(Box::new(cursor)),
         };
         (cursor, tail)
     };

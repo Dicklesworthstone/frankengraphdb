@@ -673,8 +673,8 @@ fn captured_trails_keep_zero_hops_parallel_routes_cycles_and_declared_orientatio
         GlaDirection::Reverse,
         GlaDirection::Undirected,
     ] {
-        // Seed the declared first endpoint, seed its far endpoint (normalizing
-        // the expansion backwards), and constrain the route to close on a.
+        // Correlate the declared first endpoint, correlate its far endpoint
+        // without changing declared witness order, and require a closed route.
         for shape in 0..3 {
             let tail = if shape == 2 { "a" } else { "b" };
             let anchor = if shape == 1 { "b" } else { "a" };
@@ -688,41 +688,27 @@ fn captured_trails_keep_zero_hops_parallel_routes_cycles_and_declared_orientatio
             ));
             let mut fixture = Fixture::regular();
             fixture.insert(EId(3), VId(2), VId(0), R, None);
-            let scan_direction = if shape == 1 {
-                match direction {
-                    GlaDirection::Forward => GlaDirection::Reverse,
-                    GlaDirection::Reverse => GlaDirection::Forward,
-                    GlaDirection::Undirected => GlaDirection::Undirected,
-                }
-            } else {
-                direction
-            };
             let expected: Vec<_> = fixture
                 .vertices
                 .keys()
                 .map(|&root| {
-                    let paths = expected_trails(&fixture, root, scan_direction, (0, 3))
+                    // A named path keeps its declared first endpoint and
+                    // segment order. A far-end correlation filters complete
+                    // routes from each declared start, rather than re-rooting
+                    // the traversal at that far endpoint and reversing it.
+                    let starts: Vec<_> = if shape == 1 {
+                        fixture.vertices.keys().copied().collect()
+                    } else {
+                        vec![root]
+                    };
+                    let paths = starts
                         .into_iter()
+                        .flat_map(|start| expected_trails(&fixture, start, direction, (0, 3)))
                         .filter_map(|path| {
                             let end = path.nodes().last().unwrap();
-                            if shape == 2 && end != root {
+                            if (shape == 1 || shape == 2) && end != root {
                                 return None;
                             }
-                            // Eager prefers forward when both ends coincide.
-                            let path = if shape == 1 && end != root {
-                                let nodes: Vec<_> = path.nodes().collect();
-                                let reversed = path
-                                    .steps()
-                                    .iter()
-                                    .map(|(eid, _)| *eid)
-                                    .zip(nodes)
-                                    .rev()
-                                    .collect::<Vec<_>>()
-                                    .into_boxed_slice();
-                                GraphPath::new(end, reversed)
-                            } else {
-                                path
-                            };
                             Some(GraphValue::Path(path))
                         })
                         .collect::<Vec<_>>();
@@ -732,7 +718,21 @@ fn captured_trails_keep_zero_hops_parallel_routes_cycles_and_declared_orientatio
                     ]
                 })
                 .collect();
-            assert_eq!(plain(&eager(&fixture, &plan)), expected);
+            if shape == 1 && direction == GlaDirection::Forward {
+                assert_eq!(
+                    expected[1][1].as_list().unwrap().first(),
+                    Some(&GraphValue::Path(GraphPath::new(
+                        VId(0),
+                        vec![(EId(0), VId(1))].into_boxed_slice(),
+                    ))),
+                    "the declared start0 precedes the far endpoint's zero-hop route"
+                );
+            }
+            assert_eq!(
+                plain(&eager(&fixture, &plan)),
+                expected,
+                "{direction:?}, shape={shape}"
+            );
             let mut cursor = VertexScanCursor::new(
                 fixture,
                 VertexScanPlan::compile(plan.plan()).unwrap(),
@@ -848,82 +848,128 @@ fn captured_variable_segments_never_become_fixed_edge_operands() {
 
 #[test]
 fn every_captured_trail_checkpoint_and_quota_is_terminal_without_a_partial_list() {
-    let plan = prepare("MATCH (a) RETURN a, [p = (a)-[:R*0..3]->(b) | [b, p, length(p)]] AS paths");
-    let calls = Cell::new(0);
-    let mut good = VertexScanCursor::new(
-        Fixture::regular(),
-        VertexScanPlan::compile(plan.plan()).unwrap(),
-        policy(),
-        || {
+    type Projected<F> =
+        crate::scan_stream::ScanCursor<Fixture, F, Fixture, fn() -> Result<(), usize>>;
+
+    fn cursor<F: FnMut() -> Result<(), usize>>(
+        fixture: Fixture,
+        pull: &crate::GraphSetRowPull,
+        policy: GqlQueryPolicy,
+        checkpoint: F,
+    ) -> Projected<F> {
+        crate::scan_stream::ScanCursor::ProjectedVertex(Box::new((
+            VertexScanCursor::new(
+                fixture,
+                VertexScanPlan::compile(pull.pattern().plan()).unwrap(),
+                policy,
+                checkpoint,
+            ),
+            pull.clone(),
+        )))
+    }
+
+    for (case, statement) in [
+        "MATCH (a) RETURN a, [p = (a)-[:R*0..3]->(b) | [b, p, length(p)]] AS paths",
+        "MATCH (b) RETURN b, [p = (a)-[:R*0..3]->(b) | [a, p, length(p)]] AS paths",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Computed tuple expressions belong to the real row projection VM,
+        // not PreparedGraphText's binding-only column surface. Keep the exact
+        // original statement and exercise the host's projected cursor route.
+        let pull = crate::PreparedGraphSetText::prepare(statement, |kind, name: &str| {
+            match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+                _ => None,
+            }
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .vertex_graph_row_pull()
+        .unwrap();
+        let calls = Cell::new(0);
+        let mut good = cursor(Fixture::regular(), &pull, policy(), || {
             calls.set(calls.get() + 1);
             Ok::<_, usize>(())
-        },
-    );
-    let expected = good.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
-    let rows = good.row_stats();
-    let evaluator = good.evaluator_stats();
-    let total = calls.get();
-    assert!(total > 20 && expected.len() > 1);
-    for stop in 1..=total {
-        let at = Cell::new(0);
-        let fixture = Fixture::regular();
-        let drops = fixture.drops.clone();
-        let mut cursor = VertexScanCursor::new(
-            fixture,
-            VertexScanPlan::compile(plan.plan()).unwrap(),
-            policy(),
-            || {
+        });
+        let expected = good.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let rows = good.row_stats();
+        let evaluator = good.evaluator_stats();
+        let total = calls.get();
+        assert!(total > 20 && expected.len() > 1);
+        let (row, steps, length) = if case == 0 {
+            (0, Vec::new(), 0)
+        } else {
+            (1, vec![(EId(0), VId(1))], 1)
+        };
+        assert_eq!(
+            expected[row].values()[1].as_list().unwrap().first(),
+            Some(&GraphValue::List(Box::new([
+                GraphValue::Vertex(VId(0)),
+                GraphValue::Path(GraphPath::new(VId(0), steps.into_boxed_slice())),
+                GraphValue::Scalar(CanonicalScalar::Int(length)),
+            ]))),
+            "literal tuple and computed path length, case {case}"
+        );
+        for stop in 1..=total {
+            let at = Cell::new(0);
+            let fixture = Fixture::regular();
+            let drops = fixture.drops.clone();
+            let mut cursor = cursor(fixture, &pull, policy(), || {
                 at.set(at.get() + 1);
                 if at.get() == stop { Err(stop) } else { Ok(()) }
-            },
-        );
-        let mut prefix = Vec::new();
-        loop {
-            match cursor.next() {
-                Some(Ok(row)) => prefix.push(row),
-                Some(Err(GqlQueryError::Interrupted(actual))) => {
-                    assert_eq!(actual, stop);
-                    break;
+            });
+            let mut prefix = Vec::new();
+            loop {
+                match cursor.next() {
+                    Some(Ok(row)) => prefix.push(row),
+                    Some(Err(GqlQueryError::Interrupted(actual))) => {
+                        assert_eq!(actual, stop);
+                        break;
+                    }
+                    other => panic!("expected captured-trail failure at {stop}, got {other:?}"),
                 }
-                other => panic!("expected captured-trail failure at {stop}, got {other:?}"),
             }
-        }
-        assert!(expected.starts_with(&prefix));
-        assert_eq!(cursor.row_stats().result_rows, prefix.len() as u64);
-        assert_eq!(cursor.state(), VertexScanState::Failed);
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert!(cursor.next().is_none());
-        assert_eq!(at.get(), stop);
-    }
-    let exact = [
-        rows.snapshot_records,
-        rows.result_rows,
-        evaluator.work_units,
-        evaluator.scratch_entries,
-    ];
-    assert!(exact.iter().all(|limit| *limit > 0));
-    for reduced in 0..=4 {
-        let mut limits = exact;
-        if reduced < 4 {
-            limits[reduced] -= 1;
-        }
-        let mut cursor = VertexScanCursor::new(
-            Fixture::regular(),
-            VertexScanPlan::compile(plan.plan()).unwrap(),
-            GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
-            || Ok::<_, ()>(()),
-        );
-        let result = cursor.by_ref().collect::<Result<Vec<_>, _>>();
-        if reduced == 4 {
-            assert_eq!(result.unwrap(), expected);
-            assert_eq!(cursor.evaluator_stats(), evaluator);
-        } else {
-            assert!(matches!(
-                result,
-                Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
-            ));
-            assert_eq!(cursor.state(), VertexScanState::Failed);
+            assert!(expected.starts_with(&prefix));
+            assert_eq!(cursor.row_stats().result_rows, prefix.len() as u64);
+            assert_eq!(cursor.state(), crate::scan_stream::ScanState::Failed);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
             assert!(cursor.next().is_none());
+            assert_eq!(at.get(), stop);
+        }
+        let exact = [
+            rows.snapshot_records,
+            rows.result_rows,
+            evaluator.work_units,
+            evaluator.scratch_entries,
+        ];
+        assert!(exact.iter().all(|limit| *limit > 0));
+        for reduced in 0..=4 {
+            let mut limits = exact;
+            if reduced < 4 {
+                limits[reduced] -= 1;
+            }
+            let mut cursor = cursor(
+                Fixture::regular(),
+                &pull,
+                GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                || Ok::<_, usize>(()),
+            );
+            let result = cursor.by_ref().collect::<Result<Vec<_>, _>>();
+            if reduced == 4 {
+                assert_eq!(result.unwrap(), expected);
+                assert_eq!(cursor.evaluator_stats(), evaluator);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
+                ));
+                assert_eq!(cursor.state(), crate::scan_stream::ScanState::Failed);
+                assert!(cursor.next().is_none());
+            }
         }
     }
 }

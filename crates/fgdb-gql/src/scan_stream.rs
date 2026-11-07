@@ -374,7 +374,8 @@ impl<E: core::error::Error + 'static> core::error::Error for ScanError<E> {
 /// checked row projection beside the source in one box; it adds no row bag or
 /// second meter.
 pub enum ScanCursor<VS, VF, ES, EF> {
-    Vertex(VertexScanCursor<VS, VF, GraphValueRow>),
+    /// Keep physical state outside the sum, like each projected/edge variant.
+    Vertex(Box<VertexScanCursor<VS, VF, GraphValueRow>>),
     /// The cursor must be compiled from this projection's `pattern()`. A
     /// checked identity prefix preserves source order; final rows either keep
     /// that prefix or enter the accessor's required external sort tail.
@@ -384,8 +385,6 @@ pub enum ScanCursor<VS, VF, ES, EF> {
             crate::GraphSetRowPull,
         )>,
     ),
-    /// Boxed: the edge cursor's join and resumable-quantum state is twice
-    /// the vertex cursor's size (clippy::large_enum_variant).
     Edge(Box<EdgeScanCursor<ES, EF>>),
     /// The source is compiled from this pull's pattern. Its complete traversal
     /// identity prefix proves source order. Final rows either retain that

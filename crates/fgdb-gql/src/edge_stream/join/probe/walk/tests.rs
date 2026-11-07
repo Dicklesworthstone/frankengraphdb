@@ -1582,7 +1582,7 @@ fn trail_collection_admission_keeps_unproved_profiles_refused_before_reads() {
             "{mode:?}",
         );
     }
-    for profile in 0..6 {
+    for profile in 0..7 {
         let mut ops = original[..=end].to_vec();
         match profile {
             0 => {
@@ -1591,8 +1591,7 @@ fn trail_collection_admission_keeps_unproved_profiles_refused_before_reads() {
                 };
                 *bounds = GraphWalkBounds::unbounded(0).unwrap();
             }
-            // Independent fixed scopes are admitted separately; a TRAIL
-            // collection still requires a correlated root.
+            // One independent start now shares the finite-TRAIL kernel.
             1 => ops[start + 1] = GlaOperator::ScanVertices,
             2 => {
                 let GlaOperator::VarLengthExpand {
@@ -1650,10 +1649,21 @@ fn trail_collection_admission_keeps_unproved_profiles_refused_before_reads() {
                     });
                 }
             }
+            6 => {
+                // A second independent root is still an unproved product.
+                ops[start + 1] = GlaOperator::ScanVertices;
+                ops.insert(start + 2, GlaOperator::ScanVertices);
+                let GlaOperator::Collect { end, slots, .. } = &mut ops[start] else {
+                    unreachable!("the fixture starts a collection")
+                };
+                *end += 1;
+                *slots += 1;
+            }
             _ => unreachable!(),
         }
-        assert!(
-            Collection::compile(&ops, start, 2).is_err(),
+        assert_eq!(
+            Collection::compile(&ops, start, 2).is_ok(),
+            profile == 1,
             "profile {profile}"
         );
     }
@@ -1668,8 +1678,26 @@ fn trail_collection_admission_keeps_unproved_profiles_refused_before_reads() {
         GqlQueryPolicy::new(0, 0, 0, 0),
         || Ok::<_, ()>(()),
     );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Evaluator(exceeded)))
+            if exceeded.dimension == crate::GlaLimitDimension::WorkUnits
+                && exceeded.limit == 0 && exceeded.observed == 1
+    ));
+    assert_eq!(cursor.state(), EdgeScanState::Failed);
+    assert_eq!(cursor.row_stats().snapshot_records, 0);
+    let mut source = Source::small(63);
+    source.bad = Some(EId(0));
+    source.unavailable = true;
+    let mut cursor = EdgeScanCursor::new(
+        source,
+        EdgeScanPlan::compile(query.plan()).unwrap(),
+        GqlQueryPolicy::new(0, 0, 1, 0),
+        || Ok::<_, ()>(()),
+    );
     assert!(cursor.next().is_none());
     assert_eq!(cursor.row_stats().snapshot_records, 0);
+    assert_eq!(cursor.evaluator_stats().work_units, 1);
 }
 
 #[test]

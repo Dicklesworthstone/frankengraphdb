@@ -3179,9 +3179,7 @@ mod controlled_parameter_tests {
             let mut poll = || Ok::<(), Infallible>(());
             let error =
                 parameter_controlled(raw, None, &mut BindingControl::new(&mut poll)).unwrap_err();
-            let ControlledError::Invalid(error) = error else {
-                panic!("unexpected cancellation")
-            };
+            let ControlledError::Invalid(error) = error;
             assert_eq!(
                 (
                     error.code,
