@@ -129,6 +129,21 @@ fn assert_same(actual: &PreparedWrite, expected: &PreparedWrite) {
     );
     assert_eq!(actual.replay_row_allowance, expected.replay_row_allowance);
     assert_eq!(actual.basis(), expected.basis());
+    match (&actual.raw_ordered, &expected.raw_ordered) {
+        (Some(actual), Some(expected)) => {
+            assert_eq!(actual.batches, expected.batches);
+            assert_eq!(actual.visits, expected.visits);
+            assert_eq!(actual.vertices, expected.vertices);
+            assert_eq!(actual.batch_relations, expected.batch_relations);
+            assert_eq!(actual.edge_relations, expected.edge_relations);
+            assert_eq!(
+                actual.declarations.iter().collect::<Vec<_>>(),
+                expected.declarations.iter().collect::<Vec<_>>()
+            );
+        }
+        (None, None) => {}
+        _ => panic!("raw routing provenance must match complete preparation"),
+    }
 }
 
 #[test]
@@ -144,10 +159,20 @@ fn every_ordered_incremental_cut_matches_complete_native_preparation() {
             let mut previous = None;
             for suffix in raw.chunks(width) {
                 let prepared = match previous.as_ref() {
-                    Some(previous) => db
-                        .try_extend_prepared_ordered_writes(previous, &staged, suffix)
-                        .unwrap()
-                        .expect("supported relation slices must reuse the admitted prefix"),
+                    Some(previous) => {
+                        let actual = db
+                            .try_extend_prepared_ordered_writes(previous, &staged, suffix)
+                            .unwrap()
+                            .expect("supported relation slices must reuse the admitted prefix");
+                        let mut uncached = previous.clone();
+                        uncached.raw_ordered = None;
+                        let rescanned = db
+                            .try_extend_prepared_ordered_writes(&uncached, &staged, suffix)
+                            .unwrap()
+                            .unwrap();
+                        assert_same(&actual, &rescanned);
+                        actual
+                    }
                     None => db.prepare_ordered_writes(suffix.to_vec()).unwrap(),
                 };
                 staged.extend_from_slice(suffix);
@@ -604,6 +629,153 @@ fn retired_and_ensured_edge_histories_always_keep_the_full_native_path() {
                     .is_none()
             );
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn unresolved_raw_targets_are_rerouted_before_a_later_declaration_is_cached() {
+    let ((), report) = run_async_under_lab(0x6972_0109, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = seeded(&contexts.commit()).await;
+        let mut missing = WriteBatch::new(RelationId(9));
+        missing.compare_and_set_edge_property(
+            EId(900),
+            P,
+            Some(int(0)),
+            int(1),
+            WriteMismatchPolicy::NoOp,
+        );
+        let mut vertex = WriteBatch::new(RelationId(2));
+        vertex.ensure_vertex(VId(1), vec![], vec![]);
+        let prefix = [missing, vertex];
+        let previous = db.prepare_ordered_writes(prefix.to_vec()).unwrap();
+        assert!(previous.raw_ordered.is_none());
+        assert_eq!(previous.replay_row_allowance, Some(3));
+
+        // The earlier no-op now belongs to relation 1. Its raw visit still
+        // precedes the declaration; normalization cannot erase that routing.
+        let mut declaration = WriteBatch::new(RelationId(1));
+        declaration.add_edge(EId(900), VId(1), VId(2), vec![]);
+        let actual = db
+            .try_extend_prepared_ordered_writes(&previous, &prefix, &[declaration.clone()])
+            .unwrap()
+            .unwrap();
+        let raw: Vec<_> = prefix.into_iter().chain([declaration]).collect();
+        let expected = db.prepare_ordered_writes(raw.clone()).unwrap();
+        assert_same(&actual, &expected);
+        assert_eq!(actual.replay_row_allowance, Some(5));
+        let summary = actual.raw_ordered.as_ref().unwrap();
+        assert_eq!(summary.visits, 3);
+        assert_eq!(summary.vertices, 1);
+        assert_eq!(summary.declarations.get(&EId(900)), Some(&RelationId(1)));
+
+        let mut suffix = WriteBatch::new(RelationId(3));
+        suffix.set_edge_property(EId(900), P, Some(int(7)));
+        let cached = db
+            .try_extend_prepared_ordered_writes(&actual, &raw, &[suffix.clone()])
+            .unwrap()
+            .unwrap();
+        let expected = db
+            .prepare_ordered_writes(raw.into_iter().chain([suffix]).collect())
+            .unwrap();
+        assert_same(&cached, &expected);
+        assert_eq!(cached.replay_row_allowance, Some(7));
+        // Extending the persistent declarations never changes a saved prefix.
+        assert_eq!(actual.raw_ordered.as_ref().unwrap().visits, 3);
+        assert!(previous.raw_ordered.is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cached_foreign_edge_prefix_keeps_enclosing_relations_for_later_vertex_rows() {
+    let ((), report) = run_async_under_lab(0x6972_0110, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = seeded(&contexts.commit()).await;
+        let mut high = WriteBatch::new(RelationId(9));
+        high.set_edge_property(EId(10), P, Some(int(11)));
+        let mut low = WriteBatch::new(RelationId(2));
+        low.compare_and_set_edge_property(
+            EId(10),
+            P,
+            Some(int(11)),
+            int(12),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        let prefix = [high, low];
+        let previous = db.prepare_ordered_writes(prefix.to_vec()).unwrap();
+        let summary = previous.raw_ordered.as_ref().unwrap();
+        assert_eq!(
+            summary.batch_relations,
+            BTreeSet::from([RelationId(2), RelationId(9)])
+        );
+        assert_eq!(summary.edge_relations, BTreeSet::from([RelationId(7)]));
+        assert_eq!(summary.vertices, 0);
+        assert_eq!(previous.template.coordinate_entries().len(), 1);
+        assert_eq!(previous.replay_row_allowance, Some(2));
+
+        let mut suffix = WriteBatch::new(RelationId(3));
+        suffix.ensure_vertex(VId(1), vec![], vec![]);
+        let actual = db
+            .try_extend_prepared_ordered_writes(&previous, &prefix, &[suffix.clone()])
+            .unwrap()
+            .unwrap();
+        let expected = db
+            .prepare_ordered_writes(prefix.into_iter().chain([suffix]).collect())
+            .unwrap();
+        assert_same(&actual, &expected);
+        assert_eq!(actual.replay_row_allowance, Some(6));
+        assert_eq!(
+            actual
+                .template
+                .coordinate_entries()
+                .iter()
+                .map(|coordinate| coordinate.relation)
+                .collect::<Vec<_>>(),
+            vec![RelationId(2), RelationId(3), RelationId(7), RelationId(9)]
+        );
+        assert_eq!(previous.raw_ordered.as_ref().unwrap().vertices, 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn an_unresolved_suffix_discards_the_cache_until_its_owner_is_declared() {
+    let ((), report) = run_async_under_lab(0x6972_0111, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = seeded(&contexts.commit()).await;
+        let prefix: Vec<_> = program().into_iter().take(3).collect();
+        let previous = db.prepare_ordered_writes(prefix.clone()).unwrap();
+        assert!(previous.raw_ordered.is_some());
+        let mut unresolved = WriteBatch::new(RelationId(3));
+        unresolved.compare_and_set_edge_property(
+            EId(900),
+            P,
+            Some(int(1)),
+            int(2),
+            WriteMismatchPolicy::NoOp,
+        );
+        let actual = db
+            .try_extend_prepared_ordered_writes(&previous, &prefix, &[unresolved.clone()])
+            .unwrap()
+            .unwrap();
+        let raw: Vec<_> = prefix.into_iter().chain([unresolved]).collect();
+        assert_same(&actual, &db.prepare_ordered_writes(raw.clone()).unwrap());
+        assert!(actual.raw_ordered.is_none());
+        assert!(previous.raw_ordered.is_some());
+
+        let mut declaration = WriteBatch::new(RelationId(1));
+        declaration.add_edge(EId(900), VId(1), VId(2), vec![]);
+        let rerouted = db
+            .try_extend_prepared_ordered_writes(&actual, &raw, &[declaration.clone()])
+            .unwrap()
+            .unwrap();
+        let expected = db
+            .prepare_ordered_writes(raw.into_iter().chain([declaration]).collect())
+            .unwrap();
+        assert_same(&rerouted, &expected);
+        assert!(rerouted.raw_ordered.is_some());
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

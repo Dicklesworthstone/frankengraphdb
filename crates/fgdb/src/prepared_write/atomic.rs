@@ -421,6 +421,7 @@ impl<V: Vfs + Clone> Database<V> {
             dependencies,
             replay_row_allowance: None,
             raw_input: None,
+            raw_ordered: None,
             authorization_decision_digest: None,
         })
     }

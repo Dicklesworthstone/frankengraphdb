@@ -11,7 +11,8 @@
 //! vertex effects must agree exactly across slices and are published once in
 //! the least coordinate. Birth ordinals are restored to original raw visits.
 
-use super::PreparedDependencies;
+use super::{PreparedDependencies, RawOrderedSummary};
+use crate::gql_exec::source::IndexMap;
 use crate::{Database, PendingRow, PreparedWrite, WriteBatch, WriteError, WriteTxnError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, RelationId};
@@ -20,6 +21,97 @@ use fgdb_types::{CommitCx, CommitSeq, EId, MergeEvalCx};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// Ordinary preparation builds declarations once; retained ordered prefixes
+/// share immutable search paths instead of copying the entire declaration map.
+pub(super) enum EdgeOwners {
+    Flat(BTreeMap<EId, RelationId>),
+    Shared(IndexMap<EId, RelationId>),
+}
+
+impl EdgeOwners {
+    pub(super) fn get(&self, eid: &EId) -> Option<&RelationId> {
+        match self {
+            Self::Flat(owners) => owners.get(eid),
+            Self::Shared(owners) => owners.get(eid),
+        }
+    }
+
+    pub(super) fn into_shared(self) -> Option<IndexMap<EId, RelationId>> {
+        match self {
+            Self::Shared(owners) => Some(owners),
+            Self::Flat(owners) if owners.len() <= u32::MAX as usize => {
+                Some(IndexMap::from_sorted(owners.into_iter().collect(), &mut 0))
+            }
+            Self::Flat(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DeclarationConflict<K, R> {
+    identity: K,
+    first: R,
+    second: R,
+}
+
+/// Admit only incoming declarations while sharing every unchanged search path.
+/// The supplied basis lookup is the same one used by complete preparation.
+fn extend_shared_declarations<K: Ord + Clone, R: Copy + Eq>(
+    previous: &IndexMap<K, R>,
+    declarations: impl IntoIterator<Item = (K, R)>,
+    mut live_owner: impl FnMut(&K) -> Option<R>,
+) -> Result<Option<IndexMap<K, R>>, DeclarationConflict<K, R>> {
+    let mut owners = previous.clone();
+    for (identity, relation) in declarations {
+        let known = live_owner(&identity);
+        let retained = owners.get(&identity).copied();
+        let owner = retained.or(known).unwrap_or(relation);
+        if owner != relation {
+            return Err(DeclarationConflict {
+                identity,
+                first: owner,
+                second: relation,
+            });
+        }
+        if retained.is_none() {
+            // The AVL's compact length is a representation bound, not a new
+            // transaction limit. Request the unchanged complete preparation.
+            if owners.len() == u32::MAX as usize {
+                return Ok(None);
+            }
+            owners = owners.insert(identity, owner, &mut 0);
+        }
+    }
+    Ok(Some(owners))
+}
+
+impl RawOrderedSummary {
+    /// Admit declarations before routing any suffix row, exactly as the full
+    /// ordered path does. Earlier raw targets were resolved at this same basis;
+    /// only new declarations can introduce an ownership conflict.
+    pub(super) fn extend_declarations(
+        &self,
+        writer: &BlockWriter,
+        batches: &[WriteBatch],
+    ) -> Result<Option<EdgeOwners>, WriteTxnError> {
+        let declarations = batches.iter().flat_map(|batch| {
+            batch.rows.iter().filter_map(move |pending| match pending {
+                PendingRow::Edge { eid, .. } => Some((*eid, batch.relation)),
+                _ => None,
+            })
+        });
+        extend_shared_declarations(&self.declarations, declarations, |eid| {
+            writer.live_edge(*eid).map(|(_, relation, _, _)| relation)
+        })
+        .map(|owners| owners.map(EdgeOwners::Shared))
+        .map_err(|conflict| WriteTxnError::AtomicRelationConflict {
+            first: conflict.first,
+            second: conflict.second,
+            element: ElementId::Edge(conflict.identity),
+        })
+    }
+}
+
 /// Fixed edge ownership, including declarations whose effects later cancel.
 /// A request identity cannot be declared under two relation types in one
 /// ordered program. Reject even ambiguous ENSURE declarations: their requested
@@ -27,7 +119,7 @@ use std::sync::Arc;
 pub(super) fn edge_owners<'a>(
     writer: &BlockWriter,
     batches: impl IntoIterator<Item = &'a WriteBatch>,
-) -> Result<BTreeMap<EId, RelationId>, WriteTxnError> {
+) -> Result<EdgeOwners, WriteTxnError> {
     let mut owners = BTreeMap::new();
     for batch in batches {
         for pending in &batch.rows {
@@ -46,7 +138,7 @@ pub(super) fn edge_owners<'a>(
             }
         }
     }
-    Ok(owners)
+    Ok(EdgeOwners::Flat(owners))
 }
 
 /// Only edge creation takes its type from the enclosing batch. Existing edge
@@ -54,12 +146,24 @@ pub(super) fn edge_owners<'a>(
 /// move it to that batch's relation or lose its earlier same-program writes.
 pub(super) fn route(
     writer: &BlockWriter,
-    declarations: &BTreeMap<EId, RelationId>,
+    declarations: &EdgeOwners,
     relation: RelationId,
     pending: &PendingRow,
 ) -> Option<RelationId> {
+    route_resolved(writer, declarations, relation, pending).0
+}
+
+/// The boolean distinguishes a stable identity owner from the enclosing
+/// relation fallback. A later edge declaration can reroute the latter, even
+/// when its original instruction was a conditional no-op.
+pub(super) fn route_resolved(
+    writer: &BlockWriter,
+    declarations: &EdgeOwners,
+    relation: RelationId,
+    pending: &PendingRow,
+) -> (Option<RelationId>, bool) {
     let eid = match pending {
-        PendingRow::Edge { .. } => return Some(relation),
+        PendingRow::Edge { .. } => return (Some(relation), true),
         PendingRow::DeleteEdge { eid, .. } | PendingRow::SetEdgeProperty { eid, .. } => *eid,
         PendingRow::CompareAndSet {
             elem: ElementId::Edge(eid),
@@ -72,15 +176,15 @@ pub(super) fn route(
         | PendingRow::CompareAndSet {
             elem: ElementId::Vertex(_),
             ..
-        } => return None,
+        } => return (None, true),
     };
-    declarations
+    let owner = declarations
         .get(&eid)
         .copied()
-        .or_else(|| writer.live_edge(eid).map(|(_, relation, _, _)| relation))
-        // Missing targets stay in a real slice, where the existing evaluator
-        // distinguishes an optional no-op from UnknownEdge or a failed guard.
-        .or(Some(relation))
+        .or_else(|| writer.live_edge(eid).map(|(_, relation, _, _)| relation));
+    // Missing targets stay in a real slice, where the existing evaluator
+    // distinguishes an optional no-op from UnknownEdge or a failed guard.
+    (Some(owner.unwrap_or(relation)), owner.is_some())
 }
 
 pub(super) fn vertex_effect(row: &DeltaRow) -> Result<bool, WriteTxnError> {
@@ -167,17 +271,27 @@ impl<V: Vfs + Clone> Database<V> {
         }
         let declarations = edge_owners(&self.writer, &batches)?;
         let mut relations = BTreeSet::new();
+        let mut batch_relations = BTreeSet::new();
+        let mut edge_relations = BTreeSet::new();
         let mut routed = Vec::new();
         let mut ordinal = 0_u64;
+        let mut vertices = 0_u64;
+        let mut stable_routing = true;
         for batch in &batches {
             relations.insert(batch.relation);
+            batch_relations.insert(batch.relation);
             for pending in &batch.rows {
                 ordinal = ordinal
                     .checked_add(1)
                     .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
-                let target = route(&self.writer, &declarations, batch.relation, pending);
+                let (target, resolved) =
+                    route_resolved(&self.writer, &declarations, batch.relation, pending);
+                stable_routing &= resolved && super::incremental::supported(pending);
                 if let Some(relation) = target {
                     relations.insert(relation);
+                    edge_relations.insert(relation);
+                } else {
+                    vertices += 1;
                 }
                 routed.push((ordinal, target, pending));
             }
@@ -262,6 +376,20 @@ impl<V: Vfs + Clone> Database<V> {
             coordinates.into_values().collect(),
         )
         .map_err(WriteError::Canonical)?;
+        let raw_ordered = if stable_routing {
+            declarations
+                .into_shared()
+                .map(|declarations| RawOrderedSummary {
+                    batches: batches.len(),
+                    visits: ordinal,
+                    vertices,
+                    batch_relations,
+                    edge_relations,
+                    declarations,
+                })
+        } else {
+            None
+        };
         Ok(PreparedWrite {
             template,
             basis: self.snapshot.frontier,
@@ -269,6 +397,7 @@ impl<V: Vfs + Clone> Database<V> {
             dependencies,
             replay_row_allowance,
             raw_input: None,
+            raw_ordered,
             authorization_decision_digest: None,
         })
     }
@@ -365,6 +494,59 @@ impl<V: Vfs + Clone> Database<V> {
         }
         let expanded_rows = input_rows - vertex_rows + vertex_rows * relations.len() as u128;
         admit_expanded_rows(Some(max_expanded_rows), expanded_rows)
+    }
+
+    /// Reuse exact raw-prefix counts and stable identity routing for bounded
+    /// transaction admission. False requests the unchanged complete preflight.
+    /// The raw-row limit still precedes ownership lookups and expansion checks.
+    pub(crate) fn admit_cached_ordered_write_suffix(
+        &self,
+        previous: &PreparedWrite,
+        staged_batches: usize,
+        suffix: &[WriteBatch],
+        max_expanded_rows: u64,
+    ) -> Result<bool, WriteTxnError> {
+        let Some(summary) = previous
+            .raw_ordered
+            .as_ref()
+            .filter(|summary| summary.batches == staged_batches)
+        else {
+            return Ok(false);
+        };
+        if !Arc::ptr_eq(&self.handle_owner, &previous.handle_owner)
+            || previous.basis != self.snapshot.frontier
+        {
+            return Ok(false);
+        }
+        if suffix.is_empty() || suffix.iter().any(WriteBatch::is_empty) {
+            return Err(WriteError::EmptyBatch.into());
+        }
+        let input_rows = u128::from(summary.visits)
+            + suffix
+                .iter()
+                .map(|batch| batch.rows.len() as u128)
+                .sum::<u128>();
+        admit_expanded_rows(Some(max_expanded_rows), input_rows)?;
+        let Some(declarations) = summary.extend_declarations(&self.writer, suffix)? else {
+            return Ok(false);
+        };
+        let mut relations = summary.batch_relations.clone();
+        relations.extend(&summary.edge_relations);
+        let mut vertices = u128::from(summary.vertices);
+        for batch in suffix {
+            relations.insert(batch.relation);
+            for pending in &batch.rows {
+                match route(&self.writer, &declarations, batch.relation, pending) {
+                    Some(relation) => {
+                        relations.insert(relation);
+                    }
+                    None => vertices += 1,
+                }
+            }
+        }
+        let expanded_rows = input_rows - vertices + vertices * relations.len() as u128;
+        admit_expanded_rows(Some(max_expanded_rows), expanded_rows)?;
+        Ok(true)
     }
 
     /// Publish a dependent ordered program as ONE commit. Preparation never
@@ -704,5 +886,133 @@ mod budget_tests {
         ));
         assert!(admit_expanded_rows(None, required).is_ok());
         assert!(admit_expanded_rows(Some(0), 0).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod routing_declaration_tests {
+    use super::{DeclarationConflict, IndexMap, extend_shared_declarations};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn persistent_declarations_match_complete_source_order_at_every_cut() {
+        let input = [
+            (10, 7),
+            (50, 9),
+            (60, 2),
+            (50, 9),
+            (70, 4),
+            (10, 7),
+            (80, 2),
+        ];
+        for width in [1, 2, 3, 5] {
+            let mut retained = IndexMap::from_sorted(Vec::new(), &mut 0);
+            let mut complete = BTreeMap::new();
+            for suffix in input.chunks(width) {
+                let next = extend_shared_declarations(&retained, suffix.iter().copied(), |id| {
+                    (*id == 10).then_some(7)
+                })
+                .unwrap()
+                .unwrap();
+                for &(identity, relation) in suffix {
+                    let owner = complete.entry(identity).or_insert(if identity == 10 {
+                        7
+                    } else {
+                        relation
+                    });
+                    assert_eq!(*owner, relation);
+                }
+                assert_eq!(
+                    next.iter()
+                        .map(|(&id, &owner)| (id, owner))
+                        .collect::<Vec<_>>(),
+                    complete
+                        .iter()
+                        .map(|(&id, &owner)| (id, owner))
+                        .collect::<Vec<_>>()
+                );
+                for (identity, owner) in retained.iter() {
+                    assert_eq!(next.get(identity), Some(owner));
+                }
+                retained = next;
+            }
+        }
+    }
+
+    #[test]
+    fn declaration_conflicts_preserve_first_source_error_and_pinned_prefix() {
+        let retained = IndexMap::from_sorted(vec![(10, 7), (50, 9)], &mut 0);
+        for (suffix, expected) in [
+            (
+                vec![(70, 4), (50, 2), (10, 3)],
+                DeclarationConflict {
+                    identity: 50,
+                    first: 9,
+                    second: 2,
+                },
+            ),
+            (
+                vec![(40, 2), (50, 2)],
+                DeclarationConflict {
+                    identity: 40,
+                    first: 1,
+                    second: 2,
+                },
+            ),
+            (
+                vec![(80, 5), (80, 6), (50, 2)],
+                DeclarationConflict {
+                    identity: 80,
+                    first: 5,
+                    second: 6,
+                },
+            ),
+        ] {
+            let error = extend_shared_declarations(&retained, suffix, |identity| {
+                (*identity == 40).then_some(1)
+            })
+            .unwrap_err();
+            assert_eq!(error, expected);
+            assert_eq!(
+                retained
+                    .iter()
+                    .map(|(&id, &owner)| (id, owner))
+                    .collect::<Vec<_>>(),
+                vec![(10, 7), (50, 9)]
+            );
+        }
+    }
+
+    #[test]
+    fn basis_lookups_visit_only_suffix_declarations() {
+        let retained = IndexMap::from_sorted((0..10_000).map(|id| (id, id % 5)).collect(), &mut 0);
+        let mut visited = Vec::new();
+        let updated =
+            extend_shared_declarations(&retained, [(20_000, 8), (2, 2), (20_000, 8)], |id| {
+                visited.push(*id);
+                None
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(visited, vec![20_000, 2, 20_000]);
+        assert_eq!(updated.len(), 10_001);
+        assert_eq!(updated.get(&20_000), Some(&8));
+        assert_eq!(updated.get(&2), Some(&2));
+        assert_eq!(retained.len(), 10_000);
+        assert_eq!(retained.get(&20_000), None);
+    }
+
+    #[test]
+    fn empty_declaration_suffix_does_not_look_up_or_replace_existing_owners() {
+        let retained = IndexMap::from_sorted(vec![(10, 7), (50, 9)], &mut 0);
+        let unchanged = extend_shared_declarations(&retained, [], |_| {
+            panic!("an empty suffix has no live-owner lookups")
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            unchanged.iter().collect::<Vec<_>>(),
+            retained.iter().collect::<Vec<_>>()
+        );
     }
 }

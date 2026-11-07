@@ -5,7 +5,8 @@
 //! unrelated admitted identities never enter another evaluator input.
 
 use super::{seed_row, supported, target};
-use crate::prepared_write::ordered::{edge_owners, restore_ordinal, route, vertex_effect};
+use crate::prepared_write::RawOrderedSummary;
+use crate::prepared_write::ordered::{edge_owners, restore_ordinal, route_resolved, vertex_effect};
 use crate::{
     CoordinateEntry, Database, DeltaRow, ElementId, LogicalDeltaTemplate, PendingRow,
     PreparedWrite, RelationId, Vfs, WriteBatch, WriteError, WriteTxnError,
@@ -29,7 +30,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// error precedence: a lower slice's CAS may refuse before a higher slice
     /// admits an invalid edge value. No slice is invented from normalized rows.
     /// Unchanged coordinates retain their checked canonical rows and merge only
-    /// new effects. Raw-prefix routing and owned row copying remain prefix-sized.
+    /// new effects. Stable raw routing is retained with the admitted prefix;
+    /// unresolved identity targets keep the complete routing pass. Owned row
+    /// copying and canonical ownership checks remain prefix-sized.
     pub(crate) fn try_extend_prepared_ordered_writes(
         &mut self,
         previous: &PreparedWrite,
@@ -40,18 +43,24 @@ impl<V: Vfs + Clone> Database<V> {
         if !Arc::ptr_eq(&self.handle_owner, &previous.handle_owner) {
             return Err(WriteError::ForeignPreparedWrite.into());
         }
+        let cached = previous
+            .raw_ordered
+            .as_ref()
+            .filter(|summary| summary.batches == staged.len());
         if previous.basis != self.snapshot.frontier
             || staged.is_empty()
             || suffix.is_empty()
-            || staged.iter().chain(suffix).any(WriteBatch::is_empty)
+            || suffix.iter().any(WriteBatch::is_empty)
+            || (cached.is_none() && staged.iter().any(WriteBatch::is_empty))
         {
             return Ok(None);
         }
         let first = staged[0].relation;
-        if staged
-            .iter()
-            .chain(suffix)
-            .all(|batch| batch.relation == first)
+        if cached.is_none()
+            && staged
+                .iter()
+                .chain(suffix)
+                .all(|batch| batch.relation == first)
         {
             // Ordered preparation deliberately preserves the one-relation
             // evaluator's identity-addressed foreign-edge behavior verbatim.
@@ -69,38 +78,57 @@ impl<V: Vfs + Clone> Database<V> {
                     || coordinate.schema_epoch != crate::SchemaEpoch(0)
                     || coordinate.schema_transition.is_some()
             })
-            || staged
+            || suffix
                 .iter()
-                .chain(suffix)
                 .flat_map(|batch| &batch.rows)
                 .any(|row| !supported(row))
+            || (cached.is_none()
+                && staged
+                    .iter()
+                    .flat_map(|batch| &batch.rows)
+                    .any(|row| !supported(row)))
         {
             return Ok(None);
         }
 
         // Ownership admission must precede value/identity evaluation, including
         // when a repeated EId's two declarations have different relation types.
-        let declarations = edge_owners(&self.writer, staged.iter().chain(suffix))?;
-        let mut relations = BTreeSet::new();
-        let mut edge_relations = BTreeSet::new();
+        let declarations = match cached {
+            Some(summary) => {
+                let Some(declarations) = summary.extend_declarations(&self.writer, suffix)? else {
+                    return Ok(None);
+                };
+                declarations
+            }
+            None => edge_owners(&self.writer, staged.iter().chain(suffix))?,
+        };
+        let mut batch_relations = cached
+            .map(|summary| summary.batch_relations.clone())
+            .unwrap_or_default();
+        let mut edge_relations = cached
+            .map(|summary| summary.edge_relations.clone())
+            .unwrap_or_default();
         let mut routed_suffix = Vec::new();
-        let mut visits = 0_u64;
-        let mut vertices = 0_u64;
-        let mut prefix_visits = 0_u64;
-        let mut prefix_vertices = 0_u64;
-        for (is_suffix, batch) in staged
+        let mut visits = cached.map_or(0, |summary| summary.visits);
+        let mut vertices = cached.map_or(0, |summary| summary.vertices);
+        let mut prefix_visits = visits;
+        let mut prefix_vertices = vertices;
+        let mut stable_routing = true;
+        let raw_prefix = if cached.is_some() { &[][..] } else { staged };
+        for (is_suffix, batch) in raw_prefix
             .iter()
             .map(|batch| (false, batch))
             .chain(suffix.iter().map(|batch| (true, batch)))
         {
-            relations.insert(batch.relation);
+            batch_relations.insert(batch.relation);
             for pending in &batch.rows {
                 visits = visits
                     .checked_add(1)
                     .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
-                let owner = route(&self.writer, &declarations, batch.relation, pending);
+                let (owner, resolved) =
+                    route_resolved(&self.writer, &declarations, batch.relation, pending);
+                stable_routing &= resolved;
                 if let Some(relation) = owner {
-                    relations.insert(relation);
                     edge_relations.insert(relation);
                 } else {
                     vertices += 1;
@@ -114,10 +142,11 @@ impl<V: Vfs + Clone> Database<V> {
                 prefix_vertices = vertices;
             }
         }
-        if vertices == 0 {
-            // As in full ordered preparation, an enclosing batch relation with
-            // only foreign identity-addressed edge instructions has no slice.
-            relations = edge_relations;
+        // With no vertex instructions, a batch containing only foreign edge
+        // mutations still has no slice in its enclosing relation.
+        let mut relations = edge_relations.clone();
+        if vertices != 0 {
+            relations.extend(&batch_relations);
         }
 
         let mut needed = BTreeSet::new();
@@ -333,6 +362,22 @@ impl<V: Vfs + Clone> Database<V> {
             )
             .map_err(WriteError::Canonical)?
         };
+        let raw_ordered = if stable_routing {
+            staged.len().checked_add(suffix.len()).and_then(|batches| {
+                declarations
+                    .into_shared()
+                    .map(|declarations| RawOrderedSummary {
+                        batches,
+                        visits,
+                        vertices,
+                        batch_relations,
+                        edge_relations,
+                        declarations,
+                    })
+            })
+        } else {
+            None
+        };
         Ok(Some(PreparedWrite {
             template,
             basis: previous.basis,
@@ -340,6 +385,7 @@ impl<V: Vfs + Clone> Database<V> {
             dependencies,
             replay_row_allowance,
             raw_input: None,
+            raw_ordered,
             authorization_decision_digest: previous.authorization_decision_digest,
         }))
     }
