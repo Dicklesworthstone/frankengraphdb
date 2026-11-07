@@ -86,6 +86,19 @@ impl VertexAggregatePlan {
         }
         let (aggregate, pipeline) = InputPipeline::prepare_expanding(aggregate)
             .ok_or(VertexAggregateBuildError::RequiresPlainGlobalAggregate)?;
+        // This reducer projects directly from the root record. Its input
+        // contract does not carry the per-row lists produced by GLA Collect.
+        if let Some(operator) = aggregate
+            .input_pattern()
+            .plan()
+            .operators()
+            .iter()
+            .position(|operator| matches!(operator, GlaOperator::Collect { .. }))
+        {
+            return Err(VertexAggregateBuildError::Scan(VertexScanBuildError {
+                operator,
+            }));
+        }
         let collects = aggregate
             .aggregates()
             .iter()
@@ -370,7 +383,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                         )
                         .map_err(lift)?
                 };
-                if !accepted {
+                if accepted.is_none() {
                     continue;
                 }
                 // Computed and relational inputs own one source projection.
@@ -610,7 +623,7 @@ fn project_input_row<Row: VertexScanOutput, E: From<crate::GraphIntegerError>>(
     projection: &GlaOperator,
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
 ) -> Result<Row, E> {
-    Row::project(vid, row, projection, control)
+    Row::project(vid, row, projection, &[], control)
 }
 
 pub(super) fn input_event(event: GlaExecutionEvent) -> VertexScanEvent {

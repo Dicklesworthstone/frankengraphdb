@@ -375,8 +375,9 @@ impl<E: core::error::Error + 'static> core::error::Error for ScanError<E> {
 /// second meter.
 pub enum ScanCursor<VS, VF, ES, EF> {
     Vertex(VertexScanCursor<VS, VF, GraphValueRow>),
-    /// The cursor must be compiled from this projection's `pattern()`. The
-    /// checked leading identity preserves canonical output order and uniqueness.
+    /// The cursor must be compiled from this projection's `pattern()`. A
+    /// checked identity prefix preserves source order; final rows either keep
+    /// that prefix or enter the accessor's required external sort tail.
     ProjectedVertex(
         Box<(
             VertexScanCursor<VS, VF, GraphValueRow>,
@@ -387,7 +388,8 @@ pub enum ScanCursor<VS, VF, ES, EF> {
     /// the vertex cursor's size (clippy::large_enum_variant).
     Edge(Box<EdgeScanCursor<ES, EF>>),
     /// The source is compiled from this pull's pattern. Its complete traversal
-    /// identity prefix also leads the checked final relational projection.
+    /// identity prefix proves source order. Final rows either retain that
+    /// prefix or remain private until the required external sort completes.
     ProjectedEdge(Box<(EdgeScanCursor<ES, EF>, crate::GraphSetRowPull)>),
 }
 impl<VS, VF, ES, EF> ScanCursor<VS, VF, ES, EF>

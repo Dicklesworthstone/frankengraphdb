@@ -1,7 +1,7 @@
 // A projection of the admitted historical winner and the prepared NET effects.
 // This does not interpret PendingRow, expose metadata, or own a second overlay.
 
-mod point_effect_selector {
+pub(crate) mod point_effect_selector {
     include!("point_effect_selector.rs");
 }
 

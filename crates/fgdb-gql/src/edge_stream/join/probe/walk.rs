@@ -1,4 +1,4 @@
-//! Endpoint-support specialization of an uncaptured VarLengthExpand.
+//! Indexed endpoint traversal for an uncaptured VarLengthExpand.
 //!
 //! Inside EXISTS, multiplicity and chosen route are unobservable. ALL,
 //! ALL SHORTEST and ANY SHORTEST have the same endpoint support: shortest is
@@ -11,7 +11,10 @@
 //! dominance. They use iterative backtracking and can take exponential work.
 //! Support coalescing never changes these laws. All sets, frames, index reads,
 //! and endpoint deliveries share the outer query's control and record meter.
-//! This is not a captured-path selector, graph store, spill or byte-memory bound.
+//! A finite single-atom TRAIL collection uses the same active-edge traversal
+//! but emits every route occurrence, without allocating endpoint support.
+//! A collection capture snapshots that exact live route only when requested.
+//! This is not a graph store, spill or byte-memory bound.
 
 use super::*;
 use std::collections::BTreeSet;
@@ -23,10 +26,17 @@ struct Frame {
     offered: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Emission {
+    Support,
+    TrailOccurrences,
+}
+
 pub(super) struct Endpoints {
     start: VId,
     bounds: GraphWalkBounds,
     search: GraphWalkSearch,
+    emission: Emission,
     stack: Vec<Frame>,
     visited: BTreeSet<(usize, VId)>,
     emitted: BTreeSet<VId>,
@@ -47,6 +57,69 @@ impl Endpoints {
         Self::from_admitted_start(start, bounds, search, control)
     }
 
+    /// Collection admission proves one finite TRAIL atom.
+    /// Retain its path-local edge membership but never settle an endpoint: two
+    /// routes to the same vertex contribute two list elements, in DFS order.
+    pub(super) fn trail_occurrences<S: EdgeScanSource, C>(
+        start: VId,
+        bounds: GraphWalkBounds,
+        source: &S,
+        control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
+    ) -> ScanResult<Self, S::Error, C> {
+        debug_assert!(bounds.is_bounded());
+        let mut cursor = Self::new(start, bounds, GraphWalkSearch::Trail, source, control)?;
+        cursor.emission = Emission::TrailOccurrences;
+        Ok(cursor)
+    }
+
+    /// Own the currently offered occurrence without resolving any edge again.
+    /// A normalized expansion may run opposite the declared capture. Reverse
+    /// its retained EIds and vertices in that case, matching eager capture's
+    /// forward preference when both ends coincide. The root frame alone is a
+    /// visible zero-hop path; it never contributes a relationship identity.
+    pub(super) fn capture<E, C>(
+        &self,
+        start: VId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), E, C>,
+    ) -> ScanResult<GraphPath, E, C> {
+        debug_assert_eq!(self.emission, Emission::TrailOccurrences);
+        debug_assert!(self.bounds.is_bounded());
+        let Some(last) = self.stack.last() else {
+            return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
+        };
+        let forward = self.start == start;
+        if !forward && last.vertex != start {
+            return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
+        }
+        debug_assert!(last.offered);
+        let count = self.stack.len() - 1;
+        control(GlaExecutionEvent::Work)?;
+        control(GlaExecutionEvent::ScratchEntry)?;
+        for _ in 0..count {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        // Admit the complete payload before reserving its storage, then check
+        // cancellation while copying each frame. Uncaptured lists pay neither
+        // these events nor a path allocation.
+        let mut steps = Vec::with_capacity(count);
+        for index in 0..count {
+            control(GlaExecutionEvent::Work)?;
+            let at = if forward { index + 1 } else { count - index };
+            let frame = &self.stack[at];
+            let eid = frame
+                .incoming
+                .ok_or_else(|| GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable))?;
+            let target = if forward {
+                frame.vertex
+            } else {
+                self.stack[at - 1].vertex
+            };
+            steps.push((eid, target));
+        }
+        Ok(GraphPath::new(start, steps.into_boxed_slice()))
+    }
+
     /// The async owner proves this vertex from an already admitted binding
     /// record. Keep initialization and mode history identical to the ordinary
     /// cursor; this method never establishes visibility by itself.
@@ -60,6 +133,7 @@ impl Endpoints {
             start,
             bounds,
             search,
+            emission: Emission::Support,
             stack: Vec::new(),
             visited: BTreeSet::new(),
             emitted: BTreeSet::new(),
@@ -163,9 +237,14 @@ impl Endpoints {
             let from = frame.vertex;
             if !frame.offered {
                 frame.offered = true;
-                if depth >= self.bounds.minimum() as usize && !self.emitted.contains(&from) {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    self.emitted.insert(from);
+                if depth >= self.bounds.minimum() as usize
+                    && (self.emission == Emission::TrailOccurrences
+                        || !self.emitted.contains(&from))
+                {
+                    if self.emission == Emission::Support {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        self.emitted.insert(from);
+                    }
                     return Ok(Some(from));
                 }
             }

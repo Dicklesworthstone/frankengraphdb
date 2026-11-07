@@ -37,6 +37,415 @@ fn scalar_frames(values: &[Option<i64>]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+const ROOT_ZERO_PAIRS: &[(i64, Option<i64>)] = &[(3, Some(2)), (3, Some(1))];
+const ROOT_ONE_PAIRS: &[(i64, Option<i64>)] = &[(3, Some(3)), (-3, None), (-3, None)];
+
+fn collection_frame(prefix: GraphValue, pairs: &[(i64, Option<i64>)]) -> Vec<u8> {
+    let pairs = pairs
+        .iter()
+        .map(|&(vertex, edge)| {
+            GraphValue::List(
+                vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(vertex)),
+                    GraphValue::Scalar(edge.map_or(CanonicalScalar::Null, CanonicalScalar::Int)),
+                ]
+                .into_boxed_slice(),
+            )
+        })
+        .collect();
+    GraphValueRow::from_owned_values(vec![prefix, GraphValue::List(pairs)])
+        .canonical_bytes()
+        .unwrap()
+}
+
+#[test]
+fn computed_graph_collections_spill_before_order_distinct_and_final_pages() {
+    let ((), report) = run_async_under_lab(0xe50a_0010, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = multigraph(&c.commit()).await;
+        let view = db.read_session().unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let params = GqlParameters::new();
+        // The two parallel 0->1 edges and the two 1->2 edges retain their
+        // occurrence multiplicity. The self-loop has one undirected
+        // orientation. These literal class counts do not use an executor.
+        for (head, prefix, anchor, kind, width, counts) in [
+            ("MATCH (a)", "size([a])", "a", ScanKind::Vertex, 1, [1, 1, 6]),
+            (
+                "MATCH (a)-[r:R]->(b)",
+                "size([r,a])",
+                "b",
+                ScanKind::Edge,
+                2,
+                [3, 0, 2],
+            ),
+            (
+                "MATCH (a)<-[r:R]-(b)",
+                "size([r,a])",
+                "b",
+                ScanKind::Edge,
+                2,
+                [3, 2, 0],
+            ),
+            (
+                "MATCH (a)-[r:R]-(b)",
+                "size([r,a])",
+                "b",
+                ScanKind::Edge,
+                2,
+                [5, 2, 2],
+            ),
+        ] {
+            let inputs = counts.iter().sum::<usize>();
+            let mut complete_records = None;
+            for distinct in [false, true] {
+                let mut all = Vec::new();
+                for (pairs, count) in [ROOT_ONE_PAIRS, ROOT_ZERO_PAIRS, &[]]
+                    .into_iter()
+                    .zip(counts)
+                {
+                    for _ in 0..if distinct { count.min(1) } else { count } {
+                        all.push(collection_frame(
+                            GraphValue::Scalar(CanonicalScalar::Int(width)),
+                            pairs,
+                        ));
+                    }
+                }
+                for (page, offset, limit) in [
+                    ("", 0, usize::MAX),
+                    (" SKIP 1 LIMIT 2", 1, 2),
+                    (" LIMIT 0", 0, 0),
+                    (" SKIP 64", 64, usize::MAX),
+                ] {
+                    let text = format!(
+                        "{head} RETURN {}{prefix} AS width, [({anchor})-[s:R]->(c) | [c.p,s.p]] AS neighbors ORDER BY neighbors DESC{page}",
+                        if distinct { "DISTINCT " } else { "" },
+                    );
+                    let prepared = plan(&text);
+                    let PreparedNativeRead::Set(template) = &prepared else {
+                        panic!("computed collection relation: {text}");
+                    };
+                    let bound = template.bind_parameters(&params).unwrap();
+                    assert!(bound.ordered_graph_row_pull().is_some(), "{text}");
+                    assert!(bound.ordered_row_pull().is_none(), "{text}");
+                    let wanted: Vec<_> = all.iter().skip(offset).take(limit).cloned().collect();
+                    let eager: Vec<_> = view
+                        .execute_graph_set_governed_at(&cx, &bound, view.frontier(), policy())
+                        .unwrap()
+                        .value
+                        .into_iter()
+                        .map(|row| row.canonical_bytes().unwrap())
+                        .collect();
+                    assert_eq!(eager, wanted, "eager oracle: {text}");
+                    let mut allowance = policy();
+                    allowance.rows = GqlExecutionBudget::new(1000, wanted.len() as u64);
+                    let (mut scratch, _) = file(&cx, &pool).await;
+                    let (mut destination, _) = file(&cx, &pool).await;
+                    let (mut auxiliary, _) = file(&cx, &pool).await;
+                    let (spool, _) = prepared
+                        .spool_ordered(
+                            &db,
+                            &cx,
+                            &params,
+                            allowance,
+                            &mut scratch,
+                            &mut destination,
+                            &mut auxiliary,
+                            8,
+                            128,
+                            1,
+                            32,
+                            127,
+                            4096,
+                            inputs as u64,
+                            1_000_000,
+                        )
+                        .await
+                        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                    assert_eq!(spool.kind(), kind);
+                    assert_eq!(spool.columns(), &["width", "neighbors"]);
+                    assert_eq!(spool.row_count(), wanted.len() as u64);
+                    assert_eq!(spool.snapshot_seq(), view.frontier());
+                    assert_eq!(spool.row_stats().result_rows, wanted.len() as u64);
+                    let records = spool.row_stats().snapshot_records;
+                    assert!(records > inputs as u64);
+                    assert_eq!(*complete_records.get_or_insert(records), records, "{text}");
+                    assert_eq!(contents(&spool, &mut destination, &cx).await, wanted, "{text}");
+                    assert_eq!(pool.used(), 0);
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn ordered_computed_collections_pin_their_graph_and_dynamic_properties_before_await() {
+    let ((), report) = run_async_under_lab(0xe50a_0011, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = multigraph(&c.commit()).await;
+        let at = db.read_session().unwrap().frontier();
+        let weak = Arc::downgrade(&db.snapshot);
+        let body = "RETURN a, [(a)-[s:R]->(b) | [b.p,s.p]] AS neighbors ORDER BY neighbors DESC, a DESC LIMIT 3";
+        let prepared = plan(&format!("MATCH (a) {body}"));
+        let params = GqlParameters::new();
+        let wanted = vec![
+            collection_frame(GraphValue::Vertex(VId(1)), ROOT_ONE_PAIRS),
+            collection_frame(GraphValue::Vertex(VId(0)), ROOT_ZERO_PAIRS),
+            collection_frame(GraphValue::Vertex(VId(7)), &[]),
+        ];
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let (mut scratch, _) = file(&cx, &pool).await;
+        let (mut destination, _) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
+        let future = prepared.spool_ordered(
+            &db,
+            &cx,
+            &params,
+            policy(),
+            &mut scratch,
+            &mut destination,
+            &mut auxiliary,
+            8,
+            128,
+            1,
+            16,
+            127,
+            4096,
+            8,
+            1_000_000,
+        );
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(999)));
+        change.set_edge_property(EId(0), PropertyKeyId(1), Some(CanonicalScalar::Int(777)));
+        change.delete_edge(EId(4));
+        db.write(&c.commit(), change).await.unwrap();
+        let newest = db.read_session().unwrap();
+        drop(db);
+        drop(prepared);
+        drop(params);
+        let (spool, _) = future.await.unwrap();
+        assert!(weak.upgrade().is_none());
+        assert_eq!(spool.snapshot_seq(), at);
+        assert_eq!(contents(&spool, &mut destination, &cx).await, wanted);
+        let historical = plan(&format!("MATCH (a) FOR SYSTEM_TIME AS OF SEQ {} {body}", at.0));
+        let (spool, _) = historical
+            .spool_ordered_in_view(
+                &newest,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut scratch,
+                &mut destination,
+                &mut auxiliary,
+                8,
+                128,
+                1,
+                16,
+                127,
+                4096,
+                8,
+                1_000_000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(spool.snapshot_seq(), at);
+        assert_eq!(contents(&spool, &mut destination, &cx).await, wanted);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn ordered_computed_collection_failures_keep_eager_ordinals_even_for_empty_pages() {
+    let ((), report) = run_async_under_lab(0xe50a_0012, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = multigraph(&c.commit()).await;
+        let view = db.read_session().unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        for (head, prefix, row, column) in [
+            ("MATCH (a)", "a", 1, 1),
+            ("MATCH (a)-[r:R]->(b)", "r,a", 2, 2),
+        ] {
+            for limit in [0, 1] {
+                let text = format!(
+                    "{head} RETURN {prefix}, [(a)-[s:R]->(c) | 1/(c.p+3)] AS values ORDER BY values DESC LIMIT {limit}"
+                );
+                let prepared = plan(&text);
+                let PreparedNativeRead::Set(template) = &prepared else {
+                    panic!("computed collection relation");
+                };
+                let params = GqlParameters::new();
+                let eager = view
+                    .execute_graph_set_governed_at(
+                        &cx,
+                        &template.bind_parameters(&params).unwrap(),
+                        view.frontier(),
+                        policy(),
+                    )
+                    .unwrap_err();
+                assert!(matches!(
+                    &eager,
+                    GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Projection {
+                        row: actual_row,
+                        column: actual_column,
+                        error,
+                    }) if *actual_row == row && *actual_column == column
+                        && error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+                ), "{text}: {eager:?}");
+                let (mut scratch, _) = file(&cx, &pool).await;
+                let (mut destination, _) = file(&cx, &pool).await;
+                let (mut auxiliary, _) = file(&cx, &pool).await;
+                let mut allowance = policy();
+                allowance.rows = GqlExecutionBudget::new(1000, limit);
+                let error = prepared
+                    .spool_ordered(
+                        &db,
+                        &cx,
+                        &params,
+                        allowance,
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        8,
+                        128,
+                        1,
+                        16,
+                        127,
+                        4096,
+                        8,
+                        1_000_000,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(matches!(
+                    error.execution_error(),
+                    Some(GqlQueryError::Source(ScanError::Projection {
+                        row: actual_row,
+                        column: actual_column,
+                        error,
+                    })) if *actual_row == row as u64 && *actual_column == column
+                        && error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+                ), "{text}: {error:?}");
+                assert_eq!(destination.stats().published_runs, 0);
+                assert!(destination.is_poisoned());
+                assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn ordered_computed_collections_share_exact_source_and_projection_allowances() {
+    let ((), report) = run_async_under_lab(0xe50a_0013, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = multigraph(&c.commit()).await;
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let params = GqlParameters::new();
+        for (head, prefix, anchor, inputs) in [
+            ("MATCH (a)", "a", "a", 8),
+            ("MATCH (a)-[r:R]->(b)", "r,a", "b", 5),
+        ] {
+            let prepared = plan(&format!(
+                "{head} RETURN {prefix}, [({anchor})-[s:R]->(c) | [c.p,s.p]] AS neighbors ORDER BY neighbors DESC LIMIT 0"
+            ));
+            let mut measured: Option<(u64, GlaExecutionStats)> = None;
+            for case in 0..6 {
+                let (records, evaluator) = measured.unwrap_or((
+                    1000,
+                    GlaExecutionStats {
+                        work_units: 100_000_000,
+                        scratch_entries: 10_000_000,
+                    },
+                ));
+                let allowance = GqlQueryPolicy::new(
+                    records - u64::from(case == 2),
+                    0,
+                    evaluator.work_units - u64::from(case == 4),
+                    evaluator.scratch_entries - u64::from(case == 5),
+                );
+                let (mut scratch, _) = file(&cx, &pool).await;
+                let (mut destination, _) = file(&cx, &pool).await;
+                let (mut auxiliary, _) = file(&cx, &pool).await;
+                let result = prepared
+                    .spool_ordered(
+                        &db,
+                        &cx,
+                        &params,
+                        allowance,
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        8,
+                        128,
+                        1,
+                        16,
+                        127,
+                        4096,
+                        inputs - u64::from(case == 3),
+                        1_000_000,
+                    )
+                    .await;
+                if case < 2 {
+                    let (spool, _) = result.unwrap();
+                    assert_eq!(spool.row_count(), 0);
+                    assert_eq!(spool.row_stats().result_rows, 0);
+                    assert!(spool.row_stats().snapshot_records > inputs);
+                    let actual = (spool.row_stats().snapshot_records, spool.evaluator_stats());
+                    if let Some(expected) = measured {
+                        assert_eq!(actual, expected);
+                    }
+                    measured = Some(actual);
+                    assert!(contents(&spool, &mut destination, &cx).await.is_empty());
+                } else {
+                    let error = result.unwrap_err();
+                    match case {
+                        2 | 3 => {
+                            let (dimension, limit) = if case == 2 {
+                                (GqlBudgetDimension::SnapshotRecords, records - 1)
+                            } else {
+                                (GqlBudgetDimension::ResultRows, inputs - 1)
+                            };
+                            assert!(matches!(
+                                error.execution_error(),
+                                Some(GqlQueryError::Rows(exceeded))
+                                    if exceeded.dimension == dimension
+                                        && exceeded.limit == limit
+                                        && exceeded.observed == limit + 1
+                            ), "case {case}: {error:?}");
+                        }
+                        4 | 5 => {
+                            let (dimension, limit) = if case == 4 {
+                                (fgdb_gql::GlaLimitDimension::WorkUnits, evaluator.work_units - 1)
+                            } else {
+                                (
+                                    fgdb_gql::GlaLimitDimension::ScratchEntries,
+                                    evaluator.scratch_entries - 1,
+                                )
+                            };
+                            assert!(matches!(
+                                error.execution_error(),
+                                Some(GqlQueryError::Evaluator(exceeded))
+                                    if exceeded.dimension == dimension
+                                        && exceeded.limit == limit
+                                        && exceeded.observed == u128::from(limit) + 1
+                            ), "case {case}: {error:?}");
+                        }
+                        _ => unreachable!("bounded allowance cases"),
+                    }
+                }
+                assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn undirected_parallel_occurrences_are_sorted_before_distinct_and_pagination() {
     let ((), report) = run_async_under_lab(0xe50a_0001, |root| async move {

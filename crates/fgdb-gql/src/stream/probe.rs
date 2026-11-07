@@ -28,6 +28,84 @@ pub(super) fn accepts<S: VertexScanSource, C>(
         .map_err(|error| error.map_source(unpack))
 }
 
+// With one anonymous expansion, every raw field is the constant root,
+// the same single varying endpoint, or NULL. Canonical raw-value ordering
+// therefore preserves the eager VId witness order, including tuple fields
+// and duplicate edges. Infallible predicates may filter before normalization;
+// fallible Boolean/property comparisons must keep their original visit order.
+pub(super) fn endpoint_ordered_collection(operators: &[GlaOperator]) -> bool {
+    let mut expansions = 0;
+    for operator in operators {
+        match operator {
+            GlaOperator::Expand { .. } => expansions += 1,
+            GlaOperator::BindVertex { .. }
+            | GlaOperator::BindOuterVertex { .. }
+            | GlaOperator::Select { .. }
+            | GlaOperator::VertexIdentity { .. } => {}
+            _ => return false,
+        }
+    }
+    expansions == 1
+}
+
+pub(super) fn collect<S: VertexScanSource, C>(
+    collection: &crate::edge_stream::Collection,
+    endpoint_ordered: bool,
+    vid: VId,
+    source: &S,
+    control: &mut impl FnMut(VertexScanEvent) -> ScanResult<(), S::Error, C>,
+    record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
+) -> ScanResult<crate::algebra::GraphValue, S::Error, C> {
+    let mut value = collection
+        .evaluate(
+            &[Some(vid)],
+            &Lookup(source),
+            &mut |event| {
+                control(vertex_event(event))
+                    .map_err(|error| error.map_source(EdgeScanError::Source))
+            },
+            &mut || record().map_err(|error| error.map_source(EdgeScanError::Source)),
+        )
+        .map_err(|error| error.map_source(unpack))?;
+    if endpoint_ordered && let GraphValue::List(values) = &mut value {
+        // Reuse the governed, allocation-free sorter on the list we already
+        // retain. Normalize before the row VM reads properties or evaluates
+        // computed elements, whose order can affect visible expression errors.
+        crate::set_ops::sort_canonical_values(values, &mut |event| control(vertex_event(event)))?;
+    }
+    Ok(value)
+}
+
+/// Dynamic values in a collected witness use the same admitted property
+/// routes as predicates. The caller charges the history before this lookup;
+/// charge the complete retained value before cloning its payload.
+pub(super) fn element_property<S: VertexScanSource, C>(
+    source: &S,
+    element: fgdb_delta_types::ElementId,
+    key: PropertyKeyId,
+    control: &mut impl FnMut(VertexScanEvent) -> ScanResult<(), S::Error, C>,
+) -> ScanResult<Option<CanonicalPropertyValue>, S::Error, C> {
+    let lookup = Lookup(source);
+    let mut events = |event| control(vertex_event(event));
+    let value = match element {
+        fgdb_delta_types::ElementId::Vertex(vid) => lookup.vertex_property(vid, key, &mut events),
+        fgdb_delta_types::ElementId::Edge(eid) => lookup.edge_property(eid, key, &mut events),
+    }
+    .map_err(|error| match error {
+        EdgeScanSourceError::Source(error) => GqlQueryError::Source(error),
+        EdgeScanSourceError::Control(error) => error,
+    })?
+    .flatten();
+    value
+        .map(|value| {
+            crate::algebra::GraphValue::charge_property_value(value, &mut |event| {
+                control(vertex_event(event))
+            })?;
+            Ok(value.clone())
+        })
+        .transpose()
+}
+
 fn vertex_event(event: GlaExecutionEvent) -> VertexScanEvent {
     match event {
         GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,

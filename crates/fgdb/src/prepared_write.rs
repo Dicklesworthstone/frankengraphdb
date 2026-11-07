@@ -17,6 +17,27 @@ use fgdb_strata::writer::BlockWriter;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// Facts about the exact raw input accepted by ordinary preparation. This is
+/// neither a replay allowance nor a description inferred from net effects:
+/// even a cancelled create/delete or an unused edge ENSURE makes the incremental
+/// family proof unavailable. Composed templates without that input keep None.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RawWriteSummary {
+    pub(super) relation: crate::RelationId,
+    pub(super) visits: u64,
+    pub(super) incremental: bool,
+}
+
+impl RawWriteSummary {
+    fn for_batch(batch: &WriteBatch) -> Option<Self> {
+        Some(Self {
+            relation: batch.relation,
+            visits: u64::try_from(batch.rows.len()).ok()?,
+            incremental: batch.rows.iter().all(incremental::supported),
+        })
+    }
+}
+
 /// Captures keep the ordinary mutable set until a prepared prefix is shared.
 /// Later observations copy only AVL search paths, preserving pinned prefixes.
 #[derive(Clone)]
@@ -362,6 +383,7 @@ impl<V: Vfs + Clone> Database<V> {
             handle_owner: Arc::clone(&self.handle_owner),
             dependencies,
             replay_row_allowance,
+            raw_input: None,
             authorization_decision_digest: None,
         })
     }
@@ -375,6 +397,7 @@ impl<V: Vfs + Clone> Database<V> {
         // comes from the same admitted live writer used to derive the template.
         let mut dependencies = PreparedDependencies::capture(&self.writer, &batch);
         let replay_row_allowance = u64::try_from(batch.rows.len()).ok();
+        let raw_input = RawWriteSummary::for_batch(&batch);
         let template = self.build_write_template(batch)?;
         for coordinate in template.coordinate_entries() {
             for row in &coordinate.rows {
@@ -387,6 +410,7 @@ impl<V: Vfs + Clone> Database<V> {
             handle_owner: Arc::clone(&self.handle_owner),
             dependencies,
             replay_row_allowance,
+            raw_input,
             authorization_decision_digest: None,
         })
     }

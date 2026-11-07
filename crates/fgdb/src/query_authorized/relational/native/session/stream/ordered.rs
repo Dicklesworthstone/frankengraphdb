@@ -415,6 +415,40 @@ where
         )
     }
 }
+/// Computed graph rows use the same scoped edge reader and native meter as
+/// the plain input. The sort tail alone owns DISTINCT, order and pagination.
+struct EdgeSetInput<S, F> {
+    rows: EdgeInput<S, F>,
+    pull: GraphSetRowPull,
+}
+impl<S, F> InputCursor for EdgeSetInput<S, F>
+where
+    S: EdgeScanSource<Error = QueryError> + Send,
+    F: FnMut() -> core::result::Result<(), QueryError> + Send,
+{
+    fn pull(&mut self) -> Option<Result<SpoolRow>> {
+        self.rows
+            .0
+            .next_projected(
+                &self.pull,
+                aggregate::edge::row_error,
+                |ordinal, column, error| {
+                    QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                        row: usize::try_from(ordinal).unwrap_or(usize::MAX),
+                        column,
+                        error,
+                    }))
+                },
+            )
+            .map(|row| row.map(SpoolRow::governed).map_err(authorized))
+    }
+    fn state(&self) -> ScanState {
+        self.rows.state()
+    }
+    fn stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
+        self.rows.stats()
+    }
+}
 struct OrderedInput<'q>(Box<dyn InputCursor + 'q>);
 impl SpoolInput for OrderedInput<'_> {
     async fn pull(&mut self) -> Option<Result<SpoolRow>> {
@@ -464,12 +498,13 @@ fn bind_projected_order(
     at: CommitSeq,
     facade: crate::NativeReadClass,
 ) -> core::result::Result<BoundOrder, QueryError> {
-    if let Some((pull, tail)) = query.ordered_row_pull() {
-        let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
-            unreachable!("an ordered row pull is rooted at its one vertex scan")
-        };
+    if let Some((pull, tail)) = query
+        .ordered_row_pull()
+        .or_else(|| query.ordered_graph_row_pull())
+    {
+        let plan = compile(pull.pattern())?;
         return Ok((
-            RowPlan::Vertex(plan),
+            plan,
             tail,
             at,
             query.columns().to_vec(),
@@ -599,7 +634,11 @@ fn bind_external_order(
         }
     };
     // Retain the proved one-source row-pull fusion and its shared input meter.
-    if query.ordered_row_pull().is_some() {
+    if query
+        .ordered_row_pull()
+        .or_else(|| query.ordered_graph_row_pull())
+        .is_some()
+    {
         return bind_projected_order(&query, at, prepared.facade_class())
             .map(|bound| BoundExternalOrder::Linear(Box::new(bound)));
     }
@@ -655,12 +694,16 @@ fn scoped_ordered_input<'q, C: FnMut() -> u64 + Send>(
         }
         RowPlan::Edge(plan) => {
             let source = aggregate::edge::ordered_source(at, view, cx, execution)?;
-            Box::new(EdgeInput(EdgeScanCursor::new(
+            let rows = EdgeInput(EdgeScanCursor::new(
                 source,
                 plan,
                 policy,
                 move || control.borrow_mut().checkpoint(),
-            )))
+            ));
+            match pull {
+                Some(pull) => Box::new(EdgeSetInput { rows, pull }),
+                None => Box::new(rows),
+            }
         }
     };
     Ok(OrderedInput(input))

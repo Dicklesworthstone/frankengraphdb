@@ -53,6 +53,17 @@ mod tests;
 struct Step {
     binding: Binding,
     predicates: Vec<GlaOperator>,
+    // Collection-only terminal semi/anti joins. Their bindings and capture
+    // frames remain private; every accepted parent still contributes once.
+    probes: Vec<Probe>,
+}
+
+#[derive(Clone, Copy)]
+struct LocalCapture {
+    slot: u32,
+    // One variable-length segment remains a path, even at a one-hop bound.
+    // Only a fixed single-edge capture can supply an Edge/property operand.
+    single_edge: bool,
 }
 
 pub(crate) struct Probe {
@@ -61,11 +72,11 @@ pub(crate) struct Probe {
     steps: Vec<Step>,
 }
 
-/// A bounded, correlated Collect scope over the same fixed-hop traversal and
-/// predicate kernel as a probe. Only its completion rule differs: every
-/// witness contributes one value, and only successful exhaustion emits a list.
-pub(super) struct Collection {
-    pub(super) group: usize,
+/// A bounded Collect scope over fixed-hop traversal or one correlated finite
+/// TRAIL atom, using the same traversal and predicate kernel as a probe. Every
+/// complete witness contributes one value; only exhaustion emits a list.
+pub(crate) struct Collection {
+    pub(crate) group: usize,
     probe: Probe,
     value: Option<ValueProjection>,
     tuple: Option<Vec<ValueProjection>>,
@@ -92,7 +103,7 @@ impl Probe {
         {
             return Err(EdgeScanBuildError { operator: start });
         }
-        let (steps, _) = Self::compile_body(ops, start, end, outer_width)?;
+        let (steps, _) = Self::compile_body(ops, start, end, outer_width, false)?;
         Ok((
             Self {
                 anti: *anti,
@@ -108,15 +119,18 @@ impl Probe {
         start: usize,
         end: usize,
         outer_width: usize,
-    ) -> Result<(Vec<Step>, BTreeMap<u32, u32>), EdgeScanBuildError> {
-        if !matches!(
-            ops.get(start + 1),
-            Some(
-                GlaOperator::ScanVertices
-                    | GlaOperator::BindVertex { .. }
-                    | GlaOperator::BindOuterVertex { .. }
+        compound_captures: bool,
+    ) -> Result<(Vec<Step>, BTreeMap<u32, LocalCapture>), EdgeScanBuildError> {
+        if outer_width > MAX_PATTERN_BINDINGS
+            || !matches!(
+                ops.get(start + 1),
+                Some(
+                    GlaOperator::ScanVertices
+                        | GlaOperator::BindVertex { .. }
+                        | GlaOperator::BindOuterVertex { .. }
+                )
             )
-        ) {
+        {
             return Err(EdgeScanBuildError {
                 operator: start + 1,
             });
@@ -124,27 +138,70 @@ impl Probe {
         let mut steps: Vec<Step> = Vec::new();
         let mut width = outer_width;
         let mut expansions = 0;
+        // A closing edge can bind a fresh slot equal to an earlier vertex.
+        // Keep those proved aliases, including outer copies, so captures can
+        // follow their declared route through cycles or reversed expansions.
+        let mut aliases: [usize; MAX_PATTERN_BINDINGS] = std::array::from_fn(|slot| slot);
         // Canonical capture ordinals include the containing pattern's captures.
         // Translate only declarations inside THIS scope to compact local slots.
         // A reference to an outer or undeclared capture must never become NULL.
-        let mut capture_slots = BTreeMap::<u32, u32>::new();
-        for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
+        let mut capture_slots = BTreeMap::<u32, LocalCapture>::new();
+        let mut probe_groups = Vec::new();
+        let mut operators = ops.iter().enumerate().take(end).skip(start + 1);
+        while let Some((at, op)) = operators.next() {
             let bad = || EdgeScanBuildError { operator: at };
+            if let GlaOperator::Probe {
+                group,
+                end: child_end,
+                ..
+            } = op
+                && compound_captures
+            {
+                // The canonical scope compiler emits nested constraints only
+                // after a complete positive witness. A child uses the existing
+                // probe compiler, which refuses deeper nesting and foreign
+                // capture operands; no alternate matcher or truth cache runs.
+                if *child_end as usize <= at + 1
+                    || *child_end as usize >= end
+                    || *group as usize >= crate::algebra::MAX_PATTERN_IDENTITIES
+                    || probe_groups.contains(group)
+                    || matches!(ops[start], GlaOperator::Collect { group: parent, .. } if parent == *group)
+                {
+                    return Err(bad());
+                }
+                let step = steps.last_mut().ok_or_else(bad)?;
+                let (probe, child_end) = Self::compile(ops, at, width)?;
+                step.probes.push(probe);
+                probe_groups.push(*group);
+                for (nested, _) in operators.by_ref() {
+                    if nested == child_end {
+                        break;
+                    }
+                }
+                continue;
+            }
+            // Nothing except another complete sibling probe may follow the
+            // terminal tail. This also rejects malformed/interleaved bindings.
+            if !probe_groups.is_empty() {
+                return Err(bad());
+            }
             if let GlaOperator::DifferentEdges { segments } = op
                 && let [segment] = segments.as_slice()
                 && segment.ordinal() as usize == width - 1
                 && let Some(Step {
                     binding: Binding::Walk { search, .. },
                     predicates,
+                    ..
                 }) = steps.last_mut()
                 && predicates
                     .iter()
                     .all(|predicate| matches!(predicate, GlaOperator::VertexIdentity { .. }))
             {
-                // One atom's identity domain is exactly a TRAIL. Its existing
-                // traversal owner checks EIds before descent, so retaining only
-                // endpoint support is sufficient. A later cross-atom domain
-                // still refuses below: no discarded route is reconstructed.
+                // One atom's identity domain is exactly a TRAIL. Its traversal
+                // checks EIds before descent. Probes coalesce endpoint support;
+                // collections emit every route occurrence from the same stack.
+                // A later cross-atom domain still refuses below: no discarded
+                // route is reconstructed.
                 match search {
                     GraphWalkSearch::All => *search = GraphWalkSearch::Trail,
                     GraphWalkSearch::Trail | GraphWalkSearch::Acyclic => {}
@@ -198,8 +255,21 @@ impl Probe {
                     })
                 }
                 GlaOperator::Select { slot, .. } if (slot.ordinal() as usize) < width => None,
-                GlaOperator::VertexIdentity { left, right, .. }
-                | GlaOperator::CompareProperties { left, right, .. }
+                GlaOperator::VertexIdentity { left, right, equal }
+                    if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width =>
+                {
+                    if *equal {
+                        let keep = aliases[left.ordinal() as usize];
+                        let merged = aliases[right.ordinal() as usize];
+                        for alias in aliases.iter_mut().take(width) {
+                            if *alias == merged {
+                                *alias = keep;
+                            }
+                        }
+                    }
+                    None
+                }
+                GlaOperator::CompareProperties { left, right, .. }
                     if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width =>
                 {
                     None
@@ -223,25 +293,60 @@ impl Probe {
                     start,
                     segments,
                 } => {
-                    let [segment] = segments.as_slice() else {
-                        return Err(bad());
-                    };
-                    let local = (segment.ordinal() as usize).checked_sub(outer_width);
-                    let expansion = local
-                        .and_then(|at| steps.get(at))
-                        .and_then(|step| match step.binding {
-                            Binding::Expand(expansion) => Some(expansion),
-                            _ => None,
-                        });
-                    if expansion
-                        .is_none_or(|expansion| expansion.source != start.ordinal() as usize)
+                    if segments.is_empty()
+                        || segments.len() > MAX_PATTERN_EDGES
+                        || (!compound_captures && segments.len() != 1)
+                        || start.ordinal() as usize >= width
                         || *capture as usize >= crate::algebra::MAX_PATTERN_IDENTITIES
                         || capture_slots.contains_key(capture)
                     {
                         return Err(bad());
                     }
+                    let mut endpoint = aliases[start.ordinal() as usize];
+                    let mut single_edge = segments.len() == 1;
+                    for (at, segment) in segments.iter().enumerate() {
+                        let target = segment.ordinal() as usize;
+                        let binding = target
+                            .checked_sub(outer_width)
+                            .and_then(|local| steps.get(local))
+                            .map(|step| step.binding)
+                            .ok_or_else(bad)?;
+                        let expansion = match binding {
+                            Binding::Expand(expansion) => expansion,
+                            Binding::Walk {
+                                expansion,
+                                bounds,
+                                search: GraphWalkSearch::Trail,
+                            } if compound_captures
+                                && segments.len() == 1
+                                && bounds.is_bounded() =>
+                            {
+                                single_edge = false;
+                                expansion
+                            }
+                            _ => return Err(bad()),
+                        };
+                        if segments[..at].contains(segment) {
+                            return Err(bad());
+                        }
+                        let from = aliases[expansion.source];
+                        let to = aliases[target];
+                        if from == endpoint {
+                            endpoint = to;
+                        } else if compound_captures && to == endpoint {
+                            endpoint = from;
+                        } else {
+                            return Err(bad());
+                        }
+                    }
                     let local = capture_slots.len() as u32;
-                    capture_slots.insert(*capture, local);
+                    capture_slots.insert(
+                        *capture,
+                        LocalCapture {
+                            slot: local,
+                            single_edge,
+                        },
+                    );
                     predicate = Some(GlaOperator::CapturePath {
                         capture: local,
                         start: *start,
@@ -258,8 +363,8 @@ impl Probe {
                             slot
                         },
                         |capture| match capture_slots.get(&capture) {
-                            Some(local) => *local,
-                            None => {
+                            Some(local) if local.single_edge => local.slot,
+                            _ => {
                                 captures_valid = false;
                                 capture
                             }
@@ -280,10 +385,14 @@ impl Probe {
                 if width >= MAX_PATTERN_BINDINGS || !capture_slots.is_empty() {
                     return Err(bad());
                 }
+                if let Binding::Copy { source, .. } = binding {
+                    aliases[width] = aliases[source];
+                }
                 width += 1;
                 steps.push(Step {
                     binding,
                     predicates: Vec::new(),
+                    probes: Vec::new(),
                 });
             } else {
                 steps
@@ -313,7 +422,14 @@ impl Probe {
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
         record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
     ) -> ScanResult<bool, S::Error, C> {
-        self.visit_witnesses(outer, source, control, record, &mut |_, _, _| Ok(true))
+        self.visit_witnesses(
+            outer,
+            source,
+            walk::Emission::Support,
+            control,
+            record,
+            &mut |_, _, _| Ok(true),
+        )
     }
 
     /// Visit complete witnesses in native identified-edge enumeration order.
@@ -323,6 +439,7 @@ impl Probe {
         &self,
         outer: &[Option<VId>],
         source: &S,
+        emission: walk::Emission,
         control: &mut F,
         record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
         visit: &mut impl FnMut(
@@ -461,9 +578,17 @@ impl Probe {
                                     slot.into_mut()
                                 }
                                 std::collections::btree_map::Entry::Vacant(slot) => {
-                                    let cursor = walk::Endpoints::new(
-                                        from, bounds, search, source, control,
-                                    )?;
+                                    let cursor = match emission {
+                                        walk::Emission::Support => walk::Endpoints::new(
+                                            from, bounds, search, source, control,
+                                        )?,
+                                        walk::Emission::TrailOccurrences => {
+                                            debug_assert_eq!(search, GraphWalkSearch::Trail);
+                                            walk::Endpoints::trail_occurrences(
+                                                from, bounds, source, control,
+                                            )?
+                                        }
+                                    };
                                     control(GlaExecutionEvent::ScratchEntry)?;
                                     slot.insert(cursor)
                                 }
@@ -483,12 +608,30 @@ impl Probe {
                 continue;
             };
             ids.push(candidate);
-            let Some(paths) =
-                self.test_candidate(&step.predicates, &ids, &frames, source, control)?
+            let Some(paths) = self.test_candidate(
+                &step.predicates,
+                &ids,
+                &frames,
+                Some(&walks),
+                source,
+                control,
+            )?
             else {
                 ids.pop();
                 continue;
             };
+            let mut accepted = true;
+            for probe in &step.probes {
+                control(GlaExecutionEvent::Work)?;
+                if !probe.accepts(&ids, source, control, record)? {
+                    accepted = false;
+                    break;
+                }
+            }
+            if !accepted {
+                ids.pop();
+                continue;
+            }
             depth += 1;
             if depth == self.steps.len() {
                 control(GlaExecutionEvent::Work)?;
@@ -511,6 +654,7 @@ impl Probe {
         predicates: &[GlaOperator],
         ids: &[Option<VId>],
         frames: &[Position],
+        walks: Option<&BTreeMap<usize, walk::Endpoints>>,
         source: &S,
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
     ) -> ScanResult<Option<Vec<Option<GraphPath>>>, S::Error, C> {
@@ -550,32 +694,61 @@ impl Probe {
                 segments,
             } = predicate
             {
-                // Fixed expansions already retain their chosen EId in the
-                // backtracking frame. Never reconstruct an edge by endpoints:
-                // parallel relationships can have different property values.
-                let frame = segments.first().and_then(|slot| {
-                    (slot.ordinal() as usize)
-                        .checked_sub(self.outer_width)
-                        .and_then(|at| frames.get(at))
-                });
-                let target = segments
-                    .first()
-                    .and_then(|slot| ids.get(slot.ordinal() as usize));
-                let (Some(Position::Edge(Some(eid))), Some(Some(target)), Some(Some(start))) =
-                    (frame, target, ids.get(start.ordinal() as usize))
-                else {
+                // Retain each chosen EId, never reconstruct a relationship by
+                // endpoints. The declared path can traverse an expansion in
+                // reverse, including an edge closing onto an existing slot.
+                let Some(Some(start)) = ids.get(start.ordinal() as usize) else {
                     return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
                 };
                 debug_assert_eq!(*capture as usize, paths.len());
-                // Same path-slot and step charges as the outer capture
-                // stage, before either the vector or boxed step is allocated.
-                for _ in 0..3 {
+                let local = segments[0].ordinal() as usize - self.outer_width;
+                if matches!(self.steps[local].binding, Binding::Walk { .. }) {
+                    // Collection admission keeps this as one finite TRAIL
+                    // atom. The offered occurrence still owns its exact route;
+                    // endpoint support and async probes cannot supply it.
+                    debug_assert_eq!(segments.len(), 1);
+                    let walk = walks.and_then(|walks| walks.get(&local)).ok_or_else(|| {
+                        GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable)
+                    })?;
+                    paths.push(Some(walk.capture(*start, control)?));
+                    continue;
+                }
+                // Charge the path slot and every step before reserving payload.
+                // A one-edge capture retains its original three scratch events.
+                control(GlaExecutionEvent::ScratchEntry)?;
+                for _ in segments {
+                    control(GlaExecutionEvent::ScratchEntry)?;
                     control(GlaExecutionEvent::ScratchEntry)?;
                 }
-                paths.push(Some(GraphPath::new(
-                    *start,
-                    vec![(*eid, *target)].into_boxed_slice(),
-                )));
+                let mut endpoint = *start;
+                let mut steps = Vec::with_capacity(segments.len());
+                for (at, segment) in segments.iter().enumerate() {
+                    // The predicate checkpoint already accounts for step zero.
+                    if at != 0 {
+                        control(GlaExecutionEvent::Work)?;
+                    }
+                    let target = segment.ordinal() as usize;
+                    let local = target - self.outer_width;
+                    let Binding::Expand(expansion) = self.steps[local].binding else {
+                        unreachable!("the compiler admitted only local fixed segments")
+                    };
+                    let (Some(Position::Edge(Some(eid))), Some(Some(from)), Some(Some(to))) = (
+                        frames.get(local),
+                        ids.get(expansion.source),
+                        ids.get(target),
+                    ) else {
+                        return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
+                    };
+                    endpoint = if *from == endpoint {
+                        *to
+                    } else if *to == endpoint {
+                        *from
+                    } else {
+                        return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
+                    };
+                    steps.push((*eid, endpoint));
+                }
+                paths.push(Some(GraphPath::new(*start, steps.into_boxed_slice())));
                 continue;
             }
             if !super::accepts(predicate, ids, &paths, source, control)? {
@@ -588,7 +761,7 @@ impl Probe {
 }
 
 impl Collection {
-    pub(super) fn compile(
+    pub(crate) fn compile(
         ops: &[GlaOperator],
         start: usize,
         outer_width: usize,
@@ -612,22 +785,58 @@ impl Collection {
         if close != group {
             return Err(bad());
         }
-        // This slice admits a correlated fixed hop only. Independent scans,
-        // multiple hops, walks and nested scopes remain explicit refusals.
-        let mut expansions = 0;
-        for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
-            match op {
-                GlaOperator::Expand { .. } => expansions += 1,
-                GlaOperator::ScanVertices | GlaOperator::VarLengthExpand { .. } => {
+        // Fixed scopes advance each local scan in VId order, then fixed hops
+        // in EId order, like identified eager scopes. Disconnected components
+        // keep separate positions even with copied outer predicate operands.
+        // One correlated finite TRAIL atom preserves DFS route occurrences,
+        // not endpoint support. It cannot mix scans or other expansion atoms.
+        // Fixed parents may have terminal child probes. Only direct parent
+        // scans and expansion atoms determine the collection profile; child
+        // finite walks keep their existing endpoint-support EXISTS semantics.
+        // Children test each fixed/TRAIL occurrence in separate Support
+        // frames. Rejection never advances or coalesces the paused parent
+        // route; every accepted route still contributes one list element.
+        let mut fixed = 0;
+        let mut walks = 0;
+        let mut scans = false;
+        let mut at = start + 1;
+        while at < end {
+            match &ops[at] {
+                GlaOperator::Expand { .. } => fixed += 1,
+                GlaOperator::ScanVertices => scans = true,
+                GlaOperator::VarLengthExpand { bounds, .. } if bounds.is_bounded() => walks += 1,
+                GlaOperator::VarLengthExpand { .. } => {
                     return Err(EdgeScanBuildError { operator: at });
+                }
+                GlaOperator::Probe { end: child_end, .. } => {
+                    if *child_end as usize <= at + 1 || *child_end as usize >= end {
+                        return Err(EdgeScanBuildError { operator: at });
+                    }
+                    at = *child_end as usize;
                 }
                 _ => {}
             }
+            at += 1;
         }
-        if expansions != 1 {
+        if (fixed == 0 && walks == 0)
+            || fixed > MAX_PATTERN_EDGES
+            || walks > 1
+            || (walks != 0 && (fixed != 0 || scans))
+        {
             return Err(bad());
         }
-        let (steps, captures) = Probe::compile_body(ops, start, end, outer_width)?;
+        let (steps, captures) = Probe::compile_body(ops, start, end, outer_width, true)?;
+        // Ordinary openCypher DifferentEdges lowers a single ALL atom to
+        // TRAIL in compile_body. Other modes have different multiplicity or
+        // enumeration order. Captures snapshot this atom's live route only.
+        if walks != 0
+            && steps.iter().any(|step| {
+                matches!(step.binding, Binding::Walk { search, .. }
+                    if search != GraphWalkSearch::Trail)
+            })
+        {
+            return Err(bad());
+        }
         if *slots as usize != steps.len() {
             return Err(bad());
         }
@@ -639,8 +848,9 @@ impl Collection {
             {
                 captures
                     .get(&capture)
+                    .filter(|capture| function != GraphPathFunction::Edge || capture.single_edge)
                     .map(|capture| ValueProjection::Path {
-                        capture: *capture,
+                        capture: capture.slot,
                         function,
                     })
                     .ok_or_else(bad)
@@ -675,7 +885,7 @@ impl Collection {
         ))
     }
 
-    pub(super) fn evaluate<S: EdgeScanSource, C>(
+    pub(crate) fn evaluate<S: EdgeScanSource, C>(
         &self,
         outer: &[Option<VId>],
         source: &S,
@@ -690,6 +900,7 @@ impl Collection {
         self.probe.visit_witnesses(
             outer,
             source,
+            walk::Emission::TrailOccurrences,
             control,
             record,
             &mut |bindings, paths, control| {

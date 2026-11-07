@@ -737,6 +737,56 @@ const PARALLEL_GATHER_ARCS: usize = 1 << 18;
 /// The most threads one gather uses.
 pub(crate) const MAX_GATHER_THREADS: usize = 8;
 
+/// Process-wide ceiling on additional OS workers for decoded arithmetic.
+/// Concurrent calls that cannot reserve their whole group run inline instead.
+/// This bounds thread amplification; caller threads, other work and shared
+/// lower layers still require the dedicated Prism region/bulkhead contract.
+const PROCESS_ARITHMETIC_WORKERS: usize = 8;
+static ARITHMETIC_ADMISSION: ArithmeticAdmission =
+    ArithmeticAdmission::new(PROCESS_ARITHMETIC_WORKERS);
+
+struct ArithmeticAdmission {
+    limit: usize,
+    active: std::sync::atomic::AtomicUsize,
+}
+
+impl ArithmeticAdmission {
+    const fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            active: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn try_acquire(&self, workers: usize) -> Option<ArithmeticLease<'_>> {
+        use std::sync::atomic::Ordering;
+        self.active
+            .try_update(Ordering::Acquire, Ordering::Relaxed, |active| {
+                active
+                    .checked_add(workers)
+                    .filter(|&total| total <= self.limit)
+            })
+            .ok()?;
+        Some(ArithmeticLease {
+            admission: self,
+            workers,
+        })
+    }
+}
+
+struct ArithmeticLease<'a> {
+    admission: &'a ArithmeticAdmission,
+    workers: usize,
+}
+
+impl Drop for ArithmeticLease<'_> {
+    fn drop(&mut self) {
+        self.admission
+            .active
+            .fetch_sub(self.workers, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Precharged arithmetic checks live control after at most this many scalar
 /// rows/arcs. This is independent of the logical meter's 64-unit charge runs.
 /// A parallel worker must receive a fresh parent acknowledgement before each
@@ -774,7 +824,23 @@ pub(crate) fn arithmetic_rows<T: Send, C>(
     meter: &mut impl FnxMeter<C>,
     run: impl Fn(usize, &mut [T], &mut dyn FnMut() -> bool) + Sync,
 ) -> Result<(), FnxExecutionError<C>> {
-    if ends.len() <= 1 {
+    arithmetic_rows_with_admission(rows, ends, &ARITHMETIC_ADMISSION, meter, run)
+        .map_err(FnxExecutionError::Cancelled)
+}
+
+fn arithmetic_rows_with_admission<T: Send, C>(
+    rows: &mut [T],
+    ends: &[usize],
+    admission: &ArithmeticAdmission,
+    meter: &mut impl FnxMeter<C>,
+    run: impl Fn(usize, &mut [T], &mut dyn FnMut() -> bool) + Sync,
+) -> Result<(), C> {
+    let lease = if ends.len() > 1 {
+        admission.try_acquire(ends.len())
+    } else {
+        None
+    };
+    if lease.is_none() {
         let mut failure = None;
         run(0, rows, &mut || match meter.poll() {
             Ok(()) => true,
@@ -784,7 +850,7 @@ pub(crate) fn arithmetic_rows<T: Send, C>(
             }
         });
         return match failure {
-            Some(error) => Err(FnxExecutionError::Cancelled(error)),
+            Some(error) => Err(error),
             None => Ok(()),
         };
     }
@@ -817,7 +883,9 @@ pub(crate) fn arithmetic_rows<T: Send, C>(
             self.done.store(true, Ordering::Release);
         }
     }
-    std::thread::scope(|scope| {
+    // Hold admission in this outer frame. A guard inside the scope closure
+    // would release capacity before scope joins on a refusal or unwind.
+    let result = std::thread::scope(|scope| {
         let _stop_on_exit = StopOnDrop(&stop);
         let mut rest = rows;
         let mut low = 0;
@@ -866,7 +934,7 @@ pub(crate) fn arithmetic_rows<T: Send, C>(
             }
             if pending || done {
                 idle_spins = 0;
-                meter.poll().map_err(FnxExecutionError::Cancelled)?;
+                meter.poll()?;
                 // Acknowledge only the requests captured BEFORE this poll.
                 // Polling every idle yield would repeatedly enter the host
                 // clock/authority while no additional work can start.
@@ -884,7 +952,9 @@ pub(crate) fn arithmetic_rows<T: Send, C>(
         }
         // scope joins every worker, including on a refusal, before exposing
         // this Result to the caller. Partially filled row buffers stay private.
-    })
+    });
+    drop(lease);
+    result
 }
 
 /// The threads a gather over `arcs` arcs uses.
@@ -4262,14 +4332,271 @@ mod tests {
         }
     }
 
+    fn assert_arithmetic_capacity_reusable(admission: &ArithmeticAdmission) {
+        use std::sync::atomic::Ordering;
+
+        assert!((2..=MAX_GATHER_THREADS).contains(&admission.limit));
+        let owner = std::thread::current().id();
+        let mut rows = vec![0; admission.limit];
+        let ends: Vec<_> = (1..=admission.limit).collect();
+        arithmetic_rows_with_admission(
+            &mut rows,
+            &ends,
+            admission,
+            &mut || Ok::<(), Infallible>(()),
+            |start, rows, poll| {
+                assert_ne!(std::thread::current().id(), owner);
+                assert!(poll());
+                for (offset, row) in rows.iter_mut().enumerate() {
+                    *row = start + offset + 1;
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(rows, ends);
+        assert_eq!(admission.active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn concurrent_arithmetic_groups_share_capacity_and_fall_back_inline() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct ReleaseOnDrop<'a>(&'a AtomicBool);
+        impl Drop for ReleaseOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        struct Active<'a>(&'a AtomicUsize);
+        impl Drop for Active<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::Release);
+            }
+        }
+        struct Parent {
+            owner: std::thread::ThreadId,
+            units: std::rc::Rc<std::cell::Cell<usize>>,
+            polls: usize,
+        }
+        impl FnxMeter<Infallible> for Parent {
+            fn unit(&mut self) -> Result<(), Infallible> {
+                self.units.set(self.units.get() + 1);
+                Ok(())
+            }
+            fn poll(&mut self) -> Result<(), Infallible> {
+                assert_eq!(std::thread::current().id(), self.owner);
+                self.polls += 1;
+                Ok(())
+            }
+        }
+        fn value(row: usize) -> f64 {
+            // Uneven rows and non-integral values expose a lost range offset
+            // or reordered output without making timing part of the oracle.
+            (row as f64 * 0.85) * (1.0 / ((row % 13 + 1) as f64)) + 0.125
+        }
+        fn fill(start: usize, rows: &mut [f64], poll: &mut dyn FnMut() -> bool) {
+            for (part, chunk) in rows.chunks_mut(ARITHMETIC_RUN).enumerate() {
+                if !poll() {
+                    return;
+                }
+                for (offset, row) in chunk.iter_mut().enumerate() {
+                    *row = value(start + part * ARITHMETIC_RUN + offset);
+                }
+            }
+        }
+        let n = 3 * ARITHMETIC_RUN + 3;
+        let ends = [n / 3, n];
+        let expected: Vec<u64> = (0..n).map(|row| value(row).to_bits()).collect();
+        // Four workers fill the first budget. The second budget has one spare
+        // slot, which must not admit a partial two-worker group.
+        for capacity in [4, 5] {
+            let admission = ArithmeticAdmission::new(capacity);
+            let active = AtomicUsize::new(0);
+            let peak = AtomicUsize::new(0);
+            let release = AtomicBool::new(false);
+            let (started, arrivals) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                // An assertion failure must also release the held workers
+                // before the outer scope tries to join their calling threads.
+                let release_on_exit = ReleaseOnDrop(&release);
+                let calls: Vec<_> = (0..2)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            let owner = std::thread::current().id();
+                            let mut meter = Parent {
+                                owner,
+                                units: std::rc::Rc::new(std::cell::Cell::new(0)),
+                                polls: 0,
+                            };
+                            let mut rows = vec![f64::NAN; n];
+                            arithmetic_rows_with_admission(
+                                &mut rows,
+                                &ends,
+                                &admission,
+                                &mut meter,
+                                |start, rows, poll| {
+                                    assert_ne!(std::thread::current().id(), owner);
+                                    let current = active.fetch_add(1, Ordering::AcqRel) + 1;
+                                    let _active = Active(&active);
+                                    peak.fetch_max(current, Ordering::AcqRel);
+                                    assert!(poll());
+                                    rows[0] = value(start);
+                                    started.send(()).expect("worker arrival is observed");
+                                    while !release.load(Ordering::Acquire) {
+                                        std::thread::yield_now();
+                                    }
+                                    fill(start, rows, poll);
+                                },
+                            )
+                            .unwrap();
+                            assert_eq!(meter.units.get(), 0);
+                            assert!(meter.polls > 0);
+                            rows
+                        })
+                    })
+                    .collect();
+                for _ in 0..4 {
+                    arrivals
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .expect("both groups begin real work before testing contention");
+                }
+                assert_eq!(active.load(Ordering::Acquire), 4);
+                assert_eq!(admission.active.load(Ordering::Acquire), 4);
+
+                let owner = std::thread::current().id();
+                let mut meter = Parent {
+                    owner,
+                    units: std::rc::Rc::new(std::cell::Cell::new(0)),
+                    polls: 0,
+                };
+                let mut fallback = vec![f64::NAN; n];
+                arithmetic_rows_with_admission(
+                    &mut fallback,
+                    &ends,
+                    &admission,
+                    &mut meter,
+                    |start, rows, poll| {
+                        assert_eq!(std::thread::current().id(), owner);
+                        fill(start, rows, poll);
+                    },
+                )
+                .unwrap();
+                assert_eq!(meter.units.get(), 0);
+                assert!(meter.polls > 0);
+                assert_eq!(
+                    fallback.iter().map(|row| row.to_bits()).collect::<Vec<_>>(),
+                    expected
+                );
+                // The denied call finished without waiting for either group
+                // or consuming even the spare permit in the five-slot case.
+                assert_eq!(active.load(Ordering::Acquire), 4);
+                assert_eq!(admission.active.load(Ordering::Acquire), 4);
+                assert_eq!(peak.load(Ordering::Acquire), 4);
+                drop(release_on_exit);
+                for call in calls {
+                    let rows = call.join().expect("admitted group finishes");
+                    assert_eq!(
+                        rows.iter().map(|row| row.to_bits()).collect::<Vec<_>>(),
+                        expected
+                    );
+                }
+            });
+            assert_eq!(active.load(Ordering::Acquire), 0);
+            assert_eq!(admission.active.load(Ordering::Acquire), 0);
+            assert_arithmetic_capacity_reusable(&admission);
+        }
+    }
+
+    #[test]
+    fn saturated_arithmetic_preserves_inline_cancellation_and_unwind() {
+        use std::sync::atomic::Ordering;
+
+        struct Parent {
+            owner: std::thread::ThreadId,
+            polls: std::rc::Rc<std::cell::Cell<usize>>,
+            units: usize,
+            panics: bool,
+        }
+        impl FnxMeter<std::rc::Rc<std::cell::Cell<usize>>> for Parent {
+            fn unit(&mut self) -> Result<(), std::rc::Rc<std::cell::Cell<usize>>> {
+                self.units += 1;
+                Ok(())
+            }
+            fn poll(&mut self) -> Result<(), std::rc::Rc<std::cell::Cell<usize>>> {
+                assert_eq!(std::thread::current().id(), self.owner);
+                let polls = self.polls.get() + 1;
+                self.polls.set(polls);
+                if polls == 3 {
+                    if self.panics {
+                        std::panic::resume_unwind(Box::new("inline poll panic"));
+                    }
+                    Err(std::rc::Rc::clone(&self.polls))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for panics in [false, true] {
+            let admission = ArithmeticAdmission::new(2);
+            let occupied = admission.try_acquire(2).expect("hold the worker budget");
+            let token = std::rc::Rc::new(std::cell::Cell::new(0));
+            let owner = std::thread::current().id();
+            let mut meter = Parent {
+                owner,
+                polls: std::rc::Rc::clone(&token),
+                units: 0,
+                panics,
+            };
+            let n = 4 * ARITHMETIC_RUN;
+            let mut rows = vec![0; n];
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                arithmetic_rows_with_admission(
+                    &mut rows,
+                    &[n / 2, n],
+                    &admission,
+                    &mut meter,
+                    |start, rows, poll| {
+                        assert_eq!(std::thread::current().id(), owner);
+                        assert_eq!(start, 0);
+                        for chunk in rows.chunks_mut(ARITHMETIC_RUN) {
+                            if !poll() {
+                                return;
+                            }
+                            chunk.fill(1);
+                        }
+                    },
+                )
+            }));
+            if panics {
+                let error = result.expect_err("the host panic escapes inline execution");
+                assert_eq!(error.downcast_ref::<&str>(), Some(&"inline poll panic"));
+            } else {
+                let error = result
+                    .expect("cancellation is a returned error")
+                    .expect_err("the third live poll cancels inline execution");
+                assert!(std::rc::Rc::ptr_eq(&error, &token));
+            }
+            assert_eq!(token.get(), 3);
+            assert_eq!(meter.units, 0);
+            assert!(rows[..2 * ARITHMETIC_RUN].iter().all(|&row| row == 1));
+            assert!(rows[2 * ARITHMETIC_RUN..].iter().all(|&row| row == 0));
+            assert_eq!(admission.active.load(Ordering::Acquire), 2);
+            drop(occupied);
+            assert_eq!(admission.active.load(Ordering::Acquire), 0);
+            assert_arithmetic_capacity_reusable(&admission);
+        }
+    }
+
     /// The meter and its cancellation payload deliberately contain Rc, so
     /// neither can be sent to a worker. Cancellation is triggered by actual
     /// completed worker chunks, not precharge or a clock/sleep assumption.
     #[test]
     fn parallel_arithmetic_reports_progress_and_joins_on_live_cancellation() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let admission = ArithmeticAdmission::new(MAX_GATHER_THREADS);
         let completed = AtomicUsize::new(0);
         let active = AtomicUsize::new(0);
+        let released_early = AtomicBool::new(false);
         let token = std::rc::Rc::new(std::cell::Cell::new(0));
         struct LiveParent<'a> {
             owner: std::thread::ThreadId,
@@ -4291,36 +4618,58 @@ mod tests {
                 }
             }
         }
-        struct Active<'a>(&'a AtomicUsize);
+        struct Active<'a> {
+            count: &'a AtomicUsize,
+            admission: &'a ArithmeticAdmission,
+            released_early: &'a AtomicBool,
+        }
         impl Drop for Active<'_> {
             fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::Release);
+                if self.admission.active.load(Ordering::Acquire) != MAX_GATHER_THREADS {
+                    self.released_early.store(true, Ordering::Release);
+                }
+                self.count.fetch_sub(1, Ordering::Release);
             }
         }
         let per_worker = 32 * ARITHMETIC_RUN;
         let mut rows = vec![0.0; MAX_GATHER_THREADS * per_worker];
         let ends: Vec<usize> = (1..=MAX_GATHER_THREADS).map(|i| i * per_worker).collect();
+        let owner = std::thread::current().id();
         let mut meter = LiveParent {
-            owner: std::thread::current().id(),
+            owner,
             completed: &completed,
             token: std::rc::Rc::clone(&token),
         };
-        let result = arithmetic_rows(&mut rows, &ends, &mut meter, |_, rows, poll| {
-            active.fetch_add(1, Ordering::Release);
-            let _active = Active(&active);
-            for chunk in rows.chunks_mut(ARITHMETIC_RUN) {
-                if !poll() {
-                    return;
+        let result = arithmetic_rows_with_admission(
+            &mut rows,
+            &ends,
+            &admission,
+            &mut meter,
+            |_, rows, poll| {
+                assert_ne!(std::thread::current().id(), owner);
+                active.fetch_add(1, Ordering::Release);
+                let _active = Active {
+                    count: &active,
+                    admission: &admission,
+                    released_early: &released_early,
+                };
+                for chunk in rows.chunks_mut(ARITHMETIC_RUN) {
+                    if !poll() {
+                        return;
+                    }
+                    chunk.fill(1.0);
+                    completed.fetch_add(1, Ordering::Release);
                 }
-                chunk.fill(1.0);
-                completed.fetch_add(1, Ordering::Release);
-            }
-        });
-        let Err(FnxExecutionError::Cancelled(error)) = result else {
+            },
+        );
+        let Err(error) = result else {
             panic!("worker progress must trigger cancellation")
         };
         assert!(std::rc::Rc::ptr_eq(&error, &token));
         assert_eq!(active.load(Ordering::Acquire), 0, "all workers joined");
+        assert!(!released_early.load(Ordering::Acquire));
+        assert_eq!(admission.active.load(Ordering::Acquire), 0);
+        assert_arithmetic_capacity_reusable(&admission);
         let after = completed.load(Ordering::Acquire);
         assert!(after >= 2);
         assert!(after <= token.get() + MAX_GATHER_THREADS);
@@ -4335,10 +4684,17 @@ mod tests {
     fn parallel_arithmetic_joins_peers_when_host_or_worker_unwinds() {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-        struct Active<'a>(&'a AtomicUsize);
+        struct Active<'a> {
+            count: &'a AtomicUsize,
+            admission: &'a ArithmeticAdmission,
+            released_early: &'a AtomicBool,
+        }
         impl Drop for Active<'_> {
             fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::Release);
+                if self.admission.active.load(Ordering::Acquire) != MAX_GATHER_THREADS {
+                    self.released_early.store(true, Ordering::Release);
+                }
+                self.count.fetch_sub(1, Ordering::Release);
             }
         }
         struct PanicParent<'a> {
@@ -4363,40 +4719,57 @@ mod tests {
             }
         }
         for host_panics in [true, false] {
+            let admission = ArithmeticAdmission::new(MAX_GATHER_THREADS);
             let completed = AtomicUsize::new(0);
             let active = AtomicUsize::new(0);
+            let released_early = AtomicBool::new(false);
             let at_panic = AtomicUsize::new(0);
             let worker_panicked = AtomicBool::new(false);
             let per_worker = 32 * ARITHMETIC_RUN;
             let mut rows = vec![0.0; MAX_GATHER_THREADS * per_worker];
             let ends: Vec<usize> = (1..=MAX_GATHER_THREADS).map(|i| i * per_worker).collect();
+            let owner = std::thread::current().id();
             let mut meter = PanicParent {
-                owner: std::thread::current().id(),
+                owner,
                 completed: &completed,
                 at_panic: &at_panic,
                 host_panics,
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                arithmetic_rows(&mut rows, &ends, &mut meter, |_, rows, poll| {
-                    active.fetch_add(1, Ordering::Release);
-                    let _active = Active(&active);
-                    for chunk in rows.chunks_mut(ARITHMETIC_RUN) {
-                        if !poll() {
-                            return;
+                arithmetic_rows_with_admission(
+                    &mut rows,
+                    &ends,
+                    &admission,
+                    &mut meter,
+                    |_, rows, poll| {
+                        assert_ne!(std::thread::current().id(), owner);
+                        active.fetch_add(1, Ordering::Release);
+                        let _active = Active {
+                            count: &active,
+                            admission: &admission,
+                            released_early: &released_early,
+                        };
+                        for chunk in rows.chunks_mut(ARITHMETIC_RUN) {
+                            if !poll() {
+                                return;
+                            }
+                            chunk.fill(1.0);
+                            let count = completed.fetch_add(1, Ordering::AcqRel) + 1;
+                            // The first worker to complete actual arithmetic is
+                            // the panic source, regardless of scheduling order.
+                            if !host_panics && count == 2 {
+                                worker_panicked.store(true, Ordering::Release);
+                                std::panic::resume_unwind(Box::new("worker arithmetic panic"));
+                            }
                         }
-                        chunk.fill(1.0);
-                        let count = completed.fetch_add(1, Ordering::AcqRel) + 1;
-                        // The first worker to complete actual arithmetic is
-                        // the panic source, regardless of scheduling order.
-                        if !host_panics && count == 2 {
-                            worker_panicked.store(true, Ordering::Release);
-                            std::panic::resume_unwind(Box::new("worker arithmetic panic"));
-                        }
-                    }
-                })
+                    },
+                )
             }));
             assert!(result.is_err(), "host_panics={host_panics}");
             assert_eq!(active.load(Ordering::Acquire), 0, "all workers joined");
+            assert!(!released_early.load(Ordering::Acquire));
+            assert_eq!(admission.active.load(Ordering::Acquire), 0);
+            assert_arithmetic_capacity_reusable(&admission);
             let after = completed.load(Ordering::Acquire);
             assert!(after < MAX_GATHER_THREADS * 32, "peers stopped early");
             if host_panics {

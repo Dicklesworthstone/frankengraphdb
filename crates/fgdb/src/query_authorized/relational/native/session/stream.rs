@@ -718,36 +718,50 @@ fn compile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<RowPlan, Que
 }
 
 fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<(), QueryError> {
-    // Admit private single-edge probe captures, not arbitrary captured paths
-    // or outer capture export. The native compiler still proves fixed-edge
-    // producers, operand domains, scope-local IDs and the full output profile.
-    // Keep this source fence shared by row and aggregate factories.
+    // Collection paths retain only compiler-proven local fixed hops. Terminal
+    // child probes constrain complete witnesses through the same scoped
+    // incidence, edge, endpoint and property readers. Their captures stay
+    // single-edge and local; neither a child nor an outer capture is exported.
+    // The native compiler proves the terminal layout, operand domains, local
+    // identities, capture bounds and complete output profile. This shared
+    // row/aggregate fence admits only Collect -> Probe nesting, at depth two.
     let operators = pattern.plan().operators();
-    let mut probe_end = None;
+    let mut scopes = [(0_usize, false); 2];
+    let mut depth = 0_usize;
     for (operator, op) in operators.iter().enumerate() {
-        if probe_end == Some(operator) {
-            probe_end = None;
+        if depth != 0 && scopes[depth - 1].0 == operator {
+            depth -= 1;
         }
         match op {
-            GlaOperator::Probe { group, end, .. } => {
+            GlaOperator::Probe { group, end, .. } | GlaOperator::Collect { group, end, .. } => {
                 let end = *end as usize;
-                if probe_end.is_some()
-                    || end <= operator
-                    || !matches!(operators.get(end), Some(GlaOperator::ProbeEnd { group: close }) if close == group)
-                {
+                let collect = matches!(op, GlaOperator::Collect { .. });
+                let closes = match (op, operators.get(end)) {
+                    (GlaOperator::Probe { .. }, Some(GlaOperator::ProbeEnd { group: close }))
+                    | (
+                        GlaOperator::Collect { .. },
+                        Some(GlaOperator::CollectEnd { group: close, .. }),
+                    ) => close == group,
+                    _ => false,
+                };
+                let within_parent = match depth {
+                    0 => true,
+                    1 => scopes[0].1 && !collect && end < scopes[0].0,
+                    _ => false,
+                };
+                if !within_parent || end <= operator || !closes {
                     return Err(plan_error(VertexScanBuildError { operator }));
                 }
-                probe_end = Some(end);
+                scopes[depth] = (end, collect);
+                depth += 1;
             }
             GlaOperator::CapturePath { segments, .. }
-                if probe_end.is_none() || segments.len() != 1 =>
+                if segments.is_empty()
+                    || segments.len() > fgdb_gql::algebra::MAX_PATTERN_EDGES
+                    || depth
+                        .checked_sub(1)
+                        .is_none_or(|index| !scopes[index].1 && segments.len() != 1) =>
             {
-                return Err(plan_error(VertexScanBuildError { operator }));
-            }
-            // A pattern comprehension (fgdb-7nwox) is not admitted under a
-            // capability: its collected elements would need their own
-            // admission before any value reads them.
-            GlaOperator::Collect { .. } | GlaOperator::CollectEnd { .. } => {
                 return Err(plan_error(VertexScanBuildError { operator }));
             }
             _ => {}
@@ -755,6 +769,7 @@ fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result
     }
     Ok(())
 }
+
 /// A bound row plan: the physical plan, its cut, the output columns and,
 /// for a set that pulls row by row, the projection each source row takes.
 type BoundRows = (RowPlan, CommitSeq, Vec<String>, Option<GraphSetRowPull>);
@@ -766,16 +781,11 @@ fn bind_projected_rows(
 ) -> Result<BoundRows, QueryError> {
     let pull = query
         .row_pull()
+        .or_else(|| query.vertex_graph_row_pull())
+        .or_else(|| query.edge_row_pull())
         .ok_or(QueryError::StreamingUnsupported { facade })?;
-    let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
-        unreachable!("a row pull is rooted at its one vertex scan")
-    };
-    Ok((
-        RowPlan::Vertex(plan),
-        at,
-        query.columns().to_vec(),
-        Some(pull),
-    ))
+    let plan = compile(pull.pattern())?;
+    Ok((plan, at, query.columns().to_vec(), Some(pull)))
 }
 
 fn bind(
@@ -928,7 +938,7 @@ fn build_rows<'q, C: FnMut() -> u64>(
     let (plan, at, columns, pull) = selected;
     let driver: Pull<'q, GraphValueRow> = match plan {
         RowPlan::Edge(plan) => Box::new(aggregate::edge::row_driver(
-            plan, at, view, cx, execution, policy,
+            plan, pull, at, view, cx, execution, policy,
         )?),
         RowPlan::Vertex(plan) => {
             Box::new(vertex_driver(plan, pull, at, view, cx, execution, policy)?)
@@ -949,7 +959,7 @@ fn build_send_rows<'q, C: FnMut() -> u64 + Send>(
     // native physical driver, source masks, signed permit and terminal guard.
     let driver: SendPull<'q, GraphValueRow> = match plan {
         RowPlan::Edge(plan) => Box::new(aggregate::edge::row_driver(
-            plan, at, view, cx, execution, policy,
+            plan, pull, at, view, cx, execution, policy,
         )?),
         RowPlan::Vertex(plan) => {
             Box::new(vertex_driver(plan, pull, at, view, cx, execution, policy)?)

@@ -1364,16 +1364,11 @@ pub(crate) fn canonicalize_owned(entries: &mut [CoordinateEntry]) -> Result<(), 
     Ok(())
 }
 
-/// Merge into a retained subsequence of a checked template's canonical rows.
-/// Only `LogicalDeltaTemplate` lends the existing rows to this constructor.
-pub(crate) fn replace_canonical_rows(
-    existing: &[DeltaRow],
-    mut retain: impl FnMut(&DeltaRow) -> bool,
+/// Admit additions before merging any coordinate. Multi-coordinate replacement
+/// must finish this phase for ALL coordinates before reporting duplicates.
+pub(crate) fn canonical_row_additions(
     additional: Vec<DeltaRow>,
-    entry: usize,
-) -> Result<Vec<DeltaRow>, CanonicalError> {
-    // Validate ALL additions before reporting any duplicate, including a
-    // duplicate against the retained prefix. This is build's error precedence.
+) -> Result<Vec<(Vec<u8>, DeltaRow)>, CanonicalError> {
     let mut encoded: Vec<(Vec<u8>, DeltaRow)> = additional
         .into_iter()
         .map(|mut row| {
@@ -1382,7 +1377,18 @@ pub(crate) fn replace_canonical_rows(
         })
         .collect::<Result<_, _>>()?;
     encoded.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(encoded)
+}
 
+/// Merge into a retained subsequence of a checked template's canonical rows.
+/// Only `LogicalDeltaTemplate` lends the existing rows to this constructor;
+/// additions have passed `canonical_row_additions` before any merge begins.
+pub(crate) fn replace_canonical_rows(
+    existing: &[DeltaRow],
+    mut retain: impl FnMut(&DeltaRow) -> bool,
+    encoded: Vec<(Vec<u8>, DeltaRow)>,
+    entry: usize,
+) -> Result<Vec<DeltaRow>, CanonicalError> {
     let mut retained: Vec<(&DeltaRow, Option<Vec<u8>>)> = existing
         .iter()
         .filter(|row| retain(row))

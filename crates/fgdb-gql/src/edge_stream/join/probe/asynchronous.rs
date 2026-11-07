@@ -249,18 +249,26 @@ impl Probe {
                     records: &records,
                     positions: &positions,
                 };
-                self.test_candidate(&step.predicates, &ids, &positions, &loan, &mut |event| {
-                    meter.event(event)?;
-                    // Candidate-local temporaries die before backtracking.
-                    // Charge the deepest retained local record when possible,
-                    // rather than accumulating every sibling's charge on the
-                    // outer row. A copy-only prefix still has an outer owner.
-                    let observed = match records.iter().rev().flatten().next() {
-                        Some(owner) => source.evaluation_event(owner, event),
-                        None => outer.observe(source, event),
-                    };
-                    observed.map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
-                })?
+                self.test_candidate(
+                    &step.predicates,
+                    &ids,
+                    &positions,
+                    None,
+                    &loan,
+                    &mut |event| {
+                        meter.event(event)?;
+                        // Candidate-local temporaries die before backtracking.
+                        // Charge the deepest retained local record when possible,
+                        // rather than accumulating every sibling's charge on the
+                        // outer row. A copy-only prefix still has an outer owner.
+                        let observed = match records.iter().rev().flatten().next() {
+                            Some(owner) => source.evaluation_event(owner, event),
+                            None => outer.observe(source, event),
+                        };
+                        observed
+                            .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
+                    },
+                )?
             };
             if passed.is_none() {
                 ids.pop();

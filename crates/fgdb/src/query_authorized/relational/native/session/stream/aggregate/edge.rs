@@ -490,6 +490,7 @@ pub(in super::super) fn ordered_source<'q, C: FnMut() -> u64 + Send>(
 // differs. Sources and permit never escape independently to the application.
 pub(in super::super) fn row_driver<'q, C: FnMut() -> u64>(
     plan: EdgeScanPlan,
+    pull: Option<GraphSetRowPull>,
     at: CommitSeq,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
@@ -512,7 +513,21 @@ pub(in super::super) fn row_driver<'q, C: FnMut() -> u64>(
     });
     execution.borrow_mut().checkpoint()?;
     Ok(move || {
-        let row = cursor.next().transpose().map_err(row_error)?;
+        // The value projection reads collected elements through this same
+        // scoped source and meter. No raw snapshot or second permit is
+        // available to the expression evaluator.
+        let row = if let Some(pull) = &pull {
+            cursor.next_projected(pull, row_error, |ordinal, column, error| {
+                QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    row: usize::try_from(ordinal).unwrap_or(usize::MAX),
+                    column,
+                    error,
+                }))
+            })
+        } else {
+            cursor.next().map(|row| row.map_err(row_error))
+        }
+        .transpose()?;
         // Delivery is charged only after matching, projection and native
         // admission. Natural EOF and LIMIT 0 still recheck live authority.
         execution.borrow_mut().deliver(usize::from(row.is_some()))?;

@@ -613,3 +613,317 @@ fn physical_preparation_rejects_foreign_or_nonedge_captures_even_at_limit_zero()
         assert!(super::Probe::compile(&ops, start, 2).is_err());
     }
 }
+
+// Enumerate the tiny fixture by a complete edge scan at every prefix. This
+// oracle has no indexed seek state, endpoint cache, or production walk frames.
+fn expected_trails(
+    fixture: &Fixture,
+    start: VId,
+    direction: GlaDirection,
+    bounds: (usize, usize),
+) -> Vec<GraphPath> {
+    fn visit(
+        fixture: &Fixture,
+        start: VId,
+        endpoint: VId,
+        direction: GlaDirection,
+        bounds: (usize, usize),
+        steps: &mut Vec<(EId, VId)>,
+        paths: &mut Vec<GraphPath>,
+    ) {
+        if steps.len() >= bounds.0 {
+            paths.push(GraphPath::new(start, steps.clone().into_boxed_slice()));
+        }
+        if steps.len() == bounds.1 {
+            return;
+        }
+        for (&eid, edge) in &fixture.edges {
+            if edge.relation != R || steps.iter().any(|(used, _)| *used == eid) {
+                continue;
+            }
+            let next = match direction {
+                GlaDirection::Forward if edge.source == endpoint => edge.target,
+                GlaDirection::Reverse if edge.target == endpoint => edge.source,
+                GlaDirection::Undirected if edge.source == endpoint => edge.target,
+                GlaDirection::Undirected if edge.target == endpoint => edge.source,
+                _ => continue,
+            };
+            steps.push((eid, next));
+            visit(fixture, start, next, direction, bounds, steps, paths);
+            steps.pop();
+        }
+    }
+    let mut paths = Vec::new();
+    visit(
+        fixture,
+        start,
+        start,
+        direction,
+        bounds,
+        &mut Vec::new(),
+        &mut paths,
+    );
+    paths
+}
+
+#[test]
+fn captured_trails_keep_zero_hops_parallel_routes_cycles_and_declared_orientation() {
+    for direction in [
+        GlaDirection::Forward,
+        GlaDirection::Reverse,
+        GlaDirection::Undirected,
+    ] {
+        // Seed the declared first endpoint, seed its far endpoint (normalizing
+        // the expansion backwards), and constrain the route to close on a.
+        for shape in 0..3 {
+            let tail = if shape == 2 { "a" } else { "b" };
+            let anchor = if shape == 1 { "b" } else { "a" };
+            let atom = match direction {
+                GlaDirection::Forward => format!("(a)-[:R*0..3]->({tail})"),
+                GlaDirection::Reverse => format!("(a)<-[:R*0..3]-({tail})"),
+                GlaDirection::Undirected => format!("(a)-[:R*0..3]-({tail})"),
+            };
+            let plan = prepare(&format!(
+                "MATCH ({anchor}) RETURN {anchor}, [p = {atom} | p] AS paths"
+            ));
+            let mut fixture = Fixture::regular();
+            fixture.insert(EId(3), VId(2), VId(0), R, None);
+            let scan_direction = if shape == 1 {
+                match direction {
+                    GlaDirection::Forward => GlaDirection::Reverse,
+                    GlaDirection::Reverse => GlaDirection::Forward,
+                    GlaDirection::Undirected => GlaDirection::Undirected,
+                }
+            } else {
+                direction
+            };
+            let expected: Vec<_> = fixture
+                .vertices
+                .keys()
+                .map(|&root| {
+                    let paths = expected_trails(&fixture, root, scan_direction, (0, 3))
+                        .into_iter()
+                        .filter_map(|path| {
+                            let end = path.nodes().last().unwrap();
+                            if shape == 2 && end != root {
+                                return None;
+                            }
+                            // Eager prefers forward when both ends coincide.
+                            let path = if shape == 1 && end != root {
+                                let nodes: Vec<_> = path.nodes().collect();
+                                let reversed = path
+                                    .steps()
+                                    .iter()
+                                    .map(|(eid, _)| *eid)
+                                    .zip(nodes)
+                                    .rev()
+                                    .collect::<Vec<_>>()
+                                    .into_boxed_slice();
+                                GraphPath::new(end, reversed)
+                            } else {
+                                path
+                            };
+                            Some(GraphValue::Path(path))
+                        })
+                        .collect::<Vec<_>>();
+                    vec![
+                        GraphValue::Vertex(root),
+                        GraphValue::List(paths.into_boxed_slice()),
+                    ]
+                })
+                .collect();
+            assert_eq!(plain(&eager(&fixture, &plan)), expected);
+            let mut cursor = VertexScanCursor::new(
+                fixture,
+                VertexScanPlan::compile(plan.plan()).unwrap(),
+                policy(),
+                || Ok::<_, ()>(()),
+            );
+            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(plain(&rows), expected, "{direction:?}, shape={shape}");
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        }
+    }
+}
+
+#[test]
+fn captured_variable_segments_never_become_fixed_edge_operands() {
+    let plan = prepare("MATCH (a) RETURN [p = (a)-[:R*0..3]->(b) | p] AS paths LIMIT 0");
+    let original = plan.plan().operators();
+    let start = original
+        .iter()
+        .position(|op| matches!(op, GlaOperator::Collect { .. }))
+        .unwrap();
+    let (collection, end) = super::Collection::compile(original, start, 1).unwrap();
+    // A NULL correlation has no zero-hop identity and performs no adjacency
+    // read. An isolated visible vertex has exactly its zero-hop route instead.
+    let fixture = Fixture::regular();
+    let value = collection
+        .evaluate(
+            &[None],
+            &fixture,
+            &mut |_| Ok::<_, GqlQueryError<EdgeScanError<&'static str>, ()>>(()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(value, GraphValue::List(Box::new([])));
+    assert_eq!(fixture.seeks.load(Ordering::SeqCst), 0);
+    let value = collection
+        .evaluate(
+            &[Some(VId(3))],
+            &fixture,
+            &mut |_| Ok::<_, GqlQueryError<EdgeScanError<&'static str>, ()>>(()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(
+        value,
+        GraphValue::List(Box::new([GraphValue::Path(GraphPath::new(
+            VId(3),
+            Box::new([]),
+        ))])),
+    );
+
+    let mut edge_output = original.to_vec();
+    let GlaOperator::CollectEnd {
+        value: Some(ValueProjection::Path { function, .. }),
+        ..
+    } = &mut edge_output[end]
+    else {
+        panic!("the fixture projects its local capture")
+    };
+    *function = GraphPathFunction::Edge;
+    assert!(super::Collection::compile(&edge_output, start, 1).is_err());
+
+    // A variable segment with exactly zero or one hop still carries its Path
+    // domain. Its syntactic segment count must not make it a fixed Edge.
+    for hops in [0, 1] {
+        let mut singleton = original.to_vec();
+        for op in &mut singleton {
+            if let GlaOperator::VarLengthExpand { bounds, .. } = op {
+                *bounds = crate::GraphWalkBounds::new(hops, hops).unwrap();
+            }
+        }
+        assert!(super::Collection::compile(&singleton, start, 1).is_ok());
+        let GlaOperator::CollectEnd {
+            value: Some(ValueProjection::Path { function, .. }),
+            ..
+        } = &mut singleton[end]
+        else {
+            unreachable!()
+        };
+        *function = GraphPathFunction::Edge;
+        assert!(super::Collection::compile(&singleton, start, 1).is_err());
+    }
+
+    let property =
+        prepare("MATCH (a) RETURN [(a)-[r:R]->(b) WHERE r.p > 5 | b] AS vertices LIMIT 0");
+    let predicate = property
+        .plan()
+        .operators()
+        .iter()
+        .find(|op| matches!(op, GlaOperator::SelectBoolean { .. }))
+        .unwrap()
+        .clone();
+    let mut edge_property = original.to_vec();
+    edge_property.insert(end, predicate);
+    if let GlaOperator::Collect { end, .. } = &mut edge_property[start] {
+        *end += 1;
+    }
+    assert!(super::Collection::compile(&edge_property, start, 1).is_err());
+
+    let mut probe = original.to_vec();
+    let GlaOperator::Collect { group, .. } = probe[start] else {
+        unreachable!()
+    };
+    probe[start] = GlaOperator::Probe {
+        group,
+        anti: false,
+        end: end as u32,
+    };
+    probe[end] = GlaOperator::ProbeEnd { group };
+    // Ordinary and async EXISTS share this compiler and remain support-only.
+    assert!(super::Probe::compile(&probe, start, 1).is_err());
+}
+
+#[test]
+fn every_captured_trail_checkpoint_and_quota_is_terminal_without_a_partial_list() {
+    let plan = prepare("MATCH (a) RETURN a, [p = (a)-[:R*0..3]->(b) | [b, p, length(p)]] AS paths");
+    let calls = Cell::new(0);
+    let mut good = VertexScanCursor::new(
+        Fixture::regular(),
+        VertexScanPlan::compile(plan.plan()).unwrap(),
+        policy(),
+        || {
+            calls.set(calls.get() + 1);
+            Ok::<_, usize>(())
+        },
+    );
+    let expected = good.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    let rows = good.row_stats();
+    let evaluator = good.evaluator_stats();
+    let total = calls.get();
+    assert!(total > 20 && expected.len() > 1);
+    for stop in 1..=total {
+        let at = Cell::new(0);
+        let fixture = Fixture::regular();
+        let drops = fixture.drops.clone();
+        let mut cursor = VertexScanCursor::new(
+            fixture,
+            VertexScanPlan::compile(plan.plan()).unwrap(),
+            policy(),
+            || {
+                at.set(at.get() + 1);
+                if at.get() == stop { Err(stop) } else { Ok(()) }
+            },
+        );
+        let mut prefix = Vec::new();
+        loop {
+            match cursor.next() {
+                Some(Ok(row)) => prefix.push(row),
+                Some(Err(GqlQueryError::Interrupted(actual))) => {
+                    assert_eq!(actual, stop);
+                    break;
+                }
+                other => panic!("expected captured-trail failure at {stop}, got {other:?}"),
+            }
+        }
+        assert!(expected.starts_with(&prefix));
+        assert_eq!(cursor.row_stats().result_rows, prefix.len() as u64);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(cursor.next().is_none());
+        assert_eq!(at.get(), stop);
+    }
+    let exact = [
+        rows.snapshot_records,
+        rows.result_rows,
+        evaluator.work_units,
+        evaluator.scratch_entries,
+    ];
+    assert!(exact.iter().all(|limit| *limit > 0));
+    for reduced in 0..=4 {
+        let mut limits = exact;
+        if reduced < 4 {
+            limits[reduced] -= 1;
+        }
+        let mut cursor = VertexScanCursor::new(
+            Fixture::regular(),
+            VertexScanPlan::compile(plan.plan()).unwrap(),
+            GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+            || Ok::<_, ()>(()),
+        );
+        let result = cursor.by_ref().collect::<Result<Vec<_>, _>>();
+        if reduced == 4 {
+            assert_eq!(result.unwrap(), expected);
+            assert_eq!(cursor.evaluator_stats(), evaluator);
+        } else {
+            assert!(matches!(
+                result,
+                Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
+            ));
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+            assert!(cursor.next().is_none());
+        }
+    }
+}

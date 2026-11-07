@@ -167,6 +167,173 @@ fn every_ordered_incremental_cut_matches_complete_native_preparation() {
 }
 
 #[test]
+fn repeated_same_coordinate_appends_match_complete_preparation_without_changing_prefixes() {
+    let ((), report) = run_async_under_lab(0x6972_0107, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = seeded(&contexts.commit()).await;
+        let mut staged: Vec<_> = program().into_iter().take(3).collect();
+        for (relation, first) in [(RelationId(9), 100), (RelationId(2), 200)] {
+            let mut batch = WriteBatch::new(relation);
+            for offset in 0..32 {
+                batch.add_edge(EId(first + offset), VId(5), VId(6), vec![(P, int(1))]);
+            }
+            staged.push(batch);
+        }
+        let mut previous = db.prepare_ordered_writes(staged.clone()).unwrap();
+        for step in 0..12 {
+            let before = previous.template.canonical_bytes().unwrap();
+            let mut low = WriteBatch::new(RelationId(2));
+            low.set_vertex_property(VId(2), P, Some(int(if step % 2 == 0 { 0 } else { 7 })));
+            low.set_vertex_label(VId(5), LabelId(2), step % 2 != 0);
+            low.set_edge_property(EId(60), Q, (step % 2 == 0).then(|| int(step)));
+            low.add_edge(EId(1_000 + step as u128), VId(5), VId(6), vec![]);
+            let mut high = WriteBatch::new(RelationId(9));
+            high.compare_and_set_edge_property(
+                EId(50),
+                P,
+                Some(int(51 + step)),
+                int(52 + step),
+                WriteMismatchPolicy::AbortWrite,
+            );
+            // Reverse batch order as well as the coordinate being changed.
+            let suffix = if step % 2 == 0 {
+                vec![high, low]
+            } else {
+                vec![low, high]
+            };
+            let actual = db
+                .try_extend_prepared_ordered_writes(&previous, &staged, &suffix)
+                .unwrap()
+                .unwrap();
+            staged.extend(suffix);
+            let expected = db.prepare_ordered_writes(staged.clone()).unwrap();
+            assert_same(&actual, &expected);
+            assert_eq!(previous.template.canonical_bytes().unwrap(), before);
+            assert_eq!(
+                actual
+                    .template
+                    .coordinate_entries()
+                    .iter()
+                    .map(|entry| entry.relation)
+                    .collect::<Vec<_>>(),
+                vec![RelationId(2), RelationId(9)]
+            );
+            previous = actual;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn same_coordinate_appends_keep_savepoint_and_refusal_atomicity() {
+    let ((), report) = run_async_under_lab(0x6972_0108, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let mut db = seeded(&cx).await;
+        let mut transaction = db.begin(&contexts.txn()).unwrap();
+        let prefix: Vec<_> = program().into_iter().take(3).collect();
+        transaction.write_ordered(&mut db, prefix).unwrap();
+        let before = transaction.staged_effect_digest().unwrap();
+        let birth = transaction
+            .vertex(&db, VId(5))
+            .unwrap()
+            .unwrap()
+            .birth_ordinal;
+        transaction.savepoint(&db, "mixed").unwrap();
+        let mut low = WriteBatch::new(RelationId(2));
+        low.create_vertex(VId(7), vec![], vec![(P, int(7))]);
+        low.add_edge(EId(70), VId(5), VId(7), vec![]);
+        let mut high = WriteBatch::new(RelationId(9));
+        high.set_edge_property(EId(50), P, Some(int(99)));
+        let suffix = vec![high, low];
+        transaction.write_ordered(&mut db, suffix.clone()).unwrap();
+        let changed = transaction.staged_effect_digest().unwrap();
+        assert_ne!(changed, before);
+        assert!(transaction.vertex(&db, VId(7)).unwrap().is_some());
+        assert!(db.vertex(VId(7)).unwrap().is_none());
+        let mut refused = WriteBatch::new(RelationId(2));
+        refused.compare_and_set_edge_property(
+            EId(50),
+            P,
+            Some(int(51)),
+            int(100),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        assert!(transaction.write_ordered(&mut db, vec![refused]).is_err());
+        assert_eq!(transaction.staged_effect_digest().unwrap(), changed);
+        transaction.rollback_to_savepoint(&db, "mixed").unwrap();
+        assert_eq!(transaction.staged_effect_digest().unwrap(), before);
+        assert_eq!(
+            transaction
+                .vertex(&db, VId(5))
+                .unwrap()
+                .unwrap()
+                .birth_ordinal,
+            birth
+        );
+        assert!(transaction.vertex(&db, VId(7)).unwrap().is_none());
+        transaction.write_ordered(&mut db, suffix).unwrap();
+        assert_eq!(transaction.staged_effect_digest().unwrap(), changed);
+        transaction.commit(&mut db, &cx).await.unwrap();
+        assert!(db.vertex(VId(7)).unwrap().is_some());
+        assert_eq!(
+            db.edge(EId(50)).unwrap().unwrap().props,
+            vec![(P, int(99).into())]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn a_new_lower_relation_moves_the_vertex_backbone_before_same_coordinate_reuse() {
+    let ((), report) = run_async_under_lab(0x6972_0109, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = seeded(&contexts.commit()).await;
+        let mut staged: Vec<_> = program().into_iter().take(3).collect();
+        let previous = db.prepare_ordered_writes(staged.clone()).unwrap();
+        let mut lower = WriteBatch::new(RelationId(1));
+        lower.add_edge(EId(70), VId(5), VId(6), vec![(P, int(70))]);
+        lower.set_vertex_property(VId(5), P, Some(int(50)));
+        let moved = db
+            .try_extend_prepared_ordered_writes(&previous, &staged, &[lower.clone()])
+            .unwrap()
+            .unwrap();
+        staged.push(lower);
+        assert_same(&moved, &db.prepare_ordered_writes(staged.clone()).unwrap());
+        assert_eq!(
+            moved.template.coordinate_entries()[0].relation,
+            RelationId(1)
+        );
+        for coordinate in moved.template.coordinate_entries() {
+            if coordinate.relation != RelationId(1) {
+                assert!(
+                    coordinate
+                        .rows
+                        .iter()
+                        .all(|row| !vertex_effect(row).unwrap())
+                );
+            }
+        }
+        let mut later = WriteBatch::new(RelationId(9));
+        later.compare_and_set_edge_property(
+            EId(70),
+            P,
+            Some(int(70)),
+            int(71),
+            WriteMismatchPolicy::AbortWrite,
+        );
+        later.set_vertex_property(VId(5), P, Some(int(5)));
+        let actual = db
+            .try_extend_prepared_ordered_writes(&moved, &staged, &[later.clone()])
+            .unwrap()
+            .unwrap();
+        staged.push(later);
+        assert_same(&actual, &db.prepare_ordered_writes(staged).unwrap());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn foreign_edge_identity_moves_to_its_actual_coordinate_without_empty_slices() {
     let ((), report) = run_async_under_lab(0x6972_0102, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
