@@ -946,9 +946,9 @@ impl Collection {
         // keep separate positions even with copied outer predicate operands.
         // Correlated finite TRAIL atoms preserve nested DFS route occurrences,
         // interleaved with fixed EId choices. Each complete earlier occurrence
-        // explores the following atoms before advancing. A single TRAIL may
-        // have fixed hops and one independent declared start. Multiple TRAILs
-        // currently retain their correlated root.
+        // explores the following atoms before advancing. One independent
+        // declared start preserves path order when the correlation is at the
+        // far endpoint, for both single and multiple finite TRAILs.
         // Fixed parents may have terminal child probes. Only direct parent
         // scans and expansion atoms determine the collection profile; child
         // finite walks keep their existing endpoint-support EXISTS semantics.
@@ -979,7 +979,7 @@ impl Collection {
         }
         if (fixed == 0 && walks == 0)
             || fixed + walks > MAX_PATTERN_EDGES
-            || (walks != 0 && scans != 0 && (walks != 1 || scans > 1))
+            || (walks != 0 && scans > 1)
         {
             return Err(bad());
         }

@@ -2782,7 +2782,8 @@ fn multiple_trail_collections_keep_segment_products_and_pinned_captures() {
                 11
             }
         };
-        let shapes: &[(&[&str], &[(usize, usize)])] = &[
+        type TrailShape<'a> = (&'a [&'a str], &'a [(usize, usize)]);
+        let shapes: &[TrailShape<'_>] = &[
             (&["*0..1", "*0..2"], &[(0, 1), (0, 2)]),
             (&["*0..2", "", "*0..2"], &[(0, 2), (1, 1), (0, 2)]),
             (&["*0..1", "*0..1", "*1..2"], &[(0, 1), (0, 1), (1, 2)]),

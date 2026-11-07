@@ -3013,7 +3013,8 @@ fn multiple_trail_collections_keep_every_route_inside_the_authorized_graph() {
     let mut visible = slim
         .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
         .unwrap();
-    let shapes: &[(&[&str], &[(usize, usize)])] = &[
+    type TrailShape<'a> = (&'a [&'a str], &'a [(usize, usize)]);
+    let shapes: &[TrailShape<'_>] = &[
         (&["*0..1", "*0..2"], &[(0, 1), (0, 2)]),
         (&["*0..2", "", "*0..2"], &[(0, 2), (1, 1), (0, 2)]),
         (&["*0..1", "*0..1", "*1..2"], &[(0, 1), (0, 1), (1, 2)]),

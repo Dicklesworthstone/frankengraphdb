@@ -2373,44 +2373,37 @@ fn multi_trail_product_oracle(
     reverse: bool,
     different: bool,
 ) -> Vec<(GraphPath, [VId; 3])> {
-    let mut products: Vec<Vec<GraphPath>> = vec![Vec::new()];
-    for position in 0..atoms.len() {
-        let atom = if reverse {
-            atoms.len() - 1 - position
-        } else {
-            position
-        };
-        let (mut direction, bounds) = atoms[atom];
-        if reverse {
-            direction = match direction {
-                GlaDirection::Forward => GlaDirection::Reverse,
-                GlaDirection::Reverse => GlaDirection::Forward,
-                GlaDirection::Undirected => GlaDirection::Undirected,
-            };
-        }
+    // Captures retain declared start/atom order. Enumerate complete products
+    // from each declared root, then apply a far-end correlation as a filter.
+    let roots = if reverse {
+        source.ids.iter().copied().collect::<Vec<_>>()
+    } else {
+        vec![anchor]
+    };
+    let mut products: Vec<(VId, Vec<GraphPath>)> =
+        roots.into_iter().map(|root| (root, Vec::new())).collect();
+    for &(direction, bounds) in atoms {
         let (minimum, maximum) = bounds.map_or((1, 1), |b| (b.minimum(), b.maximum()));
         let mut next = Vec::new();
-        for prefix in products {
+        for (root, prefix) in products {
             let start = prefix
                 .last()
-                .map_or(anchor, |path| path.nodes().last().unwrap());
+                .map_or(root, |path| path.nodes().last().unwrap());
             for path in complete_routes(source, start, direction, minimum, maximum) {
                 let mut product = prefix.clone();
                 product.push(path);
-                next.push(product);
+                next.push((root, product));
             }
         }
         products = next;
     }
     products
         .into_iter()
-        .filter(|segments| {
-            for (position, path) in segments.iter().enumerate() {
-                let atom = if reverse {
-                    atoms.len() - 1 - position
-                } else {
-                    position
-                };
+        .filter(|(_, segments)| {
+            if reverse && segments.last().unwrap().nodes().last() != Some(anchor) {
+                return false;
+            }
+            for (atom, path) in segments.iter().enumerate() {
                 if atoms[atom].1.is_some()
                     && path.edges().collect::<BTreeSet<_>>().len() != path.len()
                 {
@@ -2425,34 +2418,17 @@ fn multi_trail_product_oracle(
                     .len()
                     == segments.iter().map(GraphPath::len).sum::<usize>()
         })
-        .map(|mut segments| {
-            if reverse {
-                segments.reverse();
-            }
+        .map(|(start, segments)| {
             let first = &segments[0];
             let last = segments.last().unwrap();
-            let vertices = if reverse {
-                [first.nodes().last().unwrap(), first.start(), last.start()]
-            } else {
-                [
-                    first.start(),
-                    first.nodes().last().unwrap(),
-                    last.nodes().last().unwrap(),
-                ]
-            };
-            let start = vertices[0];
-            let mut endpoint = start;
+            let vertices = [
+                start,
+                first.nodes().last().unwrap(),
+                last.nodes().last().unwrap(),
+            ];
             let mut steps = Vec::new();
             for segment in segments {
-                // Eager capture prefers the retained forward orientation when a
-                // segment is closed, even during a reversed containing traversal.
-                if segment.start() == endpoint {
-                    steps.extend_from_slice(segment.steps());
-                } else {
-                    let nodes: Vec<_> = segment.nodes().collect();
-                    steps.extend(segment.steps().iter().map(|step| step.0).zip(nodes).rev());
-                }
-                endpoint = steps.last().map_or(start, |step| step.1);
+                steps.extend_from_slice(segment.steps());
             }
             (GraphPath::new(start, steps.into_boxed_slice()), vertices)
         })
@@ -2463,6 +2439,32 @@ fn multi_trail_product_oracle(
 fn multiple_trail_collections_match_complete_products_and_eager_captures() {
     use GlaDirection::{Forward as F, Reverse as R, Undirected as U};
 
+    let literal = Source::new([(0, 1, 2), (1, 0, 1), (2, 0, 2), (3, 2, 2)]);
+    let one = Some(GraphWalkBounds::new(0, 1).unwrap());
+    let witness = |start, steps: &[(u128, u128)], vertices: [u128; 3]| {
+        (
+            GraphPath::new(
+                VId(start),
+                steps.iter().map(|&(e, v)| (EId(e), VId(v))).collect(),
+            ),
+            vertices.map(VId),
+        )
+    };
+    assert_eq!(
+        multi_trail_product_oracle(&literal, VId(2), &[(F, one), (F, one)], true, true),
+        vec![
+            witness(0, &[(2, 2)], [0, 0, 2]),
+            witness(0, &[(1, 1), (0, 2)], [0, 1, 2]),
+            witness(0, &[(2, 2)], [0, 2, 2]),
+            witness(0, &[(2, 2), (3, 2)], [0, 2, 2]),
+            witness(1, &[(0, 2)], [1, 1, 2]),
+            witness(1, &[(0, 2)], [1, 2, 2]),
+            witness(1, &[(0, 2), (3, 2)], [1, 2, 2]),
+            witness(2, &[], [2, 2, 2]),
+            witness(2, &[(3, 2)], [2, 2, 2]),
+            witness(2, &[(3, 2)], [2, 2, 2]),
+        ],
+    );
     for mask in 0..64 {
         for directions in [[F, F, F], [R, U, F], [U, R, U]] {
             for shape in 0..5 {
@@ -2807,8 +2809,12 @@ fn multiple_trail_admission_requires_finite_correlated_immediate_identity_domain
             unreachable!()
         };
         *end = (*end as i32 + adjustment) as u32;
-        assert!(
-            Collection::compile(&ops, start, 2).is_err(),
+        // A single declared scan uses the same finite-route kernel, with its
+        // existing correlation identity still enforced. All other malformed
+        // domains, intervals and capture kinds remain refused before reads.
+        assert_eq!(
+            Collection::compile(&ops, start, 2).is_ok(),
+            malformed == 0,
             "profile {malformed}"
         );
     }
