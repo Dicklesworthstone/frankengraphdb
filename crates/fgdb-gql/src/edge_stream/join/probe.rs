@@ -255,7 +255,17 @@ impl Probe {
                             direction: *direction,
                         },
                         bounds: *bounds,
-                        search: *search,
+                        // At most one hop cannot repeat an EId. The positive
+                        // compiler therefore need not emit a singleton domain
+                        // for this ALL atom, even inside a mixed TRAIL scope.
+                        search: if compound_captures
+                            && *search == GraphWalkSearch::All
+                            && bounds.maximum() <= 1
+                        {
+                            GraphWalkSearch::Trail
+                        } else {
+                            *search
+                        },
                     })
                 }
                 GlaOperator::Select { slot, .. } if (slot.ordinal() as usize) < width => None,
@@ -913,8 +923,8 @@ impl Collection {
         // in EId order, like identified eager scopes. Disconnected components
         // keep separate positions even with copied outer predicate operands.
         // One correlated finite TRAIL atom preserves DFS route occurrences,
-        // interleaved with fixed EId choices. A standalone TRAIL may instead
-        // start at one independent scan; mixed atoms keep their correlated root.
+        // interleaved with fixed EId choices. One independent scan preserves
+        // declaration order when the correlation is at the far endpoint.
         // Fixed parents may have terminal child probes. Only direct parent
         // scans and expansion atoms determine the collection profile; child
         // finite walks keep their existing endpoint-support EXISTS semantics.
@@ -946,7 +956,7 @@ impl Collection {
         if (fixed == 0 && walks == 0)
             || fixed > MAX_PATTERN_EDGES
             || walks > 1
-            || (walks != 0 && scans != 0 && (fixed != 0 || scans > 1))
+            || (walks != 0 && scans > 1)
         {
             return Err(bad());
         }

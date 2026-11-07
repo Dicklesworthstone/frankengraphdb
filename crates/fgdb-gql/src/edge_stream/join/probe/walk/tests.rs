@@ -864,40 +864,41 @@ fn mixed_product_oracle(
     reverse: bool,
     different: bool,
 ) -> Vec<(GraphPath, VId, EId)> {
-    let direction = if reverse {
-        match direction {
-            GlaDirection::Forward => GlaDirection::Reverse,
-            GlaDirection::Reverse => GlaDirection::Forward,
-            GlaDirection::Undirected => GlaDirection::Undirected,
-        }
+    // A far-end correlation filters complete declared paths. It does not
+    // reverse the witness order: independent roots still advance by VId.
+    let roots = if reverse {
+        source.ids.iter().copied().collect::<Vec<_>>()
     } else {
-        direction
+        vec![start]
     };
-    let mut products: Vec<Vec<GraphPath>> = vec![Vec::new()];
+    let mut products: Vec<(VId, Vec<GraphPath>)> =
+        roots.into_iter().map(|root| (root, Vec::new())).collect();
     for step in 0..3 {
-        let declared = if reverse { 2 - step } else { step };
-        let (minimum, maximum) = if declared == walk_at {
+        let (minimum, maximum) = if step == walk_at {
             (bounds.minimum(), bounds.maximum())
         } else {
             (1, 1)
         };
         let mut next = Vec::new();
-        for prefix in products {
+        for (root, prefix) in products {
             let from = prefix
                 .last()
-                .map_or(start, |path| path.nodes().last().unwrap());
+                .map_or(root, |path| path.nodes().last().unwrap());
             for path in complete_routes(source, from, direction, minimum, maximum) {
                 let mut product = prefix.clone();
                 product.push(path);
-                next.push(product);
+                next.push((root, product));
             }
         }
         products = next;
     }
     products
         .into_iter()
-        .filter(|segments| {
-            let walk = &segments[if reverse { 2 - walk_at } else { walk_at }];
+        .filter(|(_, segments)| {
+            if reverse && segments[2].nodes().last() != Some(start) {
+                return false;
+            }
+            let walk = &segments[walk_at];
             if walk.edges().collect::<BTreeSet<_>>().len() != walk.len() {
                 return false;
             }
@@ -909,33 +910,12 @@ fn mixed_product_oracle(
                     .len()
                     == segments.iter().map(GraphPath::len).sum::<usize>()
         })
-        .map(|mut segments| {
-            if reverse {
-                segments.reverse();
-            }
-            let start = if reverse {
-                segments[0].nodes().last().unwrap()
-            } else {
-                start
-            };
-            let local_x = if reverse {
-                segments[0].start()
-            } else {
-                segments[0].nodes().last().unwrap()
-            };
+        .map(|(start, segments)| {
+            let local_x = segments[0].nodes().last().unwrap();
             let fixed = segments[usize::from(walk_at == 0)].edges().next().unwrap();
             let mut steps = Vec::new();
-            let mut endpoint = start;
             for segment in segments {
-                // A closed segment chooses its retained forward orientation,
-                // even when the containing pattern was normalized backwards.
-                if segment.start() == endpoint {
-                    steps.extend_from_slice(segment.steps());
-                } else {
-                    let nodes: Vec<_> = segment.nodes().collect();
-                    steps.extend(segment.steps().iter().map(|step| step.0).zip(nodes).rev());
-                }
-                endpoint = steps.last().map_or(start, |step| step.1);
+                steps.extend_from_slice(segment.steps());
             }
             (
                 GraphPath::new(start, steps.into_boxed_slice()),
@@ -948,6 +928,35 @@ fn mixed_product_oracle(
 
 #[test]
 fn mixed_collections_match_complete_products_and_eager_paths_in_both_orientations() {
+    let literal = Source::new([(0, 1, 2), (1, 0, 1), (2, 0, 2), (3, 2, 2)]);
+    assert_eq!(
+        mixed_product_oracle(
+            &literal,
+            VId(2),
+            GlaDirection::Forward,
+            GraphWalkBounds::new(0, 0).unwrap(),
+            1,
+            true,
+            true,
+        ),
+        vec![
+            (
+                GraphPath::new(VId(0), vec![(EId(1), VId(1)), (EId(0), VId(2))].into()),
+                VId(1),
+                EId(1),
+            ),
+            (
+                GraphPath::new(VId(0), vec![(EId(2), VId(2)), (EId(3), VId(2))].into()),
+                VId(2),
+                EId(2),
+            ),
+            (
+                GraphPath::new(VId(1), vec![(EId(0), VId(2)), (EId(3), VId(2))].into()),
+                VId(2),
+                EId(0),
+            ),
+        ],
+    );
     for mask in 0..64 {
         for direction in [
             GlaDirection::Forward,
@@ -987,14 +996,19 @@ fn mixed_collections_match_complete_products_and_eager_paths_in_both_orientation
                                     })),
                                 );
                             }
-                            let actual = EdgeScanCursor::new(
-                                source,
-                                EdgeScanPlan::compile(query.plan()).unwrap(),
-                                wide(),
-                                || Ok::<_, ()>(()),
-                            )
-                            .collect::<Result<Vec<_>, _>>()
-                            .unwrap();
+                            let compiled = EdgeScanPlan::compile(query.plan());
+                            assert!(
+                                compiled.is_ok(),
+                                "{:?}; operators={:#?}",
+                                compiled.as_ref().map(|_| ()),
+                                query.plan().operators(),
+                            );
+                            let actual =
+                                EdgeScanCursor::new(source, compiled.unwrap(), wide(), || {
+                                    Ok::<_, ()>(())
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                                .unwrap();
                             assert_eq!(actual, expected);
                         }
                     }
@@ -1006,12 +1020,34 @@ fn mixed_collections_match_complete_products_and_eager_paths_in_both_orientation
 
 #[test]
 fn mixed_collections_exclude_prior_fixed_edges_before_entering_forbidden_suffixes() {
-    let plan = collection_text(
-        "MATCH (a)-[r:R]->(b) RETURN r,a,b,\
-         [p = (b)<-[:R]-(x)-[:R*0..2]->(y) | p] AS paths LIMIT 1",
-    );
+    let text = "MATCH (a)-[r:R]->(b) RETURN r,a,b,\
+                [p = (b)<-[:R]-(x)-[:R*0..2]->(y) | p] AS paths LIMIT 1";
+    let private_input = collection_text(text);
+    // The row VM owns its output window; its private leaf has no LIMIT.
+    // Keep that original input below as a later-source-failure control.
+    assert!(matches!(
+        private_input.operators().last(),
+        Some(GlaOperator::Limit { count: None, .. })
+    ));
+    let query = PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        _ => None,
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let plan = query.plan();
+    assert!(matches!(
+        plan.operators().last(),
+        Some(GlaOperator::Limit { count: Some(1), .. })
+    ));
     let mut source = Source::new([(0, 0, 1), (1, 0, 2)]);
-    let expected = eager(&plan, &source);
+    let expected = eager(plan, &source);
+    assert_eq!(expected.len(), 1);
+    let unwindowed = eager(&private_input, &source);
+    assert_eq!(unwindowed.len(), 2);
+    assert_eq!(unwindowed[0], expected[0]);
     assert_eq!(
         expected[0].values()[3],
         list([
@@ -1026,16 +1062,31 @@ fn mixed_collections_exclude_prior_fixed_edges_before_entering_forbidden_suffixe
     // the forward TRAIL would enter vertex1's failing FORWARD incidence. A
     // final-witness-only identity filter is too late to avoid that read.
     source.bad_incidence = Some((VId(1), GlaDirection::Forward));
-    assert_eq!(
-        EdgeScanCursor::new(
-            source,
-            EdgeScanPlan::compile(&plan).unwrap(),
-            wide(),
-            || Ok::<_, ()>(()),
-        )
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap(),
-        expected,
+    let mut original = EdgeScanCursor::new(
+        source,
+        EdgeScanPlan::compile(&private_input).unwrap(),
+        wide(),
+        || Ok::<_, ()>(()),
+    );
+    assert_eq!(original.next().unwrap().unwrap(), expected[0]);
+    assert!(matches!(
+        original.next(),
+        Some(Err(GqlQueryError::Source(EdgeScanError::Source(
+            "incidence refused"
+        ))))
+    ));
+    assert_eq!(original.state(), EdgeScanState::Failed);
+    assert!(original.next().is_none());
+    let mut source = Source::new([(0, 0, 1), (1, 0, 2)]);
+    source.bad_incidence = Some((VId(1), GlaDirection::Forward));
+    let actual = EdgeScanCursor::new(source, EdgeScanPlan::compile(plan).unwrap(), wide(), || {
+        Ok::<_, ()>(())
+    })
+    .collect::<Result<Vec<_>, _>>();
+    assert!(
+        actual.as_ref().is_ok_and(|rows| rows == &expected),
+        "actual={actual:?}; expected={expected:?}; operators={:#?}",
+        plan.operators(),
     );
 }
 
@@ -1215,8 +1266,26 @@ fn mixed_collection_admission_refuses_foreign_domains_and_invalid_capture_kinds_
         GqlQueryPolicy::new(0, 0, 0, 0),
         || Ok::<_, ()>(()),
     );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Evaluator(exceeded)))
+            if exceeded.dimension == crate::GlaLimitDimension::WorkUnits
+                && exceeded.limit == 0 && exceeded.observed == 1
+    ));
     assert!(cursor.next().is_none());
     assert_eq!(cursor.row_stats().snapshot_records, 0);
+    let mut source = Source::small(63);
+    source.bad = Some(EId(0));
+    source.unavailable = true;
+    let mut cursor = EdgeScanCursor::new(
+        source,
+        EdgeScanPlan::compile(query.plan()).unwrap(),
+        GqlQueryPolicy::new(0, 0, 1, 0),
+        || Ok::<_, ()>(()),
+    );
+    assert!(cursor.next().is_none());
+    assert_eq!(cursor.row_stats().snapshot_records, 0);
+    assert_eq!(cursor.evaluator_stats().work_units, 1);
 }
 
 // Generate every bounded walk by length, then filter complete routes for
@@ -2084,8 +2153,13 @@ fn trail_collection_admission_keeps_unproved_profiles_refused_before_reads() {
                     value: CanonicalScalar::Int(1).into(),
                 });
             }
-            4..=5 => {
+            3..=5 => {
                 let addition = match profile {
+                    3 => GlaOperator::Expand {
+                        source: BindingSlot(3),
+                        relation: R.into(),
+                        direction: GlaDirection::Forward,
+                    },
                     4 => GlaOperator::VarLengthExpand {
                         source: BindingSlot(3),
                         relation: R.into(),
