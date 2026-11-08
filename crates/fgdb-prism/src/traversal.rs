@@ -325,6 +325,7 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::ArticulationPoints
         | FnxAlgorithm::Bridges
         | FnxAlgorithm::MinimumSpanningTree
+        | FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
 }

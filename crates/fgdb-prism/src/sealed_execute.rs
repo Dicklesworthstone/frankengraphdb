@@ -21,6 +21,8 @@ use std::cell::RefCell;
 use std::convert::Infallible;
 use std::mem::size_of;
 
+#[path = "sealed_bellman_ford.rs"]
+mod bellman_ford;
 #[path = "sealed_betweenness.rs"]
 mod betweenness;
 #[path = "sealed_betweenness_cooperative.rs"]
@@ -1051,6 +1053,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
                 | FnxAlgorithm::MinimumSpanningTree
+                | FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -1199,6 +1202,12 @@ impl FnxCallSpec {
         }
         if matches!(self.algorithm(), FnxAlgorithm::MinimumSpanningTree) {
             return spanning_tree::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
+        ) {
+            return bellman_ford::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(
             self.algorithm(),
@@ -1688,7 +1697,11 @@ impl EncodedRows {
                 else {
                     return Ok(());
                 };
-                if !distance.is_finite() || distance < 0.0 {
+                let signed = matches!(
+                    call.algorithm(),
+                    FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
+                );
+                if !distance.is_finite() || (!signed && distance < 0.0) {
                     return Err(ExecutionError::InvalidNumericResult.into());
                 }
                 FnxValue::Float(distance)
@@ -1950,6 +1963,9 @@ fn source_digest() -> Digest {
             include_str!("sealed_cuts.rs"),
             include_str!("spanning_tree.rs"),
             include_str!("sealed_spanning_tree.rs"),
+            include_str!("bellman_ford.rs"),
+            include_str!("sealed_bellman_ford.rs"),
+            include_str!("../../fgdb-types/src/float_arithmetic.rs"),
             include_str!("sealed_distance.rs"),
             include_str!("sealed_load.rs"),
             include_str!("sealed_eigenvector.rs"),

@@ -107,10 +107,10 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    // Epoch 30 appends weighted minimum spanning forests; prior ordinals and
+    // Epoch 31 appends exact signed Bellman-Ford distances; prior ordinals and
     // bound-call identity versions remain unchanged.
-    assert_eq!(FnxSignatureRegistry::version(), 30);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 28);
+    assert_eq!(FnxSignatureRegistry::version(), 31);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 29);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);

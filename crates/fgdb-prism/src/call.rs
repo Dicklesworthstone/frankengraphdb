@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 30;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 31;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -558,6 +558,19 @@ const SIGNATURES: &[FnxSignature] = &[
         complexity: "O((|V| + |E|) * log(1 + |V|)) logical work plus separately bounded compressed history/lookup work; O(|V|) kernel workspace",
         execution_kernel: "fgdb-prism/minimum-spanning-forest-indexed-prim-v1",
     },
+    FnxSignature {
+        name: "fnx.single_source_bellman_ford_path_length",
+        graph_input_arity: 1,
+        parameters: &[BFS_PARAMETERS[0]],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Distance],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Any,
+        numeric_profile: "fgdb-bellman-ford-exact-dyadic-round-once-canonical-sweep-v1",
+        rng_policy: "none",
+        graph_laws: "explicit projection; known source; finite signed weights; exact dyadic path sums and strict exact relaxation in canonical vertex/neighbor sweeps; reachable negative cycles refuse, unreachable cycles do not; final shortest distances round once to nearest ties-even binary64, nonfinite final distances refuse; no epsilon or FNX floating-order equivalence claim; only reachable vertices, in full-width VId order",
+        complexity: "O(|V| * (|V| + |E|)) fixed 34-limb arithmetic and logical traversal plus separately bounded compressed history/lookup work; O(|V|) kernel workspace",
+        execution_kernel: "fgdb-prism/bellman-ford-exact-dyadic-sweeps-v1",
+    },
 ];
 
 const fn directed_degree(name: &'static str, execution_kernel: &'static str) -> FnxSignature {
@@ -974,6 +987,10 @@ pub enum FnxAlgorithm {
     LabelPropagationCommunities,
     /// Weighted minimum spanning forest, with canonical Kruskal tie/order laws.
     MinimumSpanningTree,
+    /// Signed finite weights, exact dyadic sums and reachable-cycle detection.
+    SingleSourceBellmanFordPathLength {
+        source: VId,
+    },
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -1001,6 +1018,7 @@ impl FnxAlgorithm {
             Self::ShortestPathLength { .. } => 24,
             Self::LabelPropagationCommunities => 26,
             Self::MinimumSpanningTree => 27,
+            Self::SingleSourceBellmanFordPathLength { .. } => 28,
         }]
     }
 }
@@ -1132,6 +1150,9 @@ impl FnxCallSpec {
     }
     pub fn minimum_spanning_tree() -> Self {
         Self::new(FnxAlgorithm::MinimumSpanningTree)
+    }
+    pub fn single_source_bellman_ford_path_length(source: VId) -> Self {
+        Self::new(FnxAlgorithm::SingleSourceBellmanFordPathLength { source })
     }
     fn new(algorithm: FnxAlgorithm) -> Self {
         Self::compiled(algorithm, default_outputs(algorithm.signature()))
@@ -1483,6 +1504,14 @@ impl FnxCallSpec {
                     },
                     None => FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff },
                 }
+            }
+            "fnx.single_source_bellman_ford_path_length" => {
+                let source = match arguments[0] {
+                    FnxArgument::Vertex(vertex) => vertex,
+                    FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
+                    _ => return Err(invalid(0, "VId or nonnegative integer source required")),
+                };
+                FnxAlgorithm::SingleSourceBellmanFordPathLength { source }
             }
             "fnx.single_source_dijkstra_path_length" | "fnx.dijkstra_path_length" => {
                 let source = match arguments[0] {
@@ -1860,6 +1889,7 @@ impl FnxCallSpec {
             FnxAlgorithm::ShortestPathLength { .. } => 26,
             FnxAlgorithm::LabelPropagationCommunities => 28,
             FnxAlgorithm::MinimumSpanningTree => 30,
+            FnxAlgorithm::SingleSourceBellmanFordPathLength { .. } => 31,
             _ => 23,
         };
         hash.update(&binding_version.to_le_bytes());
@@ -1923,6 +1953,9 @@ impl FnxCallSpec {
                 if let FnxAlgorithm::DijkstraPathLength { target, .. } = algorithm {
                     hash.update(&target.0.to_le_bytes());
                 }
+            }
+            FnxAlgorithm::SingleSourceBellmanFordPathLength { source } => {
+                hash.update(&source.0.to_le_bytes());
             }
             FnxAlgorithm::Cdlp { max_iter } => {
                 hash.update(&(max_iter as u128).to_le_bytes());

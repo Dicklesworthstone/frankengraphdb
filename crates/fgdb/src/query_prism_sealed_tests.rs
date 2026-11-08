@@ -1197,3 +1197,156 @@ fn minimum_spanning_forest_agrees_across_native_compressed_and_cooperative_sourc
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
+
+#[test]
+fn bellman_ford_signed_distances_and_cycle_errors_match_real_compressed_sources() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let (commit, query) = (contexts.commit(), contexts.query());
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let mut graph = fixture();
+        for (edge, source, target, weight) in [
+            (1100, 2, 11, -5),
+            (1101, 11, u128::MAX, 1),
+            // This cycle is unreachable from both successful test sources.
+            (1102, 12, 12, -1),
+        ] {
+            graph.add_edge(
+                EId(edge),
+                VId(source),
+                VId(target),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(weight))],
+            );
+        }
+        db.write(&commit, graph).await.unwrap();
+        let view = db.read_session().unwrap();
+        let image = db
+            .store
+            .seal_partition(
+                &query,
+                view.partition_root(),
+                view.frontier(),
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            image.storage_kind(VId(1), RelationId(1)),
+            Some(RowStorageKind::SealedCsr)
+        );
+        assert_eq!(
+            image.storage_kind(VId(11), RelationId(1)),
+            Some(RowStorageKind::Inline)
+        );
+        let directed = vec![
+            (1, 0.0),
+            (2, 2.0),
+            (3, 2.0),
+            (4, 3.0),
+            (5, 4.0),
+            (6, 26.0),
+            (7, 27.0),
+            (8, 28.0),
+            (9, 29.0),
+            (10, 30.0),
+            (11, -3.0),
+            (u128::MAX, -2.0),
+        ];
+        let reversed = vec![(1, -2.0), (2, -4.0), (3, -4.0), (11, 1.0), (u128::MAX, 0.0)];
+        for (direction, source, expected) in [
+            (Directedness::Directed, VId(1), directed),
+            (Directedness::Reversed, VId(u128::MAX), reversed),
+        ] {
+            let mut options = options();
+            options.projection.directedness = direction;
+            let call = FnxCallSpec::single_source_bellman_ford_path_length(source);
+            assert!(call.supports_cooperative_sealed_execution());
+            let expected = expected
+                .into_iter()
+                .map(|(vertex, distance)| {
+                    vec![FnxValue::Vertex(VId(vertex)), FnxValue::Float(distance)]
+                })
+                .collect::<Vec<_>>();
+            let decoded = view.execute_fnx(&query, &call, options).unwrap();
+            assert_eq!(decoded.analytics.rows, expected, "{direction:?}");
+            let compressed = view
+                .execute_fnx_sealed(&query, &image, &call, options, memory())
+                .unwrap();
+            assert_eq!(compressed.analytics.rows, expected, "{direction:?}");
+            assert_eq!(
+                compressed.analytics.certificate.result_digest,
+                decoded.analytics.certificate.result_digest
+            );
+            let prepared = db
+                .prism_sealed_projection_at(
+                    &query,
+                    None,
+                    options.selection,
+                    options.projection,
+                    options.projection_limits,
+                    options.source_limits,
+                    SealedLimits::default(),
+                )
+                .await
+                .unwrap();
+            for quantum in [1, 7, 256] {
+                let cooperative = call
+                    .execute_sealed_cooperative(
+                        &query,
+                        &prepared,
+                        options.execution_limits,
+                        memory(),
+                        std::num::NonZeroUsize::new(quantum).unwrap(),
+                        asupersync::runtime::yield_now::yield_now,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    cooperative.rows, expected,
+                    "{direction:?}, quantum={quantum}"
+                );
+                assert_eq!(
+                    cooperative.certificate.result_digest,
+                    compressed.analytics.certificate.result_digest
+                );
+                assert_eq!(
+                    cooperative.certificate.witness,
+                    compressed.analytics.certificate.witness
+                );
+            }
+            let cycle = FnxCallSpec::single_source_bellman_ford_path_length(VId(12));
+            assert!(matches!(
+                view.execute_fnx(&query, &cycle, options),
+                Err(FnxReadError::Execution(
+                    FnxExecutionError::ReachableNegativeCycle
+                )),
+            ));
+            assert!(matches!(
+                view.execute_fnx_sealed(&query, &image, &cycle, options, memory()),
+                Err(FnxSealedReadError::Execution(
+                    FnxSealedExecutionError::Execution(FnxExecutionError::ReachableNegativeCycle,)
+                )),
+            ));
+            assert!(matches!(
+                cycle
+                    .execute_sealed_cooperative(
+                        &query,
+                        &prepared,
+                        options.execution_limits,
+                        memory(),
+                        std::num::NonZeroUsize::new(1).unwrap(),
+                        asupersync::runtime::yield_now::yield_now,
+                    )
+                    .await,
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::ReachableNegativeCycle
+                )),
+            ));
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}

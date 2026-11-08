@@ -40,6 +40,8 @@ pub struct FnxExecutionLimits {
     /// Target BFS admits its selected decoded kernel's bitmap/frontier work,
     /// result conversion and bounded direction evidence. A tighter allowance
     /// retains the original target FIFO when its existing work bound fits.
+    /// Bellman-Ford includes at most |V| full row sweeps and fixed 34-limb
+    /// exact additions/comparisons, plus final rounding and output conversion.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -56,6 +58,10 @@ pub enum FnxExecutionError<C> {
     AllocationFailed,
     NegativeWeight,
     NonFiniteWeightSum,
+    /// The selected source reaches a negative cycle under exact edge sums.
+    ReachableNegativeCycle,
+    /// A final exact shortest distance rounds outside finite binary64 range.
+    NonFiniteDistanceSum,
     InvalidNumericResult,
     InvalidUpstreamResult,
     UnknownSource(VId),
@@ -92,6 +98,8 @@ impl<C> FnxExecutionError<C> {
             Self::AllocationFailed => FnxExecutionError::AllocationFailed,
             Self::NegativeWeight => FnxExecutionError::NegativeWeight,
             Self::NonFiniteWeightSum => FnxExecutionError::NonFiniteWeightSum,
+            Self::ReachableNegativeCycle => FnxExecutionError::ReachableNegativeCycle,
+            Self::NonFiniteDistanceSum => FnxExecutionError::NonFiniteDistanceSum,
             Self::InvalidNumericResult => FnxExecutionError::InvalidNumericResult,
             Self::InvalidUpstreamResult => FnxExecutionError::InvalidUpstreamResult,
             Self::UnknownSource(vertex) => FnxExecutionError::UnknownSource(vertex),
@@ -126,6 +134,12 @@ impl<C: core::fmt::Display> core::fmt::Display for FnxExecutionError<C> {
             Self::AllocationFailed => f.write_str("Prism working allocation failed"),
             Self::NegativeWeight => f.write_str("analytics requires nonnegative projected weights"),
             Self::NonFiniteWeightSum => f.write_str("PageRank outgoing weight sum is non-finite"),
+            Self::ReachableNegativeCycle => {
+                f.write_str("analytics source reaches a negative cycle")
+            }
+            Self::NonFiniteDistanceSum => {
+                f.write_str("shortest distance is outside finite binary64 range")
+            }
             Self::InvalidNumericResult => {
                 f.write_str("invalid or unrepresentable analytics numeric result")
             }
@@ -1683,6 +1697,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
                 | FnxAlgorithm::MinimumSpanningTree
+                | FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
         ) {
             admit("result rows", n, limits.max_result_rows)?;
         }
@@ -1814,6 +1829,9 @@ impl FnxCallSpec {
                 n,
                 self.outputs().len(),
             )?),
+            FnxAlgorithm::SingleSourceBellmanFordPathLength { .. } => Some(
+                crate::bellman_ford::estimated_work::<C>(n, arcs, n, self.outputs().len())?,
+            ),
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs, graph.is_directed())
             }
@@ -1850,6 +1868,7 @@ impl FnxCallSpec {
             | FnxAlgorithm::ArticulationPoints
             | FnxAlgorithm::Bridges
             | FnxAlgorithm::MinimumSpanningTree => 0,
+            FnxAlgorithm::SingleSourceBellmanFordPathLength { .. } => 0,
             _ => {
                 let bytes_per_vertex = match algorithm {
                     FnxAlgorithm::SingleSourceShortestPathLength { .. } => {
@@ -1908,6 +1927,17 @@ impl FnxCallSpec {
                     row_count: n,
                     witness,
                 }
+            }
+            FnxAlgorithm::SingleSourceBellmanFordPathLength { source } => {
+                let (output, bytes) = crate::bellman_ford::run(
+                    graph,
+                    source,
+                    limits.max_result_rows,
+                    &mut checkpoint,
+                )?;
+                kernel_workspace_bytes = bytes;
+                execution_kernel = crate::bellman_ford::KERNEL;
+                output
             }
             FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
                 let run = crate::shortest_path::run(
@@ -2288,6 +2318,11 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("clustering.rs"));
         hash_text(&mut hash, include_str!("cuts.rs"));
         hash_text(&mut hash, include_str!("spanning_tree.rs"));
+        hash_text(&mut hash, include_str!("bellman_ford.rs"));
+        hash_text(
+            &mut hash,
+            include_str!("../../fgdb-types/src/float_arithmetic.rs"),
+        );
         hash_text(&mut hash, include_str!("directed_clustering.rs"));
         hash_text(&mut hash, include_str!("foundation.rs"));
         hash_text(&mut hash, include_str!("foundation/native.rs"));

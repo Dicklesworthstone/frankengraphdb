@@ -255,6 +255,119 @@ fn minimum_spanning_tree_masks_before_selection_and_composes_weighted_edge_rows(
 }
 
 #[test]
+fn bellman_ford_masks_hidden_cycles_and_weights_before_solving_and_folding() {
+    use crate::{QueryResult, QueryValue};
+    use fgdb_gql::GraphSymbol;
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::CanonicalF64;
+
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x0b7b_be11, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query) = (contexts.commit(), contexts.query());
+        let mut db = Database::open_memory(&commit, DatabaseKeys::new([0x0c; 32], NS, [0x0d; 32]))
+            .await
+            .unwrap();
+        let mut graph = WriteBatch::new(RelationId(1));
+        for (id, label) in [(1, 1), (2, 1), (3, 1), (4, 1), (9, 2)] {
+            graph.create_vertex(VId(id), vec![LabelId(label)], vec![]);
+        }
+        for (edge, source, target, value) in [
+            (1, 1, 2, 4),
+            (2, 1, 3, 5),
+            (3, 2, 3, -6),
+            (4, 1, 9, 0),
+            (5, 9, 9, -1),
+        ] {
+            graph.add_edge(EId(edge), VId(source), VId(target), weight(value));
+        }
+        db.write(&commit, graph).await.unwrap();
+        let authority = issuer();
+        let unrestricted = authority.issue_at(&open(), 100).unwrap();
+        let mut scope = open();
+        scope.labels = Scope::only([LabelId(1)]);
+        let token = authority.issue_at(&scope, 100).unwrap();
+        let text = "CALL fnx.single_source_bellman_ford_path_length(1) YIELD vertex,distance";
+        let options = options(Directedness::Directed);
+        // The unrestricted source builds first, but its reachable hidden
+        // cycle must not poison a capability's separately induced projection.
+        assert!(matches!(
+            call(&db, &query, &unrestricted, text, options, || 100),
+            Err(Error::Execution(FnxExecutionError::ReachableNegativeCycle)),
+        ));
+        let expected = [(1, 0.0), (2, 4.0), (3, -2.0)].map(|(vertex, distance)| {
+            vec![FnxValue::Vertex(VId(vertex)), FnxValue::Float(distance)]
+        });
+        for _ in 0..2 {
+            assert_eq!(
+                call(&db, &query, &token, text, options, || 100).unwrap(),
+                expected
+            );
+        }
+        for source in [9, 99] {
+            let source_call = format!(
+                "CALL fnx.single_source_bellman_ford_path_length({source}) YIELD vertex,distance"
+            );
+            assert!(
+                matches!(
+                    call(&db, &query, &token, &source_call, options, || 100),
+                    Err(Error::Execution(FnxExecutionError::UnknownSource(vertex))) if vertex == VId(source),
+                ),
+                "hidden and absent sources use the same refusal"
+            );
+        }
+        let hidden_weight = token
+            .attenuate(Restriction::DenyProperties([W].into()))
+            .unwrap();
+        assert_eq!(
+            call(&db, &query, &hidden_weight, text, options, || 100).unwrap(),
+            [1, 2, 3].map(|vertex| vec![FnxValue::Vertex(VId(vertex)), FnxValue::Float(0.0)]),
+            "the selected zero missing-weight policy applies before relaxation",
+        );
+        for restriction in [Restriction::MaxRows(2), Restriction::MaxWork(1)] {
+            let limited = token.attenuate(restriction).unwrap();
+            assert!(call(&db, &query, &limited, text, options, || 100).is_err());
+        }
+        let symbols = |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Property, "w") => Some(GraphSymbol::Property(W)),
+            _ => None,
+        };
+        let prefix = "CALL fnx.single_source_bellman_ford_path_length(\
+                      source => 1, relation => 'R', weight => 'w', parallel => 'min') \
+                      YIELD vertex,distance";
+        let policy = GqlQueryPolicy::new(100_000, 100, 1_000_000, 1_000_000);
+        let result = db
+            .query_authorized(
+                &query,
+                &authority,
+                &token,
+                BRANCH,
+                &format!("{prefix} RETURN count(*) AS reached,sum(distance) AS total"),
+                &GqlParameters::new(),
+                symbols,
+                policy,
+                || 100,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            QueryResult::Rows {
+                columns: vec!["reached".into(), "total".into()],
+                rows: vec![vec![
+                    QueryValue::Count(3),
+                    QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                        CanonicalF64::new(2.0)
+                    ))),
+                ]],
+            }
+        );
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn scoped_entries_charge_key_capacity_and_keep_weak_exact_source_ownership() {
     let options = options(Directedness::Directed);
     let request = ProjectionRequest {

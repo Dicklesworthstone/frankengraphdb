@@ -25,6 +25,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bellman_ford;
 mod call;
 mod clustering;
 mod cuts;

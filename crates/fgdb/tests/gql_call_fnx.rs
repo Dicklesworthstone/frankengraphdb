@@ -63,7 +63,7 @@ fn graph() -> WriteBatch {
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected. An empty value field names a
 /// vertex-only result, such as the sparse set of articulation points.
-const CALLS: [(&str, &str, &str, bool); 28] = [
+const CALLS: [(&str, &str, &str, bool); 29] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -96,6 +96,12 @@ const CALLS: [(&str, &str, &str, bool); 28] = [
     ("average_neighbor_degree", "", "score", true),
     ("label_propagation_communities", "", "component", true),
     ("minimum_spanning_tree", "", "neighbor", true),
+    (
+        "single_source_bellman_ford_path_length",
+        "1",
+        "distance",
+        false,
+    ),
 ];
 
 /// The whole graph spelled out field by field, independent of
@@ -2294,5 +2300,190 @@ fn projection_identity_and_algorithm_parameters_survive_certified_replay() {
             rows(db.query(cx, &query, &rebound, symbols, policy()).unwrap()).1,
             distances(&[(2, 0.0), (3, 3.0)]),
         );
+    });
+}
+
+#[test]
+fn bellman_ford_composes_rebinds_and_reads_signed_transaction_weights() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = Database::<MemVfs>::open_memory(commit, keys())
+            .await
+            .unwrap();
+        let mut graph = WriteBatch::new(R);
+        for id in [1, 2, 3, 9, u128::MAX] {
+            graph.create_vertex(VId(id), vec![PERSON], vec![]);
+        }
+        for (edge, source, target, weight) in [
+            (1, 1, 2, 4),
+            (2, 1, 3, 5),
+            (3, 2, 3, -6),
+            (4, 3, u128::MAX, 2),
+            // A disconnected negative cycle does not invalidate this source.
+            (5, 9, 9, -1),
+        ] {
+            graph.add_edge(
+                EId(edge),
+                VId(source),
+                VId(target),
+                vec![(P, CanonicalScalar::Int(weight))],
+            );
+        }
+        db.write(commit, graph).await.unwrap();
+        let frontier = db.frontier().unwrap();
+        let view = db.read_session().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let text = "CALL fnx.single_source_bellman_ford_path_length(\
+                    source => $source, relation => 'R', weight => 'p', parallel => 'min') \
+                    YIELD vertex,distance RETURN vertex,distance ORDER BY vertex";
+        let prepared = fgdb_gql::PreparedGraphSetText::prepare(text, symbols).unwrap();
+        let parameters = GqlParameters::new().with_int64("source", 1).unwrap();
+        let expected = distances(&[(1, 0.0), (2, 4.0), (3, -2.0), (u128::MAX, 0.0)]);
+        for result in [
+            db.query(cx, text, &parameters, symbols, policy()),
+            view.query(cx, text, &parameters, symbols, policy()),
+            txn.query(&db, cx, text, &parameters, symbols, policy()),
+        ] {
+            let (columns, actual) = rows(result.unwrap());
+            assert_eq!(columns, ["vertex", "distance"]);
+            assert_eq!(actual, expected);
+        }
+        for (source, expected) in [
+            (2, distances(&[(2, 0.0), (3, -6.0), (u128::MAX, -4.0)])),
+            (1, expected.clone()),
+        ] {
+            let arguments = GqlParameters::new().with_int64("source", source).unwrap();
+            let rebound = prepared.bind_parameters(&arguments).unwrap();
+            assert_eq!(
+                db.execute_graph_set_governed(cx, &rebound, policy())
+                    .unwrap()
+                    .value
+                    .into_iter()
+                    .map(|row| row.values().to_vec())
+                    .collect::<Vec<_>>(),
+                expected,
+                "a prepared procedure must use the current source binding",
+            );
+        }
+        let mut changes = WriteBatch::new(R);
+        changes.set_edge_property(EId(3), P, Some(CanonicalScalar::Int(-3)));
+        txn.write_ordered(&mut db, vec![changes]).unwrap();
+        assert_eq!(
+            rows(
+                txn.query(&db, cx, text, &parameters, symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            distances(&[(1, 0.0), (2, 4.0), (3, 1.0), (u128::MAX, 3.0)]),
+        );
+        assert_eq!(
+            rows(
+                view.query(cx, text, &parameters, symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            expected
+        );
+
+        let mut cycle = WriteBatch::new(R);
+        cycle.add_edge(
+            EId(6),
+            VId(u128::MAX),
+            VId(2),
+            vec![(P, CanonicalScalar::Int(-1))],
+        );
+        txn.write_ordered(&mut db, vec![cycle]).unwrap();
+        let staged = txn.staged_effect_digest().unwrap();
+        let error = procedure_error(
+            txn.query(&db, cx, text, &parameters, symbols, policy())
+                .unwrap_err(),
+        )
+        .unwrap();
+        let ProcedureError::Read(error) = error else {
+            panic!("negative cycles must retain their execution refusal: {error:?}");
+        };
+        assert!(matches!(
+            *error,
+            FnxReadError::Execution(FnxExecutionError::ReachableNegativeCycle)
+        ));
+        assert_eq!(txn.staged_effect_digest().unwrap(), staged);
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(
+            rows(db.query(cx, text, &parameters, symbols, policy()).unwrap()).1,
+            expected
+        );
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn bellman_ford_native_weights_keep_exact_sums_until_final_distance_rounding() {
+    run(async |commit, cx| {
+        let mut db = Database::<MemVfs>::open_memory(commit, keys())
+            .await
+            .unwrap();
+        let mut graph = WriteBatch::new(R);
+        for vertex in [1, 2, 3, 4, 6, 9, 10, 11, 12] {
+            graph.create_vertex(VId(vertex), vec![PERSON], vec![]);
+        }
+        for (edge, source, target, weight) in [
+            (1, 1, 2, f64::MAX),
+            (2, 1, 3, 1.0),
+            // This losing candidate exceeds binary64, while every final
+            // distance from vertex 1 remains finite.
+            (3, 2, 3, f64::MAX),
+            (4, 3, 4, -1.0),
+            (5, 9, 10, 1e16),
+            (6, 10, 11, 1.0),
+            (7, 11, 12, -1e16),
+        ] {
+            graph.add_edge(
+                EId(edge),
+                VId(source),
+                VId(target),
+                vec![(P, CanonicalScalar::Float(CanonicalF64::new(weight)))],
+            );
+        }
+        db.write(commit, graph).await.unwrap();
+        let text = "CALL fnx.single_source_bellman_ford_path_length(\
+                    source => $source, relation => 'R', weight => 'p') \
+                    YIELD vertex,distance RETURN vertex,distance ORDER BY vertex";
+        let parameters = GqlParameters::new().with_int64("source", 1).unwrap();
+        assert_eq!(
+            rows(db.query(cx, text, &parameters, symbols, policy()).unwrap()).1,
+            distances(&[(1, 0.0), (2, f64::MAX), (3, 1.0), (4, 0.0)]),
+        );
+        let other = GqlParameters::new().with_int64("source", 9).unwrap();
+        assert_eq!(
+            rows(db.query(cx, text, &other, symbols, policy()).unwrap()).1,
+            distances(&[(9, 0.0), (10, 1e16), (11, 1e16), (12, 1.0)]),
+            "path sums round only once: 1e16 + 1 - 1e16 is exactly one",
+        );
+        let mut overflow = WriteBatch::new(R);
+        overflow.add_edge(
+            EId(8),
+            VId(2),
+            VId(6),
+            vec![(P, CanonicalScalar::Float(CanonicalF64::new(f64::MAX)))],
+        );
+        db.write(commit, overflow).await.unwrap();
+        let error = procedure_error(
+            db.query(
+                cx,
+                &format!("{text} LIMIT 1"),
+                &parameters,
+                symbols,
+                policy(),
+            )
+            .unwrap_err(),
+        )
+        .unwrap();
+        let ProcedureError::Read(error) = error else {
+            panic!("final distance overflow must retain its execution refusal: {error:?}");
+        };
+        assert!(matches!(
+            *error,
+            FnxReadError::Execution(FnxExecutionError::NonFiniteDistanceSum)
+        ));
     });
 }

@@ -428,7 +428,8 @@ impl CanonicalF64 {
 
 /// Fixed-point limbs of an exact sum, in units of the least subnormal
 /// (2^-1074). A finite binary64 is below 2^1024 and an i128 below 2^127, so
-/// 2^64 inputs stay below 2^1265: far inside 34 two's-complement limbs.
+/// 2^64 finite inputs stay below 2^1088. Their scaled magnitude needs at
+/// most 2162 bits, inside 34 two's-complement limbs including the sign.
 const SUM_LIMBS: usize = 34;
 const SUM_BASE: i32 = -1074;
 
@@ -470,6 +471,35 @@ impl ExactBinary64Sum {
             negative_infinity: false,
             nan: false,
         }
+    }
+
+    /// Compare finite accumulated values without rounding them to binary64.
+    ///
+    /// Low bits that disappear from [`Self::sum`] still participate, as do
+    /// finite sums beyond binary64's output range. Returns None if either
+    /// accumulator has received a NaN or infinity. Like accumulation itself,
+    /// this uses the fixed signed-limb representation and allocates nothing.
+    #[must_use]
+    pub fn cmp_finite(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        use core::cmp::Ordering;
+        if self.nan
+            || self.positive_infinity
+            || self.negative_infinity
+            || other.nan
+            || other.positive_infinity
+            || other.negative_infinity
+        {
+            return None;
+        }
+        let negative = self.limbs[SUM_LIMBS - 1] & SIGN != 0;
+        let other_negative = other.limbs[SUM_LIMBS - 1] & SIGN != 0;
+        Some(match (negative, other_negative) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            // Within either sign, lexicographic high-to-low limb order is
+            // also signed numerical order, including two's-complement lows.
+            _ => self.limbs.iter().rev().cmp(other.limbs.iter().rev()),
+        })
     }
 
     /// Add one binary64 exactly; non-finite inputs are remembered by class.
@@ -983,6 +1013,85 @@ mod tests {
             exact(&[f64::NEG_INFINITY, 1.0]).mean(2),
             Some(f(f64::NEG_INFINITY))
         );
+    }
+
+    #[test]
+    fn exact_sum_order_keeps_rounded_away_bits_signs_and_out_of_range_values() {
+        use core::cmp::Ordering;
+        let tiny = f64::from_bits(1);
+        let ordered = [
+            exact(&[-f64::MAX, -f64::MAX, -f64::MAX]),
+            exact(&[-f64::MAX, -f64::MAX]),
+            exact(&[-f64::MAX]),
+            exact(&[-1e20, -1.0]),
+            exact(&[-1e20]),
+            exact(&[-1.0]),
+            exact(&[-tiny]),
+            exact(&[]),
+            exact(&[tiny]),
+            exact(&[1.0]),
+            exact(&[1e20]),
+            exact(&[1e20, 1.0]),
+            exact(&[f64::MAX]),
+            exact(&[f64::MAX, f64::MAX]),
+            exact(&[f64::MAX, f64::MAX, f64::MAX]),
+        ];
+        for (i, left) in ordered.iter().enumerate() {
+            for (j, right) in ordered.iter().enumerate() {
+                assert_eq!(left.cmp_finite(right), Some(i.cmp(&j)), "{i} / {j}");
+            }
+        }
+        let before = exact(&[1e20]);
+        let improved = exact(&[1e20, -1.0]);
+        assert_eq!(before.sum(), improved.sum());
+        assert_eq!(improved.cmp_finite(&before), Some(Ordering::Less));
+        assert_eq!(
+            exact(&[-0.0, -1.0, 1.0]).cmp_finite(&ExactBinary64Sum::new()),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            exact(&[f64::MAX, f64::MAX, -f64::MAX]).cmp_finite(&exact(&[f64::MAX])),
+            Some(Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn exact_sum_order_matches_independent_dyadic_integer_totals() {
+        let mut seed = 0xb311_4a6f_0d3a_7719_u64;
+        for _ in 0..512 {
+            let mut sums = [ExactBinary64Sum::new(), ExactBinary64Sum::new()];
+            let mut numerators = [0_i128; 2];
+            for side in 0..2 {
+                for _ in 0..17 {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let numerator = (seed % (1 << 40)) as i64 - (1 << 39);
+                    numerators[side] += i128::from(numerator);
+                    sums[side].add(f(numerator as f64 / 1024.0));
+                }
+            }
+            assert_eq!(
+                sums[0].cmp_finite(&sums[1]),
+                Some(numerators[0].cmp(&numerators[1]))
+            );
+        }
+    }
+
+    #[test]
+    fn exact_sum_order_refuses_non_finite_input_classes() {
+        let finite = exact(&[1.0]);
+        for values in [
+            &[f64::NAN][..],
+            &[f64::INFINITY][..],
+            &[f64::NEG_INFINITY][..],
+            &[f64::INFINITY, f64::NEG_INFINITY][..],
+        ] {
+            let special = exact(values);
+            assert_eq!(finite.cmp_finite(&special), None);
+            assert_eq!(special.cmp_finite(&finite), None);
+            assert_eq!(special.cmp_finite(&special), None);
+        }
     }
 
     #[test]

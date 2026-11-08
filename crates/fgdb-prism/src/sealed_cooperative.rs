@@ -145,6 +145,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
                 | FnxAlgorithm::MinimumSpanningTree
+                | FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -373,6 +374,26 @@ impl FnxCallSpec {
                     yield_now,
                 };
                 return super::spanning_tree::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
+            }
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::SingleSourceBellmanFordPathLength { .. }
+            ) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::bellman_ford::execute_cooperative(
                     self,
                     graph,
                     limits,
