@@ -324,6 +324,7 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::KatzCentrality(_)
         | FnxAlgorithm::ArticulationPoints
         | FnxAlgorithm::Bridges
+        | FnxAlgorithm::MinimumSpanningTree
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
 }

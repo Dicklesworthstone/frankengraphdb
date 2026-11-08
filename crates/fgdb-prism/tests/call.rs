@@ -107,10 +107,10 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    // Epoch 29 adds explicit directed/reversed eigenvector semantics without
-    // widening the graph law of core number or load centrality.
-    assert_eq!(FnxSignatureRegistry::version(), 29);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 27);
+    // Epoch 30 appends weighted minimum spanning forests; prior ordinals and
+    // bound-call identity versions remain unchanged.
+    assert_eq!(FnxSignatureRegistry::version(), 30);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 28);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);

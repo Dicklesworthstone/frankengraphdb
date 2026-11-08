@@ -629,7 +629,7 @@ mod bridge_procedures {
             _: GqlQueryPolicy,
         ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, usize>>>
         {
-            assert_eq!(call.name(), "bridges");
+            assert!(matches!(call.name(), "bridges" | "minimum_spanning_tree"));
             self.opened.set(self.opened.get() + 1);
             Some(Ok(GqlQueryExecution {
                 value: rows(),
@@ -660,10 +660,13 @@ mod bridge_procedures {
         }
     }
     fn call() -> PreparedGraphSet {
+        named_call("bridges")
+    }
+    fn named_call(name: &str) -> PreparedGraphSet {
         PreparedGraphSet::singleton()
             .procedure_call(
                 "fnx".into(),
-                "bridges".into(),
+                name.into(),
                 vec![],
                 vec![],
                 vec![
@@ -759,6 +762,34 @@ mod bridge_procedures {
         ];
         assert_eq!(execute(&query, 1), expected);
         assert_eq!(execute(&query.with_page(0, Some(1)), 1), expected[..1]);
+    }
+
+    #[test]
+    fn spanning_tree_endpoints_keep_multiplicity_and_sort_computed_cells_before_paging() {
+        let call = named_call("minimum_spanning_tree");
+        assert!(!call.has_foldable_expansion_for_source(true));
+        assert!(!call.has_canonical_vertex_prefix());
+        assert_eq!(execute(&call, 1), rows());
+        let projected = call
+            .project(
+                vec![
+                    GraphSetProjection::new("v", GraphSetValue::Column(0)),
+                    GraphSetProjection::new(
+                        "first_neighbor",
+                        GraphSetValue::Equal {
+                            left: Box::new(GraphSetValue::Column(1)),
+                            right: Box::new(GraphSetValue::Value(GraphValue::Vertex(B))),
+                        },
+                    ),
+                ],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
+        let expected = vec![GraphValueRow::from_owned_values(vec![
+            GraphValue::Vertex(A),
+            GraphValue::Scalar(CanonicalScalar::Bool(false)),
+        ])];
+        assert_eq!(execute(&projected.with_page(0, Some(1)), 1), expected);
     }
 
     #[test]

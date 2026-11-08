@@ -118,6 +118,143 @@ fn options(direction: Directedness) -> FnxReadOptions {
 }
 
 #[test]
+fn minimum_spanning_tree_masks_before_selection_and_composes_weighted_edge_rows() {
+    use crate::{QueryResult, QueryValue};
+    use fgdb_gql::GraphSymbol;
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::CanonicalF64;
+
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x0b7b_ca11, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query) = (contexts.commit(), contexts.query());
+        let mut db = Database::open_memory(&commit, DatabaseKeys::new([0x0c; 32], NS, [0x0d; 32]))
+            .await
+            .unwrap();
+        let mut graph = WriteBatch::new(RelationId(1));
+        for (id, label) in [(1, 1), (2, 1), (3, 1), (9, 2)] {
+            graph.create_vertex(VId(id), vec![LabelId(label)], vec![]);
+        }
+        for (eid, source, target, value) in [
+            (1, 1, 2, 5),
+            (2, 1, 2, 9),
+            (3, 2, 3, 1),
+            (4, 1, 3, 7),
+            (5, 1, 9, -100),
+            (6, 3, 9, -100),
+            (7, 1, 1, -900),
+        ] {
+            graph.add_edge(EId(eid), VId(source), VId(target), weight(value));
+        }
+        db.write(&commit, graph).await.unwrap();
+        let authority = issuer();
+        let unrestricted = authority.issue_at(&open(), 100).unwrap();
+        let mut scope = open();
+        scope.labels = Scope::only([LabelId(1)]);
+        let token = authority.issue_at(&scope, 100).unwrap();
+        let text = "CALL fnx.minimum_spanning_tree() YIELD vertex,neighbor,weight";
+        let options = options(Directedness::Undirected);
+        // Warm the unrestricted projection first. Its cheaper hidden paths
+        // must never influence the visible caller's forest or cached result.
+        let all = call(&db, &query, &unrestricted, text, options, || 100).unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all.iter().any(|row| row[1] == FnxValue::Vertex(VId(9))));
+        let expected = vec![
+            vec![
+                FnxValue::Vertex(VId(2)),
+                FnxValue::Vertex(VId(3)),
+                FnxValue::Float(1.0),
+            ],
+            vec![
+                FnxValue::Vertex(VId(1)),
+                FnxValue::Vertex(VId(2)),
+                FnxValue::Float(5.0),
+            ],
+        ];
+        for _ in 0..2 {
+            assert_eq!(
+                call(&db, &query, &token, text, options, || 100).unwrap(),
+                expected
+            );
+        }
+        for restriction in [Restriction::MaxRows(1), Restriction::MaxWork(1)] {
+            let limited = token.attenuate(restriction).unwrap();
+            assert!(call(&db, &query, &limited, text, options, || 100).is_err());
+        }
+        let symbols = |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Property, "w") => Some(GraphSymbol::Property(W)),
+            _ => None,
+        };
+        let prefix = "CALL fnx.minimum_spanning_tree(relation => 'R', weight => 'w', \
+                      parallel => 'min') YIELD vertex,neighbor,weight";
+        let policy = GqlQueryPolicy::new(100_000, 100, 1_000_000, 1_000_000);
+        let result = db
+            .query_authorized(
+                &query,
+                &authority,
+                &token,
+                BRANCH,
+                &format!("{prefix} RETURN vertex,neighbor,weight ORDER BY weight,vertex,neighbor"),
+                &GqlParameters::new(),
+                symbols,
+                policy,
+                || 100,
+            )
+            .unwrap();
+        let QueryResult::Rows { columns, rows } = result else {
+            panic!("weighted forest CALL must produce native rows");
+        };
+        assert_eq!(columns, ["vertex", "neighbor", "weight"]);
+        assert_eq!(
+            rows,
+            expected
+                .iter()
+                .map(|row| row
+                    .iter()
+                    .map(|cell| {
+                        QueryValue::Value(match cell {
+                            FnxValue::Vertex(vertex) => GraphValue::Vertex(*vertex),
+                            FnxValue::Float(weight) => GraphValue::Scalar(CanonicalScalar::Float(
+                                CanonicalF64::new(*weight),
+                            )),
+                            other => panic!("unexpected forest cell {other:?}"),
+                        })
+                    })
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+        let result = db
+            .query_authorized(
+                &query,
+                &authority,
+                &token,
+                BRANCH,
+                &format!("{prefix} RETURN count(*) AS edges,sum(weight) AS cost"),
+                &GqlParameters::new(),
+                symbols,
+                policy,
+                || 100,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            QueryResult::Rows {
+                columns: vec!["edges".into(), "cost".into()],
+                rows: vec![vec![
+                    QueryValue::Count(2),
+                    QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                        CanonicalF64::new(6.0)
+                    ))),
+                ]],
+            }
+        );
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn scoped_entries_charge_key_capacity_and_keep_weak_exact_source_ownership() {
     let options = options(Directedness::Directed);
     let request = ProjectionRequest {

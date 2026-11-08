@@ -1068,3 +1068,132 @@ fn a_composed_call_takes_its_source_limits_from_the_statement() {
         );
     }
 }
+
+#[test]
+fn minimum_spanning_forest_agrees_across_native_compressed_and_cooperative_sources() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let (commit, query) = (contexts.commit(), contexts.query());
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let mut batch = fixture();
+        for (eid, source, target, weight) in [
+            (1100, 11, u128::MAX, -7),
+            (1101, 1, 1, -100),
+            (1102, 6, 7, 1),
+            (1103, 7, 8, 1),
+            (1104, 6, 8, 1),
+        ] {
+            batch.add_edge(
+                EId(eid),
+                VId(source),
+                VId(target),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(weight))],
+            );
+        }
+        db.write(&commit, batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let image = db
+            .store
+            .seal_partition(
+                &query,
+                view.partition_root(),
+                view.frontier(),
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            image.storage_kind(VId(1), RelationId(1)),
+            Some(RowStorageKind::SealedCsr)
+        );
+        assert_eq!(
+            image.storage_kind(VId(11), RelationId(1)),
+            Some(RowStorageKind::Inline)
+        );
+        let text = "CALL fnx.minimum_spanning_tree() YIELD vertex,neighbor,weight";
+        let parameters = FnxParameters::new();
+        let call = FnxCallSpec::bind(text, &parameters).unwrap();
+        assert!(call.supports_cooperative_sealed_execution());
+        for parallel in [
+            ParallelEdgePolicy::Minimum,
+            ParallelEdgePolicy::Maximum,
+            ParallelEdgePolicy::Sum,
+            ParallelEdgePolicy::CollapseUnit,
+        ] {
+            let mut options = options();
+            options.projection.directedness = Directedness::Undirected;
+            options.projection.parallel_edges = parallel;
+            let decoded = view.execute_fnx(&query, &call, options).unwrap();
+            // Ten vertices in the main component, a full-width two-vertex
+            // component, and an isolate require exactly ten forest edges.
+            assert_eq!(decoded.analytics.rows.len(), 10);
+            assert!(decoded.analytics.rows.iter().all(|row| row[0] != row[1]));
+            assert!(decoded.analytics.rows.iter().any(|row| {
+                row[0] == FnxValue::Vertex(VId(11)) && row[1] == FnxValue::Vertex(VId(u128::MAX))
+            }));
+            if parallel != ParallelEdgePolicy::CollapseUnit {
+                assert_eq!(
+                    decoded.analytics.rows[0],
+                    vec![
+                        FnxValue::Vertex(VId(11)),
+                        FnxValue::Vertex(VId(u128::MAX)),
+                        FnxValue::Float(-7.0),
+                    ]
+                );
+            }
+            let compressed = view
+                .call_fnx_sealed(&query, &image, text, &parameters, options, memory())
+                .unwrap();
+            assert_eq!(
+                compressed.analytics.rows, decoded.analytics.rows,
+                "{parallel:?}"
+            );
+            assert_eq!(
+                compressed.analytics.certificate.result_digest,
+                decoded.analytics.certificate.result_digest
+            );
+            let prepared = db
+                .prism_sealed_projection_at(
+                    &query,
+                    None,
+                    options.selection,
+                    options.projection,
+                    options.projection_limits,
+                    options.source_limits,
+                    SealedLimits::default(),
+                )
+                .await
+                .unwrap();
+            for quantum in [1, 7, 256] {
+                let cooperative = call
+                    .execute_sealed_cooperative(
+                        &query,
+                        &prepared,
+                        options.execution_limits,
+                        memory(),
+                        std::num::NonZeroUsize::new(quantum).unwrap(),
+                        asupersync::runtime::yield_now::yield_now,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    cooperative.rows, decoded.analytics.rows,
+                    "{parallel:?}, quantum={quantum}"
+                );
+                assert_eq!(
+                    cooperative.certificate.result_digest,
+                    compressed.analytics.certificate.result_digest
+                );
+                assert_eq!(
+                    cooperative.certificate.witness,
+                    compressed.analytics.certificate.witness
+                );
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}

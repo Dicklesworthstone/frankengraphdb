@@ -448,13 +448,15 @@ fn procedure_rows_at<Clock: FnMut() -> u64>(
     GqlQueryError<GqlError, QueryError>,
 > {
     let spec = crate::query::bind_procedure(call, arguments)?;
-    // This cursor contract requires unique leading vertices. Bridge pairs
+    // This cursor contract requires unique leading vertices. Edge pairs
     // retain multiplicity through the ordinary masked collected source.
-    if matches!(spec.algorithm(), fgdb_prism::FnxAlgorithm::Bridges)
-        || spec
-            .outputs()
-            .first()
-            .is_none_or(|column| column.field != fgdb_prism::FnxOutput::Vertex)
+    if matches!(
+        spec.algorithm(),
+        fgdb_prism::FnxAlgorithm::Bridges | fgdb_prism::FnxAlgorithm::MinimumSpanningTree
+    ) || spec
+        .outputs()
+        .first()
+        .is_none_or(|column| column.field != fgdb_prism::FnxOutput::Vertex)
     {
         return Err(GqlQueryError::Source(GqlError::Procedure(
             crate::query::ProcedureError::ResultDomain,

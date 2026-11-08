@@ -144,6 +144,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
+                | FnxAlgorithm::MinimumSpanningTree
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -355,6 +356,23 @@ impl FnxCallSpec {
                     yield_now,
                 };
                 return super::cuts::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
+            }
+            if matches!(self.algorithm(), FnxAlgorithm::MinimumSpanningTree) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::spanning_tree::execute_cooperative(
                     self,
                     graph,
                     limits,

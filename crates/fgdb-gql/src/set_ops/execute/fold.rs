@@ -127,10 +127,10 @@ impl PreparedGraphSet {
 
 fn canonical_vertex_call(call: &PreparedProcedureCall) -> bool {
     call.namespace() == "fnx"
-        // Bridge endpoint pairs are canonical as complete tuples, but their
+        // Edge endpoint pairs are canonical as complete tuples, but their
         // leading vertex can repeat. That cannot prove secondary expression
         // order after a projection, nor satisfy the unique-vertex cursor law.
-        && call.name() != "bridges"
+        && !matches!(call.name(), "bridges" | "minimum_spanning_tree")
         && call
             .outputs()
             .first()

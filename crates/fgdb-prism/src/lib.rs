@@ -40,6 +40,7 @@ mod sealed;
 mod sealed_control;
 mod sealed_execute;
 mod shortest_path;
+mod spanning_tree;
 mod target_bfs;
 mod target_bidirectional;
 mod traversal;

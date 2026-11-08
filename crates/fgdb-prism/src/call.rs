@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 29;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 30;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -57,6 +57,8 @@ pub enum FnxOutput {
     Authority = 7,
     /// The other full-width vertex identity in a canonical undirected pair.
     Neighbor = 8,
+    /// Finite signed weight of a selected projected edge.
+    Weight = 9,
 }
 impl FnxOutput {
     pub const fn name(self) -> &'static str {
@@ -70,6 +72,7 @@ impl FnxOutput {
             Self::Hub => "hub",
             Self::Authority => "authority",
             Self::Neighbor => "neighbor",
+            Self::Weight => "weight",
         }
     }
     /// Whether `YIELD <name>` selects this field: its registered name, or
@@ -542,6 +545,19 @@ const SIGNATURES: &[FnxSignature] = &[
         complexity: "O((k + 1) * (|V| + |E|)); k <= 100; O(|V|) integer workspace",
         execution_kernel: "fgdb-prism/label-propagation-semisynchronous-csr-v1",
     },
+    FnxSignature {
+        name: "fnx.minimum_spanning_tree",
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Neighbor, FnxOutput::Weight],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Undirected,
+        numeric_profile: "fnx-mst-finite-f64-canonical-edge-order-v1",
+        rng_policy: "none",
+        graph_laws: "explicit undirected simple projection; caller-selected parallel-edge reduction; finite negative and zero weights accepted; self-loops ignored; a minimum spanning forest including every connected component; edges ordered by weight then canonical full-width endpoint pair, signed zeros tie; vertex < neighbor; endpoints identify a projected edge, not a raw EId",
+        complexity: "O((|V| + |E|) * log(1 + |V|)) logical work plus separately bounded compressed history/lookup work; O(|V|) kernel workspace",
+        execution_kernel: "fgdb-prism/minimum-spanning-forest-indexed-prim-v1",
+    },
 ];
 
 const fn directed_degree(name: &'static str, execution_kernel: &'static str) -> FnxSignature {
@@ -956,6 +972,8 @@ pub enum FnxAlgorithm {
     KatzCentrality(KatzOptions),
     /// Deterministic semi-synchronous community detection, capped at 100 rounds.
     LabelPropagationCommunities,
+    /// Weighted minimum spanning forest, with canonical Kruskal tie/order laws.
+    MinimumSpanningTree,
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -982,6 +1000,7 @@ impl FnxAlgorithm {
             Self::KatzCentrality(_) => 23,
             Self::ShortestPathLength { .. } => 24,
             Self::LabelPropagationCommunities => 26,
+            Self::MinimumSpanningTree => 27,
         }]
     }
 }
@@ -1110,6 +1129,9 @@ impl FnxCallSpec {
     /// Cut edges as canonical `(vertex, neighbor)` full-width VId pairs.
     pub fn bridges() -> Self {
         Self::new(FnxAlgorithm::Bridges)
+    }
+    pub fn minimum_spanning_tree() -> Self {
+        Self::new(FnxAlgorithm::MinimumSpanningTree)
     }
     fn new(algorithm: FnxAlgorithm) -> Self {
         Self::compiled(algorithm, default_outputs(algorithm.signature()))
@@ -1561,6 +1583,7 @@ impl FnxCallSpec {
             "fnx.label_propagation_communities" => FnxAlgorithm::LabelPropagationCommunities,
             "fnx.articulation_points" => FnxAlgorithm::ArticulationPoints,
             "fnx.bridges" => FnxAlgorithm::Bridges,
+            "fnx.minimum_spanning_tree" => FnxAlgorithm::MinimumSpanningTree,
             "fnx.cdlp" => {
                 let max_iter = match arguments[0] {
                     FnxArgument::Integer(value) if value >= 0 => usize::try_from(value).ok(),
@@ -1836,6 +1859,7 @@ impl FnxCallSpec {
             FnxAlgorithm::KatzCentrality(_) => 25,
             FnxAlgorithm::ShortestPathLength { .. } => 26,
             FnxAlgorithm::LabelPropagationCommunities => 28,
+            FnxAlgorithm::MinimumSpanningTree => 30,
             _ => 23,
         };
         hash.update(&binding_version.to_le_bytes());

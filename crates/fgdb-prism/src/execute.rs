@@ -538,6 +538,8 @@ pub(crate) enum KernelValues {
     /// At most V-1 canonical bridge pairs; output indexes select pairs rather
     /// than the projection's vertex directory. Both cells remain stable VIds.
     EndpointPairs(Vec<(usize, usize)>),
+    /// A minimum spanning forest in canonical weight/endpoint order.
+    WeightedEndpointPairs(Vec<crate::spanning_tree::WeightedEndpoint>),
 }
 pub(crate) struct KernelOutput {
     pub values: KernelValues,
@@ -550,6 +552,7 @@ impl KernelValues {
             Self::ShallowDistances(values) => values.len(),
             Self::TargetDistance { distance, .. } => usize::from(distance.is_some()),
             Self::TargetHopDistance { distance, .. } => usize::from(distance.is_some()),
+            Self::WeightedEndpointPairs(values) => values.len(),
             _ => population,
         }
     }
@@ -571,6 +574,7 @@ impl KernelValues {
             Self::Counts(values) => index < values.len(),
             Self::SelectedVertices(values) => values.get(index).copied().unwrap_or(false),
             Self::EndpointPairs(values) => index < values.len(),
+            Self::WeightedEndpointPairs(values) => index < values.len(),
         }
     }
     pub(crate) fn value<C>(
@@ -620,6 +624,28 @@ impl KernelValues {
                         neighbor
                     }],
                 ))
+            }
+            (
+                FnxOutput::Vertex | FnxOutput::Neighbor | FnxOutput::Weight,
+                Self::WeightedEndpointPairs(values),
+            ) => {
+                let edge = *values
+                    .get(index)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                if edge.vertex >= edge.neighbor
+                    || edge.neighbor >= vertices.len()
+                    || !edge.weight.is_finite()
+                    || index.checked_sub(1).is_some_and(|prior| {
+                        values[prior].compare(edge) != std::cmp::Ordering::Less
+                    })
+                {
+                    return Err(FnxExecutionError::InvalidUpstreamResult);
+                }
+                Ok(match field {
+                    FnxOutput::Vertex => FnxValue::Vertex(vertices[edge.vertex]),
+                    FnxOutput::Neighbor => FnxValue::Vertex(vertices[edge.neighbor]),
+                    _ => FnxValue::Float(edge.weight),
+                })
             }
             (FnxOutput::Vertex, _) => vertices
                 .get(index)
@@ -1656,6 +1682,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::DijkstraPathLength { .. }
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
+                | FnxAlgorithm::MinimumSpanningTree
         ) {
             admit("result rows", n, limits.max_result_rows)?;
         }
@@ -1781,6 +1808,12 @@ impl FnxCallSpec {
             FnxAlgorithm::ArticulationPoints | FnxAlgorithm::Bridges => {
                 crate::cuts::Cuts::estimated_work(n, arcs, self.outputs().len())
             }
+            FnxAlgorithm::MinimumSpanningTree => Some(crate::spanning_tree::estimated_work::<C>(
+                n,
+                arcs,
+                n,
+                self.outputs().len(),
+            )?),
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs, graph.is_directed())
             }
@@ -1815,7 +1848,8 @@ impl FnxCallSpec {
             | FnxAlgorithm::LabelPropagationCommunities
             | FnxAlgorithm::KatzCentrality(_)
             | FnxAlgorithm::ArticulationPoints
-            | FnxAlgorithm::Bridges => 0,
+            | FnxAlgorithm::Bridges
+            | FnxAlgorithm::MinimumSpanningTree => 0,
             _ => {
                 let bytes_per_vertex = match algorithm {
                     FnxAlgorithm::SingleSourceShortestPathLength { .. } => {
@@ -1982,6 +2016,12 @@ impl FnxCallSpec {
                     &mut checkpoint,
                 )?;
                 kernel_workspace_bytes = workspace_bytes;
+                output
+            }
+            FnxAlgorithm::MinimumSpanningTree => {
+                let (output, bytes) =
+                    crate::spanning_tree::run(graph, limits.max_result_rows, &mut checkpoint)?;
+                kernel_workspace_bytes = bytes;
                 output
             }
             _ => {
@@ -2247,6 +2287,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("shortest_path.rs"));
         hash_text(&mut hash, include_str!("clustering.rs"));
         hash_text(&mut hash, include_str!("cuts.rs"));
+        hash_text(&mut hash, include_str!("spanning_tree.rs"));
         hash_text(&mut hash, include_str!("directed_clustering.rs"));
         hash_text(&mut hash, include_str!("foundation.rs"));
         hash_text(&mut hash, include_str!("foundation/native.rs"));

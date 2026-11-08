@@ -603,11 +603,13 @@ impl SealedReadView {
     ) -> Result<Completed, Failure> {
         let bound = bind_procedure(call, arguments)?;
         if canonical
-            && (matches!(bound.algorithm(), fgdb_prism::FnxAlgorithm::Bridges)
-                || bound
-                    .outputs()
-                    .first()
-                    .is_none_or(|column| column.field != FnxOutput::Vertex))
+            && (matches!(
+                bound.algorithm(),
+                fgdb_prism::FnxAlgorithm::Bridges | fgdb_prism::FnxAlgorithm::MinimumSpanningTree
+            ) || bound
+                .outputs()
+                .first()
+                .is_none_or(|column| column.field != FnxOutput::Vertex))
         {
             return Err(refuse(ProcedureError::ResultDomain));
         }

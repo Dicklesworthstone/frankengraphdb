@@ -558,12 +558,14 @@ pub(crate) fn fnx_procedure_rows(
 ) -> Result<GraphProcedureExecution<GqlError, Cancel>, GqlQueryError<GqlError, Cancel>> {
     let spec = bind_procedure(call, arguments)?;
     // This native folding interface promises a unique leading vertex key.
-    // Bridge pairs can share that key and use the ordinary canonical bag path.
-    if matches!(spec.algorithm(), fgdb_prism::FnxAlgorithm::Bridges)
-        || spec
-            .outputs()
-            .first()
-            .is_none_or(|column| column.field != FnxOutput::Vertex)
+    // Edge-pair results can share that key and use the ordinary canonical bag path.
+    if matches!(
+        spec.algorithm(),
+        fgdb_prism::FnxAlgorithm::Bridges | fgdb_prism::FnxAlgorithm::MinimumSpanningTree
+    ) || spec
+        .outputs()
+        .first()
+        .is_none_or(|column| column.field != FnxOutput::Vertex)
     {
         return Err(refuse(ProcedureError::ResultDomain));
     }

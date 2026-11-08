@@ -58,6 +58,8 @@ mod load;
 mod shallow_tests;
 #[path = "sealed_shortest_path.rs"]
 mod shortest_path;
+#[path = "sealed_spanning_tree.rs"]
+mod spanning_tree;
 #[path = "sealed_target_bfs.rs"]
 mod target_bfs;
 
@@ -1048,6 +1050,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
+                | FnxAlgorithm::MinimumSpanningTree
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -1193,6 +1196,9 @@ impl FnxCallSpec {
         }
         if matches!(self.algorithm(), FnxAlgorithm::KatzCentrality(_)) {
             return katz::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(self.algorithm(), FnxAlgorithm::MinimumSpanningTree) {
+            return spanning_tree::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(
             self.algorithm(),
@@ -1605,6 +1611,12 @@ impl EncodedRows {
                 }
                 FnxValue::Vertex(vertices[neighbor])
             }
+            KernelValues::WeightedEndpointPairs(pairs) => {
+                if index >= pairs.len() {
+                    return Ok(());
+                }
+                values.value::<Infallible>(index, FnxOutput::Weight, vertices)?
+            }
             KernelValues::HubsAndAuthorities { hubs, authorities } => {
                 let hub = *hubs
                     .get(index)
@@ -1737,6 +1749,10 @@ impl EncodedRows {
                 (FnxOutput::Distance, FnxValue::Float(value)) => FnxValue::Float(value),
                 (FnxOutput::Component, FnxValue::Vertex(value)) => FnxValue::Vertex(value),
                 (FnxOutput::Neighbor, FnxValue::Vertex(value)) => FnxValue::Vertex(value),
+                (FnxOutput::Neighbor, FnxValue::Float(_)) => {
+                    values.value::<Infallible>(index, column.field, vertices)?
+                }
+                (FnxOutput::Weight, FnxValue::Float(value)) => FnxValue::Float(value),
                 (FnxOutput::Triangles, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 (FnxOutput::Core, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
@@ -1932,6 +1948,8 @@ fn source_digest() -> Digest {
             include_str!("sealed_core.rs"),
             include_str!("cuts.rs"),
             include_str!("sealed_cuts.rs"),
+            include_str!("spanning_tree.rs"),
+            include_str!("sealed_spanning_tree.rs"),
             include_str!("sealed_distance.rs"),
             include_str!("sealed_load.rs"),
             include_str!("sealed_eigenvector.rs"),
