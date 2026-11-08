@@ -22,7 +22,7 @@ use crate::mutation_text::{
 use crate::set_text::ReadValueTemplate;
 use crate::{
     GqlScalarParameter, GraphMutationAction, GraphMutationBuildError, GraphMutationTextError,
-    GraphMutationTextErrorKind, GraphMutationValue, MAX_GRAPH_MUTATION_ACTIONS,
+    GraphMutationTextErrorKind, GraphMutationValue, GraphSetColumnType, MAX_GRAPH_MUTATION_ACTIONS,
     PreparedGraphMutation, PreparedGraphMutationText,
 };
 use fgdb_types::CanonicalScalar;
