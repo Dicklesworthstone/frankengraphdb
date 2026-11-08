@@ -1986,9 +1986,9 @@ fn execution_failure(error: impl std::error::Error + 'static) -> Failure {
 /// classifies the text; nothing executes.
 fn read_failure(options: &Options, error: fgdb::QueryError) -> Failure {
     let failure = execution_failure(error);
-    let parse = matches!(
+    let write_candidate = matches!(
         failure.refusal,
-        refusal::Code::Syntax | refusal::Code::Statement
+        refusal::Code::Syntax | refusal::Code::Statement | refusal::Code::Unsupported
     );
     let write = || {
         matches!(
@@ -2002,7 +2002,7 @@ fn read_failure(options: &Options, error: fgdb::QueryError) -> Failure {
         )
         .is_ok()
     };
-    if parse && write() {
+    if write_candidate && write() {
         Failure::coded(
             refusal::Code::Permission,
             "query is read-only: run this write statement with fgdb write",

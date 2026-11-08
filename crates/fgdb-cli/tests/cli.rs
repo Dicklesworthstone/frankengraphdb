@@ -369,11 +369,30 @@ fn compact_refuses_arguments_and_a_missing_database() {
 fn query_refuses_a_write_statement_without_mutating_or_echoing_it() {
     let fixture = Fixture::new("read-only");
     succeeded(&fixture.robot("create", &[]), "created");
-    let statement = "CREATE (n:Person {id:424242})";
-    let output = fixture.robot("query", &[statement]);
-    refused(&output, 3, "query");
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("424242"));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("424242"));
+    let before = directory_bytes(&fixture.db());
+    for statement in [
+        "CREATE (n:Person {id:424242})",
+        "CALL() { CREATE (n:Person {id:424242}) } RETURN 1",
+        "WITH 424242 AS value CALL(value) { CREATE (n:Person {id:value}) } RETURN value",
+    ] {
+        let output = fixture.robot("query", &[statement]);
+        refused(&output, 3, "query");
+        assert!(rows(&output).is_empty());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("\"code\":\"permission\""));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("424242"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("424242"));
+        assert_eq!(directory_bytes(&fixture.db()), before);
+    }
+    // Returning write subqueries are outside the implemented unit-CALL slice.
+    // A write binder must succeed before a read refusal becomes permission.
+    let unsupported = fixture.robot(
+        "query",
+        &["CALL() { CREATE (n:Person {id:424242}) RETURN n } RETURN n"],
+    );
+    refused(&unsupported, 3, "query");
+    assert!(rows(&unsupported).is_empty());
+    assert!(String::from_utf8_lossy(&unsupported.stdout).contains("\"code\":\"unsupported\""));
+    assert_eq!(directory_bytes(&fixture.db()), before);
     let count = fixture.robot("query", &["MATCH (n:Person) RETURN COUNT(n) AS total"]);
     succeeded(&count, "rows");
     assert!(rows(&count)[0].contains("\"type\":\"count\",\"value\":\"0\""));
