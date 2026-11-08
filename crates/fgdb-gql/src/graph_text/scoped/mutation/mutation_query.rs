@@ -637,7 +637,7 @@ impl<'a> ParsedMutationReturn<'a> {
                         })
                 } else {
                     boundary.reads.iter().find_map(|&(source, field, column)| {
-                        (source == name && field.text == "*").then_some(column)
+                        (source == name && field.is_properties()).then_some(column)
                     })
                 }
             })
@@ -911,11 +911,24 @@ impl<'a> Parser<'a> {
                     .any(|(name, _)| name.text == source)
                     && boundary.reads.iter().any(|&(name, field, column)| {
                         name == source
-                            && field.text == key
+                            && field.is_property(key)
                             && row.get(column).is_some_and(|(_, kind)| {
-                                *kind == GraphSetColumnType::Any
-                                    || key != "*" && kind.is_scalar_like()
+                                *kind == GraphSetColumnType::Any || kind.is_scalar_like()
                             })
+                    })
+            })
+        };
+        let property_map = |source: &str| {
+            boundary.is_some_and(|boundary| {
+                row[..boundary.visible]
+                    .iter()
+                    .any(|(name, _)| name.text == source)
+                    && boundary.reads.iter().any(|&(name, field, column)| {
+                        name == source
+                            && field.is_properties()
+                            && row
+                                .get(column)
+                                .is_some_and(|(_, kind)| *kind == GraphSetColumnType::Any)
                     })
             })
         };
@@ -943,7 +956,7 @@ impl<'a> Parser<'a> {
                         if let Some(source) = property_map_source(word, token.at, &lexer)?
                             && element(source.text, false)
                         {
-                            let mut carried = property(source.text, "*");
+                            let mut carried = property_map(source.text);
                             if preserve_preimages && matches!(next.kind, TokenKind::Punct(b'{')) {
                                 // Only selectors at this map's entry boundary
                                 // need preimages; value expressions are scanned
@@ -961,9 +974,7 @@ impl<'a> Parser<'a> {
                                                 | TokenKind::DelimitedKeyword(key) => {
                                                     property(source.text, key)
                                                 }
-                                                TokenKind::Punct(b'*') => {
-                                                    property(source.text, "*")
-                                                }
+                                                TokenKind::Punct(b'*') => property_map(source.text),
                                                 _ => false,
                                             };
                                             entry = false;
@@ -1226,8 +1237,10 @@ impl<'a> Parser<'a> {
                     .filter(|boundary| boundary.width == row.len() && input < boundary.visible)
                     .and_then(|boundary| {
                         boundary.reads.iter().find_map(|&(name, field, column)| {
-                            (name == source.text && field.text == key.text && column < row.len())
-                                .then_some(column)
+                            (name == source.text
+                                && field.is_property(key.text)
+                                && column < row.len())
+                            .then_some(column)
                         })
                     })
                     .ok_or_else(|| {
@@ -1287,7 +1300,10 @@ impl<'a> Parser<'a> {
             self.boundary_reads = Some(BoundaryReads {
                 visible,
                 width: schema.len(),
-                reads,
+                reads: reads
+                    .into_iter()
+                    .map(|(alias, key, column)| (alias, BoundaryReadKey::Property(key), column))
+                    .collect(),
                 functions: Vec::new(),
                 grouped: Vec::new(),
                 scoped: Vec::new(),

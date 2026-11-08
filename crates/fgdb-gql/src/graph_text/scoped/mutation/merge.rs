@@ -2849,7 +2849,10 @@ impl<'a> ParsedVertexRowsReturn<'_, 'a> {
         Ok((!reads.is_empty()).then(|| BoundaryReads {
             visible,
             width: self.output.len(),
-            reads,
+            reads: reads
+                .into_iter()
+                .map(|(alias, key, column)| (alias, BoundaryReadKey::Property(key), column))
+                .collect(),
             functions: Vec::new(),
             grouped: Vec::new(),
             scoped: Vec::new(),

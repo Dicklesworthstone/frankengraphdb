@@ -3,11 +3,16 @@
 use super::*;
 use fgdb_gql::{GraphSymbolResolver, ReverseSymbolCatalog};
 
+const STAR: PropertyKeyId = PropertyKeyId(4);
+
 struct MetadataCatalog;
 
 impl GraphSymbolResolver for MetadataCatalog {
     fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
-        symbols(kind, name)
+        match (kind, name) {
+            (GraphSymbolKind::Property, "*") => Some(GraphSymbol::Property(STAR)),
+            _ => symbols(kind, name),
+        }
     }
 
     fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
@@ -18,6 +23,7 @@ impl GraphSymbolResolver for MetadataCatalog {
         catalog.insert_property(P, "p");
         catalog.insert_property(Q, "q");
         catalog.insert_property(SECRET, "secret");
+        catalog.insert_property(STAR, "*");
         Some(catalog)
     }
 }
@@ -30,6 +36,312 @@ fn text_list(values: &[&str]) -> GraphValue {
             .collect::<Vec<_>>()
             .into_boxed_slice(),
     )
+}
+
+#[test]
+fn literal_wildcard_properties_remain_distinct_from_captured_whole_maps() {
+    let ((), report) = run_async_under_lab(0xca11_1012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(
+            VId(1),
+            vec![VISIBLE],
+            vec![
+                (P, CanonicalScalar::Int(1)),
+                (Q, CanonicalScalar::Int(0)),
+                (STAR, CanonicalScalar::Int(7)),
+            ],
+        );
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let original = db.vertices().unwrap();
+        let pinned = db.read_session().unwrap();
+        let whole = |star, q| {
+            GraphValue::map(vec![
+                ("*".into(), int(star)),
+                ("p".into(), int(1)),
+                ("q".into(), int(q)),
+            ])
+            .unwrap()
+        };
+        let selected = GraphValue::map(vec![("*".into(), int(7))]).unwrap();
+        for (text, columns, expected) in [
+            (
+                "MATCH (n:Visible) RETURN n.`*` AS star,n{.`*`} AS selected,n{.*} AS fields",
+                vec!["star", "selected", "fields"],
+                vec![
+                    int(7),
+                    GraphValue::map(vec![("*".into(), int(7))]).unwrap(),
+                    whole(7, 0),
+                ],
+            ),
+            (
+                "MATCH (n:Visible) WITH n,n.`*` AS saved \
+                 RETURN saved,n.`*` AS star,n{.*} AS fields",
+                vec!["saved", "star", "fields"],
+                vec![int(7), int(7), whole(7, 0)],
+            ),
+            (
+                "MATCH (n:Visible) WITH n,properties(n) AS saved \
+                 RETURN n.`*` AS star,n{.`*`} AS selected,properties(n) AS fields",
+                vec!["star", "selected", "fields"],
+                vec![int(7), selected, whole(7, 0)],
+            ),
+            (
+                "MATCH (n:Visible) WITH n,count(*) AS total \
+                 RETURN n.`*` AS star,n{.*} AS fields,total",
+                vec!["star", "fields", "total"],
+                vec![int(7), whole(7, 0), int(1)],
+            ),
+            (
+                "MATCH (n:Visible) WITH n,count(*) AS total \
+                 RETURN n{.*} AS fields,n.`*` AS star,total",
+                vec!["fields", "star", "total"],
+                vec![whole(7, 0), int(7), int(1)],
+            ),
+        ] {
+            let result = db
+                .query(
+                    &contexts.query(),
+                    text,
+                    &GqlParameters::new(),
+                    MetadataCatalog,
+                    GqlQueryPolicy::new(100_000, 1, 2_000_000, 1_000_000),
+                )
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(values(result, &columns), vec![expected], "{text}");
+            assert_eq!(db.vertices().unwrap(), original, "{text}");
+            assert_eq!(db.frontier().unwrap(), basis, "{text}");
+        }
+        let mut next = 100_u128;
+        for (index, (text, columns, expected, star, q)) in [
+            (
+                "MATCH (n:Visible) WITH n,properties(n) AS before SET n.q=3 \
+                 RETURN n.`*` AS star,n{.`*`} AS selected,properties(n) AS fields",
+                vec!["star", "selected", "fields"],
+                vec![
+                    int(7),
+                    GraphValue::map(vec![("*".into(), int(7))]).unwrap(),
+                    whole(7, 3),
+                ],
+                7,
+                3,
+            ),
+            (
+                "MATCH (n:Visible) WITH n,n.`*` AS before SET n.q=4 \
+                 RETURN before,n.`*` AS star,n{.*} AS fields",
+                vec!["before", "star", "fields"],
+                vec![int(7), int(7), whole(7, 4)],
+                7,
+                4,
+            ),
+            (
+                "MATCH (n:Visible) WITH n,n.`*` AS before SET n.`*`=9 \
+                 RETURN before,n.`*` AS star,n{.*} AS fields",
+                vec!["before", "star", "fields"],
+                vec![int(7), int(9), whole(9, 4)],
+                9,
+                4,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = db
+                .query_write(
+                    &contexts.txn(),
+                    &contexts.query(),
+                    &contexts.commit(),
+                    text,
+                    &GqlParameters::new(),
+                    MetadataCatalog,
+                    R,
+                    policy(1),
+                    |request| {
+                        next += 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                        })
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(values(result, &columns), vec![expected], "{text}");
+            assert_eq!(
+                db.frontier().unwrap().0,
+                basis.0 + index as u64 + 1,
+                "{text}"
+            );
+            assert_eq!(db.vertices().unwrap().len(), 1, "{text}");
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(1).into()),
+                    (Q, CanonicalScalar::Int(q).into()),
+                    (STAR, CanonicalScalar::Int(star).into()),
+                ],
+                "{text}"
+            );
+            assert_eq!(next, 100, "SET must not allocate identities");
+            assert!(db.edges().unwrap().is_empty());
+        }
+        assert_eq!(pinned.vertices().unwrap(), original);
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+        let masked = fgdb_gql::PreparedGraphMutationQueryText::prepare(
+            "MATCH (n:Visible) WITH n SET n.q=5 RETURN n{.*} AS fields",
+            R,
+            MetadataCatalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let (_, rows, _) = db
+            .execute_graph_mutation_query_authorized(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &issuer,
+                &token,
+                "main",
+                &masked,
+                policy(1).mutations,
+                || NOW,
+            )
+            .await
+            .unwrap();
+        let visible = GraphValue::map(vec![("p".into(), int(1)), ("q".into(), int(5))]).unwrap();
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(rows.value[0].values(), &[visible]);
+        let admitted = db.vertices().unwrap();
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(
+            admitted[0].props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(5).into()),
+                (STAR, CanonicalScalar::Int(9).into()),
+            ]
+        );
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 4);
+        let admitted_frontier = db.frontier().unwrap();
+        // Standalone mutation projections mask unavailable fields to NULL.
+        let masked_field = fgdb_gql::PreparedGraphMutationQueryText::prepare(
+            "MATCH (n:Visible) WITH n,n.`*` AS before SET n.q=6 RETURN n.`*` AS star",
+            R,
+            MetadataCatalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let (_, masked_rows, _) = db
+            .execute_graph_mutation_query_authorized(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &issuer,
+                &token,
+                "main",
+                &masked_field,
+                policy(1).mutations,
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(masked_rows.value.len(), 1);
+        assert_eq!(
+            masked_rows.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Null)]
+        );
+        assert_eq!(db.frontier().unwrap().0, admitted_frontier.0 + 1);
+        let before_denied = db.vertices().unwrap();
+        assert_eq!(
+            before_denied[0].props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(6).into()),
+                (STAR, CanonicalScalar::Int(9).into()),
+            ]
+        );
+        let denied_frontier = db.frontier().unwrap();
+        // A chain admits every named read before executing its unit body.
+        let denied = PreparedGraphWriteChainText::prepare(
+            "CALL () { MATCH (n:Visible) SET n.q=7 } \
+             MATCH (n:Visible) WITH n,properties(n) AS saved RETURN n.`*` AS star",
+            R,
+            MetadataCatalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let error = db
+            .execute_graph_write_chain_authorized(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &issuer,
+                &token,
+                "main",
+                &denied,
+                insert_policy(1),
+                || NOW,
+            )
+            .await
+            .expect_err("a whole-map capture must not authorize a chain's literal-star read");
+        assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+        assert_eq!(db.vertices().unwrap(), before_denied);
+        assert_eq!(db.frontier().unwrap(), denied_frontier);
+        let committed = db.vertices().unwrap();
+        let frontier = db.frontier().unwrap();
+        let mut transaction = db.begin(&contexts.txn()).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(7), vec![], vec![(P, CanonicalScalar::Int(99))]);
+        transaction.write(&mut db, prefix).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let text = "MATCH (n:Visible) WITH n,n.`*` AS before \
+                    DELETE n RETURN n.`*` AS star LIMIT 0";
+        let query = fgdb_gql::PreparedGraphMutationQueryText::prepare(text, R, MetadataCatalog)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let error = transaction
+            .execute_graph_mutation_query_governed(
+                &mut db,
+                &contexts.query(),
+                &query,
+                policy(1).mutations,
+            )
+            .expect_err("LIMIT0 must not hide a read of the deleted literal-star field");
+        assert!(
+            matches!(
+                error,
+                fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphMutationQueryError::Mutation(
+                    fgdb_gql::GraphMutationError::DeletedElementRead { .. }
+                ))
+            ),
+            "{error:?}"
+        );
+        assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        assert_eq!(db.vertices().unwrap(), committed);
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(next, 100);
+        transaction
+            .finish(&mut db, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            committed[0].props
+        );
+        assert_eq!(pinned.vertices().unwrap(), original);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

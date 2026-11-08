@@ -1246,6 +1246,31 @@ type ProjectedSources = (usize, Vec<(usize, usize, usize)>);
 /// columns, as (source start, source end, column).
 type HoistedReads = (usize, Vec<(usize, usize, usize)>);
 
+/// A whole element map is distinct from every literal property name,
+/// including the valid quoted name `*`. Retain its source offset for errors.
+#[derive(Clone, Copy)]
+enum BoundaryReadKey<'a> {
+    Property(Name<'a>),
+    Properties { at: usize },
+}
+
+impl BoundaryReadKey<'_> {
+    fn at(self) -> usize {
+        match self {
+            Self::Property(name) => name.at,
+            Self::Properties { at } => at,
+        }
+    }
+
+    fn is_property(self, key: &str) -> bool {
+        matches!(self, Self::Property(name) if name.text == key)
+    }
+
+    fn is_properties(self) -> bool {
+        matches!(self, Self::Properties { .. })
+    }
+}
+
 /// Property reads a graph-to-row WITH's scope makes through a projected MATCH
 /// binding (`WITH n WHERE n.p = 3 ORDER BY n.q RETURN n.r`). Each is a hidden
 /// column appended to the boundary projection after its `visible` columns.
@@ -1270,12 +1295,12 @@ type HoistedReads = (usize, Vec<(usize, usize, usize)>);
 struct BoundaryReads<'a> {
     visible: usize,
     width: usize,
-    reads: Vec<(&'a str, Name<'a>, usize)>,
+    reads: Vec<(&'a str, BoundaryReadKey<'a>, usize)>,
     /// Native metadata of an unchanged carried element or captured path.
     /// Kept separate from property names so a property named `labels` or
     /// `type` cannot alias a function read.
     functions: Vec<(&'a str, GraphPathFunction, usize)>,
-    grouped: Vec<(&'a str, &'a str, Name<'a>, usize)>,
+    grouped: Vec<(&'a str, &'a str, BoundaryReadKey<'a>, usize)>,
     scoped: Vec<(&'a str, Option<&'a str>, usize)>,
 }
 

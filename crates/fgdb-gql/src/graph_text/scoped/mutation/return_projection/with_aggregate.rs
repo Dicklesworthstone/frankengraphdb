@@ -342,7 +342,7 @@ impl<'a> Parser<'a> {
         inputs: &mut Vec<ReadProjectionTemplate>,
         keys: &mut Vec<usize>,
         returned: &mut Vec<(Name<'a>, Output, GraphSetColumnType)>,
-    ) -> Result<Vec<(&'a str, Name<'a>, usize)>, GraphSetTextError> {
+    ) -> Result<Vec<(&'a str, BoundaryReadKey<'a>, usize)>, GraphSetTextError> {
         let Some(boundary) = self
             .boundary_reads
             .as_ref()
@@ -369,11 +369,11 @@ impl<'a> Parser<'a> {
                 .iter()
                 .copied()
                 .find(|name| returned.iter().all(|(output, _, _)| output.text != *name))
-                .ok_or_else(|| expected(property.at, "bounded grouping property reads"))?;
+                .ok_or_else(|| expected(property.at(), "bounded grouping property reads"))?;
             returned.push((
                 Name {
                     text: name,
-                    at: property.at,
+                    at: property.at(),
                 },
                 Output::Key(key),
                 schema[column].1,

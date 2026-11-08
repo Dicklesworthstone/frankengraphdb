@@ -46,23 +46,25 @@ impl<'a> ParsedMutationReturn<'a> {
             ));
         }
         let key = match input {
-            ReturnMapInput::Property(key) => key,
-            ReturnMapInput::Properties => Name {
-                text: "*",
-                at: source.at,
-            },
+            ReturnMapInput::Property(key) => Some(key),
+            ReturnMapInput::Properties => None,
             ReturnMapInput::Identity | ReturnMapInput::Guard => {
                 unreachable!("identity and guard handled above")
             }
         };
-        let whole_map = matches!(input, ReturnMapInput::Properties);
+        let whole_map = key.is_none();
         let current = parser
             .boundary_reads
             .as_ref()
             .filter(|boundary| boundary.width == row.len() && target < boundary.visible)
             .and_then(|boundary| {
                 boundary.reads.iter().find_map(|&(name, field, column)| {
-                    (name == source.text && field.text == key.text).then_some(column)
+                    (name == source.text
+                        && match key {
+                            Some(key) => field.is_property(key.text),
+                            None => field.is_properties(),
+                        })
+                    .then_some(column)
                 })
             })
             .filter(|&column| {
@@ -76,19 +78,13 @@ impl<'a> ParsedMutationReturn<'a> {
             })
             .ok_or_else(|| {
                 error(
-                    key.at,
+                    key.map_or(source.at, |key| key.at),
                     GraphPatternTextErrorKind::Expected(
                         "a property carried by the incoming WITH row",
                     ),
                 )
             })?;
-        if whole_map {
-            self.column(
-                Binding::Properties { target, current },
-                source,
-                GraphSetColumnType::Any,
-            )
-        } else {
+        if let Some(key) = key {
             self.column(
                 Binding::Property {
                     target,
@@ -97,6 +93,12 @@ impl<'a> ParsedMutationReturn<'a> {
                 },
                 key,
                 GraphSetColumnType::Stored,
+            )
+        } else {
+            self.column(
+                Binding::Properties { target, current },
+                source,
+                GraphSetColumnType::Any,
             )
         }
     }

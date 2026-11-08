@@ -698,7 +698,7 @@ impl<'a> Parser<'a> {
         boundary
             .reads
             .iter()
-            .find(|(name, key, _)| *name == alias && key.text == "*")
+            .find(|(name, key, _)| *name == alias && key.is_properties())
             .map(|(_, _, column)| *column)
     }
 

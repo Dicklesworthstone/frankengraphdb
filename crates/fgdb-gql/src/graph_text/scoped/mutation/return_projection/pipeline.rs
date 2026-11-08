@@ -1102,9 +1102,11 @@ impl<'a> Parser<'a> {
                         && let Some(alias) = carried_alias(carried.as_deref(), source.text)
                         && let Some(binding) =
                             boundary_property_source(head, offset, imports, alias)
-                        && !reads.iter().any(|&(known, key, _): &(_, Name<'_>, _)| {
-                            known == alias && key.text == "*"
-                        })
+                        && !reads
+                            .iter()
+                            .any(|&(known, key, _): &(_, BoundaryReadKey<'_>, _)| {
+                                known == alias && key.is_properties()
+                            })
                     {
                         let name = BOUNDARY_READ_NAMES
                             .iter()
@@ -1141,10 +1143,7 @@ impl<'a> Parser<'a> {
                         ));
                         reads.push((
                             alias,
-                            Name {
-                                text: "*",
-                                at: source.at,
-                            },
+                            BoundaryReadKey::Properties { at: source.at },
                             head.outputs.len() - 1,
                         ));
                     }
@@ -1155,9 +1154,11 @@ impl<'a> Parser<'a> {
                         && !read_locals.shadows(alias)
                         && let Some(alias) = carried_alias(carried.as_deref(), alias)
                         && let Some(source) = boundary_property_source(head, offset, imports, alias)
-                        && !reads.iter().any(|&(read, key, _): &(_, Name<'_>, _)| {
-                            read == alias && key.text == property
-                        })
+                        && !reads
+                            .iter()
+                            .any(|&(read, key, _): &(_, BoundaryReadKey<'_>, _)| {
+                                read == alias && key.is_property(property)
+                            })
                     {
                         let Some(&name) = BOUNDARY_READ_NAMES.iter().find(|name| {
                             head.outputs.iter().all(|(output, _)| output.text != **name)
@@ -1191,7 +1192,11 @@ impl<'a> Parser<'a> {
                             },
                             value,
                         ));
-                        reads.push((alias, key, head.outputs.len() - 1));
+                        reads.push((
+                            alias,
+                            BoundaryReadKey::Property(key),
+                            head.outputs.len() - 1,
+                        ));
                     } else if before_return
                         && !chained
                         && let Some(TokenKind::Word(alias)) = window[1]
@@ -1527,9 +1532,9 @@ impl<'a> Parser<'a> {
         Ok(self.boundary_reads.as_ref().is_some_and(|boundary| {
             boundary.width == width
                 && ((boundary.reads.iter())
-                    .any(|&(read, name, _)| read == alias && name.text == key)
+                    .any(|&(read, name, _)| read == alias && name.is_property(key))
                     || (boundary.grouped.iter())
-                        .any(|&(read, _, name, _)| read == alias && name.text == key))
+                        .any(|&(read, _, name, _)| read == alias && name.is_property(key)))
         }))
     }
 
@@ -1611,7 +1616,7 @@ impl<'a> Parser<'a> {
             return Ok(None);
         };
         let Some(column) = (boundary.reads.iter())
-            .find(|&&(read, key, _)| read == alias && key.text == property)
+            .find(|&&(read, key, _)| read == alias && key.is_property(property))
             .map(|&(_, _, column)| column)
             .or_else(|| {
                 (boundary.scoped.iter())
@@ -1912,7 +1917,7 @@ impl<'a> Parser<'a> {
         &mut self,
         (visible, reads, functions): (
             usize,
-            Vec<(&'a str, Name<'a>, usize)>,
+            Vec<(&'a str, BoundaryReadKey<'a>, usize)>,
             Vec<(&'a str, GraphPathFunction, usize)>,
         ),
         schema: &[(Name<'a>, GraphSetColumnType)],

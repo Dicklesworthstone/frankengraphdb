@@ -88,7 +88,7 @@ impl<'a> Parser<'a> {
             outputs.push((variable, ReadValueTemplate::Column(width + column)));
         }
         let visible = outputs.len();
-        let mut reads: Vec<(&'a str, Name<'a>, usize)> = Vec::new();
+        let mut reads: Vec<(&'a str, BoundaryReadKey<'a>, usize)> = Vec::new();
         let mut functions: Vec<(&'a str, GraphPathFunction, usize)> = Vec::new();
         // Items that keep a binding as a bare key (`p` or `p AS q`), as
         // (output alias, binding). `item` holds an item's first tokens.
@@ -165,7 +165,7 @@ impl<'a> Parser<'a> {
                             bindings.iter().find(|name| name.text == source.text)
                             && !reads
                                 .iter()
-                                .any(|&(owner, key, _)| owner == source.text && key.text == "*")
+                                .any(|&(owner, key, _)| owner == source.text && key.is_properties())
                         {
                             let column = self.hidden_property_map(
                                 &mut outputs,
@@ -176,10 +176,7 @@ impl<'a> Parser<'a> {
                             )?;
                             reads.push((
                                 source.text,
-                                Name {
-                                    text: "*",
-                                    at: source.at,
-                                },
+                                BoundaryReadKey::Properties { at: source.at },
                                 column,
                             ));
                         }
@@ -219,7 +216,7 @@ impl<'a> Parser<'a> {
                             if let Some(column) =
                                 incoming.iter().position(|(name, _)| name.text == word)
                                 && !reads.iter().any(|&(owner, property, _)| {
-                                    owner == word && property.text == key
+                                    owner == word && property.is_property(key)
                                 })
                             {
                                 // Grouping's ordinary row parser addresses
@@ -250,17 +247,17 @@ impl<'a> Parser<'a> {
                                 ));
                                 reads.push((
                                     word,
-                                    Name {
+                                    BoundaryReadKey::Property(Name {
                                         text: key,
                                         at: property.at,
-                                    },
+                                    }),
                                     outputs.len() - 1,
                                 ));
                             }
                             if let Some(&variable) = bindings.iter().find(|name| name.text == word)
                                 && !incoming.iter().any(|(name, _)| name.text == word)
                                 && !reads.iter().any(|&(owner, property, _)| {
-                                    owner == word && property.text == key
+                                    owner == word && property.is_property(key)
                                 })
                             {
                                 let property = Name {
@@ -274,7 +271,7 @@ impl<'a> Parser<'a> {
                                     (variable, property),
                                     token.at,
                                 )?;
-                                reads.push((word, property, column));
+                                reads.push((word, BoundaryReadKey::Property(property), column));
                             }
                         }
                     }
@@ -493,8 +490,8 @@ impl<'a> Parser<'a> {
         outputs: &mut Vec<(Name<'a>, ReadValueTemplate)>,
         inputs: &mut Vec<Projection<'a>>,
         width: usize,
-    ) -> Result<Vec<(&'a str, &'a str, Name<'a>, usize)>, GraphSetTextError> {
-        let mut grouped: Vec<(&'a str, &'a str, Name<'a>, usize)> = Vec::new();
+    ) -> Result<Vec<(&'a str, &'a str, BoundaryReadKey<'a>, usize)>, GraphSetTextError> {
+        let mut grouped: Vec<(&'a str, &'a str, BoundaryReadKey<'a>, usize)> = Vec::new();
         if !["WHERE", "ORDER", "SKIP", "LIMIT", "RETURN"]
             .iter()
             .any(|keyword| end.eq_ignore_ascii_case(keyword))
@@ -532,12 +529,12 @@ impl<'a> Parser<'a> {
                             kept.iter().find(|(alias, _)| *alias == source.text)
                         && !grouped
                             .iter()
-                            .any(|&(owner, _, key, _)| owner == alias && key.text == "*")
+                            .any(|&(owner, _, key, _)| owner == alias && key.is_properties())
                         && let Some(&variable) = bindings.iter().find(|name| name.text == binding)
                     {
                         let column = match grouped
                             .iter()
-                            .find(|&&(_, owner, key, _)| owner == binding && key.text == "*")
+                            .find(|&&(_, owner, key, _)| owner == binding && key.is_properties())
                         {
                             Some(&(_, _, _, column)) => column,
                             None => self
@@ -546,10 +543,7 @@ impl<'a> Parser<'a> {
                         grouped.push((
                             alias,
                             binding,
-                            Name {
-                                text: "*",
-                                at: source.at,
-                            },
+                            BoundaryReadKey::Properties { at: source.at },
                             column,
                         ));
                     }
@@ -562,7 +556,7 @@ impl<'a> Parser<'a> {
                             property.kind
                             && !grouped
                                 .iter()
-                                .any(|&(owner, _, read, _)| owner == alias && read.text == key)
+                                .any(|&(owner, _, read, _)| owner == alias && read.is_property(key))
                             && let Some(&variable) =
                                 bindings.iter().find(|name| name.text == binding)
                         {
@@ -571,10 +565,9 @@ impl<'a> Parser<'a> {
                                 at: property.at,
                             };
                             // The same binding may be kept under two aliases.
-                            let column = match grouped
-                                .iter()
-                                .find(|&&(_, owner, read, _)| owner == binding && read.text == key)
-                            {
+                            let column = match grouped.iter().find(|&&(_, owner, read, _)| {
+                                owner == binding && read.is_property(key)
+                            }) {
                                 Some(&(_, _, _, column)) => column,
                                 None => self.hidden_property(
                                     outputs,
@@ -584,7 +577,12 @@ impl<'a> Parser<'a> {
                                     token.at,
                                 )?,
                             };
-                            grouped.push((alias, binding, property, column));
+                            grouped.push((
+                                alias,
+                                binding,
+                                BoundaryReadKey::Property(property),
+                                column,
+                            ));
                         }
                     }
                 }
