@@ -221,7 +221,7 @@ fn preflight_steps<Clock: FnMut() -> u64>(
                 .admit_patterns(|pattern| admit_pattern(pattern, scope))
                 .map_err(source)?;
             reads |= foreach.requires_read();
-            reads |= preflight_steps(foreach.body().steps(), query_cx, scope, execution)?;
+            reads |= preflight_chain(foreach.body(), None, query_cx, scope, execution)?;
             continue;
         }
         if let GraphWriteChainStep::UnitCall(call) = statement {
@@ -235,7 +235,24 @@ fn preflight_steps<Clock: FnMut() -> u64>(
             call.admit_patterns(|pattern| admit_pattern(pattern, scope))
                 .map_err(source)?;
             reads |= call.requires_read();
-            reads |= preflight_steps(call.body().steps(), query_cx, scope, execution)?;
+            reads |= preflight_chain(call.body(), None, query_cx, scope, execution)?;
+            continue;
+        }
+        if let GraphWriteChainStep::ReturningCall(call) = statement {
+            if call
+                .read_element_keys()
+                .iter()
+                .any(|key| !scope.allows_property(*key))
+            {
+                return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+            }
+            call.admit_patterns(|pattern| admit_pattern(pattern, scope))
+                .map_err(source)?;
+            // Exports remain private inputs to the surrounding statement.
+            // The call reports actual graph/element demand, including its
+            // body's terminal read, separately from its returned bindings.
+            reads |= call.requires_read();
+            reads |= preflight_chain(call.body(), None, query_cx, scope, execution)?;
             continue;
         }
         if merges::preflight(statement, scope)? || vertices::preflight(statement, scope)? {
@@ -291,16 +308,17 @@ fn preflight_steps<Clock: FnMut() -> u64>(
     Ok(reads)
 }
 
-/// Admit the complete native definition without reading the database or
-/// reserving identities. Prepared sessions use the same recursive admission
-/// as execution; an empty loop cannot hide a forbidden operation or field.
-pub(super) fn admit_definition<Clock: FnMut() -> u64>(
+/// Admit each chain's terminal read as well as its writes. A returning CALL's
+/// body has its own read tail and named property keys, even when its caller
+/// selects no occurrences. Public delivery authority belongs to the outer
+/// statement; a scope's `requires_read` accounts for its private read demand.
+fn preflight_chain<Clock: FnMut() -> u64>(
     chain: &PreparedGraphWriteChain,
     continuation: Option<&fgdb_gql::PreparedGraphSet>,
     query_cx: &QueryCx,
     scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
-) -> Result<(), Fault> {
+) -> Result<bool, Fault> {
     let continuation = continuation.or_else(|| chain.read_continuation());
     if continuation.is_some_and(|read| !chain.accepts_read_continuation(read)) {
         return Err(GqlQueryError::Source(GraphWriteChainError::Read(
@@ -316,9 +334,30 @@ pub(super) fn admit_definition<Clock: FnMut() -> u64>(
     {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
+    if let Some(read) = continuation {
+        read.admit_patterns(&mut |pattern| {
+            execution.checkpoint()?;
+            admit_pattern(pattern, scope)
+        })
+        .map_err(source)?;
+    }
     // Whole-program admission precedes even the first engine ID. The
     // chain is compiler-owned, but its unsupported family is not authority.
-    let definition_reads = preflight_steps(chain.steps(), query_cx, scope, execution)?;
+    preflight_steps(chain.steps(), query_cx, scope, execution)
+}
+
+/// Admit the complete native definition without reading the database or
+/// reserving identities. Prepared sessions use the same recursive admission
+/// as execution; an empty loop cannot hide a forbidden operation or field.
+pub(super) fn admit_definition<Clock: FnMut() -> u64>(
+    chain: &PreparedGraphWriteChain,
+    continuation: Option<&fgdb_gql::PreparedGraphSet>,
+    query_cx: &QueryCx,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<(), Fault> {
+    let continuation = continuation.or_else(|| chain.read_continuation());
+    let definition_reads = preflight_chain(chain, continuation, query_cx, scope, execution)?;
     let reads = chain.returns_rows() || continuation.is_some() || definition_reads;
     if reads && !scope.rights().can_read() {
         return Err(source(WriteTxnError::Authorization(

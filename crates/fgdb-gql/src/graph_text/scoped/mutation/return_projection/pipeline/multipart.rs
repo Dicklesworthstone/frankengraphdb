@@ -2621,12 +2621,17 @@ impl<'a> Parser<'a> {
         mut self,
         statement: &'a str,
         incoming: RowSchema<'a>,
-    ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
+    ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
         self.read_elements = true;
         self.call_element_reads = true;
         let (mut result, schema) =
             self.multipart_parts_with_input(statement, true, incoming, 0, true)?;
+        self.chain_write = true;
         let stages = self.write_row_pipeline(schema)?;
+        let output = self
+            .chained_row
+            .take()
+            .ok_or_else(|| expected(self.current.at, "a terminal RETURN schema after the write"))?;
         result.append_stages(stages);
         result.append_element_keys(&mut self.syntax.element_keys);
         // Like every chain step, the read leaves the unused-declaration check
@@ -2635,7 +2640,7 @@ impl<'a> Parser<'a> {
         self.end()?;
         result.share_parameters(&self.syntax.parameters, &self.syntax.parameter_offsets);
         self.admit_multipart_size(&result)?;
-        Ok(result)
+        Ok((result, output))
     }
 
     fn multipart_parts_from(

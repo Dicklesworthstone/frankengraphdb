@@ -818,6 +818,8 @@ impl<'a> Parser<'a> {
         if head {
             let tail = self.insertion_tail(&mut returning, syntax, source, output)?;
             returning.tail = Some(tail);
+        } else {
+            self.finish_write_return(output)?;
         }
         Ok(returning)
     }

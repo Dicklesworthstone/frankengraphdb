@@ -1038,6 +1038,8 @@ impl<'a> Parser<'a> {
             }
             let tail = self.write_tail(&mut returning, columns, scope, output, row)?;
             returning.tail = Some(tail);
+        } else {
+            self.finish_write_return(output)?;
         }
         Ok(returning)
     }

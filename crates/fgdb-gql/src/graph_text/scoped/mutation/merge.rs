@@ -3427,10 +3427,11 @@ impl PreparedGraphVertexMergeRowsText {
             } else {
                 if parser.is_word("RETURN") {
                     let returning = parser.vertex_rows_return("RETURN", variable, &row)?;
+                    parser.finish_write_return(returning.output.clone())?;
                     parsed_return = Some(returning);
                 }
                 parser.end()?;
-                None
+                parser.continuation()
             }
         };
         if let Some(parsed) = &parsed_return {

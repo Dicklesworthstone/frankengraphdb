@@ -2334,6 +2334,21 @@ impl<'a> Parser<'a> {
     }
 
     /// The continuation a chained WITH tail left, at the next write.
+    /// Preserve a terminal native RETURN's typed row for a surrounding CALL.
+    /// End-of-text is an explicit preparation continuation, never permission
+    /// to append another clause after RETURN or an executable parser node.
+    fn finish_write_return(
+        &mut self,
+        row: Vec<(Name<'a>, GraphSetColumnType)>,
+    ) -> Result<(), GraphPatternTextError> {
+        if self.chain_write {
+            self.end()?;
+            self.boundary_reads = None;
+            self.chained_row = Some(row);
+        }
+        Ok(())
+    }
+
     fn continuation(&mut self) -> Option<ChainContinuation<'a>> {
         let row = self.chained_row.take()?;
         Some(ChainContinuation {

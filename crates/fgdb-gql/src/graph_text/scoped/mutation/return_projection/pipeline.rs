@@ -2034,6 +2034,7 @@ impl<'a> Parser<'a> {
             }
             self.boundary_reads = None;
             self.projected_sources = None;
+            self.finish_write_return(schema)?;
             return Ok(stages);
         }
         let at = self.current.at;
@@ -2047,7 +2048,7 @@ impl<'a> Parser<'a> {
         } else {
             GraphSetQuantifier::All
         };
-        let (mut projection, _) = self.row_projection(&schema, true)?;
+        let (mut projection, output) = self.row_projection(&schema, true)?;
         let page = self.return_expression_page(&schema, &mut projection, distinct)?;
         // The terminal RETURN is the last reader of any hidden boundary read.
         self.boundary_reads = None;
@@ -2062,6 +2063,9 @@ impl<'a> Parser<'a> {
         )?;
         if let Some(page) = page {
             append_stage(&mut stages, page, &mut depth)?;
+        }
+        if aggregate_return {
+            self.finish_write_return(output)?;
         }
         Ok(stages)
     }

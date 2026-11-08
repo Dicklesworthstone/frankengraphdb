@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::mutation_text::PreparedGraphVertexMergeRowsText;
-use crate::write_chain::{ChainTextStep, PreparedGraphForeachText, PreparedGraphUnitCallText};
+use crate::write_chain::{ChainTextStep, PreparedGraphCallText, PreparedGraphForeachText};
 use crate::{
     GraphWriteChainStep, GraphWriteChainTextError, PreparedGraphWriteChain,
     PreparedGraphWriteChainText,
@@ -29,10 +29,14 @@ enum MatchedWrite {
 pub(super) enum PreparedContinuation<'a> {
     UnitCall(ChainContinuation<'a>),
     Write(ChainTextStep, Option<ChainContinuation<'a>>),
+    /// A native terminal RETURN's exact names and types. This is preparation
+    /// metadata only; its existing write query still owns the executable IR.
+    Returned(Vec<(Name<'a>, GraphSetColumnType)>),
     Read(
         Box<(
             crate::set_text::multipart::BoundReadInput,
             Vec<PropertyKeyId>,
+            Vec<(Name<'a>, GraphSetColumnType)>,
         )>,
     ),
 }
@@ -886,6 +890,9 @@ impl PreparedGraphWriteChainText {
             tokens: 0,
         };
         let clause = lexer.clone().next()?.kind;
+        if matches!(clause, TokenKind::End) {
+            return Ok(PreparedContinuation::Returned(from.row));
+        }
         let reading = matches!(clause, TokenKind::Word(word)
             if ["MATCH", "OPTIONAL", "CALL", "WITH", "UNWIND"].iter().any(|read| word.eq_ignore_ascii_case(read)));
         let matched = if reading {
@@ -916,7 +923,7 @@ impl PreparedGraphWriteChainText {
             let parser = Parser::new_with_parameter_types(body, declarations)?
                 .with_zones(resolve.time_zones())
                 .resume_after(from.boundary, &from.parameters, from.at)?;
-            let unresolved = parser.write_read_continuation(body, from.row)?;
+            let (unresolved, output) = parser.write_read_continuation(body, from.row)?;
             let slots = unresolved.element_key_slots();
             let mut input = unresolved.resolve(resolve)?;
             input.first.owned = Some(Box::new((columns, types)));
@@ -927,7 +934,7 @@ impl PreparedGraphWriteChainText {
                     crate::GraphElementKey::Unbound | crate::GraphElementKey::Missing => None,
                 })
                 .collect();
-            return Ok(PreparedContinuation::Read(Box::new((input, keys))));
+            return Ok(PreparedContinuation::Read(Box::new((input, keys, output))));
         }
         if matches!(
             matched,
@@ -1129,14 +1136,14 @@ impl PreparedGraphWriteChainText {
         };
         let mut steps = Vec::new();
         let mut next = if first_unit_call {
-            let (call, after) = PreparedGraphUnitCallText::prepare_step(
+            let (call, after) = PreparedGraphCallText::prepare_step(
                 body,
                 relation,
                 declarations,
                 &mut resolve,
                 None,
             )?;
-            steps.push(ChainTextStep::UnitCall(Box::new(call)));
+            steps.push(ChainTextStep::Call(Box::new(call)));
             after
         } else if first_foreach {
             let (foreach, after) = PreparedGraphForeachText::prepare_step(
@@ -1215,14 +1222,14 @@ impl PreparedGraphWriteChainText {
                 false,
             )? {
                 PreparedContinuation::UnitCall(from) => {
-                    let (call, after) = PreparedGraphUnitCallText::prepare_step(
+                    let (call, after) = PreparedGraphCallText::prepare_step(
                         body,
                         relation,
                         declarations,
                         &mut resolve,
                         Some(from),
                     )?;
-                    steps.push(ChainTextStep::UnitCall(Box::new(call)));
+                    steps.push(ChainTextStep::Call(Box::new(call)));
                     next = after;
                 }
                 PreparedContinuation::Write(step, after) => {
@@ -1230,11 +1237,12 @@ impl PreparedGraphWriteChainText {
                     next = after;
                 }
                 PreparedContinuation::Read(input) => {
-                    let (input, keys) = *input;
+                    let (input, keys, _) = *input;
                     read = Some(input);
                     read_keys = keys;
                     break;
                 }
+                PreparedContinuation::Returned(_) => break,
             }
         }
         // One write is a chain only as a vertex MERGE over a leading UNWIND
@@ -1297,7 +1305,7 @@ impl PreparedGraphWriteChainText {
         let mut schema: Vec<GqlParameterSpec> = Vec::new();
         for step in &self.steps {
             let specs = match step {
-                ChainTextStep::UnitCall(call) => {
+                ChainTextStep::Call(call) => {
                     for spec in call.parameter_schema() {
                         if !schema.iter().any(|known| known.name == spec.name) {
                             schema.push(spec);
@@ -1386,7 +1394,7 @@ impl PreparedGraphWriteChainText {
         let mut template = self.clone();
         let input = match template.steps.first_mut() {
             Some(ChainTextStep::Foreach(foreach)) => &mut foreach.input.first,
-            Some(ChainTextStep::UnitCall(call)) => &mut call.input.first,
+            Some(ChainTextStep::Call(call)) => &mut call.input.first,
             Some(ChainTextStep::VertexMerge(merge)) => match &mut merge.input {
                 crate::mutation_text::VertexMergeRowsTextInput::Relation(input) => &mut **input,
                 _ => return Err(refused().into()),
@@ -1479,11 +1487,15 @@ impl PreparedGraphWriteChainText {
                     previous = Some(bound.column_types().to_vec());
                     steps.push(GraphWriteChainStep::Foreach(Box::new(bound)));
                 }
-                ChainTextStep::UnitCall(call) => {
+                ChainTextStep::Call(call) => {
                     let bound =
                         call.bind_parameters(&own(&call.parameter_schema())?, previous.as_deref())?;
-                    previous = Some(bound.column_types().to_vec());
-                    steps.push(GraphWriteChainStep::UnitCall(Box::new(bound)));
+                    previous = Some(match &bound {
+                        GraphWriteChainStep::UnitCall(call) => call.column_types().to_vec(),
+                        GraphWriteChainStep::ReturningCall(call) => call.column_types().to_vec(),
+                        _ => unreachable!("a scoped call binds to its checked call kind"),
+                    });
+                    steps.push(bound);
                 }
                 _ => self.bind_non_foreach_step(step, &mut own, &mut previous, &mut steps)?,
             }
@@ -1555,7 +1567,7 @@ impl PreparedGraphWriteChainText {
         steps: &mut Vec<GraphWriteChainStep>,
     ) -> Result<(), GraphWriteChainTextError> {
         match step {
-            ChainTextStep::Foreach(_) | ChainTextStep::UnitCall(_) => {
+            ChainTextStep::Foreach(_) | ChainTextStep::Call(_) => {
                 return Err(expected(self.statement.len(), "a non-scoped write binding").into());
             }
             ChainTextStep::VertexMerge(merge) => {

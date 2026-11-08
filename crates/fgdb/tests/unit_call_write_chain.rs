@@ -1,4 +1,7 @@
-//! Unit CALL subqueries retain outer occurrences and one atomic, scoped owner.
+//! Scoped CALL subqueries retain one atomic owner and their relational contract.
+
+#[path = "unit_call_write_chain/returning.rs"]
+mod returning;
 
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;

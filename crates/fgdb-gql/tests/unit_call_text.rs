@@ -1,5 +1,6 @@
-//! Unit write CALL keeps native write owners, explicit import scopes and a
-//! private body. Engine integration laws cover staged effects and rollback.
+//! Write CALL keeps native write owners and explicit import scopes. Unit
+//! bodies preserve occurrences; returning bodies join their private output.
+//! Engine integration laws cover staged effects and rollback.
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
@@ -109,9 +110,9 @@ fn unit_call_imports_and_body_bindings_never_widen_outer_scope() {
 }
 
 #[test]
-fn returning_or_malformed_unit_bodies_refuse_before_catalog_resolution() {
+fn union_or_malformed_write_bodies_refuse_before_catalog_resolution() {
     for text in [
-        "CALL() { CREATE (:F) RETURN 1 AS value }",
+        "CALL() { CREATE (:F) RETURN 1 AS value UNION RETURN 2 AS value }",
         "CALL() { CREATE (:F) UNION CREATE (:F) }",
         "CALL() { CREATE (:F)",
         "CALL() { CREATE (:F]; }",
@@ -515,10 +516,10 @@ fn scheduler_executes_native_insert_plans_and_preserves_empty_duplicate_outer_ro
             "UNWIND [[],[2,2],NULL,[5]] AS values \
              CALL(values) { UNWIND values AS x CREATE (:F {p:x}) } RETURN values",
             vec![
-                GraphValue::List(Vec::new()),
-                GraphValue::List(vec![int(2), int(2)]),
+                GraphValue::List(Vec::new().into_boxed_slice()),
+                GraphValue::List(vec![int(2), int(2)].into_boxed_slice()),
                 GraphValue::Scalar(CanonicalScalar::Null),
-                GraphValue::List(vec![int(5)]),
+                GraphValue::List(vec![int(5)].into_boxed_slice()),
             ],
             vec![2, 2, 5],
         ),
@@ -599,6 +600,258 @@ fn scheduler_executes_native_insert_plans_and_preserves_empty_duplicate_outer_ro
                 .map(|value| CanonicalPropertyValue::from(CanonicalScalar::Int(value)))
                 .collect::<Vec<_>>(),
             "{text}",
+        );
+    }
+}
+
+#[test]
+fn returning_calls_retain_typed_exports_from_every_native_write_owner() {
+    use fgdb_gql::GraphSetColumnType::{Edge, Scalar, Vertex};
+
+    for (text, kind) in [
+        ("CALL { CREATE (n:F) RETURN n AS value }", Vertex),
+        (
+            "MATCH (n:F) CALL(n) { SET n.p=1 RETURN n AS value } RETURN value",
+            Vertex,
+        ),
+        (
+            "MATCH (n:F) CALL(n) { REMOVE n.p RETURN 7 AS value } RETURN value",
+            Scalar,
+        ),
+        (
+            "MATCH (n:F) CALL(n) { DELETE n RETURN 7 AS value } RETURN value",
+            Scalar,
+        ),
+        (
+            "CALL { MERGE (n:F {p:1}) RETURN n AS value } RETURN value",
+            Vertex,
+        ),
+        (
+            "MATCH (a:F),(b:F) CALL(a,b) { \
+             MERGE (a)-[r:R]->(b) RETURN r AS value } RETURN value",
+            Edge,
+        ),
+        (
+            "MATCH (a:F),(b:F) CALL(a,b) { MERGE (a)-[r:R]->(b) \
+             ON CREATE SET r.p=1 ON MATCH SET r.q=2 RETURN r AS value } RETURN value",
+            Edge,
+        ),
+        (
+            "CALL { CREATE (:F) MATCH (m:F) RETURN m AS value } RETURN value",
+            Vertex,
+        ),
+        (
+            "CALL { CREATE (:F) RETURN count(*) AS value } RETURN value",
+            Scalar,
+        ),
+    ] {
+        let chain = prepare(text);
+        let GraphWriteChainStep::ReturningCall(call) = &chain.steps()[0] else {
+            panic!("returned writes must retain their scoped owner: {text}");
+        };
+        assert_eq!(call.export_columns(), &["value"], "{text}");
+        assert_eq!(call.export_column_types(), &[kind], "{text}");
+        assert_eq!(call.body().columns(), &["value"], "{text}");
+        assert_eq!(call.body().column_types(), &[kind], "{text}");
+        assert_eq!(chain.columns(), &["value"], "{text}");
+        assert_eq!(chain.column_types(), &[kind], "{text}");
+        assert!(
+            call.output().is_some(),
+            "terminal delivery needs a governed output: {text}"
+        );
+        assert!(chain.returns_rows(), "{text}");
+    }
+
+    for text in [
+        "WITH 7 AS x CALL { WITH x CREATE (:F {p:x}) RETURN x+1 AS value } RETURN value",
+        "WITH 7 AS x,8 AS y CALL(*) { CREATE (:F {p:x,q:y}) RETURN x+y AS value } RETURN value",
+        "CALL { CREATE (n:F) RETURN n } SET n.p=2 RETURN n",
+        "CALL { CREATE (n:F) RETURN n } MATCH (m:F) RETURN n,m",
+        "CREATE (a:F) WITH a CALL(a) { CREATE (b:F) RETURN b } CREATE (copy:F) RETURN copy",
+        "CALL { CALL { CREATE (:F) RETURN 1 AS value } } RETURN 7 AS kept",
+    ] {
+        prepare(text);
+    }
+}
+
+#[test]
+fn returning_call_exports_obey_scope_collision_and_terminal_return_rules() {
+    for text in [
+        "WITH 7 AS x CALL(x) { CREATE (:F) RETURN x } RETURN x",
+        "WITH 7 AS x CALL() { CREATE (:F) RETURN 1 AS x } RETURN x",
+        "WITH 7 AS x CALL() { CREATE (:F) RETURN x AS value } RETURN value",
+        "WITH 7 AS x CALL(x) { CALL() { CREATE (:F) RETURN x AS value } RETURN value } RETURN value",
+        "CALL { CREATE (local:F) RETURN 1 AS value } RETURN local",
+        "CALL { CREATE (local:F) RETURN 1 AS value } SET local.p=2",
+        "CALL { CREATE (:F) RETURN 1 AS value,2 AS value } RETURN value",
+        "CALL { CREATE (:F) RETURN 1 AS value CREATE (:F) } RETURN value",
+        "CALL { FOREACH (x IN [] | CREATE (:F) RETURN x AS value) RETURN 1 AS value } RETURN value",
+    ] {
+        assert!(
+            PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols).is_err(),
+            "unexpectedly admitted {text}",
+        );
+    }
+}
+
+#[test]
+fn returning_scheduler_executes_native_writes_and_joins_each_outer_occurrence() {
+    use fgdb_delta_types::ElementId;
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::insertion::GraphInsertPolicy;
+    use fgdb_gql::{
+        GqlQueryPolicy, GraphIntegerError, GraphWriteChainCursor, GraphWriteChainReadPhase,
+        GraphWriteChainTask,
+    };
+    use fgdb_types::{CanonicalScalar, VId};
+
+    let query = GqlQueryPolicy::new(100, 100, 100_000, 100_000);
+    for (text, expected_rows, expected_created, expected_body_reads) in [
+        (
+            "UNWIND [1,1,2] AS x CALL(x) { UNWIND [x,x+10] AS y \
+             CREATE (:F {p:y}) RETURN y AS value } RETURN x,value",
+            vec![
+                vec![1, 1],
+                vec![1, 11],
+                vec![1, 1],
+                vec![1, 11],
+                vec![2, 2],
+                vec![2, 12],
+            ],
+            6,
+            0,
+        ),
+        (
+            "UNWIND [[],[2,2],NULL,[5]] AS values CALL(values) { \
+             UNWIND values AS x CREATE (:F {p:x}) RETURN x AS value } RETURN value",
+            vec![vec![2], vec![2], vec![5]],
+            3,
+            0,
+        ),
+        (
+            "UNWIND [1,1,2] AS x CALL(x) { \
+             CALL(x) { CREATE (:F {p:x}) RETURN x+10 AS v } \
+             CALL(v) { CREATE (:F {q:v}) } RETURN v AS value } RETURN x,value",
+            vec![vec![1, 11], vec![1, 11], vec![2, 12]],
+            6,
+            0,
+        ),
+        (
+            "CALL { CREATE (:F) CALL { RETURN 7 AS value } RETURN value } RETURN value",
+            vec![vec![7]],
+            1,
+            1,
+        ),
+        (
+            "CALL { UNWIND [] AS x CREATE (:F) CALL { RETURN 7 AS value } \
+             RETURN count(*) AS value } RETURN value",
+            vec![vec![0]],
+            0,
+            1,
+        ),
+        (
+            "CALL { UNWIND [1,1,2] AS x CREATE (:F {p:x}) RETURN x AS value }",
+            vec![vec![1], vec![1], vec![2]],
+            3,
+            0,
+        ),
+    ] {
+        let chain = prepare(text);
+        let mut cursor = GraphWriteChainCursor::new(&chain, true);
+        let mut rows = None;
+        let mut created = 0_u128;
+        let mut phases = Vec::new();
+        while let Some(task) = cursor
+            .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
+            .unwrap()
+        {
+            match task {
+                GraphWriteChainTask::Read(read) => {
+                    phases.push((read.phase(), read.delivers_rows()));
+                    rows = Some(
+                        read.execute_governed(rows.take(), query, no_graph, || Ok(()))
+                            .unwrap_or_else(|error| panic!("read {text}: {error:?}"))
+                            .value,
+                    );
+                }
+                GraphWriteChainTask::Write {
+                    step: GraphWriteChainStep::Query(insert),
+                    delivers: false,
+                    ..
+                } => {
+                    let batch = insert
+                        .execute_governed_over(
+                            rows.take(),
+                            GraphInsertPolicy::new(query, 100, 0),
+                            no_graph,
+                            |_| {
+                                created += 1;
+                                Ok::<_, ()>(ElementId::Vertex(VId(created)))
+                            },
+                            || Ok(()),
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!("native returning CREATE {text}: {error:?}")
+                        });
+                    rows = Some(batch.into_parts().1.value);
+                }
+                GraphWriteChainTask::Write {
+                    step: GraphWriteChainStep::Insert(insert),
+                    continues: false,
+                    delivers: false,
+                } => {
+                    insert
+                        .execute_governed_over(
+                            rows.take(),
+                            GraphInsertPolicy::new(query, 100, 0),
+                            no_graph,
+                            |_| {
+                                created += 1;
+                                Ok::<_, ()>(ElementId::Vertex(VId(created)))
+                            },
+                            || Ok(()),
+                        )
+                        .unwrap_or_else(|error| panic!("native unit CREATE {text}: {error:?}"));
+                    rows = Some(Vec::new());
+                }
+                other => panic!("unexpected native scheduler task for {text}: {other:?}"),
+            }
+        }
+        let mut actual: Vec<_> = rows
+            .unwrap()
+            .into_iter()
+            .map(|row| row.values().to_vec())
+            .collect();
+        let mut expected: Vec<Vec<_>> = expected_rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                    .collect()
+            })
+            .collect();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected, "{text}");
+        assert_eq!(created, expected_created, "{text}");
+        assert_eq!(
+            phases
+                .iter()
+                .filter(|(phase, _)| *phase == GraphWriteChainReadPhase::BodyOutput)
+                .count(),
+            expected_body_reads,
+            "{text}",
+        );
+        assert!(
+            phases
+                .iter()
+                .all(|(phase, delivers)| !*delivers || *phase == GraphWriteChainReadPhase::Output),
+            "body work must stay private: {text}",
+        );
+        assert_eq!(
+            phases.iter().filter(|(_, delivers)| *delivers).count(),
+            1,
+            "{text}"
         );
     }
 }

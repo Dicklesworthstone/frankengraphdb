@@ -1,9 +1,9 @@
 //! Native scoped writes share one scheduler, transaction and execution meter.
-//! FOREACH invokes its body per member; unit CALL invokes it per outer row.
+//! FOREACH invokes its body per member; CALL invokes it per outer row.
 
 use super::{
-    GraphWriteChainStep, PreparedGraphUnitCall, PreparedGraphWriteChain,
-    PreparedGraphWriteChainText,
+    GraphWriteChainStep, PreparedGraphReturningCall, PreparedGraphUnitCall,
+    PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
 use crate::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
 use crate::set_ops::WithOwnedRows;
@@ -189,6 +189,8 @@ pub struct GraphWriteChainRead<'a> {
 pub enum GraphWriteChainReadPhase {
     Input,
     Collection,
+    /// A returning body's terminal native read, always private to its CALL.
+    BodyOutput,
     Output,
 }
 
@@ -233,6 +235,7 @@ impl GraphWriteChainRead<'_> {
 enum ScopedWrite<'a> {
     Foreach(&'a PreparedGraphForeach),
     UnitCall(&'a PreparedGraphUnitCall),
+    ReturningCall(&'a PreparedGraphReturningCall),
 }
 
 impl<'a> ScopedWrite<'a> {
@@ -240,6 +243,7 @@ impl<'a> ScopedWrite<'a> {
         match step {
             GraphWriteChainStep::Foreach(foreach) => Some(Self::Foreach(foreach)),
             GraphWriteChainStep::UnitCall(call) => Some(Self::UnitCall(call)),
+            GraphWriteChainStep::ReturningCall(call) => Some(Self::ReturningCall(call)),
             _ => None,
         }
     }
@@ -248,6 +252,7 @@ impl<'a> ScopedWrite<'a> {
         match self {
             Self::Foreach(foreach) => &foreach.input,
             Self::UnitCall(call) => &call.input,
+            Self::ReturningCall(call) => &call.input,
         }
     }
 
@@ -255,6 +260,7 @@ impl<'a> ScopedWrite<'a> {
         match self {
             Self::Foreach(foreach) => foreach.output.as_ref(),
             Self::UnitCall(call) => call.output.as_ref(),
+            Self::ReturningCall(call) => call.output.as_ref(),
         }
     }
 
@@ -262,6 +268,7 @@ impl<'a> ScopedWrite<'a> {
         match self {
             Self::Foreach(foreach) => &foreach.body,
             Self::UnitCall(call) => &call.body,
+            Self::ReturningCall(call) => &call.body,
         }
     }
 
@@ -269,6 +276,7 @@ impl<'a> ScopedWrite<'a> {
         match self {
             Self::Foreach(foreach) => &foreach.outer_types,
             Self::UnitCall(call) => &call.outer_types,
+            Self::ReturningCall(call) => &call.outer_types,
         }
     }
 
@@ -276,6 +284,7 @@ impl<'a> ScopedWrite<'a> {
         match self {
             Self::Foreach(foreach) => &foreach.imports,
             Self::UnitCall(call) => &call.imports,
+            Self::ReturningCall(call) => &call.imports,
         }
     }
 
@@ -283,6 +292,7 @@ impl<'a> ScopedWrite<'a> {
         match self {
             Self::Foreach(foreach) => foreach.returning,
             Self::UnitCall(call) => call.returning,
+            Self::ReturningCall(call) => call.returning,
         }
     }
 }
@@ -294,6 +304,7 @@ struct Iteration<'a> {
     member: usize,
     body_at: usize,
     body_running: bool,
+    body_read_running: bool,
     collection_running: bool,
     restored: Vec<GraphValueRow>,
 }
@@ -345,6 +356,7 @@ impl<'a> GraphWriteChainCursor<'a> {
                 member: 0,
                 body_at: 0,
                 body_running: false,
+                body_read_running: false,
                 collection_running: false,
                 restored: Vec::new(),
             });
@@ -385,15 +397,43 @@ impl<'a> GraphWriteChainCursor<'a> {
                     }
                     return Ok(Some(GraphWriteChainTask::Write {
                         step,
-                        continues: iteration.body_at < iteration.scope.body().steps.len(),
+                        continues: iteration.body_at < iteration.scope.body().steps.len()
+                            || iteration.scope.body().read_continuation().is_some(),
                         delivers: false,
                     }));
                 }
-                // Body output is local, even if the last native write emitted
-                // zero or several occurrences. Its outer row remains intact.
                 if iteration.body_running {
-                    *rows = None;
+                    // A terminal graph read observes the just-staged body. It
+                    // runs even over zero input rows: native global aggregates
+                    // may still produce their zero/null/empty-list group.
+                    if !iteration.body_read_running
+                        && let Some(read) = iteration.scope.body().read_continuation()
+                    {
+                        control(Work)?;
+                        iteration.body_read_running = true;
+                        return Ok(Some(GraphWriteChainTask::Read(GraphWriteChainRead {
+                            plan: read,
+                            phase: GraphWriteChainReadPhase::BodyOutput,
+                            delivers: false,
+                        })));
+                    }
+                    if let ScopedWrite::ReturningCall(call) = iteration.scope {
+                        call.join_returned_controlled(
+                            iteration.outer.as_ref().ok_or_else(invalid)?,
+                            rows.take().ok_or_else(invalid)?,
+                            &mut iteration.restored,
+                            control,
+                        )?;
+                        // Only joined rows survive. In particular, an empty
+                        // returned bag removes this outer occurrence while
+                        // retaining the body's already-staged effects.
+                        iteration.outer = None;
+                    } else {
+                        // Unit CALL and FOREACH ignore all body-local rows.
+                        *rows = None;
+                    }
                     iteration.body_running = false;
+                    iteration.body_read_running = false;
                 }
                 if iteration.outer.is_none() {
                     control(Work)?;
@@ -421,7 +461,7 @@ impl<'a> GraphWriteChainCursor<'a> {
                                     delivers: false,
                                 })));
                             }
-                            ScopedWrite::UnitCall(_) => {
+                            ScopedWrite::UnitCall(_) | ScopedWrite::ReturningCall(_) => {
                                 iteration.outer = Some(outer);
                             }
                         }
@@ -433,7 +473,7 @@ impl<'a> GraphWriteChainCursor<'a> {
                     // member. Its imported row is the native body input.
                     let collection = match iteration.scope {
                         ScopedWrite::Foreach(_) => Some(outer.values().last().ok_or_else(invalid)?),
-                        ScopedWrite::UnitCall(_) => None,
+                        ScopedWrite::UnitCall(_) | ScopedWrite::ReturningCall(_) => None,
                     };
                     let length = match collection {
                         Some(GraphValue::Scalar(fgdb_types::CanonicalScalar::Null)) => 0,

@@ -434,7 +434,8 @@ impl WriteTxn {
             })? {
                 // Scoped writes suspend the outer occurrence bag while their
                 // bodies use this workspace and cumulative allowance. The
-                // scheduler restores the outer rows and drops local bindings.
+                // scheduler retains unit rows or joins declared CALL exports;
+                // all other local bindings remain private.
                 let (step, delivers) = match task {
                     GraphWriteChainTask::Write { step, delivers, .. } => (step, delivers),
                     GraphWriteChainTask::Read(read) => {
@@ -483,7 +484,9 @@ impl WriteTxn {
                 let (stats, returning) = match step {
                     // The shared cursor expands scopes into governed read
                     // phases and ordinary native body writes.
-                    GraphWriteChainStep::Foreach(_) | GraphWriteChainStep::UnitCall(_) => {
+                    GraphWriteChainStep::Foreach(_)
+                    | GraphWriteChainStep::UnitCall(_)
+                    | GraphWriteChainStep::ReturningCall(_) => {
                         return Err(source(WriteTxnError::UnsupportedAtomicMutation));
                     }
                     GraphWriteChainStep::EdgeUpsert(_)

@@ -1078,9 +1078,6 @@ impl PreparedGraphEdgeMergeText {
         merged: &RowMerge<'a>,
         continues: bool,
     ) -> Result<Option<(usize, ChainContinuation<'a>)>, GraphEdgeMergeTextError> {
-        if !continues {
-            return Ok(None);
-        }
         let schema = merged.0.row.as_slice();
         let keep = keep + merged.0.unbound.len();
         // The shared write-tail compiler carries final-state property cells
@@ -1088,6 +1085,9 @@ impl PreparedGraphEdgeMergeText {
         // the following write, just as after CREATE's implicit WITH head.
         if let Some(continuation) = parser.continuation() {
             return Ok(Some((keep, continuation)));
+        }
+        if !continues {
+            return Ok(None);
         }
         let row = if let Some(head) = &merged.3 {
             head.output.clone()
@@ -2230,6 +2230,9 @@ impl<'a> Parser<'a> {
             returning.tail =
                 Some(self.edge_merge_tail(&mut returning, columns, items.output, row.is_some())?);
         } else {
+            if keyword == "RETURN" {
+                self.finish_write_return(items.output.clone())?;
+            }
             returning.output = items.output;
         }
         Ok(returning)

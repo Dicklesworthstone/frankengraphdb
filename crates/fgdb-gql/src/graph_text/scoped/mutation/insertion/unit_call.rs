@@ -1,6 +1,6 @@
-//! Unit write subqueries prepare a native scoped chain. The scheduler invokes
-//! that chain once per outer occurrence and preserves the outer row, including
-//! when a body's read produces no rows. No result or local binding is exported.
+//! Write subqueries prepare a native scoped chain. Unit bodies preserve each
+//! outer occurrence; returning bodies export their typed result columns. Both
+//! use the same bounded heap preparation frames and native write/read owners.
 
 use super::chain::PreparedContinuation;
 use super::*;
@@ -8,10 +8,13 @@ use crate::graph_text::parameters::UnresolvedGraphText;
 use crate::graph_text::scoped::mutation::return_projection::pipeline::multipart::UnresolvedReadInput;
 use crate::set_text::multipart::BoundReadInput;
 use crate::set_text::{ElementKeySlot, ReadProjectionTemplate};
-use crate::write_chain::{ChainTextStep, PreparedGraphUnitCallText};
-use crate::{GraphWriteChainTextError, PreparedGraphUnitCall, PreparedGraphWriteChainText};
+use crate::write_chain::{ChainTextStep, PreparedGraphCallText};
+use crate::{
+    GraphWriteChainStep, GraphWriteChainTextError, PreparedGraphReturningCall,
+    PreparedGraphUnitCall, PreparedGraphWriteChainText,
+};
 
-struct UnitCallPreparation<'a> {
+struct CallPreparation<'a> {
     statement: &'a str,
     parser: Parser<'a>,
     input: BoundReadInput,
@@ -22,10 +25,13 @@ struct UnitCallPreparation<'a> {
     slots: Vec<ElementKeySlot>,
     next: Option<ChainContinuation<'a>>,
     steps: Vec<ChainTextStep>,
+    read: Option<BoundReadInput>,
+    read_keys: Vec<PropertyKeyId>,
+    exports: Option<Vec<(Name<'a>, GraphSetColumnType)>>,
     close_at: usize,
 }
 
-impl PreparedGraphUnitCallText {
+impl PreparedGraphCallText {
     pub(crate) fn prepare_step<'a>(
         statement: &'a str,
         relation: RelationId,
@@ -63,7 +69,7 @@ impl PreparedGraphUnitCallText {
                 .ok_or_else(|| expected(statement.len(), "a completed unit CALL"))?;
             let (call, after) = frame.finish(resolve)?;
             if let Some(parent) = pending.last_mut() {
-                parent.steps.push(ChainTextStep::UnitCall(Box::new(call)));
+                parent.steps.push(ChainTextStep::Call(Box::new(call)));
                 parent.next = after;
             } else {
                 return Ok((call, after));
@@ -77,7 +83,7 @@ impl PreparedGraphUnitCallText {
         resolve: &mut impl GraphSymbolResolver,
         from: Option<ChainContinuation<'a>>,
         depth: usize,
-    ) -> Result<UnitCallPreparation<'a>, GraphWriteChainTextError> {
+    ) -> Result<CallPreparation<'a>, GraphWriteChainTextError> {
         if depth >= crate::MAX_GRAPH_SET_DEPTH {
             return Err(crate::GraphSetTextError {
                 offset: from.as_ref().map_or(0, |from| from.at),
@@ -164,7 +170,7 @@ impl PreparedGraphUnitCallText {
             boundary: None,
             parameters: parser.syntax.parameters.clone(),
         });
-        Ok(UnitCallPreparation {
+        Ok(CallPreparation {
             statement,
             parser,
             input,
@@ -175,6 +181,9 @@ impl PreparedGraphUnitCallText {
             slots,
             next,
             steps: Vec::new(),
+            read: None,
+            read_keys: Vec::new(),
+            exports: None,
             close_at,
         })
     }
@@ -204,7 +213,7 @@ impl PreparedGraphUnitCallText {
         &self,
         arguments: &GqlParameters,
         expected_input: Option<&[GraphSetColumnType]>,
-    ) -> Result<PreparedGraphUnitCall, GraphWriteChainTextError> {
+    ) -> Result<GraphWriteChainStep, GraphWriteChainTextError> {
         if let Some((_, types)) = self.input.first.owned.as_deref()
             && expected_input != Some(types.as_slice())
         {
@@ -229,20 +238,49 @@ impl PreparedGraphUnitCallText {
             .as_ref()
             .map(|output| output.bind_parameters(&arguments.subset_for(output.parameter_schema())))
             .transpose()?;
-        Ok(PreparedGraphUnitCall {
-            input,
-            output,
-            body,
-            outer_columns: self.outer_columns.clone(),
-            outer_types: self.outer_types.clone(),
-            imports: self.imports.clone(),
-            read_keys: self.read_keys.clone(),
-            returning: self.returning,
-        })
+        if let Some((columns, types)) = &self.exports {
+            if body.columns() != columns || body.column_types() != types {
+                return Err(expected(
+                    self.input.first.return_at,
+                    "the prepared CALL export schema",
+                )
+                .into());
+            }
+            let joined_columns = self.outer_columns.iter().chain(columns).cloned().collect();
+            let joined_types = self.outer_types.iter().chain(types).copied().collect();
+            Ok(GraphWriteChainStep::ReturningCall(Box::new(
+                PreparedGraphReturningCall {
+                    input,
+                    output,
+                    body,
+                    outer_types: self.outer_types.clone(),
+                    imports: self.imports.clone(),
+                    export_columns: columns.clone(),
+                    export_types: types.clone(),
+                    joined_columns,
+                    joined_types,
+                    read_keys: self.read_keys.clone(),
+                    returning: self.returning,
+                },
+            )))
+        } else {
+            Ok(GraphWriteChainStep::UnitCall(Box::new(
+                PreparedGraphUnitCall {
+                    input,
+                    output,
+                    body,
+                    outer_columns: self.outer_columns.clone(),
+                    outer_types: self.outer_types.clone(),
+                    imports: self.imports.clone(),
+                    read_keys: self.read_keys.clone(),
+                    returning: self.returning,
+                },
+            )))
+        }
     }
 }
 
-impl<'a> UnitCallPreparation<'a> {
+impl<'a> CallPreparation<'a> {
     fn next_nested(
         &mut self,
         relation: RelationId,
@@ -251,7 +289,7 @@ impl<'a> UnitCallPreparation<'a> {
     ) -> Result<Option<ChainContinuation<'a>>, GraphWriteChainTextError> {
         let body_text = &self.statement[..self.close_at];
         while let Some(from) = self.next.take() {
-            if self.steps.len() >= crate::MAX_GRAPH_SET_DEPTH {
+            if self.steps.len() >= crate::MAX_GRAPH_SET_DEPTH && from.at != self.close_at {
                 return Err(expected(from.at, "bounded unit CALL body step count").into());
             }
             match PreparedGraphWriteChainText::prepare_continuation(
@@ -267,11 +305,13 @@ impl<'a> UnitCallPreparation<'a> {
                     self.steps.push(step);
                     self.next = after;
                 }
-                PreparedContinuation::Read(_) => {
-                    return Err(
-                        expected(self.close_at, "a unit CALL body ending in a write").into(),
-                    );
+                PreparedContinuation::Read(read) => {
+                    let (read, keys, exports) = *read;
+                    self.read = Some(read);
+                    self.read_keys = keys;
+                    self.exports = Some(exports);
                 }
+                PreparedContinuation::Returned(exports) => self.exports = Some(exports),
             }
         }
         Ok(None)
@@ -280,7 +320,7 @@ impl<'a> UnitCallPreparation<'a> {
     fn finish(
         self,
         resolve: &mut impl GraphSymbolResolver,
-    ) -> Result<(PreparedGraphUnitCallText, Option<ChainContinuation<'a>>), GraphWriteChainTextError>
+    ) -> Result<(PreparedGraphCallText, Option<ChainContinuation<'a>>), GraphWriteChainTextError>
     {
         let Self {
             statement,
@@ -292,6 +332,9 @@ impl<'a> UnitCallPreparation<'a> {
             imports,
             mut slots,
             steps,
+            read,
+            read_keys,
+            exports,
             close_at,
             next: _,
         } = self;
@@ -301,9 +344,29 @@ impl<'a> UnitCallPreparation<'a> {
         let body = PreparedGraphWriteChainText {
             statement: statement[..close_at].to_owned(),
             steps,
-            read: None,
-            read_keys: Vec::new(),
+            read,
+            read_keys,
         };
+        let mut combined = outer;
+        if let Some(exports) = &exports {
+            for &(name, kind) in exports {
+                if combined.iter().any(|(outer, _)| outer.text == name.text) {
+                    return Err(
+                        expected(name.at, "a CALL export distinct from outer bindings").into(),
+                    );
+                }
+                parser.capacity(
+                    combined.len(),
+                    MAX_PATTERN_VERTICES,
+                    crate::algebra::PatternLimitDimension::Columns,
+                )?;
+                combined.push((name, kind));
+            }
+        }
+        let (joined_columns, joined_types): (Vec<_>, Vec<_>) = combined
+            .iter()
+            .map(|(name, kind)| (name.text.to_owned(), *kind))
+            .unzip();
         let mut parameters = parser.syntax.parameters.clone();
         for spec in body.parameter_schema() {
             if !parameters.iter().any(|known| known.name == spec.name) {
@@ -326,17 +389,35 @@ impl<'a> UnitCallPreparation<'a> {
                 None,
                 Some(ChainContinuation {
                     at: parser.current.at,
-                    row: outer,
+                    row: combined,
                     boundary: None,
                     parameters,
                 }),
                 true,
             )
-        } else if matches!(parser.current.kind, TokenKind::End) {
+        } else if matches!(parser.current.kind, TokenKind::End) && exports.is_none() {
             parser.end()?;
             (None, None, false)
         } else {
-            let pipeline = parser.write_row_pipeline(outer)?;
+            let pipeline = if matches!(parser.current.kind, TokenKind::End) {
+                // A standalone returning CALL delivers its checked combined
+                // row through the native projection owner, without inventing
+                // a source-text RETURN or charging private body rows publicly.
+                vec![ReadStageTemplate::Project {
+                    at: close_at,
+                    projection: combined
+                        .iter()
+                        .enumerate()
+                        .map(|(column, (name, _))| ReadProjectionTemplate {
+                            name: name.text.to_owned(),
+                            value: ReadValueTemplate::Column(column),
+                        })
+                        .collect(),
+                    quantifier: crate::GraphSetQuantifier::All,
+                }]
+            } else {
+                parser.write_row_pipeline(combined)?
+            };
             let continuation = parser.continuation();
             if continuation.is_none() {
                 parser.end()?;
@@ -354,7 +435,7 @@ impl<'a> UnitCallPreparation<'a> {
             });
             slots.extend(output.element_key_slots());
             let mut output = output.resolve(resolve)?;
-            output.first.owned = Some(Box::new((outer_columns.clone(), outer_types.clone())));
+            output.first.owned = Some(Box::new((joined_columns, joined_types)));
             (Some(output), continuation, true)
         };
         let read_keys = slots
@@ -365,7 +446,7 @@ impl<'a> UnitCallPreparation<'a> {
             })
             .collect();
         Ok((
-            PreparedGraphUnitCallText {
+            PreparedGraphCallText {
                 input,
                 output,
                 body,
@@ -374,6 +455,12 @@ impl<'a> UnitCallPreparation<'a> {
                 imports,
                 read_keys,
                 returning,
+                exports: exports.map(|exports| {
+                    exports
+                        .into_iter()
+                        .map(|(name, kind)| (name.text.to_owned(), kind))
+                        .unzip()
+                }),
             },
             continuation,
         ))
@@ -501,15 +588,11 @@ impl<'a> Parser<'a> {
                         && !matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
                         && !matches!(previous, Some(TokenKind::Word(prior))
                             if ["AS", "STARTS", "ENDS", "ON"].iter().any(|word| prior.eq_ignore_ascii_case(word)))
-                        && ["RETURN", "UNION"]
-                            .iter()
-                            .any(|clause| word.eq_ignore_ascii_case(clause)) =>
+                        && word.eq_ignore_ascii_case("UNION") =>
                 {
                     return Err(error(
                         token.at,
-                        GraphPatternTextErrorKind::Expected(
-                            "a unit CALL write body without RETURN or UNION",
-                        ),
+                        GraphPatternTextErrorKind::Expected("a write CALL body without UNION"),
                     ));
                 }
                 TokenKind::Word(word)

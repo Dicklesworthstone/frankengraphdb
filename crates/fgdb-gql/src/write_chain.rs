@@ -22,8 +22,8 @@ pub use foreach::{
     GraphWriteChainCursor, GraphWriteChainRead, GraphWriteChainReadPhase, GraphWriteChainTask,
     PreparedGraphForeach,
 };
-pub use unit_call::PreparedGraphUnitCall;
-pub(crate) use unit_call::PreparedGraphUnitCallText;
+pub(crate) use unit_call::PreparedGraphCallText;
+pub use unit_call::{PreparedGraphReturningCall, PreparedGraphUnitCall};
 
 use crate::insertion::PreparedGraphInsert;
 use crate::insertion_query_text::InsertReturnTemplate;
@@ -44,8 +44,8 @@ use crate::{
 pub(crate) enum ChainTextStep {
     /// A scoped iteration whose body never changes its outer occurrence bag.
     Foreach(Box<PreparedGraphForeachText>),
-    /// A private write body invoked once per outer occurrence.
-    UnitCall(Box<PreparedGraphUnitCallText>),
+    /// A private unit or returning body invoked once per outer occurrence.
+    Call(Box<PreparedGraphCallText>),
     /// CREATE, with its WITH head (every step but the last) or RETURN.
     Insert(Box<(PreparedGraphInsertText, Option<InsertReturnTemplate>)>),
     /// A relationship MERGE over the previous write's rows (the last step).
@@ -89,7 +89,7 @@ impl PreparedGraphWriteChainText {
         }
         match self.steps.last() {
             Some(ChainTextStep::Foreach(step)) => step.returning,
-            Some(ChainTextStep::UnitCall(step)) => step.returning,
+            Some(ChainTextStep::Call(step)) => step.returning,
             Some(ChainTextStep::Insert(step)) => step.1.is_some(),
             Some(ChainTextStep::EdgeMerge(step)) => step.1.is_some(),
             Some(ChainTextStep::Mutation(step)) => step.1.is_some(),
@@ -222,6 +222,8 @@ pub enum GraphWriteChainStep {
     /// A native unit subquery whose imported bindings are private to its
     /// body. The cursor preserves each outer row and the host's transaction.
     UnitCall(Box<PreparedGraphUnitCall>),
+    /// A native subquery whose returned rows extend each outer occurrence.
+    ReturningCall(Box<PreparedGraphReturningCall>),
     /// A CREATE with a WITH head (every step but the last) or a RETURN (the
     /// last step): it returns rows.
     Query(Box<PreparedGraphInsertQuery>),
@@ -269,6 +271,7 @@ impl core::fmt::Debug for GraphWriteChainStep {
         f.write_str(match self {
             Self::Foreach(_) => "Foreach([REDACTED])",
             Self::UnitCall(_) => "UnitCall([REDACTED])",
+            Self::ReturningCall(_) => "ReturningCall([REDACTED])",
             Self::Query(_) => "Query([REDACTED])",
             Self::Insert(_) => "Insert([REDACTED])",
             Self::EdgeMerge(_) => "EdgeMerge([REDACTED])",
@@ -540,6 +543,15 @@ impl PreparedGraphWriteChain {
             .map_or_else(|| self.write_columns(), |read| read.columns())
     }
 
+    /// The exact final row domains, including a terminal native read.
+    #[must_use]
+    pub fn column_types(&self) -> &[crate::GraphSetColumnType] {
+        self.read.as_ref().map_or_else(
+            || self.read_input_types().unwrap_or(&[]),
+            |read| read.column_types(),
+        )
+    }
+
     /// An immutable native read of the final write's private output.
     #[must_use]
     pub fn read_continuation(&self) -> Option<&crate::PreparedGraphSet> {
@@ -551,6 +563,7 @@ impl PreparedGraphWriteChain {
         match self.steps.last() {
             Some(GraphWriteChainStep::Foreach(step)) => step.columns(),
             Some(GraphWriteChainStep::UnitCall(step)) => step.columns(),
+            Some(GraphWriteChainStep::ReturningCall(step)) => step.columns(),
             Some(GraphWriteChainStep::Query(query)) => query.columns(),
             Some(GraphWriteChainStep::EdgeMergeQuery(query)) => query.columns(),
             Some(GraphWriteChainStep::EdgeUpsertQuery { query, .. }) => query.columns(),
@@ -567,6 +580,9 @@ impl PreparedGraphWriteChain {
             return step.returns_rows();
         }
         if let Some(GraphWriteChainStep::UnitCall(step)) = self.steps.last() {
+            return step.returns_rows();
+        }
+        if let Some(GraphWriteChainStep::ReturningCall(step)) = self.steps.last() {
             return step.returns_rows();
         }
         matches!(

@@ -984,7 +984,7 @@ fn a_late_read_or_field_failure_between_creates_exposes_no_second_proposal() {
 fn invalid_read_between_writes_refuses_the_whole_chain_without_resolving_invalid_fields() {
     for text in [
         "CREATE (a {p:1}) WITH a MATCH (b) WITH b CREATE (copy {p:a.q}) RETURN copy",
-        "CREATE (a) WITH a CALL (a) { CREATE (b) RETURN b } CREATE (copy) RETURN copy",
+        "CREATE (a) WITH a CALL (a) { CREATE (b) RETURN b AS a } CREATE (copy) RETURN copy",
         "CREATE (a) WITH a MATCH (b) RETURN b CREATE (copy) RETURN copy",
         "CREATE (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) CREATE (copy {p:missing.q}) RETURN copy",
     ] {

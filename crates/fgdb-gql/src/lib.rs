@@ -100,7 +100,8 @@ pub use pipeline_aggregate_text::{
 pub use write_chain::{
     GraphWriteChainCursor, GraphWriteChainError, GraphWriteChainRead, GraphWriteChainReadPhase,
     GraphWriteChainStep, GraphWriteChainTask, GraphWriteChainTextError, PreparedGraphForeach,
-    PreparedGraphUnitCall, PreparedGraphWriteChain, PreparedGraphWriteChainText,
+    PreparedGraphReturningCall, PreparedGraphUnitCall, PreparedGraphWriteChain,
+    PreparedGraphWriteChainText,
 };
 pub use write_script::{
     BoundGraphWriteScriptBatch, GraphWriteScriptBatchBindError, GraphWriteScriptBatchError,
