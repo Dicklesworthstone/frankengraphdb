@@ -940,7 +940,9 @@ impl<'a> Parser<'a> {
                         }
                     }
                     if self.read_elements {
-                        if let Some(source) = property_map_source(word, token.at, &lexer)? {
+                        if let Some(source) = property_map_source(word, token.at, &lexer)?
+                            && element(source.text, false)
+                        {
                             let mut carried = property(source.text, "*");
                             if preserve_preimages && matches!(next.kind, TokenKind::Punct(b'{')) {
                                 // Only selectors at this map's entry boundary
@@ -969,6 +971,15 @@ impl<'a> Parser<'a> {
                                         TokenKind::Punct(b'{' | b'[' | b'(') => {
                                             depth += 1;
                                             entry = false;
+                                            // Repeatedly scanning an already
+                                            // overdeep suffix is quadratic.
+                                            // Native RETURN framing enforces
+                                            // this same delimiter limit. Let
+                                            // it emit the original diagnostic.
+                                            if depth > crate::MAX_GRAPH_SET_DEPTH {
+                                                carried = false;
+                                                break;
+                                            }
                                         }
                                         TokenKind::Punct(b'}' | b']' | b')') => depth -= 1,
                                         TokenKind::Punct(b',') if depth == 1 => entry = true,

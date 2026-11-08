@@ -686,6 +686,44 @@ fn returning_calls_retain_typed_exports_from_every_native_write_owner() {
 }
 
 #[test]
+fn captured_return_maps_keep_the_existing_nesting_boundary() {
+    // Keep ordinary supported inputs and the exact diagnostic of the retained
+    // native CLI. Deep selector lookahead must yield to this existing guard.
+    let resolve = |kind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Label, "Visible") => Some(GraphSymbol::Label(LabelId(1))),
+        _ => symbols(kind, name),
+    };
+    let statement = |opening: &str, closing: &str, depth| {
+        format!(
+            "CALL {{ CREATE (n:Visible {{p:1}}) RETURN n }} \
+             WITH n,n.p AS before SET n.q=2 RETURN {}1{} AS value",
+            opening.repeat(depth),
+            closing.repeat(depth),
+        )
+    };
+    for (opening, closing, error_at) in [("n{x:", "}", 341), ("{x:", "}", 276), ("[", "]", 146)] {
+        for depth in [1, 8, 16, 32, 64] {
+            let text = statement(opening, closing, depth);
+            let chain = PreparedGraphWriteChainText::prepare(&text, RelationId(1), resolve)
+                .unwrap_or_else(|error| panic!("{opening} depth {depth}: {error:?}"))
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            assert_eq!(chain.columns(), &["value"], "{opening} depth {depth}");
+        }
+        for depth in [128, 512, 2_048] {
+            let text = statement(opening, closing, depth);
+            let error = PreparedGraphWriteChainText::prepare(&text, RelationId(1), resolve)
+                .expect_err("the existing expression nesting bound must reject before execution");
+            assert_eq!(
+                error.to_string(),
+                format!("byte {error_at}: integer expression nests deeper than 64 levels"),
+                "{opening} depth {depth}",
+            );
+        }
+    }
+}
+
+#[test]
 fn returning_call_exports_obey_scope_collision_and_terminal_return_rules() {
     for text in [
         "WITH 7 AS x CALL(x) { CREATE (:F) RETURN x } RETURN x",

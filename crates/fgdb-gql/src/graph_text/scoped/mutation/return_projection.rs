@@ -31,6 +31,17 @@ enum ValueResolver<'r, 'a> {
     /// A write RETURN item or aggregate argument, a whole value too.
     Write(&'r mut dyn ReturnLeaves<'a>),
 }
+
+struct ReadValueRoute {
+    at: usize,
+    membership_list: bool,
+    scalar: bool,
+    comprehension: bool,
+    subscript_base: bool,
+    imported_element: Option<usize>,
+    endpoint: bool,
+}
+
 impl<'a> ValueResolver<'_, 'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         match self {
@@ -2921,15 +2932,15 @@ impl<'a> Parser<'a> {
                 .any(|keyword| word.eq_ignore_ascii_case(keyword))))
     }
 
-    #[allow(clippy::type_complexity)]
-    fn read_value_inner(
+    #[inline(never)]
+    fn read_value_route(
         &mut self,
-        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        graph_inputs: bool,
+        resolved: bool,
         schema: &[(Name<'a>, GraphSetColumnType)],
-        resolve: &mut Option<ValueResolver<'_, 'a>>,
         depth: usize,
         operators: bool,
-    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+    ) -> Result<ReadValueRoute, GraphSetTextError> {
         let at = self.current.at;
         // Taken here, so only this read is the bounded IN list (fgdb-klah2).
         let membership_list = core::mem::take(&mut self.membership_list);
@@ -2939,7 +2950,6 @@ impl<'a> Parser<'a> {
                 kind: GraphSetTextErrorKind::IntegerNesting { limit: 64 },
             });
         }
-        let mut graph_map = false;
         // A composite that is an operator's left operand is one operand of
         // the scalar expression, not the whole value: `size(l) > 0`, `[0] +
         // n.tags`. A resolved scope compiles it over its own leaves, so
@@ -2949,9 +2959,9 @@ impl<'a> Parser<'a> {
         // (element_compared), where read whole here it would end at `=`.
         let scalar = operators
             && (self.composite_operand_continues()?
-                || (inputs.is_none() && resolve.is_none() && self.at_hoisted_existence_value())
-                || (inputs.is_some()
-                    && resolve.is_none()
+                || (!graph_inputs && !resolved && self.at_hoisted_existence_value())
+                || (graph_inputs
+                    && !resolved
                     && (self.element_compared(Route {
                         row: None,
                         graph: Some(self),
@@ -2975,15 +2985,15 @@ impl<'a> Parser<'a> {
         // again instead of producing NULL or a typed name refusal.
         let subscript_base = !operators
             && self.named_subscript_follows()?
-            && (inputs.is_none()
+            && (!graph_inputs
                 || !matches!(self.current.kind, TokenKind::Word(word)
                     if !self.elements.contains(&word)
                         && (self.syntax.variables.iter().any(|name| name.text == word)
                             || self.syntax.names_path(word)
                             || self.syntax.visible_edge(word).is_some())));
         let imported_element = if self.call_element_reads
-            && inputs.is_none()
-            && resolve.is_none()
+            && !graph_inputs
+            && !resolved
             && let TokenKind::Word(word) = self.current.kind
             && !self.elements.contains(&word)
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
@@ -2998,7 +3008,43 @@ impl<'a> Parser<'a> {
             None
         };
         let endpoint = self.endpoint_call()?.is_some();
-        let mut value = if scalar && let Some(resolve) = resolve.as_mut() {
+        Ok(ReadValueRoute {
+            at,
+            membership_list,
+            scalar,
+            comprehension,
+            subscript_base,
+            imported_element,
+            endpoint,
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn read_value_inner(
+        &mut self,
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+        operators: bool,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let ReadValueRoute {
+            at,
+            membership_list,
+            scalar,
+            comprehension,
+            subscript_base,
+            imported_element,
+            endpoint,
+        } = self.read_value_route(
+            inputs.is_some(),
+            resolve.is_some(),
+            schema,
+            depth,
+            operators,
+        )?;
+        let mut graph_map = false;
+        let value = if scalar && let Some(resolve) = resolve.as_mut() {
             self.resolved_scalar_value(resolve, depth, at)?
         } else if scalar {
             self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth, false)?
@@ -3009,22 +3055,7 @@ impl<'a> Parser<'a> {
             graph_map = true;
             ReadValueTemplate::Column(column)
         } else if subscript_base {
-            if let TokenKind::Word(word) = self.current.kind
-                && let Some(binding) = self.elements.iter().rposition(|name| *name == word)
-            {
-                let offset = self.element_offset(binding, at)?;
-                self.advance()?;
-                ReadValueTemplate::Local(offset)
-            } else if let Some(resolve) = resolve.as_mut() {
-                let operand = match resolve.leaf(self)? {
-                    Some(column) => Operand::Column(column),
-                    None => self.row_operand(schema)?,
-                };
-                self.read_value_template(operand, at)?
-            } else {
-                let operand = self.row_operand(schema)?;
-                self.read_value_template(operand, at)?
-            }
+            self.read_subscript_base(schema, resolve, at)?
         } else if let Some(column) = self.comprehension_read(schema.len())? {
             // A graph head already gathered this pattern comprehension into
             // a hidden column (hoist_comprehension).
@@ -3093,65 +3124,9 @@ impl<'a> Parser<'a> {
                 predicate: Box::new(predicate),
             }
         } else if self.take(b'[')? {
-            let mut items = Vec::new();
-            if !self.take(b']')? {
-                loop {
-                    self.capacity(
-                        items.len(),
-                        crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
-                        crate::algebra::PatternLimitDimension::Columns,
-                    )?;
-                    items.push(self.read_recursive_value(
-                        inputs.as_deref_mut(),
-                        schema,
-                        resolve,
-                        depth + 1,
-                    )?);
-                    if self.take(b']')? {
-                        break;
-                    }
-                    self.punct(b',', ", or ]")?;
-                }
-            }
-            ReadValueTemplate::List(items)
+            self.read_list_literal(inputs.as_deref_mut(), schema, resolve, depth)?
         } else if self.take(b'{')? {
-            // A map literal {k: e, ...} (fgdb-2jw3z), keys sorted and unique.
-            let mut entries: Vec<(Box<str>, ReadValueTemplate)> = Vec::new();
-            if !self.take(b'}')? {
-                loop {
-                    self.capacity(
-                        entries.len(),
-                        crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
-                        crate::algebra::PatternLimitDimension::Columns,
-                    )?;
-                    let key = self.schema_name()?;
-                    self.punct(b':', ":")?;
-                    let value = self.read_recursive_value(
-                        inputs.as_deref_mut(),
-                        schema,
-                        resolve,
-                        depth + 1,
-                    )?;
-                    entries.push((key.text.into(), value));
-                    if self.take(b'}')? {
-                        break;
-                    }
-                    self.punct(b',', ", or }")?;
-                }
-            }
-            entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-            if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-                return Err(GraphSetTextError {
-                    offset: at,
-                    kind: GraphSetTextErrorKind::Expected("unique keys in a map literal"),
-                });
-            }
-            let (keys, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-            ReadValueTemplate::MapLiteral {
-                keys: keys.into_boxed_slice(),
-                values,
-                guard: None,
-            }
+            self.read_map_literal(inputs.as_deref_mut(), schema, resolve, depth, at)?
         } else if let Some(column) = self.static_endpoint_read(inputs.as_deref_mut())? {
             ReadValueTemplate::Column(column)
         } else if let Some(column) = self.resolved_write_metadata(resolve)? {
@@ -3182,80 +3157,10 @@ impl<'a> Parser<'a> {
         } else if (self.is_word("KEYS") || self.is_word("PROPERTIES"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
-            let keys = self.is_word("KEYS");
-            let resolved =
-                self.resolved_map_leaf(inputs.is_none() && schema.is_empty(), resolve)?;
-            let (map, graph) = if let Some(column) = resolved {
-                (ReadValueTemplate::Column(column), true)
-            } else {
-                self.advance()?;
-                self.punct(b'(', "(")?;
-                let source = match self.current.kind {
-                    TokenKind::Word(word)
-                        if !self.elements.contains(&word)
-                            && matches!(
-                                self.lexer.clone().next()?.kind,
-                                TokenKind::Punct(b')')
-                            ) =>
-                    {
-                        Some(Name {
-                            text: word,
-                            at: self.current.at,
-                        })
-                    }
-                    _ => None,
-                };
-                let column = if let Some(source) = source {
-                    if let Some(columns) = inputs.as_deref_mut()
-                        && (self
-                            .syntax
-                            .variables
-                            .iter()
-                            .any(|name| name.text == source.text)
-                            || self.syntax.visible_edge(source.text).is_some())
-                    {
-                        Some(self.property_map_projection(columns, source)?)
-                    } else {
-                        self.boundary_property_map(schema, source.text)
-                    }
-                } else {
-                    None
-                };
-                let (map, graph) = if let Some(column) = column {
-                    self.advance()?;
-                    (ReadValueTemplate::Column(column), true)
-                } else {
-                    (
-                        self.read_recursive_value(
-                            inputs.as_deref_mut(),
-                            schema,
-                            resolve,
-                            depth + 1,
-                        )?,
-                        false,
-                    )
-                };
-                self.punct(b')', ")")?;
-                (map, graph)
-            };
-            if graph {
-                graph_map = true;
-                if keys {
-                    ReadValueTemplate::Keys(Box::new(map))
-                } else {
-                    map
-                }
-            } else {
-                ReadValueTemplate::ElementMetadata {
-                    kind: if keys {
-                        crate::GraphElementMetadata::Keys
-                    } else {
-                        crate::GraphElementMetadata::Properties
-                    },
-                    value: Box::new(map),
-                    catalog: self.syntax.element_catalog.request(),
-                }
-            }
+            let (value, graph) =
+                self.read_map_function(inputs.as_deref_mut(), schema, resolve, depth)?;
+            graph_map = graph;
+            value
         } else if let Some(function) = self.list_function()? {
             // head/last/tail/range/reduce (fgdb-20foe).
             self.advance()?;
@@ -3313,61 +3218,8 @@ impl<'a> Parser<'a> {
                 self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
             self.punct(b')', ")")?;
             ReadValueTemplate::Size(Box::new(inner))
-        } else if let Some((function, dotted)) = self.temporal_call()? {
-            // A temporal constructor of a map, text, temporal value or NULL,
-            // or a dotted call such as date.truncate(unit, value, map) whose
-            // argument is the list of its arguments (fgdb-txbg9). Empty
-            // constructors share one explicit statement-time parameter.
-            let at = self.current.at;
-            self.advance()?;
-            if dotted {
-                self.advance()?;
-                self.advance()?;
-            }
-            self.punct(b'(', "(")?;
-            let argument = if !dotted
-                && function != crate::GraphTemporalFunction::Duration
-                && self.take(b')')?
-            {
-                self.statement_time_value(at)?
-            } else if let Some((least, most)) = function.arity() {
-                let mut items = Vec::new();
-                loop {
-                    items.push(self.read_recursive_value(
-                        inputs.as_deref_mut(),
-                        schema,
-                        resolve,
-                        depth + 1,
-                    )?);
-                    if self.take(b')')? {
-                        break;
-                    }
-                    if items.len() == most {
-                        return Err(GraphSetTextError {
-                            offset: self.current.at,
-                            kind: GraphSetTextErrorKind::Expected(")"),
-                        });
-                    }
-                    self.punct(b',', ", or )")?;
-                }
-                if items.len() < least {
-                    return Err(GraphSetTextError {
-                        offset: at,
-                        kind: GraphSetTextErrorKind::Expected("more temporal function arguments"),
-                    });
-                }
-                ReadValueTemplate::List(items)
-            } else {
-                let argument =
-                    self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
-                self.punct(b')', ")")?;
-                argument
-            };
-            ReadValueTemplate::Temporal {
-                function,
-                argument: Box::new(argument),
-                zones: self.zones.clone(),
-            }
+        } else if let Some(call) = self.temporal_call()? {
+            self.read_temporal_constructor(call, inputs.as_deref_mut(), schema, resolve, depth)?
         } else if let Some(parentheses) = self.parenthesized_name()? {
             // `(n)`, `((n))`: parentheses around a lone name that no operator
             // follows group nothing, so the name is read as it would be bare
@@ -3406,98 +3258,163 @@ impl<'a> Parser<'a> {
         {
             self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
         } else if resolve.is_some() && self.collected_aggregate_call()? {
-            // percentileDisc(x, p): the resolver collects x as a hidden
-            // aggregate, and p reads after aggregation (fgdb-qbaex).
-            // stDev(x) and stDevP(x) take the collected list alone.
-            let function = if self.is_word("PERCENTILEDISC") {
-                crate::GraphValueFunction::PercentileDisc
-            } else if self.is_word("PERCENTILECONT") {
-                crate::GraphValueFunction::PercentileCont
-            } else if self.is_word("STDEV") {
-                crate::GraphValueFunction::StDev
-            } else {
-                crate::GraphValueFunction::StDevP
-            };
-            self.advance()?;
-            self.punct(b'(', "(")?;
-            self.percentile_leaf = true;
-            let collected = match resolve.as_mut() {
-                Some(resolve) => resolve.leaf(self)?,
-                None => None,
-            };
-            let (false, Some(collected)) = (core::mem::take(&mut self.percentile_leaf), collected)
-            else {
-                return Err(GraphSetTextError {
-                    offset: at,
-                    kind: GraphSetTextErrorKind::Expected(
-                        "percentileDisc, percentileCont, stDev or stDevP as an aggregating item",
-                    ),
-                });
-            };
-            let argument = if matches!(
-                function,
-                crate::GraphValueFunction::StDev | crate::GraphValueFunction::StDevP
-            ) {
-                ReadValueTemplate::Column(collected)
-            } else {
-                self.punct(b',', ",")?;
-                let p =
-                    self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
-                ReadValueTemplate::List(vec![ReadValueTemplate::Column(collected), p])
-            };
-            self.punct(b')', ")")?;
-            // Count at the value reader, so a scalar lazy owner's eager
-            // slot cannot hide a collected call inside SIZE, a list/map,
-            // or a subscript. Value-language conditional owners do not
-            // observe this count and keep their own deferred branch scopes.
-            self.collected_scalar_calls += 1;
-            ReadValueTemplate::Function {
-                function,
-                argument: Box::new(argument),
-            }
+            self.read_collected_function(inputs.as_deref_mut(), schema, resolve, depth, at)?
         } else if let Some(resolve) = resolve.as_mut() {
             // Element and map entries (`x.p` of a comprehension element over
             // COLLECT, an imported `row.key`) take let slots, as the element
             // filter's do (fgdb-1c29d, fgdb-694ga, fgdb-0s2pq).
             self.resolved_scalar_value(resolve, depth, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
-            // `n IS NULL` is a scalar predicate over the element, which the
-            // scalar compiler reads (element_null_operand).
-            let bare = matches!(self.current.kind, TokenKind::Word(word)
-                if !self.elements.contains(&word)
-                    && (self.syntax.variables.iter().any(|name| name.text == word)
-                    || self.syntax.names_path(word)
-                    || self.syntax.visible_edge(word).is_some()))
-                // `v:L` is a label test, an expression over the element
-                // (fgdb-qo3jv), never the bare element.
-                && !matches!(
-                    self.lexer.clone().next()?.kind,
-                    TokenKind::Punct(b'.' | b'(' | b':')
-                )
-                && !matches!(self.lexer.clone().next()?.kind,
-                    TokenKind::Word(next) if next.eq_ignore_ascii_case("IS"));
-            if bare && self.element_subscript_follows()? {
-                // `n[key]` subscripts n's property map, so an absent key
-                // reads NULL and a non-text key fails as for any map.
-                let variable = self.property_variable()?;
-                ReadValueTemplate::Column(self.projection_slot(
-                    columns,
-                    Projection {
-                        variable,
-                        property: None,
-                        path: Some(GraphPathFunction::Properties),
-                        collect: None,
-                    },
-                )?)
-            } else if bare {
-                let variable = self.any_variable()?;
-                ReadValueTemplate::Column(self.mutation_projection(columns, variable, None)?)
-            } else {
-                self.read_scalar_value(Some(columns), schema, at, depth, membership_list)?
-            }
+            self.read_graph_leaf(columns, schema, at, depth, membership_list)?
         } else {
             self.read_scalar_value(None, schema, at, depth, membership_list)?
         };
+        self.read_value_postfix(inputs, schema, resolve, depth, value, graph_map)
+    }
+
+    #[inline(never)]
+    fn read_graph_leaf(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        at: usize,
+        depth: usize,
+        membership_list: bool,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        // `n IS NULL` is a scalar predicate over the element, which the
+        // scalar compiler reads (element_null_operand).
+        let bare = matches!(self.current.kind, TokenKind::Word(word)
+            if !self.elements.contains(&word)
+                && (self.syntax.variables.iter().any(|name| name.text == word)
+                || self.syntax.names_path(word)
+                || self.syntax.visible_edge(word).is_some()))
+            // `v:L` is a label test, an expression over the element
+            // (fgdb-qo3jv), never the bare element.
+            && !matches!(
+                self.lexer.clone().next()?.kind,
+                TokenKind::Punct(b'.' | b'(' | b':')
+            )
+            && !matches!(self.lexer.clone().next()?.kind,
+                TokenKind::Word(next) if next.eq_ignore_ascii_case("IS"));
+        if bare && self.element_subscript_follows()? {
+            // `n[key]` subscripts n's property map, so an absent key
+            // reads NULL and a non-text key fails as for any map.
+            let variable = self.property_variable()?;
+            Ok(ReadValueTemplate::Column(self.projection_slot(
+                columns,
+                Projection {
+                    variable,
+                    property: None,
+                    path: Some(GraphPathFunction::Properties),
+                    collect: None,
+                },
+            )?))
+        } else if bare {
+            let variable = self.any_variable()?;
+            Ok(ReadValueTemplate::Column(
+                self.mutation_projection(columns, variable, None)?,
+            ))
+        } else {
+            self.read_scalar_value(Some(columns), schema, at, depth, membership_list)
+        }
+    }
+
+    #[inline(never)]
+    fn read_subscript_base(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        if let TokenKind::Word(word) = self.current.kind
+            && let Some(binding) = self.elements.iter().rposition(|name| *name == word)
+        {
+            let offset = self.element_offset(binding, at)?;
+            self.advance()?;
+            Ok(ReadValueTemplate::Local(offset))
+        } else if let Some(resolve) = resolve.as_mut() {
+            let operand = match resolve.leaf(self)? {
+                Some(column) => Operand::Column(column),
+                None => self.row_operand(schema)?,
+            };
+            Ok(self.read_value_template(operand, at)?)
+        } else {
+            let operand = self.row_operand(schema)?;
+            Ok(self.read_value_template(operand, at)?)
+        }
+    }
+
+    #[inline(never)]
+    fn read_collected_function(
+        &mut self,
+        inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        // percentileDisc(x, p): the resolver collects x as a hidden
+        // aggregate, and p reads after aggregation (fgdb-qbaex).
+        // stDev(x) and stDevP(x) take the collected list alone.
+        let function = if self.is_word("PERCENTILEDISC") {
+            crate::GraphValueFunction::PercentileDisc
+        } else if self.is_word("PERCENTILECONT") {
+            crate::GraphValueFunction::PercentileCont
+        } else if self.is_word("STDEV") {
+            crate::GraphValueFunction::StDev
+        } else {
+            crate::GraphValueFunction::StDevP
+        };
+        self.advance()?;
+        self.punct(b'(', "(")?;
+        self.percentile_leaf = true;
+        let collected = match resolve.as_mut() {
+            Some(resolve) => resolve.leaf(self)?,
+            None => None,
+        };
+        let (false, Some(collected)) = (core::mem::take(&mut self.percentile_leaf), collected)
+        else {
+            return Err(GraphSetTextError {
+                offset: at,
+                kind: GraphSetTextErrorKind::Expected(
+                    "percentileDisc, percentileCont, stDev or stDevP as an aggregating item",
+                ),
+            });
+        };
+        let argument = if matches!(
+            function,
+            crate::GraphValueFunction::StDev | crate::GraphValueFunction::StDevP
+        ) {
+            ReadValueTemplate::Column(collected)
+        } else {
+            self.punct(b',', ",")?;
+            let p = self.read_recursive_value(inputs, schema, resolve, depth + 1)?;
+            ReadValueTemplate::List(vec![ReadValueTemplate::Column(collected), p])
+        };
+        self.punct(b')', ")")?;
+        // Count at the value reader, so a scalar lazy owner's eager
+        // slot cannot hide a collected call inside SIZE, a list/map,
+        // or a subscript. Value-language conditional owners do not
+        // observe this count and keep their own deferred branch scopes.
+        self.collected_scalar_calls += 1;
+        Ok(ReadValueTemplate::Function {
+            function,
+            argument: Box::new(argument),
+        })
+    }
+
+    // Keep these frames separate from primary dispatch: recursive composite
+    // values must reach the existing depth guard on ordinary thread stacks.
+    #[inline(never)]
+    fn read_value_postfix(
+        &mut self,
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+        mut value: ReadValueTemplate,
+        mut graph_map: bool,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
         // A lone element is the element's whole value, not a scalar program,
         // so a list, vertex or path element passes through intact.
         if let ReadValueTemplate::Integer { program, .. } = &value
@@ -3590,6 +3507,219 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(value)
+    }
+
+    #[inline(never)]
+    fn read_list_literal(
+        &mut self,
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let mut items = Vec::new();
+        if !self.take(b']')? {
+            loop {
+                self.capacity(
+                    items.len(),
+                    crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
+                    crate::algebra::PatternLimitDimension::Columns,
+                )?;
+                items.push(self.read_recursive_value(
+                    inputs.as_deref_mut(),
+                    schema,
+                    resolve,
+                    depth + 1,
+                )?);
+                if self.take(b']')? {
+                    break;
+                }
+                self.punct(b',', ", or ]")?;
+            }
+        }
+        Ok(ReadValueTemplate::List(items))
+    }
+
+    #[inline(never)]
+    fn read_map_literal(
+        &mut self,
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        // A map literal {k: e, ...} (fgdb-2jw3z), keys sorted and unique.
+        let mut entries: Vec<(Box<str>, ReadValueTemplate)> = Vec::new();
+        if !self.take(b'}')? {
+            loop {
+                self.capacity(
+                    entries.len(),
+                    crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
+                    crate::algebra::PatternLimitDimension::Columns,
+                )?;
+                let key = self.schema_name()?;
+                self.punct(b':', ":")?;
+                let value =
+                    self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+                entries.push((key.text.into(), value));
+                if self.take(b'}')? {
+                    break;
+                }
+                self.punct(b',', ", or }")?;
+            }
+        }
+        entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(GraphSetTextError {
+                offset: at,
+                kind: GraphSetTextErrorKind::Expected("unique keys in a map literal"),
+            });
+        }
+        let (keys, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        Ok(ReadValueTemplate::MapLiteral {
+            keys: keys.into_boxed_slice(),
+            values,
+            guard: None,
+        })
+    }
+
+    #[inline(never)]
+    fn read_map_function(
+        &mut self,
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+    ) -> Result<(ReadValueTemplate, bool), GraphSetTextError> {
+        let keys = self.is_word("KEYS");
+        let resolved = self.resolved_map_leaf(inputs.is_none() && schema.is_empty(), resolve)?;
+        let (map, graph) = if let Some(column) = resolved {
+            (ReadValueTemplate::Column(column), true)
+        } else {
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            let source = match self.current.kind {
+                TokenKind::Word(word)
+                    if !self.elements.contains(&word)
+                        && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b')')) =>
+                {
+                    Some(Name {
+                        text: word,
+                        at: self.current.at,
+                    })
+                }
+                _ => None,
+            };
+            let column = if let Some(source) = source {
+                if let Some(columns) = inputs.as_deref_mut()
+                    && (self
+                        .syntax
+                        .variables
+                        .iter()
+                        .any(|name| name.text == source.text)
+                        || self.syntax.visible_edge(source.text).is_some())
+                {
+                    Some(self.property_map_projection(columns, source)?)
+                } else {
+                    self.boundary_property_map(schema, source.text)
+                }
+            } else {
+                None
+            };
+            let (map, graph) = if let Some(column) = column {
+                self.advance()?;
+                (ReadValueTemplate::Column(column), true)
+            } else {
+                (
+                    self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?,
+                    false,
+                )
+            };
+            self.punct(b')', ")")?;
+            (map, graph)
+        };
+        let value = if graph {
+            if keys {
+                ReadValueTemplate::Keys(Box::new(map))
+            } else {
+                map
+            }
+        } else {
+            ReadValueTemplate::ElementMetadata {
+                kind: if keys {
+                    crate::GraphElementMetadata::Keys
+                } else {
+                    crate::GraphElementMetadata::Properties
+                },
+                value: Box::new(map),
+                catalog: self.syntax.element_catalog.request(),
+            }
+        };
+        Ok((value, graph))
+    }
+
+    #[inline(never)]
+    fn read_temporal_constructor(
+        &mut self,
+        (function, dotted): (crate::GraphTemporalFunction, bool),
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        // A temporal constructor of a map, text, temporal value or NULL,
+        // or a dotted call such as date.truncate(unit, value, map) whose
+        // argument is the list of its arguments (fgdb-txbg9). Empty
+        // constructors share one explicit statement-time parameter.
+        let at = self.current.at;
+        self.advance()?;
+        if dotted {
+            self.advance()?;
+            self.advance()?;
+        }
+        self.punct(b'(', "(")?;
+        let argument =
+            if !dotted && function != crate::GraphTemporalFunction::Duration && self.take(b')')? {
+                self.statement_time_value(at)?
+            } else if let Some((least, most)) = function.arity() {
+                let mut items = Vec::new();
+                loop {
+                    items.push(self.read_recursive_value(
+                        inputs.as_deref_mut(),
+                        schema,
+                        resolve,
+                        depth + 1,
+                    )?);
+                    if self.take(b')')? {
+                        break;
+                    }
+                    if items.len() == most {
+                        return Err(GraphSetTextError {
+                            offset: self.current.at,
+                            kind: GraphSetTextErrorKind::Expected(")"),
+                        });
+                    }
+                    self.punct(b',', ", or )")?;
+                }
+                if items.len() < least {
+                    return Err(GraphSetTextError {
+                        offset: at,
+                        kind: GraphSetTextErrorKind::Expected("more temporal function arguments"),
+                    });
+                }
+                ReadValueTemplate::List(items)
+            } else {
+                let argument =
+                    self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+                self.punct(b')', ")")?;
+                argument
+            };
+        Ok(ReadValueTemplate::Temporal {
+            function,
+            argument: Box::new(argument),
+            zones: self.zones.clone(),
+        })
     }
 
     fn starts_range_dots(&self) -> Result<bool, GraphPatternTextError> {
