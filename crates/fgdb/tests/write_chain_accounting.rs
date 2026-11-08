@@ -9,8 +9,9 @@ use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
     GlaExecutionStats, GlaLimitDimension, GqlExecutionStats, GqlParameters, GqlQueryError,
-    GqlQueryExecution, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteChainStep,
-    PreparedGraphWriteChain, PreparedGraphWriteChainText,
+    GqlQueryExecution, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
+    GraphWriteChainStep, PreparedGraphWriteChain, PreparedGraphWriteChainText,
+    ReverseSymbolCatalog,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -245,6 +246,22 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
         _ => None,
+    }
+}
+
+struct MetadataCatalog;
+
+impl GraphSymbolResolver for MetadataCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_relation(R, "R");
+        catalog.insert_property(P, "p");
+        catalog.insert_property(Q, "q");
+        Some(catalog)
     }
 }
 
@@ -1462,28 +1479,63 @@ fn post_write_match_delete_failures_restore_the_existing_transaction_prefix() {
         prefix.create_vertex(VId(7), vec![], vec![(P, CanonicalScalar::Int(99))]);
         transaction.write(&mut database, prefix).unwrap();
         let digest = transaction.staged_effect_digest().unwrap();
-        for (text, incident) in [
+        for (text, incident, metadata) in [
             (
                 "CREATE (audit {p:100}) WITH audit MATCH (n {p:1}) DELETE n RETURN n",
                 true,
+                false,
             ),
             (
                 "CREATE (audit {p:100}) WITH audit MATCH (n {p:1}) \
                  DETACH DELETE n RETURN n.p LIMIT 0",
                 false,
+                false,
+            ),
+            (
+                "CREATE (audit {p:100}) WITH audit MATCH (n {p:1}) \
+                 DETACH DELETE n RETURN properties(n) LIMIT 0",
+                false,
+                true,
+            ),
+            (
+                "CREATE (audit {p:100}) WITH audit MATCH (n {p:1}) \
+                 DETACH DELETE n RETURN keys(n) LIMIT 0",
+                false,
+                true,
+            ),
+            (
+                "CREATE (audit {p:100}) WITH audit MATCH (n {p:1}) \
+                 DETACH DELETE n RETURN labels(n) LIMIT 0",
+                false,
+                true,
+            ),
+            (
+                "CREATE (audit {p:100}) WITH audit MATCH (n {p:1}) \
+                 DETACH DELETE n RETURN n{.*} LIMIT 0",
+                false,
+                true,
             ),
             (
                 "MATCH (victim {p:1}) CREATE (audit {p:100}) WITH victim,audit \
                  MATCH (n {p:2}) DETACH DELETE victim RETURN victim.p LIMIT 0",
+                false,
                 false,
             ),
             (
                 "CREATE (audit {p:100}) WITH audit MATCH (a {p:1})-[r:R]->(b) \
                  DELETE r RETURN r.p LIMIT 0",
                 false,
+                false,
             ),
         ] {
-            let chain = prepare(text);
+            let chain = if metadata {
+                PreparedGraphWriteChainText::prepare(text, R, MetadataCatalog)
+                    .expect(text)
+                    .bind_parameters(&GqlParameters::new())
+                    .expect(text)
+            } else {
+                prepare(text)
+            };
             let error = transaction
                 .execute_graph_write_chain_governed(
                     &mut database,

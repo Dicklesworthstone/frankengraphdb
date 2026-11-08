@@ -873,24 +873,50 @@ impl<'a> Parser<'a> {
     /// Whether the RETURN at the current token reads a property or metadata of a
     /// dynamically typed value of the WITH row, such as an unwound element,
     /// or an owned identity whose fields the native staged reader supplies.
+    /// Only mutation returns can overlay captured preimages. CREATE returns
+    /// must keep imported map/metadata reads on their native owned-row tail.
     /// Nothing is consumed.
     pub(super) fn return_reads_row_element(
         &self,
         row: &[(Name<'a>, GraphSetColumnType)],
+        preserve_preimages: bool,
     ) -> Result<bool, GraphPatternTextError> {
         if !self.is_word("RETURN") {
             return Ok(false);
         }
         let visible = self.visible_width(row);
-        let element = |word: &str| {
+        let element = |word: &str, carried: bool| {
             row[..visible].iter().any(|(name, kind)| {
                 name.text == word
                     && (*kind == GraphSetColumnType::Any
                         || self.read_elements
+                            && (!preserve_preimages || !carried)
                             && matches!(
                                 kind,
                                 GraphSetColumnType::Vertex | GraphSetColumnType::Edge
                             ))
+            })
+        };
+        // Keep the mutation owner's proposal overlay and DeletedElementRead
+        // checks whenever the incoming row already carries the required read.
+        // A partial capture cannot satisfy a different field or a complete map.
+        let boundary = self
+            .boundary_reads
+            .as_ref()
+            .filter(|boundary| boundary.width == row.len() && boundary.visible <= row.len());
+        let property = |source: &str, key: &str| {
+            boundary.is_some_and(|boundary| {
+                row[..boundary.visible]
+                    .iter()
+                    .any(|(name, _)| name.text == source)
+                    && boundary.reads.iter().any(|&(name, field, column)| {
+                        name == source
+                            && field.text == key
+                            && row.get(column).is_some_and(|(_, kind)| {
+                                *kind == GraphSetColumnType::Any
+                                    || key != "*" && kind.is_scalar_like()
+                            })
+                    })
             })
         };
         let mut lexer = self.lexer.clone();
@@ -899,21 +925,81 @@ impl<'a> Parser<'a> {
             let token = lexer.next()?;
             match token.kind {
                 TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
-                TokenKind::Word(word)
-                    if !matches!(previous, TokenKind::Punct(b'.'))
-                        && ((element(word)
-                            && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')))
-                            || (self.read_elements
-                                && (property_map_source(word, token.at, &lexer)?
-                                    .is_some_and(|source| element(source.text))
-                                    || metadata_source(word, token.at, &lexer)?.is_some_and(
-                                        |(source, function)| {
-                                            function == GraphPathFunction::Labels
-                                                && element(source.text)
-                                        },
-                                    )))) =>
-                {
-                    return Ok(true);
+                TokenKind::Word(word) if !matches!(previous, TokenKind::Punct(b'.')) => {
+                    let mut lookahead = lexer.clone();
+                    let next = lookahead.next()?;
+                    if matches!(next.kind, TokenKind::Punct(b'.')) {
+                        let carried = match lookahead.next()?.kind {
+                            TokenKind::Word(key) | TokenKind::DelimitedKeyword(key) => {
+                                property(word, key)
+                            }
+                            _ => false,
+                        };
+                        if element(word, carried) {
+                            return Ok(true);
+                        }
+                    }
+                    if self.read_elements {
+                        if let Some(source) = property_map_source(word, token.at, &lexer)? {
+                            let mut carried = property(source.text, "*");
+                            if preserve_preimages && matches!(next.kind, TokenKind::Punct(b'{')) {
+                                // Only selectors at this map's entry boundary
+                                // need preimages; value expressions are scanned
+                                // by the ordinary token walk below.
+                                carried = true;
+                                let mut depth = 1_usize;
+                                let mut entry = true;
+                                while depth != 0 {
+                                    let field = lookahead.next()?;
+                                    match field.kind {
+                                        TokenKind::End => break,
+                                        TokenKind::Punct(b'.') if depth == 1 && entry => {
+                                            carried &= match lookahead.next()?.kind {
+                                                TokenKind::Word(key)
+                                                | TokenKind::DelimitedKeyword(key) => {
+                                                    property(source.text, key)
+                                                }
+                                                TokenKind::Punct(b'*') => {
+                                                    property(source.text, "*")
+                                                }
+                                                _ => false,
+                                            };
+                                            entry = false;
+                                        }
+                                        TokenKind::Punct(b'{' | b'[' | b'(') => {
+                                            depth += 1;
+                                            entry = false;
+                                        }
+                                        TokenKind::Punct(b'}' | b']' | b')') => depth -= 1,
+                                        TokenKind::Punct(b',') if depth == 1 => entry = true,
+                                        _ => entry = false,
+                                    }
+                                }
+                            }
+                            if element(source.text, carried) {
+                                return Ok(true);
+                            }
+                        }
+                        if let Some((source, GraphPathFunction::Labels)) =
+                            metadata_source(word, token.at, &lexer)?
+                        {
+                            let carried = boundary.is_some_and(|boundary| {
+                                row[..boundary.visible]
+                                    .iter()
+                                    .any(|(name, _)| name.text == source.text)
+                                    && boundary.functions.iter().any(|&(name, function, column)| {
+                                        name == source.text
+                                            && function == GraphPathFunction::Labels
+                                            && row.get(column).is_some_and(|(_, kind)| {
+                                                *kind == GraphSetColumnType::List
+                                            })
+                                    })
+                            });
+                            if element(source.text, carried) {
+                                return Ok(true);
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -936,7 +1022,7 @@ impl<'a> Parser<'a> {
         // as an unwound element, reads it after the write as a tail over an
         // implicit `WITH *` (fgdb-122y1).
         let row_element = match row {
-            Some(row) => self.return_reads_row_element(row)?,
+            Some(row) => self.return_reads_row_element(row, true)?,
             None => false,
         };
         let implicit = (self.chain_write && self.at_chained_write()?) || row_element;

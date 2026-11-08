@@ -533,14 +533,47 @@ fn returned_identity_maps_and_metadata_read_the_completed_native_write() {
         const SET: &str = "CALL { CREATE (n:Visible {p:1}) RETURN n } SET n.q=2 RETURN ";
         const INSERT: &str = "CALL { CREATE (n:Visible {p:1}) RETURN n } CREATE (:Visible) RETURN ";
         const EDGE: &str = "CALL { CREATE ()-[r:R {p:3}]->() RETURN r } SET r.q=4 RETURN ";
+        const CAPTURED: &str = "CALL { CREATE (n:Visible {p:1}) RETURN n } \
+            WITH n,n.p AS before SET n.q=2 RETURN ";
+        const CAPTURED_INSERT: &str = "CALL { CREATE (n:Visible {p:1}) RETURN n } \
+            WITH n,n.p AS before CREATE (:Visible) RETURN ";
         let map12 = GraphValue::map(vec![("p".into(), int(1)), ("q".into(), int(2))]).unwrap();
         let map34 = GraphValue::map(vec![("p".into(), int(3)), ("q".into(), int(4))]).unwrap();
         for (prefix, expression, expected, vertices, edges) in [
             (SET, "n{.p,.q}", map12.clone(), 1, 0),
             (SET, "n{.*}", map12.clone(), 1, 0),
-            (SET, "properties(n)", map12, 1, 0),
+            (SET, "properties(n)", map12.clone(), 1, 0),
             (SET, "keys(n)", text_list(&["p", "q"]), 1, 0),
             (SET, "labels(n)", text_list(&["Visible"]), 1, 0),
+            (CAPTURED, "n{.p,.q}", map12.clone(), 1, 0),
+            (CAPTURED, "n{.*}", map12.clone(), 1, 0),
+            (CAPTURED, "properties(n)", map12, 1, 0),
+            (CAPTURED, "keys(n)", text_list(&["p", "q"]), 1, 0),
+            (CAPTURED, "labels(n)", text_list(&["Visible"]), 1, 0),
+            (CAPTURED_INSERT, "n.p", int(1), 2, 0),
+            (
+                CAPTURED_INSERT,
+                "n{.p}",
+                GraphValue::map(vec![("p".into(), int(1))]).unwrap(),
+                2,
+                0,
+            ),
+            (
+                CAPTURED_INSERT,
+                "n{.*}",
+                GraphValue::map(vec![("p".into(), int(1))]).unwrap(),
+                2,
+                0,
+            ),
+            (
+                CAPTURED_INSERT,
+                "properties(n)",
+                GraphValue::map(vec![("p".into(), int(1))]).unwrap(),
+                2,
+                0,
+            ),
+            (CAPTURED_INSERT, "keys(n)", text_list(&["p"]), 2, 0),
+            (CAPTURED_INSERT, "labels(n)", text_list(&["Visible"]), 2, 0),
             (
                 INSERT,
                 "n{.p}",
@@ -596,7 +629,7 @@ fn returned_identity_maps_and_metadata_read_the_completed_native_write() {
                     .map(|row| row.props)
                     .collect();
                 actual.sort();
-                let expected = if prefix == INSERT {
+                let expected = if matches!(prefix, INSERT | CAPTURED_INSERT) {
                     vec![vec![], vec![(P, CanonicalScalar::Int(1).into())]]
                 } else {
                     vec![vec![

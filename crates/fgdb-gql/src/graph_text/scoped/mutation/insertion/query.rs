@@ -648,7 +648,7 @@ impl<'a> Parser<'a> {
         // Imported owned identities have no frozen CREATE-property slot.
         // Read their terminal fields through the existing staged row tail.
         let implicit = (self.chain_write && self.at_chained_write()?)
-            || (self.read_elements && self.return_reads_row_element(source)?);
+            || (self.read_elements && self.return_reads_row_element(source, false)?);
         let head = implicit || self.take_word("WITH")?;
         if !head {
             self.word("RETURN")?;

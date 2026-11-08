@@ -600,17 +600,34 @@ fn multipart_read_merge_binds_native_actions_and_reuses_the_parameter_table() {
 
 #[test]
 fn multipart_merge_preserves_dropped_scope_and_read_only_call_boundaries() {
-    for text in [
-        "CREATE (n) WITH 1 AS k OPTIONAL MATCH (m) MERGE (x {p:n.p}) RETURN x",
-        "CREATE (n) WITH n CALL { WITH n MERGE (x) RETURN x } RETURN n",
-        "CREATE (n) WITH n CALL { WITH n CREATE (x) RETURN x } MERGE (y) RETURN y",
+    let text = "CREATE (n) WITH 1 AS k OPTIONAL MATCH (m) MERGE (x {p:n.p}) RETURN x";
+    assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+    assert!(PreparedGraphWriteChainText::prepare(text, RelationId(1), text_symbols).is_err());
+
+    // Returning-write CALL now owns these effects. Preserve the original inputs
+    // as positive cases while the discarded outer binding above stays invalid.
+    for (text, name) in [
+        (
+            "CREATE (n) WITH n CALL { WITH n MERGE (x) RETURN x } RETURN n",
+            "n",
+        ),
+        (
+            "CREATE (n) WITH n CALL { WITH n CREATE (x) RETURN x } MERGE (y) RETURN y",
+            "y",
+        ),
     ] {
         assert!(
             PreparedGraphWriteChainText::is_chain(text).unwrap(),
             "{text}"
         );
-        assert!(
-            PreparedGraphWriteChainText::prepare(text, RelationId(1), text_symbols).is_err(),
+        let chain = PreparedGraphWriteChainText::prepare(text, RelationId(1), text_symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(chain.columns(), &[name], "{text}");
+        assert_eq!(
+            chain.column_types(),
+            &[GraphSetColumnType::Vertex],
             "{text}"
         );
     }

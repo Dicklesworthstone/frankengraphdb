@@ -1617,9 +1617,14 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let source = self.name()?;
-        // An owned identity reads the current staged graph. A cached map
-        // from its input must not hide fields changed by the preceding write.
-        let native = if columns.is_none() && resolve.is_none() && self.read_elements {
+        // Read boundaries retain their admitted maps, including adapters that
+        // cannot look up an identity again. Owned post-write tails discard those
+        // preimages before reaching this parser and use the staged graph reader.
+        let native = if columns.is_none()
+            && resolve.is_none()
+            && self.read_elements
+            && self.boundary_property_map(schema, source.text).is_none()
+        {
             schema[..self.visible_width(schema)]
                 .iter()
                 .position(|(name, kind)| {
