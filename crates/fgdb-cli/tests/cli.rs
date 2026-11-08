@@ -374,6 +374,7 @@ fn query_refuses_a_write_statement_without_mutating_or_echoing_it() {
         "CREATE (n:Person {id:424242})",
         "CALL() { CREATE (n:Person {id:424242}) } RETURN 1",
         "WITH 424242 AS value CALL(value) { CREATE (n:Person {id:value}) } RETURN value",
+        "CALL() { CREATE (n:Person {id:424242}) RETURN n } RETURN n",
     ] {
         let output = fixture.robot("query", &[statement]);
         refused(&output, 3, "query");
@@ -383,12 +384,9 @@ fn query_refuses_a_write_statement_without_mutating_or_echoing_it() {
         assert!(!String::from_utf8_lossy(&output.stderr).contains("424242"));
         assert_eq!(directory_bytes(&fixture.db()), before);
     }
-    // Returning write subqueries are outside the implemented unit-CALL slice.
     // A write binder must succeed before a read refusal becomes permission.
-    let unsupported = fixture.robot(
-        "query",
-        &["CALL() { CREATE (n:Person {id:424242}) RETURN n } RETURN n"],
-    );
+    // Graph DDL still has no executable write plan.
+    let unsupported = fixture.robot("query", &["CREATE GRAPH social"]);
     refused(&unsupported, 3, "query");
     assert!(rows(&unsupported).is_empty());
     assert!(String::from_utf8_lossy(&unsupported.stdout).contains("\"code\":\"unsupported\""));

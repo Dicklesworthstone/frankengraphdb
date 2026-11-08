@@ -610,6 +610,7 @@ fn returning_calls_retain_typed_exports_from_every_native_write_owner() {
 
     for (text, kind) in [
         ("CALL { CREATE (n:F) RETURN n AS value }", Vertex),
+        ("CALL() { CREATE (:F) RETURN 1 AS value }", Scalar),
         (
             "MATCH (n:F) CALL(n) { SET n.p=1 RETURN n AS value } RETURN value",
             Vertex,
@@ -666,8 +667,11 @@ fn returning_calls_retain_typed_exports_from_every_native_write_owner() {
         "WITH 7 AS x CALL { WITH x CREATE (:F {p:x}) RETURN x+1 AS value } RETURN value",
         "WITH 7 AS x,8 AS y CALL(*) { CREATE (:F {p:x,q:y}) RETURN x+y AS value } RETURN value",
         "CALL { CREATE (n:F) RETURN n } SET n.p=2 RETURN n",
+        "CALL { CREATE (n:F {p:1}) RETURN n AS created } SET created.q=2 RETURN created.p AS p,created.q AS q",
+        "CALL { CREATE (n:F {p:1}) RETURN n AS parent } CREATE (child:F) CREATE (parent)-[:R]->(child) RETURN parent.p AS p",
         "CALL { CREATE (n:F) RETURN n } MATCH (m:F) RETURN n,m",
         "CREATE (a:F) WITH a CALL(a) { CREATE (b:F) RETURN b } CREATE (copy:F) RETURN copy",
+        "CREATE (a) WITH a CALL (a) { CREATE (b) RETURN b } CREATE (copy) RETURN copy",
         "CALL { CALL { CREATE (:F) RETURN 1 AS value } } RETURN 7 AS kept",
     ] {
         prepare(text);

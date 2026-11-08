@@ -190,23 +190,27 @@ fn cli_inline_call_reads_imports_staged_rows_and_reopened_storage() {
         "{reopened}"
     );
     assert!(has_pair(&reopened, 3, 31), "{reopened}");
-    let refused = failed(
-        fixture.run(
-            "query",
-            &["CALL { CREATE (n:Person {p:9,q:90}) RETURN n } RETURN n"],
-        ),
-        3,
-    );
-    assert!(
-        refused.contains("writes inside inline CALL are not supported"),
-        "{refused}"
-    );
+    let returning = "CALL { CREATE (n:Person {p:9,q:90}) RETURN n } RETURN n";
+    let refused = failed(fixture.run("query", &[returning]), 3);
+    assert!(refused.contains("\"code\":\"permission\""), "{refused}");
+    assert!(!refused.contains("\"event\":\"row\""), "{refused}");
     assert_eq!(
         successful(fixture.run("query", &[query]))
             .matches("\"event\":\"row\"")
             .count(),
         3
     );
+    let written = successful(fixture.run("write", &[returning]));
+    assert_eq!(written.matches("\"event\":\"row\"").count(), 1, "{written}");
+    let reopened = successful(fixture.run("query", &[query]));
+    assert_eq!(
+        reopened.matches("\"event\":\"row\"").count(),
+        4,
+        "{reopened}"
+    );
+    for (p, q) in [(1, 11), (2, 21), (3, 31), (9, 91)] {
+        assert!(has_pair(&reopened, p, q), "{reopened}");
+    }
 }
 
 #[test]

@@ -347,7 +347,7 @@ the `diagnostics` wording, which may change:
 |---|---|---|
 | `usage` | usage (2) | the command line is wrong |
 | `syntax` | query (3) | the statement does not parse; `offset` is the byte to fix |
-| `unsupported` | query (3) | a recognized construct that is not supported yet: graph or branch DDL, `AT BRANCH`, `CALL {...}` |
+| `unsupported` | query (3) | a recognized construct that is not supported yet: graph or branch DDL, `AT BRANCH` |
 | `not_found` | query (3) | a label, relation or property name in the statement has no binding |
 | `invalid_value` | query (3) | a parameter or value is missing, unexpected, mistyped or out of range |
 | `statement` | query (3) | the statement parses but its definition is refused; also every remote statement refusal |

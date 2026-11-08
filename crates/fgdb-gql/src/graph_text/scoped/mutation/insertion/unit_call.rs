@@ -2,7 +2,7 @@
 //! outer occurrence; returning bodies export their typed result columns. Both
 //! use the same bounded heap preparation frames and native write/read owners.
 
-use super::chain::PreparedContinuation;
+use super::chain::{PreparedContinuation, PreparedReadContinuation};
 use super::*;
 use crate::graph_text::parameters::UnresolvedGraphText;
 use crate::graph_text::scoped::mutation::return_projection::pipeline::multipart::UnresolvedReadInput;
@@ -306,10 +306,14 @@ impl<'a> CallPreparation<'a> {
                     self.next = after;
                 }
                 PreparedContinuation::Read(read) => {
-                    let (read, keys, exports) = *read;
-                    self.read = Some(read);
+                    let PreparedReadContinuation {
+                        input,
+                        keys,
+                        output,
+                    } = *read;
+                    self.read = Some(input);
                     self.read_keys = keys;
-                    self.exports = Some(exports);
+                    self.exports = Some(output);
                 }
                 PreparedContinuation::Returned(exports) => self.exports = Some(exports),
             }

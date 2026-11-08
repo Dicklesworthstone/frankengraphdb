@@ -870,9 +870,10 @@ impl<'a> Parser<'a> {
     /// `row` is the WITH row of a write after WITH (fgdb-sl4ym): RETURN then
     /// reads its values, and `*` is every column it carries.
     /// Whether the RETURN at the current token reads `name.key` of a
-    /// dynamically typed value of the WITH row, such as an unwound element.
+    /// dynamically typed value of the WITH row, such as an unwound element,
+    /// or an owned identity whose fields the native staged reader supplies.
     /// Nothing is consumed.
-    fn return_reads_row_element(
+    pub(super) fn return_reads_row_element(
         &self,
         row: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<bool, GraphPatternTextError> {
@@ -880,10 +881,16 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         let visible = self.visible_width(row);
-        let dynamic = |word: &str| {
-            row[..visible]
-                .iter()
-                .any(|(name, kind)| name.text == word && *kind == GraphSetColumnType::Any)
+        let element = |word: &str| {
+            row[..visible].iter().any(|(name, kind)| {
+                name.text == word
+                    && (*kind == GraphSetColumnType::Any
+                        || self.read_elements
+                            && matches!(
+                                kind,
+                                GraphSetColumnType::Vertex | GraphSetColumnType::Edge
+                            ))
+            })
         };
         let mut lexer = self.lexer.clone();
         let mut previous = self.current.kind;
@@ -893,7 +900,7 @@ impl<'a> Parser<'a> {
                 TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
                 TokenKind::Word(word)
                     if !matches!(previous, TokenKind::Punct(b'.'))
-                        && dynamic(word)
+                        && element(word)
                         && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) =>
                 {
                     return Ok(true);

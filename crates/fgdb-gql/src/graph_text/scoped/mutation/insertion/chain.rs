@@ -32,13 +32,13 @@ pub(super) enum PreparedContinuation<'a> {
     /// A native terminal RETURN's exact names and types. This is preparation
     /// metadata only; its existing write query still owns the executable IR.
     Returned(Vec<(Name<'a>, GraphSetColumnType)>),
-    Read(
-        Box<(
-            crate::set_text::multipart::BoundReadInput,
-            Vec<PropertyKeyId>,
-            Vec<(Name<'a>, GraphSetColumnType)>,
-        )>,
-    ),
+    Read(Box<PreparedReadContinuation<'a>>),
+}
+
+pub(super) struct PreparedReadContinuation<'a> {
+    pub(super) input: crate::set_text::multipart::BoundReadInput,
+    pub(super) keys: Vec<PropertyKeyId>,
+    pub(super) output: Vec<(Name<'a>, GraphSetColumnType)>,
 }
 
 impl PreparedGraphWriteChainText {
@@ -934,7 +934,13 @@ impl PreparedGraphWriteChainText {
                     crate::GraphElementKey::Unbound | crate::GraphElementKey::Missing => None,
                 })
                 .collect();
-            return Ok(PreparedContinuation::Read(Box::new((input, keys, output))));
+            return Ok(PreparedContinuation::Read(Box::new(
+                PreparedReadContinuation {
+                    input,
+                    keys,
+                    output,
+                },
+            )));
         }
         if matches!(
             matched,
@@ -1237,7 +1243,7 @@ impl PreparedGraphWriteChainText {
                     next = after;
                 }
                 PreparedContinuation::Read(input) => {
-                    let (input, keys, _) = *input;
+                    let PreparedReadContinuation { input, keys, .. } = *input;
                     read = Some(input);
                     read_keys = keys;
                     break;

@@ -2157,8 +2157,8 @@ fn refusals_carry_a_stable_code_and_a_readable_message() {
     );
     let corpus: &[Case] = &[
         // The 2026-10-20 reality check's table (R12). Pattern comprehension and
-        // a list-valued SET and read CALL bodies now run. A write CALL body
-        // remains an explicit unsupported case, beside graph and branch DDL.
+        // a list-valued SET and read/write CALL bodies now run. Read-only
+        // query refuses implemented writes with permission; DDL is unsupported.
         (
             "write",
             &[],
@@ -2173,9 +2173,9 @@ fn refusals_carry_a_stable_code_and_a_readable_message() {
             &[],
             "CALL { CREATE (p:Person) RETURN p } RETURN p",
             3,
-            "unsupported",
-            Some(7),
-            Some("byte 7: writes inside inline CALL are not supported"),
+            "permission",
+            None,
+            Some("query is read-only: run this write statement with fgdb write"),
         ),
         (
             "write",

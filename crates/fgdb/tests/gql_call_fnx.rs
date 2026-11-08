@@ -6,7 +6,7 @@
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{
     Database, DatabaseKeys, GqlError, MemVfs, ProcedureError, QueryError, QueryResult, QueryValue,
-    WriteBatch,
+    WriteBatch, WriteTxnError,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
@@ -197,6 +197,12 @@ fn procedure_error(error: QueryError) -> Result<ProcedureError, QueryError> {
         QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Source(
             GqlError::Procedure(error),
         ))) => Ok(error),
+        QueryError::TransactionSet(error) => match *error {
+            GqlQueryError::Source(GraphSetExecutionError::Source(WriteTxnError::Gql(
+                GqlError::Procedure(error),
+            ))) => Ok(error),
+            other => Err(QueryError::TransactionSet(Box::new(other))),
+        },
         other => Err(other),
     }
 }

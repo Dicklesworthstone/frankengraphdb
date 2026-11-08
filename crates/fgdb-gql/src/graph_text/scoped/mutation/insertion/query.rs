@@ -645,7 +645,10 @@ impl<'a> Parser<'a> {
         // occurrences (openCypher Create6 "... WITH n WHERE ... RETURN").
         // In a chain, a next write directly after it (`CREATE (a), (b) MERGE
         // (a)-[:R]->(b)`) reads every binding, as `WITH *` would.
-        let implicit = self.chain_write && self.at_chained_write()?;
+        // Imported owned identities have no frozen CREATE-property slot.
+        // Read their terminal fields through the existing staged row tail.
+        let implicit = (self.chain_write && self.at_chained_write()?)
+            || (self.read_elements && self.return_reads_row_element(source)?);
         let head = implicit || self.take_word("WITH")?;
         if !head {
             self.word("RETURN")?;
