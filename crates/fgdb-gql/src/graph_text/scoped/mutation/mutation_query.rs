@@ -5,6 +5,7 @@
 mod combined;
 mod row_maps;
 
+use super::return_projection::pipeline::{metadata_source, property_map_source};
 use super::*;
 use crate::mutation_text::{
     MutationReturnTemplate, PreparedGraphMutationQueryText, WriteReturnGroupTemplate,
@@ -869,7 +870,7 @@ impl<'a> ParsedMutationReturn<'a> {
 impl<'a> Parser<'a> {
     /// `row` is the WITH row of a write after WITH (fgdb-sl4ym): RETURN then
     /// reads its values, and `*` is every column it carries.
-    /// Whether the RETURN at the current token reads `name.key` of a
+    /// Whether the RETURN at the current token reads a property or metadata of a
     /// dynamically typed value of the WITH row, such as an unwound element,
     /// or an owned identity whose fields the native staged reader supplies.
     /// Nothing is consumed.
@@ -900,8 +901,17 @@ impl<'a> Parser<'a> {
                 TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
                 TokenKind::Word(word)
                     if !matches!(previous, TokenKind::Punct(b'.'))
-                        && element(word)
-                        && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) =>
+                        && ((element(word)
+                            && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')))
+                            || (self.read_elements
+                                && (property_map_source(word, token.at, &lexer)?
+                                    .is_some_and(|source| element(source.text))
+                                    || metadata_source(word, token.at, &lexer)?.is_some_and(
+                                        |(source, function)| {
+                                            function == GraphPathFunction::Labels
+                                                && element(source.text)
+                                        },
+                                    )))) =>
                 {
                     return Ok(true);
                 }

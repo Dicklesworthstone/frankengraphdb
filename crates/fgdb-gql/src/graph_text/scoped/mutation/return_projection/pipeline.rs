@@ -507,7 +507,7 @@ fn hidden_boundary_value<'a>(
 
 /// Recognize only a complete graph-element map request. Nested map-valued
 /// expressions keep their ordinary scalar leaves and are not catalog reads.
-pub(super) fn property_map_source<'a>(
+pub(in crate::graph_text::scoped::mutation) fn property_map_source<'a>(
     word: &'a str,
     at: usize,
     lexer: &Lexer<'a>,
@@ -538,7 +538,7 @@ pub(super) fn property_map_source<'a>(
 /// map-valued rows, and must not be inferred to be vertices. A literal NULL
 /// argument is no binding: the scalar compiler answers `labels(null)` and
 /// its siblings with NULL (TCK Graph3 [7], Graph4 [3]).
-pub(super) fn metadata_source<'a>(
+pub(in crate::graph_text::scoped::mutation) fn metadata_source<'a>(
     word: &'a str,
     at: usize,
     lexer: &Lexer<'a>,

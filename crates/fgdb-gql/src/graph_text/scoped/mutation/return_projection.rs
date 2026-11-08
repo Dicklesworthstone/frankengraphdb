@@ -1617,14 +1617,28 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let source = self.name()?;
+        // An owned identity reads the current staged graph. A cached map
+        // from its input must not hide fields changed by the preceding write.
+        let native = if columns.is_none() && resolve.is_none() && self.read_elements {
+            schema[..self.visible_width(schema)]
+                .iter()
+                .position(|(name, kind)| {
+                    name.text == source.text
+                        && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                })
+        } else {
+            None
+        };
         let carried = if columns.is_none() {
-            self.boundary_property_map(schema, source.text).or_else(|| {
-                schema[..self.visible_width(schema)]
-                    .iter()
-                    .position(|(name, kind)| {
-                        name.text == source.text
-                            && (kind.is_scalar_like() || *kind == GraphSetColumnType::Any)
-                    })
+            native.or_else(|| {
+                self.boundary_property_map(schema, source.text).or_else(|| {
+                    schema[..self.visible_width(schema)]
+                        .iter()
+                        .position(|(name, kind)| {
+                            name.text == source.text
+                                && (kind.is_scalar_like() || *kind == GraphSetColumnType::Any)
+                        })
+                })
             })
         } else {
             None
@@ -1725,15 +1739,22 @@ impl<'a> Parser<'a> {
         }
         let (keys, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         if all {
-            let base = match columns.as_deref_mut() {
-                Some(columns) => {
+            let base = match (columns.as_deref_mut(), native) {
+                (Some(columns), _) => {
                     ReadValueTemplate::Column(self.property_map_projection(columns, source)?)
                 }
-                None if resolve.is_some() => resolve
+                (None, _) if resolve.is_some() => resolve
                     .as_mut()
                     .expect("resolver checked")
                     .map_properties(self, source)?,
-                None => ReadValueTemplate::Column(carried.expect("carried map source checked")),
+                (None, Some(column)) => ReadValueTemplate::ElementMetadata {
+                    kind: crate::GraphElementMetadata::Properties,
+                    value: Box::new(ReadValueTemplate::Column(column)),
+                    catalog: self.syntax.element_catalog.request(),
+                },
+                (None, None) => {
+                    ReadValueTemplate::Column(carried.expect("carried map source checked"))
+                }
             };
             return Ok(ReadValueTemplate::MapOverlay {
                 base: Box::new(base),
@@ -1741,18 +1762,19 @@ impl<'a> Parser<'a> {
                 values,
             });
         }
-        let guard = match columns {
-            Some(columns) => {
+        let guard = match (columns, native) {
+            (Some(columns), _) => {
                 ReadValueTemplate::Column(self.mutation_projection(columns, source, None)?)
             }
-            None if resolve.is_some() => {
+            (None, _) if resolve.is_some() => {
                 ReadValueTemplate::Column(resolve.as_mut().expect("resolver checked").map_input(
                     self,
                     source,
                     ReturnMapInput::Guard,
                 )?)
             }
-            None => ReadValueTemplate::MapOverlay {
+            (None, Some(column)) => ReadValueTemplate::Column(column),
+            (None, None) => ReadValueTemplate::MapOverlay {
                 base: Box::new(ReadValueTemplate::Column(
                     carried.expect("carried map source checked"),
                 )),
