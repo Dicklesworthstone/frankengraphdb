@@ -2598,7 +2598,11 @@ impl<'a> Parser<'a> {
             .iter()
             .any(|write| self.is_word(write))
                 || self.at_relationship_merge().unwrap_or(false)
-                || (self.chain_write && self.is_word("MERGE")))
+                || (self.chain_write && self.is_word("MERGE"))
+                || (self.chain_write
+                    && self.is_word("CALL")
+                    && crate::PreparedGraphWriteChainText::call_has_write(self.lexer.clone())
+                        .unwrap_or(false)))
     }
 
     fn multipart_parts(

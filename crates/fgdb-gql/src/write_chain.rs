@@ -15,9 +15,15 @@
 
 mod foreach;
 mod read;
+mod unit_call;
 
 pub(crate) use foreach::PreparedGraphForeachText;
-pub use foreach::{GraphWriteChainCursor, GraphWriteChainTask, PreparedGraphForeach};
+pub use foreach::{
+    GraphWriteChainCursor, GraphWriteChainRead, GraphWriteChainReadPhase, GraphWriteChainTask,
+    PreparedGraphForeach,
+};
+pub use unit_call::PreparedGraphUnitCall;
+pub(crate) use unit_call::PreparedGraphUnitCallText;
 
 use crate::insertion::PreparedGraphInsert;
 use crate::insertion_query_text::InsertReturnTemplate;
@@ -38,6 +44,8 @@ use crate::{
 pub(crate) enum ChainTextStep {
     /// A scoped iteration whose body never changes its outer occurrence bag.
     Foreach(Box<PreparedGraphForeachText>),
+    /// A private write body invoked once per outer occurrence.
+    UnitCall(Box<PreparedGraphUnitCallText>),
     /// CREATE, with its WITH head (every step but the last) or RETURN.
     Insert(Box<(PreparedGraphInsertText, Option<InsertReturnTemplate>)>),
     /// A relationship MERGE over the previous write's rows (the last step).
@@ -81,6 +89,7 @@ impl PreparedGraphWriteChainText {
         }
         match self.steps.last() {
             Some(ChainTextStep::Foreach(step)) => step.returning,
+            Some(ChainTextStep::UnitCall(step)) => step.returning,
             Some(ChainTextStep::Insert(step)) => step.1.is_some(),
             Some(ChainTextStep::EdgeMerge(step)) => step.1.is_some(),
             Some(ChainTextStep::Mutation(step)) => step.1.is_some(),
@@ -210,6 +219,9 @@ pub enum GraphWriteChainStep {
     /// Native scoped side effects over an evaluated collection. Hosts execute
     /// this through GraphWriteChainCursor inside their existing workspace.
     Foreach(Box<PreparedGraphForeach>),
+    /// A native unit subquery whose imported bindings are private to its
+    /// body. The cursor preserves each outer row and the host's transaction.
+    UnitCall(Box<PreparedGraphUnitCall>),
     /// A CREATE with a WITH head (every step but the last) or a RETURN (the
     /// last step): it returns rows.
     Query(Box<PreparedGraphInsertQuery>),
@@ -256,6 +268,7 @@ impl core::fmt::Debug for GraphWriteChainStep {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::Foreach(_) => "Foreach([REDACTED])",
+            Self::UnitCall(_) => "UnitCall([REDACTED])",
             Self::Query(_) => "Query([REDACTED])",
             Self::Insert(_) => "Insert([REDACTED])",
             Self::EdgeMerge(_) => "EdgeMerge([REDACTED])",
@@ -506,6 +519,9 @@ impl PreparedGraphWriteChain {
                 GraphWriteChainStep::Foreach(foreach) if !foreach.requires_read() => {
                     foreach.body().independent_create_relation()?
                 }
+                GraphWriteChainStep::UnitCall(call) if !call.requires_read() => {
+                    call.body().independent_create_relation()?
+                }
                 _ => return None,
             };
             if relation.is_some_and(|previous| previous != current) {
@@ -534,6 +550,7 @@ impl PreparedGraphWriteChain {
     pub(crate) fn write_columns(&self) -> &[String] {
         match self.steps.last() {
             Some(GraphWriteChainStep::Foreach(step)) => step.columns(),
+            Some(GraphWriteChainStep::UnitCall(step)) => step.columns(),
             Some(GraphWriteChainStep::Query(query)) => query.columns(),
             Some(GraphWriteChainStep::EdgeMergeQuery(query)) => query.columns(),
             Some(GraphWriteChainStep::EdgeUpsertQuery { query, .. }) => query.columns(),
@@ -547,6 +564,9 @@ impl PreparedGraphWriteChain {
     #[must_use]
     pub fn returns_rows(&self) -> bool {
         if let Some(GraphWriteChainStep::Foreach(step)) = self.steps.last() {
+            return step.returns_rows();
+        }
+        if let Some(GraphWriteChainStep::UnitCall(step)) = self.steps.last() {
             return step.returns_rows();
         }
         matches!(

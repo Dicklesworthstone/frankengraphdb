@@ -44,7 +44,9 @@ pub enum GraphSetTextErrorKind {
 impl core::fmt::Display for GraphSetTextErrorKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::CallBodyWrite => f.write_str("writes inside inline CALL are not supported"),
+            Self::CallBodyWrite => {
+                f.write_str("writes inside inline CALL require native write-chain execution")
+            }
             Self::Expected(item) => crate::graph_text::write_expected(f, item),
             Self::Pattern(kind) => kind.fmt(f),
             Self::SetBuild(error) => error.fmt(f),

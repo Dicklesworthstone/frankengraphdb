@@ -832,14 +832,8 @@ mod tests {
     ) -> bool {
         let policy = GqlQueryPolicy::new(1_000, 1_000, 1_000_000, 1_000_000);
         let execution = match task {
-            GraphWriteChainTask::ForeachInput { foreach } => {
-                foreach.execute_input_governed(rows.take(), policy, no_patterns, || Ok(()))
-            }
-            GraphWriteChainTask::ForeachCollection { foreach } => {
-                foreach.execute_collection_governed(rows.take(), policy, no_patterns, || Ok(()))
-            }
-            GraphWriteChainTask::ForeachOutput { foreach, .. } => {
-                foreach.execute_output_governed(rows.take(), policy, no_patterns, || Ok(()))
+            GraphWriteChainTask::Read(read) => {
+                read.execute_governed(rows.take(), policy, no_patterns, || Ok(()))
             }
             GraphWriteChainTask::Write { .. } => return false,
         };
@@ -997,7 +991,8 @@ mod tests {
             .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
             .unwrap()
         {
-            inputs += usize::from(matches!(&task, GraphWriteChainTask::ForeachInput { .. }));
+            inputs += usize::from(matches!(&task, GraphWriteChainTask::Read(read)
+                if read.phase() == crate::GraphWriteChainReadPhase::Input));
             if !execute_foreach_phase(&task, &mut rows) {
                 assert!(matches!(
                     task,
@@ -1041,8 +1036,8 @@ mod tests {
         let error = loop {
             match cursor.next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(())) {
                 Ok(Some(task)) => {
-                    inputs +=
-                        usize::from(matches!(&task, GraphWriteChainTask::ForeachInput { .. }));
+                    inputs += usize::from(matches!(&task, GraphWriteChainTask::Read(read)
+                        if read.phase() == crate::GraphWriteChainReadPhase::Input));
                     assert!(execute_foreach_phase(&task, &mut rows));
                 }
                 Err(error) => break error,
@@ -1072,7 +1067,8 @@ mod tests {
                 .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
                 .unwrap()
                 .unwrap();
-            inputs += usize::from(matches!(&task, GraphWriteChainTask::ForeachInput { .. }));
+            inputs += usize::from(matches!(&task, GraphWriteChainTask::Read(read)
+                if read.phase() == crate::GraphWriteChainReadPhase::Input));
             assert!(execute_foreach_phase(&task, &mut rows));
         }
         let before = rows.clone();
@@ -1115,8 +1111,10 @@ mod tests {
             .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
             .unwrap()
         {
-            if let GraphWriteChainTask::ForeachOutput { delivers, .. } = &task {
-                outputs.push(*delivers);
+            if let GraphWriteChainTask::Read(read) = &task
+                && read.phase() == crate::GraphWriteChainReadPhase::Output
+            {
+                outputs.push(read.delivers_rows());
             }
             if !execute_foreach_phase(&task, &mut rows) {
                 assert!(matches!(
@@ -1153,23 +1151,13 @@ mod tests {
             .unwrap()
         {
             match task {
-                GraphWriteChainTask::ForeachInput { foreach } => {
-                    rows = Some(
-                        foreach
-                            .execute_input_governed(rows.take(), policy, no_patterns, || Ok(()))
-                            .unwrap()
-                            .value,
+                GraphWriteChainTask::Read(read) => {
+                    assert_eq!(
+                        read.delivers_rows(),
+                        read.phase() == crate::GraphWriteChainReadPhase::Output
                     );
-                }
-                GraphWriteChainTask::ForeachCollection { foreach } => {
                     rows = Some(
-                        foreach
-                            .execute_collection_governed(
-                                rows.take(),
-                                policy,
-                                no_patterns,
-                                || Ok(()),
-                            )
+                        read.execute_governed(rows.take(), policy, no_patterns, || Ok(()))
                             .unwrap()
                             .value,
                     );
@@ -1214,15 +1202,6 @@ mod tests {
                         }
                         other => panic!("unexpected local step: {other:?}"),
                     }
-                }
-                GraphWriteChainTask::ForeachOutput { foreach, delivers } => {
-                    assert!(delivers);
-                    rows = Some(
-                        foreach
-                            .execute_output_governed(rows.take(), policy, no_patterns, || Ok(()))
-                            .unwrap()
-                            .value,
-                    );
                 }
             }
         }
@@ -1398,25 +1377,17 @@ mod tests {
             .unwrap()
         {
             match task {
-                GraphWriteChainTask::ForeachInput { foreach } => {
-                    rows = Some(
-                        foreach
-                            .execute_input_governed(rows.take(), policy, no_patterns, || Ok(()))
-                            .unwrap()
-                            .value,
+                GraphWriteChainTask::Read(read) => {
+                    if read.phase() == crate::GraphWriteChainReadPhase::Collection {
+                        collections += 1;
+                        assert_eq!(rows.as_ref().unwrap().len(), 1);
+                    }
+                    assert_eq!(
+                        read.delivers_rows(),
+                        read.phase() == crate::GraphWriteChainReadPhase::Output
                     );
-                }
-                GraphWriteChainTask::ForeachCollection { foreach } => {
-                    collections += 1;
-                    assert_eq!(rows.as_ref().unwrap().len(), 1);
                     rows = Some(
-                        foreach
-                            .execute_collection_governed(
-                                rows.take(),
-                                policy,
-                                no_patterns,
-                                || Ok(()),
-                            )
+                        read.execute_governed(rows.take(), policy, no_patterns, || Ok(()))
                             .unwrap()
                             .value,
                     );
@@ -1434,15 +1405,6 @@ mod tests {
                     iterations.push(local[0].values().last().unwrap().clone());
                     // A body's physical output never determines outer rows.
                     rows = Some(Vec::new());
-                }
-                GraphWriteChainTask::ForeachOutput { foreach, delivers } => {
-                    assert!(delivers);
-                    rows = Some(
-                        foreach
-                            .execute_output_governed(rows.take(), policy, no_patterns, || Ok(()))
-                            .unwrap()
-                            .value,
-                    );
                 }
             }
         }

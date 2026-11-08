@@ -5,6 +5,7 @@
 mod chain;
 mod foreach;
 mod query;
+mod unit_call;
 
 use super::*;
 use crate::insertion::{

@@ -16,6 +16,7 @@ impl PreparedGraphWriteChain {
     fn read_input_types(&self) -> Option<&[GraphSetColumnType]> {
         match self.steps.last()? {
             GraphWriteChainStep::Foreach(step) => Some(step.column_types()),
+            GraphWriteChainStep::UnitCall(step) => Some(step.column_types()),
             GraphWriteChainStep::Query(query) => Some(query.column_types()),
             GraphWriteChainStep::EdgeMergeQuery(query) => Some(query.column_types()),
             GraphWriteChainStep::EdgeUpsertQuery { query, .. } => Some(query.column_types()),

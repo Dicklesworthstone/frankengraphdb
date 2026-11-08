@@ -432,74 +432,15 @@ impl WriteTxn {
                     event,
                 )
             })? {
-                // FOREACH suspends this occurrence bag while its iterations
-                // use the SAME workspace and cumulative allowance. Its native
-                // body writes return here one at a time; the scheduler restores
-                // the original outer rows and drops body-local bindings.
+                // Scoped writes suspend the outer occurrence bag while their
+                // bodies use this workspace and cumulative allowance. The
+                // scheduler restores the outer rows and drops local bindings.
                 let (step, delivers) = match task {
                     GraphWriteChainTask::Write { step, delivers, .. } => (step, delivers),
-                    GraphWriteChainTask::ForeachInput { foreach } => {
-                        let allowance = remaining(&used, mutation_effects, false);
+                    GraphWriteChainTask::Read(read) => {
+                        let allowance = remaining(&used, mutation_effects, read.delivers_rows());
                         let failure = std::cell::RefCell::new(None);
-                        let selected = foreach.execute_input_governed(
-                            rows.take(),
-                            allowance.query,
-                            chain_insert_source(workspace.txn, database, cx, &failure),
-                            || match failure.borrow_mut().take() {
-                                Some(error) => Err(error),
-                                None => cx.checkpoint(),
-                            },
-                        );
-                        let selected = match failure.into_inner() {
-                            Some(error) => Err(GqlQueryError::Interrupted(error)),
-                            None => selected,
-                        }
-                        .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
-                        add(
-                            &mut used,
-                            &GraphInsertStats {
-                                selection: selected.rows,
-                                evaluator: selected.evaluator,
-                                created_vertices: 0,
-                                created_edges: 0,
-                            },
-                        );
-                        rows = Some(selected.value);
-                        continue;
-                    }
-                    GraphWriteChainTask::ForeachCollection { foreach } => {
-                        let allowance = remaining(&used, mutation_effects, false);
-                        let failure = std::cell::RefCell::new(None);
-                        let selected = foreach.execute_collection_governed(
-                            rows.take(),
-                            allowance.query,
-                            chain_insert_source(workspace.txn, database, cx, &failure),
-                            || match failure.borrow_mut().take() {
-                                Some(error) => Err(error),
-                                None => cx.checkpoint(),
-                            },
-                        );
-                        let selected = match failure.into_inner() {
-                            Some(error) => Err(GqlQueryError::Interrupted(error)),
-                            None => selected,
-                        }
-                        .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
-                        add(
-                            &mut used,
-                            &GraphInsertStats {
-                                selection: selected.rows,
-                                evaluator: selected.evaluator,
-                                created_vertices: 0,
-                                created_edges: 0,
-                            },
-                        );
-                        rows = Some(selected.value);
-                        continue;
-                    }
-                    GraphWriteChainTask::ForeachOutput { foreach, delivers } => {
-                        let allowance = remaining(&used, mutation_effects, delivers);
-                        let failure = std::cell::RefCell::new(None);
-                        let selected = foreach.execute_output_governed(
+                        let selected = read.execute_governed(
                             rows.take(),
                             allowance.query,
                             chain_insert_source(workspace.txn, database, cx, &failure),
@@ -540,9 +481,9 @@ impl WriteTxn {
                 let edge_merge = GraphEdgeMergePolicy::new(allowance.query)
                     .with_creation_limit(allowance.max_edges);
                 let (stats, returning) = match step {
-                    // The shared cursor expands every FOREACH into governed
-                    // input/output tasks and ordinary native body writes.
-                    GraphWriteChainStep::Foreach(_) => {
+                    // The shared cursor expands scopes into governed read
+                    // phases and ordinary native body writes.
+                    GraphWriteChainStep::Foreach(_) | GraphWriteChainStep::UnitCall(_) => {
                         return Err(source(WriteTxnError::UnsupportedAtomicMutation));
                     }
                     GraphWriteChainStep::EdgeUpsert(_)

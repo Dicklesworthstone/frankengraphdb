@@ -224,6 +224,20 @@ fn preflight_steps<Clock: FnMut() -> u64>(
             reads |= preflight_steps(foreach.body().steps(), query_cx, scope, execution)?;
             continue;
         }
+        if let GraphWriteChainStep::UnitCall(call) = statement {
+            if call
+                .read_element_keys()
+                .iter()
+                .any(|key| !scope.allows_property(*key))
+            {
+                return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+            }
+            call.admit_patterns(|pattern| admit_pattern(pattern, scope))
+                .map_err(source)?;
+            reads |= call.requires_read();
+            reads |= preflight_steps(call.body().steps(), query_cx, scope, execution)?;
+            continue;
+        }
         if merges::preflight(statement, scope)? || vertices::preflight(statement, scope)? {
             reads = true;
             continue;
@@ -524,12 +538,6 @@ enum Proposal<'a> {
         GraphMutationBatch,
         GraphMutationPolicy,
     ),
-}
-
-enum ForeachPhase {
-    Input,
-    Collection,
-    Output,
 }
 
 fn mutation_error(
@@ -989,20 +997,9 @@ impl<V: Vfs + Clone> Database<V> {
                         event,
                     )
                 })? {
-                    let loop_phase = match &task {
-                        GraphWriteChainTask::ForeachInput { foreach } => {
-                            Some((*foreach, ForeachPhase::Input, false))
-                        }
-                        GraphWriteChainTask::ForeachCollection { foreach } => {
-                            Some((*foreach, ForeachPhase::Collection, false))
-                        }
-                        GraphWriteChainTask::ForeachOutput { foreach, delivers } => {
-                            Some((*foreach, ForeachPhase::Output, *delivers))
-                        }
-                        GraphWriteChainTask::Write { .. } => None,
-                    };
-                    if let Some((foreach, phase, delivers)) = loop_phase {
-                        let allowance = remaining(policy, &used, mutation_effects, delivers);
+                    if let GraphWriteChainTask::Read(read) = &task {
+                        let allowance =
+                            remaining(policy, &used, mutation_effects, read.delivers_rows());
                         let returning = query_cx
                             .with_restriction(|| {
                                 let controls = RefCell::new(&mut execution);
@@ -1018,26 +1015,12 @@ impl<V: Vfs + Clone> Database<V> {
                                     query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                                     controls.borrow_mut().checkpoint()
                                 };
-                                match phase {
-                                    ForeachPhase::Input => foreach.execute_input_governed(
-                                        rows.take(),
-                                        allowance.query,
-                                        graph,
-                                        checkpoint,
-                                    ),
-                                    ForeachPhase::Collection => foreach.execute_collection_governed(
-                                        rows.take(),
-                                        allowance.query,
-                                        graph,
-                                        checkpoint,
-                                    ),
-                                    ForeachPhase::Output => foreach.execute_output_governed(
-                                        rows.take(),
-                                        allowance.query,
-                                        graph,
-                                        checkpoint,
-                                    ),
-                                }
+                                read.execute_governed(
+                                    rows.take(),
+                                    allowance.query,
+                                    graph,
+                                    checkpoint,
+                                )
                             })
                             .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
                         used.selection.snapshot_records = used
@@ -1061,7 +1044,7 @@ impl<V: Vfs + Clone> Database<V> {
                         delivers,
                     } = task
                     else {
-                        unreachable!("FOREACH phases use the native relational collector above");
+                        unreachable!("scoped read phases use the native collector above");
                     };
                     let allowance = remaining(policy, &used, mutation_effects, delivers);
                     let (stats, returning, effects) = if matches!(

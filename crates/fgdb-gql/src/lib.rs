@@ -98,9 +98,9 @@ pub use pipeline_aggregate_text::{
     PreparedGraphPipelineAggregateText,
 };
 pub use write_chain::{
-    GraphWriteChainCursor, GraphWriteChainError, GraphWriteChainStep, GraphWriteChainTask,
-    GraphWriteChainTextError, PreparedGraphForeach, PreparedGraphWriteChain,
-    PreparedGraphWriteChainText,
+    GraphWriteChainCursor, GraphWriteChainError, GraphWriteChainRead, GraphWriteChainReadPhase,
+    GraphWriteChainStep, GraphWriteChainTask, GraphWriteChainTextError, PreparedGraphForeach,
+    PreparedGraphUnitCall, PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
 pub use write_script::{
     BoundGraphWriteScriptBatch, GraphWriteScriptBatchBindError, GraphWriteScriptBatchError,
