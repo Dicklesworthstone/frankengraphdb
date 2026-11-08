@@ -3632,7 +3632,7 @@ impl<'a> Parser<'a> {
                 (ReadValueTemplate::Column(column), true)
             } else {
                 (
-                    self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?,
+                    self.read_recursive_value(inputs, schema, resolve, depth + 1)?,
                     false,
                 )
             };
@@ -3710,8 +3710,7 @@ impl<'a> Parser<'a> {
                 }
                 ReadValueTemplate::List(items)
             } else {
-                let argument =
-                    self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+                let argument = self.read_recursive_value(inputs, schema, resolve, depth + 1)?;
                 self.punct(b')', ")")?;
                 argument
             };
