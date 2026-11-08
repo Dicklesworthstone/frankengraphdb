@@ -569,8 +569,20 @@ impl PreparedGraphWriteChainText {
         }
         let mut brackets = vec![b'{'];
         let mut previous = None;
+        // A RETURN's expressions may use write words as ordinary identifiers
+        // (`RETURN delete + 1`, for example). Its branch cannot write again,
+        // but a sibling UNION branch or enclosing CALL still can.
+        let mut returning_at = None;
+        let mut previous_case_expression = false;
         loop {
             let token = script::next_script_token(&mut lexer)?;
+            let after_case_expression = previous_case_expression;
+            // CASE is also a legal alias/schema name. Only its expression
+            // prefix prevents the next DELETE word from starting a clause.
+            previous_case_expression = matches!(token.kind, TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("CASE"))
+                && !matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
+                && !matches!(previous, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"));
             match token.kind {
                 TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
                 TokenKind::Punct(open @ (b'(' | b'[' | b'{')) => brackets.push(open),
@@ -583,6 +595,7 @@ impl PreparedGraphWriteChainText {
                     if brackets.pop() != Some(open) || brackets.is_empty() {
                         return Ok(false);
                     }
+                    returning_at = returning_at.filter(|&depth| depth <= brackets.len());
                 }
                 TokenKind::Word(word)
                     if brackets.iter().all(|&open| open == b'{')
@@ -590,6 +603,20 @@ impl PreparedGraphWriteChainText {
                         && !matches!(previous, Some(TokenKind::Word(prior))
                             if ["AS", "ON", "STARTS", "ENDS"].iter().any(|not| prior.eq_ignore_ascii_case(not))) =>
                 {
+                    if returning_at.is_some() {
+                        if returning_at == Some(brackets.len())
+                            && word.eq_ignore_ascii_case("UNION")
+                        {
+                            returning_at = None;
+                        }
+                        previous = Some(token.kind);
+                        continue;
+                    }
+                    if word.eq_ignore_ascii_case("RETURN") {
+                        returning_at = Some(brackets.len());
+                        previous = Some(token.kind);
+                        continue;
+                    }
                     if ["CREATE", "INSERT", "MERGE", "FOREACH"]
                         .iter()
                         .any(|clause| word.eq_ignore_ascii_case(clause))
@@ -610,6 +637,9 @@ impl PreparedGraphWriteChainText {
                     if ["DELETE", "DETACH"]
                         .iter()
                         .any(|clause| word.eq_ignore_ascii_case(clause))
+                        && !after_case_expression
+                        && !matches!(previous, Some(TokenKind::Word(prior))
+                            if ["ALL", "DISTINCT"].iter().any(|prefix| prior.eq_ignore_ascii_case(prefix)))
                         && Self::deletion_clause_target(
                             lexer.clone(),
                             previous,

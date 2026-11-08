@@ -29,6 +29,16 @@ fn prepare(text: &str) -> PreparedGraphWriteChain {
         .unwrap_or_else(|error| panic!("bind {text}: {error:?}"))
 }
 
+fn no_graph(
+    _: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+    _: fgdb_gql::GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+    fgdb_gql::GqlQueryError<(), ()>,
+> {
+    panic!("source-free unit CALL must retain its native owned row source")
+}
+
 #[test]
 fn unit_calls_admit_native_read_write_bodies_and_every_import_spelling() {
     for text in [
@@ -163,6 +173,303 @@ fn write_call_framing_keeps_read_only_calls_and_identifier_uses_with_their_owner
         PreparedGraphSetText::prepare("CALL() { RETURN 1 AS value } RETURN value", symbols).is_ok()
     );
     assert!(PreparedGraphSetText::prepare("CALL() { CREATE (:F) } RETURN 1", symbols).is_err());
+}
+
+#[test]
+fn write_keyword_aliases_keep_native_read_only_execution() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
+    use fgdb_types::CanonicalScalar;
+
+    let mut cases = Vec::new();
+    for name in [
+        "create", "insert", "merge", "set", "remove", "delete", "detach", "foreach",
+    ] {
+        cases.push((
+            format!("CALL {{ WITH 1 AS {name} RETURN {name} AS value }} RETURN value"),
+            vec![1],
+        ));
+    }
+    for (text, expected) in [
+        (
+            "CALL { WITH 1 AS delete RETURN delete + 1 AS value } RETURN value",
+            vec![2],
+        ),
+        (
+            "CALL { WITH 1 AS delete RETURN DISTINCT delete + 1 AS value } RETURN value",
+            vec![2],
+        ),
+        (
+            "CALL { WITH [2,3] AS delete RETURN delete[1] AS value } RETURN value",
+            vec![3],
+        ),
+        (
+            "CALL { WITH 1 AS delete \
+             RETURN CASE delete + 1 WHEN 2 THEN 7 ELSE 0 END AS value } RETURN value",
+            vec![7],
+        ),
+        (
+            "CALL { WITH 1 AS delete \
+             WITH CASE delete + 1 WHEN 2 THEN 7 ELSE 0 END AS value RETURN value } RETURN value",
+            vec![7],
+        ),
+        (
+            "CALL { WITH 1 AS delete WITH DISTINCT delete + 1 AS kept \
+             RETURN kept AS value } RETURN value",
+            vec![2],
+        ),
+        (
+            "CALL { CALL { WITH 1 AS delete RETURN delete + 1 AS kept } \
+             RETURN kept AS value } RETURN value",
+            vec![2],
+        ),
+        (
+            "CALL { WITH 1 AS delete RETURN delete + 1 AS value \
+             UNION ALL RETURN 3 AS value } RETURN value",
+            vec![2, 3],
+        ),
+        (
+            "WITH 1 AS delete CALL(delete) { RETURN delete + 1 AS value } RETURN value",
+            vec![2],
+        ),
+    ] {
+        cases.push((text.to_owned(), expected));
+    }
+    for (text, expected) in cases {
+        assert!(
+            !PreparedGraphWriteChainText::is_chain(&text).unwrap(),
+            "read-only identifier use routed to writes: {text}"
+        );
+        let plan = PreparedGraphSetText::prepare(&text, symbols)
+            .unwrap_or_else(|error| panic!("prepare {text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let result = plan
+            .execute_governed(
+                GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                |_, _| -> Result<_, GqlQueryError<(), ()>> {
+                    panic!("source-free read CALL must not touch a graph: {text}")
+                },
+                || Ok(()),
+            )
+            .unwrap_or_else(|error| panic!("execute {text}: {error:?}"));
+        let mut values: Vec<_> = result
+            .value
+            .into_iter()
+            .map(|row| {
+                assert_eq!(row.len(), 1, "{text}");
+                row.values()[0].clone()
+            })
+            .collect();
+        values.sort();
+        assert_eq!(
+            values,
+            expected
+                .into_iter()
+                .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                .collect::<Vec<_>>(),
+            "{text}",
+        );
+    }
+
+    // A child's RETURN ends at its closing brace. UNION begins a new branch;
+    // its write must still reach the unit body's explicit refusal rule.
+    for text in [
+        "CALL { CALL { WITH 1 AS delete RETURN delete + 1 AS value } \
+         CREATE (:F {p:value}) }",
+        "CALL { CALL { RETURN 1 AS x } CALL { CREATE (:F {p:2}) } }",
+        "CALL { WITH {return:7} AS item WITH item.return AS value CREATE (:F {p:value}) }",
+        "CALL { WITH {`return`:7} AS item WITH item.`return` AS value CREATE (:F {p:value}) }",
+        "CALL { MATCH (n:F) WITH n,1 AS case DELETE n }",
+    ] {
+        prepare(text);
+    }
+    for text in [
+        "CALL { RETURN 1 AS value UNION CREATE (:F) }",
+        "CALL { RETURN 1 AS value UNION ALL CREATE (:F) }",
+    ] {
+        assert!(
+            PreparedGraphWriteChainText::is_chain(text).unwrap(),
+            "{text}"
+        );
+        assert!(
+            PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols).is_err(),
+            "a returned write branch must still refuse: {text}",
+        );
+    }
+    // RETURN is a reserved identifier in this language, even when delimited;
+    // the framing fix must not widen that established name grammar.
+    for text in [
+        "CALL { WITH 1 AS return WITH return AS value CREATE (:F {p:value}) }",
+        "CALL { WITH 1 AS `return` WITH `return` AS value CREATE (:F {p:value}) }",
+    ] {
+        assert!(PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols).is_err());
+    }
+}
+
+#[test]
+fn unit_call_rebinding_changes_nested_effects_without_mutating_a_bound_plan() {
+    use fgdb_delta_types::ElementId;
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::insertion::{GraphInsertIntent, GraphInsertPolicy};
+    use fgdb_gql::{GqlQueryPolicy, GraphIntegerError, GraphWriteChainCursor, GraphWriteChainTask};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
+
+    let text = "WITH $outer AS x CALL(x) { CALL(x) { CREATE (:F {p:x+$delta}) } } \
+                RETURN x+$tail AS value";
+    let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+        text,
+        RelationId(1),
+        &[
+            ("outer", GqlParameterType::Int64),
+            ("delta", GqlParameterType::Int64),
+            ("tail", GqlParameterType::Int64),
+        ],
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(template.parameter_schema().len(), 3);
+    let arguments = |outer, delta, tail| {
+        GqlParameters::new()
+            .with_int64("outer", outer)
+            .unwrap()
+            .with_int64("delta", delta)
+            .unwrap()
+            .with_int64("tail", tail)
+            .unwrap()
+    };
+    let first = template.bind_parameters(&arguments(1, 2, 3)).unwrap();
+    let retained = first.clone();
+    let second = template.bind_parameters(&arguments(9, 20, 30)).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(first, retained);
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+
+    let query = GqlQueryPolicy::new(100, 100, 100_000, 100_000);
+    for (chain, expected_property, expected_result) in
+        [(&first, 3, 4), (&second, 29, 39), (&first, 3, 4)]
+    {
+        let mut cursor = GraphWriteChainCursor::new(chain, true);
+        let mut rows = None;
+        let mut properties = Vec::new();
+        while let Some(task) = cursor
+            .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
+            .unwrap()
+        {
+            match task {
+                GraphWriteChainTask::Read(read) => {
+                    rows = Some(
+                        read.execute_governed(rows.take(), query, no_graph, || Ok(()))
+                            .unwrap()
+                            .value,
+                    );
+                }
+                GraphWriteChainTask::Write {
+                    step: GraphWriteChainStep::Insert(insert),
+                    continues: false,
+                    delivers: false,
+                } => {
+                    let batch = insert
+                        .execute_governed_over(
+                            rows.take(),
+                            GraphInsertPolicy::new(query, 10, 0),
+                            no_graph,
+                            |_| Ok::<_, ()>(ElementId::Vertex(VId(1))),
+                            || Ok(()),
+                        )
+                        .unwrap();
+                    for intent in batch.into_intents() {
+                        let GraphInsertIntent::Vertex {
+                            properties: fields, ..
+                        } = intent
+                        else {
+                            panic!("only the native vertex insert may execute");
+                        };
+                        properties.extend(fields);
+                    }
+                    rows = Some(Vec::new());
+                }
+                other => panic!("unexpected task: {other:?}"),
+            }
+        }
+        assert_eq!(
+            properties,
+            vec![(
+                PropertyKeyId(1),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(expected_property)),
+            )],
+        );
+        let rows = rows.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(expected_result))],
+        );
+    }
+}
+
+#[test]
+fn unit_call_cursor_stops_before_effects_at_every_scheduler_control_boundary() {
+    use fgdb_gql::{
+        GqlQueryPolicy, GraphIntegerError, GraphIntegerErrorKind, GraphWriteChainCursor,
+        GraphWriteChainTask,
+    };
+
+    let chain = prepare("UNWIND [1,1,2] AS x CALL(x) { CALL(x) { CREATE (:F {p:x}) } } RETURN x");
+    let query = GqlQueryPolicy::new(100, 100, 100_000, 100_000);
+    let run = |stop: Option<usize>| {
+        let mut cursor = GraphWriteChainCursor::new(&chain, true);
+        let mut rows = None;
+        let mut trace = Vec::new();
+        let mut writes = 0;
+        let result = loop {
+            let task = cursor.next(&mut rows, &mut |event| {
+                let at = trace.len();
+                trace.push((event, writes));
+                if stop == Some(at) {
+                    Err(GraphIntegerError {
+                        instruction: at,
+                        kind: GraphIntegerErrorKind::IncompatibleOperands,
+                    })
+                } else {
+                    Ok(())
+                }
+            });
+            match task {
+                Err(error) => break Err(error),
+                Ok(None) => break Ok(rows),
+                Ok(Some(GraphWriteChainTask::Read(read))) => {
+                    rows = Some(
+                        read.execute_governed(rows.take(), query, no_graph, || Ok(()))
+                            .unwrap()
+                            .value,
+                    );
+                }
+                Ok(Some(GraphWriteChainTask::Write {
+                    step: GraphWriteChainStep::Insert(_),
+                    continues: false,
+                    delivers: false,
+                })) => {
+                    writes += 1;
+                    rows = Some(Vec::new());
+                }
+                Ok(Some(other)) => panic!("unexpected task: {other:?}"),
+            }
+        };
+        (result, trace, writes)
+    };
+    let (complete, trace, writes) = run(None);
+    assert_eq!(writes, 3);
+    assert_eq!(complete.unwrap().unwrap().len(), 3);
+    for stop in 0..trace.len() {
+        let (refused, observed, writes) = run(Some(stop));
+        assert_eq!(refused.unwrap_err().instruction, stop);
+        assert_eq!(observed, trace[..=stop]);
+        assert_eq!(
+            writes, trace[stop].1,
+            "effects after refused checkpoint {stop}"
+        );
+    }
 }
 
 #[test]
