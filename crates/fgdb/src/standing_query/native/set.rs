@@ -493,12 +493,7 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             // source/work/scratch ceiling without spending a final-row
             // allowance on each matching relationship occurrence.
             let input_policy = group::input_policy(policy);
-            let right = self.compile_group_input(
-                cx,
-                plan.right,
-                input_policy,
-                checkpoint,
-            )?;
+            let right = self.compile_group_input(cx, plan.right, input_policy, checkpoint)?;
             let state = self.database.prepare_standing_join_spec(
                 cx,
                 [right, left],

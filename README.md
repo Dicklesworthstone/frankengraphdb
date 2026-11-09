@@ -136,7 +136,7 @@ RETURN person
 
 Matching and nonmatching branches share the same complete sources and use the existing semi-join and anti-join derivatives. Additional witnesses do not duplicate an outer result; only a first or last matching witness changes its Boolean presence. The compiler recognizes its literal-TRUE, LIMIT-one existence wrapper specifically. General per-invocation pages, aggregates and fallible discarded expressions still refuse.
 
-Eligible correlated `COUNT { ... }` expressions and returning `CALL` bodies with `count(*)` also use maintained native grouping:
+Eligible correlated `COUNT { ... }` expressions and returning `CALL` bodies with `count(*)`, `count(value)` or `count(DISTINCT value)` also use maintained native grouping:
 
 ```cypher
 SUBSCRIBE TO
@@ -146,7 +146,20 @@ RETURN person,
        COUNT { MATCH (person)-[:KNOWS]->(friend) } AS degree
 ```
 
-Counts include parallel witnesses, return zero for an absent match, and remain independent of duplicate outer occurrences. The right-hand source is first restricted to keys needed by current outer rows, then grouped once per key before its count is joined back to the original outer bag. This also prevents unused groups from causing conditional count-overflow errors. Witness rows use the existing private aggregate-input budget; counts retain native checked Int64 conversion. The initial count profile supports typed equality correlation and keyless counts; COUNT of an expression, additional correlated predicates, HAVING, local pages and DISTINCT remain unsupported.
+Counts return zero for an absent match and remain independent of duplicate outer occurrences. `count(*)` includes parallel witnesses; `count(friend)` excludes NULL values; `count(DISTINCT friend)` counts unique neighbors and changes only when a neighbor's first or last witness changes. For example:
+
+```cypher
+SUBSCRIBE TO
+MATCH (person:Person)
+WITH person
+CALL (person) {
+    MATCH (person)-[:KNOWS]->(friend)
+    RETURN count(DISTINCT friend) AS neighbors
+}
+RETURN person, neighbors
+```
+
+The right-hand source is first restricted to keys needed by current outer rows, then grouped once per key before its count is joined back to the original outer bag. This also prevents unused groups from causing conditional count-overflow errors. Witness rows use the existing private aggregate-input budget; counts retain native checked Int64 conversion. Value counts require a safely projected column of the independent graph source, including copied or reordered aliases. Typed equality correlation and keyless counts qualify; computed/property arguments, outer-only arguments, additional correlated predicates, HAVING, local pages and relational DISTINCT remain unsupported.
 
 ### Nested MAP parameters in transaction reads
 

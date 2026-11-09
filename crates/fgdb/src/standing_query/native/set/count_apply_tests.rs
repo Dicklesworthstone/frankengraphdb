@@ -25,6 +25,21 @@ const CALL_COUNT: &str = concat!(
     "CALL (a) { MATCH (a)-[:R]->(b:M) RETURN count(*) AS degree } ",
     "RETURN token,a,degree"
 );
+const CALL_VALUE_COUNT: &str = concat!(
+    "MATCH (a:L) UNWIND [7,7] AS token WITH token,a ",
+    "CALL (a) { MATCH (a)-[:R]->(b:M) RETURN count(b) AS degree } ",
+    "RETURN token,a,degree"
+);
+const CALL_DISTINCT_NEIGHBORS: &str = concat!(
+    "MATCH (a:L) UNWIND [7,7] AS token WITH token,a ",
+    "CALL (a) { MATCH (a)-[:R]->(b:M) RETURN count(DISTINCT b) AS degree } ",
+    "RETURN token,a,degree"
+);
+const CALL_DISTINCT_EDGES: &str = concat!(
+    "MATCH (a:L) UNWIND [7,7] AS token WITH token,a ",
+    "CALL (a) { MATCH (a)-[r:R]->(b:M) RETURN count(DISTINCT r) AS degree } ",
+    "RETURN token,a,degree"
+);
 const COUNT_FILTER: &str = concat!(
     "MATCH (a:L) UNWIND [7,7] AS token WITH token,a ",
     "WHERE COUNT { MATCH (a)-[:R]->(b:M) } >= 2 RETURN token,a"
@@ -73,10 +88,9 @@ fn integer(value: i64) -> GraphValue {
 }
 
 fn vertex(value: Option<u128>) -> GraphValue {
-    value.map_or(
-        GraphValue::Scalar(CanonicalScalar::Null),
-        |id| GraphValue::Vertex(VId(id)),
-    )
+    value.map_or(GraphValue::Scalar(CanonicalScalar::Null), |id| {
+        GraphValue::Vertex(VId(id))
+    })
 }
 
 fn row(values: Vec<GraphValue>) -> GraphValueRow {
@@ -96,15 +110,13 @@ fn occurrences(rows: impl IntoIterator<Item = GraphValueRow>) -> Bag {
 }
 
 fn cells(values: Vec<QueryValue>) -> GraphValueRow {
-    row(
-        values
-            .into_iter()
-            .map(|value| match value {
-                QueryValue::Value(value) => value,
-                _ => panic!("a native relational count retains its value cells"),
-            })
-            .collect(),
-    )
+    row(values
+        .into_iter()
+        .map(|value| match value {
+            QueryValue::Value(value) => value,
+            _ => panic!("a native relational count retains its value cells"),
+        })
+        .collect())
 }
 
 fn native_bag(rows: &ZSet<Vec<QueryValue>>) -> Bag {
@@ -156,7 +168,11 @@ fn check(
             panic!("native correlated counts return rows");
         };
         assert_eq!(columns.as_slice(), query.columns());
-        assert_eq!(occurrences(rows.into_iter().map(cells)), *expected, "{text}");
+        assert_eq!(
+            occurrences(rows.into_iter().map(cells)),
+            *expected,
+            "{text}"
+        );
     }
 }
 
@@ -219,7 +235,11 @@ fn expected_bags(counts: &[(u128, i64)]) -> [Bag; 4] {
 }
 
 fn assert_count_circuit(queries: &[StandingQuery]) {
-    assert!(queries.iter().any(|query| matches!(query, StandingQuery::Group(_))));
+    assert!(
+        queries
+            .iter()
+            .any(|query| matches!(query, StandingQuery::Group(_)))
+    );
     for expected in [RowJoinKind::Semi, RowJoinKind::Left] {
         assert!(queries.iter().any(|query| {
             matches!(query, StandingQuery::Join(join) if join.spec().kind() == expected)
@@ -323,8 +343,7 @@ fn native_count_and_call_summarize_parallel_witnesses_once_per_outer_occurrence(
                 13 => expected_bags(&[(1, 0), (9, 1)]),
                 _ => unreachable!(),
             };
-            for (((text, query, handle), before), after) in
-                queries.iter().zip(&expected).zip(&next)
+            for (((text, query, handle), before), after) in queries.iter().zip(&expected).zip(&next)
             {
                 check(&db, &cx, text, query, handle, after, policy());
                 check_delta(&db, &cx, handle, from, before, after);
@@ -335,6 +354,122 @@ fn native_count_and_call_summarize_parallel_witnesses_once_per_outer_occurrence(
             db.rebuild_standing_query(&cx, handle, policy()).unwrap();
             check(&db, &cx, text, query, handle, rows, policy());
             check_delta(&db, &cx, handle, db.frontier().unwrap(), rows, rows);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn expected_value_counts(counts: &[(u128, i64, i64)]) -> [Bag; 3] {
+    let mut expected = [Bag::new(), Bag::new(), Bag::new()];
+    for &(owner, occurrences, neighbors) in counts {
+        for (output, count) in expected
+            .iter_mut()
+            .zip([occurrences, neighbors, occurrences])
+        {
+            output.insert(
+                row(vec![integer(7), vertex(Some(owner)), integer(count)]),
+                2,
+            );
+        }
+    }
+    expected
+}
+
+#[test]
+fn native_value_counts_distinguish_parallel_edges_and_last_neighbor_support() {
+    let ((), report) = run_async_under_lab(0x636e_7007, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xe7)).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let parameters = GqlParameters::new();
+        let mut queries = Vec::new();
+        for text in [
+            CALL_VALUE_COUNT,
+            CALL_DISTINCT_NEIGHBORS,
+            CALL_DISTINCT_EDGES,
+        ] {
+            let prepared = PreparedNativeRead::prepare(text, &parameters, symbols).unwrap();
+            let (nodes, _) = prepared.subscription_footprint(&cx, &parameters).unwrap();
+            let first = db.standing_queries.len();
+            let handle = db
+                .register_standing_native(&cx, text, &parameters, symbols, policy())
+                .unwrap();
+            assert!(u64::try_from(db.standing_queries.len() - first).unwrap() <= nodes);
+            assert_count_circuit(&db.standing_queries[first..]);
+            queries.push((text, bind(text), handle));
+        }
+        let mut expected = expected_value_counts(&[(1, 2, 1), (3, 1, 1), (5, 0, 0)]);
+        for ((text, query, handle), rows) in queries.iter().zip(&expected) {
+            check(&db, &cx, text, query, handle, rows, policy());
+        }
+        for phase in 0..12 {
+            let from = db.frontier().unwrap();
+            let mut change = WriteBatch::new(R);
+            match phase {
+                0 => {
+                    change.delete_edge(EId(11));
+                }
+                1 => {
+                    change.add_edge(EId(15), VId(1), VId(4), vec![]);
+                }
+                2 => {
+                    change.delete_edge(EId(12));
+                }
+                3 => {
+                    change.add_edge(EId(16), VId(1), VId(4), vec![]);
+                }
+                4 => {
+                    change.set_vertex_label(VId(4), M, false);
+                }
+                5 => {
+                    change.set_vertex_label(VId(4), M, true);
+                }
+                6 => {
+                    change.delete_vertex(VId(4));
+                }
+                7 => {
+                    change.add_edge(EId(17), VId(1), VId(2), vec![]);
+                }
+                8 => {
+                    change.set_vertex_label(VId(1), L, false);
+                }
+                9 => {
+                    change.set_vertex_label(VId(1), L, true);
+                    change.add_edge(EId(18), VId(1), VId(2), vec![]);
+                }
+                10 => {
+                    change.delete_vertex(VId(2));
+                }
+                11 => {
+                    change.set_vertex_label(VId(6), M, true);
+                    change.add_edge(EId(19), VId(5), VId(6), vec![]);
+                }
+                _ => unreachable!(),
+            }
+            db.write(&commit, change).await.unwrap();
+            let next = match phase {
+                0 | 2 => expected_value_counts(&[(1, 1, 1), (3, 1, 1), (5, 0, 0)]),
+                1 => expected_value_counts(&[(1, 2, 2), (3, 1, 1), (5, 0, 0)]),
+                3 | 5 => expected_value_counts(&[(1, 2, 1), (3, 1, 1), (5, 0, 0)]),
+                4 | 6 | 10 => expected_value_counts(&[(1, 0, 0), (3, 0, 0), (5, 0, 0)]),
+                7 => expected_value_counts(&[(1, 1, 1), (3, 0, 0), (5, 0, 0)]),
+                8 => expected_value_counts(&[(3, 0, 0), (5, 0, 0)]),
+                9 => expected_value_counts(&[(1, 2, 1), (3, 0, 0), (5, 0, 0)]),
+                11 => expected_value_counts(&[(1, 0, 0), (3, 0, 0), (5, 2, 1)]),
+                _ => unreachable!(),
+            };
+            for (((text, query, handle), before), after) in queries.iter().zip(&expected).zip(&next)
+            {
+                check(&db, &cx, text, query, handle, after, policy());
+                check_delta(&db, &cx, handle, from, before, after);
+            }
+            expected = next;
+        }
+        for ((text, query, handle), rows) in queries.iter().zip(&expected) {
+            db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+            check(&db, &cx, text, query, handle, rows, policy());
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -363,13 +498,7 @@ fn counts_of_missing_and_null_imports_are_zero_without_scaling_shared_key_summar
         let query = bind(NULL_IMPORT);
         let first = db.standing_queries.len();
         let handle = db
-            .register_standing_native(
-                &cx,
-                NULL_IMPORT,
-                &GqlParameters::new(),
-                symbols,
-                policy(),
-            )
+            .register_standing_native(&cx, NULL_IMPORT, &GqlParameters::new(), symbols, policy())
             .unwrap();
         assert_count_circuit(&db.standing_queries[first..]);
         let mut expected = bag([
@@ -450,10 +579,7 @@ fn counts_of_missing_and_null_imports_are_zero_without_scaling_shared_key_summar
                     (nullable_row(1, Some(2), 1), 2),
                     (nullable_row(3, Some(2), 1), 1),
                 ]),
-                8 => bag([
-                    (nullable_row(1, None, 0), 1),
-                    (nullable_row(3, None, 0), 1),
-                ]),
+                8 => bag([(nullable_row(1, None, 0), 1), (nullable_row(3, None, 0), 1)]),
                 9 => bag([(nullable_row(3, None, 0), 1)]),
                 _ => unreachable!(),
             };
@@ -487,13 +613,7 @@ fn private_count_witnesses_do_not_spend_the_public_result_row_quota() {
             let query = bind(text);
             let first = db.standing_queries.len();
             let handle = db
-                .register_standing_native(
-                    &cx,
-                    text,
-                    &GqlParameters::new(),
-                    symbols,
-                    two,
-                )
+                .register_standing_native(&cx, text, &GqlParameters::new(), symbols, two)
                 .unwrap();
             assert_count_circuit(&db.standing_queries[first..]);
             queries.push((text, query, handle));
@@ -562,13 +682,7 @@ fn an_empty_outer_bag_keeps_a_private_global_zero_group_under_zero_public_rows()
         let zero = GqlQueryPolicy::new(1_000, 0, 50_000_000, 50_000_000);
         let first = db.standing_queries.len();
         let handle = db
-            .register_standing_native(
-                &cx,
-                UNCORRELATED,
-                &GqlParameters::new(),
-                symbols,
-                zero,
-            )
+            .register_standing_native(&cx, UNCORRELATED, &GqlParameters::new(), symbols, zero)
             .unwrap();
         assert_count_circuit(&db.standing_queries[first..]);
         check(&db, &cx, UNCORRELATED, &query, &handle, &Bag::new(), zero);
@@ -712,7 +826,15 @@ fn each_count_registration_and_rebuild_checkpoint_preserves_existing_circuits() 
         change.delete_vertex(VId(2));
         db.write(&commit, change).await.unwrap();
         let expected = expected_bags(&[(1, 0), (3, 1), (5, 0)]);
-        check(&db, &cx, CALL_COUNT, &query, &handle, &expected[1], policy());
+        check(
+            &db,
+            &cx,
+            CALL_COUNT,
+            &query,
+            &handle,
+            &expected[1],
+            policy(),
+        );
         db.standing_native_query(&cx, &sibling, policy()).unwrap();
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -762,7 +884,7 @@ fn local_count_semantics_and_fallible_discarded_values_refuse_even_under_empty_o
             ),
             concat!(
                 "MATCH (a:L) WITH a CALL (a) { ",
-                "MATCH (a)-[:R]->(b) RETURN count(b) AS degree } RETURN a,degree"
+                "MATCH (a)-[:R]->(b) RETURN count(b.p) AS degree } RETURN a,degree"
             ),
         ] {
             assert!(
@@ -777,8 +899,8 @@ fn local_count_semantics_and_fallible_discarded_values_refuse_even_under_empty_o
                 } else {
                     text.to_owned()
                 };
-                let prepared = PreparedNativeRead::prepare(&statement, &parameters, symbols)
-                    .unwrap();
+                let prepared =
+                    PreparedNativeRead::prepare(&statement, &parameters, symbols).unwrap();
                 assert!(matches!(
                     prepared.subscription_footprint(&cx, &parameters),
                     Err(StandingQueryError::Unsupported)

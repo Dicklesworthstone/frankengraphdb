@@ -51,7 +51,9 @@ fn charge<E>(
 }
 
 fn names(width: usize) -> Vec<String> {
-    (0..width).map(|column| format!("__fg_apply_{column}")).collect()
+    (0..width)
+        .map(|column| format!("__fg_apply_{column}"))
+        .collect()
 }
 
 fn project<E>(
@@ -65,9 +67,7 @@ fn project<E>(
         values
             .into_iter()
             .enumerate()
-            .map(|(column, value)| {
-                GraphSetProjection::new(format!("__fg_apply_{column}"), value)
-            })
+            .map(|(column, value)| GraphSetProjection::new(format!("__fg_apply_{column}"), value))
             .collect(),
         GraphSetQuantifier::All,
     )
@@ -86,7 +86,12 @@ fn body<'a, E>(
     }
     match &query.node {
         SetNode::Scope(input) => body(input, no_imports, stages, control),
-        SetNode::Project { input, projection, quantifier: GraphSetQuantifier::All, .. } => {
+        SetNode::Project {
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
+            ..
+        } => {
             let Some(base) = body(input, no_imports, stages, control)? else {
                 return Ok(None);
             };
@@ -106,14 +111,22 @@ fn body<'a, E>(
             Ok(Some(base))
         }
         SetNode::Join { left, right, spec } if spec.kind() == RowJoinKind::Inner => {
-            Ok(Some(Base { arguments: Some(left), right, spec: Some(spec) }))
+            Ok(Some(Base {
+                arguments: Some(left),
+                right,
+                spec: Some(spec),
+            }))
         }
-        SetNode::CrossJoin { left, right } => {
-            Ok(Some(Base { arguments: Some(left), right, spec: None }))
-        }
-        SetNode::Pattern(_) if no_imports => {
-            Ok(Some(Base { arguments: None, right: query, spec: None }))
-        }
+        SetNode::CrossJoin { left, right } => Ok(Some(Base {
+            arguments: Some(left),
+            right,
+            spec: None,
+        })),
+        SetNode::Pattern(_) if no_imports => Ok(Some(Base {
+            arguments: None,
+            right: query,
+            spec: None,
+        })),
         _ => Ok(None),
     }
 }
@@ -125,7 +138,12 @@ pub(super) fn existence_input(query: &PreparedGraphSet) -> Option<&PreparedGraph
     if !query.unadorned_incremental_node() {
         return None;
     }
-    let SetNode::Apply { right, kind: ApplyKind::Optional, .. } = &query.node else {
+    let SetNode::Apply {
+        right,
+        kind: ApplyKind::Optional,
+        ..
+    } = &query.node
+    else {
         return None;
     };
     if !right.order.is_empty() || right.offset != 0 || right.count != Some(1) {
@@ -136,7 +154,8 @@ pub(super) fn existence_input(query: &PreparedGraphSet) -> Option<&PreparedGraph
         projection,
         quantifier: GraphSetQuantifier::All,
         ..
-    } = &right.node else {
+    } = &right.node
+    else {
         return None;
     };
     if projection.len() != 1 {
@@ -166,7 +185,12 @@ fn argument_slots<E>(
             Ok(Some(imports.to_vec()))
         }
         SetNode::Scope(input) => argument_slots(input, imports, control),
-        SetNode::Project { input, projection, quantifier: GraphSetQuantifier::All, .. } => {
+        SetNode::Project {
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
+            ..
+        } => {
             let Some(slots) = argument_slots(input, imports, control)? else {
                 return Ok(None);
             };
@@ -205,12 +229,15 @@ fn independent<E>(
             }
             // Check hidden projection cells too: visible-column metadata must
             // never hide a conditionally failing property or catalog read.
-            for column in pattern.plan().operators().iter().flat_map(|operator| {
-                match operator {
+            for column in pattern
+                .plan()
+                .operators()
+                .iter()
+                .flat_map(|operator| match operator {
                     GlaOperator::ProjectValues { columns } => columns.as_slice(),
                     _ => &[],
-                }
-            }) {
+                })
+            {
                 control(GlaExecutionEvent::Work)?;
                 if !matches!(
                     column,
@@ -229,10 +256,13 @@ fn independent<E>(
             }
             Ok(true)
         }
-        SetNode::Scope(input) | SetNode::Filter { input, .. } => {
-            independent(input, control)
-        }
-        SetNode::Project { input, projection, quantifier: GraphSetQuantifier::All, .. } => {
+        SetNode::Scope(input) | SetNode::Filter { input, .. } => independent(input, control),
+        SetNode::Project {
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
+            ..
+        } => {
             for cell in projection {
                 control(GlaExecutionEvent::Work)?;
                 if !matches!(
@@ -317,7 +347,13 @@ impl PreparedGraphSet {
         if !self.unadorned_incremental_node() {
             return Ok(None);
         }
-        let SetNode::Apply { left, right: body_query, imports, kind } = &self.node else {
+        let SetNode::Apply {
+            left,
+            right: body_query,
+            imports,
+            kind,
+        } = &self.node
+        else {
             return Ok(None);
         };
         if matches!(kind, ApplyKind::Collect { .. }) {
@@ -350,7 +386,9 @@ impl PreparedGraphSet {
             Some(code) => rebound(code, &slots, control)?,
             None => Vec::new(),
         };
-        let last_filter = stages.iter().rposition(|stage| matches!(stage, Stage::Filter(..)));
+        let last_filter = stages
+            .iter()
+            .rposition(|stage| matches!(stage, Stage::Filter(..)));
         for (index, stage) in stages.iter().enumerate() {
             control(GlaExecutionEvent::Work)?;
             match stage {
@@ -388,7 +426,9 @@ impl PreparedGraphSet {
         let right_projection = if optional {
             charge(right_width + 1, control)?;
             let mut values: Vec<_> = (0..right_width).map(GraphSetValue::Column).collect();
-            values.push(GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(true))));
+            values.push(GraphSetValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Bool(true),
+            )));
             let Some(projection) = project(&base.right.types, values, control)? else {
                 return Ok(None);
             };
@@ -413,15 +453,24 @@ impl PreparedGraphSet {
         };
         let Ok(mut join) = join else { return Ok(None) };
         if !on.is_empty() {
-            let Ok(selected) = join.with_predicate(&on) else { return Ok(None) };
+            let Ok(selected) = join.with_predicate(&on) else {
+                return Ok(None);
+            };
             join = selected;
         }
-        join = join.with_kind(if optional { RowJoinKind::Left } else { RowJoinKind::Inner });
+        join = join.with_kind(if optional {
+            RowJoinKind::Left
+        } else {
+            RowJoinKind::Inner
+        });
         let mut types: Vec<_> = join.column_types().collect();
         // Keep the original body schema first. Its checked VM programs then
         // need no rewriting, including lexical locals inside CASE/list values.
         // The complete outer tuple and optional witness are a private suffix.
-        charge(base_slots.len() + left_width + usize::from(optional), control)?;
+        charge(
+            base_slots.len() + left_width + usize::from(optional),
+            control,
+        )?;
         let mut values: Vec<_> = base_slots.into_iter().map(GraphSetValue::Column).collect();
         values.extend((0..left_width).map(GraphSetValue::Column));
         if optional {
@@ -437,12 +486,13 @@ impl PreparedGraphSet {
             control(GlaExecutionEvent::Work)?;
             match stage {
                 Stage::Project(query, projection) => {
-                    charge(projection.len() + left_width + usize::from(optional), control)?;
+                    charge(
+                        projection.len() + left_width + usize::from(optional),
+                        control,
+                    )?;
                     let marker = width + left_width;
-                    let mut values: Vec<_> = projection
-                        .iter()
-                        .map(|cell| cell.value().clone())
-                        .collect();
+                    let mut values: Vec<_> =
+                        projection.iter().map(|cell| cell.value().clone()).collect();
                     values.extend((width..width + left_width).map(GraphSetValue::Column));
                     if optional {
                         values.push(GraphSetValue::Column(marker));
@@ -451,12 +501,15 @@ impl PreparedGraphSet {
                         return Ok(None);
                     };
                     if optional {
-                        let Ok(guarded) = projected.with_null_guard(marker, 0..projection.len()) else {
+                        let Ok(guarded) = projected.with_null_guard(marker, 0..projection.len())
+                        else {
                             return Ok(None);
                         };
                         projected = guarded;
                     }
-                    if projected.column_types().get(..projection.len()) != Some(query.types.as_slice()) {
+                    if projected.column_types().get(..projection.len())
+                        != Some(query.types.as_slice())
+                    {
                         return Ok(None);
                     }
                     width = projection.len();
@@ -466,24 +519,27 @@ impl PreparedGraphSet {
                 Stage::Filter(_) if optional => {}
                 Stage::Filter(code) => {
                     charge(types.len() + code.len(), control)?;
-                    let Ok(selected) = RowProjectionSpec::selection(
-                        types.clone(), names(types.len()), code,
-                    ) else { return Ok(None) };
+                    let Ok(selected) =
+                        RowProjectionSpec::selection(types.clone(), names(types.len()), code)
+                    else {
+                        return Ok(None);
+                    };
                     output.push(selected);
                 }
             }
         }
         charge(left_width + width, control)?;
-        let mut values: Vec<_> = (width..width + left_width).map(GraphSetValue::Column).collect();
+        let mut values: Vec<_> = (width..width + left_width)
+            .map(GraphSetValue::Column)
+            .collect();
         values.extend((0..width).map(GraphSetValue::Column));
         let Some(mut restored) = project(&types, values, control)? else {
             return Ok(None);
         };
         if optional {
-            let Ok(guarded) = restored.with_null_guard(
-                width + left_width,
-                left_width..left_width + width,
-            ) else {
+            let Ok(guarded) =
+                restored.with_null_guard(width + left_width, left_width..left_width + width)
+            else {
                 return Ok(None);
             };
             restored = guarded;
@@ -496,8 +552,12 @@ impl PreparedGraphSet {
         // ordinary computed projection deliberately does not permit.
         charge(self.types.len(), control)?;
         let Ok(named) = RowProjectionSpec::selection(
-            self.types.clone(), self.columns.clone(), &[GraphSetPredicateOp::Truth(Some(true))],
-        ) else { return Ok(None) };
+            self.types.clone(),
+            self.columns.clone(),
+            &[GraphSetPredicateOp::Truth(Some(true))],
+        ) else {
+            return Ok(None);
+        };
         output.push(named);
         control(GlaExecutionEvent::Work)?;
         Ok(Some(MaintainedApplyJoin {

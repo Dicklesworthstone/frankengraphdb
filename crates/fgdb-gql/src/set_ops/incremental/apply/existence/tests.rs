@@ -2,13 +2,12 @@
 //! The oracle below uses full-input scalar membership, independent of the recipe.
 
 use super::*;
-use crate::algebra::{GraphValueRow, GraphValueOrder, IntegerComparison};
+use crate::algebra::{GraphValueOrder, GraphValueRow, IntegerComparison};
 use crate::row_join::IncrementalRowJoin;
 use crate::row_projection::IncrementalRowProjection;
 use crate::{
-    GqlParameters, GqlScalarParameter, GraphAggregate, GraphIntegerBinary,
-    GraphIntegerExpression, GraphIntegerOp, GraphSymbol, GraphSymbolKind,
-    PreparedGraphSetText, PreparedGraphText,
+    GqlParameters, GqlScalarParameter, GraphAggregate, GraphIntegerBinary, GraphIntegerExpression,
+    GraphIntegerOp, GraphSymbol, GraphSymbolKind, PreparedGraphSetText, PreparedGraphText,
 };
 use fgdb_delta_types::zset::set::{IncrementalSet, SetOperation};
 use fgdb_delta_types::{LabelId, LimbLimit, PropertyKeyId, RelationId, ZSet, ZWeight};
@@ -51,9 +50,9 @@ fn plain(rows: &ZSet<GraphValueRow>) -> Bag {
 }
 
 fn difference(after: &ZSet<GraphValueRow>, before: &ZSet<GraphValueRow>) -> ZSet<GraphValueRow> {
-    bag(plain(after).into_iter().chain(
-        plain(before).into_iter().map(|(row, count)| (row, -count)),
-    ))
+    bag(plain(after)
+        .into_iter()
+        .chain(plain(before).into_iter().map(|(row, count)| (row, -count))))
 }
 
 fn leaf() -> PreparedGraphSet {
@@ -69,12 +68,8 @@ fn outer() -> PreparedGraphSet {
     PreparedGraphText::prepare(
         "MATCH (n) RETURN n.p AS token,n AS owner,n.q AS wanted",
         |kind, name| match (kind, name) {
-            (GraphSymbolKind::Property, "p") => {
-                Some(GraphSymbol::Property(PropertyKeyId(1)))
-            }
-            (GraphSymbolKind::Property, "q") => {
-                Some(GraphSymbol::Property(PropertyKeyId(2)))
-            }
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
             _ => None,
         },
     )
@@ -87,7 +82,9 @@ fn outer() -> PreparedGraphSet {
 
 fn arguments(types: Vec<GraphSetColumnType>) -> PreparedGraphSet {
     PreparedGraphSet::arguments(
-        (0..types.len()).map(|column| format!("arg{column}")).collect(),
+        (0..types.len())
+            .map(|column| format!("arg{column}"))
+            .collect(),
         types,
     )
     .unwrap()
@@ -96,9 +93,7 @@ fn arguments(types: Vec<GraphSetColumnType>) -> PreparedGraphSet {
 fn witness(body: PreparedGraphSet) -> PreparedGraphSet {
     body.project_ordered_output(vec![GraphSetProjection::new(
         "owner",
-        GraphSetValue::Literal(
-            GqlScalarParameter::new(CanonicalScalar::Bool(true)).unwrap(),
-        ),
+        GraphSetValue::Literal(GqlScalarParameter::new(CanonicalScalar::Bool(true)).unwrap()),
     )])
     .unwrap()
     .with_page(0, Some(1))
@@ -167,9 +162,7 @@ impl Circuit {
         assert_eq!(recipe.join.kind(), RowJoinKind::Semi);
         Self {
             present_join: IncrementalRowJoin::new(recipe.join.clone()),
-            absent_join: IncrementalRowJoin::new(
-                recipe.join.with_kind(RowJoinKind::Anti),
-            ),
+            absent_join: IncrementalRowJoin::new(recipe.join.with_kind(RowJoinKind::Anti)),
             present: IncrementalRowProjection::new(recipe.present),
             absent: IncrementalRowProjection::new(recipe.absent),
             union: IncrementalSet::new(SetOperation::UnionAll),
@@ -182,23 +175,28 @@ impl Circuit {
         left: &ZSet<GraphValueRow>,
         right: &ZSet<GraphValueRow>,
     ) -> ZSet<GraphValueRow> {
-        let present = self.present_join
+        let present = self
+            .present_join
             .prepare(left, right, LIMBS, None, &mut |_| Ok::<_, ()>(()))
             .unwrap()
             .commit();
-        let absent = self.absent_join
+        let absent = self
+            .absent_join
             .prepare(left, right, LIMBS, None, &mut |_| Ok::<_, ()>(()))
             .unwrap()
             .commit();
-        let present = self.present
+        let present = self
+            .present
             .prepare(&present, LIMBS, None, &mut |_| Ok::<_, ()>(()))
             .unwrap()
             .commit();
-        let absent = self.absent
+        let absent = self
+            .absent
             .prepare(&absent, LIMBS, None, &mut |_| Ok::<_, ()>(()))
             .unwrap()
             .commit();
-        let delta = self.union
+        let delta = self
+            .union
             .prepare(&present, &absent, LIMBS, &mut |_| Ok::<_, ()>(()))
             .unwrap()
             .commit();
@@ -216,25 +214,49 @@ impl Circuit {
 fn left_rows(mask: usize) -> ZSet<GraphValueRow> {
     bag([
         (
-            row(vec![scalar(Some(3)), GraphValue::Vertex(VId(u128::MAX)), scalar(Some(10))]),
+            row(vec![
+                scalar(Some(3)),
+                GraphValue::Vertex(VId(u128::MAX)),
+                scalar(Some(10)),
+            ]),
             2,
         ),
         (
-            row(vec![scalar(Some(4)), GraphValue::Vertex(VId(17)), scalar(Some(0))]),
+            row(vec![
+                scalar(Some(4)),
+                GraphValue::Vertex(VId(17)),
+                scalar(Some(0)),
+            ]),
             3,
         ),
-    ].into_iter().enumerate().filter_map(|(index, item)| {
-        (mask & (1 << index) != 0).then_some(item)
-    }))
+    ]
+    .into_iter()
+    .enumerate()
+    .filter_map(|(index, item)| (mask & (1 << index) != 0).then_some(item)))
 }
 
 fn right_rows(mask: usize) -> ZSet<GraphValueRow> {
     bag([
-        (row(vec![GraphValue::Vertex(VId(1)), scalar(Some(10)), scalar(None)]), 2),
-        (row(vec![GraphValue::Vertex(VId(u128::MAX)), scalar(Some(10)), scalar(None)]), 3),
-    ].into_iter().enumerate().filter_map(|(index, item)| {
-        (mask & (1 << index) != 0).then_some(item)
-    }))
+        (
+            row(vec![
+                GraphValue::Vertex(VId(1)),
+                scalar(Some(10)),
+                scalar(None),
+            ]),
+            2,
+        ),
+        (
+            row(vec![
+                GraphValue::Vertex(VId(u128::MAX)),
+                scalar(Some(10)),
+                scalar(None),
+            ]),
+            3,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    .filter_map(|(index, item)| (mask & (1 << index) != 0).then_some(item)))
 }
 
 fn oracle(left: &ZSet<GraphValueRow>, right: &ZSet<GraphValueRow>) -> Bag {
@@ -287,7 +309,10 @@ fn presence_deltas_preserve_outer_bags_across_all_256_simultaneous_transitions()
 fn real_null_rhs_is_a_witness_but_null_predicate_import_is_unknown() {
     let source = leaf()
         .project(
-            vec![GraphSetProjection::new("missing", GraphSetValue::Value(scalar(None)))],
+            vec![GraphSetProjection::new(
+                "missing",
+                GraphSetValue::Value(scalar(None)),
+            )],
             GraphSetQuantifier::All,
         )
         .unwrap();
@@ -295,16 +320,26 @@ fn real_null_rhs_is_a_witness_but_null_predicate_import_is_unknown() {
         .cross_join(source)
         .unwrap();
     let query = outer().optional_apply(witness(body), vec![2]).unwrap();
-    let left = row(vec![scalar(Some(8)), GraphValue::Vertex(VId(19)), scalar(None)]);
+    let left = row(vec![
+        scalar(Some(8)),
+        GraphValue::Vertex(VId(19)),
+        scalar(None),
+    ]);
     let mut circuit = Circuit::new(&query);
-    circuit.tick(&bag([(left.clone(), 4)]), &bag([(row(vec![scalar(None)]), 3)]));
+    circuit.tick(
+        &bag([(left.clone(), 4)]),
+        &bag([(row(vec![scalar(None)]), 3)]),
+    );
     let mut expected = left.values().to_vec();
     expected.push(truth());
     assert_eq!(plain(circuit.rows()), Bag::from([(row(expected), 4)]));
     circuit.tick(&ZSet::new(), &bag([(row(vec![scalar(None)]), -3)]));
     let mut expected = left.values().to_vec();
     expected.push(scalar(None));
-    assert_eq!(plain(circuit.rows()), Bag::from([(row(expected.clone()), 4)]));
+    assert_eq!(
+        plain(circuit.rows()),
+        Bag::from([(row(expected.clone()), 4)])
+    );
     let mut selected = Circuit::new(&self::query());
     selected.tick(&bag([(left, 4)]), &right_rows(3));
     assert_eq!(plain(selected.rows()), Bag::from([(row(expected), 4)]));
@@ -335,12 +370,18 @@ fn typed_keys_and_numeric_where_keep_their_distinct_equality_laws() {
     );
     let mut expected = left_rows(1).iter().next().unwrap().0.values().to_vec();
     expected.push(truth());
-    assert_eq!(plain(circuit.rows()), Bag::from([(row(expected.clone()), 2)]));
+    assert_eq!(
+        plain(circuit.rows()),
+        Bag::from([(row(expected.clone()), 2)])
+    );
 
     let floating = GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(10.0)));
     let source = leaf()
         .project(
-            vec![GraphSetProjection::new("score", GraphSetValue::Value(floating.clone()))],
+            vec![GraphSetProjection::new(
+                "score",
+                GraphSetValue::Value(floating.clone()),
+            )],
             GraphSetQuantifier::All,
         )
         .unwrap();
@@ -350,13 +391,15 @@ fn typed_keys_and_numeric_where_keep_their_distinct_equality_laws() {
         .filter(&[equal(0, 1)])
         .unwrap();
     let query = outer().optional_apply(witness(body), vec![2]).unwrap();
-    assert!(query
-        .incremental_apply_exists_with_control(&mut allow)
-        .unwrap()
-        .unwrap()
-        .join
-        .keys()
-        .is_empty());
+    assert!(
+        query
+            .incremental_apply_exists_with_control(&mut allow)
+            .unwrap()
+            .unwrap()
+            .join
+            .keys()
+            .is_empty()
+    );
     let mut circuit = Circuit::new(&query);
     circuit.tick(&left_rows(1), &bag([(row(vec![floating]), 5)]));
     assert_eq!(plain(circuit.rows()), Bag::from([(row(expected), 2)]));
@@ -364,18 +407,27 @@ fn typed_keys_and_numeric_where_keep_their_distinct_equality_laws() {
 
 #[test]
 fn only_literal_one_witness_pages_are_erased_and_discarded_effects_still_refuse() {
-    let base = || arguments(vec![GraphSetColumnType::Stored]).cross_join(leaf()).unwrap();
+    let base = || {
+        arguments(vec![GraphSetColumnType::Stored])
+            .cross_join(leaf())
+            .unwrap()
+    };
     let literal = base()
         .project(
-            vec![GraphSetProjection::new("ignored", GraphSetValue::Value(scalar(Some(9))))],
+            vec![GraphSetProjection::new(
+                "ignored",
+                GraphSetValue::Value(scalar(Some(9))),
+            )],
             GraphSetQuantifier::All,
         )
         .unwrap();
     let admitted = outer().optional_apply(witness(literal), vec![2]).unwrap();
-    assert!(admitted
-        .incremental_apply_exists_with_control(&mut allow)
-        .unwrap()
-        .is_some());
+    assert!(
+        admitted
+            .incremental_apply_exists_with_control(&mut allow)
+            .unwrap()
+            .is_some()
+    );
     let division = GraphSetValue::Integer(
         GraphIntegerExpression::prepare(&[
             GraphIntegerOp::Literal(Some(12)),
@@ -392,11 +444,9 @@ fn only_literal_one_witness_pages_are_erased_and_discarded_effects_still_refuse(
         .unwrap()
         .filter(&[GraphSetPredicateOp::Truth(Some(false))])
         .unwrap();
-    let property = PreparedGraphText::prepare(
-        "MATCH (n) RETURN n.p AS payload",
-        |kind, _| (kind == GraphSymbolKind::Property)
-            .then_some(GraphSymbol::Property(PropertyKeyId(1))),
-    )
+    let property = PreparedGraphText::prepare("MATCH (n) RETURN n.p AS payload", |kind, _| {
+        (kind == GraphSymbolKind::Property).then_some(GraphSymbol::Property(PropertyKeyId(1)))
+    })
     .unwrap()
     .bind_parameters(&GqlParameters::new())
     .unwrap();
@@ -411,33 +461,55 @@ fn only_literal_one_witness_pages_are_erased_and_discarded_effects_still_refuse(
         witness(base()).with_page(0, Some(0)),
         witness(base()).with_page(0, Some(2)),
         witness(base()).with_page(1, Some(1)),
-        witness(base()).with_order_by(&[GraphValueOrder::ascending(0)]).unwrap(),
+        witness(base())
+            .with_order_by(&[GraphValueOrder::ascending(0)])
+            .unwrap(),
         false_witness,
         witness(base().with_page(0, Some(1))),
-        witness(base().project(
-            vec![GraphSetProjection::new("id", GraphSetValue::Column(1))],
-            GraphSetQuantifier::Distinct,
-        ).unwrap()),
-        witness(base().group_by(&[], &[GraphAggregate::count_rows("count")]).unwrap()),
+        witness(
+            base()
+                .project(
+                    vec![GraphSetProjection::new("id", GraphSetValue::Column(1))],
+                    GraphSetQuantifier::Distinct,
+                )
+                .unwrap(),
+        ),
+        witness(
+            base()
+                .group_by(&[], &[GraphAggregate::count_rows("count")])
+                .unwrap(),
+        ),
         witness(fallible),
-        witness(arguments(vec![GraphSetColumnType::Stored]).cross_join(property.into()).unwrap()),
+        witness(
+            arguments(vec![GraphSetColumnType::Stored])
+                .cross_join(property.into())
+                .unwrap(),
+        ),
     ] {
         let query = outer().optional_apply(body, vec![2]).unwrap();
-        assert!(query
-            .incremental_apply_exists_with_control(&mut allow)
-            .unwrap()
-            .is_none());
+        assert!(
+            query
+                .incremental_apply_exists_with_control(&mut allow)
+                .unwrap()
+                .is_none()
+        );
     }
     let outer_page = self::query().with_page(0, Some(0));
     assert!(!outer_page.incremental_window_sequence_compatible());
-    assert!(outer_page
-        .incremental_apply_exists_with_control(&mut allow)
-        .unwrap()
-        .is_none());
+    assert!(
+        outer_page
+            .incremental_apply_exists_with_control(&mut allow)
+            .unwrap()
+            .is_none()
+    );
 }
 
 fn admitted_apply(query: &PreparedGraphSet) -> bool {
-    if query.incremental_apply_exists_with_control(&mut allow).unwrap().is_some() {
+    if query
+        .incremental_apply_exists_with_control(&mut allow)
+        .unwrap()
+        .is_some()
+    {
         return true;
     }
     match &query.node {
@@ -489,7 +561,11 @@ fn every_definition_checkpoint_keeps_original_schema_names_and_transcript() {
     assert_eq!(recipe.output.column_types(), query.column_types());
     assert_eq!(
         recipe.output.columns().collect::<Vec<_>>(),
-        query.columns().iter().map(String::as_str).collect::<Vec<_>>()
+        query
+            .columns()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
     );
     for stop in 1..=calls {
         let mut seen = 0;

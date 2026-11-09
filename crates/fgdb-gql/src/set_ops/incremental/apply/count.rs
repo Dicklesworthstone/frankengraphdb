@@ -1,4 +1,4 @@
-//! Keyed correlated COUNT(*) through source restriction and native grouping.
+//! Keyed correlated counts through source restriction and native grouping.
 //! Counts are formed from RHS weights, never from an outer-multiplied join.
 
 use super::*;
@@ -8,7 +8,7 @@ use crate::{
     PreparedGraphSetAggregate,
 };
 
-/// A native CountRows recipe over complete original sources.
+/// A native COUNT recipe over complete original sources.
 ///
 /// Compile the original outer and RHS once. Restrict RHS through restrict
 /// (RHS Semi outer), feed those rows to group, then join the ORIGINAL outer
@@ -41,9 +41,7 @@ fn count_summary<'a, E>(
             projection,
             quantifier: GraphSetQuantifier::All,
             ..
-        } if projection.len() == 1
-            && matches!(projection[0].value(), GraphSetValue::Column(0)) =>
-        {
+        } if projection.len() == 1 && matches!(projection[0].value(), GraphSetValue::Column(0)) => {
             count_summary(input, control)
         }
         SetNode::Aggregate(summary) => {
@@ -60,8 +58,14 @@ fn count_summary<'a, E>(
             }
             let mut specs = summary.aggregate_specs();
             control(GlaExecutionEvent::Work)?;
-            if specs.next() != Some((GraphAggregateFunction::CountRows, None))
-                || specs.next().is_some()
+            if !matches!(
+                specs.next(),
+                Some((GraphAggregateFunction::CountRows, None))
+                    | Some((
+                        GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct,
+                        Some(_),
+                    ))
+            ) || specs.next().is_some()
             {
                 return Ok(None);
             }
@@ -72,14 +76,19 @@ fn count_summary<'a, E>(
 }
 
 impl PreparedGraphSet {
-    /// Prove a bounded correlated global COUNT(*) is a native group circuit.
+    /// Prove a bounded correlated global count is a native group circuit.
     ///
-    /// Only Inner Apply with one untransformed, keyless CountRows is admitted.
+    /// Only Inner Apply with one untransformed, keyless count is admitted.
     /// Transparent scopes and one-column count aliases may surround the group.
     /// Its input contains one Arguments-to-independent-graph inner join/product
     /// followed by total ALL projections. The native count-star input may have
-    /// zero projected columns: ALL preserves its occurrence count. ON predicates,
-    /// postfilters, other aggregates, DISTINCT, pages and computed effects refuse.
+    /// zero projected columns: ALL preserves its occurrence count. COUNT(value)
+    /// and COUNT(DISTINCT value) additionally require a copied RHS column, proved
+    /// through every projection. The native grouping owner retains nonnull and
+    /// distinct support, including last-occurrence deletion. An outer argument
+    /// cannot stand in for a RHS value shared by different outer rows. ON
+    /// predicates, postfilters, other aggregates, relational DISTINCT, pages and
+    /// computed effects refuse.
     ///
     /// The complete RHS is first semijoined against active outer keys. This
     /// preserves RHS multiplicity while excluding uninvoked key groups BEFORE
@@ -106,7 +115,8 @@ impl PreparedGraphSet {
             right: body_query,
             imports,
             kind: ApplyKind::Inner,
-        } = &self.node else {
+        } = &self.node
+        else {
             return Ok(None);
         };
         let Some(summary) = count_summary(body_query, control)? else {
@@ -121,14 +131,15 @@ impl PreparedGraphSet {
         {
             return Ok(None);
         }
-        // A COUNT(*) observes occurrence multiplicity, including ALL projection
-        // collisions. It does not observe total copied/literal output values.
-        for stage in stages {
+        // Every original projection executes before aggregation, even when its
+        // output is discarded. Prove all cells total before tracing the one
+        // requested argument; a dead fallible cell must never be optimized away.
+        for stage in &stages {
             control(GlaExecutionEvent::Work)?;
             let Stage::Project(_, projection) = stage else {
                 return Ok(None);
             };
-            for cell in projection {
+            for cell in *projection {
                 control(GlaExecutionEvent::Work)?;
                 if !matches!(
                     cell.value(),
@@ -140,6 +151,36 @@ impl PreparedGraphSet {
                     return Ok(None);
                 }
             }
+        }
+        let Some((function, mut argument)) = summary.aggregate_specs().next() else {
+            return Ok(None);
+        };
+        if let Some(mut column) = argument {
+            // Follow aliases backwards to the original Arguments + RHS frame.
+            // ALL copies preserve occurrence multiplicity, even when multiple
+            // complete input rows project to the same counted value. Native
+            // COUNT DISTINCT, rather than this proof, owns value equivalence.
+            for stage in stages.iter().rev() {
+                control(GlaExecutionEvent::Work)?;
+                let Stage::Project(_, projection) = stage else {
+                    return Ok(None);
+                };
+                let Some(cell) = projection.get(column) else {
+                    return Ok(None);
+                };
+                let GraphSetValue::Column(input) = cell.value() else {
+                    return Ok(None);
+                };
+                column = *input;
+            }
+            let width = base.arguments.map_or(0, |input| input.types.len());
+            let Some(right_column) = column.checked_sub(width) else {
+                return Ok(None);
+            };
+            if right_column >= base.right.types.len() {
+                return Ok(None);
+            }
+            argument = Some(right_column);
         }
         let arguments = match base.arguments {
             Some(arguments) => {
@@ -198,10 +239,17 @@ impl PreparedGraphSet {
         let Some(count_name) = count_name else {
             return Ok(None);
         };
-        let Ok(grouped) = active.group_by(
-            &group_keys,
-            &[GraphAggregate::count_rows(&count_name)],
-        ) else {
+        let count = match (function, argument) {
+            (GraphAggregateFunction::CountRows, None) => GraphAggregate::count_rows(&count_name),
+            (GraphAggregateFunction::Count, Some(column)) => {
+                GraphAggregate::count(&count_name, column)
+            }
+            (GraphAggregateFunction::CountDistinct, Some(column)) => {
+                GraphAggregate::count_distinct(&count_name, column)
+            }
+            _ => return Ok(None),
+        };
+        let Ok(grouped) = active.group_by(&group_keys, &[count]) else {
             return Ok(None);
         };
         let PreparedGraphSet {
@@ -209,7 +257,8 @@ impl PreparedGraphSet {
             columns: group_columns,
             types: group_types,
             ..
-        } = grouped else {
+        } = grouped
+        else {
             return Ok(None);
         };
         charge(group_types.len() + left.types.len(), control)?;

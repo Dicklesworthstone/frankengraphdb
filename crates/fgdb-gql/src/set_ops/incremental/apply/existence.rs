@@ -141,7 +141,9 @@ impl PreparedGraphSet {
         join = join.with_kind(RowJoinKind::Semi);
         charge(left.types.len() + 1, control)?;
         let mut values: Vec<_> = (0..left.types.len()).map(GraphSetValue::Column).collect();
-        values.push(GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(true))));
+        values.push(GraphSetValue::Value(GraphValue::Scalar(
+            CanonicalScalar::Bool(true),
+        )));
         let Some(present) = project(&left.types, values, control)? else {
             return Ok(None);
         };

@@ -7,9 +7,7 @@ use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, LimbLimit, PropertyKeyId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::row_join::RowJoinKind;
-use fgdb_gql::{
-    GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphSetText,
-};
+use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphSetText};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts};
 use std::collections::BTreeMap;
 
@@ -66,10 +64,9 @@ fn bind(text: &str) -> PreparedGraphSet {
 }
 
 fn vertex(value: Option<u128>) -> GraphValue {
-    value.map_or(
-        GraphValue::Scalar(CanonicalScalar::Null),
-        |id| GraphValue::Vertex(VId(id)),
-    )
+    value.map_or(GraphValue::Scalar(CanonicalScalar::Null), |id| {
+        GraphValue::Vertex(VId(id))
+    })
 }
 
 fn boolean(value: bool) -> GraphValue {
@@ -93,15 +90,13 @@ fn occurrences(rows: impl IntoIterator<Item = GraphValueRow>) -> Bag {
 }
 
 fn cells(values: Vec<QueryValue>) -> GraphValueRow {
-    row(
-        values
-            .into_iter()
-            .map(|value| match value {
-                QueryValue::Value(value) => value,
-                _ => panic!("a native relational result retains its value cells"),
-            })
-            .collect(),
-    )
+    row(values
+        .into_iter()
+        .map(|value| match value {
+            QueryValue::Value(value) => value,
+            _ => panic!("a native relational result retains its value cells"),
+        })
+        .collect())
 }
 
 fn native_bag(rows: &ZSet<Vec<QueryValue>>) -> Bag {
@@ -152,7 +147,11 @@ fn check(
             panic!("native existence queries return rows");
         };
         assert_eq!(columns, query.columns());
-        assert_eq!(occurrences(rows.into_iter().map(cells)), *expected, "{text}");
+        assert_eq!(
+            occurrences(rows.into_iter().map(cells)),
+            *expected,
+            "{text}"
+        );
     }
 }
 
@@ -322,8 +321,7 @@ fn native_exists_filters_and_values_keep_outer_bags_through_first_and_last_witne
                 13 => expected_bags(&[(1, false), (9, true)]),
                 _ => unreachable!(),
             };
-            for (((text, query, handle), before), after) in
-                queries.iter().zip(&expected).zip(&next)
+            for (((text, query, handle), before), after) in queries.iter().zip(&expected).zip(&next)
             {
                 check(&db, &cx, text, query, handle, after);
                 check_delta(&db, &cx, handle, from, before, after);
@@ -340,7 +338,11 @@ fn native_exists_filters_and_values_keep_outer_bags_through_first_and_last_witne
 }
 
 fn nullable_row(owner: u128, imported: Option<u128>, present: bool) -> GraphValueRow {
-    row(vec![vertex(Some(owner)), vertex(imported), boolean(present)])
+    row(vec![
+        vertex(Some(owner)),
+        vertex(imported),
+        boolean(present),
+    ])
 }
 
 #[test]
@@ -361,13 +363,7 @@ fn exists_over_optional_imports_preserves_null_outer_rows_and_parallel_multiplic
         let query = bind(NULL_IMPORT);
         let first = db.standing_queries.len();
         let handle = db
-            .register_standing_native(
-                &cx,
-                NULL_IMPORT,
-                &GqlParameters::new(),
-                symbols,
-                policy(),
-            )
+            .register_standing_native(&cx, NULL_IMPORT, &GqlParameters::new(), symbols, policy())
             .unwrap();
         assert_existence_circuit(&db.standing_queries[first..]);
         let mut expected = bag([
@@ -614,8 +610,8 @@ fn existential_source_effects_and_local_pages_refuse_under_empty_outer_and_limit
                 } else {
                     text.to_owned()
                 };
-                let prepared = PreparedNativeRead::prepare(&statement, &parameters, symbols)
-                    .unwrap();
+                let prepared =
+                    PreparedNativeRead::prepare(&statement, &parameters, symbols).unwrap();
                 assert!(matches!(
                     prepared.subscription_footprint(&cx, &parameters),
                     Err(StandingQueryError::Unsupported)
