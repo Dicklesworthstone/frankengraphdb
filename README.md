@@ -108,6 +108,17 @@ RETURN person, friend
 
 Each person keeps qualifying friends, including parallel-edge occurrences, or one row with a NULL friend when none qualify. The predicate runs inside the optional match before null extension. Subquery-local names remain private; later clauses retain the original outer bindings. Multi-clause subquery bodies use the same native expression and correlated `Apply` operators as ordinary reads, with their existing work, scratch, cancellation and authorization controls. Source was added on 2026-11-09; full runtime qualification remains open as recorded in [implementation status](IMPLEMENTATION_STATUS.md).
 
+### Nested MAP parameters in transaction reads
+
+`WriteTxn::query` and the CLI's `transaction --query` accept nested MAP fields in node and relationship property patterns, using the same argument handling as ordinary reads:
+
+```cypher
+MATCH (person:Person {id: $request.person.id})
+RETURN person
+```
+
+Each CLI read step keeps its own parameters. Ordinary transaction reads include staged changes; an explicit `FOR SYSTEM_TIME AS OF SEQ` selects retained committed history at or before the transaction's original basis. MAP fields remain available in other expressions, and generated bindings avoid collisions with caller parameters. Source and regression coverage were added on 2026-11-09; runtime qualification remains open in [implementation status](IMPLEMENTATION_STATUS.md).
+
 ### Relationship reuse in MATCH
 
 A positive `MATCH` uses each relationship ID at most once across the entire

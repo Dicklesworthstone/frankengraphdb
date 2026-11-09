@@ -444,6 +444,136 @@ fn each_step_binds_its_own_parameters_without_text_interpolation() {
 }
 
 #[test]
+fn nested_map_read_parameters_keep_step_bindings_and_the_selected_view() {
+    let ((), report) = run_async_under_lab(0x7478_6330, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        seed.create_vertex(
+            VId(1),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(4))],
+        );
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let options = options(&[
+            "--write",
+            "MATCH (n:Person) SET n.p = 99",
+            "--query",
+            "MATCH (n:Person {p: $request.person.value}) RETURN n.p AS p, $request_person_value AS explicit, $request.person.value AS original",
+            "--param",
+            r#"request=json:{"person":{"value":99}}"#,
+            "--param",
+            "request_person_value=int:7",
+            "--query",
+            "MATCH (n:Person {p: $request.person.value}) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.p AS p",
+            "--param",
+            r#"request=json:{"person":{"value":4}}"#,
+            "--param",
+            "at=uint:1",
+            "--query",
+            "MATCH (n:Person {p: $request.person.value}) RETURN n.p AS p",
+            "--param",
+            r#"request=json:{"person":{"value":4}}"#,
+            "--query",
+            "MATCH (n:Person {p: $request.person.value}) RETURN SUM(n.p) AS total",
+            "--param",
+            r#"request=json:{"person":{"value":99}}"#,
+        ]);
+        let mut bytes = Vec::new();
+        okay(run(&mut db, &contexts, &options, None, true, &mut bytes).await);
+        let text = output(bytes);
+        assert!(
+            text.contains(
+                r#""statement":2,"cells":[{"type":"int","value":"99"},{"type":"int","value":"7"},{"type":"int","value":"99"}]"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                r#""index":3,"kind":"query","view":"committed_history","basis":1,"count":1"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""event":"columns","statement":3,"seq":1,"columns":["p"]"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""statement":3,"cells":[{"type":"int","value":"4"}]"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                r#""index":4,"kind":"query","view":"transaction_local","basis":1,"count":0"#
+            ),
+            "{text}"
+        );
+        assert!(!text.contains(r#""event":"row","statement":4"#), "{text}");
+        assert!(
+            text.contains(r#""statement":5,"cells":[{"type":"wideint","value":"99"}]"#),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "\"kind\":\"committed\",\"basis\":1,\"seq\":2,\"count\":3,\"statements\":5}\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+            CanonicalScalar::Int(99).into()
+        );
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn nested_map_binding_and_late_read_errors_cannot_publish_a_write_prefix() {
+    let ((), report) = run_async_under_lab(0x7478_6331, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        for (parameter, query) in [
+            (
+                r#"request=json:{"person":7}"#,
+                "MATCH (n:Person {p: $request.person.value}) RETURN n.p AS p",
+            ),
+            (
+                "request=int:4",
+                "MATCH (n:Person {p: $request.person.value}) RETURN n.p AS p",
+            ),
+            (
+                r#"request=json:{"person":{"value":4}}"#,
+                "MATCH (n:Person {p: $request.person.value}) RETURN 1 / 0 AS refused",
+            ),
+        ] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let options = options(&[
+                "--write",
+                "CREATE (n:Person {p: 4})",
+                "--query",
+                query,
+                "--param",
+                parameter,
+            ]);
+            let mut bytes = Vec::new();
+            let error = run(&mut db, &contexts, &options, None, true, &mut bytes)
+                .await
+                .expect_err("a refused map read must abort the buffered program");
+            assert!(error.message.contains("step 2"), "{}", error.message);
+            assert!(bytes.is_empty(), "a refused map read published a prefix");
+            assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+            assert!(db.vertices_at(CommitSeq(0)).unwrap().is_empty());
+            assert_eq!(contexts.txn().outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn invalid_tail_and_future_historical_reads_cannot_publish_a_valid_write_prefix() {
     let ((), report) = run_async_under_lab(0x7478_6305, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

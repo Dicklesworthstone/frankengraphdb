@@ -13,9 +13,9 @@ use crate::{Database, WriteTxnError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::RelationId;
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphMutationProgramError, GraphSymbolResolver,
-    GraphWriteProgramError, GraphWriteProgramPolicy, GraphWriteScriptExecutionError,
-    TemporalAggregatePlan,
+    GqlMapArgumentText, GqlParameters, GqlQueryPolicy, GraphMutationProgramError,
+    GraphSymbolResolver, GraphWriteProgramError, GraphWriteProgramPolicy,
+    GraphWriteScriptExecutionError, TemporalAggregatePlan,
 };
 use fgdb_types::{CommitCx, CommitSeq, QueryCx, TxnCx};
 
@@ -23,6 +23,8 @@ impl WriteTxn {
     /// Execute a native read over this transaction's pinned basis and canonical
     /// staged effects. Pattern, aggregate, WITH-aggregate and set/pipeline reads
     /// use the same classification and result columns as [`Database::query`].
+    /// Map-argument fields in pattern predicates use the same argument
+    /// lowering, preserving the caller's original diagnostic offsets.
     ///
     /// Ownership and lifecycle are checked before invoking the symbol resolver.
     /// Binding/execution errors never try another facade or a live reader. Each
@@ -52,6 +54,12 @@ impl WriteTxn {
     ) -> Result<QueryResult, QueryError> {
         self.ensure_database(database)
             .map_err(|error| QueryError::Transaction(Box::new(error)))?;
+        let lowered = GqlMapArgumentText::lower_fields(text, params);
+        let (text, params) = lowered
+            .as_ref()
+            .map_or((text, params), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
         let prepared = PreparedNativeRead::prepare(text, params, resolver)?;
         prepared.execute_in_transaction(self, database, cx, params, policy)
     }

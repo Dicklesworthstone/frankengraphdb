@@ -37,7 +37,7 @@ use super::{
 use asupersync::fs::Vfs;
 use fgdb::{Database, PreparedNativeRead, QueryResult, QueryValue};
 use fgdb_gql::algebra::GraphValueRow;
-use fgdb_gql::{BoundNativeGraphWrite, GqlParameters, GraphWriteProgramPolicy};
+use fgdb_gql::{BoundNativeGraphWrite, GqlMapArgumentText, GqlParameters, GraphWriteProgramPolicy};
 use fgdb_types::{CommitSeq, EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
 use std::io::Write;
 
@@ -277,8 +277,17 @@ fn prepare(
                     .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
                 Ok(PreparedStep::Write(Box::new(bound)))
             } else {
+                // Each step owns its final arguments. Derive pattern-map
+                // fields once, retaining the captured statement instant, and
+                // keep the original text/arguments for classification errors.
+                let lowered = GqlMapArgumentText::lower_fields(&step.text, &params);
+                let (text, arguments) = lowered
+                    .as_ref()
+                    .map_or((step.text.as_str(), &params), |(lowered, derived)| {
+                        (lowered.text(), derived)
+                    });
                 let query =
-                    PreparedNativeRead::prepare(&step.text, &params, options).map_err(|error| {
+                    PreparedNativeRead::prepare(text, arguments, options).map_err(|error| {
                         // Likewise a write given to --query: preparing it as a
                         // write only classifies the text; nothing executes.
                         let write = matches!(
@@ -300,6 +309,7 @@ fn prepare(
                 statements = statements
                     .checked_add(1)
                     .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
+                let params = lowered.map_or(params, |(_, derived)| derived);
                 Ok(PreparedStep::Read(Box::new(query), params))
             }
         })()
