@@ -113,6 +113,19 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
         // its meter. Count the complete child, not only its first graph leaf.
         return circuit(cx, definition.input())?.append(1);
     }
+    if let Some(plan) = query.incremental_apply_join_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
+        // Count exactly the same optional witness, join and projection stages
+        // as Staging::compile. Admission never substitutes the body's first
+        // graph leaf or omits a dependency because an outer input is empty.
+        let stages = u64::try_from(plan.output.len())
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .and_then(|count| count.checked_add(u64::from(plan.right_projection.is_some())))
+            .ok_or(StandingQueryError::Unsupported)?;
+        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
+    }
     if let Some(input) = query.incremental_scope() {
         return circuit(cx, input);
     }

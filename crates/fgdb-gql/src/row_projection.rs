@@ -139,6 +139,57 @@ impl RowProjectionSpec {
         })
     }
 
+    /// Guard selected ordinary outputs with the compiler's Boolean witness.
+    /// The checked original value or canonical NULL has the SAME admitted
+    /// domain; the general CASE constructor's Any result must not widen it.
+    /// This is a specific value-or-NULL proof, never a caller-selected type
+    /// assertion. Expanded UNWIND specifications cannot use this operation.
+    pub(crate) fn with_null_guard(
+        mut self,
+        marker: usize,
+        outputs: core::ops::Range<usize>,
+    ) -> Result<Self, RowProjectionBuildError> {
+        if self.expand_last
+            || self.expand_range
+            || outputs.start > outputs.end
+            || outputs.end > self.projection.len()
+        {
+            return Err(GraphSetProjectionError::InvalidValue {
+                column: outputs.start,
+            }
+            .into());
+        }
+        match self.input.get(marker) {
+            Some(GraphSetColumnType::Scalar) => {}
+            Some(_) => {
+                return Err(GraphSetProjectionError::InvalidValue {
+                    column: outputs.start,
+                }
+                .into());
+            }
+            None => {
+                return Err(GraphSetProjectionError::UnknownInput {
+                    column: outputs.start,
+                    input: marker,
+                }
+                .into());
+            }
+        }
+        for column in outputs {
+            let original = &self.projection[column];
+            let value = GraphSetValue::Case {
+                arms: vec![(GraphSetValue::Column(marker), original.value().clone())],
+                otherwise: Some(Box::new(GraphSetValue::TypedNull(self.types[column]))),
+            };
+            // Wrapping adds expression depth/nodes. Use the ordinary admission
+            // even though its broad CASE domain is unnecessary for this proof.
+            GraphSetProjection::admit_output(&value, &self.input, column)?;
+            let name = original.name().to_owned();
+            self.projection[column] = GraphSetProjection::new(name, value);
+        }
+        Ok(self)
+    }
+
     /// Widen only the declared output domains of already-checked expressions.
     /// Native procedure schemas can expose Any while a registered kernel
     /// proves a concrete domain. Every requested domain must contain the

@@ -485,6 +485,46 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 query.column_types(),
             )?;
             self.append(StandingQuery::Group(Box::new(state)))
+        } else if let Some(plan) =
+            query.incremental_apply_join_with_control(&mut |_| checkpoint())?
+        {
+            // The GQL owner proves the complete correlated body before any
+            // state is appended. Maintain its original children and exact
+            // joins/projections; no per-commit subquery replay is introduced.
+            let left = self.compile(cx, plan.left, policy, checkpoint)?;
+            let mut right = self.compile(cx, plan.right, policy, checkpoint)?;
+            if let Some(spec) = plan.right_projection {
+                let state = self.database.prepare_standing_projection(
+                    cx,
+                    right,
+                    spec,
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                right = self.append(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+            }
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [left, right],
+                &plan.join,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            let mut input = self.append(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+            for spec in plan.output {
+                let state = self.database.prepare_standing_projection(
+                    cx,
+                    input,
+                    spec,
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                input = self.append(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+            }
+            input
         } else if let Some(input) = query.incremental_scope() {
             return self.compile(cx, input, policy, checkpoint);
         } else if let Some((input, projection, quantifier)) = query.incremental_projection() {
@@ -1137,3 +1177,6 @@ mod triangle_tests;
 
 #[cfg(test)]
 mod clustering_tests;
+
+#[cfg(test)]
+mod apply_tests;

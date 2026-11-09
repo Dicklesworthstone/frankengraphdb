@@ -108,6 +108,22 @@ RETURN person, friend
 
 Each person keeps qualifying friends, including parallel-edge occurrences, or one row with a NULL friend when none qualify. The predicate runs inside the optional match before null extension. Subquery-local names remain private; later clauses retain the original outer bindings. Multi-clause subquery bodies use the same native expression and correlated `Apply` operators as ordinary reads, with their existing work, scratch, cancellation and authorization controls. Source was added on 2026-11-09; full runtime qualification remains open as recorded in [implementation status](IMPLEMENTATION_STATUS.md).
 
+### Maintained correlated graph queries
+
+Standing queries and native subscriptions can maintain eligible returning `CALL` subqueries and `OPTIONAL MATCH` continuations through the existing incremental joins and projections:
+
+```cypher
+SUBSCRIBE TO
+MATCH (person:Person)
+CALL (person) {
+    MATCH (person)-[:KNOWS]->(friend)
+    RETURN friend
+}
+RETURN person, friend
+```
+
+The maintained circuit preserves duplicate occurrences and updates its result from committed changes. Optional continuations retain one NULL-extended row per outer occurrence when the last matching witness disappears. The initial profile requires a complete graph source whose independent evaluation cannot introduce a data error; graph identity outputs and safe constant/column projections qualify. Per-invocation aggregation, pagination, DISTINCT, nested correlation and fallible independent property/catalog outputs remain outside this profile. Registrations retain the existing session-local, resident-state contract. This source addition is not runtime-qualified; see [implementation status](IMPLEMENTATION_STATUS.md).
+
 ### Nested MAP parameters in transaction reads
 
 `WriteTxn::query` and the CLI's `transaction --query` accept nested MAP fields in node and relationship property patterns, using the same argument handling as ordinary reads:

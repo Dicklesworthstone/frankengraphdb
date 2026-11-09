@@ -3,6 +3,7 @@
 
 use super::*;
 
+mod apply;
 mod window;
 
 impl PreparedGraphSet {
@@ -82,14 +83,24 @@ impl PreparedGraphSet {
                 // exactly like pattern rows. A page can preserve that order;
                 // the host must still admit the complete CALL derivative.
                 SetNode::ProcedureCall(_) => (false, false),
-                SetNode::Owned { .. } | SetNode::Arguments | SetNode::Apply { .. } => (true, true),
-                // Hidden-key output preserves a sequence no longer expressible
-                // by its visible cells. An inherited canonical window would
-                // select different occurrences; the ranked proof refuses it.
+                SetNode::Owned { .. } => (true, true),
+                // Arguments and Apply have positional enumeration, but an
+                // unpaged invocation does not itself introduce a window.
+                // Complete derivative admission still belongs to the host.
+                SetNode::Arguments => (false, true),
+                SetNode::Apply { left, right, .. } => {
+                    let a = shape(left);
+                    let b = shape(right);
+                    (a.0 || b.0, true)
+                }
+                // An output projection keeps positional enumeration. Retain
+                // every real order/page below it without inventing one for an
+                // ordinary compiler-emitted, unpaged CALL output projection.
                 SetNode::Project {
+                    input,
                     preserve_order: true,
                     ..
-                } => (true, true),
+                } => (shape(input).0, true),
                 SetNode::Scope(input)
                 | SetNode::Filter { input, .. }
                 | SetNode::Project { input, .. } => shape(input),
@@ -106,7 +117,13 @@ impl PreparedGraphSet {
                 SetNode::Unwind { input, .. } => (shape(input).0, true),
                 SetNode::Values => (false, true),
             };
-            (query.count.is_some() || nested_window, positional_source)
+            (
+                query.count.is_some()
+                    || query.offset != 0
+                    || !query.order.is_empty()
+                    || nested_window,
+                positional_source,
+            )
         }
         let (window, positional) = shape(self);
         !window || !positional
