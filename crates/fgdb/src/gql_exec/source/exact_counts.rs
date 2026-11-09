@@ -1,5 +1,5 @@
 //! Exact, discardable cardinalities owned by one immutable snapshot generation.
-//! Only unrestricted current-cut counts use them. They never replace source
+//! Unrestricted readers may pin them with their exact cut. They never replace source
 //! admission, authorize a hidden population, or supply a historical estimate.
 
 use super::{IndexMap, SourceEvent};
@@ -89,7 +89,7 @@ impl ExactCounts {
         }
     }
 
-    pub(super) fn lookup<E>(
+    pub(crate) fn lookup<E>(
         &self,
         source: GraphCountSource,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,

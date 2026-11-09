@@ -519,6 +519,7 @@ impl WriteTxn {
         self.savepoints.clear();
         self.read_set.get_mut().clear();
         self.point_reads.get_mut().clear();
+        *self.count_reads.get_mut() = CountReads::default();
         self.match_expansions.get_mut().clear();
         self.scanned_vertex_labels.get_mut().clear();
         self.scanned_vertices.set(false);
@@ -618,6 +619,7 @@ impl WriteTxn {
     ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, WriteTxnError> {
         let read_set = self.read_set.borrow();
         let point_reads = self.point_reads.borrow();
+        let count_reads = self.count_reads.borrow();
         let match_expansions = self.match_expansions.borrow();
         let scanned_vertex_labels = self.scanned_vertex_labels.borrow();
         let mutation_footprint = match scope {
@@ -629,6 +631,7 @@ impl WriteTxn {
         let scanned_edge_relations = self.scanned_edge_relations.borrow();
         if read_set.is_empty()
             && point_reads.is_empty()
+            && count_reads.is_empty()
             && match_expansions.is_empty()
             && scanned_vertex_labels.is_empty()
             && scanned_edge_relations.is_empty()
@@ -690,6 +693,9 @@ impl WriteTxn {
                         _ => {}
                     }
                     if let Some(element) = point_reads.conflict(row, checkpoint)? {
+                        return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
+                    }
+                    if let Some(element) = count_reads.conflict(database, row, seq, checkpoint)? {
                         return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
                     }
                     if let Some(element) =

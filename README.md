@@ -161,6 +161,19 @@ RETURN person, neighbors
 
 The right-hand source is first restricted to keys needed by current outer rows, then grouped once per key before its count is joined back to the original outer bag. This also prevents unused groups from causing conditional count-overflow errors. Witness rows use the existing private aggregate-input budget; counts retain native checked Int64 conversion. Value counts require a safely projected column of the independent graph source, including copied or reordered aliases. Typed equality correlation and keyless counts qualify; computed/property arguments, outer-only arguments, additional correlated predicates, HAVING, local pages and relational DISTINCT remain unsupported.
 
+### Exact counts inside write transactions
+
+Eligible transaction counts read exact metadata pinned to the transaction's own snapshot, plus its canonical staged changes. They do not scan the full vertex or edge population:
+
+```cypher
+MATCH (person:Person) RETURN count(*) AS people
+MATCH (a)-[edge:KNOWS]->(b) RETURN count(edge) AS relationships
+```
+
+This includes all-vertex, single-label, all-directed-edge and single-relation populations, and identity counts whose nonnull or distinct semantics the existing binder proves. Staged creations, label changes, edge deletions and vertex cascades participate immediately; savepoint rollback restores the corresponding answer. An advancing database head cannot change a transaction's pinned count. Accepted snapshot refresh and native rebase preparations advance the metadata with the basis.
+
+Counts retain population conflict witnesses, so a relevant concurrent deletion, insertion or label change cannot be missed just because no rows were enumerated. Unrelated property or relation changes can remain independent. Conditional staged `ENSURE` proposals retain identity observations too, preventing replay from changing a previously observed local count. Unknown metadata, property filters and unproved endpoint-label intersections keep their ordinary source execution. This uses the existing bounded transaction and aggregate owners; it does not establish full SSI or a new durable statistics format. Runtime qualification remains open as recorded in [implementation status](IMPLEMENTATION_STATUS.md).
+
 ### Nested MAP parameters in transaction reads
 
 `WriteTxn::query` and the CLI's `transaction --query` accept nested MAP fields in node and relationship property patterns, using the same argument handling as ordinary reads:

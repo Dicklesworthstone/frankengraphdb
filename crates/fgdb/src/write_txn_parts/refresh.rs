@@ -161,6 +161,7 @@ impl WriteTxn {
             }
             (prepared, saved_prepared)
         };
+        let basis_counts = database.snapshot.exact_counts.clone();
         checkpoint()?;
         // Sole acceptance point. All fallible work is over and the immutable
         // database borrow prevents publication from moving the validated cut.
@@ -170,6 +171,7 @@ impl WriteTxn {
         }
         self.prepared = prepared;
         self.basis = frontier;
+        self.basis_counts = basis_counts;
         Ok(frontier)
     }
 }

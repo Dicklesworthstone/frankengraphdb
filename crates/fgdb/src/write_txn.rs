@@ -28,6 +28,7 @@ include!("write_txn_parts/field_rebase.rs");
 include!("write_txn_parts/vertex_reads.rs");
 include!("write_txn_parts/edge_reads.rs");
 include!("write_txn_parts/point_reads.rs");
+include!("write_txn_parts/count_reads.rs");
 include!("write_txn_parts/gql_types.rs");
 include!("write_txn_parts/gql_entry.rs");
 include!("write_txn_parts/gql_node.rs");

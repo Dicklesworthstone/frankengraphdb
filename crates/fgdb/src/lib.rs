@@ -3691,6 +3691,7 @@ impl<V: Vfs + Clone> Database<V> {
             .expect("the pin counter starts above zero and only increments");
         WriteTxn::begin(
             self.snapshot.frontier,
+            self.snapshot.exact_counts.clone(),
             txn,
             id,
             Arc::clone(&self.handle_owner),

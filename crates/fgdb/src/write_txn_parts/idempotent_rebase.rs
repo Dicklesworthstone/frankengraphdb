@@ -251,10 +251,12 @@ impl WriteTxn {
             self.staged.clone(),
             max_expanded_rows,
         )?;
+        let basis_counts = database.snapshot.exact_counts.clone();
         checkpoint()?;
         debug_assert_eq!(prepared.basis, frontier);
         self.prepared = Some(std::sync::Arc::new(prepared));
         self.basis = frontier;
+        self.basis_counts = basis_counts;
         Ok(())
     }
 }

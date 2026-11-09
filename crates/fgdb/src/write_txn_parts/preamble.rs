@@ -800,6 +800,9 @@ impl From<GqlError> for WriteTxnError {
 pub struct WriteTxn {
     handle_owner: std::sync::Arc<()>,
     basis: CommitSeq,
+    /// Exact discardable counts from this basis, never the handle's newer head.
+    /// Persistent counter trees share their immutable nodes across generations.
+    basis_counts: crate::gql_exec::source::exact_counts::ExactCounts,
     staged: Vec<WriteBatch>,
     /// Raw vertex identities in this many complete staged batches have already
     /// entered the monotonic read set. Truncating staged input also truncates
@@ -824,6 +827,8 @@ pub struct WriteTxn {
     read_set: std::cell::RefCell<std::collections::BTreeSet<ElementId>>,
     /// Explicit field getters retain point domains without narrowing full reads.
     point_reads: std::cell::RefCell<PointReads>,
+    /// Count inputs observe a complete population without enumerating its IDs.
+    count_reads: std::cell::RefCell<CountReads>,
     match_expansions: std::cell::RefCell<std::collections::BTreeSet<(VId, RelationId)>>,
     scanned_vertex_labels: std::cell::RefCell<std::collections::BTreeSet<LabelId>>,
     /// A scan depends on absent rows too, even if it returned nothing or its
