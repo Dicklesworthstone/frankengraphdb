@@ -443,25 +443,42 @@ fn every_selected_circuit_registration_and_rebuild_checkpoint_preserves_previous
             .unwrap();
         let expected = check(&db, &cx, &query, &handle);
         let mut total = 0;
-        rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
-            total += 1;
-            Ok(())
-        })
+        let private_inputs = handle.native.as_deref().unwrap().private_inputs().unwrap();
+        rebuild_checked(
+            &mut db,
+            &cx,
+            first,
+            handle.index,
+            private_inputs,
+            policy(),
+            &mut || {
+                total += 1;
+                Ok(())
+            },
+        )
         .unwrap();
         let before = saved(&db.standing_queries);
         for stop in 1..=total {
             let mut seen = 0;
             assert!(matches!(
-                rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
-                    seen += 1;
-                    if seen == stop {
-                        Err(StandingQueryError::Maintenance(
-                            StandingQueryFailure::Interrupted,
-                        ))
-                    } else {
-                        Ok(())
+                rebuild_checked(
+                    &mut db,
+                    &cx,
+                    first,
+                    handle.index,
+                    private_inputs,
+                    policy(),
+                    &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(StandingQueryError::Maintenance(
+                                StandingQueryFailure::Interrupted,
+                            ))
+                        } else {
+                            Ok(())
+                        }
                     }
-                }),
+                ),
                 Err(StandingQueryError::Maintenance(
                     StandingQueryFailure::Interrupted
                 ))

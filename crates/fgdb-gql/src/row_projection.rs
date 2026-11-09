@@ -190,6 +190,50 @@ impl RowProjectionSpec {
         Ok(self)
     }
 
+    /// Replace NULL in one copied column by an admitted nonnull value of its
+    /// existing domain. This proves the precise output type that general CASE
+    /// conservatively widens to Any. Only a direct input copy qualifies: the
+    /// NULL test cannot duplicate a fallible/computed expression or observe a
+    /// different invocation ordinal. No value is coerced or read from a source.
+    pub(crate) fn with_null_default(
+        mut self,
+        column: usize,
+        fallback: crate::algebra::GraphValue,
+    ) -> Result<Self, RowProjectionBuildError> {
+        let invalid = || GraphSetProjectionError::InvalidValue { column };
+        if self.expand_last || self.expand_range {
+            return Err(invalid().into());
+        }
+        let Some(original) = self.projection.get(column) else {
+            return Err(invalid().into());
+        };
+        let GraphSetValue::Column(input) = original.value() else {
+            return Err(invalid().into());
+        };
+        if fallback.is_null()
+            || !fallback.validate_bounds()
+            || !self.types[column].accepts(&fallback)
+        {
+            return Err(invalid().into());
+        }
+        let is_null = crate::GraphIntegerExpression::prepare_scalar(&[
+            crate::GraphIntegerOp::PresenceColumn(*input),
+            crate::GraphIntegerOp::IsNull(true),
+        ])
+        .map_err(|_| invalid())?;
+        let value = GraphSetValue::Case {
+            arms: vec![(
+                GraphSetValue::Integer(is_null),
+                GraphSetValue::Value(fallback),
+            )],
+            otherwise: Some(Box::new(original.value().clone())),
+        };
+        GraphSetProjection::admit_output(&value, &self.input, column)?;
+        let name = original.name().to_owned();
+        self.projection[column] = GraphSetProjection::new(name, value);
+        Ok(self)
+    }
+
     /// Widen only the declared output domains of already-checked expressions.
     /// Native procedure schemas can expose Any while a registered kernel
     /// proves a concrete domain. Every requested domain must contain the

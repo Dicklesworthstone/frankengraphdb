@@ -125,6 +125,21 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             .ok_or(StandingQueryError::Unsupported)?;
         return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
     }
+    if let Some(plan) = query.incremental_apply_distinct_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
+        // Outer normalization and DISTINCT arguments share one source. The
+        // argument join, body projections, restoration join and public
+        // projections are the same nodes admitted by Staging::compile.
+        let stages = plan
+            .body
+            .len()
+            .checked_add(plan.output.len())
+            .and_then(|count| count.checked_add(4))
+            .and_then(|count| u64::try_from(count).ok())
+            .ok_or(StandingQueryError::Unsupported)?;
+        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
+    }
     if let Some(plan) = query.incremental_apply_exists_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
     })? {

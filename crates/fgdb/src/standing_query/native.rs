@@ -28,14 +28,28 @@ pub(super) enum Layout {
     Circuit {
         columns: Vec<String>,
         first: usize,
+        private_inputs: Vec<bool>,
     },
     GroupCircuit {
         columns: Vec<String>,
         slots: Vec<GraphAggregateTextSlot>,
         first: usize,
+        private_inputs: Vec<bool>,
     },
 }
 impl Layout {
+    /// One role per compiled node, captured before circuit publication. These
+    /// roles survive policy changes and distinguish shared public sources from
+    /// private witnesses even when the initial result allowance is unbounded.
+    pub(super) fn private_inputs(&self) -> Option<&[bool]> {
+        match self {
+            Self::Circuit { private_inputs, .. } | Self::GroupCircuit { private_inputs, .. } => {
+                Some(private_inputs)
+            }
+            Self::Rows { .. } | Self::Aggregate { .. } => None,
+        }
+    }
+
     fn columns(&self) -> &[String] {
         match self {
             Self::Rows { columns }

@@ -21,8 +21,7 @@ const M: LabelId = LabelId(2);
 const LIMBS: LimbLimit = LimbLimit::new(4);
 const INNER: &str = "MATCH (a:L) UNWIND [7,7] AS token \
     CALL (a) { MATCH (a)-[:R]->(b) RETURN b AS child } RETURN token,a,child";
-const OPTIONAL: &str =
-    "MATCH (a:L) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN a,b";
+const OPTIONAL: &str = "MATCH (a:L) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN a,b";
 type Bag = BTreeMap<GraphValueRow, i128>;
 
 fn policy() -> GqlQueryPolicy {
@@ -204,11 +203,7 @@ fn native_call_and_optional_keep_parallel_bags_exact_deltas_and_bounded_footprin
         let mut db = Database::open_memory(&commit, keys(0xc1)).await.unwrap();
         let mut seed = WriteBatch::new(R);
         for (id, label, value) in [(1, L, 10), (2, M, 20), (3, L, 30), (4, M, 40)] {
-            seed.create_vertex(
-                VId(id),
-                vec![label],
-                vec![(P, CanonicalScalar::Int(value))],
-            );
+            seed.create_vertex(VId(id), vec![label], vec![(P, CanonicalScalar::Int(value))]);
         }
         seed.add_edge(EId(11), VId(1), VId(2), vec![]);
         seed.add_edge(EId(12), VId(1), VId(2), vec![]);
@@ -230,10 +225,7 @@ fn native_call_and_optional_keep_parallel_bags_exact_deltas_and_bounded_footprin
         }
         let mut expected = [
             bag([(inner_row(1, 2), 4), (inner_row(3, 2), 2)]),
-            bag([
-                (optional_row(1, Some(2)), 2),
-                (optional_row(3, Some(2)), 1),
-            ]),
+            bag([(optional_row(1, Some(2)), 2), (optional_row(3, Some(2)), 1)]),
         ];
         for ((text, definition, handle), rows) in queries.iter().zip(&expected) {
             check(&db, &cx, definition, handle, rows);
@@ -284,10 +276,7 @@ fn native_call_and_optional_keep_parallel_bags_exact_deltas_and_bounded_footprin
                     change.delete_edge(EId(12));
                     [
                         bag([(inner_row(1, 4), 2), (inner_row(3, 2), 2)]),
-                        bag([
-                            (optional_row(1, Some(4)), 1),
-                            (optional_row(3, Some(2)), 1),
-                        ]),
+                        bag([(optional_row(1, Some(4)), 1), (optional_row(3, Some(2)), 1)]),
                     ]
                 }
                 4 => {
@@ -295,10 +284,7 @@ fn native_call_and_optional_keep_parallel_bags_exact_deltas_and_bounded_footprin
                     change.delete_vertex(VId(2));
                     [
                         bag([(inner_row(1, 4), 2)]),
-                        bag([
-                            (optional_row(1, Some(4)), 1),
-                            (optional_row(3, None), 1),
-                        ]),
+                        bag([(optional_row(1, Some(4)), 1), (optional_row(3, None), 1)]),
                     ]
                 }
                 5 => {
@@ -420,11 +406,7 @@ fn optional_definition() -> PreparedGraphSet {
     left.optional_apply(body, vec![1]).unwrap()
 }
 
-fn computed_optional_row(
-    owner: u128,
-    wanted: Option<i64>,
-    child: Option<u128>,
-) -> GraphValueRow {
+fn computed_optional_row(owner: u128, wanted: Option<i64>, child: Option<u128>) -> GraphValueRow {
     let matched = child.is_some();
     GraphValueRow::from_owned_values(vec![
         vertex(Some(owner)),
@@ -699,25 +681,41 @@ fn every_apply_registration_and_rebuild_checkpoint_keeps_old_circuits_private() 
         };
         let first = *first;
         let mut calls = 0;
-        rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
-            calls += 1;
-            Ok(())
-        })
+        rebuild_checked(
+            &mut db,
+            &cx,
+            first,
+            handle.index,
+            handle.native.as_deref().unwrap().private_inputs().unwrap(),
+            policy(),
+            &mut || {
+                calls += 1;
+                Ok(())
+            },
+        )
         .unwrap();
         let accepted = saved(&db.standing_queries);
         for stop in 1..=calls {
             let mut seen = 0;
             assert!(
-                rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
-                    seen += 1;
-                    if seen == stop {
-                        Err(StandingQueryError::Maintenance(
-                            StandingQueryFailure::Interrupted,
-                        ))
-                    } else {
-                        Ok(())
+                rebuild_checked(
+                    &mut db,
+                    &cx,
+                    first,
+                    handle.index,
+                    handle.native.as_deref().unwrap().private_inputs().unwrap(),
+                    policy(),
+                    &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(StandingQueryError::Maintenance(
+                                StandingQueryFailure::Interrupted,
+                            ))
+                        } else {
+                            Ok(())
+                        }
                     }
-                })
+                )
                 .is_err()
             );
             assert_eq!(seen, stop);
@@ -758,9 +756,9 @@ fn per_invocation_scopes_and_fallible_rhs_refuse_even_beneath_empty_outer_and_li
         for text in [
             "MATCH (a:L) CALL (a) { MATCH (a)-[:R]->(b) RETURN b AS child LIMIT 1 } \
              RETURN a,child",
-            "MATCH (a:L) CALL (a) { MATCH (a)-[:R]->(b) RETURN DISTINCT b AS child } \
+            "MATCH (a:L) CALL (a) { MATCH (a)-[:R]->(b) RETURN DISTINCT b AS child LIMIT 1 } \
              RETURN a,child",
-            "MATCH (a:L) CALL (a) { MATCH (a)-[:R]->(b) RETURN count(b) AS total } \
+            "MATCH (a:L) CALL (a) { MATCH (a)-[:R]->(b) RETURN count(b.p) AS total } \
              RETURN a,total",
             "MATCH (a:L) CALL (a) { MATCH (b:M) RETURN 12 / b.p AS quotient } \
              RETURN a,quotient",
@@ -816,30 +814,32 @@ fn inner_exports_fail_before_later_filters_and_optional_refuses_that_stage_order
             .unwrap();
         let before = saved(&db.standing_queries);
         let left = leaf("MATCH (a:L) RETURN a");
-        let body =
-            PreparedGraphSet::arguments(vec!["a".into()], vec![GraphSetColumnType::Vertex])
-                .unwrap()
-                .cross_join(leaf("MATCH (b:M) RETURN b"))
-                .unwrap()
-                .project(
-                    vec![GraphSetProjection::new(
-                        "bad",
-                        GraphSetValue::Integer(
-                            GraphIntegerExpression::prepare(&[
-                                GraphIntegerOp::Literal(Some(12)),
-                                GraphIntegerOp::Literal(Some(0)),
-                                GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
-                            ])
-                            .unwrap(),
-                        ),
-                    )],
-                    GraphSetQuantifier::All,
-                )
-                .unwrap()
-                .filter(&[GraphSetPredicateOp::Truth(Some(false))])
-                .unwrap();
+        let body = PreparedGraphSet::arguments(vec!["a".into()], vec![GraphSetColumnType::Vertex])
+            .unwrap()
+            .cross_join(leaf("MATCH (b:M) RETURN b"))
+            .unwrap()
+            .project(
+                vec![GraphSetProjection::new(
+                    "bad",
+                    GraphSetValue::Integer(
+                        GraphIntegerExpression::prepare(&[
+                            GraphIntegerOp::Literal(Some(12)),
+                            GraphIntegerOp::Literal(Some(0)),
+                            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+                        ])
+                        .unwrap(),
+                    ),
+                )],
+                GraphSetQuantifier::All,
+            )
+            .unwrap()
+            .filter(&[GraphSetPredicateOp::Truth(Some(false))])
+            .unwrap();
         let inner = left.clone().apply(body.clone(), vec![0]).unwrap();
-        assert!(db.execute_graph_set_governed(&cx, &inner, policy()).is_err());
+        assert!(
+            db.execute_graph_set_governed(&cx, &inner, policy())
+                .is_err()
+        );
         assert!(matches!(
             db.register_standing_relation(&cx, &inner, policy()),
             Err(StandingQueryError::Maintenance(

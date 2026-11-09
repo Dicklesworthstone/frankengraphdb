@@ -241,6 +241,7 @@ struct Staging<'a, V: Vfs + Clone> {
     first: usize,
     accepted: bool,
     group_input: bool,
+    private_inputs: Vec<bool>,
 }
 impl<'a, V: Vfs + Clone> Staging<'a, V> {
     fn new(database: &'a mut Database<V>) -> Self {
@@ -249,9 +250,19 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             database,
             accepted: false,
             group_input: false,
+            private_inputs: Vec::new(),
         }
     }
     fn append(&mut self, query: StandingQuery) -> usize {
+        self.append_with_role(query, self.group_input)
+    }
+    fn append_private(&mut self, query: StandingQuery) -> usize {
+        self.append_with_role(query, true)
+    }
+    fn append_with_role(&mut self, query: StandingQuery, private_input: bool) -> usize {
+        // Exactly one bounded role entry per compiled node. The same suffix
+        // guard owns both allocations until the complete handle is accepted.
+        self.private_inputs.push(private_input);
         self.database.store_standing_query(query).index
     }
 
@@ -501,7 +512,7 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 input_policy,
                 self.database.standing_queries.len(),
             )?;
-            let active = self.append(StandingQuery::Join(Box::new(state)));
+            let active = self.append_private(StandingQuery::Join(Box::new(state)));
             checkpoint()?;
             // Group only keys needed by a current outer row. Unrequested
             // groups must not introduce a conditional Int64 count overflow.
@@ -514,7 +525,7 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 &plan.group_columns,
                 &plan.group_types,
             )?;
-            let grouped = self.append(StandingQuery::Group(Box::new(state)));
+            let grouped = self.append_private(StandingQuery::Group(Box::new(state)));
             checkpoint()?;
             let state = self.database.prepare_standing_join_spec(
                 cx,
@@ -524,6 +535,77 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 self.database.standing_queries.len(),
             )?;
             let mut input = self.append(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+            for spec in plan.output {
+                let state = self.database.prepare_standing_projection(
+                    cx,
+                    input,
+                    spec,
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                input = self.append(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+            }
+            input
+        } else if let Some(plan) =
+            query.incremental_apply_distinct_with_control(&mut |_| checkpoint())?
+        {
+            // Distinctness belongs to one argument tuple, not the outer bag.
+            // Share the original source, deduplicate its imported arguments,
+            // and restore every outer occurrence only after the body stages.
+            let left = self.compile(cx, plan.left, policy, checkpoint)?;
+            let input_policy = group::input_policy(policy);
+            let right = self.compile_group_input(cx, plan.right, input_policy, checkpoint)?;
+            let state = self.database.prepare_standing_projection(
+                cx,
+                left,
+                plan.outer,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            let outer = self.append(StandingQuery::Projection(Box::new(state)));
+            checkpoint()?;
+            let state = self.database.prepare_standing_projection(
+                cx,
+                outer,
+                plan.arguments,
+                input_policy,
+                self.database.standing_queries.len(),
+            )?;
+            let arguments = self.append_private(StandingQuery::Projection(Box::new(state)));
+            checkpoint()?;
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [arguments, right],
+                &plan.join,
+                input_policy,
+                self.database.standing_queries.len(),
+            )?;
+            let mut input = self.append_private(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+            // The GQL recipe carries normalized import keys through each
+            // body projection. Its DISTINCT owners retain parallel support
+            // privately; only the final restored rows spend result allowance.
+            for spec in plan.body {
+                let state = self.database.prepare_standing_projection(
+                    cx,
+                    input,
+                    spec,
+                    input_policy,
+                    self.database.standing_queries.len(),
+                )?;
+                input = self.append_private(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+            }
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [outer, input],
+                &plan.restore,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            input = self.append(StandingQuery::Join(Box::new(state)));
             checkpoint()?;
             for spec in plan.output {
                 let state = self.database.prepare_standing_projection(
@@ -799,6 +881,7 @@ fn register_checked<V: Vfs + Clone>(
     let layout = Arc::new(Layout::Circuit {
         columns: query.columns().to_vec(),
         first: staged.first,
+        private_inputs: std::mem::take(&mut staged.private_inputs),
     });
     let handle = StandingQueryHandle {
         owner: Arc::clone(&staged.database.handle_owner),
@@ -880,6 +963,7 @@ fn register_group_checked<V: Vfs + Clone>(
         columns: columns.to_vec(),
         slots: slots.to_vec(),
         first: staged.first,
+        private_inputs: std::mem::take(&mut staged.private_inputs),
     });
     let handle = StandingQueryHandle {
         owner: Arc::clone(&staged.database.handle_owner),
@@ -900,75 +984,39 @@ pub(in crate::standing_query) fn rebuild<V: Vfs + Clone>(
     cx: &QueryCx,
     first: usize,
     root: usize,
+    private_inputs: &[bool],
     policy: GqlQueryPolicy,
 ) -> Result<CommitSeq, StandingQueryError> {
     let mut checkpoint = || cx.checkpoint().map_err(StandingQueryError::Interrupted);
-    rebuild_checked(database, cx, first, root, policy, &mut checkpoint)
+    rebuild_checked(
+        database,
+        cx,
+        first,
+        root,
+        private_inputs,
+        policy,
+        &mut checkpoint,
+    )
 }
 fn rebuild_checked<V: Vfs + Clone>(
     database: &mut Database<V>,
     cx: &QueryCx,
     first: usize,
     root: usize,
+    private_inputs: &[bool],
     policy: GqlQueryPolicy,
     checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
 ) -> Result<CommitSeq, StandingQueryError> {
     if first > root || root >= database.standing_queries.len() {
         return Err(StandingQueryError::UnknownHandle);
     }
-    // Re-derive the same input/result distinction as recursive registration.
-    // Every group's COMPLETE input subtree has no result-row quota, including
-    // nested groups. Follow dependencies rather than clearing a whole prefix:
-    // unrelated sibling branches must retain their own result allowance.
-    let mut private_inputs = Vec::new();
-    for _ in first..=root {
-        checkpoint()?;
-        private_inputs.push(false);
+    if private_inputs.len() != root - first + 1 {
+        return Err(StandingQueryError::Unsupported);
     }
-    for old in (first..=root).rev() {
-        checkpoint()?;
-        let inherited = private_inputs[old - first];
-        let mut mark = |input: usize, private: bool| {
-            checkpoint()?;
-            if input < first || input >= old {
-                return Err(StandingQueryError::Unsupported);
-            }
-            private_inputs[input - first] |= private;
-            Ok(())
-        };
-        match &database.standing_queries[old] {
-            StandingQuery::Group(query) => mark(query.input, true)?,
-            StandingQuery::Set(query) => {
-                for input in query.inputs {
-                    mark(input, inherited)?;
-                }
-            }
-            StandingQuery::Join(query) => {
-                for input in query.inputs {
-                    mark(input, inherited)?;
-                }
-            }
-            StandingQuery::Projection(query) => mark(query.input, inherited)?,
-            StandingQuery::Window(query) => mark(query.input, inherited)?,
-            StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {}
-            StandingQuery::CoreNumbers(query) if query.has_value_rows() => {
-                if let Some(definition) = query.selected {
-                    mark(definition.input, true)?;
-                }
-            }
-            StandingQuery::TriangleCounts(query) => {
-                if let Some(definition) = query.selected {
-                    mark(definition.input, true)?;
-                }
-            }
-            StandingQuery::Components(query) => {
-                if let Some(input) = query.relation.selected_input() {
-                    mark(input, true)?;
-                }
-            }
-            _ => return Err(StandingQueryError::Unsupported),
-        }
-    }
+    // Reuse the compiler's structural roles, never old numeric allowances or
+    // transitive dependency marking. A shared source may feed both a private
+    // argument DISTINCT and the public restoration join; its public allowance
+    // must remain effective. The immutable layout survives every failed rebuild.
     let mut staged = Staging::new(database);
     let at = staged.database.snapshot.frontier;
     for old in first..=root {
@@ -1158,7 +1206,7 @@ fn rebuild_checked<V: Vfs + Clone>(
             }
             _ => return Err(StandingQueryError::Unsupported),
         };
-        staged.append(replacement);
+        staged.append_with_role(replacement, private_inputs[old - first]);
         checkpoint()?;
     }
     // Rebase private dependency indexes before any old state is replaced.
@@ -1291,3 +1339,6 @@ mod existence_tests;
 
 #[cfg(test)]
 mod count_apply_tests;
+
+#[cfg(test)]
+mod distinct_apply_tests;

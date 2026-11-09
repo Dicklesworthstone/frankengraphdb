@@ -122,7 +122,21 @@ CALL (person) {
 RETURN person, friend
 ```
 
-The maintained circuit preserves duplicate occurrences and updates its result from committed changes. Optional continuations retain one NULL-extended row per outer occurrence when the last matching witness disappears. The initial profile requires a complete graph source whose independent evaluation cannot introduce a data error; graph identity outputs and safe constant/column projections qualify. General per-invocation aggregation, pagination, DISTINCT, nested correlation and fallible independent property/catalog outputs remain outside this profile. Registrations retain the existing session-local, resident-state contract. This source addition is not runtime-qualified; see [implementation status](IMPLEMENTATION_STATUS.md).
+The maintained circuit preserves duplicate occurrences and updates its result from committed changes. Optional continuations retain one NULL-extended row per outer occurrence when the last matching witness disappears. The initial profile requires a complete graph source whose independent evaluation cannot introduce a data error; graph identity outputs and safe constant/column projections qualify. General per-invocation aggregation, pagination, nested correlation and fallible independent property/catalog outputs remain outside this profile. DISTINCT and count bodies have the additional profiles below. Registrations retain the existing session-local, resident-state contract. These source additions are not runtime-qualified; see [implementation status](IMPLEMENTATION_STATUS.md).
+
+Per-invocation `DISTINCT` can remove parallel witnesses inside an eligible returning subquery while preserving each occurrence of its outer row:
+
+```cypher
+SUBSCRIBE TO
+MATCH (person:Person)
+CALL (person) {
+    MATCH (person)-[:KNOWS]->(friend)
+    RETURN DISTINCT friend
+}
+RETURN person, friend
+```
+
+The circuit maintains one body result for each distinct imported argument tuple and rejoins it to the original outer bag. Each DISTINCT barrier retains its invocation identity, so results from different arguments cannot collapse together. NULL arguments remain distinct from ordinary false/zero values; repeated or reordered imports retain their exact meaning. Later filters and projections stay in order, and optional bodies extend missing results only after the complete body finishes. Parallel-edge deletions change a distinct friend result only when its last witness disappears. Private witness allowances survive rebuilds independently of final-result quotas. The source-effect, finite-width and no-local-page restrictions still apply.
 
 Eligible `EXISTS`, `NOT EXISTS` and existence-valued return expressions also have a maintained path, including after `WITH` and `UNWIND`:
 

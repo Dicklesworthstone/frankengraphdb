@@ -6,6 +6,10 @@ use super::*;
 mod apply;
 mod window;
 
+pub use apply::{
+    MaintainedApplyJoin, MaintainedCountJoin, MaintainedDistinctApply, MaintainedExistenceJoin,
+};
+
 impl PreparedGraphSet {
     /// Peel exactly one finite relational window, preserving its entire input
     /// node. The ALL window runs after the node's own quantifier. A page without

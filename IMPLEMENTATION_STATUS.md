@@ -265,13 +265,56 @@ Source added 2026-11-09 extends the maintained native query circuit (`fgdb-w6-vi
 
 Imported positions may be reordered or repeated, and the original outer-row multiplicity remains intact. Optional bodies keep their predicates inside the join. A private TRUE witness distinguishes a real match whose values are NULL from an absent match, and lazy output guards produce NULL for every unmatched export, including constants and expressions over imported values. The original definition and native transcript remain unchanged. Existing private registration guards, maintenance failure fencing and whole-circuit rebuild cover the added nodes.
 
-The initial profile admits a single independently safe graph source with identity/path outputs, total column/literal wrappers, imported arguments, supported joins, filters and ALL projections. Independent property and catalog outputs are refused because valid stored values or missing names can otherwise raise errors when an empty outer input would never execute the original body. General per-invocation aggregation, DISTINCT, pages, nested Apply, graph-reading exports and positional random values remain unsupported. Each child must also pass its ordinary maintained-source admission; no first-leaf substitute or source omission is used. Width limits and existing per-node maintenance allowances remain in force. Registrations are resident and session-local, without durable catalog ownership or spill.
+The initial profile admits a single independently safe graph source with identity/path outputs, total column/literal wrappers, imported arguments, supported joins, filters and ALL projections. Independent property and catalog outputs are refused because valid stored values or missing names can otherwise raise errors when an empty outer input would never execute the original body. General per-invocation aggregation, pages, nested Apply, graph-reading exports and positional random values remain unsupported. Relational DISTINCT has the separate profile below. Each child must also pass its ordinary maintained-source admission; no first-leaf substitute or source omission is used. Width limits and existing per-node maintenance allowances remain in force. Registrations are resident and session-local, without durable catalog ownership or spill.
 
 The native `EXISTS`/`NOT EXISTS` and existence-valued RETURN lowering now has its own maintained presence recipe. Only an optional Apply ending in one literal TRUE column with ALL, LIMIT 1, zero offset and no order qualifies. The proof retains the entire input below that compiler-generated wrapper, including all refusal and effect boundaries. Its complete left/right children compile once; existing Semi and Anti joins partition the original outer bag, project TRUE or typed NULL, and combine through UNION ALL before restoring exact public names. Six derived stages preserve outer multiplicity even with parallel witnesses, repeated/nonprefix imports and actual NULL-valued matches. The shared sequence gate ignores only that proven presence page; child/outer pages and ordering remain subject to their existing admission. Predicates may cross only column-copy projections; later total column/literal exports preserve nonemptiness, and discarded computed expressions are never optimized away. This is a presence rewrite, with no generic pagination admission.
 
 A separate bounded count recipe admits correlated `COUNT { ... }` and returning `CALL ... count(*)`, `count(value)` or `count(DISTINCT value)` bodies. It requires one untransformed, keyless count over a safe imported-argument/graph join, with total ALL projections and no extra ON or postfilter conditions. Value counts trace their argument backwards through every copy/reorder projection to an original RHS column; arbitrary outer-only values cannot substitute for a per-key RHS value. Every discarded projection cell still has to be total. Existing RHS-Semi-outer matching restricts the counted relation to currently requested keys before native grouping and checked Int64 conversion. The native aggregate owner retains nonnull/distinct support and its last-occurrence deletion law. Grouping deduplicates RHS key positions while retaining every original typed equality constraint in both joins; duplicate outer rows never scale the count. The original outer bag then Left-joins the groups, and the existing integer COALESCE VM fills missing counts with scalar zero. Keyless and NULL-import cases follow the same recipe. The grouping owner retains the actual complete active-input definition. Both original children compile once, with five derived nodes; subscription admission counts the same nodes. RHS/restriction/group stages use the established private aggregate-input policy, so a large witness bag or the internal keyless zero group does not spend the final-result-row allowance. Additional correlated predicates, computed/property count arguments, HAVING, relational DISTINCT, local pages and computed/discarded effects remain refused.
 
 Regression sources cover literal bags, parallel witnesses, duplicate and NULL imports, native CALL/OPTIONAL/EXISTS/COUNT continuations, first/last-witness transitions, actual NULL-valued matches, guarded output expressions and domains, signed-delta integration, subscription footprint and atomic registration/rebuild refusal. The existence suite includes an independent 256-transition presence oracle, numeric-versus-typed equality checks and exact literal-page/effect refusal boundaries. Count regressions add an independent 256-transition weighted-count oracle, inactive counts above Int64, simultaneous last-outer removal, repeated key constraints, zero defaults and private-witness/public-row quota checks. The value-count extension adds 2,048 weighted transitions through reordered aliases, NULL exclusion, distinct support above Int64 occurrence counts, and twelve native topology transitions distinguishing parallel edges from unique neighbors. Focused pinned formatting and whitespace checks pass for these source additions. A single-job, single-thread pinned `cargo check -p fgdb --lib` stopped at the foundation `asupersync` compile with SIGKILL under the shared 8 GiB memory limit, before product typechecking. Compilation, Clippy and regression execution remain **UNRUN**; no broader bead or exact-tree qualification is claimed.
+
+### Maintained per-invocation DISTINCT
+
+Source added 2026-11-09 extends `fgdb-w6-views-2wz` with native correlated
+Inner/Optional Apply bodies containing DISTINCT projections. Both complete
+sources compile once. A private projection retains distinct imported argument
+tuples, and existing joins/projections execute the body once per tuple. Every
+DISTINCT barrier carries an exact private invocation key; a final join restores
+the ORIGINAL outer bag and its multiplicities. Later ALL projections preserve
+their resulting counts. Optional null extension occurs only at this final join,
+after all real body filters and projections. A true all-NULL export remains a
+matching witness, while absence never evaluates a fabricated expression row.
+
+Invocation keys encode each scalar/stored/vertex/edge import as its NULL flag
+and a nonnull value in the same domain. A specifically checked column-default
+constructor proves the output type without a general type assertion. Ordinary
+typed join equality remains unchanged; false, numeric zero, vertex/edge zero
+and NULL cannot collide. Stored bounded collections retain canonical identity.
+Reordered/repeated imports and no-import bodies use the same recipe. Local
+pages/order, grouping, nested invocation, unsupported import domains and
+reader/ordinal effects refuse. The independent RHS effect proof is unchanged.
+
+Circuit layouts now retain explicit private/public roles for every compiled
+node. Rebuild consumes those immutable roles, preserving private witness
+allowances even after an initially unbounded policy changes to a small public
+row limit. Shared public outer sources remain subject to their quotas. Count's
+private restriction/group states retain the same explicit distinction. This
+replaces inference from transitive group dependencies; failed rebuilds still
+publish no replacement state. All four public Apply recipe types have public
+crate-root names, as required by the workspace's `unnameable_types` lint.
+
+Nine GQL regression functions include an independent 2,048-transition oracle,
+NULL/filler collisions, stored collections, multiple DISTINCT barriers,
+filter/error ordering, residual ON remapping and every preparation checkpoint.
+Three database regressions cover native legacy/scoped CALL text, committed
+parallel-witness/label/cascade changes, literal and eager expected bags, repeated
+deltas, Optional NULL behavior and atomic registration/rebuild failures. The
+quota regression keeps over 64 private witnesses under two public output rows,
+including a rebuild from an unbounded allowance. Existing rebuild tests now
+pass the captured role map. Pinned formatting, whitespace and independent
+source reviews passed; product typechecking, Clippy, runtime assertions and
+exact-tree proof remain **UNRUN** under the foundation compiler memory blocker.
+The broader durable-view bead remains open.
 
 ### Buffered terminal OPTIONAL execution
 

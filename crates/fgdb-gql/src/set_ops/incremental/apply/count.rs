@@ -123,7 +123,14 @@ impl PreparedGraphSet {
             return Ok(None);
         };
         let mut stages = Vec::new();
-        let Some(base) = body(summary.input(), imports.is_empty(), &mut stages, control)? else {
+        let Some(base) = body(
+            summary.input(),
+            imports.is_empty(),
+            false,
+            &mut stages,
+            control,
+        )?
+        else {
             return Ok(None);
         };
         if base.spec.is_some_and(|spec| spec.predicate().is_some())

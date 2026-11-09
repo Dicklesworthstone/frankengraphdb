@@ -666,10 +666,20 @@ impl<V: Vfs + Clone> Database<V> {
         }
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         if let Some(
-            native::Layout::Circuit { first, .. } | native::Layout::GroupCircuit { first, .. },
+            layout @ (native::Layout::Circuit { first, .. }
+            | native::Layout::GroupCircuit { first, .. }),
         ) = handle.native.as_deref()
         {
-            return native::set::rebuild(self, cx, *first, handle.index, policy);
+            return native::set::rebuild(
+                self,
+                cx,
+                *first,
+                handle.index,
+                layout
+                    .private_inputs()
+                    .ok_or(StandingQueryError::Unsupported)?,
+                policy,
+            );
         }
         let current = self
             .standing_queries

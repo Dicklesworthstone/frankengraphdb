@@ -659,25 +659,42 @@ fn every_group_circuit_admission_and_rebuild_checkpoint_preserves_the_old_regist
             _ => unreachable!(),
         };
         let mut calls = 0;
-        rebuild_checked(&mut db, &cx, first, h.index, one, &mut || {
-            calls += 1;
-            Ok(())
-        })
+        let private_inputs = h.native.as_deref().unwrap().private_inputs().unwrap();
+        rebuild_checked(
+            &mut db,
+            &cx,
+            first,
+            h.index,
+            private_inputs,
+            one,
+            &mut || {
+                calls += 1;
+                Ok(())
+            },
+        )
         .unwrap();
         let accepted = saved(&db.standing_queries);
         for stop in 1..=calls {
             let mut seen = 0;
             assert!(
-                rebuild_checked(&mut db, &cx, first, h.index, one, &mut || {
-                    seen += 1;
-                    if seen == stop {
-                        Err(StandingQueryError::Maintenance(
-                            StandingQueryFailure::Interrupted,
-                        ))
-                    } else {
-                        Ok(())
+                rebuild_checked(
+                    &mut db,
+                    &cx,
+                    first,
+                    h.index,
+                    private_inputs,
+                    one,
+                    &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(StandingQueryError::Maintenance(
+                                StandingQueryFailure::Interrupted,
+                            ))
+                        } else {
+                            Ok(())
+                        }
                     }
-                })
+                )
                 .is_err()
             );
             assert_eq!(seen, stop);
@@ -800,25 +817,42 @@ fn native_collection_admission_and_rebuild_keep_budget_and_cancellation_atomic()
                 assert_eq!(saved(&db.standing_queries), accepted);
             }
             let mut calls = 0;
-            rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
-                calls += 1;
-                Ok(())
-            })
+            let private_inputs = handle.native.as_deref().unwrap().private_inputs().unwrap();
+            rebuild_checked(
+                &mut db,
+                &cx,
+                first,
+                handle.index,
+                private_inputs,
+                policy(),
+                &mut || {
+                    calls += 1;
+                    Ok(())
+                },
+            )
             .unwrap();
             let accepted = saved(&db.standing_queries);
             for stop in 1..=calls {
                 let mut seen = 0;
                 assert!(
-                    rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
-                        seen += 1;
-                        if seen == stop {
-                            Err(StandingQueryError::Maintenance(
-                                StandingQueryFailure::Interrupted,
-                            ))
-                        } else {
-                            Ok(())
+                    rebuild_checked(
+                        &mut db,
+                        &cx,
+                        first,
+                        handle.index,
+                        private_inputs,
+                        policy(),
+                        &mut || {
+                            seen += 1;
+                            if seen == stop {
+                                Err(StandingQueryError::Maintenance(
+                                    StandingQueryFailure::Interrupted,
+                                ))
+                            } else {
+                                Ok(())
+                            }
                         }
-                    })
+                    )
                     .is_err()
                 );
                 assert_eq!(seen, stop);
