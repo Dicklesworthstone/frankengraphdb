@@ -80,6 +80,20 @@ pub struct SnapshotVertexSource<'q> {
 }
 
 impl SnapshotVertexSource<'_> {
+    /// A necessary join equality proved by the external compiler. The seed
+    /// bag has already completed and owns its byte reservation. Reuse the
+    /// ordinary bounded posting union, exact-cut winners and numeric peers;
+    /// the original pattern and pair predicate still evaluate every candidate.
+    pub(crate) fn with_property_seeds(
+        mut self,
+        key: PropertyKeyId,
+        values: crate::gql_exec::source::PropertySeedValues,
+    ) -> Self {
+        self.candidates =
+            RootCandidates::Membership(membership::MembershipCandidates::from_seeds(key, values));
+        self
+    }
+
     /// Prefer an admitted leading equality, then numeric constraints on one
     /// allowed property, then a safe leading prefix or membership. Later
     /// fallible predicates retain their ordinary evaluation order.

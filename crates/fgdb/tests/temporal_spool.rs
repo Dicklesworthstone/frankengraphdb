@@ -219,6 +219,321 @@ async fn element_spool(
     })
 }
 
+mod resident_property_seeds {
+    use super::*;
+    use fgdb_types::{
+        CanonicalDecimal, CanonicalF64, CanonicalList, CanonicalMap, CanonicalMapEntry,
+        CanonicalPropertyValue, CanonicalText,
+    };
+
+    const TEXT: &str = "UNWIND $wanted AS wanted MATCH (n:L) WHERE n.p=wanted \
+                        RETURN n ORDER BY n";
+
+    fn scalar(value: CanonicalScalar) -> GraphValue {
+        GraphValue::Scalar(value)
+    }
+
+    fn float(value: f64) -> CanonicalScalar {
+        CanonicalScalar::Float(CanonicalF64::new(value))
+    }
+
+    fn decimal(value: i128) -> CanonicalScalar {
+        CanonicalScalar::Decimal(CanonicalDecimal::from_integer(value).unwrap())
+    }
+
+    fn arguments(values: Vec<GraphValue>) -> GqlParameters {
+        GqlParameters::new().with_list("wanted", values).unwrap()
+    }
+
+    fn mixed_arguments() -> GqlParameters {
+        arguments(
+            [
+                CanonicalScalar::Int(7),
+                float(7.0),
+                CanonicalScalar::Int(7),
+                CanonicalScalar::Null,
+                decimal(7),
+                CanonicalScalar::Bool(true),
+            ]
+            .into_iter()
+            .map(scalar)
+            .collect(),
+        )
+    }
+
+    fn rows(ids: &[u128]) -> Vec<GraphValueRow> {
+        ids.iter()
+            .map(|&id| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(id))]))
+            .collect()
+    }
+
+    async fn fixture(cx: &fgdb_types::CommitCx) -> Database<MemVfs> {
+        let mut db = Database::open_memory(
+            cx,
+            DatabaseKeys::new(
+                [0x81; 32],
+                DatabaseSecurityNamespaceId([0x82; 32]),
+                [0x83; 32],
+            ),
+        )
+        .await
+        .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 1..=64_u128 {
+            let value = match id {
+                1 => Some(CanonicalScalar::Int(7)),
+                2 => Some(float(7.0)),
+                3 => Some(decimal(7)),
+                4 => Some(CanonicalScalar::Int(9)),
+                5 => Some(CanonicalScalar::Null),
+                6 => None,
+                7 => Some(CanonicalScalar::Bool(true)),
+                8 => Some(CanonicalScalar::Int(9_007_199_254_740_993)),
+                9 => Some(float(9_007_199_254_740_992.0)),
+                10 => Some(CanonicalScalar::Int(9_007_199_254_740_992)),
+                _ => Some(CanonicalScalar::Int(100 + id as i64)),
+            };
+            batch.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                value
+                    .into_iter()
+                    .map(|value| (PropertyKeyId(1), value))
+                    .collect(),
+            );
+        }
+        db.write(cx, batch).await.unwrap();
+        db
+    }
+
+    #[test]
+    fn external_property_roots_preserve_occurrences_numeric_domains_and_exact_allowances() {
+        let ((), report) = run_async_under_lab(0x5eed_7061, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = fixture(&contexts.commit()).await;
+            let view = db.read_session().unwrap();
+            let params = mixed_arguments();
+            let prepared = PreparedNativeRead::prepare(TEXT, &params, symbols).unwrap();
+            let indexed = element_spool(&view, &cx, &prepared, &params, policy(), 8)
+                .await
+                .unwrap();
+            // Int/Float equality shares a numeric class. Decimal keeps the
+            // existing pairwise law; it must not poison the other key probes
+            // as one combined IN predicate would. Left duplicates survive.
+            assert_eq!(indexed.rows, rows(&[1, 1, 1, 2, 2, 2, 3, 7]));
+            assert_eq!(indexed.stats.snapshot_records, 4);
+            let scanned = element_spool(&view, &cx, &prepared, &params, policy(), 1)
+                .await
+                .unwrap();
+            assert_eq!(scanned.rows, indexed.rows);
+            assert_eq!(scanned.stats.snapshot_records, 64);
+            let exact = GqlQueryPolicy::new(
+                indexed.stats.snapshot_records,
+                indexed.stats.result_rows,
+                indexed.evaluator.work_units,
+                indexed.evaluator.scratch_entries,
+            );
+            assert_eq!(
+                element_spool(&view, &cx, &prepared, &params, exact, 8)
+                    .await
+                    .unwrap(),
+                indexed,
+            );
+            for dimension in [0, 1, 2] {
+                let mut below = exact;
+                match dimension {
+                    0 => {
+                        below.rows = fgdb_gql::GqlExecutionBudget::new(3, indexed.stats.result_rows)
+                    }
+                    1 => below.evaluator.max_work_units -= 1,
+                    2 => below.evaluator.max_scratch_entries -= 1,
+                    _ => unreachable!(),
+                }
+                let error = element_spool(&view, &cx, &prepared, &params, below, 8)
+                    .await
+                    .unwrap_err();
+                match dimension {
+                    0 => assert!(matches!(error.execution_error(),
+                        Some(GqlQueryError::Rows(error))
+                            if error.dimension == GqlBudgetDimension::SnapshotRecords)),
+                    1 => assert!(matches!(error.execution_error(),
+                        Some(GqlQueryError::Evaluator(error))
+                            if error.dimension == GlaLimitDimension::WorkUnits)),
+                    2 => assert!(matches!(error.execution_error(),
+                        Some(GqlQueryError::Evaluator(error))
+                            if error.dimension == GlaLimitDimension::ScratchEntries)),
+                    _ => unreachable!(),
+                }
+            }
+            for (values, expected, records) in [
+                (vec![], vec![], 0),
+                (vec![scalar(CanonicalScalar::Null)], vec![], 0),
+                (
+                    vec![scalar(CanonicalScalar::Int(9_007_199_254_740_993))],
+                    vec![8],
+                    1,
+                ),
+                (vec![scalar(float(9_007_199_254_740_992.0))], vec![9, 10], 2),
+            ] {
+                let params = arguments(values);
+                let actual = element_spool(&view, &cx, &prepared, &params, policy(), 8)
+                    .await
+                    .unwrap();
+                assert_eq!(actual.rows, rows(&expected));
+                assert_eq!(actual.stats.snapshot_records, records);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn external_property_roots_recheck_changed_deleted_and_historical_winners() {
+        let ((), report) = run_async_under_lab(0x5eed_7062, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let mut db = fixture(&commit).await;
+            let old = db.pinned_read_view().unwrap();
+            let cut = old.frontier();
+            let params = mixed_arguments();
+            let prepared = PreparedNativeRead::prepare(TEXT, &params, symbols).unwrap();
+            let mut change = WriteBatch::new(RelationId(1));
+            change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(99)));
+            change.delete_vertex(VId(2));
+            change.set_vertex_property(VId(3), PropertyKeyId(1), Some(decimal(8)));
+            change.set_vertex_property(VId(4), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
+            change.create_vertex(
+                VId(65),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+            );
+            db.write(&commit, change).await.unwrap();
+            db.compact(&commit).await.unwrap();
+            let current = db.read_session().unwrap();
+            for (view, expected) in [
+                (&old, rows(&[1, 1, 1, 2, 2, 2, 3, 7])),
+                (&current, rows(&[4, 4, 4, 7, 65, 65, 65])),
+            ] {
+                let actual = element_spool(view, &cx, &prepared, &params, policy(), 8)
+                    .await
+                    .unwrap();
+                let scan = element_spool(view, &cx, &prepared, &params, policy(), 1)
+                    .await
+                    .unwrap();
+                assert_eq!(actual.rows, expected);
+                assert_eq!(actual.rows, scan.rows);
+                assert_eq!(actual.snapshot, view.frontier());
+                assert!(actual.stats.snapshot_records <= 6);
+                assert!(scan.stats.snapshot_records >= 64);
+            }
+            let historical = "UNWIND $wanted AS wanted MATCH (n:L) \
+                FOR SYSTEM_TIME AS OF SEQ $cut WHERE n.p=wanted RETURN n ORDER BY n";
+            let params = params.with_uint64("cut", cut.0).unwrap();
+            let prepared = PreparedNativeRead::prepare(historical, &params, symbols).unwrap();
+            let actual = element_spool(&current, &cx, &prepared, &params, policy(), 8)
+                .await
+                .unwrap();
+            assert_eq!(actual.snapshot, cut);
+            assert_eq!(actual.rows, rows(&[1, 1, 1, 2, 2, 2, 3, 7]));
+            assert!(actual.stats.snapshot_records <= 6);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn external_property_roots_fall_back_for_collection_keys_without_losing_matches() {
+        let ((), report) = run_async_under_lab(0x5eed_7063, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let mut db = fixture(&commit).await;
+            let list = CanonicalPropertyValue::List(
+                CanonicalList::try_new(vec![CanonicalScalar::Int(7).into()]).unwrap(),
+            );
+            let map = CanonicalPropertyValue::Map(
+                CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+                    CanonicalText::new_ucs_basic("x").unwrap(),
+                    CanonicalScalar::Int(7).into(),
+                )])
+                .unwrap(),
+            );
+            let mut batch = WriteBatch::new(RelationId(1));
+            for (id, value) in [(65, list), (66, map)] {
+                batch.create_vertex_values(
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(1), value)],
+                );
+            }
+            db.write(&commit, batch).await.unwrap();
+            let view = db.read_session().unwrap();
+            let value = scalar(CanonicalScalar::Int(7));
+            let list = GraphValue::List(vec![value.clone()].into_boxed_slice());
+            let params = arguments(vec![
+                list.clone(),
+                GraphValue::map(vec![("x".into(), value.clone())]).unwrap(),
+                list,
+                value,
+                scalar(CanonicalScalar::Null),
+            ]);
+            let prepared = PreparedNativeRead::prepare(TEXT, &params, symbols).unwrap();
+            for run_rows in [1, 8] {
+                let actual = element_spool(&view, &cx, &prepared, &params, policy(), run_rows)
+                    .await
+                    .unwrap();
+                assert_eq!(actual.rows, rows(&[1, 2, 65, 65, 66]));
+                assert_eq!(actual.stats.snapshot_records, 66);
+            }
+            // Scalar seeds remain useful when unrelated stored values are
+            // collections. The original pair law rejects those other domains.
+            let params = arguments(vec![
+                scalar(CanonicalScalar::Int(7)),
+                scalar(CanonicalScalar::Null),
+            ]);
+            for (run_rows, records) in [(1, 66), (8, 2)] {
+                let actual = element_spool(&view, &cx, &prepared, &params, policy(), run_rows)
+                    .await
+                    .unwrap();
+                assert_eq!(actual.rows, rows(&[1, 2]));
+                assert_eq!(actual.stats.snapshot_records, records);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn external_property_roots_preserve_late_expression_failures_with_limit_zero() {
+        let ((), report) = run_async_under_lab(0x5eed_7064, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = fixture(&contexts.commit()).await;
+            let view = db.read_session().unwrap();
+            let params = GqlParameters::new();
+            for text in [
+                "UNWIND [1,0] AS divisor WITH 7/divisor AS wanted \
+                 MATCH (n:L) WHERE n.p=wanted RETURN n LIMIT 0",
+                "UNWIND [7,9] AS wanted MATCH (n:L) WHERE n.p=wanted \
+                 RETURN 1/(n.p-9) AS value LIMIT 0",
+            ] {
+                let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+                for run_rows in [1, 8] {
+                    let error = element_spool(&view, &cx, &prepared, &params, policy(), run_rows)
+                        .await
+                        .unwrap_err();
+                    assert!(
+                        matches!(error,
+                        NativeSpoolError::SetExecution(GraphSetExecutionError::Projection { error, .. })
+                            if error.kind == GraphIntegerErrorKind::DivisionByZero),
+                        "{text}",
+                    );
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
 #[test]
 fn temporal_rows_merge_with_original_values_stats_and_work_refusal() {
     let ((), report) = run_async_under_lab(0x7e4d_0001, |root| async move {

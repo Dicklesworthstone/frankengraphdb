@@ -7,6 +7,7 @@ pub(super) struct Selection {
     code: Box<[GraphSetPredicateOp]>,
     columns: Option<Box<[usize]>>,
     vertex_seed_column: Option<usize>,
+    property_seed_column: Option<(usize, fgdb_delta_types::PropertyKeyId)>,
 }
 
 // Reuse the native eligibility proof: only unpaged transparent scopes and one
@@ -53,27 +54,35 @@ pub(super) fn compile(
             .collect::<Vec<_>>()
             .into_boxed_slice()
     });
-    let vertex_seed_column = if right.order.is_empty() && right.offset == 0 && right.count.is_none()
-    {
-        if let SetNode::Pattern(pattern) = &right.node {
-            pattern.seeded_root_column().and_then(|root| {
+    let (vertex_seed_column, property_seed_column) =
+        if right.order.is_empty() && right.offset == 0 && right.count.is_none() {
+            if let SetNode::Pattern(pattern) = &right.node {
                 let mut free = |_| Ok::<(), core::convert::Infallible>(());
-                super::super::execute::selected_cross_probe_keys(
+                let keys = super::super::execute::selected_cross_probe_keys(
                     left.types.len(),
                     code,
                     columns.as_deref(),
                     &mut free,
                 )
-                .unwrap_or_else(|never| match never {})
-                .into_iter()
-                .find_map(|(left, right)| (right == root).then_some(left))
-            })
+                .unwrap_or_else(|never| match never {});
+                let identity = pattern.seeded_root_column().and_then(|root| {
+                    keys.iter()
+                        .find_map(|&(left, right)| (right == root).then_some(left))
+                });
+                let property = if identity.is_none() {
+                    keys.iter().find_map(|&(left, right)| {
+                        pattern.seeded_root_property(right).map(|key| (left, key))
+                    })
+                } else {
+                    None
+                };
+                (identity, property)
+            } else {
+                (None, None)
+            }
         } else {
-            None
-        }
-    } else {
-        None
-    };
+            (None, None)
+        };
     let plan = SpillSetCrossPlan {
         left: Box::new(AsyncSpillSetPlan::compile_at(
             left,
@@ -93,6 +102,7 @@ pub(super) fn compile(
             code: code.into(),
             columns,
             vertex_seed_column,
+            property_seed_column,
         }),
     };
     // The physical source already applied the filter and optional copies.
@@ -133,6 +143,20 @@ impl SpillSetCrossPlan {
             return None;
         }
         self.selection.as_ref()?.vertex_seed_column
+    }
+
+    /// A necessary scalar equality between one leading column and the right
+    /// vertex root's property. Hosts with exact-cut property postings may
+    /// narrow this source after the COMPLETE left bag, preserving the original
+    /// pair matcher. NULL and graph elements seed nothing; list/map operands
+    /// require the ordinary source. Numeric peers and stale historical postings
+    /// remain the host's responsibility. Identity seeding takes precedence.
+    /// Other physical source profiles retain their existing admission.
+    pub fn property_seed_column(&self) -> Option<(usize, fgdb_delta_types::PropertyKeyId)> {
+        if !matches!(self.right().source(), AsyncSpillSetSourcePlan::Vertex(_)) {
+            return None;
+        }
+        self.selection.as_ref()?.property_seed_column
     }
 
     /// TRUE means only accepted pairs form this physical source's output.

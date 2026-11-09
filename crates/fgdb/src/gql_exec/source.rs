@@ -24,6 +24,16 @@ pub(crate) enum SourceEvent {
     ScratchEntry,
     SnapshotRecord,
 }
+
+/// Bounded scalar roots copied from a completed external relation. Values
+/// and their capacity drop before the byte reservations are released. The
+/// original relation remains in its spool; these values only select candidate
+/// postings and never replace the join's original equality predicate.
+pub(crate) struct PropertySeedValues {
+    pub(crate) values: Vec<CanonicalScalar>,
+    pub(crate) _charge: fgdb_strata::tiered::memory::MemoryCharge,
+    pub(crate) _extra: Option<fgdb_strata::tiered::memory::MemoryCharge>,
+}
 /// Admitted topology keeps edge identity so captured paths name real edges.
 type IdentifiedEdge = (EId, VId, RelationId, VId);
 type VertexCursor = Reverse<(VId, CommitSeq, usize, usize)>;

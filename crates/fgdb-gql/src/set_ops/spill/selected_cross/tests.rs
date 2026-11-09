@@ -367,6 +367,103 @@ fn vertex_seed_proof_keeps_root_columns_and_expression_window_boundaries() {
 }
 
 #[test]
+fn property_seed_proof_requires_a_necessary_root_equality_and_keeps_failure_barriers() {
+    let pattern = |text| -> PreparedGraphSet {
+        PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Relation, "R") => {
+                Some(GraphSymbol::Relation(fgdb_delta_types::RelationId(7)))
+            }
+            _ => None,
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .with_duplicates()
+        .into()
+    };
+    let left = pattern("MATCH (a) RETURN a,a.p AS wanted");
+    let right = pattern("MATCH (b) RETURN b.p AS value,b");
+    let selected = |right: PreparedGraphSet, code: &[GraphSetPredicateOp]| {
+        cross(
+            &left
+                .clone()
+                .cross_join(right)
+                .unwrap()
+                .filter(code)
+                .unwrap(),
+        )
+    };
+    let expected = Some((1, PropertyKeyId(1)));
+    assert_eq!(
+        selected(right.clone(), &[equal(1, 2)]).property_seed_column(),
+        expected,
+    );
+    // A root need not be projected by identity when its property is the
+    // necessary equality. The source still owns the original property read.
+    assert_eq!(
+        selected(pattern("MATCH (b) RETURN b.p AS value"), &[equal(1, 2)]).property_seed_column(),
+        expected,
+    );
+    for code in [
+        vec![equal(1, 2), GraphSetPredicateOp::Not],
+        vec![
+            equal(1, 2),
+            GraphSetPredicateOp::Truth(Some(true)),
+            GraphSetPredicateOp::Or,
+        ],
+    ] {
+        assert_eq!(selected(right.clone(), &code).property_seed_column(), None);
+    }
+    assert_eq!(
+        selected(
+            right.clone(),
+            &[
+                equal(1, 2),
+                GraphSetPredicateOp::Truth(Some(true)),
+                GraphSetPredicateOp::And,
+            ],
+        )
+        .property_seed_column(),
+        expected,
+    );
+    let identity = selected(
+        right.clone(),
+        &[equal(1, 2), equal(0, 3), GraphSetPredicateOp::And],
+    );
+    assert_eq!(identity.vertex_seed_column(), Some(0));
+    assert_eq!(identity.property_seed_column(), None);
+    for right in [
+        right.clone().with_page(0, Some(0)),
+        right.clone().with_page(1, None),
+        right
+            .clone()
+            .with_order_by(&[GraphValueOrder::ascending(0)])
+            .unwrap(),
+        pattern("MATCH (b) WHERE 1/(b.p-2)>0 RETURN b.p AS value,b"),
+        pattern("MATCH (b) RETURN b.p+1 AS value,b"),
+        pattern("MATCH (b)-[:R]->(c) RETURN b.p AS value,b"),
+    ] {
+        assert_eq!(selected(right, &[equal(1, 2)]).property_seed_column(), None);
+    }
+    let projected = left
+        .cross_join(right)
+        .unwrap()
+        .project(
+            vec![
+                GraphSetProjection::new("value", GraphSetValue::Column(2)),
+                GraphSetProjection::new("wanted", GraphSetValue::Column(1)),
+                GraphSetProjection::new("again", GraphSetValue::Column(2)),
+            ],
+            GraphSetQuantifier::All,
+        )
+        .unwrap()
+        .filter(&[equal(0, 1)])
+        .unwrap();
+    assert_eq!(cross(&projected).property_seed_column(), expected);
+}
+
+#[test]
 fn walk_seed_proof_keeps_native_path_modes_and_requires_the_root_identity() {
     let pattern = |text: &str| -> PreparedGraphSet {
         PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {

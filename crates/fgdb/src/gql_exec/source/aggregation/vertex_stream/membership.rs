@@ -1,14 +1,15 @@
 //! Lazy unions of scalar-membership postings in canonical vertex order.
 //!
-//! The bound Boolean program owns its literals. Opening clones that immutable
-//! definition, without collecting keys, histories, or candidate identities.
-//! First demand proves scalar conversion cannot fail, then retains at most the
-//! same 64 posting heads as range scans. Wider unions and collection-bearing
-//! property domains use the complete history scan before any row is emitted.
+//! The bound Boolean program or a completed external relation owns its literals.
+//! Opening retains that immutable definition without collecting histories or
+//! candidate identities. First demand retains at most the same 64 posting heads
+//! as range scans. Wider unions use a complete history scan. Boolean membership
+//! also preserves collection-conversion failures; external equality seeds leave
+//! every pair's complete typed comparison to the original join.
 
 use super::{IndexMap, index_successor, numeric, range};
 use crate::gql_exec::source::{
-    History, PropertyEqualityIndex, SourceEvent, VertexHistoryScanCursor,
+    History, PropertyEqualityIndex, PropertySeedValues, SourceEvent, VertexHistoryScanCursor,
 };
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::algebra::BoundBooleanExpression;
@@ -26,8 +27,31 @@ enum Frontier {
 
 pub(super) struct MembershipCandidates {
     key: PropertyKeyId,
-    expression: BoundBooleanExpression,
+    definition: Definition,
     frontier: Frontier,
+}
+
+enum Definition {
+    Expression(BoundBooleanExpression),
+    Seeds(PropertySeedValues),
+}
+
+impl Definition {
+    fn members(&self) -> impl Iterator<Item = Cow<'_, CanonicalScalar>> {
+        let (expression, seeds) = match self {
+            Self::Expression(expression) => (Some(expression), None),
+            Self::Seeds(seeds) => (None, Some(seeds.values.as_slice())),
+        };
+        expression
+            .into_iter()
+            .flat_map(|expression| {
+                expression
+                    .literal_membership_conjunct()
+                    .expect("the immutable membership definition was checked at opening")
+                    .1
+            })
+            .chain(seeds.into_iter().flatten().map(Cow::Borrowed))
+    }
 }
 
 impl MembershipCandidates {
@@ -35,9 +59,17 @@ impl MembershipCandidates {
         let (key, _) = expression.literal_membership_conjunct()?;
         Some(Self {
             key,
-            expression: expression.clone(),
+            definition: Definition::Expression(expression.clone()),
             frontier: Frontier::Pending,
         })
+    }
+
+    pub(super) fn from_seeds(key: PropertyKeyId, values: PropertySeedValues) -> Self {
+        Self {
+            key,
+            definition: Definition::Seeds(values),
+            frontier: Frontier::Pending,
+        }
     }
 
     pub(super) fn key(&self) -> PropertyKeyId {
@@ -58,11 +90,7 @@ impl MembershipCandidates {
         let Some(value) = value else {
             return Ok(true);
         };
-        let (_, members) = self
-            .expression
-            .literal_membership_conjunct()
-            .expect("the immutable membership definition was checked at opening");
-        for member in members {
+        for member in self.definition.members() {
             control(VertexScanEvent::Work)?;
             if fgdb_gql::algebra::IntegerComparison::Equal
                 .accepts_scalar_pair(Some(value), Some(member.as_ref()))
@@ -118,17 +146,19 @@ impl MembershipCandidates {
         after: Option<VId>,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Frontier, C> {
-        if !index.scalar_only(self.key, &mut |event| control(stream_event(event)))? {
+        // A Boolean IN expression eagerly converts stored collections. An
+        // external join has no such conversion: scalar-vs-collection equality
+        // cannot match, and collection-valued seed inputs already declined the
+        // optimization before this source was constructed.
+        if matches!(self.definition, Definition::Expression(_))
+            && !index.scalar_only(self.key, &mut |event| control(stream_event(event)))?
+        {
             // Scalar IN eagerly loads its property value. A collection that
             // cannot enter the scalar evaluator must still raise on the scan.
             return Ok(Frontier::Histories(VertexHistoryScanCursor::default()));
         }
-        let (_, members) = self
-            .expression
-            .literal_membership_conjunct()
-            .expect("the immutable membership definition was checked at opening");
         let mut heads: Vec<range::Head> = Vec::new();
-        for member in members {
+        for member in self.definition.members() {
             control(VertexScanEvent::Work)?;
             let peers = match member.as_ref() {
                 CanonicalScalar::Null => continue,
@@ -481,5 +511,81 @@ mod tests {
             assert_eq!(output, [VId(0), VId(1), VId(u128::MAX)]);
             assert!(matches!(source.frontier, Frontier::Histories(_)));
         }
+    }
+
+    #[test]
+    fn external_scalar_seeds_keep_posting_union_and_refund_owned_bytes_after_refusal() {
+        use asupersync::lab::run_async_under_lab;
+        use fgdb_strata::tiered::memory::MemoryPool;
+        use fgdb_types::{CanonicalDecimal, CanonicalF64, PurposeContexts};
+
+        let ((), report) = run_async_under_lab(0x5eed_7401, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let integer = CanonicalScalar::Int(7);
+            let floating = CanonicalScalar::Float(CanonicalF64::new(7.0));
+            let decimal = CanonicalScalar::Decimal(CanonicalDecimal::from_integer(7).unwrap());
+            let mut collection = row(VId(99), 1, CanonicalScalar::Int(0));
+            collection.props[0].1 = CanonicalPropertyValue::List(
+                CanonicalList::try_new(vec![integer.clone().into()]).unwrap(),
+            );
+            let patches = vec![patch(vec![
+                row(VId(1), 1, integer.clone()),
+                row(VId(2), 1, floating),
+                row(VId(3), 1, decimal.clone()),
+                row(VId(4), 1, CanonicalScalar::Int(8)),
+                collection,
+            ])];
+            let index = PropertyEqualityIndex::build(&patches);
+            let pool = MemoryPool::new(16_384, 0).unwrap();
+            let make = || {
+                let values = vec![integer.clone(), decimal.clone(), integer.clone()];
+                let bytes = values.capacity() * core::mem::size_of::<CanonicalScalar>();
+                MembershipCandidates::from_seeds(
+                    KEY,
+                    PropertySeedValues {
+                        values,
+                        _charge: pool.reserve(&cx, bytes).unwrap(),
+                        _extra: None,
+                    },
+                )
+            };
+            let mut total = 0;
+            let mut complete = make();
+            let mut output = Vec::new();
+            drain(&mut complete, &index, &mut None, &mut output, &mut |_| {
+                total += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+            assert_eq!(output, [VId(1), VId(2), VId(3)]);
+            assert!(matches!(complete.frontier, Frontier::Buckets(_)));
+            assert!(
+                pool.used() > 0,
+                "candidate definitions retain their byte owner"
+            );
+            drop(complete);
+            assert_eq!(pool.used(), 0);
+            for stop in 1..=total {
+                let mut source = make();
+                let mut after = None;
+                let mut output = Vec::new();
+                let mut seen = 0;
+                let result = drain(&mut source, &index, &mut after, &mut output, &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                });
+                assert_eq!(result, Err(stop));
+                assert!(pool.used() > 0);
+                drain(&mut source, &index, &mut after, &mut output, &mut |_| {
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
+                assert_eq!(output, [VId(1), VId(2), VId(3)]);
+                drop(source);
+                assert_eq!(pool.used(), 0, "stop={stop}");
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
