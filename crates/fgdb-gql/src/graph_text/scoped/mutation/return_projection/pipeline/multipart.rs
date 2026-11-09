@@ -1303,6 +1303,8 @@ impl<'a> Parser<'a> {
     /// ordinary scalar/value evaluator owns Boolean precedence, three-valued
     /// logic and lazy CASE; graph sources retain the existing eager governed
     /// Apply contract. A public projection never exports the private suffix.
+    /// An OPTIONAL child supplies its local export range and ends at this
+    /// WHERE, before the containing clause performs its null extension.
     #[allow(clippy::type_complexity)]
     fn multipart_existence_expression(
         &mut self,
@@ -1310,6 +1312,7 @@ impl<'a> Parser<'a> {
         incoming: &RowSchema<'a>,
         aggregate: bool,
         call_depth: usize,
+        optional_exports: Option<core::ops::Range<usize>>,
     ) -> Result<(Vec<UnresolvedContinuation<'a>>, RowSchema<'a>, bool), GraphSetTextError> {
         let at = self.current.at;
         let returning = self.is_word("RETURN");
@@ -1431,11 +1434,11 @@ impl<'a> Parser<'a> {
                 &mut pipeline,
                 ReadStageTemplate::Project {
                     at,
-                    projection: incoming
-                        .iter()
-                        .enumerate()
-                        .map(|(column, (name, _))| ReadProjectionTemplate {
-                            name: name.text.to_owned(),
+                    projection: optional_exports
+                        .clone()
+                        .unwrap_or(0..incoming.len())
+                        .map(|column| ReadProjectionTemplate {
+                            name: incoming[column].0.text.to_owned(),
                             value: ReadValueTemplate::Column(column),
                         })
                         .collect(),
@@ -1443,9 +1446,14 @@ impl<'a> Parser<'a> {
                 },
                 &mut depth,
             )?;
-            let (tail, next, terminal) = self.multipart_row_tail(incoming.clone(), aggregate)?;
-            pipeline.extend(tail);
-            (next, terminal)
+            if let Some(exports) = optional_exports {
+                (incoming[exports].to_vec(), true)
+            } else {
+                let (tail, next, terminal) =
+                    self.multipart_row_tail(incoming.clone(), aggregate)?;
+                pipeline.extend(tail);
+                (next, terminal)
+            }
         };
         let mut syntax = self.take_part_syntax()?;
         syntax.return_at = at;
@@ -2662,6 +2670,10 @@ impl<'a> Parser<'a> {
         owned: bool,
     ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
         self.refuse_call_write(call_depth)?;
+        // The optional child owns exactly one MATCH and its WHERE. Graph
+        // expressions in that WHERE are completed here, inside the child,
+        // rather than consuming the containing query's following clauses.
+        let optional_imports = self.optional_body.then_some(incoming.len());
         let mut terminal = false;
         let first = if self.is_word("MATCH") && incoming.is_empty() && !owned {
             let (input, next, terminal, _) =
@@ -2723,7 +2735,10 @@ impl<'a> Parser<'a> {
             if self.row_existence_filter(incoming.len())?
                 || self.row_existence_projection(incoming.len())?
             {
-                let (next, done) = if self.is_word("WHERE")
+                let optional_exports =
+                    optional_imports.map(|imports| imports..self.visible_width(&incoming));
+                let (next, done) = if optional_exports.is_none()
+                    && self.is_word("WHERE")
                     && self.whole_row_existence_filter(incoming.len())?
                 {
                     let (part, next, done) =
@@ -2732,13 +2747,21 @@ impl<'a> Parser<'a> {
                     (next, done)
                 } else {
                     let (parts, next, done) = self.multipart_existence_expression(
-                        statement, &incoming, aggregate, call_depth,
+                        statement,
+                        &incoming,
+                        aggregate,
+                        call_depth,
+                        optional_exports,
                     )?;
                     result.continuations.extend(parts);
                     (next, done)
                 };
                 incoming = next;
                 terminal = done;
+                if optional_imports.is_some() && terminal {
+                    self.boundary_reads = None;
+                    self.projected_sources = None;
+                }
             } else if self.inline_call()? {
                 let (part, next, done) =
                     self.multipart_call_part(statement, &incoming, aggregate, call_depth)?;
@@ -2754,7 +2777,7 @@ impl<'a> Parser<'a> {
                 if !self.is_word("MATCH") {
                     return Err(expected(self.current.at, "MATCH after WITH or OPTIONAL"));
                 }
-                if kind == RowJoinKind::Left && self.clause_where_deferred()? {
+                if kind == RowJoinKind::Left && self.clause_where_requires_apply()? {
                     let (part, next, done) =
                         self.multipart_optional_apply(statement, &incoming, aggregate, call_depth)?;
                     result.continuations.push(part);
@@ -3221,9 +3244,12 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// Whether the clause starting at this MATCH has a top-level WHERE the
-    /// composition entry re-reads (deferred_wheres). Nothing is consumed.
-    fn clause_where_deferred(&self) -> Result<bool, GraphPatternTextError> {
+    /// Whether this OPTIONAL clause needs its own correlated Apply. A graph
+    /// expression must be placed inside that child before parsing its pattern:
+    /// a parsed nested scope would otherwise be refused at the MATCH offset,
+    /// before the composition entry can identify the WHERE for a retry.
+    /// Only lookahead and the original deferred-WHERE offset are retained.
+    fn clause_where_requires_apply(&mut self) -> Result<bool, GraphPatternTextError> {
         const CLAUSES: [&str; 10] = [
             "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "UNION", "ORDER", "SKIP",
             "LIMIT",
@@ -3241,7 +3267,16 @@ impl<'a> Parser<'a> {
                     if depth == 0 && !matches!(previous, TokenKind::Punct(b'.')) =>
                 {
                     if word.eq_ignore_ascii_case("WHERE") {
-                        return Ok(self.deferred_wheres.contains(&token.at));
+                        if self.deferred_wheres.contains(&token.at) {
+                            return Ok(true);
+                        }
+                        if row_pattern_filter_starts(&mut lexer.clone(), |_| false)?
+                            || !row_pattern_expressions(&mut lexer.clone(), |_| false)?.is_empty()
+                        {
+                            self.deferred_wheres.push(token.at);
+                            return Ok(true);
+                        }
+                        return Ok(false);
                     }
                     if CLAUSES
                         .iter()
@@ -3704,35 +3739,42 @@ impl<'a> Parser<'a> {
             None
         };
         let mut terminal = !head.with;
-        let (mut pipeline, mut next) = if optional_body {
-            // The optional Apply's body ends with its WHERE and exports the
-            // clause's own bindings; the clauses after it are the caller's.
-            let at = self.current.at;
-            let mut stages = Vec::new();
-            let mut depth = 2;
-            self.word("WHERE")?;
-            self.row_selection(&schema, &mut stages, &mut depth, at)?;
-            let exports: RowSchema<'a> = schema[incoming.len()..visible].to_vec();
-            stages.push(ReadStageTemplate::Project {
-                at,
-                projection: (incoming.len()..visible)
-                    .map(|column| ReadProjectionTemplate {
-                        name: schema[column].0.text.to_owned(),
-                        value: ReadValueTemplate::Column(column),
-                    })
-                    .collect(),
-                quantifier: GraphSetQuantifier::All,
-            });
-            self.boundary_reads = None;
-            self.projected_sources = None;
-            terminal = true;
-            (stages, exports)
-        } else if head.with {
-            let (pipeline, schema, _) = self.row_pipeline_prefix(schema)?;
-            (pipeline, schema)
-        } else {
-            (graph_page.into_iter().collect(), schema)
-        };
+        let (mut pipeline, mut next) =
+            if optional_body && self.row_existence_filter(schema.len())? {
+                // Keep the candidate row intact until the multipart owner has
+                // appended its correlated graph sources and Boolean filter.
+                // Projecting the child exports here would hide imported bindings;
+                // filtering after the Apply would erase null-extended outer rows.
+                (Vec::new(), schema)
+            } else if optional_body {
+                // The optional Apply's body ends with its WHERE and exports the
+                // clause's own bindings; the clauses after it are the caller's.
+                let at = self.current.at;
+                let mut stages = Vec::new();
+                let mut depth = 2;
+                self.word("WHERE")?;
+                self.row_selection(&schema, &mut stages, &mut depth, at)?;
+                let exports: RowSchema<'a> = schema[incoming.len()..visible].to_vec();
+                stages.push(ReadStageTemplate::Project {
+                    at,
+                    projection: (incoming.len()..visible)
+                        .map(|column| ReadProjectionTemplate {
+                            name: schema[column].0.text.to_owned(),
+                            value: ReadValueTemplate::Column(column),
+                        })
+                        .collect(),
+                    quantifier: GraphSetQuantifier::All,
+                });
+                self.boundary_reads = None;
+                self.projected_sources = None;
+                terminal = true;
+                (stages, exports)
+            } else if head.with {
+                let (pipeline, schema, _) = self.row_pipeline_prefix(schema)?;
+                (pipeline, schema)
+            } else {
+                (graph_page.into_iter().collect(), schema)
+            };
         // The body's RETURN may follow its own WITH stages, so ask again here.
         if !terminal
             && self.call_body

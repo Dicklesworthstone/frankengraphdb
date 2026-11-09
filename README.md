@@ -94,6 +94,20 @@ EXPLAIN (CERTIFICATE) MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*);
 
 ---
 
+### Correlated filters in OPTIONAL MATCH
+
+An `OPTIONAL MATCH` after `WITH`, `UNWIND` or a returning `CALL` can filter its candidate matches with correlated `EXISTS`/`NOT EXISTS`, `COUNT { ... }`, and pattern-comprehension or list predicates. For example:
+
+```cypher
+MATCH (person:Person)
+WITH person
+OPTIONAL MATCH (person)-[:KNOWS]->(friend)
+WHERE COUNT { MATCH (friend)-[:KNOWS]->(other) } >= 2
+RETURN person, friend
+```
+
+Each person keeps qualifying friends, including parallel-edge occurrences, or one row with a NULL friend when none qualify. The predicate runs inside the optional match before null extension. Subquery-local names remain private; later clauses retain the original outer bindings. Multi-clause subquery bodies use the same native expression and correlated `Apply` operators as ordinary reads, with their existing work, scratch, cancellation and authorization controls. Source was added on 2026-11-09; full runtime qualification remains open as recorded in [implementation status](IMPLEMENTATION_STATUS.md).
+
 ### Relationship reuse in MATCH
 
 A positive `MATCH` uses each relationship ID at most once across the entire

@@ -626,7 +626,6 @@ fn optional_kind_and_parameters_are_bound_into_the_existing_transcripts() {
 fn unsupported_optional_scopes_and_graph_functions_refuse_before_catalog() {
     for text in [
         "MATCH (a) WITH a.score AS a OPTIONAL MATCH (a) RETURN a",
-        "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN b",
         "MATCH (a) WITH a OPTIONAL RETURN a",
     ] {
         let mut calls = 0;
@@ -723,6 +722,277 @@ fn unsupported_optional_scopes_and_graph_functions_refuse_before_catalog() {
         4
     );
     assert!(kept.contains(&vertices(&[None])));
+}
+
+#[test]
+fn optional_graph_predicates_filter_candidates_before_null_extension() {
+    // Only b=2 reaches a vertex with a greater score. The two 1->2 edge
+    // occurrences survive; a=2 and a=3 each lose their sole candidate, and
+    // a=4 has none. All three owners must still emit one NULL-extended row.
+    let accepted = vec![
+        vertices(&[Some(1), Some(2)]),
+        vertices(&[Some(1), Some(2)]),
+        vertices(&[Some(2), None]),
+        vertices(&[Some(3), None]),
+        vertices(&[Some(4), None]),
+    ];
+    for predicate in [
+        "EXISTS { MATCH (b)-[:R]->(c) WHERE c.score > b.score }",
+        "COUNT { MATCH (b)-[:R]->(c) WHERE c.score > b.score } = 1",
+        "EXISTS { MATCH (b)-[:R]->(c) WITH b,c WHERE c.score > b.score RETURN c }",
+        "COUNT { MATCH (b)-[:R]->(c) WITH b,c WHERE c.score > b.score RETURN c } > 0",
+        "size([(b)-[:R]->(c) WHERE c.score > b.score | c]) > 0",
+        "any(c IN [(b)-[:R]->(c) | c] WHERE c.score > b.score)",
+        "b.score = 20 AND EXISTS { MATCH (b)-[:R]->() }",
+        "b.score > a.score AND EXISTS { MATCH (b)-[:R]->(c) WHERE c.score > b.score } AND COUNT { MATCH (b)-[:R]->(c) RETURN c } = 1",
+        "CASE WHEN COUNT { MATCH (b)-[:R]->(c) WHERE c.score > b.score } > 0 THEN true ELSE false END",
+    ] {
+        let statement = format!(
+            "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+             WHERE {predicate} RETURN a,b ORDER BY a,b"
+        );
+        assert_eq!(rows(&statement), accepted, "{statement}");
+    }
+    for predicate in [
+        "NOT EXISTS { MATCH (b)-[:R]->(c) WHERE c.score > b.score }",
+        "COUNT { MATCH (b)-[:R]->(c) WHERE c.score > b.score } = 0",
+    ] {
+        let statement = format!(
+            "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+             WHERE {predicate} RETURN a,b ORDER BY a,b"
+        );
+        assert_eq!(
+            rows(&statement),
+            vec![
+                vertices(&[Some(1), None]),
+                vertices(&[Some(2), Some(3)]),
+                vertices(&[Some(3), Some(3)]),
+                vertices(&[Some(4), None]),
+            ],
+            "{statement}",
+        );
+    }
+    assert_eq!(
+        rows(
+            "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+             WHERE EXISTS { MATCH (b)-[:R]->(c) WHERE c.score > b.score } \
+                OR b.score = 30 RETURN a,b ORDER BY a,b"
+        ),
+        vec![
+            vertices(&[Some(1), Some(2)]),
+            vertices(&[Some(1), Some(2)]),
+            vertices(&[Some(2), Some(3)]),
+            vertices(&[Some(3), Some(3)]),
+            vertices(&[Some(4), None]),
+        ]
+    );
+}
+
+#[test]
+fn optional_subqueries_keep_duplicate_imports_nulls_and_private_scopes() {
+    // Both WITH and returning CALL carry the same vertex; the optional body
+    // must not consume the containing RETURN or erase duplicate input rows.
+    for prefix in [
+        "MATCH (a {score:10}) WITH a AS kept UNWIND [1,2] AS occurrence",
+        "MATCH (a {score:10}) CALL (a) { RETURN a AS kept } UNWIND [1,2] AS occurrence",
+    ] {
+        let statement = format!(
+            "{prefix} OPTIONAL MATCH (kept)-[:R]->(b) \
+             WHERE EXISTS {{ MATCH (b)-[:R]->(c) WHERE c.score > b.score }} \
+             RETURN occurrence,kept,b ORDER BY occurrence,kept,b"
+        );
+        let expected: Vec<_> = [1, 1, 2, 2]
+            .into_iter()
+            .map(|occurrence| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(occurrence)),
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Vertex(VId(2)),
+                ])
+            })
+            .collect();
+        assert_eq!(rows(&statement), expected, "{statement}");
+    }
+    assert_eq!(
+        rows(
+            "UNWIND [10,10,40,null] AS wanted OPTIONAL MATCH (b {score:wanted}) \
+             WHERE COUNT { MATCH (b)-[:R]->() } > 1 RETURN wanted,b ORDER BY wanted,b"
+        ),
+        vec![
+            scalar_vertex(Some(10), Some(1)),
+            scalar_vertex(Some(10), Some(1)),
+            scalar_vertex(Some(40), None),
+            scalar_vertex(None, None),
+        ]
+    );
+    assert_eq!(
+        rows(
+            "UNWIND [null] AS kept OPTIONAL MATCH (kept)-[:R]->(b) \
+             WHERE EXISTS { MATCH (b)-[:R]->() } RETURN kept,b"
+        ),
+        vec![vertices(&[None, None])]
+    );
+    let text = "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+        WHERE COUNT { MATCH (b)-[:R]->(private) RETURN private } > 0 RETURN *";
+    assert_eq!(
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .columns(),
+        &["a", "b"],
+    );
+    let mixed = "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+        WHERE b.score > a.score \
+          AND EXISTS { MATCH (b)-[:R]->(c) WHERE c.score > b.score } \
+          AND COUNT { MATCH (b)-[:R]->(c) RETURN c } = 1 \
+        RETURN * ORDER BY a,b";
+    assert_eq!(
+        PreparedGraphSetText::prepare(mixed, symbols)
+            .unwrap()
+            .columns(),
+        &["a", "b"],
+    );
+    assert_eq!(
+        rows(mixed),
+        vec![
+            vertices(&[Some(1), Some(2)]),
+            vertices(&[Some(1), Some(2)]),
+            vertices(&[Some(2), None]),
+            vertices(&[Some(3), None]),
+            vertices(&[Some(4), None]),
+        ],
+    );
+    for text in [
+        "UNWIND [] AS a OPTIONAL MATCH (b) WHERE EXISTS { MATCH (b)-[:R]->(private) } RETURN private",
+        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE COUNT { MATCH (b)-[:R]->(private) } > 0 RETURN private",
+        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE EXISTS { MATCH (b) WITH b CREATE () } RETURN b",
+    ] {
+        let mut calls = 0;
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}",
+        );
+        assert_eq!(calls, 0, "{text}");
+    }
+}
+
+#[test]
+fn optional_subqueries_end_before_following_clauses_and_rebind_parameters() {
+    let text = "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+        WHERE COUNT { MATCH (b)-[:R]->(c) WHERE c.score > b.score } >= $minimum \
+        WITH a,b OPTIONAL MATCH (b)-[:R]->(d) \
+        WHERE EXISTS { MATCH (d) WHERE d.score=30 } RETURN a,b,d ORDER BY a,b,d";
+    let prepared = PreparedGraphSetText::prepare(text, symbols).unwrap();
+    let original = prepared.canonical_template_bytes();
+    let mut digests = Vec::new();
+    for (minimum, expected) in [
+        (
+            1,
+            vec![
+                vertices(&[Some(1), Some(2), Some(3)]),
+                vertices(&[Some(1), Some(2), Some(3)]),
+                vertices(&[Some(2), None, None]),
+                vertices(&[Some(3), None, None]),
+                vertices(&[Some(4), None, None]),
+            ],
+        ),
+        (
+            2,
+            vec![
+                vertices(&[Some(1), None, None]),
+                vertices(&[Some(2), None, None]),
+                vertices(&[Some(3), None, None]),
+                vertices(&[Some(4), None, None]),
+            ],
+        ),
+    ] {
+        let params = GqlParameters::new().with_int64("minimum", minimum).unwrap();
+        let query = prepared.bind_parameters(&params).unwrap();
+        assert_eq!(
+            run(&query, wide(), None, &Cell::new(0), || Ok(()))
+                .unwrap()
+                .value,
+            expected,
+        );
+        digests.push(query.canonical_bytes());
+        assert_eq!(prepared.canonical_template_bytes(), original);
+    }
+    assert_ne!(digests[0], digests[1]);
+}
+
+#[test]
+fn optional_subqueries_keep_governed_limits_and_late_errors() {
+    let statement = "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+        WHERE COUNT { MATCH (b)-[:R]->(c) WHERE c.score > b.score } > 0 \
+        AND CASE WHEN true THEN true ELSE 1/0 = 0 END RETURN a,b";
+    let query = bind(statement);
+    let checkpoints = Cell::new(0);
+    let measured = run(&query, wide(), None, &Cell::new(0), || {
+        checkpoints.set(checkpoints.get() + 1);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(measured.rows.result_rows, 5);
+    let caps = [
+        measured.rows.snapshot_records,
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    ];
+    assert_eq!(
+        run(
+            &query,
+            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+            None,
+            &Cell::new(0),
+            || Ok(())
+        )
+        .unwrap(),
+        measured,
+    );
+    for dimension in 0..4 {
+        let mut limits = caps;
+        assert!(limits[dimension] > 0);
+        limits[dimension] -= 1;
+        assert!(
+            run(
+                &query,
+                GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                None,
+                &Cell::new(0),
+                || Ok(())
+            )
+            .is_err()
+        );
+    }
+    for stop in 1..=checkpoints.get() {
+        let seen = Cell::new(0);
+        let result = run(&query, wide(), None, &Cell::new(0), || {
+            seen.set(seen.get() + 1);
+            if seen.get() == stop {
+                Err(stop)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+        assert_eq!(seen.get(), stop);
+    }
+    for suffix in ["", " LIMIT 0"] {
+        let statement = format!(
+            "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+             WHERE COUNT {{ MATCH (b)-[:R]->() }} > 1/0 RETURN b{suffix}"
+        );
+        assert!(matches!(
+            run(&bind(&statement), wide(), None, &Cell::new(0), || Ok(())),
+            Err(GqlQueryError::Source(
+                GraphSetExecutionError::Projection { .. }
+            )),
+        ));
+    }
 }
 
 mod carried_metadata {

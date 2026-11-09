@@ -156,6 +156,14 @@ The kernel performs positive-gain local optimization and weighted graph coarseni
 
 Regression sources compare small weighted graphs and a coarsening fixture with the pinned foundation, and cover options, named sweep controls and digest identity, numeric refusals, sweep exhaustion, host admission and every cancellation boundary. `fgdb/tests/gql_call_fnx.rs`, `authorized_prism.rs`, `prism_cooperative.rs` and `buffered_sealed_prism.rs` cover composition, weighted overlays, historical replay, scope masking, signed limits and cooperative cursor release. Compilation and runtime qualification are blocked by SIGKILL while compiling the pinned `asupersync` dependency, including a metadata-only attempt, before product typechecking. Full integration tests and validation gates remain **UNRUN**; this source addition is not runtime-qualified.
 
+### Correlated graph expressions in OPTIONAL MATCH filters
+
+Source added 2026-11-09, extending the correlated-query work in `fgdb-og3db` and `fgdb-2ht8c`. An OPTIONAL continuation after `WITH`, `UNWIND` or returning `CALL` now admits `EXISTS`/`NOT EXISTS`, `COUNT { ... }`, pattern comprehensions and list predicates in its WHERE, including supported multi-clause subquery bodies. The existing parser identifies graph-expression sources before parsing the optional clause, retains its complete typed candidate row, and lowers those sources plus the Boolean predicate inside the existing optional `Apply`. Only the optional clause's local bindings are exported. Each input occurrence therefore keeps all qualifying matches or exactly one NULL extension; filtering never runs after the left join and erases an unmatched outer row.
+
+The shared native operators retain imported-value typing, subquery scope privacy, eager governed graph-source evaluation, scalar CASE laziness, parameter binding and definition limits. No new runtime interpreter or host-specific query path is added. Tests in `fgdb-gql/tests/multipart_optional_reads.rs` assert literal bags, parallel edges, duplicate and NULL imports, following-clause boundaries, private names, parameters, exact resource limits and every cancellation checkpoint. `fgdb/tests/native_optional_subqueries.rs` adds staged-overlay, pinned-view, exact-history, reopen, capability-pruned-oracle and conflict-witness cases.
+
+Pinned formatting and patch applicability checks are available for this source addition. Rust compilation and these regression executions remain **UNRUN**: the pinned foundation compilation previously exhausted the environment's memory allowance, and the canonical filesystem is full. These sources do not close either broader bead or claim a completed exact-tree proof.
+
 ### Pinned embedded read views
 
 `Database::read_session()` returns an immutable `EmbeddedReadView` owning one decoded generation. A view:
