@@ -183,7 +183,7 @@ fn pattern_comprehension_follows(
 }
 
 /// Whether the next token starts an operator that binds tighter than a
-/// comparison: arithmetic, a null predicate (`IS`), IN, a string predicate
+/// comparison: arithmetic, a null predicate (`IS`), [NOT] IN, a string predicate
 /// or `=~`. `a < b IS NOT NULL` is `a < (b IS NOT NULL)` (TCK Precedence1
 /// [23]), so `b` is then not the comparison's whole right operand.
 pub(super) fn tighter_than_comparison(
@@ -192,6 +192,10 @@ pub(super) fn tighter_than_comparison(
     Ok(match lexer.next()?.kind {
         TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^') => true,
         TokenKind::Punct(b'=') => matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT") => matches!(
+            lexer.next()?.kind,
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")
+        ),
         TokenKind::Word(word) => ["IS", "IN", "STARTS", "ENDS", "CONTAINS"]
             .iter()
             .any(|operator| word.eq_ignore_ascii_case(operator)),
@@ -2678,9 +2682,11 @@ impl<'a> Parser<'a> {
     /// Whether a whole composite stands here as a comparison's right
     /// operand: a list or map literal, a list- or map-typed parameter or a
     /// bare list-typed row column, which no subscript, slice, entry read or
-    /// call, no operator binding tighter than a comparison and no further
-    /// comparison of a chain follows (fgdb-bqri3). A list comprehension is a
-    /// let operand of its own (starts_let_operand).
+    /// call or operator binding tighter than a comparison follows
+    /// (fgdb-bqri3). A following comparison ends this operand: the ordinary
+    /// comparison tail reads it again as the next pair's left operand
+    /// (fgdb-fc7cx). A list comprehension is a let operand of its own
+    /// (starts_let_operand).
     pub(super) fn composite_right_operand(
         &self,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
@@ -2699,7 +2705,7 @@ impl<'a> Parser<'a> {
         }
         Ok(!matches!(
             lexer.clone().next()?.kind,
-            TokenKind::Punct(b'[' | b'.' | b'(' | b'=' | b'!' | b'<' | b'>')
+            TokenKind::Punct(b'[' | b'.' | b'(')
         ) && !tighter_than_comparison(&mut lexer)?)
     }
 

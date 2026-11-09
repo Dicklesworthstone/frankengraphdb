@@ -1521,6 +1521,152 @@ fn a_composite_on_the_right_compares_like_the_mirrored_comparison() {
     }
 }
 
+/// A composite in the middle of a comparison chain is one operand, not a
+/// nested comparison and not a scalar-only expression (fgdb-fc7cx). Each
+/// adjacent pair retains the ordinary three-valued comparison semantics.
+#[test]
+fn composite_middle_operands_preserve_comparison_chains() {
+    let truth = CanonicalScalar::Bool;
+    for (statement, expected) in [
+        ("RETURN 1 + 1 < [1] < 3 AS v", CanonicalScalar::Null),
+        (
+            "WITH 0 AS x, 5 AS y RETURN x < [1] < y AS v",
+            CanonicalScalar::Null,
+        ),
+        ("UNWIND [[1]] AS x RETURN x = [1] = [1] AS v", truth(true)),
+        ("UNWIND [[1]] AS x RETURN x <= [1] < [2] AS v", truth(true)),
+        (
+            "UNWIND [[1]] AS x RETURN x = [2] = [NULL] AS v",
+            truth(false),
+        ),
+        (
+            "UNWIND [[NULL]] AS x RETURN x = [NULL] = [NULL] AS v",
+            CanonicalScalar::Null,
+        ),
+        (
+            "UNWIND [{k:1}] AS x RETURN x = {k:1} = {k:1} AS v",
+            truth(true),
+        ),
+        (
+            "UNWIND [{k:1}] AS x RETURN x <> {k:2} != {k:3} AS v",
+            truth(true),
+        ),
+        (
+            "UNWIND [[1]] AS x RETURN NOT x = [1] = [2] AS v",
+            truth(true),
+        ),
+        (
+            "UNWIND [[1]] AS x RETURN x = [1] = [1] AND true AS v",
+            truth(true),
+        ),
+        // Predicates, subscripts and entry reads still bind more tightly
+        // than comparison, while a following comparison does not.
+        ("RETURN true = [1] IN [[1]] = true AS v", truth(true)),
+        ("RETURN true = [1] NOT IN [[2]] = true AS v", truth(true)),
+        ("RETURN false = [1] NOT IN [[1]] = false AS v", truth(true)),
+        (
+            "RETURN true = [1] NOT IN [[NULL]] = true AS v",
+            CanonicalScalar::Null,
+        ),
+        (
+            "UNWIND [[1]] AS x RETURN x = [1] IS NULL = false AS v",
+            truth(false),
+        ),
+        ("UNWIND [[1]] AS x RETURN x = [1][0] = 1 AS v", truth(false)),
+        ("UNWIND [1] AS x RETURN x = {k:1}.k = 1 AS v", truth(true)),
+        (
+            "UNWIND [[1]] AS x RETURN [0] + x < [1] + [1] < [2] AS v",
+            truth(true),
+        ),
+    ] {
+        let result = execute(&prepare(statement), &text("x"), policy())
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        assert_eq!(result.value.len(), 1, "{statement}");
+        assert_eq!(
+            result.value[0].values()[0].as_scalar(),
+            Some(&expected),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn composite_chain_parameters_rebind_without_consuming_the_following_comparison() {
+    use fgdb_gql::GqlParameterType;
+    use fgdb_gql::algebra::GraphValue;
+
+    let template = PreparedGraphSetText::prepare_with_parameter_types(
+        "UNWIND [$xs] AS x WITH x, $xs AS middle, $map AS m \
+         RETURN x = $xs = [1] AS parameter_list, \
+         x = middle = [1] AS column_list, m = $map = {k:1} AS parameter_map",
+        &[
+            ("xs", GqlParameterType::List),
+            ("map", GqlParameterType::Map),
+        ],
+        symbols,
+    )
+    .unwrap();
+    let transcript = template.canonical_template_bytes();
+    let mut plans = Vec::new();
+    for value in [1, 2] {
+        let cell = GraphValue::Scalar(CanonicalScalar::Int(value));
+        let parameters = GqlParameters::new()
+            .with_list("xs", vec![cell.clone()])
+            .unwrap()
+            .with_map("map", vec![("k".into(), cell)])
+            .unwrap();
+        let query = template.bind_parameters(&parameters).unwrap();
+        plans.push(query.canonical_bytes());
+        let result = execute(&query, &text("unused"), policy()).unwrap();
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(
+            result.value[0].values(),
+            &[0; 3].map(|_| GraphValue::Scalar(CanonicalScalar::Bool(value == 1)))
+        );
+    }
+    assert_ne!(plans[0], plans[1]);
+    assert_eq!(template.canonical_template_bytes(), transcript);
+
+    // WHERE keeps only TRUE; NULL and FALSE do not become a row. The
+    // comparison tail also keeps its ordinary expression/work failures
+    // underneath an empty final page.
+    let query = prepare("UNWIND [[1],[2],NULL] AS x WITH x WHERE x = [1] = [1] RETURN x");
+    let result = execute(&query, &text("unused"), policy()).unwrap();
+    assert_eq!(
+        result.value,
+        [GraphValueRow::from_owned_values(vec![GraphValue::List(
+            vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice()
+        )])]
+    );
+    for statement in [
+        "UNWIND [[1]] AS x RETURN x = [1] = [1 / 0] AS v LIMIT 0",
+        "UNWIND [[1]] AS x RETURN x = [2] = [1 / 0] AS v LIMIT 0",
+    ] {
+        assert!(
+            matches!(
+                execute(&prepare(statement), &text("unused"), policy()),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    error: fgdb_gql::GraphIntegerError {
+                        kind: fgdb_gql::GraphIntegerErrorKind::DivisionByZero,
+                        ..
+                    },
+                    ..
+                }))
+            ),
+            "{statement}"
+        );
+    }
+    assert!(matches!(
+        execute(
+            &query,
+            &text("unused"),
+            GqlQueryPolicy::new(100, 100, 1, 1_000_000)
+        ),
+        Err(GqlQueryError::Evaluator(error))
+            if error.dimension == fgdb_gql::GlaLimitDimension::WorkUnits
+    ));
+}
+
 /// fgdb-txbg9: date(...) builds a date from one calendar's fields (over an
 /// optional `date` base), from ISO 8601 text, from a date or from NULL, and a
 /// date reads its fields as `d.year`. Expected days are the TCK's (Temporal1
