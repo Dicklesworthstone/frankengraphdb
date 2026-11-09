@@ -213,7 +213,6 @@ fn query(error: &fgdb::QueryError) -> Option<(Code, Option<usize>)> {
         Q::TemporalSetText(text) => Some((text.class().into(), Some(text.offset))),
         Q::Unsupported { .. }
         | Q::StreamingUnsupported { .. }
-        | Q::TemporalTransactionUnsupported { .. }
         | Q::AggregateStreamPlan(_)
         | Q::EdgeAggregateStreamPlan(_) => Some((Code::Unsupported, None)),
         Q::Authorization(_) => Some((Code::Permission, None)),

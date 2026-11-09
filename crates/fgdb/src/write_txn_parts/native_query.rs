@@ -1,8 +1,9 @@
 //! Native text over the existing transaction reader and write executors.
 //!
-//! Classification is shared with Database::query; execution never calls that
-//! method, since doing so would silently drop the caller's staged overlay and
-//! transaction observations. No parser, executor or snapshot is duplicated.
+//! Classification is shared with Database::query. Ordinary reads use the
+//! caller's staged overlay and observations; an explicit AS OF selector uses
+//! retained committed history, bounded by that transaction's original basis.
+//! No parser, executor or snapshot is duplicated.
 
 use super::WriteTxn;
 use crate::query::{
@@ -14,8 +15,9 @@ use fgdb_delta_types::RelationId;
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphMutationProgramError, GraphSymbolResolver,
     GraphWriteProgramError, GraphWriteProgramPolicy, GraphWriteScriptExecutionError,
+    TemporalAggregatePlan,
 };
-use fgdb_types::{CommitCx, QueryCx, TxnCx};
+use fgdb_types::{CommitCx, CommitSeq, QueryCx, TxnCx};
 
 impl WriteTxn {
     /// Execute a native read over this transaction's pinned basis and canonical
@@ -28,10 +30,17 @@ impl WriteTxn {
     /// including observations from filtered/empty answers and late refusals.
     /// Refusal does not finish the transaction or discard its staged effects.
     ///
+    /// An explicit `FOR SYSTEM_TIME AS OF SEQ` reads retained committed history
+    /// at or before the original transaction basis, including in a transaction
+    /// with staged writes. Staged effects are excluded even at that exact
+    /// basis. A later selector is refused even if the database has advanced.
+    /// Historical reads observe immutable versions and therefore do not add
+    /// current-state conflict witnesses; ordinary reads keep their existing
+    /// witnesses. This is the explicit historical isolation carve-out.
+    ///
     /// This does not stage a write, commit, finish, retry or advance the basis.
-    /// Historical selectors and EXPLAIN are not part of this bounded facade;
-    /// temporal plans return [`QueryError::TemporalTransactionUnsupported`]. No
-    /// durable snapshot certificate is issued for an uncommitted overlay.
+    /// EXPLAIN is not part of this bounded facade. No durable snapshot
+    /// certificate is issued for an uncommitted overlay.
     pub fn query<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -46,6 +55,24 @@ impl WriteTxn {
         let prepared = PreparedNativeRead::prepare(text, params, resolver)?;
         prepared.execute_in_transaction(self, database, cx, params, policy)
     }
+
+    /// Validate the historical isolation boundary before any governed source
+    /// can observe data. The native as-of executor independently checks the
+    /// retained floor and keeps all ordinary resource/cancellation admission.
+    fn admit_historical_query<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        as_of: CommitSeq,
+    ) -> Result<(), QueryError> {
+        database.frontier().map_err(QueryError::Read)?;
+        if as_of > self.basis() {
+            return Err(QueryError::Read(crate::ReadError::BeyondFrontier {
+                asked: as_of,
+                frontier: self.basis(),
+            }));
+        }
+        Ok(())
+    }
 }
 
 impl PreparedNativeRead {
@@ -56,8 +83,8 @@ impl PreparedNativeRead {
     ///
     /// The template itself owns no transaction, snapshot pin or permission. Each
     /// call validates the supplied transaction's lifecycle and database owner
-    /// before binding. A temporal template fails explicitly rather than reading
-    /// either the live database or an invented historical overlay.
+    /// before binding. Temporal templates use the explicit committed-history
+    /// contract of [`WriteTxn::query`], never the live cut or a staged history.
     pub fn execute_in_transaction<V: Vfs + Clone>(
         &self,
         transaction: &WriteTxn,
@@ -66,12 +93,31 @@ impl PreparedNativeRead {
         params: &GqlParameters,
         policy: GqlQueryPolicy,
     ) -> Result<QueryResult, QueryError> {
+        self.execute_in_transaction_with_snapshot(transaction, database, cx, params, policy)
+            .map(|(result, _)| result)
+    }
+
+    /// Execute while retaining whether the answer came from committed history.
+    /// `Some(sequence)` names the explicit AS OF cut; `None` means the answer
+    /// uses the transaction's staged workspace and cannot be described as a
+    /// committed snapshot. The same bound plan supplies both rows and metadata,
+    /// including for temporal aggregates and compound reads. Refusals return
+    /// neither successful metadata nor partial rows.
+    pub fn execute_in_transaction_with_snapshot<V: Vfs + Clone>(
+        &self,
+        transaction: &WriteTxn,
+        database: &Database<V>,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+    ) -> Result<(QueryResult, Option<CommitSeq>), QueryError> {
         transaction
             .ensure_database(database)
             .map_err(|error| QueryError::Transaction(Box::new(error)))?;
         let captured = database.capture_statement_parameters(cx, self.statement(), params)?;
         let params = captured.as_ref();
-        match self {
+        let mut historical_snapshot = None;
+        let result: Result<QueryResult, QueryError> = match self {
             Self::Pattern(prepared) => {
                 let query = prepared
                     .bind_parameters(params)
@@ -127,12 +173,54 @@ impl PreparedNativeRead {
                     .map_err(|error| QueryError::TransactionSet(Box::new(error)))?;
                 Ok(values(prepared.columns().to_vec(), result.value))
             }
-            Self::TemporalPattern(_) | Self::TemporalSet(_) | Self::TemporalAggregate(_) => {
-                Err(QueryError::TemporalTransactionUnsupported {
-                    facade: self.facade_class(),
-                })
+            Self::TemporalPattern(prepared) => {
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::TemporalText)?;
+                transaction.admit_historical_query(database, query.as_of())?;
+                historical_snapshot = Some(query.as_of());
+                let result = database
+                    .execute_graph_pattern_governed_at(cx, query.pattern(), query.as_of(), policy)
+                    .map_err(QueryError::Pattern)?;
+                Ok(values(query.pattern().columns().to_vec(), result.value))
             }
-        }
+            Self::TemporalSet(prepared) => {
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::TemporalSetText)?;
+                transaction.admit_historical_query(database, query.as_of())?;
+                historical_snapshot = Some(query.as_of());
+                let result = database
+                    .execute_graph_set_governed_at(cx, query.query(), query.as_of(), policy)
+                    .map_err(QueryError::Set)?;
+                Ok(values(prepared.columns().to_vec(), result.value))
+            }
+            Self::TemporalAggregate(prepared) => {
+                let query = prepared
+                    .bind_source_parameters(params)
+                    .map_err(QueryError::TemporalText)?;
+                transaction.admit_historical_query(database, query.as_of())?;
+                historical_snapshot = Some(query.as_of());
+                let result = match query.aggregate() {
+                    TemporalAggregatePlan::Graph(aggregate) => database
+                        .execute_graph_aggregate_governed_at(cx, aggregate, query.as_of(), policy),
+                    TemporalAggregatePlan::Relation(aggregate) => database
+                        .execute_graph_set_aggregate_governed_at(
+                            cx,
+                            aggregate,
+                            query.as_of(),
+                            policy,
+                        ),
+                }
+                .map_err(QueryError::Aggregate)?;
+                Ok(aggregates(
+                    prepared.columns().to_vec(),
+                    prepared.output_slots(),
+                    result.value,
+                ))
+            }
+        };
+        Ok((result?, historical_snapshot))
     }
 }
 

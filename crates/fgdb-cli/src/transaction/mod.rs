@@ -13,6 +13,10 @@
 //! allowances with --query results. All RETURN expressions and output admission
 //! precede the sole completion boundary; LIMIT affects rows, never effects.
 //! Other write steps retain their multi-statement programs.
+//! An explicit AS OF read selects committed history no later than the original
+//! transaction basis. Its statement record says `view=committed_history` and
+//! its columns record carries that exact `seq`; ordinary reads retain their
+//! transaction-local overlay. Both share the same completion/output boundary.
 //! A --write with --from-query runs its read-once/bind-all batch in this SAME
 //! transaction. The source sees earlier staged writes. One source statement
 //! and every expanded script statement count toward the existing 64-statement
@@ -31,10 +35,10 @@ use super::{
     Failure, Options, cell, execution_failure, human_value, parameter, quoted, refusal, value_cell,
 };
 use asupersync::fs::Vfs;
-use fgdb::{Database, NativeReadClass, PreparedNativeRead, QueryResult, QueryValue};
+use fgdb::{Database, PreparedNativeRead, QueryResult, QueryValue};
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{BoundNativeGraphWrite, GqlParameters, GraphWriteProgramPolicy};
-use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
+use fgdb_types::{CommitSeq, EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
 use std::io::Write;
 
 pub(super) const MAX_STATEMENTS: usize = 64;
@@ -293,16 +297,6 @@ fn prepare(
                             execution_failure(error)
                         }
                     })?;
-                if matches!(
-                    query.facade_class(),
-                    NativeReadClass::TemporalPattern
-                        | NativeReadClass::TemporalAggregate
-                        | NativeReadClass::TemporalSet
-                ) {
-                    return Err(Failure::query(
-                        "historical selectors have no staged transaction semantics",
-                    ));
-                }
                 statements = statements
                     .checked_add(1)
                     .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
@@ -350,6 +344,7 @@ fn buffer_rows(
     result: QueryResult,
     index: usize,
     basis: u64,
+    snapshot: Option<CommitSeq>,
     robot: bool,
     cx: &QueryCx,
 ) -> Result<u64, Failure> {
@@ -358,7 +353,15 @@ fn buffer_rows(
     };
     let count =
         u64::try_from(rows.len()).map_err(|_| Failure::query("transaction row count overflow"))?;
-    buffer_row_header(output, &columns, index, basis, robot, count, false)?;
+    buffer_row_header(
+        output,
+        &columns,
+        index,
+        basis,
+        robot,
+        count,
+        RowOrigin::Query(snapshot),
+    )?;
     for row in rows {
         cx.checkpoint().map_err(Failure::query)?;
         let mut cells = Vec::with_capacity(row.len());
@@ -383,6 +386,11 @@ fn buffer_rows(
 // The two row-producing step types share framing and scalar encoding, not
 // storage execution. Returning rows are borrowed during encoding: they are
 // never cloned into another complete QueryResult just to drive transport.
+enum RowOrigin {
+    Write,
+    Query(Option<CommitSeq>),
+}
+
 fn buffer_row_header(
     output: &mut BufferedOutput,
     columns: &[String],
@@ -390,16 +398,29 @@ fn buffer_row_header(
     basis: u64,
     robot: bool,
     count: u64,
-    write: bool,
+    origin: RowOrigin,
 ) -> Result<(), Failure> {
-    let kind = if write { "write" } else { "query" };
+    let (kind, snapshot) = match origin {
+        RowOrigin::Write => ("write", None),
+        RowOrigin::Query(snapshot) => ("query", snapshot),
+    };
+    let view = if snapshot.is_some() {
+        "committed_history"
+    } else {
+        "transaction_local"
+    };
     if robot {
-        let statements = if write { ",\"statements\":1" } else { "" };
+        let statements = if matches!(origin, RowOrigin::Write) {
+            ",\"statements\":1"
+        } else {
+            ""
+        };
+        let sequence = snapshot.map_or_else(String::new, |seq| format!(",\"seq\":{}", seq.0));
         output.line(&format!(
-            r#"{{"v":1,"event":"statement","index":{index},"kind":"{kind}","view":"transaction_local","basis":{basis},"count":{count}{statements}}}"#,
+            r#"{{"v":1,"event":"statement","index":{index},"kind":"{kind}","view":"{view}","basis":{basis},"count":{count}{statements}}}"#,
         ))?;
         output.line(&format!(
-            r#"{{"v":1,"event":"columns","statement":{index},"columns":[{}]}}"#,
+            r#"{{"v":1,"event":"columns","statement":{index}{sequence},"columns":[{}]}}"#,
             columns
                 .iter()
                 .map(|name| quoted(name))
@@ -407,9 +428,16 @@ fn buffer_row_header(
                 .join(",")
         ))?;
     } else {
-        output.line(&format!(
-            "statement {index}: {kind} (transaction-local basis {basis})"
-        ))?;
+        if let Some(seq) = snapshot {
+            output.line(&format!(
+                "statement {index}: {kind} (committed history seq {}; transaction basis {basis})",
+                seq.0
+            ))?;
+        } else {
+            output.line(&format!(
+                "statement {index}: {kind} (transaction-local basis {basis})"
+            ))?;
+        }
         output.line(
             &columns
                 .iter()
@@ -448,7 +476,15 @@ fn buffer_returning_rows(
 ) -> Result<u64, Failure> {
     let count =
         u64::try_from(rows.len()).map_err(|_| Failure::query("transaction row count overflow"))?;
-    buffer_row_header(output, columns, index, basis, robot, count, true)?;
+    buffer_row_header(
+        output,
+        columns,
+        index,
+        basis,
+        robot,
+        count,
+        RowOrigin::Write,
+    )?;
     for row in rows {
         cx.checkpoint().map_err(Failure::query)?;
         let mut cells = Vec::with_capacity(row.values().len());
@@ -527,10 +563,11 @@ async fn run_with_limits<V: Vfs + Clone>(
                         // Both the per-step row limit and the remaining
                         // transaction-wide delivery allowance must hold.
                         let allowance = options.budget.policy_with_result_cap(remaining);
-                        let rows = query
-                            .execute_in_transaction(&txn, db, &cx, params, allowance)
+                        let (rows, snapshot) = query
+                            .execute_in_transaction_with_snapshot(&txn, db, &cx, params, allowance)
                             .map_err(execution_failure)?;
-                        let added = buffer_rows(&mut output, rows, index + 1, basis, robot, &cx)?;
+                        let added =
+                            buffer_rows(&mut output, rows, index + 1, basis, snapshot, robot, &cx)?;
                         count = count
                             .checked_add(added)
                             .filter(|n| *n <= limits.rows)
