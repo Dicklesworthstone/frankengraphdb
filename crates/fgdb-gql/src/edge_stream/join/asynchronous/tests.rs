@@ -7,6 +7,8 @@ use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+mod optional;
+
 const R: RelationId = RelationId(7);
 const S: RelationId = RelationId(8);
 const P: PropertyKeyId = PropertyKeyId(9);
@@ -127,6 +129,7 @@ struct Source {
     fail_seek: Option<usize>,
     fail_reserve: bool,
     hidden: Option<EId>,
+    expected_output_records: usize,
 }
 impl Source {
     fn new(mask: usize) -> Self {
@@ -142,6 +145,7 @@ impl Source {
             fail_seek: None,
             fail_reserve: false,
             hidden: None,
+            expected_output_records: 2,
         };
         for (at, (id, from, to, relation, prop)) in [
             (0, 0, 0, R, -2),
@@ -337,7 +341,7 @@ impl AsyncEdgeJoinSource for Source {
         columns: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Guard, EdgeScanSourceError<Self::Error, C>> {
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), self.expected_output_records);
         self.counts.output_columns.store(columns, Ordering::SeqCst);
         self.guard(control)
     }

@@ -38,6 +38,9 @@ pub type AsyncIncidentCandidateResult<Record, Error, Control> =
 /// outlives every source record. A collected projection additionally forwards
 /// every native allocation event to join_output_event before allocation: its
 /// variable witness payload cannot be bounded by the active record slice.
+/// A terminal OPTIONAL likewise reserves its fixed output with an empty
+/// record slice and forwards every projection allocation to join_output_event;
+/// its independently owned local records need not be moved into a flat slice.
 /// Explicit () guards declare no byte bound.
 pub trait AsyncEdgeJoinSource: AsyncEdgeScanSource {
     type TraversalGuard: Send;
@@ -90,12 +93,16 @@ pub trait AsyncEdgeJoinSource: AsyncEdgeScanSource {
 /// and GraphMatchClause::collect/collect_tuple; each collection is complete
 /// before its containing row can be delivered.
 /// Independent vertex scans, variable collection atoms, nested collection
-/// probes, OPTIONAL and returned variable-length paths remain typed refusals;
+/// probes, OPTIONAL and returned variable-length paths remain typed refusals
+/// for ordinary ordered streams. External-sort input additionally admits one
+/// terminal correlated fixed-hop OPTIONAL and retains its resumable local
+/// witness frame, without materializing the nullable relation;
 /// missing indexes and interrupted reads never establish existential absence.
 #[derive(Clone)]
 pub struct AsyncEdgeJoinPlan {
     inner: EdgeScanPlan,
     columns: usize,
+    optional: Option<Arc<probe::Optional>>,
 }
 impl AsyncEdgeJoinPlan {
     /// The checked root selector. Nested expansions and probes retain their
@@ -133,12 +140,80 @@ impl AsyncEdgeJoinPlan {
     /// be applied exactly once AFTER sorting, including DISTINCT and hidden
     /// key removal. Final SKIP/LIMIT never suppresses input errors in this lane.
     /// ResultRows counts input occurrences, not the consumer's final page.
+    /// One terminal correlated OPTIONAL may copy outer bindings and expand
+    /// fixed edges through native predicates and path captures. Each complete
+    /// witness contributes once; successful exhaustion contributes one NULL
+    /// extension only when no witness existed. Independent roots, multiple or
+    /// nested optional scopes, variable paths and post-scope predicates still
+    /// refuse before source construction. The complete external tail remains
+    /// responsible for ordering, DISTINCT, hidden keys and final pagination.
     pub fn compile_sort_input(
         plan: &GlaPlan<GraphValueRow>,
     ) -> Result<(Self, crate::scan_stream::ScanSortTail), EdgeScanBuildError> {
         Self::check_access(plan)?;
+        if let Some(start) = plan
+            .operators()
+            .iter()
+            .position(|op| matches!(op, GlaOperator::Optional { .. }))
+        {
+            return Self::compile_optional_sort_input(plan, start);
+        }
         let (inner, tail) = EdgeScanPlan::compile_sort_input(plan)?;
         Ok((Self::from_inner(inner), tail))
+    }
+
+    fn compile_optional_sort_input(
+        plan: &GlaPlan<GraphValueRow>,
+        start: usize,
+    ) -> Result<(Self, crate::scan_stream::ScanSortTail), EdgeScanBuildError> {
+        let ops = plan.operators();
+        let tail = crate::scan_stream::ScanSortTail::compile(plan)
+            .map_err(|operator| EdgeScanBuildError { operator })?;
+        let prefix = &ops[..start];
+        let width = 2 + prefix
+            .iter()
+            .filter(|op| matches!(op, GlaOperator::Expand { .. }))
+            .count();
+        let captures: Vec<_> = prefix
+            .iter()
+            .filter_map(|op| match op {
+                GlaOperator::CapturePath { segments, .. } => Some(segments.len() == 1),
+                _ => None,
+            })
+            .collect();
+        // The positive compiler below validates the complete prefix. Private
+        // probe/collection frames cannot stand for exported outer slots.
+        if prefix
+            .iter()
+            .any(|op| matches!(op, GlaOperator::Probe { .. } | GlaOperator::Collect { .. }))
+        {
+            return Err(EdgeScanBuildError { operator: start });
+        }
+        let optional = probe::Optional::compile(ops, start, width, &captures)?;
+        let columns = optional.columns();
+        let mut positive = prefix.to_vec();
+        positive.push(GlaOperator::ProjectValues {
+            columns: (0..width)
+                .map(|slot| ValueProjection::Vertex {
+                    slot: crate::algebra::BindingSlot(slot as u32),
+                })
+                .collect(),
+        });
+        positive.push(GlaOperator::OrderByValues);
+        positive.push(GlaOperator::Limit {
+            offset: 0,
+            count: None,
+        });
+        let positive = GlaPlan::from_operators(positive);
+        let inner = compile_output(&positive, Output::SortInput)?;
+        Ok((
+            Self {
+                inner,
+                columns,
+                optional: Some(Arc::new(optional)),
+            },
+            tail,
+        ))
     }
 
     fn check_access(plan: &GlaPlan<GraphValueRow>) -> Result<(), EdgeScanBuildError> {
@@ -179,7 +254,11 @@ impl AsyncEdgeJoinPlan {
             unreachable!("the fixed-hop compiler proves the projection")
         };
         let columns = columns.len();
-        Self { inner, columns }
+        Self {
+            inner,
+            columns,
+            optional: None,
+        }
     }
 
     pub fn hop_count(&self) -> usize {
@@ -202,8 +281,8 @@ impl core::fmt::Debug for AsyncEdgeJoinPlan {
 /// Extracting the pair transfers both obligations to the caller; retain the
 /// guard for as long as the extracted row is retained.
 pub struct AsyncEdgeJoinOutput<Guard> {
-    row: GraphValueRow,
-    guard: Guard,
+    pub(super) row: GraphValueRow,
+    pub(super) guard: Guard,
 }
 impl<Guard> AsyncEdgeJoinOutput<Guard> {
     pub fn row(&self) -> &GraphValueRow {
@@ -231,6 +310,7 @@ impl<Guard> core::fmt::Debug for AsyncEdgeJoinOutput<Guard> {
 }
 
 struct Frame<R, Guard> {
+    optional: Option<probe::OptionalState<R, Guard>>,
     records: Vec<R>,
     traversal: Traversal,
     pending: Option<(EId, R)>,
@@ -378,6 +458,7 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
             let traversal = Traversal::new(hops, &mut |event| meter.event(event))?;
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             *frame = Some(Frame {
+                optional: None,
                 records: Vec::with_capacity(hops),
                 traversal,
                 pending: None,
@@ -392,6 +473,27 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
         }
         loop {
             meter.event(GlaExecutionEvent::Work)?;
+            if let Some(optional) = &self.plan.optional
+                && let Some(state) = &mut frame.optional
+            {
+                if let Some(row) = optional
+                    .next_async::<S, F, C, EMIT>(
+                        state,
+                        &frame.traversal,
+                        &mut frame.records,
+                        source,
+                        meter,
+                        self.seq,
+                        self.plan.columns,
+                    )
+                    .await?
+                {
+                    return Ok(Some(row));
+                }
+                frame.optional = None;
+                frame.pop();
+                continue;
+            }
             let depth = frame.records.len();
             let (eid, record, from, to) = if depth == 0 {
                 let (eid, record, second) = if let Some((eid, record)) = frame.pending.take() {
@@ -506,6 +608,15 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
             };
             if depth + 1 < hops {
                 frame.traversal.after[depth + 1] = None;
+                continue;
+            }
+            if let Some(optional) = &self.plan.optional {
+                frame.optional = Some(optional.start_async(
+                    &frame.traversal.bindings,
+                    values.paths,
+                    source,
+                    meter,
+                )?);
                 continue;
             }
             if self.skip != 0 {

@@ -16,6 +16,164 @@ pub(super) trait Outer<S: AsyncEdgeJoinSource>:
     fn observe(&self, source: &S, event: GlaExecutionEvent) -> Result<(), S::Error>;
 }
 
+// One definition-bounded traversal, shared by short-circuit probes, complete
+// collections and resumable OPTIONAL output. Records drop before the guard.
+struct WitnessState<R, G> {
+    ids: Vec<Option<VId>>,
+    positions: Vec<Position>,
+    records: Vec<Option<R>>,
+    walks: BTreeMap<usize, walk::Endpoints>,
+    depth: usize,
+    resume: bool,
+    exhausted: bool,
+    _guard: G,
+}
+
+pub(in crate::edge_stream::join) struct OptionalState<R, G> {
+    witnesses: WitnessState<R, G>,
+    outer_paths: Vec<Option<GraphPath>>,
+    found: bool,
+    finished: bool,
+}
+
+impl Optional {
+    pub(in crate::edge_stream::join) fn start_async<S, F, C>(
+        &self,
+        bindings: &[Option<VId>],
+        outer_paths: Vec<Option<GraphPath>>,
+        source: &S,
+        meter: &mut Meter<F>,
+    ) -> ScanResult<OptionalState<S::Record, S::TraversalGuard>, S::Error, C>
+    where
+        S: AsyncEdgeJoinSource,
+        F: FnMut() -> Result<(), C>,
+    {
+        debug_assert_eq!(outer_paths.len(), self.outer_captures);
+        Ok(OptionalState {
+            witnesses: self.probe.start_async(bindings, source, meter)?,
+            outer_paths,
+            found: false,
+            finished: false,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::edge_stream::join) async fn next_async<S, F, C, const EMIT: bool>(
+        &self,
+        state: &mut OptionalState<S::Record, S::TraversalGuard>,
+        outer: &Traversal,
+        outer_records: &mut [S::Record],
+        source: &mut S,
+        meter: &mut Meter<F>,
+        seq: CommitSeq,
+        columns: usize,
+    ) -> ScanResult<
+        Option<super::super::asynchronous::AsyncEdgeJoinOutput<S::OutputGuard>>,
+        S::Error,
+        C,
+    >
+    where
+        S: AsyncEdgeJoinSource,
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
+        if state.finished {
+            return Ok(None);
+        }
+        let mut frame = EdgeOuter::<S> {
+            records: outer_records,
+            choices: &outer.choices,
+            seq,
+        };
+        let local_paths = self
+            .probe
+            .next_witness_async(&mut state.witnesses, &mut frame, source, meter)
+            .await?;
+        let local_paths = match local_paths {
+            Some(paths) => {
+                state.found = true;
+                Some(paths)
+            }
+            None => {
+                state.finished = true;
+                if state.found {
+                    return Ok(None);
+                }
+                // Only successful complete exhaustion establishes absence.
+                // The original outer slots remain intact; every copied/local
+                // slot belongs to the OPTIONAL frame and becomes NULL.
+                debug_assert_eq!(state.witnesses.ids.len(), self.probe.outer_width);
+                for _ in &self.probe.steps {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    state.witnesses.ids.push(None);
+                }
+                None
+            }
+        };
+        let count = if EMIT {
+            Some(meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?)
+        } else {
+            None
+        };
+        // Local records occupy nullable slots, so they are not a flat slice.
+        // Reserve the row's fixed owner, then charge EVERY copied field/path
+        // cell and payload quantum through join_output_event before allocation.
+        // This independent guard survives all local/outer records.
+        let mut guard =
+            flatten(source.reserve_join_output(&[], columns, &mut |event| meter.event(event)))?;
+        let mut control = |event| {
+            meter.event(event)?;
+            source
+                .join_output_event(&mut guard, event)
+                .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
+        };
+        control(GlaExecutionEvent::ScratchEntry)?;
+        for _ in 0..self.outer_captures + self.captures.len() {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        let mut paths = Vec::with_capacity(self.outer_captures + self.captures.len());
+        for path in &state.outer_paths {
+            control(GlaExecutionEvent::Work)?;
+            if let Some(path) = path {
+                for _ in path.steps() {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+            }
+            paths.push(path.clone());
+        }
+        if let Some(local_paths) = local_paths {
+            debug_assert_eq!(local_paths.len(), self.captures.len());
+            paths.extend(local_paths);
+        } else {
+            paths.resize_with(self.outer_captures + self.captures.len(), || None);
+        }
+        let loan = Records {
+            outer: &frame,
+            records: &state.witnesses.records,
+            positions: &state.witnesses.positions,
+        };
+        let row = project_collected(
+            &self.projection,
+            &state.witnesses.ids,
+            &paths,
+            &[],
+            &loan,
+            &mut control,
+        )?;
+        if let Some(count) = count {
+            meter.event(GlaExecutionEvent::ResultRow)?;
+            meter.rows.result_rows = count;
+        } else {
+            meter.event(GlaExecutionEvent::Work)?;
+        }
+        Ok(Some(super::super::asynchronous::AsyncEdgeJoinOutput {
+            row,
+            guard,
+        }))
+    }
+}
+
 impl Probe {
     pub(in crate::edge_stream::join) async fn accepts_async<S, F, C>(
         &self,
@@ -103,11 +261,33 @@ impl Probe {
             ) -> ScanResult<bool, S::Error, C>
             + Send,
     {
+        let mut state = self.start_async(bindings, source, meter)?;
+        while let Some(paths) = self
+            .next_witness_async(&mut state, &mut outer, source, meter)
+            .await?
+        {
+            if visit(&state.ids, &paths, source, &outer, meter)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn start_async<S, F, C>(
+        &self,
+        bindings: &[Option<VId>],
+        source: &S,
+        meter: &mut Meter<F>,
+    ) -> ScanResult<WitnessState<S::Record, S::TraversalGuard>, S::Error, C>
+    where
+        S: AsyncEdgeJoinSource,
+        F: FnMut() -> Result<(), C>,
+    {
         debug_assert_eq!(bindings.len(), self.outer_width);
         // Admission precedes vectors and payloads. This guard covers fixed
         // slots; every awaited record brings its own source payload guard.
         // Declare the guard first so local records/vectors drop before refund.
-        let _guard = flatten(
+        let guard = flatten(
             source.reserve_traversal(self.outer_width + self.steps.len() - 1, &mut |event| {
                 meter.event(event)
             }),
@@ -120,29 +300,70 @@ impl Probe {
             meter.event(GlaExecutionEvent::Work)?;
             ids.push(*id);
         }
-        let mut positions: Vec<_> = self
+        let positions: Vec<_> = self
             .steps
             .iter()
             .map(|step| Position::new(step.binding))
             .collect();
-        let mut records: Vec<Option<S::Record>> = (0..self.steps.len()).map(|_| None).collect();
-        let mut walks = BTreeMap::<usize, walk::Endpoints>::new();
-        let mut depth = 0;
+        let records: Vec<Option<S::Record>> = (0..self.steps.len()).map(|_| None).collect();
+        Ok(WitnessState {
+            ids,
+            positions,
+            records,
+            walks: BTreeMap::new(),
+            depth: 0,
+            resume: false,
+            exhausted: false,
+            _guard: guard,
+        })
+    }
+
+    async fn next_witness_async<S, O, F, C>(
+        &self,
+        state: &mut WitnessState<S::Record, S::TraversalGuard>,
+        outer: &mut O,
+        source: &mut S,
+        meter: &mut Meter<F>,
+    ) -> ScanResult<Option<Vec<Option<GraphPath>>>, S::Error, C>
+    where
+        S: AsyncEdgeJoinSource,
+        O: Outer<S>,
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
+        if state.exhausted {
+            return Ok(None);
+        }
+        if state.resume {
+            state.depth -= 1;
+            state.ids.pop();
+            state.resume = false;
+        }
+        let WitnessState {
+            ids,
+            positions,
+            records,
+            walks,
+            depth,
+            resume,
+            exhausted,
+            ..
+        } = state;
         loop {
             meter.event(GlaExecutionEvent::Work)?;
             // Retrying this binding drops its previous candidate, not any
             // accepted ancestor. Never keep a sibling's fields through descent.
-            records[depth] = None;
-            let step = &self.steps[depth];
+            records[*depth] = None;
+            let step = &self.steps[*depth];
             let candidate = match step.binding {
                 Binding::Copy {
                     source: from,
                     nullable,
                 } => {
-                    if matches!(positions[depth], Position::Copy(true)) {
+                    if matches!(positions[*depth], Position::Copy(true)) {
                         None
                     } else {
-                        positions[depth] = Position::Copy(true);
+                        positions[*depth] = Position::Copy(true);
                         let value = ids[from];
                         if value.is_none() && !nullable {
                             None
@@ -153,7 +374,7 @@ impl Probe {
                 }
                 Binding::Expand(expansion) => {
                     if let Some(from) = ids[expansion.source] {
-                        let Position::Edge(mut after) = positions[depth] else {
+                        let Position::Edge(mut after) = positions[*depth] else {
                             unreachable!("compiled fixed expansion position");
                         };
                         let mut admitted = None;
@@ -176,7 +397,7 @@ impl Probe {
                             }
                         };
                         check_admission(&candidate, admitted)?;
-                        positions[depth] = Position::Edge(after);
+                        positions[*depth] = Position::Edge(after);
                         if let Some(candidate) = candidate {
                             // Invisible identities still advance and consume
                             // candidate admission. They are not NULL witnesses.
@@ -203,7 +424,7 @@ impl Probe {
                                     ));
                                 }
                             }
-                            records[depth] = Some(record);
+                            records[*depth] = Some(record);
                             Some(Some(to))
                         } else {
                             None
@@ -219,16 +440,17 @@ impl Probe {
                 } => match ids[expansion.source] {
                     None => None, // An identity path cannot manufacture a NULL seed.
                     Some(from) => {
-                        if let std::collections::btree_map::Entry::Vacant(slot) = walks.entry(depth)
+                        if let std::collections::btree_map::Entry::Vacant(slot) =
+                            walks.entry(*depth)
                         {
                             // Validate even an identity path without opening
                             // an index. Existing local/outer records are the
                             // only authority for this correlated seed.
                             {
                                 let loan = Records {
-                                    outer: &outer,
-                                    records: &records,
-                                    positions: &positions,
+                                    outer: &*outer,
+                                    records,
+                                    positions,
                                 };
                                 vertex(&loan, from, &mut |event| meter.event(event))?;
                             }
@@ -236,23 +458,23 @@ impl Probe {
                                 from,
                                 bounds,
                                 search,
-                                &mut |event| walk::async_event(source, &outer, meter, event),
+                                &mut |event| walk::async_event(source, &*outer, meter, event),
                             )?;
                             walk::async_event(
                                 source,
-                                &outer,
+                                &*outer,
                                 meter,
                                 GlaExecutionEvent::ScratchEntry,
                             )?;
                             slot.insert(walk);
                         }
                         let candidate = walks
-                            .get_mut(&depth)
+                            .get_mut(depth)
                             .expect("initialized path support")
-                            .next_async(expansion, source, meter, &mut outer)
+                            .next_async(expansion, source, meter, outer)
                             .await?;
                         candidate.map(|(vertex, record)| {
-                            records[depth] = record;
+                            records[*depth] = record;
                             Some(vertex)
                         })
                     }
@@ -264,25 +486,26 @@ impl Probe {
                 }
             };
             let Some(candidate) = candidate else {
-                walks.remove(&depth);
-                if depth == 0 {
-                    return Ok(false);
+                walks.remove(depth);
+                if *depth == 0 {
+                    *exhausted = true;
+                    return Ok(None);
                 }
-                depth -= 1;
+                *depth -= 1;
                 ids.pop();
                 continue;
             };
             ids.push(candidate);
             let passed = {
                 let loan = Records {
-                    outer: &outer,
-                    records: &records,
-                    positions: &positions,
+                    outer: &*outer,
+                    records,
+                    positions,
                 };
                 self.test_candidate(
                     &step.predicates,
-                    &ids,
-                    &positions,
+                    ids,
+                    positions,
                     None,
                     &loan,
                     &mut |event| {
@@ -304,20 +527,17 @@ impl Probe {
                 ids.pop();
                 continue;
             };
-            depth += 1;
-            if depth == self.steps.len() {
+            *depth += 1;
+            if *depth == self.steps.len() {
                 // The former first-witness loop performed this same checkpoint
                 // before returning. A collection resumes only after its complete
                 // occurrence has been copied under the outer owner's charge.
                 meter.event(GlaExecutionEvent::Work)?;
-                if visit(&ids, &paths, source, &outer, meter)? {
-                    return Ok(true);
-                }
-                depth -= 1;
-                ids.pop();
+                *resume = true;
+                return Ok(Some(paths));
             } else {
-                positions[depth] = Position::new(self.steps[depth].binding);
-                walks.remove(&depth); // Each new local prefix owns fresh history.
+                positions[*depth] = Position::new(self.steps[*depth].binding);
+                walks.remove(depth); // Each new local prefix owns fresh history.
             }
         }
     }

@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 mod asynchronous;
 mod walk;
+pub(super) use asynchronous::OptionalState;
 
 #[derive(Clone, Copy)]
 enum Binding {
@@ -80,6 +81,131 @@ pub(crate) struct Collection {
     probe: Probe,
     value: Option<ValueProjection>,
     tuple: Option<Vec<ValueProjection>>,
+}
+
+/// One terminal correlated OPTIONAL scope. It shares the probe's checked
+/// binding program; its complete witnesses escape one at a time, never as a
+/// collected bag. Only external ordering owns its eventual row order/page.
+pub(super) struct Optional {
+    probe: Probe,
+    projection: GlaOperator,
+    outer_captures: usize,
+    captures: BTreeMap<u32, LocalCapture>,
+}
+
+impl Optional {
+    pub(super) fn compile(
+        ops: &[GlaOperator],
+        start: usize,
+        outer_width: usize,
+        outer_capture_edges: &[bool],
+    ) -> Result<Self, EdgeScanBuildError> {
+        let bad = || EdgeScanBuildError { operator: start };
+        let outer_captures = outer_capture_edges.len();
+        let GlaOperator::Optional { group, end, slots } = ops[start] else {
+            return Err(bad());
+        };
+        let end = end as usize;
+        if end <= start + 1
+            || !matches!(ops.get(end), Some(GlaOperator::OptionalEnd { group: close }) if *close == group)
+        {
+            return Err(bad());
+        }
+        // Post-scope predicates must observe success BEFORE deciding absence.
+        // Admit a terminal scope here; later scopes/filters retain their typed
+        // refusal instead of being moved inside this OPTIONAL's witness test.
+        let Some(GlaOperator::ProjectValues { columns }) = ops.get(end + 1) else {
+            return Err(EdgeScanBuildError { operator: end + 1 });
+        };
+        // The shared tail compiler checks the LAST projection. Prove that it
+        // is this same projection: no intervening filter, second projection,
+        // page or other instruction may disappear between the scope and tail.
+        let suffix = &ops[end + 2..];
+        if !matches!(
+            suffix,
+            [
+                GlaOperator::OrderByValues | GlaOperator::OrderByValueColumns { .. },
+                GlaOperator::Limit { .. }
+            ] | [
+                GlaOperator::Distinct,
+                GlaOperator::OrderByValues | GlaOperator::OrderByValueColumns { .. },
+                GlaOperator::Limit { .. }
+            ]
+        ) {
+            return Err(EdgeScanBuildError { operator: end + 2 });
+        }
+        if let Some(offset) = ops[start + 1..end].iter().position(|op| {
+            matches!(
+                op,
+                GlaOperator::ScanVertices
+                    | GlaOperator::VarLengthExpand { .. }
+                    | GlaOperator::Probe { .. }
+                    | GlaOperator::Collect { .. }
+                    | GlaOperator::Optional { .. }
+            )
+        }) {
+            return Err(EdgeScanBuildError {
+                operator: start + 1 + offset,
+            });
+        }
+        let (steps, captures) = Probe::compile_body(ops, start, end, outer_width, true)?;
+        if steps.is_empty() || steps.len() != slots as usize {
+            return Err(bad());
+        }
+        for (&global, local) in &captures {
+            if global as usize != outer_captures + local.slot as usize {
+                return Err(bad());
+            }
+        }
+        let capture = |ordinal: u32, single: bool| {
+            outer_capture_edges
+                .get(ordinal as usize)
+                .is_some_and(|edge| !single || *edge)
+                || captures
+                    .get(&ordinal)
+                    .is_some_and(|local| !single || local.single_edge)
+        };
+        for column in columns {
+            let valid = match column {
+                ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
+                    (slot.ordinal() as usize) < outer_width + steps.len()
+                }
+                ValueProjection::EdgeProperty { capture: path, .. } => capture(*path, true),
+                ValueProjection::Path {
+                    capture: path,
+                    function,
+                } => match function {
+                    GraphPathFunction::Edge => capture(*path, true),
+                    GraphPathFunction::Value
+                    | GraphPathFunction::Length
+                    | GraphPathFunction::Nodes
+                    | GraphPathFunction::Edges => capture(*path, false),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !valid {
+                return Err(EdgeScanBuildError { operator: end + 1 });
+            }
+        }
+        Ok(Self {
+            probe: Probe {
+                anti: false,
+                outer_width,
+                steps,
+            },
+            projection: ops[end + 1].clone(),
+            outer_captures,
+            captures,
+        })
+    }
+
+    pub(super) fn columns(&self) -> usize {
+        let GlaOperator::ProjectValues { columns } = &self.projection else {
+            unreachable!("optional compiler checked projection")
+        };
+        columns.len()
+    }
 }
 
 impl Probe {

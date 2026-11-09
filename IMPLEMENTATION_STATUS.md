@@ -273,6 +273,44 @@ A separate bounded count recipe admits correlated `COUNT { ... }` and returning 
 
 Regression sources cover literal bags, parallel witnesses, duplicate and NULL imports, native CALL/OPTIONAL/EXISTS/COUNT continuations, first/last-witness transitions, actual NULL-valued matches, guarded output expressions and domains, signed-delta integration, subscription footprint and atomic registration/rebuild refusal. The existence suite includes an independent 256-transition presence oracle, numeric-versus-typed equality checks and exact literal-page/effect refusal boundaries. Count regressions add an independent 256-transition weighted-count oracle, inactive counts above Int64, simultaneous last-outer removal, repeated key constraints, zero defaults and private-witness/public-row quota checks. The value-count extension adds 2,048 weighted transitions through reordered aliases, NULL exclusion, distinct support above Int64 occurrence counts, and twelve native topology transitions distinguishing parallel edges from unique neighbors. Focused pinned formatting and whitespace checks pass for these source additions. A single-job, single-thread pinned `cargo check -p fgdb --lib` stopped at the foundation `asupersync` compile with SIGKILL under the shared 8 GiB memory limit, before product typechecking. Compilation, Clippy and regression execution remain **UNRUN**; no broader bead or exact-tree qualification is claimed.
 
+### Buffered terminal OPTIONAL execution
+
+Source added 2026-11-09 extends the larger-than-memory row path from plan §8.7.
+`AsyncEdgeJoinPlan` admits an
+edge-rooted fixed-hop prefix followed by exactly one terminal correlated GLA
+OPTIONAL scope. The scope supports copied outer bindings, fixed expansion,
+native vertex/property/Boolean predicates, clause-local different-edge rules
+and fixed path/edge captures. It exports original and nullable local identities,
+properties and captures through the original final projection. The existing
+external owner applies its complete sort, DISTINCT, hidden-key and page tail.
+
+The async probe traversal is now a resumable witness state shared with existing
+EXISTS/collection execution. Each optional witness escapes once; only successful
+exhaustion can emit the one NULL extension. Source refusal, malformed admission,
+cancellation and resource errors cannot become absence. The cursor retains a
+definition-bounded prefix/local traversal, with source-owned record guards and
+an independent output reservation grown before payload/capture copies. Dropping
+a pending pull drops the entire private traversal and permanently fails that
+cursor. Historical buffered reads use one selected cut throughout.
+
+Admission proves the complete prefix, optional body and exact final tail;
+extra instructions or duplicate projections cannot be silently discarded.
+Independent optional scans, variable-length paths inside the scope, nested or
+multiple OPTIONAL, later filters/clauses, prefix probes/collections, foreign
+capture operands in optional predicates and catalog/map projections still
+refuse. This extension selects the async external-order source; ordinary
+synchronous streams and aggregate source profiles retain their prior contracts.
+
+Regression sources in `edge_stream/join/asynchronous/tests/optional.rs` and
+`query_spool/sort/buffered_optional_tests.rs` cover 135 directional/filter
+differentials, literal parallel/no-match outputs, captures and repetition,
+invisible candidates, every cancellation checkpoint, pending-pull drop, all
+four query limits, malformed programs and historical cold-spool results with
+DISTINCT/pages. Late body errors refuse publication even under LIMIT 0. Pinned
+rustfmt and whitespace checks pass. Product compilation, runtime tests, Clippy
+and exact-tree proof remain **UNRUN** under the shared foundation compiler
+memory blocker; no performance or full external-memory GQL claim is made.
+
 ### Reusable plan-only execution
 
 `BoundPlan` is the executor-ready plan-only form. It is appropriate when statement spelling and the caller's name-to-ID map are intentionally outside the value's identity.
