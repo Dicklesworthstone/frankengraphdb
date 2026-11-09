@@ -10,7 +10,8 @@ use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeReturnBinding, GraphEdgeUpsertBranch,
     GraphEdgeUpsertPolicy, GraphSetProjection, GraphSetQuantifier, GraphSetValue, GraphSymbol,
-    GraphSymbolKind, PreparedGraphEdgeUpsertQuery, PreparedGraphEdgeUpsertText,
+    GraphSymbolKind, GraphSymbolResolver, PreparedGraphEdgeUpsertQuery,
+    PreparedGraphEdgeUpsertQueryText, PreparedGraphEdgeUpsertText, ReverseSymbolCatalog,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
@@ -34,6 +35,45 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
         _ => None,
     }
+}
+
+#[derive(Clone, Copy)]
+struct Catalog {
+    complete: bool,
+}
+impl GraphSymbolResolver for Catalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_property(P, "p");
+        if self.complete {
+            catalog.insert_property(Q, "q");
+        }
+        Some(catalog)
+    }
+}
+
+fn map(entries: Vec<(&str, GraphValue)>) -> GraphValue {
+    GraphValue::map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.into(), value))
+            .collect(),
+    )
+    .unwrap()
+}
+
+fn text(value: &str) -> GraphValue {
+    GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap())
+}
+
+fn map_query(text: &str, complete: bool) -> PreparedGraphEdgeUpsertQuery {
+    PreparedGraphEdgeUpsertQueryText::prepare(text, S, Catalog { complete })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
 }
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -656,5 +696,222 @@ fn computed_edge_output_errors_beyond_limit_zero_restore_the_outer_prefix() {
                 vec![vec![int(80)]]
             );
         }
+    });
+}
+
+#[test]
+fn relationship_maps_read_both_branches_prior_staging_and_the_final_set() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        seed(&mut db, commit, true).await;
+        let query = map_query(
+            &format!(
+                "{UPSERT} RETURN properties(r) AS full,keys(r) AS names,\
+                 r{{.*,p:r.p+1,tag:'view'}} AS projected,r{{.q}} AS selected"
+            ),
+            true,
+        );
+        let mut txn = db.begin(txcx).unwrap();
+        let (_, created, first) = txn
+            .execute_graph_edge_upsert_query_engine_governed(&mut db, cx, &query, policy(1))
+            .unwrap();
+        let edge = created.edge().unwrap();
+        assert!(created.created());
+        assert_eq!(
+            first.value[0].values(),
+            &[
+                map(vec![("p", int(14))]),
+                GraphValue::List(vec![text("p")].into_boxed_slice()),
+                map(vec![("p", int(15)), ("tag", text("view"))]),
+                map(vec![("q", GraphValue::Scalar(CanonicalScalar::Null))]),
+            ]
+        );
+        let mut prior = WriteBatch::new(R);
+        prior.set_edge_property(edge, Q, Some(CanonicalScalar::Int(9)));
+        txn.write(&mut db, prior).unwrap();
+        let (_, matched, second) = txn
+            .execute_graph_edge_upsert_query_engine_governed(&mut db, cx, &query, policy(1))
+            .unwrap();
+        assert_eq!(matched.edge(), Some(edge));
+        assert!(!matched.created());
+        assert_eq!(
+            second.value[0].values(),
+            &[
+                map(vec![("p", int(30)), ("q", int(9))]),
+                GraphValue::List(vec![text("p"), text("q")].into_boxed_slice()),
+                map(vec![("p", int(31)), ("q", int(9)), ("tag", text("view"))]),
+                map(vec![("q", int(9))]),
+            ]
+        );
+        assert_eq!(first.value[0].values()[0], map(vec![("p", int(14))]));
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            db.edge(edge).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(30).into()),
+                (Q, CanonicalScalar::Int(9).into())
+            ]
+        );
+    });
+}
+
+#[test]
+fn relationship_maps_keep_duplicate_occurrences_and_compose_with_groups_and_tails() {
+    run(async |commit, cx, txcx| {
+        for suffix in [
+            "RETURN r{.*} AS document,count(*) AS occurrences,collect(DISTINCT r{.*}) AS maps",
+            "WITH r{.*} AS document RETURN document,count(*) AS occurrences,collect(DISTINCT document) AS maps",
+            "WITH r AS edge RETURN edge{.*} AS document,count(*) AS occurrences,collect(DISTINCT edge{.*}) AS maps",
+        ] {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            seed(&mut db, commit, true).await;
+            let query = map_query(&format!("{UPSERT} {suffix}"), true);
+            let mut txn = db.begin(txcx).unwrap();
+            let (_, output) = txn
+                .execute_graph_edge_upserts_query_engine_governed(&mut db, cx, &query, policy(1))
+                .unwrap();
+            // The first S occurrence creates p=14; the second MATCH branch
+            // advances that same edge to 30. Both final occurrence maps read
+            // 30, while grouping retains the multiplicity of the two inputs.
+            let document = map(vec![("p", int(30))]);
+            assert_eq!(
+                output.value,
+                vec![GraphValueRow::from_owned_values(vec![
+                    document.clone(),
+                    int(2),
+                    GraphValue::List(vec![document].into_boxed_slice()),
+                ])],
+                "{suffix}"
+            );
+            txn.finish(&mut db, commit).await.unwrap();
+            assert_eq!(
+                read(&db, cx, "MATCH ()-[r:R]->() RETURN r.p AS p"),
+                vec![vec![int(30)]]
+            );
+        }
+    });
+}
+
+#[test]
+fn relationship_map_catalog_and_expression_failures_roll_back_even_under_limit_zero() {
+    run(async |commit, cx, txcx| {
+        for plural in [false, true] {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            seed(&mut db, commit, true).await;
+            let mut txn = db.begin(txcx).unwrap();
+            let mut prior = WriteBatch::new(R);
+            prior.create_vertex(VId(80), vec![ITEM], vec![]);
+            txn.write(&mut db, prior).unwrap();
+            let before = (db.frontier().unwrap(), txn.staged_effect_digest().unwrap());
+            for (suffix, complete) in [
+                ("SET r.q=9 RETURN r{.*} AS document LIMIT 0", false),
+                ("SET r.q=9 RETURN r{.*,bad:1/0} AS document LIMIT 0", true),
+            ] {
+                let query = map_query(
+                    &format!(
+                        "MATCH (a:Item)-[:S]->(b:Item) MERGE (a)-[r:R]->(b) \
+                         ON CREATE SET r.p=7 ON MATCH SET r.p=r.p+1 {suffix}"
+                    ),
+                    complete,
+                );
+                let failed = if plural {
+                    txn.execute_graph_edge_upserts_query_engine_governed(
+                        &mut db,
+                        cx,
+                        &query,
+                        policy(0),
+                    )
+                    .is_err()
+                } else {
+                    txn.execute_graph_edge_upsert_query_engine_governed(
+                        &mut db,
+                        cx,
+                        &query,
+                        policy(0),
+                    )
+                    .is_err()
+                };
+                assert!(failed, "plural={plural}: {suffix}");
+                assert_eq!(
+                    (db.frontier().unwrap(), txn.staged_effect_digest().unwrap()),
+                    before
+                );
+            }
+            txn.finish(&mut db, commit).await.unwrap();
+            assert!(db.vertex(VId(80)).unwrap().is_some());
+            assert!(read(&db, cx, "MATCH ()-[r:R]->() RETURN r").is_empty());
+        }
+    });
+}
+
+#[test]
+fn plain_relationship_merge_projects_complete_endpoint_and_carried_maps() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        seed(&mut db, commit, true).await;
+        let mut txn = db.begin(txcx).unwrap();
+        for prefix in [
+            "MATCH (a:Item)-[:S]->(b:Item)",
+            "MATCH (a:Item)-[:S]->(b:Item) WITH a,b",
+        ] {
+            let query = fgdb_gql::PreparedGraphEdgeMergeQueryText::prepare(
+                &format!(
+                    "{prefix} MERGE (a)-[r:R {{p:7}}]->(b) \
+                     RETURN r{{.*,p:r.p+1,a}} AS document,a{{.p}} AS source,b{{.*}} AS target"
+                ),
+                S,
+                Catalog { complete: true },
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let (_, output) = txn
+                .execute_graph_edge_merge_query_engine_governed(
+                    &mut db,
+                    cx,
+                    &query,
+                    policy(2).merge,
+                )
+                .unwrap();
+            let expected = GraphValueRow::from_owned_values(vec![
+                map(vec![("a", GraphValue::Vertex(VId(1))), ("p", int(8))]),
+                map(vec![("p", int(1))]),
+                map(vec![("p", int(2))]),
+            ]);
+            assert_eq!(output.value, vec![expected.clone(), expected], "{prefix}");
+        }
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(&db, cx, "MATCH ()-[r:R]->() RETURN r.p AS p"),
+            vec![vec![int(7)]],
+            "projection overrides do not change stored properties"
+        );
+    });
+}
+
+#[test]
+fn relationship_merge_map_guards_keep_null_optional_endpoints_null() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        seed(&mut db, commit, true).await;
+        let query = fgdb_gql::PreparedGraphEdgeMergeQueryText::prepare(
+            "MATCH (a:Item)-[:S]->(b:Item) OPTIONAL MATCH (b)-[:S]->(missing) \
+             MERGE (a)-[r:R {p:7}]->(b) RETURN r{.*} AS document,\
+             missing{.p} AS selected,missing{.*,p:999} AS wildcard",
+            S,
+            Catalog { complete: true },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let (_, output) = txn
+            .execute_graph_edge_merge_query_engine_governed(&mut db, cx, &query, policy(2).merge)
+            .unwrap();
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        let expected =
+            GraphValueRow::from_owned_values(vec![map(vec![("p", int(7))]), null.clone(), null]);
+        assert_eq!(output.value, vec![expected.clone(), expected]);
+        txn.finish(&mut db, commit).await.unwrap();
     });
 }

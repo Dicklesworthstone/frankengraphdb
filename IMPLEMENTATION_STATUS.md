@@ -130,6 +130,35 @@ changes, runtime tests, Clippy and exact-tree proof therefore remain UNRUN.
 UBS was also unavailable. Neither bead is closed or claimed fully qualified.
 The dependency pins and required gates are unchanged.
 
+### Relationship MERGE property maps
+
+Added 2026-11-09 for `fgdb-2jw3z`. The current relationship write owners already
+execute `MERGE RETURN`, including plural input and bare `properties(r)`/`keys(r)`.
+The earlier broad refusal summaries above describe older cuts. This addition
+closes the remaining map-projection syntax gap: wildcard and selective maps,
+explicit overrides and shorthand fields in plain relationship `MERGE RETURN`,
+including endpoint maps and identities carried through `WITH`, plus wildcard
+maps in the dedicated `ON CREATE`/`ON MATCH`/`SET` owner.
+
+The compiler uses the existing final-overlay metadata expression and point
+property bindings. It adds no second graph reader, interpreter or transaction
+owner. Every complete map retains current authority masking before reverse
+naming/payload admission, complete-field conflict observations, cumulative
+budgets and the statement rollback workspace. Grouping and tails retain frozen
+final values for every selected occurrence. A NULL optional identity produces a
+NULL map; a map override changes the result, not storage. Invalid source scopes,
+path-as-map sources and duplicate field names refuse before catalog resolution.
+
+Eight regression functions in `fgdb-gql/tests/edge_merge_text.rs`,
+`fgdb-gql/tests/edge_upsert_return_text.rs`, `fgdb/tests/edge_upsert_returning.rs`
+and authorized `edge_upsert_query_tests.rs` cover both branches, prior staging,
+plural multiplicity, grouping/tails, NULL guards, missing reverse names and late
+errors beneath `LIMIT 0`, and equal visible work for absent versus hidden large
+properties. Pinned rustfmt and whitespace checks passed. Product typechecking,
+runtime tests, Clippy and exact-tree proof remain **UNRUN**: the pinned foundation
+previously exhausted the shared 8 GiB compiler limit, and no approved remote
+compiler is available. The broader map bead remains open.
+
 ### List predicates inside aggregates
 
 `COUNT(ALL(x IN values WHERE predicate))` and `COLLECT(ALL(...))` retain the list predicate through native read pipelines, aggregating `WITH`, and simple or computed write `RETURN` expressions (`fgdb-xv0sy`). All aggregate argument owners use the shared lexical lookahead that distinguishes the list predicate from an explicit set quantifier such as `COUNT(ALL n.p)`. Both forms compose, including `COUNT(ALL ALL(...))`; comments and keyword case follow the ordinary lexer. NULL predicates remain absent from COUNT/COLLECT, false remains a value, and an empty list retains ALL's vacuous truth. Regression sources are `fgdb-gql/tests/multipart_aggregates.rs` and `fgdb-gql/tests/write_return_aggregates.rs`.

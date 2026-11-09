@@ -190,6 +190,43 @@ fn relationship_merge_tails_keep_write_boundaries_and_lexical_scope() {
 }
 
 #[test]
+fn relationship_map_projection_respects_visible_element_and_shorthand_scopes() {
+    use fgdb_gql::PreparedGraphEdgeMergeQueryText;
+
+    for text in [
+        "MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN r{.*,p:1,a} AS document,a{.p} AS source",
+        "MATCH (a),(b) WITH a,b,7 AS marker MERGE (a)-[r:R]->(b) RETURN r{.*,marker} AS document",
+        "MATCH (a),(b) MERGE path=(a)-[r:R]->(b) RETURN r{.*,path} AS document",
+        "MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN b{.*} AS target,count(*) AS n",
+    ] {
+        PreparedGraphEdgeMergeQueryText::prepare(text, R, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+    }
+    for text in [
+        "MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN missing{.*}",
+        "MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN r{.*,missing}",
+        "MATCH (a),(b) MERGE path=(a)-[r:R]->(b) RETURN path{.*}",
+        "MATCH (a),(b) MERGE path=(a)-[r:R]->(b) RETURN path{.p}",
+        "MATCH (a),(b) WITH a,b,7 AS marker MERGE (a)-[r:R]->(b) RETURN marker{.*}",
+        "MATCH (a),(b) WITH a,b MERGE (a)-[r:R]->(b) RETURN r{.*,p:1,p:2}",
+    ] {
+        let calls = Cell::new(0);
+        let result = PreparedGraphEdgeMergeQueryText::prepare(text, R, |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "{text}");
+        assert_eq!(
+            calls.get(),
+            0,
+            "invalid map scope reached the catalog: {text}"
+        );
+    }
+}
+
+#[test]
 fn whole_pattern_actions_keep_lazy_reads_of_resolved_endpoint_fields() {
     use fgdb_gql::algebra::{GraphValue, GraphValueRow};
     use fgdb_gql::{GraphEdgeMergeRowAction, GraphWriteChainStep, PreparedGraphWriteChainText};

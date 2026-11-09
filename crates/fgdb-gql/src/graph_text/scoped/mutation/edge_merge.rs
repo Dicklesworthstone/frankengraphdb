@@ -10,7 +10,7 @@ use crate::{
     GraphSetColumnType, GraphSetProjection, GraphSetQuantifier, PreparedGraphEdgeMerge,
     PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeMergeText,
 };
-use mutation_query::ReturnLeaves;
+use mutation_query::{ReturnLeaves, ReturnMapInput};
 
 struct ParsedEdgeMerge<'a> {
     source: Name<'a>,
@@ -1938,6 +1938,95 @@ struct EdgeMergeLeaves<'r, 'a> {
     row: Option<&'r [(Name<'a>, GraphSetColumnType)]>,
 }
 impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
+    fn map_input(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+        input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        if parser.elements.contains(&source.text) {
+            return Err(error(source.at, GraphPatternTextErrorKind::UnknownVariable));
+        }
+        let property = match input {
+            ReturnMapInput::Property(key) => Some(key),
+            // Complete maps use the final-overlay reader in map_properties;
+            // a frozen MATCH map can precede later actions on a carried edge.
+            ReturnMapInput::Properties => {
+                return Err(error(
+                    source.at,
+                    GraphPatternTextErrorKind::Expected("a post-MERGE property-map expression"),
+                ));
+            }
+            ReturnMapInput::Identity | ReturnMapInput::Guard => None,
+        };
+        let (binding, kind) = if self.returning.is_relationship(source.text) {
+            match property {
+                Some(key) => (EdgeBinding::Property(key), GraphSetColumnType::Stored),
+                None => (EdgeBinding::Edge, GraphSetColumnType::Edge),
+            }
+        } else if let Some((path, reverse)) = self
+            .returning
+            .path
+            .filter(|(path, _)| path.text == source.text)
+        {
+            if matches!(input, ReturnMapInput::Identity) {
+                return self
+                    .returning
+                    .path_column(reverse, GraphPathFunction::Value, path);
+            }
+            return Err(error(
+                source.at,
+                GraphPatternTextErrorKind::Expected("a vertex or relationship map source"),
+            ));
+        } else {
+            let (column, kind) = if let Some(row) = self.row {
+                let visible = parser.visible_width(row);
+                let column = row[..visible]
+                    .iter()
+                    .position(|(name, _)| name.text == source.text)
+                    .ok_or_else(|| error(source.at, GraphPatternTextErrorKind::UnknownVariable))?;
+                (column, row[column].1)
+            } else {
+                let kind = parser
+                    .insertion_match_kind(source.text)
+                    .ok_or_else(|| error(source.at, GraphPatternTextErrorKind::UnknownVariable))?;
+                let column = parser.mutation_projection(self.columns, source, property)?;
+                (column, kind)
+            };
+            if !matches!(input, ReturnMapInput::Identity)
+                && !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+            {
+                return Err(error(
+                    source.at,
+                    GraphPatternTextErrorKind::Expected("a vertex or relationship map source"),
+                ));
+            }
+            match (self.row, property) {
+                (Some(_), Some(key)) => (
+                    EdgeBinding::InputProperty { column, key },
+                    GraphSetColumnType::Stored,
+                ),
+                (_, Some(_)) => (EdgeBinding::Input(column), GraphSetColumnType::Stored),
+                (_, None) => (EdgeBinding::Input(column), kind),
+            }
+        };
+        self.returning
+            .column(binding, property.unwrap_or(source), kind)
+    }
+
+    fn map_properties(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+    ) -> Result<ReadValueTemplate, GraphPatternTextError> {
+        let column = self.map_input(parser, source, ReturnMapInput::Guard)?;
+        Ok(ReadValueTemplate::ElementMetadata {
+            kind: crate::GraphElementMetadata::Properties,
+            value: Box::new(ReadValueTemplate::Column(column)),
+            catalog: parser.syntax.element_catalog.request(),
+        })
+    }
+
     fn metadata_leaf(
         &mut self,
         parser: &mut Parser<'a>,
