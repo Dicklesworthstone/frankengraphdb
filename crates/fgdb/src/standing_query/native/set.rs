@@ -486,6 +486,63 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             )?;
             self.append(StandingQuery::Group(Box::new(state)))
         } else if let Some(plan) =
+            query.incremental_apply_count_with_control(&mut |_| checkpoint())?
+        {
+            let left = self.compile(cx, plan.left, policy, checkpoint)?;
+            // Count witnesses are private aggregate input. Retain every
+            // source/work/scratch ceiling without spending a final-row
+            // allowance on each matching relationship occurrence.
+            let input_policy = group::input_policy(policy);
+            let right = self.compile_group_input(
+                cx,
+                plan.right,
+                input_policy,
+                checkpoint,
+            )?;
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [right, left],
+                &plan.restrict,
+                input_policy,
+                self.database.standing_queries.len(),
+            )?;
+            let active = self.append(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+            // Group only keys needed by a current outer row. Unrequested
+            // groups must not introduce a conditional Int64 count overflow.
+            let state = self.database.prepare_standing_group_rows(
+                cx,
+                active,
+                plan.group,
+                input_policy,
+                self.database.standing_queries.len(),
+                &plan.group_columns,
+                &plan.group_types,
+            )?;
+            let grouped = self.append(StandingQuery::Group(Box::new(state)));
+            checkpoint()?;
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [left, grouped],
+                &plan.join,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            let mut input = self.append(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+            for spec in plan.output {
+                let state = self.database.prepare_standing_projection(
+                    cx,
+                    input,
+                    spec,
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                input = self.append(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+            }
+            input
+        } else if let Some(plan) =
             query.incremental_apply_exists_with_control(&mut |_| checkpoint())?
         {
             // A Boolean witness needs only support, not matching pair rows.
@@ -1236,3 +1293,6 @@ mod apply_tests;
 
 #[cfg(test)]
 mod existence_tests;
+
+#[cfg(test)]
+mod count_apply_tests;

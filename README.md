@@ -122,7 +122,7 @@ CALL (person) {
 RETURN person, friend
 ```
 
-The maintained circuit preserves duplicate occurrences and updates its result from committed changes. Optional continuations retain one NULL-extended row per outer occurrence when the last matching witness disappears. The initial profile requires a complete graph source whose independent evaluation cannot introduce a data error; graph identity outputs and safe constant/column projections qualify. Per-invocation aggregation, pagination, DISTINCT, nested correlation and fallible independent property/catalog outputs remain outside this profile. Registrations retain the existing session-local, resident-state contract. This source addition is not runtime-qualified; see [implementation status](IMPLEMENTATION_STATUS.md).
+The maintained circuit preserves duplicate occurrences and updates its result from committed changes. Optional continuations retain one NULL-extended row per outer occurrence when the last matching witness disappears. The initial profile requires a complete graph source whose independent evaluation cannot introduce a data error; graph identity outputs and safe constant/column projections qualify. General per-invocation aggregation, pagination, DISTINCT, nested correlation and fallible independent property/catalog outputs remain outside this profile. Registrations retain the existing session-local, resident-state contract. This source addition is not runtime-qualified; see [implementation status](IMPLEMENTATION_STATUS.md).
 
 Eligible `EXISTS`, `NOT EXISTS` and existence-valued return expressions also have a maintained path, including after `WITH` and `UNWIND`:
 
@@ -135,6 +135,18 @@ RETURN person
 ```
 
 Matching and nonmatching branches share the same complete sources and use the existing semi-join and anti-join derivatives. Additional witnesses do not duplicate an outer result; only a first or last matching witness changes its Boolean presence. The compiler recognizes its literal-TRUE, LIMIT-one existence wrapper specifically. General per-invocation pages, aggregates and fallible discarded expressions still refuse.
+
+Eligible correlated `COUNT { ... }` expressions and returning `CALL` bodies with `count(*)` also use maintained native grouping:
+
+```cypher
+SUBSCRIBE TO
+MATCH (person:Person)
+WITH person
+RETURN person,
+       COUNT { MATCH (person)-[:KNOWS]->(friend) } AS degree
+```
+
+Counts include parallel witnesses, return zero for an absent match, and remain independent of duplicate outer occurrences. The right-hand source is first restricted to keys needed by current outer rows, then grouped once per key before its count is joined back to the original outer bag. This also prevents unused groups from causing conditional count-overflow errors. Witness rows use the existing private aggregate-input budget; counts retain native checked Int64 conversion. The initial count profile supports typed equality correlation and keyless counts; COUNT of an expression, additional correlated predicates, HAVING, local pages and DISTINCT remain unsupported.
 
 ### Nested MAP parameters in transaction reads
 

@@ -113,6 +113,18 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
         // its meter. Count the complete child, not only its first graph leaf.
         return circuit(cx, definition.input())?.append(1);
     }
+    if let Some(plan) = query.incremental_apply_count_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
+        // The group's complete active-input definition is descriptive here:
+        // the compiler shares the two already-compiled sources, then adds
+        // Semi, Group, Left join and the recipe's output projections.
+        let stages = u64::try_from(plan.output.len())
+            .ok()
+            .and_then(|count| count.checked_add(3))
+            .ok_or(StandingQueryError::Unsupported)?;
+        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
+    }
     if let Some(plan) = query.incremental_apply_exists_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
     })? {

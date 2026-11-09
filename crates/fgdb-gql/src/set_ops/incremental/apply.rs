@@ -9,6 +9,7 @@ use crate::row_join::{RowJoinKind, RowJoinSpec};
 use crate::row_projection::RowProjectionSpec;
 use fgdb_types::CanonicalScalar;
 
+mod count;
 mod existence;
 
 /// A bag-only maintenance recipe for one correlated graph continuation.
@@ -299,8 +300,8 @@ impl PreparedGraphSet {
     ///
     /// DISTINCT, order/pages (even LIMIT 0), aggregation, collection, nested
     /// invocation and computed-before-selection Optional bodies refuse. Thus
-    /// per-invocation COUNT is not admitted. The separate existence recipe
-    /// handles only the compiler's literal-witness LIMIT-one lowering.
+    /// per-invocation COUNT is handled only by the separate count recipe.
+    /// The existence recipe handles the literal-witness LIMIT-one lowering.
     /// This proves bags only, never positional enumeration or an outer window.
     /// Repeated/nonprefix imports preserve the original outer multiplicities;
     /// no projected-import bag is joined back to its parent. Internal width or
