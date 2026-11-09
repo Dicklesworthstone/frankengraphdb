@@ -90,7 +90,11 @@ impl PreparedGraphSet {
                 SetNode::Arguments => (false, true),
                 SetNode::Apply { left, right, .. } => {
                     let a = shape(left);
-                    let b = shape(right);
+                    // A literal TRUE/LIMIT-one output observes only presence,
+                    // never the identity or order of its selected witness.
+                    // Ignore just that page; every real descendant window
+                    // and the full existence derivative still need admission.
+                    let b = shape(apply::existence_input(query).unwrap_or(right));
                     (a.0 || b.0, true)
                 }
                 // An output projection keeps positional enumeration. Retain

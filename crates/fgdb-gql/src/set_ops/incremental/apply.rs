@@ -9,6 +9,8 @@ use crate::row_join::{RowJoinKind, RowJoinSpec};
 use crate::row_projection::RowProjectionSpec;
 use fgdb_types::CanonicalScalar;
 
+mod existence;
+
 /// A bag-only maintenance recipe for one correlated graph continuation.
 ///
 /// Compile both complete children independently, optionally project the right
@@ -113,6 +115,38 @@ fn body<'a, E>(
         }
         _ => Ok(None),
     }
+}
+
+/// The compiler's literal-witness page has no observable selected identity.
+/// This shape-only matcher removes exactly that page from sequence analysis;
+/// it does not admit the descendant or promise that the body is effect-free.
+pub(super) fn existence_input(query: &PreparedGraphSet) -> Option<&PreparedGraphSet> {
+    if !query.unadorned_incremental_node() {
+        return None;
+    }
+    let SetNode::Apply { right, kind: ApplyKind::Optional, .. } = &query.node else {
+        return None;
+    };
+    if !right.order.is_empty() || right.offset != 0 || right.count != Some(1) {
+        return None;
+    }
+    let SetNode::Project {
+        input,
+        projection,
+        quantifier: GraphSetQuantifier::All,
+        ..
+    } = &right.node else {
+        return None;
+    };
+    if projection.len() != 1 {
+        return None;
+    }
+    let literal_true = match projection[0].value() {
+        GraphSetValue::Literal(value) => matches!(value.value(), CanonicalScalar::Bool(true)),
+        GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(true))) => true,
+        _ => false,
+    };
+    literal_true.then_some(input.as_ref())
 }
 
 /// Return original outer positions, not a deduplicated relation of imports.
@@ -265,7 +299,8 @@ impl PreparedGraphSet {
     ///
     /// DISTINCT, order/pages (even LIMIT 0), aggregation, collection, nested
     /// invocation and computed-before-selection Optional bodies refuse. Thus
-    /// per-invocation COUNT and the LIMIT-one EXISTS lowering are not admitted.
+    /// per-invocation COUNT is not admitted. The separate existence recipe
+    /// handles only the compiler's literal-witness LIMIT-one lowering.
     /// This proves bags only, never positional enumeration or an outer window.
     /// Repeated/nonprefix imports preserve the original outer multiplicities;
     /// no projected-import bag is joined back to its parent. Internal width or

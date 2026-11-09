@@ -124,6 +124,18 @@ RETURN person, friend
 
 The maintained circuit preserves duplicate occurrences and updates its result from committed changes. Optional continuations retain one NULL-extended row per outer occurrence when the last matching witness disappears. The initial profile requires a complete graph source whose independent evaluation cannot introduce a data error; graph identity outputs and safe constant/column projections qualify. Per-invocation aggregation, pagination, DISTINCT, nested correlation and fallible independent property/catalog outputs remain outside this profile. Registrations retain the existing session-local, resident-state contract. This source addition is not runtime-qualified; see [implementation status](IMPLEMENTATION_STATUS.md).
 
+Eligible `EXISTS`, `NOT EXISTS` and existence-valued return expressions also have a maintained path, including after `WITH` and `UNWIND`:
+
+```cypher
+SUBSCRIBE TO
+MATCH (person:Person)
+WITH person
+WHERE NOT EXISTS { MATCH (person)-[:KNOWS]->(friend) }
+RETURN person
+```
+
+Matching and nonmatching branches share the same complete sources and use the existing semi-join and anti-join derivatives. Additional witnesses do not duplicate an outer result; only a first or last matching witness changes its Boolean presence. The compiler recognizes its literal-TRUE, LIMIT-one existence wrapper specifically. General per-invocation pages, aggregates and fallible discarded expressions still refuse.
+
 ### Nested MAP parameters in transaction reads
 
 `WriteTxn::query` and the CLI's `transaction --query` accept nested MAP fields in node and relationship property patterns, using the same argument handling as ordinary reads:

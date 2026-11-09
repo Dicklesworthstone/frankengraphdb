@@ -486,6 +486,59 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             )?;
             self.append(StandingQuery::Group(Box::new(state)))
         } else if let Some(plan) =
+            query.incremental_apply_exists_with_control(&mut |_| checkpoint())?
+        {
+            // A Boolean witness needs only support, not matching pair rows.
+            // Share both complete sources between the complementary joins so
+            // duplicate outer occurrences retain their original multiplicity.
+            let left = self.compile(cx, plan.left, policy, checkpoint)?;
+            let right = self.compile(cx, plan.right, policy, checkpoint)?;
+            let mut branches = [0; 2];
+            for (branch, (kind, projection)) in [
+                (RowJoinKind::Semi, plan.present),
+                (RowJoinKind::Anti, plan.absent),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let spec = plan.join.clone().with_kind(kind);
+                let state = self.database.prepare_standing_join_spec(
+                    cx,
+                    [left, right],
+                    &spec,
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                let input = self.append(StandingQuery::Join(Box::new(state)));
+                checkpoint()?;
+                let state = self.database.prepare_standing_projection(
+                    cx,
+                    input,
+                    projection,
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                branches[branch] = self.append(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+            }
+            let state = self.database.prepare_standing_set(
+                cx,
+                branches,
+                SetOperation::UnionAll,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            let input = self.append(StandingQuery::Set(Box::new(state)));
+            checkpoint()?;
+            let state = self.database.prepare_standing_projection(
+                cx,
+                input,
+                plan.output,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            self.append(StandingQuery::Projection(Box::new(state)))
+        } else if let Some(plan) =
             query.incremental_apply_join_with_control(&mut |_| checkpoint())?
         {
             // The GQL owner proves the complete correlated body before any
@@ -1180,3 +1233,6 @@ mod clustering_tests;
 
 #[cfg(test)]
 mod apply_tests;
+
+#[cfg(test)]
+mod existence_tests;

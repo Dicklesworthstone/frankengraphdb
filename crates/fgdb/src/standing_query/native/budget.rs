@@ -113,6 +113,13 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
         // its meter. Count the complete child, not only its first graph leaf.
         return circuit(cx, definition.input())?.append(1);
     }
+    if let Some(plan) = query.incremental_apply_exists_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
+        // Shared children, complementary Semi/Anti joins, two witness
+        // projections, UNION ALL, and one public-schema restoration.
+        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, 6);
+    }
     if let Some(plan) = query.incremental_apply_join_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
     })? {
