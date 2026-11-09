@@ -141,6 +141,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::HitsCentrality
                 | FnxAlgorithm::LabelPropagationCommunities
+                | FnxAlgorithm::LouvainCommunities(_)
                 | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
@@ -445,6 +446,23 @@ impl FnxCallSpec {
                     yield_now,
                 };
                 return super::label_propagation::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
+            }
+            if matches!(self.algorithm(), FnxAlgorithm::LouvainCommunities(_)) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::louvain::execute_cooperative(
                     self,
                     graph,
                     limits,

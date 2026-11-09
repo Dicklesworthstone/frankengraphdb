@@ -63,7 +63,7 @@ fn graph() -> WriteBatch {
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected. An empty value field names a
 /// vertex-only result, such as the sparse set of articulation points.
-const CALLS: [(&str, &str, &str, bool); 29] = [
+const CALLS: [(&str, &str, &str, bool); 30] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -102,6 +102,7 @@ const CALLS: [(&str, &str, &str, bool); 29] = [
         "distance",
         false,
     ),
+    ("louvain_communities", "", "component", true),
 ];
 
 /// The whole graph spelled out field by field, independent of
@@ -741,6 +742,119 @@ fn label_propagation_composes_with_staged_topology_and_replays_the_pinned_cut() 
         assert_eq!(
             db.query(cx, text, &params, symbols, policy()).unwrap(),
             before
+        );
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            db.query(cx, text, &params, symbols, policy()).unwrap(),
+            staged
+        );
+        assert_eq!(
+            old.query(cx, text, &params, symbols, policy()).unwrap(),
+            before
+        );
+        assert_eq!(
+            db.replay(cx, &certificate, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn louvain_composes_with_weighted_staged_topology_and_replays_the_pinned_cut() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = Database::<MemVfs>::open_memory(commit, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=7 {
+            seed.create_vertex(VId(id), vec![PERSON], vec![]);
+        }
+        // Two disconnected triangles and an isolate have unambiguous
+        // communities. Identical positive weights preserve that partition.
+        for (edge, source, target) in [
+            (1, 1, 2),
+            (2, 2, 3),
+            (3, 3, 1),
+            (4, 4, 5),
+            (5, 5, 6),
+            (6, 6, 4),
+        ] {
+            seed.add_edge(
+                EId(edge),
+                VId(source),
+                VId(target),
+                vec![(P, CanonicalScalar::Int(10))],
+            );
+        }
+        db.write(commit, seed).await.unwrap();
+        let old = db.read_session().unwrap();
+        let text = "CALL fnx.louvain_communities({weight:'p'}) YIELD node,component \
+                    RETURN node,component ORDER BY node";
+        let params = GqlParameters::new();
+        let expected = |components: [u128; 7]| -> Vec<Vec<GraphValue>> {
+            components
+                .into_iter()
+                .enumerate()
+                .map(|(index, component)| {
+                    vec![
+                        GraphValue::Vertex(VId(index as u128 + 1)),
+                        GraphValue::Vertex(VId(component)),
+                    ]
+                })
+                .collect()
+        };
+        let (before, certificate) = db
+            .execute_certified(cx, text, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(rows(before.clone()).0, vec!["node", "component"]);
+        assert_eq!(rows(before.clone()).1, expected([1, 1, 1, 4, 4, 4, 7]));
+        assert_eq!(certificate.procedures.len(), 1);
+        let separate = "CALL fnx.louvain_communities(\
+                        weight => 'p', resolution => $resolution, threshold => 1e-7, \
+                        max_levels => NULL, weighted => true) YIELD node,component \
+                        RETURN node,component ORDER BY node";
+        let resolution = GqlParameters::new().with_int64("resolution", 4).unwrap();
+        assert_eq!(
+            rows(
+                db.query(cx, separate, &resolution, symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            expected([1, 2, 3, 4, 5, 6, 7]),
+            "higher resolution must change the partition through typed native arguments"
+        );
+
+        let mut txn = db.begin(txcx).unwrap();
+        let mut change = WriteBatch::new(R);
+        change.add_edge(EId(7), VId(6), VId(7), vec![(P, CanonicalScalar::Int(10))]);
+        txn.write(&mut db, change).unwrap();
+        let staged = txn
+            .query(&db, cx, text, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(rows(staged.clone()).1, expected([1, 1, 1, 4, 4, 4, 4]));
+        assert_eq!(
+            db.query(cx, text, &params, symbols, policy()).unwrap(),
+            before
+        );
+        let groups = "CALL fnx.louvain_communities({weight:'p'}) YIELD component \
+                      RETURN component,count(*) AS members \
+                      GROUP BY component ORDER BY component";
+        assert_eq!(
+            txn.query(&db, cx, groups, &params, symbols, policy())
+                .unwrap(),
+            QueryResult::Rows {
+                columns: vec!["component".to_owned(), "members".to_owned()],
+                rows: [(1, 3), (4, 4)]
+                    .map(|(component, members)| {
+                        vec![
+                            QueryValue::Value(GraphValue::Vertex(VId(component))),
+                            QueryValue::Count(members),
+                        ]
+                    })
+                    .to_vec(),
+            }
         );
         txn.finish(&mut db, commit).await.unwrap();
         assert_eq!(

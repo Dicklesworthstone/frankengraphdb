@@ -321,6 +321,7 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::OutDegreeCentrality
         | FnxAlgorithm::HitsCentrality
         | FnxAlgorithm::LabelPropagationCommunities
+        | FnxAlgorithm::LouvainCommunities(_)
         | FnxAlgorithm::KatzCentrality(_)
         | FnxAlgorithm::ArticulationPoints
         | FnxAlgorithm::Bridges

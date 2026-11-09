@@ -1,5 +1,6 @@
-//! Native CALL kernels over fallible compressed rows. No flat adjacency is
-//! constructed, including for a hub row. The decoded implementation remains
+//! Native CALL kernels over fallible compressed rows. Kernels declare their
+//! workspace; multilevel Louvain retains an admitted coarsening graph. No
+//! decoded source projection is constructed. The decoded implementation remains
 //! an independent differential oracle, not a hidden fallback.
 
 use crate::execute::{
@@ -55,6 +56,8 @@ mod katz;
 mod label_propagation;
 #[path = "sealed_load.rs"]
 mod load;
+#[path = "sealed_louvain.rs"]
+mod louvain;
 #[cfg(test)]
 #[path = "shallow_bfs_tests.rs"]
 mod shallow_tests;
@@ -1049,6 +1052,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::HitsCentrality
                 | FnxAlgorithm::LabelPropagationCommunities
+                | FnxAlgorithm::LouvainCommunities(_)
                 | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
@@ -1196,6 +1200,9 @@ impl FnxCallSpec {
         }
         if matches!(self.algorithm(), FnxAlgorithm::LabelPropagationCommunities) {
             return label_propagation::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(self.algorithm(), FnxAlgorithm::LouvainCommunities(_)) {
+            return louvain::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(self.algorithm(), FnxAlgorithm::KatzCentrality(_)) {
             return katz::execute(self, cx, graph, limits, memory, &admission);

@@ -472,6 +472,7 @@ fn cooperative_buffered_calls_preserve_historical_answers_across_quanta() {
             "CALL fnx.load_centrality() YIELD vertex,score",
             "CALL fnx.average_neighbor_degree() YIELD vertex,score",
             "CALL fnx.label_propagation_communities() YIELD vertex,component",
+            "CALL fnx.louvain_communities() YIELD vertex,component",
             "CALL fnx.pagerank(iterations => 4, weighted => false) YIELD vertex,score",
             "CALL fnx.in_degree_centrality() YIELD vertex,score",
             "CALL fnx.out_degree_centrality() YIELD vertex,score",
@@ -809,6 +810,10 @@ fn cooperative_buffered_cancellation_and_every_warm_suspend_release_the_reader()
         ),
         (
             "CALL fnx.label_propagation_communities() YIELD vertex,component",
+            Directedness::Undirected,
+        ),
+        (
+            "CALL fnx.louvain_communities() YIELD vertex,component",
             Directedness::Undirected,
         ),
         (

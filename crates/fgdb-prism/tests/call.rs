@@ -107,10 +107,10 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    // Epoch 31 appends exact signed Bellman-Ford distances; prior ordinals and
+    // Epoch 32 appends multilevel Louvain communities; prior ordinals and
     // bound-call identity versions remain unchanged.
-    assert_eq!(FnxSignatureRegistry::version(), 31);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 29);
+    assert_eq!(FnxSignatureRegistry::version(), 32);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 30);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);
@@ -182,6 +182,135 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
             FnxGraphKind::Undirected
         );
     }
+}
+
+#[test]
+fn louvain_named_sweep_limit_preserves_positional_calls_and_binds_identity() {
+    let signature = FnxSignatureRegistry::lookup("fnx.louvain_communities").unwrap();
+    assert_eq!(FnxSignatureRegistry::signatures()[29], *signature);
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.positional)
+            .map(|parameter| parameter.name)
+            .collect::<Vec<_>>(),
+        ["resolution", "threshold", "max_levels", "weighted"]
+    );
+    assert_eq!(
+        signature.parameters[4],
+        FnxParameterSpec {
+            name: "max_iter",
+            value_type: FnxParameterType::PositiveInteger,
+            positional: false,
+            default: Some(FnxArgument::Integer(100)),
+        }
+    );
+    let options = LouvainOptions::new(1.0, 1e-7, None, true).unwrap();
+    assert_eq!(options, LouvainOptions::default());
+    assert_eq!(options.max_iter(), 100);
+    let defaults = FnxCallSpec::louvain_communities(options);
+    for text in [
+        "CALL fnx.louvain_communities()",
+        "CALL fnx.louvain_communities(1.0,1e-7,NULL,true)",
+        "CALL fnx.louvain_communities(max_iter => 100)",
+        "CALL fnx.louvain_communities(weighted => true, max_iter => 100, resolution => 1.0, threshold => 1e-7, max_levels => NULL)",
+    ] {
+        let actual = bind(text);
+        assert_eq!(actual, defaults, "{text}");
+        assert_eq!(actual.digest(), defaults.digest(), "{text}");
+    }
+    let limited = FnxCallSpec::louvain_communities(options.with_max_iter(101).unwrap());
+    assert_eq!(
+        limited,
+        bind("CALL fnx.louvain_communities(max_iter => 101)")
+    );
+    assert_ne!(limited.digest(), defaults.digest());
+
+    let options = LouvainOptions::new(0.75, 0.0, Some(3), false)
+        .unwrap()
+        .with_max_iter(200)
+        .unwrap();
+    assert_eq!(options.max_iter(), 200);
+    let parameters = FnxParameters::from([("sweeps".to_owned(), FnxArgument::Integer(200))]);
+    let rebound = FnxCallSpec::bind(
+        "CALL fnx.louvain_communities(max_iter => $sweeps, weighted => false, \
+         max_levels => 3, threshold => 0.0, resolution => 0.75)",
+        &parameters,
+    )
+    .unwrap();
+    assert_eq!(rebound, FnxCallSpec::louvain_communities(options));
+    let error = FnxCallSpec::from_arguments(
+        "fnx",
+        "louvain_communities",
+        &[
+            FnxArgument::Float(1.0),
+            FnxArgument::Float(1e-7),
+            FnxArgument::Null,
+            FnxArgument::Boolean(true),
+            FnxArgument::Integer(100),
+        ],
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(error.site, FnxCallSite::Argument(4));
+    assert_eq!(error.kind, FnxBindErrorKind::TooManyArguments);
+}
+
+#[test]
+fn louvain_named_sweep_limit_refuses_invalid_and_duplicate_controls_precisely() {
+    assert!(LouvainOptions::default().with_max_iter(0).is_err());
+    for value in [
+        FnxArgument::Integer(0),
+        FnxArgument::Integer(-1),
+        FnxArgument::Float(1.0),
+        FnxArgument::Null,
+        FnxArgument::Boolean(true),
+        FnxArgument::Vertex(VId(u128::MAX)),
+    ] {
+        let error = FnxCallSpec::from_named_arguments(
+            "fnx",
+            "louvain_communities",
+            &[
+                ("resolution", FnxArgument::Float(1.0)),
+                ("max_iter", value),
+                ("weighted", FnxArgument::Boolean(true)),
+            ],
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(error.site, FnxCallSite::Argument(1), "{value:?}");
+        assert!(matches!(error.kind, FnxBindErrorKind::InvalidArgument(_)));
+    }
+    let duplicate = FnxCallSpec::from_named_arguments(
+        "fnx",
+        "louvain_communities",
+        &[
+            ("max_iter", FnxArgument::Integer(100)),
+            ("weighted", FnxArgument::Boolean(true)),
+            ("max_iter", FnxArgument::Integer(200)),
+        ],
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(duplicate.site, FnxCallSite::Argument(2));
+    assert_eq!(
+        duplicate.kind,
+        FnxBindErrorKind::InvalidArgument("duplicate named argument")
+    );
+    for text in [
+        "CALL fnx.louvain_communities(max_iter => 0)",
+        "CALL fnx.louvain_communities(max_iter => $missing)",
+    ] {
+        assert!(FnxCallSpec::is_standalone_kernel_call(text), "{text}");
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
+    let unregistered = "CALL fnx.louvain_communities(iterations => 100)";
+    assert!(!FnxCallSpec::is_standalone_kernel_call(unregistered));
+    assert!(FnxCallSpec::bind(unregistered, &FnxParameters::new()).is_err());
 }
 
 #[test]

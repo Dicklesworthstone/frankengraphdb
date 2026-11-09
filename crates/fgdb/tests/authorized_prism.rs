@@ -35,7 +35,7 @@ const DIJKSTRA: &str =
     "CALL fnx.single_source_dijkstra_path_length(1,NULL,true) YIELD vertex,distance";
 const CC: &str = "CALL fnx.connected_components() YIELD vertex,component";
 const TRIANGLES: &str = "CALL fnx.triangles() YIELD vertex,triangles";
-const CALLS: [&str; 10] = [
+const CALLS: [&str; 11] = [
     "CALL fnx.pagerank(0.85,1000,1e-12,true) YIELD score AS rank,vertex AS id",
     BFS,
     DIJKSTRA,
@@ -46,6 +46,7 @@ const CALLS: [&str; 10] = [
     "CALL fnx.clustering_coefficient() YIELD score,vertex",
     "CALL fnx.articulation_points() YIELD node AS cut",
     "CALL fnx.bridges() YIELD neighbor AS target,node AS source",
+    "CALL fnx.louvain_communities() YIELD vertex,component",
 ];
 fn authority(seed: u64, namespace: DatabaseSecurityNamespaceId) -> Authority {
     Authority::new(
@@ -443,6 +444,90 @@ fn label_propagation_uses_the_masked_graph_and_signed_result_limit() {
             )
             .unwrap_err();
         authorization(failure, Error::LimitExceeded(LimitDimension::Rows));
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn louvain_native_call_masks_topology_before_weights_and_obeys_signed_limits() {
+    use fgdb::{QueryResult, QueryValue};
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0x5ec0_3028, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = database(&contexts.commit(), true).await;
+        let control = database(&contexts.commit(), false).await;
+        let issuer = authority(328, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let text = "CALL fnx.louvain_communities(\
+                    {weight:'weight', parallel:'min', self_loops:'drop'}) \
+                    YIELD node,component RETURN node,component ORDER BY node";
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |kind, name: &str| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Property, "weight") => {
+                Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(1)))
+            }
+            _ => None,
+        };
+        let expected = QueryResult::Rows {
+            columns: vec!["node".to_owned(), "component".to_owned()],
+            rows: [1, 2, 3, u128::MAX]
+                .into_iter()
+                .map(|id| {
+                    [id, if id == u128::MAX { id } else { 1 }]
+                        .map(|value| QueryValue::Value(GraphValue::Vertex(VId(value))))
+                        .to_vec()
+                })
+                .collect(),
+        };
+        assert_eq!(
+            control.query(&cx, text, &params, symbols, policy).unwrap(),
+            expected
+        );
+        assert_eq!(
+            db.query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                text,
+                &params,
+                symbols,
+                policy,
+                || 100,
+            )
+            .unwrap(),
+            expected
+        );
+        // The physically present hidden vertices and relation carry Boolean
+        // weights. An unmasked read observes and refuses them; the authorized
+        // call must exclude them before any numeric weight validation.
+        assert!(db.query(&cx, text, &params, symbols, policy).is_err());
+        for (restriction, dimension) in [
+            (Restriction::MaxNodes(3), LimitDimension::Nodes),
+            (Restriction::MaxRows(3), LimitDimension::Rows),
+            (Restriction::MaxWork(0), LimitDimension::Work),
+        ] {
+            let restricted = token.attenuate(restriction).unwrap();
+            assert!(matches!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &restricted,
+                    BRANCH,
+                    text,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
+                ),
+                Err(QueryError::Authorization(Error::LimitExceeded(actual)))
+                    if actual == dimension
+            ));
+        }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
