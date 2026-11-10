@@ -107,9 +107,9 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    // Epoch 32 appends multilevel Louvain communities; prior ordinals and
-    // bound-call identity versions remain unchanged.
-    assert_eq!(FnxSignatureRegistry::version(), 32);
+    // Epoch 33 admits directed Newman load without changing procedure
+    // ordinals or bound-call identity versions.
+    assert_eq!(FnxSignatureRegistry::version(), 33);
     assert_eq!(FnxSignatureRegistry::signatures().len(), 30);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
@@ -176,11 +176,30 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
         eigenvector.execution_kernel,
         "fgdb-prism/eigenvector-csr-gather-v1"
     );
-    for name in ["fnx.core_number", "fnx.load_centrality"] {
-        assert_eq!(
-            FnxSignatureRegistry::lookup(name).unwrap().graph_kind,
-            FnxGraphKind::Undirected
-        );
+    assert_eq!(
+        FnxSignatureRegistry::lookup("fnx.core_number")
+            .unwrap()
+            .graph_kind,
+        FnxGraphKind::Undirected
+    );
+    let load = FnxSignatureRegistry::lookup("fnx.load_centrality").unwrap();
+    assert_eq!(load.graph_kind, FnxGraphKind::Any);
+    assert_eq!(load.outputs, &[FnxOutput::Vertex, FnxOutput::Score]);
+    assert!(load.parameters.is_empty());
+    assert_eq!(load.execution_kernel, "fgdb-prism/newman-load-csr-v3");
+    let call = FnxCallSpec::bind("CALL fnx.load_centrality()", &FnxParameters::new()).unwrap();
+    assert_eq!(
+        FnxReadOptions::whole_graph_for(&call, None)
+            .projection
+            .directedness,
+        Directedness::Undirected
+    );
+    for direction in [
+        Directedness::Undirected,
+        Directedness::Directed,
+        Directedness::Reversed,
+    ] {
+        call.validate_sealed_projection(direction).unwrap();
     }
 }
 

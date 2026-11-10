@@ -187,7 +187,7 @@ impl FnxReadOptions {
     /// [`Self::whole_graph`] read in the direction `call`'s signature law
     /// requires: an undirected-law procedure (connected components,
     /// triangles, clustering) reads every edge undirected. Betweenness,
-    /// closeness, harmonic and eigenvector centrality keep their undirected
+    /// closeness, harmonic, eigenvector and load centrality keep their undirected
     /// whole-graph defaults while admitting explicit directed and reversed projections.
     /// Every other procedure reads directed edges.
     /// A reciprocal pair in an undirected input projects to a parallel edge,
@@ -203,6 +203,7 @@ impl FnxReadOptions {
                         | FoundationAlgorithm::ClosenessCentrality
                         | FoundationAlgorithm::HarmonicCentrality
                         | FoundationAlgorithm::EigenvectorCentrality
+                        | FoundationAlgorithm::LoadCentrality
                 )
             )
         {

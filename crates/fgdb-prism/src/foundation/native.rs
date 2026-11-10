@@ -380,8 +380,8 @@ pub(super) fn core<C>(
 /// transitions and delivery. Each source reaches at most C vertices, where
 /// C <= min(V, arcs + 1): a component with C vertices needs C-1 edges, and
 /// every such edge contributes at least one admitted arc. The looser arc
-/// bound also covers directed input conservatively; the registered Load
-/// procedure itself requires an undirected, loop-free projection.
+/// bound also covers directed input conservatively: BFS follows outgoing rows,
+/// while predecessor recovery follows incoming rows in the same weak component.
 /// Connected inputs retain the former bound; edgeless input is now O(V).
 pub(crate) fn load_work(nodes: usize, arcs: usize) -> Option<usize> {
     Load::source_bound(nodes, arcs)
@@ -404,13 +404,13 @@ enum LoadPhase {
 #[derive(Clone, Copy)]
 pub(crate) enum LoadStep {
     Scalar,
-    Row(usize),
+    Row { vertex: usize, predecessors: bool },
     Complete,
 }
 
 /// One bounded state machine serves decoded and compressed graph readers.
 /// The BFS queue is also the reverse dependency stack. Predecessor counts are
-/// collected during BFS; parents are recovered from the immutable undirected
+/// collected during BFS; parents are recovered from the immutable incoming
 /// row, without retaining adjacency or a vector of predecessor lists. The
 /// same unique queue identifies precisely the scratch cells to reset and
 /// output cells to reduce: other components need no work for this source.
@@ -443,6 +443,10 @@ impl Load {
 
     pub(crate) fn workspace(nodes: usize) -> Option<usize> {
         nodes.checked_mul(3 * size_of::<usize>() + 2 * size_of::<f64>())
+    }
+
+    pub(crate) fn workspace_bytes(&self) -> usize {
+        self.peak
     }
 
     pub(crate) fn new<C>(nodes: usize, limit: usize) -> Result<Self, FnxExecutionError<C>> {
@@ -576,7 +580,10 @@ impl Load {
                     .checked_add(1)
                     .ok_or(FnxExecutionError::SizeOverflow)?;
                 self.active = Some((vertex, false));
-                return Ok(LoadStep::Row(vertex));
+                return Ok(LoadStep::Row {
+                    vertex,
+                    predecessors: false,
+                });
             }
             LoadPhase::BreadthFirst => self.phase = LoadPhase::Reverse(self.queue.len()),
             LoadPhase::Reverse(at) if at > 0 => {
@@ -590,7 +597,10 @@ impl Load {
                     }
                     self.active = Some((vertex, true));
                     self.seen_parents = 0;
-                    return Ok(LoadStep::Row(vertex));
+                    return Ok(LoadStep::Row {
+                        vertex,
+                        predecessors: true,
+                    });
                 }
             }
             LoadPhase::Reverse(_) => self.phase = LoadPhase::Reduce(0),
@@ -714,10 +724,16 @@ fn drive_load<C>(
         match state.step()? {
             LoadStep::Scalar => {}
             LoadStep::Complete => break,
-            LoadStep::Row(vertex) => {
-                let row = graph
-                    .neighbors_indices(vertex)
-                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            LoadStep::Row {
+                vertex,
+                predecessors,
+            } => {
+                let row = if predecessors {
+                    graph.in_neighbors_indices(vertex)
+                } else {
+                    graph.neighbors_indices(vertex)
+                }
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
                 // Decoded rows are immutable, sorted, unique, valid ordinals.
                 // Distances and predecessor counts are bounded by the vertex
                 // population; visits cannot refuse except on a self-loop or

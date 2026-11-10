@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 32;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 33;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -440,13 +440,16 @@ const SIGNATURES: &[FnxSignature] = &[
         "fgdb-prism/in-degree-directory-v2",
     ),
     directed_degree("fnx.out_degree_centrality", "fgdb-prism/out-degree-csr-v1"),
-    foundation(
-        "fnx.load_centrality",
-        FnxOutput::Score,
-        "explicit undirected simple projection; unweighted; self-loops refused; Newman load splits accumulated flow equally among shortest-path predecessors; normalized by (|V|-1)(|V|-2); isolates retained",
-        "O(|V| + sum_components |C| * (|C| + |E_C|)); O(|V|) kernel workspace",
-        "fgdb-prism/newman-load-csr-v2",
-    ),
+    FnxSignature {
+        graph_kind: FnxGraphKind::Any,
+        ..foundation(
+            "fnx.load_centrality",
+            FnxOutput::Score,
+            "unqualified whole-graph input defaults to undirected; explicit directed, reversed or undirected simple projection; unweighted; self-loops refused; Newman load splits accumulated flow equally among shortest-path predecessors; normalized by (|V|-1)(|V|-2) in both directed and undirected projections; isolates retained",
+            "O(|V| + sum_components |C| * (|C| + |E_C|)); O(|V|) kernel workspace",
+            "fgdb-prism/newman-load-csr-v3",
+        )
+    },
     FnxSignature {
         name: "fnx.hits_centrality",
         graph_input_arity: 1,

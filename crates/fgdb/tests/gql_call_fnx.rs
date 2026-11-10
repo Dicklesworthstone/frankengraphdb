@@ -2607,3 +2607,64 @@ fn bellman_ford_native_weights_keep_exact_sums_until_final_distance_rounding() {
         ));
     });
 }
+
+#[test]
+fn directed_load_projection_composes_and_replays_the_pinned_snapshot() {
+    run(async |commit, cx| {
+        for (name, direction) in [
+            ("directed", Directedness::Directed),
+            ("reversed", Directedness::Reversed),
+        ] {
+            let mut db = open(commit).await;
+            let old = db.read_session().unwrap();
+            let text = format!(
+                "CALL fnx.load_centrality({{labels:['Person'], relations:['R'], \
+                 direction:'{name}', parallel:'collapse', self_loops:'drop'}}) \
+                 YIELD vertex AS node, score AS rank \
+                 WHERE rank >= 0 RETURN node, rank ORDER BY node"
+            );
+            let call = FnxCallSpec::bind(
+                "CALL fnx.load_centrality() YIELD vertex AS node, score AS rank",
+                &FnxParameters::new(),
+            )
+            .unwrap();
+            let mut options = explicit(false);
+            options.selection.vertex_label = Some(PERSON);
+            options.selection.relation = Some(R);
+            options.projection.directedness = direction;
+            options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+            options.projection.self_loops = SelfLoopPolicy::Drop;
+            let expected: Vec<Vec<_>> = old
+                .execute_fnx(cx, &call, options)
+                .unwrap()
+                .analytics
+                .rows
+                .into_iter()
+                .map(|row| row.into_iter().map(value).collect())
+                .collect();
+            let params = GqlParameters::new();
+            let (before, certificate) = db
+                .execute_certified(cx, &text, &params, symbols, policy())
+                .unwrap();
+            let (columns, actual) = rows(before.clone());
+            assert_eq!(columns, vec!["node", "rank"]);
+            assert_eq!(actual, expected);
+            let mut more = WriteBatch::new(R);
+            more.add_edge(EId(6), VId(5), VId(6), vec![]);
+            db.write(commit, more).await.unwrap();
+            assert_ne!(
+                rows(db.query(cx, &text, &params, symbols, policy()).unwrap()).1,
+                actual
+            );
+            assert_eq!(
+                old.query(cx, &text, &params, symbols, policy()).unwrap(),
+                before
+            );
+            assert_eq!(
+                db.replay(cx, &certificate, &params, symbols, policy())
+                    .unwrap(),
+                before
+            );
+        }
+    });
+}

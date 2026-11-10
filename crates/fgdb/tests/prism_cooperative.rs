@@ -2731,3 +2731,245 @@ fn cooperative_incoming_degrees_preserve_history_fallback_and_exact_admission() 
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
+
+#[test]
+fn directed_load_sealed_and_cooperative_paths_preserve_history_and_exact_workspace() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let mut db = small_database(&contexts.commit(), 7, false).await;
+        let mut batch = WriteBatch::new(RelationId(1));
+        for (at, (source, target)) in
+            [(0, 1), (0, 2), (1, 3), (2, 3), (2, 4), (3, 5), (4, 5)]
+                .into_iter()
+                .enumerate()
+        {
+            batch.add_edge(
+                EId(at as u128 + 1),
+                VId(source),
+                VId(target),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(-3))],
+            );
+        }
+        // A second witness reduces to the same unweighted edge. Excluded
+        // endpoints may carry nonnumeric weights without becoming observable.
+        batch.add_edge(
+            EId(8),
+            VId(0),
+            VId(1),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+        );
+        batch.create_vertex(VId(99), vec![LabelId(2)], vec![]);
+        batch.add_edge(
+            EId(9),
+            VId(99),
+            VId(3),
+            vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+        );
+        db.write(&contexts.commit(), batch).await.unwrap();
+        let original = db.frontier().unwrap();
+        let mut change = WriteBatch::new(RelationId(1));
+        change.delete_edge(EId(6));
+        db.write(&contexts.commit(), change).await.unwrap();
+        let current = db.frontier().unwrap();
+        let call =
+            FnxCallSpec::bind("CALL fnx.load_centrality()", &FnxParameters::new()).unwrap();
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let mut previous = None;
+            for at in [original, current] {
+                let mut opt = options(direction);
+                opt.as_of = Some(at);
+                let graph = projection(&db, &cx, opt).await;
+                let expected = call
+                    .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                    .unwrap();
+                let native = db
+                    .read_session()
+                    .unwrap()
+                    .execute_fnx(&cx, &call, opt)
+                    .unwrap()
+                    .analytics;
+                assert_eq!(expected.rows, native.rows);
+                assert_eq!(
+                    expected.certificate.result_digest,
+                    native.certificate.result_digest
+                );
+                assert_eq!(expected.rows.len(), 7);
+                assert_eq!(expected.certificate.projection_digest, graph.digest());
+                assert_eq!(expected.certificate.snapshot, graph.binding());
+                let scalar = 7 * (3 * size_of::<usize>() + 2 * size_of::<f64>());
+                let opposite = if direction == Directedness::Directed {
+                    let mut reversed = opt;
+                    reversed.projection.directedness = Directedness::Reversed;
+                    projection(&db, &cx, reversed)
+                        .await
+                        .incoming_index_stats()
+                        .unwrap()
+                        .charged_workspace_bytes
+                } else {
+                    0
+                };
+                assert_eq!(
+                    expected.certificate.kernel_workspace_bytes,
+                    scalar + opposite,
+                    "only newly owned opposite-face backing belongs to the kernel"
+                );
+                let exact = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: scalar + opposite,
+                    ..memory()
+                };
+                let exact_work = FnxExecutionLimits {
+                    max_estimated_work: expected.certificate.estimated_work,
+                    ..opt.execution_limits
+                };
+                assert_eq!(
+                    call.execute_sealed(&cx, &graph, exact_work, exact).unwrap(),
+                    expected
+                );
+                for q in [1, 7, 257] {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                    let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                    let (actual, pending) = drive(
+                        call.execute_sealed_cooperative(
+                            &controlled,
+                            &graph,
+                            exact_work,
+                            exact,
+                            quantum(q),
+                            yield_now,
+                        ),
+                        &probe,
+                        q,
+                    );
+                    compare_execution(&actual.unwrap(), &expected);
+                    if q == 1 {
+                        assert!(pending > 0);
+                    }
+                }
+                let below = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: scalar + opposite - 1,
+                    ..exact
+                };
+                for refused in [
+                    call.execute_sealed(&cx, &graph, exact_work, below).unwrap_err(),
+                    call.execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        exact_work,
+                        below,
+                        quantum(7),
+                        yield_now,
+                    )
+                    .await
+                    .unwrap_err(),
+                ] {
+                    assert!(matches!(
+                        refused,
+                        FnxSealedExecutionError::Execution(
+                            FnxExecutionError::LimitExceeded { .. }
+                        ) | FnxSealedExecutionError::Source(SealedProjectionError::Read(
+                            fgdb_strata::tiered::sealed::SealedError::Limit { .. }
+                        ))
+                    ));
+                }
+                let yields = Cell::new(0);
+                let refused = call
+                    .execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        FnxExecutionLimits {
+                            max_estimated_work: exact_work.max_estimated_work - 1,
+                            ..exact_work
+                        },
+                        exact,
+                        quantum(1),
+                        || {
+                            yields.set(yields.get() + 1);
+                            std::future::ready(())
+                        },
+                    )
+                    .await;
+                assert!(matches!(
+                    refused,
+                    Err(FnxSealedExecutionError::Execution(
+                        FnxExecutionError::LimitExceeded {
+                            resource: "estimated work",
+                            ..
+                        }
+                    ))
+                ));
+                assert_eq!(yields.get(), 0, "admit work before opposite construction");
+                assert_eq!(
+                    call.execute_sealed(&cx, &graph, exact_work, exact).unwrap(),
+                    expected,
+                    "refusals leave the original projection usable"
+                );
+                if let Some(previous) = previous {
+                    assert_ne!(expected.certificate.result_digest, previous);
+                }
+                previous = Some(expected.certificate.result_digest);
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn directed_load_cancels_at_every_sealed_cooperative_checkpoint_without_partial_output() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let db = small_database(&contexts.commit(), 3, false).await;
+        let call =
+            FnxCallSpec::bind("CALL fnx.load_centrality()", &FnxParameters::new()).unwrap();
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let opt = options(direction);
+            let graph = projection(&db, &cx, opt).await;
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let (expected, pending) = drive(
+                call.execute_sealed_cooperative(
+                    &controlled,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(7),
+                    yield_now,
+                ),
+                &probe,
+                7,
+            );
+            let expected = expected.unwrap();
+            assert!(pending > 0);
+            for stop in 1..=probe.calls() {
+                let refusal = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&refusal));
+                let (actual, _) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(7),
+                        yield_now,
+                    ),
+                    &refusal,
+                    7,
+                );
+                assert!(matches!(actual, Err(FnxSealedExecutionError::Cancelled(_))));
+                assert_eq!(refusal.calls(), stop);
+            }
+            compare_execution(
+                &expected,
+                &call
+                    .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                    .unwrap(),
+            );
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}

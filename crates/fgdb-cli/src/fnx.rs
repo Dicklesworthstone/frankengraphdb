@@ -1589,10 +1589,16 @@ mod tests {
     }
 
     #[test]
-    fn sealed_core_and_load_preflight_accept_only_undirected_projections() {
-        for call in [
-            "CALL fnx.core_number() YIELD core AS level, node AS id",
-            "CALL fnx.load_centrality() YIELD score AS rank, node AS id",
+    fn sealed_core_and_load_preflight_enforce_their_direction_laws() {
+        for (call, admits_directed) in [
+            (
+                "CALL fnx.core_number() YIELD core AS level, node AS id",
+                false,
+            ),
+            (
+                "CALL fnx.load_centrality() YIELD score AS rank, node AS id",
+                true,
+            ),
         ] {
             for direction in ["directed", "reversed", "undirected"] {
                 let args: Vec<String> = [
@@ -1616,12 +1622,12 @@ mod tests {
                 assert!(options.fnx_call);
                 match super::prepare(&options) {
                     Ok(prepared) => {
-                        assert_eq!(direction, "undirected");
+                        assert!(admits_directed || direction == "undirected");
                         assert!(prepared.is_sealed());
                         assert!(prepared.call.supports_sealed_execution());
                     }
                     Err(failure) => {
-                        assert_ne!(direction, "undirected");
+                        assert!(!admits_directed && direction != "undirected");
                         assert_eq!(failure.code, 3);
                         assert_eq!(failure.class, "query");
                     }

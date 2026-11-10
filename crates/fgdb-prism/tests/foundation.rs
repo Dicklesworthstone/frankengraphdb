@@ -853,7 +853,7 @@ fn load_centrality_matches_pinned_fnx_for_every_small_simple_graph() {
             assert_eq!(degree_bits(&actual), expected, "n={n} mask={mask}");
             assert_eq!(
                 actual.certificate.execution_kernel,
-                "fgdb-prism/newman-load-csr-v2"
+                "fgdb-prism/newman-load-csr-v3"
             );
             assert_eq!(
                 actual.certificate.kernel_workspace_bytes,
@@ -1020,15 +1020,22 @@ fn load_centrality_admission_and_every_live_stop_are_preserved() {
         Err(FnxExecutionError::SelfLoopRefused)
     ));
     for direction in [Directedness::Directed, Directedness::Reversed] {
+        let singleton = view_direction(&[1], &[], SelfLoopPolicy::Keep, direction);
+        assert_eq!(
+            degree_bits(
+                &procedure
+                    .execute(&singleton, limits(1 << 20), &mut NativeControl::default())
+                    .unwrap()
+            ),
+            BTreeMap::from([(VId(1), 0.0_f64.to_bits())])
+        );
         assert!(matches!(
             procedure.execute(
-                &view_direction(&[1], &[], SelfLoopPolicy::Keep, direction),
+                &view_direction(&[1], &[(1, 1)], SelfLoopPolicy::Keep, direction),
                 limits(1 << 20),
                 &mut NativeControl::default()
             ),
-            Err(FnxExecutionError::GraphKind {
-                required: FnxGraphKind::Undirected
-            })
+            Err(FnxExecutionError::SelfLoopRefused)
         ));
     }
 }
@@ -1855,5 +1862,140 @@ fn directed_and_reversed_betweenness_match_pinned_bits_witness_and_exact_work() 
                 );
             }
         }
+    }
+}
+
+#[test]
+fn directed_load_matches_pinned_fnx_on_every_small_topology_and_sparse_full_width_graphs() {
+    let identities = [u128::MAX, 0, 1 << 100, (1 << 64) | 17];
+    for n in 0..=4 {
+        let pairs: Vec<_> = (0..n)
+            .flat_map(|source| {
+                (0..n)
+                    .filter(move |&target| source != target)
+                    .map(move |target| (source, target))
+            })
+            .collect();
+        for mask in 0usize..(1 << pairs.len()) {
+            let edges: Vec<_> = pairs
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, &(source, target))| (identities[source], identities[target]))
+                .collect();
+            check_directed_load(&identities[..n], &edges);
+        }
+    }
+    // The foundation switches to parallel sources at 500; source-ordered
+    // floating reductions and reached-only resets must agree beyond it.
+    let identities: Vec<_> = (0..513)
+        .rev()
+        .map(|at| (1u128 << 110) + ((at as u128) << 64) + 17)
+        .collect();
+    let edges: Vec<_> = [(0, 1), (0, 2), (1, 3), (2, 3), (2, 4), (3, 5), (4, 5), (7, 6)]
+        .into_iter()
+        .map(|(source, target)| (identities[source], identities[target]))
+        .collect();
+    check_directed_load(&identities, &edges);
+}
+
+fn check_directed_load(vertices: &[u128], edges: &[(u128, u128)]) {
+    let procedure = call("load_centrality");
+    for direction in [Directedness::Directed, Directedness::Reversed] {
+        let graph = view_direction(vertices, edges, SelfLoopPolicy::Keep, direction);
+        let names = graph.nodes_ordered();
+        let mut reference = DiGraph::strict();
+        for &name in &names {
+            reference.add_node(name);
+        }
+        for source in 0..graph.node_count() {
+            for &target in graph.neighbors_indices(source).unwrap() {
+                reference.add_edge(names[source], names[target]).unwrap();
+            }
+        }
+        let oracle = fnx_algorithms::load_centrality_directed(&reference);
+        let expected: BTreeMap<_, _> = oracle
+            .scores
+            .iter()
+            .map(|score| {
+                (
+                    VId(u128::from_str_radix(&score.node, 16).unwrap()),
+                    score.score.to_bits(),
+                )
+            })
+            .collect();
+        let n = vertices.len();
+        let arcs = edges.len();
+        let work = n.min(arcs + 1) * (4 * n + 2 * arcs) + 11 * n + 16;
+        let mut meter = NativeControl::default();
+        let actual = procedure.execute(&graph, limits(work), &mut meter).unwrap();
+        assert_eq!(degree_bits(&actual), expected, "{direction:?}: {edges:?}");
+        assert_eq!(actual.rows.len(), n);
+        assert_eq!(actual.certificate.estimated_work, work);
+        assert!(meter.units <= work);
+        assert_eq!(
+            actual.certificate.witness.nodes_touched,
+            oracle.witness.nodes_touched
+        );
+        assert_eq!(
+            actual.certificate.witness.queue_peak,
+            oracle.witness.queue_peak
+        );
+        assert_eq!(
+            actual.certificate.kernel_workspace_bytes,
+            n * (3 * size_of::<usize>() + 2 * size_of::<f64>())
+        );
+        assert!(matches!(
+            procedure.execute(&graph, limits(work - 1), &mut NativeControl::default()),
+            Err(FnxExecutionError::LimitExceeded {
+                resource: "estimated work", requested, limit
+            }) if requested == work && limit == work - 1
+        ));
+    }
+}
+
+#[test]
+fn directed_load_uses_incoming_predecessors_and_preserves_every_live_refusal() {
+    let vertices: Vec<_> = (0u128..7).collect();
+    // Unequal shortest-path predecessor counts make reversal change Newman
+    // load. These literal pre-normalization totals are not Brandes scores.
+    let edges = [(0, 1), (0, 2), (1, 3), (2, 3), (2, 4), (3, 5), (4, 5)];
+    let procedure = call("load_centrality");
+    for (direction, raw) in [
+        (Directedness::Directed, [0.0, 0.75, 2.25, 2.0, 1.0, 0.0, 0.0]),
+        (Directedness::Reversed, [0.0, 1.0, 2.0, 2.25, 0.75, 0.0, 0.0]),
+    ] {
+        let graph = view_direction(&vertices, &edges, SelfLoopPolicy::Keep, direction);
+        let mut measured = NativeControl::default();
+        let baseline = procedure
+            .execute(&graph, limits(1 << 20), &mut measured)
+            .unwrap();
+        let expected: BTreeMap<_, _> = vertices
+            .iter()
+            .copied()
+            .zip(raw)
+            .map(|(vertex, value)| (VId(vertex), (value * (1.0_f64 / 30.0)).to_bits()))
+            .collect();
+        assert_eq!(degree_bits(&baseline), expected);
+        for stop in (1..=measured.units)
+            .map(NativeStop::Work)
+            .chain((1..=measured.polls.len()).map(NativeStop::Poll))
+        {
+            let mut meter = NativeControl {
+                stop: Some(stop),
+                ..NativeControl::default()
+            };
+            assert!(matches!(
+                procedure.execute(&graph, limits(1 << 20), &mut meter),
+                Err(FnxExecutionError::Cancelled(at)) if at == stop
+            ));
+            assert!(meter.stopped);
+        }
+        assert_eq!(
+            procedure
+                .execute(&graph, limits(1 << 20), &mut NativeControl::default())
+                .unwrap(),
+            baseline
+        );
     }
 }
