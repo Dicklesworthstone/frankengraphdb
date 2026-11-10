@@ -107,9 +107,9 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    // Epoch 33 admits directed Newman load without changing procedure
+    // Epoch 34 admits directed total-degree cores without changing procedure
     // ordinals or bound-call identity versions.
-    assert_eq!(FnxSignatureRegistry::version(), 33);
+    assert_eq!(FnxSignatureRegistry::version(), 34);
     assert_eq!(FnxSignatureRegistry::signatures().len(), 30);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
@@ -180,8 +180,22 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
         FnxSignatureRegistry::lookup("fnx.core_number")
             .unwrap()
             .graph_kind,
-        FnxGraphKind::Undirected
+        FnxGraphKind::Any
     );
+    let core = FnxCallSpec::bind("CALL fnx.core_number()", &FnxParameters::new()).unwrap();
+    assert_eq!(
+        FnxReadOptions::whole_graph_for(&core, None)
+            .projection
+            .directedness,
+        Directedness::Undirected
+    );
+    for direction in [
+        Directedness::Undirected,
+        Directedness::Directed,
+        Directedness::Reversed,
+    ] {
+        core.validate_sealed_projection(direction).unwrap();
+    }
     let load = FnxSignatureRegistry::lookup("fnx.load_centrality").unwrap();
     assert_eq!(load.graph_kind, FnxGraphKind::Any);
     assert_eq!(load.outputs, &[FnxOutput::Vertex, FnxOutput::Score]);

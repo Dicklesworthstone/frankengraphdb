@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 33;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 34;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -402,13 +402,16 @@ const SIGNATURES: &[FnxSignature] = &[
             "fgdb-prism/eigenvector-csr-gather-v1",
         )
     },
-    foundation(
-        "fnx.core_number",
-        FnxOutput::Core,
-        "explicit undirected simple projection; unweighted; self-loops refused; k-core number of each vertex, an exact count",
-        "O(|V| + |E|)",
-        "fgdb-prism/core-number-bucket-csr-v1",
-    ),
+    FnxSignature {
+        graph_kind: FnxGraphKind::Any,
+        ..foundation(
+            "fnx.core_number",
+            FnxOutput::Core,
+            "unqualified whole-graph input defaults to undirected; explicit directed, reversed or undirected simple projection; unweighted; self-loops refused; k-core number of each vertex, an exact count; directed degree is in-degree plus out-degree, so reciprocal arcs count twice and reversing every arc preserves core numbers",
+            "O(|V| + |E|)",
+            "fgdb-prism/core-number-bucket-csr-v1",
+        )
+    },
     FnxSignature {
         name: "fnx.cdlp",
         graph_input_arity: 1,

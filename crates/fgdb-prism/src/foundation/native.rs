@@ -264,10 +264,21 @@ pub(super) fn core<C>(
     let mut max_degree = 0usize;
     for vertex in 0..n {
         arithmetic.step()?;
-        let count = graph
+        let outgoing = graph
             .neighbors_indices(vertex)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?
             .len();
+        let incoming = if graph.is_directed() {
+            graph
+                .in_neighbors_indices(vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+                .len()
+        } else {
+            0
+        };
+        let count = outgoing
+            .checked_add(incoming)
+            .ok_or(FnxExecutionError::SizeOverflow)?;
         degree.push(count);
         max_degree = max_degree.max(count);
     }
@@ -287,8 +298,9 @@ pub(super) fn core<C>(
         .and_then(|bytes| bytes.checked_add(position_bytes))
         .ok_or(FnxExecutionError::SizeOverflow)?;
 
-    // Stable counting sort by initial degree. The simple, loop-free graph
-    // has max_degree < n, so this is linear and needs no comparison sort.
+    // Stable counting sort by initial degree. A simple loop-free projection
+    // has at most n-1 incidences per face. Directed total degree counts both
+    // faces, including both arcs of a reciprocal pair; bins remain O(n).
     for &count in &degree {
         arithmetic.step()?;
         bins[count] += 1;
@@ -324,7 +336,16 @@ pub(super) fn core<C>(
         let row = graph
             .neighbors_indices(vertex)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-        for &neighbor in row {
+        let incoming = if graph.is_directed() {
+            graph
+                .in_neighbors_indices(vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+        } else {
+            &[]
+        };
+        // Each removed directed arc reduces the other endpoint's total
+        // degree once. Do not deduplicate a reciprocal neighbor across faces.
+        for &neighbor in row.iter().chain(incoming) {
             arithmetic.step()?;
             if degree[neighbor] > degree[vertex] {
                 let count = degree[neighbor];
@@ -343,6 +364,7 @@ pub(super) fn core<C>(
         }
         arcs = arcs
             .checked_add(row.len())
+            .and_then(|arcs| arcs.checked_add(incoming.len()))
             .ok_or(FnxExecutionError::SizeOverflow)?;
     }
 

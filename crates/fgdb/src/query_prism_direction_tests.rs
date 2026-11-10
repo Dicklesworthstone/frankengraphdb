@@ -366,6 +366,238 @@ fn assert_projection(
 }
 
 #[test]
+fn directed_core_runs_over_real_sealed_sources_with_cooperative_and_refusal_parity() {
+    use std::cell::Cell;
+    use std::num::NonZeroUsize;
+
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for vertex in [0, 1, 2, 3, u128::MAX] {
+            batch.create_vertex(VId(vertex), vec![LabelId(1)], vec![]);
+        }
+        // Reciprocal triangle, one-way leaf, isolate, one raw duplicate and
+        // one stored loop. The explicit projection decides the last two.
+        for (eid, (source, target)) in [
+            (0, 1),
+            (1, 0),
+            (0, 2),
+            (2, 0),
+            (1, 2),
+            (2, 1),
+            (3, 0),
+            (0, 1),
+            (0, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            batch.add_edge(EId(eid as u128), VId(source), VId(target), vec![]);
+        }
+        db.write(&commit, batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let image = db
+            .store
+            .seal_partition(
+                &query,
+                view.partition_root(),
+                view.frontier(),
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
+        let call = FnxCallSpec::bind(
+            "CALL fnx.core_number() YIELD vertex,core",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        for direction in DIRECTIONS {
+            let mut opt = options();
+            opt.selection.weight = FnxWeightSpec::Unit;
+            opt.projection = ProjectionSpec {
+                directedness: direction,
+                parallel_edges: ParallelEdgePolicy::CollapseUnit,
+                self_loops: SelfLoopPolicy::Drop,
+            };
+            let (graph, decoded) = assert_projection(&view, &query, &image, opt);
+            let core = if direction == Directedness::Undirected {
+                2
+            } else {
+                4
+            };
+            let expected: Vec<_> = [(0, core), (1, core), (2, core), (3, 1), (u128::MAX, 0)]
+                .into_iter()
+                .map(|(vertex, core)| vec![FnxValue::Vertex(VId(vertex)), FnxValue::Integer(core)])
+                .collect();
+            assert_eq!(
+                call.execute(&decoded, opt.execution_limits, || query.checkpoint())
+                    .unwrap()
+                    .rows,
+                expected,
+            );
+            let synchronous = call
+                .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                .unwrap();
+            assert_eq!(synchronous.rows, expected);
+            assert_eq!(
+                synchronous.certificate.adapter,
+                AdapterPath::CompressedCursor
+            );
+            let exact_memory = FnxMemoryLimits {
+                max_kernel_workspace_bytes: synchronous.certificate.kernel_workspace_bytes,
+                ..memory()
+            };
+            let exact_work = FnxExecutionLimits {
+                max_estimated_work: synchronous.certificate.estimated_work,
+                ..opt.execution_limits
+            };
+            assert_eq!(
+                call.execute_sealed(&query, &graph, exact_work, exact_memory)
+                    .unwrap(),
+                synchronous,
+            );
+            assert!(matches!(
+                call.execute_sealed(
+                    &query,
+                    &graph,
+                    FnxExecutionLimits {
+                        max_estimated_work: exact_work.max_estimated_work - 1,
+                        ..exact_work
+                    },
+                    exact_memory
+                ),
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::LimitExceeded {
+                        resource: "estimated work",
+                        ..
+                    }
+                )),
+            ));
+            // The opposite-index builder may report its own typed source
+            // workspace refusal before the scalar kernel can allocate.
+            assert!(
+                call.execute_sealed(
+                    &query,
+                    &graph,
+                    exact_work,
+                    FnxMemoryLimits {
+                        max_kernel_workspace_bytes: exact_memory.max_kernel_workspace_bytes - 1,
+                        ..exact_memory
+                    }
+                )
+                .is_err()
+            );
+            let yields = Cell::new(0);
+            let cooperative = call
+                .execute_sealed_cooperative(
+                    &query,
+                    &graph,
+                    exact_work,
+                    exact_memory,
+                    NonZeroUsize::new(1).unwrap(),
+                    || {
+                        yields.set(yields.get() + 1);
+                        asupersync::runtime::yield_now::yield_now()
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(yields.get() > graph.node_count());
+            assert_eq!(cooperative.rows, expected);
+            assert_eq!(
+                cooperative.certificate.result_digest,
+                synchronous.certificate.result_digest,
+            );
+            assert_eq!(
+                cooperative.certificate.witness,
+                synchronous.certificate.witness
+            );
+            assert_eq!(
+                cooperative.certificate.kernel_workspace_bytes,
+                exact_memory.max_kernel_workspace_bytes,
+            );
+
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            call.execute_sealed_cooperative(
+                &query.with_checkpoint_probe(Arc::clone(&probe)),
+                &graph,
+                exact_work,
+                exact_memory,
+                NonZeroUsize::new(1).unwrap(),
+                asupersync::runtime::yield_now::yield_now,
+            )
+            .await
+            .unwrap();
+            let checkpoints = probe.calls();
+            for stop in [1, checkpoints / 2, checkpoints] {
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                assert!(matches!(
+                    call.execute_sealed_cooperative(
+                        &query.with_checkpoint_probe(Arc::clone(&probe)),
+                        &graph,
+                        exact_work,
+                        exact_memory,
+                        NonZeroUsize::new(1).unwrap(),
+                        asupersync::runtime::yield_now::yield_now,
+                    )
+                    .await,
+                    Err(FnxSealedExecutionError::Cancelled(_)),
+                ));
+                assert_eq!(probe.calls(), stop);
+            }
+
+            let mut kept = opt;
+            kept.projection.self_loops = SelfLoopPolicy::Keep;
+            let graph = projected(&view, &query, &image, kept);
+            assert!(matches!(
+                call.execute_sealed(&query, &graph, opt.execution_limits, memory()),
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::SelfLoopRefused
+                )),
+            ));
+            assert!(matches!(
+                call.execute_sealed_cooperative(
+                    &query,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    NonZeroUsize::new(1).unwrap(),
+                    asupersync::runtime::yield_now::yield_now,
+                )
+                .await,
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::SelfLoopRefused
+                )),
+            ));
+            let mut reject = opt;
+            reject.projection.parallel_edges = ParallelEdgePolicy::Reject;
+            assert!(matches!(
+                view.prism_sealed_projection_at(
+                    &query,
+                    &image,
+                    view.frontier(),
+                    reject.selection,
+                    reject.projection,
+                    reject.projection_limits,
+                    reject.source_limits,
+                ),
+                Err(SealedReadError::Projection(
+                    SealedProjectionError::Projection(ProjectionError::ParallelEdge { .. },)
+                )),
+            ));
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn actual_mixed_tiers_support_all_directions_reductions_and_registered_calls() {
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);

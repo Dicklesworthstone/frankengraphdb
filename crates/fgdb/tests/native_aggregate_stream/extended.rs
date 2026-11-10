@@ -924,17 +924,9 @@ fn ordinary_filtered_edge_aggregates_keep_pull_budgets_history_and_refusal() {
         for (input, count, sum) in [
             ("MATCH (a:L)-[r:R]->(b:L)", 9, 136),
             ("MATCH (a:L)-[r:R]->(b:L) WHERE a <> b", 7, 106),
-            (
-                "MATCH (a:L)-[r:R]->(b:L) WHERE a.score < b.score",
-                4,
-                53,
-            ),
+            ("MATCH (a:L)-[r:R]->(b:L) WHERE a.score < b.score", 4, 53),
             ("MATCH (a)-[r:R]->(b) WHERE a.tag IS NULL", 4, 49),
-            (
-                "MATCH (a:L)<-[r:R]-(b:L) WHERE a.score > b.score",
-                4,
-                53,
-            ),
+            ("MATCH (a:L)<-[r:R]-(b:L) WHERE a.score > b.score", 4, 53),
             (
                 "MATCH (a)-[r:R]->(b) WHERE r.score > a.score OR b.tag IS NULL",
                 6,
@@ -1000,6 +992,24 @@ fn ordinary_filtered_edge_aggregates_keep_pull_budgets_history_and_refusal() {
                     Err(QueryError::Aggregate(
                         GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)
                     ))
+                ));
+            }
+        }
+
+        // The Boolean VM evaluates both operands. A decisive sibling and an
+        // empty output page must not hide a reached arithmetic error.
+        for predicate in [
+            "r.score > 0 OR 1/(r.score-r.score) > 0",
+            "r.score < 0 AND 1/(r.score-r.score) > 0",
+        ] {
+            for limit in [0, 1] {
+                let text = format!(
+                    "MATCH (a)-[r:R]->(b) WHERE {predicate} RETURN sum(r.score) AS total LIMIT {limit}"
+                );
+                assert!(matches!(
+                    db.query(&cx, &text, &args, symbols(), wide()),
+                    Err(QueryError::Aggregate(GqlQueryError::Data(error)))
+                        if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
                 ));
             }
         }

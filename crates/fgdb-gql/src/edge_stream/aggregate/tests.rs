@@ -390,17 +390,12 @@ fn ordinary_filtered_edge_dispatch_matches_eager_and_literal_answers() {
         ),
     ];
     for (filter, expected) in cases {
-        for (pattern, (count, total)) in [
-            "(a)-[r:R]->(b)",
-            "(a)<-[r:R]-(b)",
-            "(a)-[r:R]-(b)",
-        ]
-        .into_iter()
-        .zip(expected)
+        for (pattern, (count, total)) in ["(a)-[r:R]->(b)", "(a)<-[r:R]-(b)", "(a)-[r:R]-(b)"]
+            .into_iter()
+            .zip(expected)
         {
-            let text = format!(
-                "MATCH {pattern} WHERE {filter} RETURN COUNT(*) AS n,SUM(r.p) AS total"
-            );
+            let text =
+                format!("MATCH {pattern} WHERE {filter} RETURN COUNT(*) AS n,SUM(r.p) AS total");
             let q = prepare(&text);
             let Some(AggregateScanPlan::Edge(plan)) = AggregateScanPlan::compile_numeric(&q) else {
                 panic!("filtered single-edge aggregate was not admitted: {text}");

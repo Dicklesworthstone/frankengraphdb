@@ -2007,10 +2007,16 @@ impl FnxCallSpec {
                 let (output, workspace_bytes) =
                     crate::foundation::run(graph, algorithm, arcs, &mut checkpoint)?;
                 kernel_workspace_bytes = workspace_bytes;
-                if graph.is_directed()
-                    && algorithm == crate::FoundationAlgorithm::EigenvectorCentrality
-                {
-                    execution_kernel = "fgdb-prism/eigenvector-csr-incoming-gather-v1";
+                if graph.is_directed() {
+                    match algorithm {
+                        crate::FoundationAlgorithm::EigenvectorCentrality => {
+                            execution_kernel = "fgdb-prism/eigenvector-csr-incoming-gather-v1";
+                        }
+                        crate::FoundationAlgorithm::CoreNumber => {
+                            execution_kernel = "fgdb-prism/core-number-total-degree-csr-v1";
+                        }
+                        _ => {}
+                    }
                 }
                 output
             }
