@@ -14,16 +14,16 @@
 //! and initial projection preparation remain the caller's responsibility.
 
 use super::{
-    ComplexityWitness, DegreeCentrality, Delivery, EncodedRows, Error, ExecutionError, Finished,
-    FnxAlgorithm, FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, FnxResult, FnxRowCursor,
-    HopDistance, KernelOutput, KernelValues, PageRankOptions, QueryCx, Result, ResultAdmission,
-    SealedGraphView, SealedNeighborCursor, add, admit, checkpoint, execution_pass_work,
-    finish_encoded, mul, require_loop_free_degree, reserve,
+    ComplexityWitness, DegreeCentrality, Delivery, DirectedDegree, EncodedRows, Error,
+    ExecutionError, Finished, FnxAlgorithm, FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits,
+    FnxResult, FnxRowCursor, HopDistance, KernelOutput, KernelValues, PageRankOptions, QueryCx,
+    Result, ResultAdmission, SealedGraphView, SealedNeighborCursor, add, admit, checkpoint,
+    execution_pass_work, finish_encoded, mul, require_loop_free_degree, reserve,
 };
 use crate::execute::shallow_bfs;
 use crate::sealed_control::{Control, Guard};
 use crate::shortest_path::{Entry, IndexedHeap};
-use crate::{DijkstraOptions, FoundationAlgorithm, SealedProjectionError};
+use crate::{DijkstraOptions, Directedness, FoundationAlgorithm, SealedProjectionError};
 use fgdb_strata::tiered::sealed::{SealedScanBudget, SealedScanStep};
 use std::cell::RefCell;
 use std::future::Future;
@@ -695,10 +695,26 @@ impl FnxCallSpec {
                 }
                 FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
                     admission.rows(n)?;
+                    let directed = graph.spec().directedness != Directedness::Undirected;
+                    let directory = graph.incoming_degrees().is_some();
                     (
-                        "fgdb-prism/sealed-degree-directory-cooperative-v1",
+                        if !directed {
+                            "fgdb-prism/sealed-degree-directory-cooperative-v1"
+                        } else if directory {
+                            "fgdb-prism/sealed-total-degree-directory-cooperative-v1"
+                        } else {
+                            "fgdb-prism/sealed-total-degree-cooperative-v1"
+                        },
                         pass,
-                        mul(n, size_of::<f64>())?,
+                        mul(
+                            n,
+                            size_of::<f64>()
+                                + if directed && !directory {
+                                    size_of::<usize>()
+                                } else {
+                                    0
+                                },
+                        )?,
                         None,
                     )
                 }
@@ -818,7 +834,11 @@ impl FnxCallSpec {
                         | FoundationAlgorithm::AverageNeighborDegree
                 )
             ) {
-                require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+                if graph.spec().directedness == Directedness::Undirected {
+                    require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+                } else if graph.has_self_loops() {
+                    return Err(ExecutionError::SelfLoopRefused.into());
+                }
             }
             let mut control = Cooperate {
                 cx,
@@ -833,13 +853,22 @@ impl FnxCallSpec {
                 FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
                     directed_degree_centrality(
                         graph,
-                        matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality),
+                        if matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality) {
+                            DirectedDegree::Incoming
+                        } else {
+                            DirectedDegree::Outgoing
+                        },
                         &mut control,
                     )
                     .await?
                 }
                 FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
-                    degree_centrality(graph, &mut control).await?
+                    if graph.spec().directedness == Directedness::Undirected {
+                        degree_centrality(graph, &mut control).await?
+                    } else {
+                        directed_degree_centrality(graph, DirectedDegree::Total, &mut control)
+                            .await?
+                    }
                 }
                 FnxAlgorithm::PageRank(options) => {
                     pagerank(graph, options, source, &mut control).await?
@@ -981,7 +1010,7 @@ where
 
 async fn directed_degree_centrality<Yield, YieldFuture>(
     graph: &SealedGraphView,
-    incoming: bool,
+    direction: DirectedDegree,
     control: &mut Cooperate<'_, Yield, impl Guard>,
 ) -> Result<KernelOutput>
 where
@@ -990,8 +1019,11 @@ where
 {
     control.tick().await?;
     let n = graph.node_count();
-    let directory = incoming.then(|| graph.incoming_degrees()).flatten();
-    let scan = incoming && directory.is_none();
+    let directory = direction
+        .needs_incoming()
+        .then(|| graph.incoming_degrees())
+        .flatten();
+    let scan = direction.needs_incoming() && directory.is_none();
     let mut counts = reserve(if scan { n } else { 0 })?;
     let mut edges = 0usize;
     if scan {
@@ -1004,6 +1036,9 @@ where
             let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
             while let Some((target, _)) = control.next(&mut row).await? {
                 control.tick().await?;
+                if direction == DirectedDegree::Total && target == source {
+                    return Err(ExecutionError::SelfLoopRefused.into());
+                }
                 let count = counts
                     .get_mut(target)
                     .ok_or(ExecutionError::InvalidUpstreamResult)?;
@@ -1015,14 +1050,21 @@ where
     let mut output = DegreeCentrality::new(n)?;
     for vertex in 0..n {
         control.tick().await?;
-        output.push_directed(if incoming {
-            directory.unwrap_or(&counts).get(vertex).copied()
+        if direction == DirectedDegree::Total {
+            output.push_total(
+                graph.degree(vertex),
+                directory.unwrap_or(&counts).get(vertex).copied(),
+            )?;
         } else {
-            graph.degree(vertex)
-        })?;
+            output.push_directed(if direction == DirectedDegree::Incoming {
+                directory.unwrap_or(&counts).get(vertex).copied()
+            } else {
+                graph.degree(vertex)
+            })?;
+        }
     }
     control.tick().await?;
-    output.finish_directed(incoming, edges, scan)
+    output.finish_directed(direction, edges, scan)
 }
 
 // The heap and its exclusively borrowed repair both belong to this future.

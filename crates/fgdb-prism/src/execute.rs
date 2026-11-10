@@ -2009,6 +2009,9 @@ impl FnxCallSpec {
                 kernel_workspace_bytes = workspace_bytes;
                 if graph.is_directed() {
                     match algorithm {
+                        crate::FoundationAlgorithm::DegreeCentrality => {
+                            execution_kernel = "fgdb-prism/degree-centrality-total-degree-csr-v1";
+                        }
                         crate::FoundationAlgorithm::EigenvectorCentrality => {
                             execution_kernel = "fgdb-prism/eigenvector-csr-incoming-gather-v1";
                         }

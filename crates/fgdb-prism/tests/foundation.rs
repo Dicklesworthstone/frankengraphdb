@@ -767,7 +767,11 @@ fn admission_refuses_before_the_foundation_runs() {
     )
     .unwrap();
     assert!(matches!(
-        call("degree_centrality").execute(&directed, limits(1 << 20), || Ok::<(), Infallible>(())),
+        call("average_neighbor_degree").execute(
+            &directed,
+            limits(1 << 20),
+            || Ok::<(), Infallible>(())
+        ),
         Err(FnxExecutionError::GraphKind {
             required: FnxGraphKind::Undirected
         })
@@ -1340,7 +1344,7 @@ fn native_core_matches_independent_k_core_elimination_on_all_small_topologies() 
 }
 
 #[test]
-fn directed_core_matches_independent_threshold_elimination_on_every_small_digraph() {
+fn directed_degree_and_core_match_independent_oracles_on_every_small_digraph() {
     // NetworkX's directed core contract uses in-degree + out-degree. A
     // reciprocal pair contributes twice; this is not an in-core or out-core.
     // https://networkx.org/documentation/stable/reference/algorithms/generated/networkx.algorithms.core.core_number.html
@@ -1402,6 +1406,25 @@ fn directed_core_matches_independent_threshold_elimination_on_every_small_digrap
                 .zip(cores[..n].iter().copied())
                 .map(|(vertex, core)| (VId(vertex), core))
                 .collect();
+            // Independent matrix row + column counts, normalized with the
+            // NetworkX degree_centrality reciprocal-multiplication contract.
+            // https://networkx.org/documentation/stable/_modules/networkx/algorithms/centrality/degree_alg.html
+            let expected_degrees: BTreeMap<_, _> = (0..n)
+                .map(|vertex| {
+                    let degree: usize = (0..n)
+                        .map(|other| {
+                            usize::from(adjacent[vertex][other])
+                                + usize::from(adjacent[other][vertex])
+                        })
+                        .sum();
+                    let score = if n == 1 {
+                        1.0
+                    } else {
+                        degree as f64 * (1.0 / (n - 1) as f64)
+                    };
+                    (VId(vertices[vertex]), score.to_bits())
+                })
+                .collect();
             let work = n + 2 * edges.len();
             for direction in [Directedness::Directed, Directedness::Reversed] {
                 let graph = view_direction(&vertices[..n], &edges, SelfLoopPolicy::Keep, direction);
@@ -1425,6 +1448,29 @@ fn directed_core_matches_independent_threshold_elimination_on_every_small_digrap
                 if n == 0 {
                     assert_eq!(actual.certificate.kernel_workspace_bytes, 0);
                 }
+                let mut control = NativeControl::default();
+                let centrality = call("degree_centrality")
+                    .execute(&graph, limits(work), &mut control)
+                    .unwrap();
+                assert_eq!(
+                    degree_bits(&centrality),
+                    expected_degrees,
+                    "n={n} mask={mask} {direction:?}"
+                );
+                assert_eq!(control.units, 4 * n + 5);
+                assert_eq!(centrality.certificate.estimated_work, work);
+                assert_eq!(
+                    centrality.certificate.witness.edges_scanned,
+                    2 * edges.len()
+                );
+                assert_eq!(
+                    centrality.certificate.kernel_workspace_bytes,
+                    n * std::mem::size_of::<f64>()
+                );
+                assert_eq!(
+                    centrality.certificate.execution_kernel,
+                    "fgdb-prism/degree-centrality-total-degree-csr-v1"
+                );
             }
             cases += 1;
         }
@@ -1433,73 +1479,97 @@ fn directed_core_matches_independent_threshold_elimination_on_every_small_digrap
 }
 
 #[test]
-fn directed_core_keeps_work_and_live_refusal_prefixes_and_self_loop_policy() {
+fn directed_total_degree_kernels_keep_work_and_live_refusal_prefixes_and_self_loop_policy() {
     let vertices = [0, 1, 2, 3, u128::MAX];
     // A reciprocal triangle is a 4-core, with a one-way leaf and an isolate.
     let edges = [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1), (3, 0)];
-    let procedure = call("core_number");
     let work = vertices.len() + 2 * edges.len();
-    for direction in [Directedness::Directed, Directedness::Reversed] {
-        let graph = view_direction(&vertices, &edges, SelfLoopPolicy::Keep, direction);
-        let mut complete = NativeControl::default();
-        let expected = procedure
-            .execute(&graph, limits(work), &mut complete)
-            .unwrap();
-        assert_eq!(
-            core_values(&expected),
-            BTreeMap::from([
-                (VId(0), 4),
-                (VId(1), 4),
-                (VId(2), 4),
-                (VId(3), 1),
-                (VId(u128::MAX), 0),
-            ])
-        );
-        assert!(matches!(
-            procedure.execute(&graph, limits(work - 1), &mut NativeControl::default()),
-            Err(FnxExecutionError::LimitExceeded {
-                resource: "estimated work",
-                ..
-            })
-        ));
-        for stop in (1..=complete.units)
-            .map(NativeStop::Work)
-            .chain((1..=complete.polls.len()).map(NativeStop::Poll))
-        {
-            let mut control = NativeControl {
-                stop: Some(stop),
-                ..Default::default()
-            };
+    for name in ["core_number", "degree_centrality"] {
+        let procedure = call(name);
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let graph = view_direction(&vertices, &edges, SelfLoopPolicy::Keep, direction);
+            let mut complete = NativeControl::default();
+            let expected = procedure
+                .execute(&graph, limits(work), &mut complete)
+                .unwrap();
+            if name == "core_number" {
+                assert_eq!(
+                    core_values(&expected),
+                    BTreeMap::from([
+                        (VId(0), 4),
+                        (VId(1), 4),
+                        (VId(2), 4),
+                        (VId(3), 1),
+                        (VId(u128::MAX), 0),
+                    ])
+                );
+            } else {
+                assert_eq!(
+                    degree_bits(&expected),
+                    BTreeMap::from([
+                        (VId(0), 1.25_f64.to_bits()),
+                        (VId(1), 1.0_f64.to_bits()),
+                        (VId(2), 1.0_f64.to_bits()),
+                        (VId(3), 0.25_f64.to_bits()),
+                        (VId(u128::MAX), 0.0_f64.to_bits()),
+                    ])
+                );
+            }
             assert!(matches!(
-                procedure.execute(&graph, limits(work), &mut control),
-                Err(FnxExecutionError::Cancelled(observed)) if observed == stop
+                procedure.execute(&graph, limits(work - 1), &mut NativeControl::default()),
+                Err(FnxExecutionError::LimitExceeded {
+                    resource: "estimated work",
+                    ..
+                })
             ));
-            assert!(control.stopped);
-            match stop {
-                NativeStop::Work(at) => assert_eq!(control.units, at),
-                NativeStop::Poll(at) => {
-                    assert_eq!(control.polls.len(), at);
-                    assert_eq!(control.units, complete.polls[at - 1]);
+            for stop in (1..=complete.units)
+                .map(NativeStop::Work)
+                .chain((1..=complete.polls.len()).map(NativeStop::Poll))
+            {
+                let mut control = NativeControl {
+                    stop: Some(stop),
+                    ..Default::default()
+                };
+                assert!(matches!(
+                    procedure.execute(&graph, limits(work), &mut control),
+                    Err(FnxExecutionError::Cancelled(observed)) if observed == stop
+                ));
+                assert!(control.stopped);
+                match stop {
+                    NativeStop::Work(at) => assert_eq!(control.units, at),
+                    NativeStop::Poll(at) => {
+                        assert_eq!(control.polls.len(), at);
+                        assert_eq!(control.units, complete.polls[at - 1]);
+                    }
                 }
             }
-        }
-        assert_eq!(run("core_number", &graph), expected);
-        for (nodes, loop_edges) in [
-            (vec![0], vec![(0, 0)]),
-            (vec![0, 1], vec![(0, 1), (1, 0), (0, 0), (1, 1)]),
-        ] {
-            let kept = view_direction(&nodes, &loop_edges, SelfLoopPolicy::Keep, direction);
-            assert!(matches!(
-                procedure.execute(&kept, limits(100), &mut NativeControl::default()),
-                Err(FnxExecutionError::SelfLoopRefused)
-            ));
-            let dropped = view_direction(&nodes, &loop_edges, SelfLoopPolicy::Drop, direction);
-            let result = run("core_number", &dropped);
-            assert!(
-                core_values(&result)
-                    .values()
-                    .all(|&core| core == if nodes.len() == 1 { 0 } else { 2 })
-            );
+            assert_eq!(run(name, &graph), expected);
+            for (nodes, loop_edges) in [
+                (vec![0], vec![(0, 0)]),
+                (vec![0, 1], vec![(0, 1), (1, 0), (0, 0), (1, 1)]),
+            ] {
+                let kept = view_direction(&nodes, &loop_edges, SelfLoopPolicy::Keep, direction);
+                assert!(matches!(
+                    procedure.execute(&kept, limits(100), &mut NativeControl::default()),
+                    Err(FnxExecutionError::SelfLoopRefused)
+                ));
+                let dropped = view_direction(&nodes, &loop_edges, SelfLoopPolicy::Drop, direction);
+                let result = run(name, &dropped);
+                if name == "core_number" {
+                    assert!(
+                        core_values(&result)
+                            .values()
+                            .all(|&core| core == if nodes.len() == 1 { 0 } else { 2 })
+                    );
+                } else {
+                    let score = if nodes.len() == 1 { 1.0_f64 } else { 2.0_f64 };
+                    assert!(
+                        degree_bits(&result)
+                            .values()
+                            .all(|&bits| bits == score.to_bits())
+                    );
+                }
+            }
         }
     }
 }
@@ -1522,6 +1592,22 @@ fn native_degree_keeps_reciprocal_multiplication_and_empty_singleton_semantics()
         degree_bits(&run("degree_centrality", &graph))[&VId(u128::MAX)],
         expected.to_bits()
     );
+    for direction in [Directedness::Directed, Directedness::Reversed] {
+        let graph = view_direction(
+            &vertices,
+            &[
+                (vertices[0], vertices[1]),
+                (vertices[2], vertices[0]),
+                (vertices[0], vertices[3]),
+            ],
+            SelfLoopPolicy::Keep,
+            direction,
+        );
+        assert_eq!(
+            degree_bits(&run("degree_centrality", &graph))[&VId(u128::MAX)],
+            expected.to_bits()
+        );
+    }
 
     let empty = view(&[], &[], SelfLoopPolicy::Keep);
     let singleton = view(&[u128::MAX], &[], SelfLoopPolicy::Keep);

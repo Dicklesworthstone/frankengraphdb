@@ -42,10 +42,8 @@ pub(crate) fn estimated_work(
 ) -> Option<usize> {
     let step = n.checked_add(arcs)?;
     match algorithm {
-        FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::AverageNeighborDegree => {
-            Some(step)
-        }
-        FoundationAlgorithm::CoreNumber => {
+        FoundationAlgorithm::AverageNeighborDegree => Some(step),
+        FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::CoreNumber => {
             n.checked_add(arcs.checked_mul(if directed { 2 } else { 1 })?)
         }
         FoundationAlgorithm::ClosenessCentrality | FoundationAlgorithm::HarmonicCentrality => {

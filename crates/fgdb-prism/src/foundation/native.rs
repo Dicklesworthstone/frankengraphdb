@@ -82,10 +82,21 @@ pub(super) fn degree<C>(
     let mut arcs = 0usize;
     for vertex in 0..n {
         arithmetic.step()?;
-        let degree = graph
+        let outgoing = graph
             .neighbors_indices(vertex)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?
             .len();
+        let incoming = if graph.is_directed() {
+            graph
+                .in_neighbors_indices(vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+                .len()
+        } else {
+            0
+        };
+        let degree = outgoing
+            .checked_add(incoming)
+            .ok_or(FnxExecutionError::SizeOverflow)?;
         arcs = arcs
             .checked_add(degree)
             .ok_or(FnxExecutionError::SizeOverflow)?;
