@@ -873,6 +873,201 @@ fn ordinary_queries_use_the_selected_numeric_cursor_and_its_exact_allowances() {
 }
 
 #[test]
+fn ordinary_filtered_edge_aggregates_keep_pull_budgets_history_and_refusal() {
+    use fgdb_gql::PreparedGraphAggregateText;
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
+    let ((), report) = run_async_under_lab(0xa66e_2103, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 0..5_u128 {
+            let mut properties = vec![(SCORE, CanonicalScalar::Int(id as i64 * 10))];
+            if id != 0 && id != 2 {
+                properties.push((TAG, CanonicalScalar::Int(1)));
+            }
+            batch.create_vertex(
+                VId(id),
+                if id == 2 { vec![] } else { vec![LABEL] },
+                properties,
+            );
+        }
+        // Include parallel edges, self loops, and endpoints outside the label.
+        // The totals below are sums over this literal relation, independently
+        // of either evaluator's filtering or aggregation implementation.
+        for (id, from, to, score) in [
+            (10, 0, 1, 2),
+            (11, 0, 1, 3),
+            (12, 1, 0, 5),
+            (13, 1, 1, 7),
+            (14, 1, 2, 11),
+            (15, 2, 3, 13),
+            (16, 3, 4, 17),
+            (17, 4, 3, 19),
+            (18, 4, 4, 23),
+            (19, 3, 0, 29),
+            (20, 0, 3, 31),
+        ] {
+            batch.add_edge(
+                EId(id),
+                VId(from),
+                VId(to),
+                vec![(SCORE, CanonicalScalar::Int(score))],
+            );
+        }
+        let basis = db.write(&commit, batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let args = GqlParameters::new();
+        for (input, count, sum) in [
+            ("MATCH (a:L)-[r:R]->(b:L)", 9, 136),
+            ("MATCH (a:L)-[r:R]->(b:L) WHERE a <> b", 7, 106),
+            (
+                "MATCH (a:L)-[r:R]->(b:L) WHERE a.score < b.score",
+                4,
+                53,
+            ),
+            ("MATCH (a)-[r:R]->(b) WHERE a.tag IS NULL", 4, 49),
+            (
+                "MATCH (a:L)<-[r:R]-(b:L) WHERE a.score > b.score",
+                4,
+                53,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) WHERE r.score > a.score OR b.tag IS NULL",
+                6,
+                81,
+            ),
+            ("MATCH (a:L)-[r:R]-(b:L) WHERE a <> b", 14, 212),
+        ] {
+            let text = format!("{input} RETURN count(*) AS n,sum(r.score) AS total");
+            let mut resolver = symbols();
+            let prepared = PreparedGraphAggregateText::prepare(&text, |kind, name| {
+                fgdb_gql::GraphSymbolResolver::resolve_symbol(&mut resolver, kind, name)
+            })
+            .unwrap();
+            let definition = prepared.bind_parameters(&args).unwrap();
+            assert!(
+                fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(&definition).is_some(),
+                "{text}"
+            );
+            let mut cursor = db
+                .query_aggregate_stream(&cx, &text, &args, symbols(), wide())
+                .unwrap();
+            let logical = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            let stats = cursor.row_stats();
+            let work = cursor.evaluator_stats();
+            assert_eq!((stats.snapshot_records, stats.result_rows), (11, 1));
+            let exact = GqlQueryPolicy::new(
+                stats.snapshot_records,
+                stats.result_rows,
+                work.work_units,
+                work.scratch_entries,
+            );
+            let typed = db
+                .execute_graph_aggregate_governed(&cx, &definition, exact)
+                .unwrap();
+            assert_eq!(typed.value, logical);
+            assert_eq!(typed.rows, stats);
+            assert_eq!(typed.evaluator, work);
+            let expected = QueryResult::Rows {
+                columns: vec!["n".into(), "total".into()],
+                rows: vec![vec![
+                    GraphAggregateValue::Count(count),
+                    GraphAggregateValue::Integer(sum),
+                ]],
+            };
+            assert_eq!(
+                db.query(&cx, &text, &args, symbols(), exact).unwrap(),
+                expected,
+                "{text}"
+            );
+            assert_eq!(
+                view.query(&cx, &text, &args, symbols(), exact).unwrap(),
+                expected,
+                "{text}"
+            );
+            for short in [
+                GqlQueryPolicy::new(10, 1, u64::MAX, u64::MAX),
+                GqlQueryPolicy::new(11, 0, u64::MAX, u64::MAX),
+                GqlQueryPolicy::new(11, 1, work.work_units - 1, u64::MAX),
+                GqlQueryPolicy::new(11, 1, u64::MAX, work.scratch_entries - 1),
+            ] {
+                assert!(matches!(
+                    db.query(&cx, &text, &args, symbols(), short),
+                    Err(QueryError::Aggregate(
+                        GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)
+                    ))
+                ));
+            }
+        }
+
+        let text = "MATCH (a:L)-[r:R]->(b:L) RETURN sum(r.score) AS total";
+        let expected = db.query(&cx, text, &args, symbols(), wide()).unwrap();
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        assert_eq!(
+            db.query(
+                &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                text,
+                &args,
+                symbols(),
+                wide(),
+            )
+            .unwrap(),
+            expected
+        );
+        let calls = probe.calls();
+        assert!(calls > 2);
+        for stop in [1, calls / 2, calls] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            assert!(matches!(
+                db.query(
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    text,
+                    &args,
+                    symbols(),
+                    wide(),
+                ),
+                Err(QueryError::Aggregate(GqlQueryError::Interrupted(_)))
+            ));
+            assert_eq!(probe.calls(), stop);
+        }
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_edge_property(
+            EId(20),
+            SCORE,
+            Some(CanonicalScalar::ucs_basic_text("late invalid edge score").unwrap()),
+        );
+        db.write(&commit, update).await.unwrap();
+        for limit in [0, 1] {
+            let text = format!("{text} LIMIT {limit}");
+            assert!(matches!(
+                db.query(&cx, &text, &args, symbols(), wide()),
+                Err(QueryError::Aggregate(GqlQueryError::Source(
+                    GraphAggregateError::NonIntegerSum { aggregate: 0 }
+                )))
+            ));
+        }
+        assert_eq!(
+            view.query(&cx, text, &args, symbols(), wide()).unwrap(),
+            expected
+        );
+        let historical = format!(
+            "MATCH (a:L)-[r:R]->(b:L) FOR SYSTEM_TIME AS OF SEQ {} RETURN sum(r.score) AS total",
+            basis.0
+        );
+        assert_eq!(
+            db.query(&cx, &historical, &args, symbols(), wide())
+                .unwrap(),
+            expected
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn ordinary_numeric_queries_keep_pinned_history_and_refuse_late_errors_without_retry() {
     use fgdb_types::context::SimulationCheckpointProbe;
     use std::sync::Arc;

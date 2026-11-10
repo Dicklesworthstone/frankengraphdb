@@ -35,9 +35,9 @@ impl AggregateScanPlan {
     pub fn compile_numeric(aggregate: &crate::PreparedGraphAggregate) -> Option<Self> {
         use crate::GraphAggregateFunction::{Collect, CollectDistinct};
         use crate::GraphSetValue;
-        use crate::algebra::GlaOperator;
+        use crate::algebra::{GlaOperator, VertexPredicate};
 
-        if aggregate.count_metadata_source().is_some()
+        if aggregate.count_metadata_candidate_source().is_some()
             || aggregate.count_summary_source().is_some()
             || aggregate
                 .aggregates()
@@ -80,13 +80,26 @@ impl AggregateScanPlan {
                     // the input remains this single edge scan. The physical
                     // compiler below validates its complete capture contract.
                     | GlaOperator::CapturePath { .. }
+                    | GlaOperator::VertexIdentity { .. }
+                    | GlaOperator::CompareProperties { .. }
+                    | GlaOperator::SelectBoolean { .. }
                     | GlaOperator::ProjectValues { .. }
                     | GlaOperator::OrderByValues
                     | GlaOperator::Limit {
                         offset: 0,
                         count: None,
                     } => true,
-                    GlaOperator::Select { predicates, .. } => predicates.is_empty(),
+                    // Preserve the host's indexed endpoint closure for
+                    // literal property comparisons. Labels, null tests and
+                    // bound-row predicates need no additional graph source;
+                    // the existing edge compiler validates their slots and
+                    // captures before an input cursor can open.
+                    GlaOperator::Select { predicates, .. } => predicates.iter().all(|predicate| {
+                        matches!(
+                            predicate,
+                            VertexPredicate::HasLabel(_) | VertexPredicate::PropertyNull { .. }
+                        )
+                    }),
                     _ => false,
                 }) =>
             {

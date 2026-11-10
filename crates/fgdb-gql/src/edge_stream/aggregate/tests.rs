@@ -163,7 +163,7 @@ fn prepare(text: &str) -> PreparedGraphAggregate {
     PreparedGraphAggregateText::prepare(text, |kind, name: &str| match kind {
         GraphSymbolKind::Relation => Some(GraphSymbol::Relation(if name == "S" { S } else { R })),
         GraphSymbolKind::Property => Some(GraphSymbol::Property(P)),
-        _ => None,
+        GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_types::LabelId(1))),
     })
     .unwrap()
     .bind_parameters(&GqlParameters::new())
@@ -352,6 +352,144 @@ fn predicates_probes_and_captured_paths_still_use_the_original_binding_executor(
         assert_eq!(
             vec![run(&q, s, policy()).next().unwrap().unwrap()],
             eager.value,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_filtered_edge_dispatch_matches_eager_and_literal_answers() {
+    use crate::scan_stream::AggregateScanPlan;
+
+    // Parallel edges, a missing edge property, a stored NULL vertex property
+    // and a self-loop distinguish bag multiplicity from endpoint identity.
+    // Each pair is (COUNT(*), SUM(r.p)), forward/reverse/undirected.
+    let cases = [
+        ("b.p IS NULL", [(2, Some(5)), (0, None), (2, Some(5))]),
+        ("a.p IS NULL", [(0, None), (2, Some(5)), (2, Some(5))]),
+        (
+            "a.p IS NOT NULL AND b.p IS NOT NULL",
+            [(2, Some(-3)), (2, Some(-3)), (3, Some(-2))],
+        ),
+        ("a <> b", [(3, Some(6)), (3, Some(6)), (6, Some(12))]),
+        ("a = b", [(1, Some(-4)), (1, Some(-4)), (1, Some(-4))]),
+        ("a.p > b.p", [(1, Some(1)), (0, None), (1, Some(1))]),
+        ("a.p < b.p", [(0, None), (1, Some(1)), (1, Some(1))]),
+        (
+            "r.p > 0 OR b.p IS NULL",
+            [(3, Some(6)), (2, Some(6)), (5, Some(12))],
+        ),
+        (
+            "NOT (r.p > 0) OR a.p IS NULL",
+            [(1, Some(-4)), (3, Some(1)), (3, Some(1))],
+        ),
+        ("r.p IS NULL", [(1, None), (1, None), (2, None)]),
+        (
+            "r.p IS NOT NULL AND a <> b",
+            [(2, Some(6)), (2, Some(6)), (4, Some(12))],
+        ),
+    ];
+    for (filter, expected) in cases {
+        for (pattern, (count, total)) in [
+            "(a)-[r:R]->(b)",
+            "(a)<-[r:R]-(b)",
+            "(a)-[r:R]-(b)",
+        ]
+        .into_iter()
+        .zip(expected)
+        {
+            let text = format!(
+                "MATCH {pattern} WHERE {filter} RETURN COUNT(*) AS n,SUM(r.p) AS total"
+            );
+            let q = prepare(&text);
+            let Some(AggregateScanPlan::Edge(plan)) = AggregateScanPlan::compile_numeric(&q) else {
+                panic!("filtered single-edge aggregate was not admitted: {text}");
+            };
+            let s = source(63);
+            let eager = q
+                .execute_governed_with_element_properties(
+                    s.edges.len() as u64,
+                    s.vertices.keys().copied(),
+                    s.edges.iter().map(|(&id, (a, r, b, _))| (id, *a, *r, *b)),
+                    |vid, tests| {
+                        Ok::<_, ()>(tests.iter().all(|test| {
+                            test.matches_borrowed([], s.vertices[&vid].iter().map(|(k, v)| (*k, v)))
+                        }))
+                    },
+                    |id, _| {
+                        Ok(s.vertices[&id]
+                            .iter()
+                            .find(|(k, _)| *k == P)
+                            .map(|(_, v)| v))
+                    },
+                    |id, _| Ok(s.edges[&id].3.iter().find(|(k, _)| *k == P).map(|(_, v)| v)),
+                    policy(),
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap();
+            let mut stream = EdgeAggregateCursor::new(s, plan, policy(), || Ok::<_, ()>(()));
+            let row = stream.next().unwrap().unwrap();
+            assert_eq!(
+                row.values(),
+                &[GraphAggregateValue::Count(count), sum(total)],
+                "{text}"
+            );
+            assert_eq!(vec![row], eager.value, "{text}");
+            assert_eq!(stream.row_stats().result_rows, 1);
+            assert!(stream.next().is_none());
+        }
+    }
+}
+
+#[test]
+fn ordinary_filtered_edge_dispatch_preserves_exact_count_candidates() {
+    use crate::scan_stream::AggregateScanPlan;
+
+    // Endpoint-label universality still requires the host's snapshot proof.
+    for text in [
+        "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS n",
+        "MATCH (a:L)<-[:R]-(b:L) RETURN COUNT(a) AS n",
+        "MATCH (a:L)-[]->(b:L) RETURN COUNT(b) AS n",
+    ] {
+        let q = prepare(text);
+        assert!(q.count_metadata_source().is_none(), "{text}");
+        assert!(q.count_metadata_candidate_source().is_some(), "{text}");
+        assert!(AggregateScanPlan::compile_numeric(&q).is_none(), "{text}");
+    }
+    for text in [
+        "MATCH (a:L)-[r:R]->(b:L) RETURN SUM(r.p) AS total",
+        "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(DISTINCT a) AS n",
+        "MATCH (a:L)-[r:R]->(b:L) RETURN COUNT(DISTINCT r) AS n",
+        "MATCH (a:L)-[:R]-(b:L) RETURN COUNT(*) AS n",
+    ] {
+        let q = prepare(text);
+        assert!(q.count_metadata_candidate_source().is_none(), "{text}");
+        assert!(
+            matches!(
+                AggregateScanPlan::compile_numeric(&q),
+                Some(AggregateScanPlan::Edge(_))
+            ),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_filtered_edge_dispatch_keeps_keyed_and_multihop_host_plans() {
+    use crate::scan_stream::AggregateScanPlan;
+
+    for text in [
+        "MATCH (a)-[r:R]->(b) WHERE a.p=7 RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b) WHERE b.p=7 RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b) WHERE a.p>=7 RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b) WHERE b.p<7 RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b) WHERE a.p<>7 RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b)-[:S]->(c) WHERE b.p IS NULL RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:S]->(c) } RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b) WHERE b.p IS NULL RETURN COLLECT(r.p) AS values",
+    ] {
+        assert!(
+            AggregateScanPlan::compile_numeric(&prepare(text)).is_none(),
             "{text}"
         );
     }
