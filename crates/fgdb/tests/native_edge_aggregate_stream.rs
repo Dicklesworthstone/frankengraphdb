@@ -136,6 +136,7 @@ fn native_edge_and_multihop_aggregates_preserve_bags_orientation_and_exact_domai
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, seed()).await.unwrap();
+        let view = db.read_session().unwrap();
         for direction in 0..3 {
             for hops in 1..=3 {
                 let mut pattern = "(a:L)".to_owned();
@@ -169,6 +170,47 @@ fn native_edge_and_multihop_aggregates_preserve_bags_orientation_and_exact_domai
                 assert!(row.keys().is_empty());
                 assert_eq!(row.values(), oracle(direction, hops), "{text}");
                 assert_eq!(rows, vec![row.values().to_vec()], "{text}");
+                if hops == 2 {
+                    let mut resolver = symbols();
+                    let prepared =
+                        fgdb_gql::PreparedGraphAggregateText::prepare(&text, |kind, name| {
+                            fgdb_gql::GraphSymbolResolver::resolve_symbol(&mut resolver, kind, name)
+                        })
+                        .unwrap();
+                    let definition = prepared.bind_parameters(&params).unwrap();
+                    assert!(matches!(
+                        fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(&definition),
+                        Some(fgdb_gql::scan_stream::AggregateScanPlan::Edge(_))
+                    ));
+                    let stats = cursor.row_stats();
+                    let work = cursor.evaluator_stats();
+                    // Incident candidates share this allowance with root
+                    // histories; it is not just the stored edge count.
+                    let exact = GqlQueryPolicy::new(
+                        stats.snapshot_records,
+                        stats.result_rows,
+                        work.work_units,
+                        work.scratch_entries,
+                    );
+                    let ordinary = db
+                        .execute_graph_aggregate_governed(&cx, &definition, exact)
+                        .unwrap();
+                    assert_eq!(ordinary.value, vec![row.clone()]);
+                    assert_eq!(ordinary.rows, stats);
+                    assert_eq!(ordinary.evaluator, work);
+                    let expected = QueryResult::Rows {
+                        columns: columns.clone(),
+                        rows: rows.clone(),
+                    };
+                    assert_eq!(
+                        db.query(&cx, &text, &params, symbols(), exact).unwrap(),
+                        expected
+                    );
+                    assert_eq!(
+                        view.query(&cx, &text, &params, symbols(), exact).unwrap(),
+                        expected
+                    );
+                }
                 assert_eq!(cursor.row_stats().result_rows, 1);
                 assert_eq!(cursor.state(), VertexScanState::Exhausted);
                 assert!(cursor.next().is_none());
@@ -288,12 +330,16 @@ fn edge_templates_freeze_parameters_and_history_without_borrowing_the_writer() {
 
 #[test]
 fn native_edge_aggregate_quotas_late_errors_and_close_keep_one_cumulative_cursor() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
     let ((), report) = run_async_under_lab(0xa66e_3003, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        db.write(&commit, seed()).await.unwrap();
+        let basis = db.write(&commit, seed()).await.unwrap();
+        let view = db.read_session().unwrap();
         let text =
             "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN COUNT(*) AS total, SUM(r.score) AS weight";
         let params = GqlParameters::new();
@@ -314,6 +360,38 @@ fn native_edge_aggregate_quotas_late_errors_and_close_keep_one_cumulative_cursor
                 .unwrap(),
             expected
         );
+        let original = prepared.execute(&db, &cx, &params, exact).unwrap();
+        let QueryResult::Rows { rows, .. } = &original else {
+            panic!("expected aggregate rows");
+        };
+        assert_eq!(rows, &vec![expected.values().to_vec()]);
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        assert_eq!(
+            prepared
+                .execute(
+                    &db,
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    &params,
+                    exact
+                )
+                .unwrap(),
+            original
+        );
+        let calls = probe.calls();
+        assert!(calls > 2);
+        for stop in [1, calls / 2, calls] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            assert!(matches!(
+                prepared.execute(
+                    &db,
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    &params,
+                    exact,
+                ),
+                Err(QueryError::Aggregate(GqlQueryError::Interrupted(_)))
+            ));
+            assert_eq!(probe.calls(), stop);
+        }
         for policy in [
             GqlQueryPolicy::new(records - 1, 1, u64::MAX, u64::MAX),
             GqlQueryPolicy::new(u64::MAX, 0, u64::MAX, u64::MAX),
@@ -334,6 +412,12 @@ fn native_edge_aggregate_quotas_late_errors_and_close_keep_one_cumulative_cursor
             assert!(stream.next().is_none());
             stream.close();
             assert_eq!((stream.row_stats(), stream.evaluator_stats()), stats);
+            assert!(matches!(
+                prepared.execute(&db, &cx, &params, policy),
+                Err(QueryError::Aggregate(
+                    GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)
+                ))
+            ));
         }
         let mut closed = prepared
             .stream_aggregate(&db, &cx, &params, wide())
@@ -344,6 +428,18 @@ fn native_edge_aggregate_quotas_late_errors_and_close_keep_one_cumulative_cursor
         assert_eq!(closed.row_stats().snapshot_records, 0);
         assert_eq!(closed.evaluator_stats().work_units, 0);
         assert!(closed.next().is_none());
+        // Every reached predicate evaluates even if a Boolean sibling
+        // decides the answer or the final output page is empty.
+        for limit in [0, 1] {
+            let invalid_filter = format!(
+                "MATCH (a)-[r:R]->(b)-[s:R]->(c) WHERE s.score IS NULL OR 1/(r.score-r.score)>0 RETURN SUM(r.score) AS weight LIMIT {limit}"
+            );
+            assert!(matches!(
+                db.query(&cx, &invalid_filter, &params, symbols(), wide()),
+                Err(QueryError::Aggregate(GqlQueryError::Data(error)))
+                    if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+            ));
+        }
         let mut edit = WriteBatch::new(R);
         edit.add_edge(
             EId(11),
@@ -368,6 +464,33 @@ fn native_edge_aggregate_quotas_late_errors_and_close_keep_one_cumulative_cursor
         assert_eq!(invalid.row_stats().result_rows, 0);
         assert!(!format!("{invalid:?}").contains("private incompatible edge"));
         assert!(invalid.next().is_none());
+        for limit in [0, 1] {
+            assert!(matches!(
+                db.query(
+                    &cx,
+                    &format!("{text} LIMIT {limit}"),
+                    &params,
+                    symbols(),
+                    wide(),
+                ),
+                Err(QueryError::Aggregate(GqlQueryError::Source(
+                    GraphAggregateError::NonIntegerSum { aggregate: 1 }
+                )))
+            ));
+        }
+        assert_eq!(
+            view.query(&cx, text, &params, symbols(), exact).unwrap(),
+            original
+        );
+        let historical = format!(
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) FOR SYSTEM_TIME AS OF SEQ {} RETURN COUNT(*) AS total, SUM(r.score) AS weight",
+            basis.0
+        );
+        assert_eq!(
+            db.query(&cx, &historical, &params, symbols(), wide())
+                .unwrap(),
+            original
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

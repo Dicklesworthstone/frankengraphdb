@@ -17,9 +17,10 @@ use fgdb_types::CommitSeq;
 /// only the complete bound definition and precedes source access. Once a
 /// cursor has opened, its errors are final; execution is never retried.
 /// Metadata counts retain their host's exact-count path. Collections retain
-/// their existing source-order contract. An edge input must be one unbound
-/// fixed-edge scan: keyed endpoint and multi-hop plans can use substantially
-/// cheaper bound-closure or factorized evaluation in the ordinary host.
+/// their existing source-order contract. Edge inputs admit an unbound fixed
+/// scan or one linear two-hop numeric reduction. Keyed roots, support/count
+/// reductions and more complex joins retain the host's indexed or factorized
+/// evaluation.
 #[derive(Clone, Debug)]
 pub enum AggregateScanPlan {
     Vertex(crate::stream::aggregate::VertexAggregatePlan),
@@ -35,7 +36,7 @@ impl AggregateScanPlan {
     pub fn compile_numeric(aggregate: &crate::PreparedGraphAggregate) -> Option<Self> {
         use crate::GraphAggregateFunction::{Collect, CollectDistinct};
         use crate::GraphSetValue;
-        use crate::algebra::{GlaOperator, VertexPredicate};
+        use crate::algebra::GlaOperator;
 
         if aggregate.count_metadata_candidate_source().is_some()
             || aggregate.count_summary_source().is_some()
@@ -73,42 +74,80 @@ impl AggregateScanPlan {
                     .ok()
                     .map(Self::Vertex)
             }
-            GlaOperator::ScanEdges { .. }
-                if operators.iter().all(|operator| match operator {
-                    GlaOperator::ScanEdges { .. }
-                    // Named root-edge properties use a capture even though
-                    // the input remains this single edge scan. The physical
-                    // compiler below validates its complete capture contract.
-                    | GlaOperator::CapturePath { .. }
-                    | GlaOperator::VertexIdentity { .. }
-                    | GlaOperator::CompareProperties { .. }
-                    | GlaOperator::SelectBoolean { .. }
-                    | GlaOperator::ProjectValues { .. }
-                    | GlaOperator::OrderByValues
-                    | GlaOperator::Limit {
-                        offset: 0,
-                        count: None,
-                    } => true,
-                    // Preserve the host's indexed endpoint closure for
-                    // literal property comparisons. Labels, null tests and
-                    // bound-row predicates need no additional graph source;
-                    // the existing edge compiler validates their slots and
-                    // captures before an input cursor can open.
-                    GlaOperator::Select { predicates, .. } => predicates.iter().all(|predicate| {
-                        matches!(
-                            predicate,
-                            VertexPredicate::HasLabel(_) | VertexPredicate::PropertyNull { .. }
-                        )
-                    }),
-                    _ => false,
-                }) =>
-            {
+            GlaOperator::ScanEdges { .. } if Self::admits_edge_input(aggregate) => {
                 crate::edge_stream::aggregate::EdgeAggregatePlan::compile(aggregate)
                     .ok()
                     .map(Self::Edge)
             }
             _ => None,
         }
+    }
+
+    fn admits_edge_input(aggregate: &crate::PreparedGraphAggregate) -> bool {
+        use crate::GraphAggregateFunction::{
+            AverageInt, AverageIntDistinct, SumInt, SumIntDistinct,
+        };
+        use crate::algebra::{GlaOperator, VertexPredicate};
+
+        let operators = aggregate.input_pattern().plan().operators();
+        let joined = operators
+            .iter()
+            .any(|operator| matches!(operator, GlaOperator::Expand { .. }));
+        if joined
+            && (aggregate.input_projection().is_some()
+                || aggregate.input_relation().is_some()
+                || !aggregate.aggregates().iter().any(|spec| {
+                    matches!(
+                        spec.function(),
+                        SumInt | SumIntDistinct | AverageInt | AverageIntDistinct
+                    )
+                }))
+        {
+            // Count and support reductions have weighted/factorized host
+            // paths. A SUM/AVG input must enumerate occurrences today, so it
+            // can instead reduce the existing indexed join cursor directly.
+            return false;
+        }
+        let mut expanded = false;
+        operators
+            .iter()
+            .enumerate()
+            .all(|(at, operator)| match operator {
+                GlaOperator::ScanEdges { .. } => at == 0,
+                GlaOperator::Expand { source, .. } if !expanded && source.ordinal() == 1 => {
+                    expanded = true;
+                    true
+                }
+                GlaOperator::DifferentEdges { .. } => joined,
+                // Keep closing equalities on the host's join planner. The narrow
+                // extension is a linear chain, not an arbitrary two-edge cycle.
+                GlaOperator::VertexIdentity { left, right, equal } => {
+                    !joined || !*equal || (left.ordinal() < 2 && right.ordinal() < 2)
+                }
+                GlaOperator::Select { predicates, .. } => {
+                    // Only the initial root prefix can choose the host's indexed
+                    // endpoint closure. Predicates after Expand cannot drive it.
+                    expanded
+                        || predicates.iter().all(|predicate| {
+                            matches!(
+                                predicate,
+                                VertexPredicate::HasLabel(_) | VertexPredicate::PropertyNull { .. }
+                            )
+                        })
+                }
+                // The physical compiler still validates complete captures, slots,
+                // edge uniqueness and the unpaginated aggregate input contract.
+                GlaOperator::CapturePath { .. }
+                | GlaOperator::CompareProperties { .. }
+                | GlaOperator::SelectBoolean { .. }
+                | GlaOperator::ProjectValues { .. }
+                | GlaOperator::OrderByValues
+                | GlaOperator::Limit {
+                    offset: 0,
+                    count: None,
+                } => true,
+                _ => false,
+            })
     }
 }
 

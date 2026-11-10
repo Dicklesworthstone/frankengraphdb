@@ -263,6 +263,8 @@ fn oracle(s: &Source, shape: usize, dir: GlaDirection) -> Vec<GraphAggregateValu
 
 #[test]
 fn global_edge_aggregates_match_full_assignment_oracle_and_eager_results() {
+    use crate::scan_stream::AggregateScanPlan;
+
     for mask in 0..64 {
         for direction in [
             GlaDirection::Forward,
@@ -305,7 +307,21 @@ fn global_edge_aggregates_match_full_assignment_oracle_and_eager_results() {
                         || Ok::<_, ()>(()),
                     )
                     .unwrap();
-                let mut stream = run(&q, s, policy());
+                // Exercise ordinary dispatch against the independent oracle,
+                // including all 192 two-hop graph/direction combinations.
+                // The triangle keeps the explicit cursor's broader contract.
+                let plan = if shape < 2 {
+                    let Some(AggregateScanPlan::Edge(plan)) =
+                        AggregateScanPlan::compile_numeric(&q)
+                    else {
+                        panic!("ordinary aggregate refused shape {shape}: {pattern}");
+                    };
+                    plan
+                } else {
+                    assert!(AggregateScanPlan::compile_numeric(&q).is_none());
+                    EdgeAggregatePlan::compile(&q).unwrap()
+                };
+                let mut stream = EdgeAggregateCursor::new(s, plan, policy(), || Ok::<_, ()>(()));
                 assert_eq!(stream.row_stats().result_rows, 0);
                 let row = stream.next().unwrap().unwrap();
                 assert_eq!(row.values(), want);
@@ -479,9 +495,85 @@ fn ordinary_filtered_edge_dispatch_keeps_keyed_and_multihop_host_plans() {
         "MATCH (a)-[r:R]->(b) WHERE a.p>=7 RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b) WHERE b.p<7 RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b) WHERE a.p<>7 RETURN SUM(r.p) AS total",
-        "MATCH (a)-[r:R]->(b)-[:S]->(c) WHERE b.p IS NULL RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b)-[:S]->(c)-[:R]->(d) WHERE b.p IS NULL RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:S]->(c) } RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b) WHERE b.p IS NULL RETURN COLLECT(r.p) AS values",
+    ] {
+        assert!(
+            AggregateScanPlan::compile_numeric(&prepare(text)).is_none(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_two_hop_numeric_dispatch_admits_plain_directional_predicates() {
+    use crate::scan_stream::AggregateScanPlan;
+
+    for pattern in [
+        "(a)-[r:R]->(b)-[s:S]->(c)",
+        "(a)<-[r:R]-(b)<-[s:S]-(c)",
+        "(a)-[r:R]-(b)-[s:S]-(c)",
+        "(a)-[r:R]->(b)<-[s:S]-(c)",
+        "(a)<-[r:R]-(b)-[s:S]->(c)",
+    ] {
+        for filter in [
+            "",
+            "WHERE b.p IS NULL",
+            "WHERE c.p < 7",
+            "WHERE a <> c",
+            "WHERE a = b",
+            "WHERE a.p < c.p",
+            "WHERE r.p > 0 OR b.p IS NULL",
+        ] {
+            for numeric in [
+                "SUM(r.p)",
+                "SUM(DISTINCT r.p)",
+                "AVG(s.p)",
+                "AVG(DISTINCT s.p)",
+            ] {
+                let text =
+                    format!("MATCH {pattern} {filter} RETURN COUNT(*) AS n,{numeric} AS numeric");
+                assert!(
+                    matches!(
+                        AggregateScanPlan::compile_numeric(&prepare(&text)),
+                        Some(AggregateScanPlan::Edge(_))
+                    ),
+                    "{text}"
+                );
+            }
+        }
+    }
+    assert!(matches!(
+        AggregateScanPlan::compile_numeric(&prepare(
+            "MATCH (a:L)-[r:R]->(b:L)-[s:S]->(c:L) RETURN SUM(s.p) AS total"
+        )),
+        Some(AggregateScanPlan::Edge(_))
+    ));
+}
+
+#[test]
+fn ordinary_two_hop_numeric_dispatch_preserves_host_join_strategies() {
+    use crate::scan_stream::AggregateScanPlan;
+
+    for text in [
+        // Counts and support summaries keep their factorized evaluator.
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN COUNT(*) AS n",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN COUNT(r.p) AS n",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN COUNT(DISTINCT c) AS n",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN MIN(c.p) AS lo,MAX(c.p) AS hi",
+        // Root literal predicates can select an indexed endpoint closure.
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE a.p=7 RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE b.p>=7 RETURN AVG(s.p) AS mean",
+        // Closing identities, branching and longer joins retain host plans.
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE a=c RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE b=c RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(a) RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b), (a)-[s:S]->(c) RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c)-[t:R]->(d) RETURN SUM(r.p) AS total",
+        // Collection order and computed input remain outside this extension.
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN SUM(r.p) AS total,COLLECT(c.p) AS values",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN SUM(r.p * c.p + 2) AS total",
     ] {
         assert!(
             AggregateScanPlan::compile_numeric(&prepare(text)).is_none(),
