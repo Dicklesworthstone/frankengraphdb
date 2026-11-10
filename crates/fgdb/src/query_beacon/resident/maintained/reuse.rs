@@ -101,7 +101,7 @@ impl QueryIndexes {
 
 fn exact_request(query: Search<'_>) -> bool {
     match query {
-        Search::Text { .. } => true,
+        Search::Text { .. } | Search::BooleanText { .. } => true,
         Search::Vector { mode, .. } => mode == VectorSearch::Exact,
         Search::Hybrid(query) => {
             query.profile.vector_weight() == 0 || query.vector_mode == VectorSearch::Exact

@@ -4361,6 +4361,165 @@ fn searched(db: &TestDb, args: &[&str]) -> (u64, Vec<String>, SearchRows) {
 }
 
 #[test]
+fn boolean_search_clauses_preserve_scores_eligibility_and_committed_history() {
+    let db = TestDb::new("search-boolean");
+    db.create();
+    let first = db.write(
+        &["CREATE (a:Person {name:'A', team:'graph graph storage'}), \
+         (b:Person {name:'B', team:'graph database'}), \
+         (c:Person {name:'C', team:'graph storage deprecated'}), \
+         (d:Person {name:'D', team:'graph'}), \
+         (e:Person {name:'E', team:'storage database'}), \
+         (f:Person {name:'F', team:'graph storage database'}), \
+         (m:Person {name:'M'})"],
+    );
+    let ids = vertex_ids(&db);
+    let args = [
+        "--text-property",
+        "team",
+        "--text-required",
+        "graph",
+        "--text-optional",
+        "storage database",
+        "--text-excluded",
+        "deprecated",
+        "--text-minimum-optional",
+        "1",
+        "--vertex-label",
+        "Person",
+        "--k",
+        "10",
+    ];
+    let (seq, columns, before) = searched(&db, &args);
+    assert_eq!(seq, first);
+    assert_eq!(columns, ["vertex", "score"]);
+    let (_, _, ordinary) = searched(
+        &db,
+        &[
+            "--text",
+            "graph storage database",
+            "--text-property",
+            "team",
+            "--vertex-label",
+            "Person",
+            "--k",
+            "10",
+        ],
+    );
+    let selected = [&ids["A"], &ids["B"], &ids["F"]];
+    let expected: SearchRows = ordinary
+        .into_iter()
+        .filter(|row| selected.contains(&&row[0].1))
+        .collect();
+    assert_eq!(
+        before, expected,
+        "Boolean clauses retain ordinary distinct-term BM25 bits"
+    );
+    assert_eq!(before.len(), 3);
+    let weakest = before.last().unwrap();
+    let mut filtered = args.to_vec();
+    *filtered.last_mut().unwrap() = "1";
+    filtered.extend(["--eligible", &weakest[0].1]);
+    assert_eq!(searched(&db, &filtered).2, vec![weakest.clone()]);
+
+    let mut both_optional = args;
+    both_optional[9] = "2";
+    let (_, _, both) = searched(&db, &both_optional);
+    assert_eq!(both.len(), 1);
+    assert_eq!(both[0][0], ("vertex".to_owned(), ids["F"].clone()));
+    for clause in ["--text-required", "--text-excluded"] {
+        let value = if clause == "--text-excluded" {
+            "deprecated"
+        } else {
+            ""
+        };
+        assert!(
+            searched(&db, &["--text-property", "team", clause, value])
+                .2
+                .is_empty()
+        );
+    }
+    let (_, _, optional) = searched(
+        &db,
+        &[
+            "--text-property",
+            "team",
+            "--text-optional",
+            "storage database",
+            "--text-excluded",
+            "deprecated",
+            "--text-minimum-optional",
+            "0",
+        ],
+    );
+    let mut optional_ids: Vec<_> = optional.iter().map(|row| row[0].1.clone()).collect();
+    optional_ids.sort();
+    let mut expected_ids: Vec<_> = ["A", "B", "E", "F"].map(|name| ids[name].clone()).into();
+    expected_ids.sort();
+    assert_eq!(optional_ids, expected_ids);
+
+    let second =
+        db.write(&["MATCH (p:Person) WHERE p.name='B' SET p.team='graph database deprecated'"]);
+    let (seq, _, after) = searched(&db, &args);
+    assert_eq!(seq, second);
+    assert_eq!(after.len(), 2);
+    assert!(after.iter().all(|row| row[0].1 != ids["B"]));
+    let old = first.to_string();
+    let mut historical = args.to_vec();
+    historical.extend(["--as-of", &old]);
+    assert_eq!(searched(&db, &historical), (first, columns, before));
+}
+
+#[test]
+fn boolean_search_refuses_conflicting_modes_and_bad_flags_before_opening_storage() {
+    // The directory has keys but no database. A malformed search must be a
+    // usage refusal, not an attempted open of that nonexistent database.
+    let db = TestDb::new("search-boolean-refusals");
+    for suffix in [
+        vec!["--text", "graph"],
+        vec!["--text-match", "all"],
+        vec!["--text-match", "phrase"],
+        vec!["--max-expansions", "1"],
+        vec!["--vector", "1", "--vector-property", "born"],
+        vec!["--vector-property", "born"],
+        vec!["--expand-from", "1", "--max-hops", "1"],
+        vec!["--max-hops", "1"],
+        vec!["--candidates", "1"],
+        vec!["--text-required", "again"],
+        vec!["--text-minimum-optional", "-1"],
+        vec!["--text-minimum-optional", "+1"],
+        vec!["--text-minimum-optional", ""],
+        vec!["--text-minimum-optional", "1.5"],
+        vec![
+            "--text-minimum-optional",
+            "0",
+            "--text-minimum-optional",
+            "1",
+        ],
+    ] {
+        let mut args = vec!["--text-property", "team", "--text-required", "graph"];
+        args.extend(suffix);
+        db.command("search", &args).failure(2, "usage");
+    }
+    for args in [
+        vec!["--text-required", "graph"],
+        vec!["--text-property", "team", "--text-minimum-optional", "1"],
+        vec!["--text-property", "unknown", "--text-optional", "graph"],
+    ] {
+        db.command("search", &args).failure(2, "usage");
+    }
+    let schema = run(false, &["robot", "schema"]);
+    schema.success();
+    assert!(
+        json(&schema.stdout)
+            .get("search")
+            .get("lanes")
+            .string()
+            .contains("--text-required")
+    );
+}
+
+#[test]
 fn search_eligible_precedes_candidate_limits_keeps_transit_and_pins_history() {
     let db = TestDb::new("search-eligible");
     db.create();
