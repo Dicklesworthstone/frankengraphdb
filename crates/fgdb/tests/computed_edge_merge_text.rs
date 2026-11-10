@@ -647,3 +647,109 @@ fn a_merge_over_parallel_relationships_updates_each_without_allocating() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+
+fn integer_list(values: &[i64]) -> GraphValue {
+    GraphValue::List(
+        values.iter().map(|value| GraphValue::Scalar(CanonicalScalar::Int(*value))).collect(),
+    )
+}
+
+#[test]
+fn native_relationship_target_lists_keep_frozen_clauses_and_survive_reopen() {
+    let ((), report) = run_async_under_lab(0xed7e_b101, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        seed(&mut db, &commit).await;
+        let before = db.frontier().unwrap();
+        let statement = format!(
+            "{HEAD} ON CREATE SET e.p=[1,2],e.w=[7,8] \
+             ON MATCH SET e.p=e.w+[],e.w=e.p+[] \
+             SET e.p=e.p+[3],e.w=reverse(e.p) RETURN e.p,e.w"
+        );
+        for (p, w) in [(vec![1, 2, 3], vec![2, 1]), (vec![2, 1, 3], vec![1, 2])] {
+            let QueryResult::Rows { rows, .. } = db.query_write_engine(
+                &txn, &query, &commit, &statement, &GqlParameters::new(), symbols, R,
+                policy(4, 1),
+            ).await.unwrap() else {
+                panic!("list-valued relationship actions return their final values");
+            };
+            assert_eq!(rows, [vec![
+                fgdb::QueryValue::Value(integer_list(&p)),
+                fgdb::QueryValue::Value(integer_list(&w)),
+            ]]);
+            let edges = db.edges().unwrap();
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].props, vec![
+                (P, integer_list(&p).to_written_property().unwrap()),
+                (W, integer_list(&w).to_written_property().unwrap()),
+            ]);
+        }
+        assert_eq!(db.frontier().unwrap().0, before.0 + 2);
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let edges = db.edges().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert!(edges[0].entry.src == VId(1) && edges[0].entry.dst == VId(2));
+        assert_eq!(edges[0].props, vec![
+            (P, integer_list(&[2, 1, 3]).to_written_property().unwrap()),
+            (W, integer_list(&[1, 2]).to_written_property().unwrap()),
+        ]);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn parameter_unwind_relationship_target_lists_share_the_atomic_overlay() {
+    let ((), report) = run_async_under_lab(0xed7e_b102, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        for late_error in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut db, &commit).await;
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            let delta = if late_error { "row.delta/(3-row.dst)" } else { "row.delta" };
+            let text = format!(
+                "UNWIND $rows AS row \
+                 MATCH (a:Node {{p:row.src}}),(b:Node {{p:row.dst}}) \
+                 MERGE (a)-[e:R]->(b) ON CREATE SET e.w=[] SET e.w=e.w+[{delta}]"
+            );
+            let arguments = rows(&[(1, 2, 2), (1, 3, 4), (1, 2, 3)]);
+            let frozen = arguments.canonical_bytes();
+            let result = db.query_write_engine(
+                &txn, &query, &commit, &text, &arguments, symbols, R, policy(5, 2),
+            ).await;
+            if late_error {
+                assert!(result.is_err());
+                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+                assert!(db.edges().unwrap().is_empty());
+            } else {
+                result.unwrap();
+                assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                assert_eq!(db.vertices().unwrap(), before.1);
+                let edges = db.edges().unwrap();
+                assert_eq!(edges.len(), 2);
+                for edge in edges {
+                    assert_eq!(edge.entry.src, VId(1));
+                    let expected = if edge.entry.dst == VId(2) {
+                        integer_list(&[2, 3])
+                    } else {
+                        assert_eq!(edge.entry.dst, VId(3));
+                        integer_list(&[4])
+                    };
+                    assert_eq!(edge.props, vec![(W, expected.to_written_property().unwrap())]);
+                }
+            }
+            assert_eq!(arguments.canonical_bytes(), frozen);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

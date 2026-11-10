@@ -434,3 +434,144 @@ fn row_merge_target_reuse_requires_every_branch_to_preserve_keys_and_visibility(
         }
     }
 }
+
+
+#[test]
+fn target_list_merge_dispatch_preserves_scalar_constants_and_lexical_scopes() {
+    use fgdb_gql::PreparedGraphWriteChainText;
+
+    // Existing parameter-batch copied-map dispatch also covers a WITH
+    // continuation; restricting the new list proof must preserve that owner.
+    assert!(PreparedGraphWriteChainText::is_chain(
+        "UNWIND $rows AS row MERGE (n:Person {p:row.p}) WITH n,row SET n += row"
+    ).unwrap());
+
+    for head in [
+        "MERGE (n:Person {p:1})",
+        "MATCH (a),(b) MERGE (a)-[n:R]->(b)",
+    ] {
+        for tail in [
+            "SET n.active=n.active+1,n.name=[1,2] RETURN n.name",
+            "SET n.name=[1,2],n.active=n.active+1 RETURN n.name",
+            "SET n.active=size([1,2])+n.active RETURN [n.active]",
+            "SET n.name=['n.active + [1]', {n:7}.n] RETURN n.active",
+            "SET n.name=[n IN [{p:1}] | n.p] RETURN n.name",
+            "SET n.name=[n IN [{p:1}] WHERE n.p=1 | n.p] RETURN n.name",
+            "SET n.name=[reduce(n={p:0}, x IN [1] | {p:n.p+x}).p] RETURN n.name",
+            "ON CREATE SET n.name=[1] ON MATCH SET n.active=n.active+1 RETURN n.name",
+            "SET n.active=n.active+1 RETURN [n.active]",
+            "SET n.active=n.active+1; MERGE (m) SET m.name=[m.p]",
+        ] {
+            let text = format!("{head} {tail}");
+            assert!(!PreparedGraphWriteChainText::is_chain(&text).unwrap(), "{text}");
+        }
+        for rhs in [
+            "[n.p]",
+            "n.name+[$value]",
+            "n.name+[{p:n.p}.p]",
+            "tail(n.name)",
+            "reverse(n.name)",
+            "split(n.name, ',')",
+            "[x IN n.name | x]",
+            "[n IN n.name | n]",
+            "[reduce(n=n.name, x IN [1] | n+x)]",
+            "[[n IN [{p:1}] | n.p], n.p]",
+            "CASE WHEN n.active=1 THEN [n.p] ELSE [] END",
+        ] {
+            let text = format!("{head} SET n.name={rhs} RETURN n.name");
+            assert!(PreparedGraphWriteChainText::is_chain(&text).unwrap(), "{text}");
+        }
+    }
+}
+
+#[test]
+fn target_list_merge_binds_stored_frames_without_reentering_the_catalog() {
+    use fgdb_gql::{
+        GraphEdgeMergeRowAction, GraphVertexMergeRowAction, GraphVertexMergeRowInput,
+        GraphWriteChainStep, PreparedGraphWriteChainText,
+    };
+
+    for head in [
+        "MERGE (n:Person {p:1})",
+        "MATCH (a),(b) MERGE (a)-[n:R]->(b)",
+    ] {
+        for rhs in [
+            "[n.p,n.p]",
+            "n.name+[$value]",
+            "n.name+[{p:n.p}.p]",
+            "tail(n.name)",
+            "reverse(n.name)",
+            "split(n.name, ',')",
+            "[x IN n.name | x]",
+            "[n IN n.name | n]",
+            "CASE WHEN n.active=1 THEN [n.p] ELSE [] END",
+        ] {
+            let text = format!("{head} ON MATCH SET n.name={rhs} RETURN n.name");
+            let calls = Cell::new(0);
+            let template = PreparedGraphWriteChainText::prepare(&text, R, |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                if kind == GraphSymbolKind::Relation && name == "R" {
+                    Some(GraphSymbol::Relation(R))
+                } else {
+                    symbols(kind, name)
+                }
+            })
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            let prepared_calls = calls.get();
+            for value in [2, 7] {
+                let arguments = if rhs.contains("$value") {
+                    GqlParameters::new().with_int64("value", value).unwrap()
+                } else {
+                    GqlParameters::new()
+                };
+                let frozen = arguments.canonical_bytes();
+                let bound = template
+                    .bind_parameters(&arguments)
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                let inputs = match bound.steps() {
+                    [GraphWriteChainStep::VertexMergeQuery(query)] => {
+                        let actions = query.merge().actions().unwrap();
+                        assert!(actions.on_create.is_empty() && actions.after.is_empty());
+                        let [GraphVertexMergeRowAction::Value {
+                            key, inputs: Some(inputs), ..
+                        }] = &actions.on_match[..] else {
+                            panic!("expected one stored vertex frame: {text}");
+                        };
+                        assert_eq!(*key, NAME);
+                        inputs
+                    }
+                    [GraphWriteChainStep::EdgeUpsertQuery { upsert, .. }] => {
+                        let actions = upsert.actions();
+                        assert!(actions.on_create.is_empty() && actions.after.is_empty());
+                        let [GraphEdgeMergeRowAction::Value {
+                            key, inputs: Some(inputs), ..
+                        }] = &actions.on_match[..] else {
+                            panic!("expected one stored relationship frame: {text}");
+                        };
+                        assert_eq!(*key, NAME);
+                        inputs
+                    }
+                    _ => panic!("expected one native MERGE step: {text}"),
+                };
+                assert!(!inputs.is_empty(), "{text}");
+                assert!(inputs.iter().all(|input| matches!(
+                    input, GraphVertexMergeRowInput::Property(_)
+                )), "{text}");
+                if rhs == "[n.p,n.p]" {
+                    assert_eq!(inputs, &[GraphVertexMergeRowInput::Property(P)]);
+                }
+                assert_eq!(calls.get(), prepared_calls, "{text}");
+                assert_eq!(arguments.canonical_bytes(), frozen);
+            }
+        }
+    }
+    for rhs in ["[n.p,other.p]", "n.name+[{p:other.p}.p]"] {
+        let text = format!("MERGE (n:Person {{p:1}}) SET n.name={rhs}");
+        let calls = Cell::new(0);
+        assert!(PreparedGraphWriteChainText::prepare(&text, R, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        }).is_err(), "{text}");
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+}

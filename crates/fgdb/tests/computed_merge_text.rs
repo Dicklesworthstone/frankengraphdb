@@ -146,8 +146,9 @@ fn malformed_expression_scopes_and_declared_types_refuse_before_catalog_callback
         "MERGE (n:Person {id:1}) SET n.count=n",
         "MERGE (n:Person {id:1}) SET n.count=n.count.part",
         "MERGE (n:Person {id:1}) SET n.count=coalesce(n.count,)",
-        // A constant list writes a stored List (fgdb-k3nub); one built from
-        // the MERGE vertex's own fields does not yet.
+        // The unique-upsert facade has no runtime composite frame. The
+        // native dispatcher routes target-dependent lists through row MERGE;
+        // this narrower facade must retain its original pre-catalog refusal.
         "MERGE (n:Person {id:1}) SET n.count=[n.count]",
         "MERGE (n:Person {id:1}) SET n.count=$s*2",
     ] {
@@ -1590,6 +1591,150 @@ fn match_and_trailing_map_replacement_clear_the_keys_the_clause_does_not_assign(
             [(ID, Scalar::Int(50)), (SECRET, Scalar::Int(99))]
         );
         assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+
+fn integer_list(values: &[i64]) -> GraphValue {
+    GraphValue::List(
+        values.iter().map(|value| GraphValue::Scalar(Scalar::Int(*value))).collect(),
+    )
+}
+
+#[test]
+fn native_target_lists_keep_branch_and_clause_cuts_and_survive_reopen() {
+    let ((), report) = run_async_under_lab(0x5c73_b101, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let before = db.frontier().unwrap();
+        let statement = "MERGE (n:Person {id:1}) \
+            ON CREATE SET n.count=[n.id],n.name='red,blue' \
+            ON MATCH SET n.count=n.count+[$delta] \
+            SET n.copy=reverse(n.count),n.count=n.count+[99] \
+            RETURN n.count AS current,n.copy AS previous";
+        for (delta, current, previous) in [
+            (2, vec![1, 99], vec![1]),
+            (3, vec![1, 99, 3, 99], vec![3, 99, 1]),
+        ] {
+            let arguments = GqlParameters::new().with_int64("delta", delta).unwrap();
+            let frozen = arguments.canonical_bytes();
+            let fgdb::QueryResult::Rows { rows, .. } = db
+                .query_write_engine(
+                    &txn, &query, &commit, statement, &arguments, symbols, R,
+                    program_policy(4),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("a native MERGE RETURN must return its completed rows");
+            };
+            assert_eq!(
+                rows,
+                [vec![
+                    fgdb::QueryValue::Value(integer_list(&current)),
+                    fgdb::QueryValue::Value(integer_list(&previous)),
+                ]]
+            );
+            assert_eq!(arguments.canonical_bytes(), frozen);
+            assert_eq!(db.vertices().unwrap().len(), 1);
+        }
+        let fgdb::QueryResult::Rows { rows, .. } = db
+            .query_write_engine(
+                &txn, &query, &commit,
+                "MERGE (n:Person {id:1}) ON MATCH \
+                 SET n.copy=tail(n.count),n.ready=split(n.name,','), \
+                     n.count=[n IN n.count WHERE n>1 | n+1] \
+                 RETURN n.count,n.copy,n.ready",
+                &GqlParameters::new(), symbols, R, program_policy(3),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("list functions and a shadowing comprehension return values");
+        };
+        let expected = vec![
+            fgdb::QueryValue::Value(integer_list(&[100, 4, 100])),
+            fgdb::QueryValue::Value(integer_list(&[99, 3, 99])),
+            fgdb::QueryValue::Value(GraphValue::List(
+                ["red", "blue"].into_iter().map(|value| {
+                    GraphValue::Scalar(Scalar::ucs_basic_text(value).unwrap())
+                }).collect(),
+            )),
+        ];
+        assert_eq!(rows, [expected.clone()]);
+        assert_eq!(db.frontier().unwrap().0, before.0 + 3);
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let fgdb::QueryResult::Rows { rows, .. } = db.query(
+            &query, "MATCH (n:Person {id:1}) RETURN n.count,n.copy,n.ready",
+            &GqlParameters::new(), symbols, query_policy(),
+        ).unwrap() else {
+            panic!("stored lists must remain readable after reopen");
+        };
+        assert_eq!(rows, [expected]);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn unwind_target_lists_accumulate_and_late_refusals_publish_no_prefix() {
+    let ((), report) = run_async_under_lab(0x5c73_b102, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        for mode in 0..4 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let rhs = match mode {
+                1 => "n.count+[row.delta/(2-row.id)]",
+                2 => "n.count+CASE WHEN row.id=2 THEN [row] ELSE [row.delta] END",
+                _ => "n.count+[row.delta]",
+            };
+            let text = format!(
+                "UNWIND $rows AS row MERGE (n:Person {{id:row.id}}) \
+                 ON CREATE SET n.count=[] SET n.count={rhs}"
+            );
+            let arguments = rows(&[(1, 2), (2, 5), (1, 3)]);
+            let frozen = arguments.canonical_bytes();
+            let result = db.query_write_engine(
+                &txn, &query, &commit, &text, &arguments, symbols, R,
+                program_policy(if mode == 3 { 4 } else { 5 }),
+            ).await;
+            if mode == 0 {
+                result.unwrap();
+                assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+                let fgdb::QueryResult::Rows { rows, .. } = db.query(
+                    &query, "MATCH (n:Person) RETURN n.id,n.count ORDER BY n.id",
+                    &GqlParameters::new(), symbols, query_policy(),
+                ).unwrap() else {
+                    panic!("completed UNWIND writes remain queryable");
+                };
+                assert_eq!(rows, [
+                    vec![
+                        fgdb::QueryValue::Value(GraphValue::Scalar(Scalar::Int(1))),
+                        fgdb::QueryValue::Value(integer_list(&[2, 3])),
+                    ],
+                    vec![
+                        fgdb::QueryValue::Value(GraphValue::Scalar(Scalar::Int(2))),
+                        fgdb::QueryValue::Value(integer_list(&[5])),
+                    ],
+                ]);
+            } else {
+                assert!(result.is_err(), "mode {mode}");
+                assert_eq!(db.frontier().unwrap(), before, "mode {mode}");
+                assert!(db.vertices().unwrap().is_empty(), "mode {mode}");
+                assert!(db.edges().unwrap().is_empty(), "mode {mode}");
+            }
+            assert_eq!(arguments.canonical_bytes(), frozen);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -929,6 +929,11 @@ impl<'a> Parser<'a> {
             (Some(row), Some((true, false))) => Some(self.merge_row_value(row)?),
             _ => None,
         };
+        let list = row_value.is_none() && self.set_value_is_list()?;
+        // The row-action owner freezes stored target properties alongside
+        // carried columns. A target-dependent list must use that value frame,
+        // not the unique upsert's bind-time constant-list evaluator.
+        let target_list = list && reads.is_some_and(|(_, target)| target);
         Ok(if let Some(value) = row_value {
             ParsedUpsertAction::RowValue {
                 key,
@@ -936,10 +941,11 @@ impl<'a> Parser<'a> {
                 value,
                 at,
             }
-        } else if self.set_value_is_list()? {
+        } else if list && !target_list {
             // A constant list (`['a', 'b']`, `$tags`) is a stored List
             // (fgdb-k3nub), evaluated once when the statement binds.
-            // One built from the MERGE vertex's own fields is not yet.
+            // A unique-upsert facade still has no runtime composite frame;
+            // native target-dependent lists belong to the row-chain owner.
             let mut inputs = Vec::new();
             let value = self.read_graph_value(&mut inputs, 0)?;
             if !inputs.is_empty() {
@@ -1027,7 +1033,7 @@ impl<'a> Parser<'a> {
                 inputs.push(input);
                 Ok(Some(inputs.len() - 1))
             };
-            let operand = if mixed || row.is_none() {
+            let operand = if mixed || row.is_none() || target_list {
                 // One parse admits both domains. Scalar templates retain the
                 // existing integer action and its accounting; only a real
                 // composite template needs the explicit mixed value frame.
@@ -1038,6 +1044,15 @@ impl<'a> Parser<'a> {
                 } else {
                     self.read_resolved_value(&mut resolve, 0)?
                 };
+                if target_list && inputs.is_empty() {
+                    // A comprehension local may share the target's spelling.
+                    // The shared reader resolves that scope before this leaf
+                    // resolver; with no outer inputs the list stays bind-time.
+                    return Ok(ParsedUpsertAction::Property {
+                        key,
+                        value: VertexUpsertValueTemplate::Composite { value, at },
+                    });
+                }
                 match value {
                     ReadValueTemplate::Column(column) => Operand::Column(column),
                     ReadValueTemplate::Literal(value) => Operand::Literal(value),

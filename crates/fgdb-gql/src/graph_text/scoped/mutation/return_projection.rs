@@ -312,6 +312,48 @@ fn list_operand_at(
     }
 }
 
+/// A visibly list-valued RHS without typed row names or parameters. Write
+/// dispatch uses the same lookahead as the value compiler, so a list nested
+/// inside a scalar call does not change that assignment's execution owner.
+pub(super) fn explicit_list_value_at<'a>(
+    token: Token<'a>,
+    lexer: &Lexer<'a>,
+) -> Result<bool, GraphPatternTextError> {
+    Ok(list_operand_at(token, lexer, Route::NONE)?
+        || list_chain_at(token, lexer, Route::NONE)?)
+}
+
+fn list_chain_at<'a>(
+    mut token: Token<'a>,
+    lexer: &Lexer<'a>,
+    route: Route<'_, 'a>,
+) -> Result<bool, GraphPatternTextError> {
+    let mut lexer = lexer.clone();
+    let mut list = false;
+    let mut joined = false;
+    loop {
+        while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
+            token = lexer.next()?;
+        }
+        list |= list_operand_at(token, &lexer, route)?;
+        loop {
+            token = skip_factor(token, &mut lexer)?;
+            if !matches!(token.kind, TokenKind::Punct(b'*' | b'/' | b'%' | b'^')) {
+                break;
+            }
+            token = lexer.next()?;
+            while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
+                token = lexer.next()?;
+            }
+        }
+        if !matches!(token.kind, TokenKind::Punct(b'+' | b'-')) {
+            return Ok(list && joined);
+        }
+        joined = true;
+        token = lexer.next()?;
+    }
+}
+
 /// Whether the CASE that `lexer` is just past the `CASE` of has a THEN or
 /// ELSE result that starts with a list operand (list_operand_at), at its own
 /// level: such a CASE is read as a value-language Case (fgdb-13l85).
@@ -2259,31 +2301,7 @@ impl<'a> Parser<'a> {
         &self,
         route: Route<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
-        let mut lexer = self.lexer.clone();
-        let mut token = self.current;
-        let mut list = false;
-        let mut joined = false;
-        loop {
-            while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
-                token = lexer.next()?;
-            }
-            list |= list_operand_at(token, &lexer, route)?;
-            loop {
-                token = skip_factor(token, &mut lexer)?;
-                if !matches!(token.kind, TokenKind::Punct(b'*' | b'/' | b'%' | b'^')) {
-                    break;
-                }
-                token = lexer.next()?;
-                while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
-                    token = lexer.next()?;
-                }
-            }
-            if !matches!(token.kind, TokenKind::Punct(b'+' | b'-')) {
-                return Ok(list && joined);
-            }
-            joined = true;
-            token = lexer.next()?;
-        }
+        list_chain_at(self.current, &self.lexer, route)
     }
 
     /// The visible list-typed row column a bare name here reads, when no

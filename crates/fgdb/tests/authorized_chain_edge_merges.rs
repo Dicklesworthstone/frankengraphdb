@@ -5107,3 +5107,133 @@ fn vertex_merge_wildcard_projection_failure_rolls_back_even_with_limit_zero() {
         }
     });
 }
+
+
+#[test]
+fn target_list_frames_mask_fields_select_branches_and_rollback_every_refusal() {
+    lab(0xc4a1_b101, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 2), NOW).unwrap();
+        for relationship in [false, true] {
+            let mut measured = None;
+            for mode in 0..8 {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(1), vec![L], vec![
+                    (P, CanonicalScalar::Int(1)),
+                    (SECRET, CanonicalScalar::Int(99)),
+                    (Q, CanonicalScalar::Int(5)),
+                ]);
+                seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+                if relationship {
+                    seed.add_edge(EId(99), VId(1), VId(2), vec![
+                        (P, CanonicalScalar::Int(7)),
+                        (SECRET, CanonicalScalar::Int(66)),
+                        (Q, CanonicalScalar::Int(5)),
+                    ]);
+                }
+                db.write(&commit, seed).await.unwrap();
+                let before = (
+                    db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap(),
+                );
+                let head = if relationship {
+                    "MATCH (a:Visible {p:1}),(b:Visible {p:2}) WITH a,b \
+                     UNWIND [1,2] AS x MERGE (a)-[n:R]->(b)"
+                } else {
+                    "UNWIND [1,2] AS x MERGE (n:Visible {p:1})"
+                };
+                let selected = match mode {
+                    5 => "n.q=[n.p,n.secret,1/(2-x)]",
+                    6 => "n.q=[n.p,CASE WHEN x=2 THEN {bad:n.p} ELSE x END]",
+                    7 => "n.secret=[n.p,x]",
+                    _ => "n.q=[n.p,n.secret,x]",
+                };
+                // The invalid and unauthorized CREATE branch is dormant:
+                // only the matched branch may admit fields or evaluate RHS.
+                let text = format!(
+                    "{head} ON CREATE SET n.secret=[1/(n.p-n.p)] \
+                     ON MATCH SET {selected}"
+                );
+                let program = chain(&text);
+                let mut bounded = policy(2).with_mutation_limit(2);
+                if matches!(mode, 1..=3) {
+                    let (work, scratch) = measured.unwrap();
+                    bounded.query.evaluator.max_work_units = work;
+                    bounded.query.evaluator.max_scratch_entries = scratch;
+                    if mode == 2 {
+                        bounded.query.evaluator.max_work_units -= 1;
+                    } else if mode == 3 {
+                        bounded.query.evaluator.max_scratch_entries -= 1;
+                    }
+                } else if mode == 4 {
+                    bounded.max_mutation_effects = 1;
+                }
+                let result = db.execute_graph_write_chain_authorized(
+                    &txn, &query, &commit, &issuer, &token, "main", &program,
+                    bounded, || NOW,
+                ).await;
+                if mode <= 1 {
+                    let (stats, rows, completion) = result.unwrap_or_else(|error| {
+                        panic!("relationship={relationship}, mode={mode}: {error:?}")
+                    });
+                    assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+                    assert_eq!(stats.mutation_effects, 2);
+                    assert!(rows.value.is_empty());
+                    let usage = (stats.evaluator.work_units, stats.evaluator.scratch_entries);
+                    assert!(usage.0 > 0 && usage.1 > 0);
+                    if mode == 0 {
+                        measured = Some(usage);
+                    } else {
+                        assert_eq!(Some(usage), measured);
+                    }
+                    let (p, secret, props) = if relationship {
+                        (7, 66, db.edge(EId(99)).unwrap().unwrap().props)
+                    } else {
+                        (1, 99, db.vertex(VId(1)).unwrap().unwrap().props)
+                    };
+                    let masked = GraphValue::List(vec![
+                        int(p), GraphValue::Scalar(CanonicalScalar::Null), int(2),
+                    ].into());
+                    assert_eq!(props, vec![
+                        (P, CanonicalScalar::Int(p).into()),
+                        (SECRET, CanonicalScalar::Int(secret).into()),
+                        (Q, masked.to_written_property().unwrap()),
+                    ]);
+                    assert!(matches!(
+                        completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+                        if commit_seq.0 == before.0.0 + 1
+                    ));
+                } else {
+                    let error = result.unwrap_err();
+                    if mode == 5 {
+                        let mut cause: Option<&(dyn core::error::Error + 'static)> =
+                            Some(&error);
+                        let mut arithmetic = None;
+                        while let Some(error) = cause {
+                            if let Some(error) =
+                                error.downcast_ref::<fgdb_gql::GraphIntegerError>()
+                            {
+                                arithmetic = Some(error.kind);
+                                break;
+                            }
+                            cause = error.source();
+                        }
+                        assert_eq!(
+                            arithmetic, Some(fgdb_gql::GraphIntegerErrorKind::DivisionByZero),
+                            "{error:?}"
+                        );
+                    } else if mode == 7 {
+                        assert!(authorization(&error).is_some(), "{error:?}");
+                    }
+                    assert_eq!(
+                        (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+                        before,
+                        "relationship={relationship}, mode={mode}",
+                    );
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}

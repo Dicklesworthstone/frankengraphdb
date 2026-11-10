@@ -47,10 +47,12 @@ impl PreparedGraphWriteChainText {
     /// - a CREATE, a WITH after it, then another CREATE;
     /// - a MERGE after a CREATE, with or without a WITH between;
     /// - a vertex MERGE first, then another CREATE or MERGE;
-    /// - a relationship MERGE introducing an endpoint, or after a WITH.
+    /// - a relationship MERGE introducing an endpoint, or after a WITH;
+    /// - a MERGE action building a list from its target's stored properties.
     ///
     /// Consecutive CREATE clauses without a WITH are one insertion. A first
-    /// vertex MERGE with ON or SET clauses is an upsert, not a chain. Quoted values,
+    /// vertex MERGE with scalar or constant-list ON/SET clauses is an upsert.
+    /// Quoted values,
     /// property keys, aliases, `ON CREATE` and `STARTS WITH` / `ENDS WITH`
     /// are not clauses. A second statement ends the scan. This validates
     /// nothing and resolves no symbol.
@@ -346,9 +348,8 @@ impl PreparedGraphWriteChainText {
                             // the chain's catalog-bound action owner evaluates
                             // it even when this ingestion statement has no
                             // WITH or RETURN (fgdb-at06q).
-                            if parameter_unwound
-                                && vertex
-                                && Self::vertex_copied_maps_need_rows(lexer.clone())?
+                            if vertex
+                                && Self::vertex_actions_need_rows(lexer.clone(), parameter_unwound)?
                             {
                                 return Ok(true);
                             }
@@ -392,9 +393,8 @@ impl PreparedGraphWriteChainText {
                         // there (fgdb-at06q).
                         return Ok(true);
                     }
-                    // A first MERGE's ON/SET clauses stay with it: a lone
-                    // MERGE with them is the unique upsert's statement, and
-                    // one another write follows heads a chain.
+                    // Other ON/SET clauses stay with the first MERGE. A
+                    // subsequent write makes that MERGE head a chain.
                 }
                 _ => {}
             }
@@ -521,6 +521,13 @@ impl PreparedGraphWriteChainText {
                         return Ok(true);
                     }
                 }
+                TokenKind::Punct(b'=')
+                    if actions
+                        && depth == 0
+                        && Self::target_list_value_needs_rows(lexer.clone(), relationship)? =>
+                {
+                    return Ok(true);
+                }
                 // Replacing the relationship's map needs a governed key
                 // read at each clause, which the row-action owner supplies.
                 // This also admits an empty map and a map parameter after
@@ -554,11 +561,13 @@ impl PreparedGraphWriteChainText {
         }
     }
 
-    /// A vertex MERGE over a parameter UNWIND normally uses the batch writer.
-    /// Copying a nonliteral map needs the row-action owner and its frozen
-    /// catalog. Property assignments and literal maps keep their existing
-    /// dispatch; quoted text and nested expressions cannot impersonate SET.
-    fn vertex_copied_maps_need_rows(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+    /// Target-dependent lists need the row-action owner's stored input frame.
+    /// A parameter-UNWIND's copied maps also need that owner's frozen catalog.
+    /// Scalar and constant-list assignments retain their existing dispatch.
+    fn vertex_actions_need_rows(
+        mut lexer: Lexer<'_>,
+        copied_maps: bool,
+    ) -> Result<bool, GraphPatternTextError> {
         if !matches!(
             script::next_script_token(&mut lexer)?.kind,
             TokenKind::Punct(b'(')
@@ -569,7 +578,7 @@ impl PreparedGraphWriteChainText {
             TokenKind::Word(name) => Some(name),
             _ => None,
         };
-        let (mut depth, mut actions) = (1_usize, false);
+        let (mut depth, mut actions, mut target_clause) = (1_usize, false, true);
         let (mut previous, mut before) = (None, None);
         loop {
             let token = script::next_script_token(&mut lexer)?;
@@ -577,11 +586,43 @@ impl PreparedGraphWriteChainText {
                 TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
                 TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
-                TokenKind::Word(word) if depth == 0 && word.eq_ignore_ascii_case("SET") => {
+                TokenKind::Word(word)
+                    if depth == 0
+                        && [
+                            "RETURN", "WITH", "UNWIND", "MERGE", "CREATE", "INSERT", "MATCH",
+                            "OPTIONAL", "DELETE", "DETACH", "REMOVE", "FOREACH", "CALL",
+                        ]
+                        .iter()
+                        .any(|end| word.eq_ignore_ascii_case(end))
+                        && !matches!(previous, Some(TokenKind::Punct(b'.')))
+                        && !matches!(previous, Some(TokenKind::Word(on)) if on.eq_ignore_ascii_case("ON")) =>
+                {
+                    if !copied_maps {
+                        return Ok(false);
+                    }
+                    // Preserve the parameter batch's established copied-map
+                    // lookahead across WITH. Only the new target-list proof
+                    // belongs to this MERGE's own ON/SET clauses.
+                    target_clause = false;
+                }
+                TokenKind::Word(word)
+                    if depth == 0
+                        && word.eq_ignore_ascii_case("SET")
+                        && !matches!(previous, Some(TokenKind::Punct(b'.'))) =>
+                {
                     actions = true;
                 }
                 TokenKind::Punct(b'=')
                     if actions
+                        && target_clause
+                        && depth == 0
+                        && Self::target_list_value_needs_rows(lexer.clone(), vertex)? =>
+                {
+                    return Ok(true);
+                }
+                TokenKind::Punct(b'=')
+                    if copied_maps
+                        && actions
                         && depth == 0
                         && matches!(previous, Some(TokenKind::Word(name)) if Some(name) == vertex)
                         && !matches!(before, Some(TokenKind::Punct(b'.')))
@@ -593,7 +634,8 @@ impl PreparedGraphWriteChainText {
                     return Ok(true);
                 }
                 TokenKind::Punct(b'+')
-                    if actions
+                    if copied_maps
+                        && actions
                         && depth == 0
                         && matches!(previous, Some(TokenKind::Word(name)) if Some(name) == vertex)
                         && !matches!(before, Some(TokenKind::Punct(b'.')))
@@ -604,6 +646,102 @@ impl PreparedGraphWriteChainText {
                 _ => {}
             }
             before = previous;
+            previous = Some(token.kind);
+        }
+    }
+
+    /// Framing only: one assignment's RHS is visibly list-valued and reads
+    /// a field of the MERGE target. Use the compiler's list lookahead and
+    /// native tokens so scalar calls, quoted text, map keys, local bindings,
+    /// sibling assignments and later clauses cannot supply a false proof.
+    /// The selected native compiler still owns all typing.
+    fn target_list_value_needs_rows(
+        mut lexer: Lexer<'_>,
+        target: Option<&str>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        let mut ahead = lexer.clone();
+        let first = script::next_script_token(&mut ahead)?;
+        if !return_projection::explicit_list_value_at(first, &ahead)? {
+            return Ok(false);
+        }
+        let mut depth = 0_usize;
+        // A list/quantifier local starts after its source (WHERE or |); a
+        // reduce accumulator starts after its initializer and source (|).
+        // Reads in those sources still refer to the outer MERGE target.
+        let mut shadows: Vec<(usize, bool)> = Vec::new();
+        let mut reductions = Vec::new();
+        let mut previous = None;
+        loop {
+            let token = script::next_script_token(&mut lexer)?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Punct(b',' | b')' | b']' | b'}') if depth == 0 => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    depth -= 1;
+                    shadows.retain(|(scope, _)| *scope <= depth);
+                    reductions.retain(|scope| *scope <= depth);
+                }
+                TokenKind::Punct(b'|') => {
+                    for (scope, active) in &mut shadows {
+                        if *scope == depth {
+                            *active = true;
+                        }
+                    }
+                }
+                TokenKind::Word(word)
+                    if depth == 0
+                        && [
+                            "ON", "SET", "RETURN", "WITH", "UNWIND", "MERGE", "CREATE",
+                            "INSERT", "MATCH", "OPTIONAL", "DELETE", "DETACH", "REMOVE",
+                            "FOREACH", "CALL",
+                        ]
+                        .iter()
+                        .any(|end| word.eq_ignore_ascii_case(end))
+                        && !matches!(previous, Some(TokenKind::Punct(b'.')))
+                        && !matches!(
+                            script::next_script_token(&mut lexer.clone())?.kind,
+                            TokenKind::Punct(b'.')
+                        ) =>
+                {
+                    return Ok(false);
+                }
+                TokenKind::Word(word) if !matches!(previous, Some(TokenKind::Punct(b'.'))) => {
+                    let next = script::next_script_token(&mut lexer.clone())?.kind;
+                    if word.eq_ignore_ascii_case("REDUCE")
+                        && matches!(next, TokenKind::Punct(b'('))
+                    {
+                        reductions.push(depth + 1);
+                    }
+                    if word == target
+                        && depth > 0
+                        && ((matches!(next, TokenKind::Word(in_word) if in_word.eq_ignore_ascii_case("IN"))
+                            && matches!(previous, Some(TokenKind::Punct(b'[' | b'(' | b','))))
+                            || (matches!(next, TokenKind::Punct(b'='))
+                                && matches!(previous, Some(TokenKind::Punct(b'(')))
+                                && reductions.last() == Some(&depth)))
+                    {
+                        shadows.push((depth, false));
+                    }
+                    if word.eq_ignore_ascii_case("WHERE") && reductions.last() != Some(&depth) {
+                        for (scope, active) in &mut shadows {
+                            if *scope == depth {
+                                *active = true;
+                            }
+                        }
+                    }
+                    if word == target
+                        && matches!(next, TokenKind::Punct(b'.'))
+                        && !shadows.iter().any(|(_, active)| *active)
+                    {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
             previous = Some(token.kind);
         }
     }
@@ -1251,7 +1389,7 @@ impl PreparedGraphWriteChainText {
                 PreparedContinuation::Returned(_) => break,
             }
         }
-        // One write is a chain only as a vertex MERGE over a leading UNWIND
+        // One write is a chain as a target-list vertex MERGE, one over a leading UNWIND
         // or MATCH (`UNWIND [1, 2] AS x MERGE (n {id: x}) RETURN n`, `MATCH
         // (p:Person) MERGE (c:City {name: p.bornIn})`), or as a relationship
         // MERGE is_chain claims: one whose ON/SET clauses read or write the
@@ -1262,6 +1400,9 @@ impl PreparedGraphWriteChainText {
         // every relationship MERGE after a WITH.
         let unwound_merge = matches!(steps.as_slice(), [ChainTextStep::VertexMerge(merge)]
             if matches!(merge.input, crate::mutation_text::VertexMergeRowsTextInput::Relation(_)));
+        let target_list_merge = !unwound_merge
+            && matches!(steps.as_slice(), [ChainTextStep::VertexMerge(_)])
+            && Self::is_chain(body)?;
         let edge_merge = matches!(steps.as_slice(), [ChainTextStep::EdgeMerge(_)]);
         let returning_row_mutation = matches!(steps.as_slice(), [ChainTextStep::Mutation(step)]
             if step.1.is_some())
@@ -1270,6 +1411,7 @@ impl PreparedGraphWriteChainText {
             && !first_foreach
             && !first_unit_call
             && !unwound_merge
+            && !target_list_merge
             && !edge_merge
             && !returning_row_mutation
             && read.is_none()
