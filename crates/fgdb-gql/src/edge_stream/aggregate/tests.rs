@@ -196,21 +196,30 @@ fn sum(value: Option<i128>) -> GraphAggregateValue {
 // Enumerate complete VId assignments independently, then count every edge
 // choice for each atom. No production cursor, GLA slot or prefix pruning.
 fn oracle(s: &Source, shape: usize, dir: GlaDirection) -> Vec<GraphAggregateValue> {
-    let atoms = [(0, R, 1), (1, S, 2), (2, R, 0)];
+    let atoms = [(0, R, 1, dir), (1, S, 2, dir), (2, R, 0, dir)];
     let width = if shape == 0 { 2 } else { 3 };
+    assignment_oracle(s, &atoms[..=shape], width, false)
+}
+
+fn assignment_oracle(
+    s: &Source,
+    atoms: &[(usize, RelationId, usize, GlaDirection)],
+    width: usize,
+    repeatable: bool,
+) -> Vec<GraphAggregateValue> {
     let domain: Vec<_> = s.vertices.keys().copied().collect();
     let mut n = 0;
     let mut present = 0;
     let mut edge_sum = None;
     let mut vertex_sum = None;
-    for mut code in 0..domain.len().pow(width) {
+    for mut code in 0..domain.len().pow(width as u32) {
         let mut values = Vec::new();
         for _ in 0..width {
             values.push(domain[code % domain.len()]);
             code /= domain.len();
         }
         let mut choices = Vec::new();
-        for &(from, rel, to) in &atoms[..=shape] {
+        for &(from, rel, to, dir) in atoms {
             choices.push(
                 s.edges
                     .iter()
@@ -240,7 +249,7 @@ fn oracle(s: &Source, shape: usize, dir: GlaDirection) -> Vec<GraphAggregateValu
                 distinct &= !selected.contains(&eid);
                 selected.push(eid);
             }
-            if !distinct {
+            if !repeatable && !distinct {
                 continue;
             }
             n += 1;
@@ -248,7 +257,7 @@ fn oracle(s: &Source, shape: usize, dir: GlaDirection) -> Vec<GraphAggregateValu
                 present += 1;
                 edge_sum = Some(edge_sum.unwrap_or(0) + value);
             }
-            if let Some(value) = integer(&s.vertices[&values[width as usize - 1]]) {
+            if let Some(value) = integer(&s.vertices[&values[width - 1]]) {
                 vertex_sum = Some(vertex_sum.unwrap_or(0) + value);
             }
         }
@@ -329,6 +338,114 @@ fn global_edge_aggregates_match_full_assignment_oracle_and_eager_results() {
                 assert_eq!(stream.row_stats().result_rows, 1);
                 assert_eq!(stream.state(), EdgeScanState::Exhausted);
                 assert!(stream.next().is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_tree_numeric_dispatch_matches_full_assignment_bags_in_both_match_modes() {
+    use crate::scan_stream::AggregateScanPlan;
+
+    // Three through five-edge chains and branches rooted at different earlier
+    // vertices. The oracle enumerates complete assignments and edge products,
+    // so it does not share the cursor's incremental expansion strategy.
+    let shapes: [&[(usize, RelationId, usize)]; 6] = [
+        &[(0, R, 1), (1, S, 2), (2, R, 3)],
+        &[(0, R, 1), (1, R, 2), (2, S, 3), (3, R, 4)],
+        &[(0, R, 1), (1, S, 2), (2, R, 3), (3, R, 4), (4, S, 5)],
+        &[(0, R, 1), (0, R, 2)],
+        &[(0, R, 1), (0, R, 2), (1, S, 3)],
+        &[(0, R, 1), (0, R, 2), (1, S, 3), (2, R, 4)],
+    ];
+    let directions = [
+        GlaDirection::Forward,
+        GlaDirection::Reverse,
+        GlaDirection::Undirected,
+    ];
+    for shape in shapes {
+        let width = shape
+            .iter()
+            .flat_map(|&(from, _, to)| [from, to])
+            .max()
+            .unwrap()
+            + 1;
+        for profile in 0..4 {
+            let atoms: Vec<_> = shape
+                .iter()
+                .enumerate()
+                .map(|(at, &(from, relation, to))| {
+                    let direction = if profile < 3 {
+                        directions[profile]
+                    } else {
+                        directions[at % 3]
+                    };
+                    (from, relation, to, direction)
+                })
+                .collect();
+            for repeatable in [false, true] {
+                for captured in [false, true] {
+                    let pattern = atoms
+                        .iter()
+                        .enumerate()
+                        .map(|(at, &(from, relation, to, direction))| {
+                            let from = char::from(b'a' + from as u8);
+                            let to = char::from(b'a' + to as u8);
+                            let name = if captured {
+                                format!("r{at}")
+                            } else {
+                                String::new()
+                            };
+                            let relation = if relation == R { "R" } else { "S" };
+                            match direction {
+                                GlaDirection::Forward => {
+                                    format!("({from})-[{name}:{relation}]->({to})")
+                                }
+                                GlaDirection::Reverse => {
+                                    format!("({from})<-[{name}:{relation}]-({to})")
+                                }
+                                GlaDirection::Undirected => {
+                                    format!("({from})-[{name}:{relation}]-({to})")
+                                }
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let mode = if repeatable { "REPEATABLE ELEMENTS " } else { "" };
+                    let end = char::from(b'a' + (width - 1) as u8);
+                    let columns = if captured {
+                        format!(
+                            "COUNT(*) AS n,COUNT(r0.p) AS present,SUM(r0.p) AS edge_sum,SUM({end}.p) AS vertex_sum"
+                        )
+                    } else {
+                        format!("COUNT(*) AS n,SUM({end}.p) AS vertex_sum")
+                    };
+                    let text = format!("MATCH {mode}{pattern} RETURN {columns}");
+                    let q = prepare(&text);
+                    assert!(!q.uses_root_group_retirement(), "{text}");
+                    let Some(AggregateScanPlan::Edge(plan)) =
+                        AggregateScanPlan::compile_numeric(&q)
+                    else {
+                        panic!("ordinary tree aggregate refused: {text}");
+                    };
+                    for mask in 0..64 {
+                        let s = source(mask);
+                        let mut want = assignment_oracle(&s, &atoms, width, repeatable);
+                        if !captured {
+                            want = vec![want[0].clone(), want[3].clone()];
+                        }
+                        let mut stream =
+                            EdgeAggregateCursor::new(s, plan.clone(), policy(), || Ok::<_, ()>(()));
+                        assert_eq!(
+                            stream.next().unwrap().unwrap().values(),
+                            want,
+                            "mask={mask}: {text}"
+                        );
+                        assert_eq!(stream.row_stats().result_rows, 1, "{text}");
+                        assert_eq!(stream.state(), EdgeScanState::Exhausted, "{text}");
+                        assert!(stream.next().is_none(), "{text}");
+                    }
+                }
             }
         }
     }
@@ -495,7 +612,6 @@ fn ordinary_filtered_edge_dispatch_keeps_keyed_and_multihop_host_plans() {
         "MATCH (a)-[r:R]->(b) WHERE a.p>=7 RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b) WHERE b.p<7 RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b) WHERE a.p<>7 RETURN SUM(r.p) AS total",
-        "MATCH (a)-[r:R]->(b)-[:S]->(c)-[:R]->(d) WHERE b.p IS NULL RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:S]->(c) } RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b) WHERE b.p IS NULL RETURN COLLECT(r.p) AS values",
     ] {
@@ -516,6 +632,10 @@ fn ordinary_two_hop_numeric_dispatch_admits_plain_directional_predicates() {
         "(a)-[r:R]-(b)-[s:S]-(c)",
         "(a)-[r:R]->(b)<-[s:S]-(c)",
         "(a)<-[r:R]-(b)-[s:S]->(c)",
+        "(a)-[r:R]->(b)-[s:S]->(c)-[t:R]->(d)",
+        "(a)-[r:R]->(b), (a)-[s:S]->(c)",
+        "(a)-[r:R]->(b)-[s:S]->(c), (b)-[t:R]->(d)",
+        "(a)<-[r:R]-(b)-[s:S]-(c)-[t:R]->(d)-[u:S]->(e)-[v:R]->(f)",
     ] {
         for filter in [
             "",
@@ -550,6 +670,12 @@ fn ordinary_two_hop_numeric_dispatch_admits_plain_directional_predicates() {
         )),
         Some(AggregateScanPlan::Edge(_))
     ));
+    assert!(matches!(
+        AggregateScanPlan::compile_numeric(&prepare(
+            "MATCH (a)-[r:R]->(b)-[:S]->(c)-[:R]->(d) WHERE b.p IS NULL RETURN SUM(r.p) AS total"
+        )),
+        Some(AggregateScanPlan::Edge(_))
+    ));
 }
 
 #[test]
@@ -562,24 +688,122 @@ fn ordinary_two_hop_numeric_dispatch_preserves_host_join_strategies() {
         "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN COUNT(r.p) AS n",
         "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN COUNT(DISTINCT c) AS n",
         "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN MIN(c.p) AS lo,MAX(c.p) AS hi",
+        "MATCH (a)-[:R]->(b)-[:S]->(c)-[:R]->(d) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R]->(b), (a)-[:S]->(c) RETURN MIN(c.p) AS lo,MAX(c.p) AS hi",
         // Root literal predicates can select an indexed endpoint closure.
         "MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE a.p=7 RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE b.p>=7 RETURN AVG(s.p) AS mean",
-        // Closing identities, branching and longer joins retain host plans.
+        "MATCH (a)-[r:R]->(b)-[:S]->(c)-[:R]->(d) WHERE a.p=7 RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b), (a)-[s:S]->(c) WHERE b.p>=7 RETURN AVG(s.p) AS mean",
+        // Closing identities retain indexed seeks and intersection access.
         "MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE a=c RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE b=c RETURN SUM(r.p) AS total",
         "MATCH (a)-[r:R]->(b)-[s:S]->(a) RETURN SUM(r.p) AS total",
-        "MATCH (a)-[r:R]->(b), (a)-[s:S]->(c) RETURN SUM(r.p) AS total",
-        "MATCH (a)-[r:R]->(b)-[s:S]->(c)-[t:R]->(d) RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b)-[:S]->(c)-[:R]->(d) WHERE a=d RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b)-[:S]->(c)-[:R]->(a) RETURN SUM(r.p) AS total",
+        "MATCH (a)-[r:R]->(b), (a)-[:S]->(c), (b)-[:R]->(d) WHERE c=d RETURN SUM(r.p) AS total",
         // Collection order and computed input remain outside this extension.
         "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN SUM(r.p) AS total,COLLECT(c.p) AS values",
         "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN SUM(r.p * c.p + 2) AS total",
+        "MATCH (a)-[r:R]->(b)-[:S]->(c)-[:R]->(d) RETURN SUM(r.p) AS total,COLLECT(d.p) AS values",
+        "MATCH (a)-[r:R]->(b), (a)-[:S]->(c), (b)-[:R]->(d) RETURN SUM(r.p * d.p + 2) AS total",
     ] {
         assert!(
             AggregateScanPlan::compile_numeric(&prepare(text)).is_none(),
             "{text}"
         );
     }
+}
+
+#[test]
+fn ordinary_numeric_dispatch_preserves_reachable_finite_root_group_retirement() {
+    use crate::scan_stream::AggregateScanPlan;
+
+    for text in [
+        "MATCH (a)-[:R]->(b) RETURN a,AVG(b.p) AS mean GROUP BY a LIMIT 2",
+        "MATCH (a)<-[:R]-(b) RETURN a,SUM(b.p) AS total GROUP BY a SKIP 1 LIMIT 2",
+        "MATCH (a)-[:R]-(b) RETURN AVG(DISTINCT b.p) AS mean GROUP BY a LIMIT 2",
+        "MATCH (a)-[:R]->(b) RETURN a,SUM(b.p) AS total GROUP BY a SKIP 18446744073709551615 LIMIT 0",
+        // Distinct relationship types prove DIFFERENT EDGES without EIds.
+        "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN a,SUM(c.p) AS total GROUP BY a LIMIT 2",
+        "MATCH (a)-[:R]->(b), (a)-[:S]->(c) RETURN a,AVG(c.p) AS mean GROUP BY a LIMIT 2",
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:R]->(c) RETURN a,SUM(c.p) AS total GROUP BY a SKIP 1 LIMIT 2",
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:R]->(c)-[:R]->(d) RETURN a,SUM(d.p) AS total GROUP BY a LIMIT 2",
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b), (a)-[:R]->(c), (b)-[:R]->(d) RETURN a,SUM(d.p) AS total GROUP BY a LIMIT 2",
+    ] {
+        let q = prepare(text);
+        let definition = q.canonical_bytes();
+        assert!(!q.input_pattern().plan().requires_identified_edges(), "{text}");
+        assert!(q.uses_root_group_retirement(), "{text}");
+        assert!(AggregateScanPlan::compile_numeric(&q).is_none(), "{text}");
+        assert_eq!(q.canonical_bytes(), definition, "{text}");
+    }
+}
+
+#[test]
+fn ordinary_numeric_dispatch_does_not_infer_root_retirement_from_group_key_alone() {
+    use crate::scan_stream::AggregateScanPlan;
+
+    for text in [
+        "MATCH (a)-[:R]->(b) RETURN SUM(b.p) AS total",
+        "MATCH (a)-[:R]->(b) RETURN b,SUM(b.p) AS total GROUP BY b LIMIT 2",
+        "MATCH (a)-[:R]->(b) RETURN a,b,SUM(b.p) AS total GROUP BY a,b LIMIT 2",
+        "MATCH (a)-[:R]->(b) RETURN a.p,SUM(b.p) AS total GROUP BY a.p LIMIT 2",
+        "MATCH (a)-[:R]->(b) RETURN a,SUM(b.p) AS total GROUP BY a",
+        "MATCH (a)-[:R]->(b) RETURN a,SUM(b.p) AS total GROUP BY a SKIP 1 LIMIT 18446744073709551615",
+        "MATCH (a)-[:R]->(b) RETURN DISTINCT AVG(b.p) AS mean GROUP BY a LIMIT 2",
+        "MATCH (a)-[:R]->(b) RETURN a,SUM(b.p + 1) AS total GROUP BY a LIMIT 2",
+        // Both edge captures and real DIFFERENT EDGES checks route through
+        // the element executor, which cannot reach the root-group owner.
+        "MATCH (a)-[r:R]->(b) RETURN a,SUM(r.p) AS total GROUP BY a LIMIT 2",
+        "MATCH REPEATABLE ELEMENTS (a)-[r:R]->(b) RETURN a,SUM(b.p) AS total GROUP BY a LIMIT 2",
+        "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN a,SUM(c.p) AS total GROUP BY a LIMIT 2",
+        "MATCH (a)-[:R]->(b), (a)-[:R]->(c), (b)-[:R]->(d) RETURN a,SUM(d.p) AS total GROUP BY a LIMIT 2",
+    ] {
+        let q = prepare(text);
+        let definition = q.canonical_bytes();
+        assert!(!q.uses_root_group_retirement(), "{text}");
+        assert!(
+            matches!(
+                AggregateScanPlan::compile_numeric(&q),
+                Some(AggregateScanPlan::Edge(_))
+            ),
+            "{text}"
+        );
+        assert_eq!(q.canonical_bytes(), definition, "{text}");
+    }
+}
+
+#[test]
+fn root_group_capability_keeps_computed_and_relational_input_owners_separate() {
+    use crate::scan_stream::AggregateScanPlan;
+    use crate::{GraphAggregate, PreparedGraphSet};
+
+    let plain = prepare(
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:R]->(c) RETURN a,SUM(c.p) AS total GROUP BY a LIMIT 2",
+    );
+    assert!(plain.uses_root_group_retirement());
+    let relation = PreparedGraphAggregate::prepare_relation(
+        PreparedGraphSet::from(plain.input_pattern().clone()),
+        plain.group_key_columns(),
+        &[GraphAggregate::sum_int(
+            "total",
+            plain.aggregates()[0].argument_column().unwrap(),
+        )],
+        0,
+        Some(2),
+    )
+    .unwrap();
+    assert!(relation.input_relation().is_some());
+    assert!(!relation.uses_root_group_retirement());
+    assert!(AggregateScanPlan::compile_numeric(&relation).is_none());
+
+    let computed = prepare(
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:R]->(c) RETURN a,SUM(c.p + 1) AS total GROUP BY a LIMIT 2",
+    );
+    assert!(computed.input_projection().is_some());
+    assert!(!computed.uses_root_group_retirement());
+    assert!(AggregateScanPlan::compile_numeric(&computed).is_none());
 }
 
 #[test]

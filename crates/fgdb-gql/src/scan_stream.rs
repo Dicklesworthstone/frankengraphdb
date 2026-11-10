@@ -18,9 +18,9 @@ use fgdb_types::CommitSeq;
 /// cursor has opened, its errors are final; execution is never retried.
 /// Metadata counts retain their host's exact-count path. Collections retain
 /// their existing source-order contract. Edge inputs admit an unbound fixed
-/// scan or one linear two-hop numeric reduction. Keyed roots, support/count
-/// reductions and more complex joins retain the host's indexed or factorized
-/// evaluation.
+/// scan or a connected fixed-edge tree with a SUM/AVG reduction. Keyed roots,
+/// closing joins, support/count reductions and finite root-group retirement
+/// retain the host's indexed, factorized or bounded-group evaluation.
 #[derive(Clone, Debug)]
 pub enum AggregateScanPlan {
     Vertex(crate::stream::aggregate::VertexAggregatePlan),
@@ -40,6 +40,7 @@ impl AggregateScanPlan {
 
         if aggregate.count_metadata_candidate_source().is_some()
             || aggregate.count_summary_source().is_some()
+            || aggregate.uses_root_group_retirement()
             || aggregate
                 .aggregates()
                 .iter()
@@ -108,26 +109,27 @@ impl AggregateScanPlan {
             // can instead reduce the existing indexed join cursor directly.
             return false;
         }
-        let mut expanded = false;
+        let mut width = 2_usize;
         operators
             .iter()
             .enumerate()
             .all(|(at, operator)| match operator {
                 GlaOperator::ScanEdges { .. } => at == 0,
-                GlaOperator::Expand { source, .. } if !expanded && source.ordinal() == 1 => {
-                    expanded = true;
+                GlaOperator::Expand { source, .. } if (source.ordinal() as usize) < width => {
+                    width += 1;
                     true
                 }
                 GlaOperator::DifferentEdges { .. } => joined,
-                // Keep closing equalities on the host's join planner. The narrow
-                // extension is a linear chain, not an arbitrary two-edge cycle.
+                // The host can intersect a closing join or seek its already
+                // bound target. Trees may branch from any earlier endpoint,
+                // but positive identities on appended vertices keep that path.
                 GlaOperator::VertexIdentity { left, right, equal } => {
                     !joined || !*equal || (left.ordinal() < 2 && right.ordinal() < 2)
                 }
                 GlaOperator::Select { predicates, .. } => {
                     // Only the initial root prefix can choose the host's indexed
                     // endpoint closure. Predicates after Expand cannot drive it.
-                    expanded
+                    width > 2
                         || predicates.iter().all(|predicate| {
                             matches!(
                                 predicate,
