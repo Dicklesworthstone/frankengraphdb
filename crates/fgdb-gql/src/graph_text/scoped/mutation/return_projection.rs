@@ -1892,6 +1892,27 @@ impl<'a> Parser<'a> {
         self.read_value_inner(inputs, schema, resolve, depth, true)
     }
 
+    /// A bare argument in a collection-only position has a structural type.
+    /// Keep explicit declarations, including nullable scalar arguments, and
+    /// let the shared parameter table reject incompatible earlier uses.
+    /// Postfix reads and composed expressions do not constrain their base:
+    /// a list source such as $map.items or $value + [1] is not a bare list.
+    fn infer_collection_parameter(
+        &mut self,
+        kind: GqlParameterType,
+    ) -> Result<(), GraphPatternTextError> {
+        let TokenKind::Parameter(name) = self.current.kind else {
+            return Ok(());
+        };
+        let next = self.lexer.clone().next()?.kind;
+        if matches!(next, TokenKind::Punct(b')' | b']' | b'|'))
+            || matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("WHERE"))
+        {
+            self.parameter_types.entry(name.to_owned()).or_insert(kind);
+        }
+        Ok(())
+    }
+
     /// The composite value a scalar expression reads through a let slot
     /// (fgdb-o5o9t). It never hands its own head back to the scalar compiler.
     pub(super) fn read_composite_operand(
@@ -3605,6 +3626,7 @@ impl<'a> Parser<'a> {
         } else {
             self.advance()?;
             self.punct(b'(', "(")?;
+            self.infer_collection_parameter(GqlParameterType::Map)?;
             let source = match self.current.kind {
                 TokenKind::Word(word)
                     if !self.elements.contains(&word)
@@ -4272,6 +4294,7 @@ impl<'a> Parser<'a> {
         };
         Ok(match function {
             ListFunction::Head | ListFunction::Last | ListFunction::Tail => {
+                self.infer_collection_parameter(GqlParameterType::List)?;
                 let list = Box::new(next(self, inputs, resolve)?);
                 match function {
                     ListFunction::Head => ReadValueTemplate::Index {
@@ -4307,6 +4330,7 @@ impl<'a> Parser<'a> {
                 self.punct(b',', ",")?;
                 let element = self.name()?;
                 self.word("IN")?;
+                self.infer_collection_parameter(GqlParameterType::List)?;
                 let list = Box::new(next(self, inputs.as_deref_mut(), resolve)?);
                 self.punct(b'|', "|")?;
                 self.elements.push(accumulator.text);
@@ -4342,6 +4366,7 @@ impl<'a> Parser<'a> {
     > {
         let element = self.name()?;
         self.word("IN")?;
+        self.infer_collection_parameter(GqlParameterType::List)?;
         let list = self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
         self.elements.push(element.text);
         let parts = self.element_parts(inputs, schema, resolve, depth, projection);
