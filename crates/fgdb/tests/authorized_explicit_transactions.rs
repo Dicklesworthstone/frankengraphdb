@@ -460,6 +460,204 @@ fn retirement_and_expiry_between_calls_cannot_publish_an_earlier_prefix() {
 }
 
 #[test]
+fn retirement_and_expiry_during_output_admission_abort_before_returning_rows() {
+    run(async |commit, query, txn| {
+        for writing in [false, true] {
+            for retire in [false, true] {
+                let mut db = Database::open_memory(commit, keys()).await.unwrap();
+                let issuer = authority();
+                let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+                let now = Arc::new(AtomicU64::new(NOW));
+                let clock = Arc::clone(&now);
+                let before = db.frontier().unwrap();
+                let mut owner = db
+                    .begin_authorized_write(
+                        txn,
+                        commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        policy(),
+                        10,
+                        move || clock.load(Ordering::Relaxed),
+                    )
+                    .unwrap();
+                owner
+                    .stage_chain(
+                        &mut db,
+                        query,
+                        &chain("CREATE (n:Visible {p:1})"),
+                        |_, _, _| Ok(()),
+                    )
+                    .unwrap();
+                let mut admitted = false;
+                let admit =
+                    |rows: &[fgdb_gql::algebra::GraphValueRow],
+                     _: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+                     output: &mut dyn fgdb::AuthorizedWriteOutput| {
+                        let [GraphValue::Vertex(vertex)] = rows[0].values() else {
+                            panic!("vertex result")
+                        };
+                        assert_eq!(
+                            output.metadata(
+                                ElementId::Vertex(*vertex),
+                                GraphElementMetadata::Properties,
+                                &names(),
+                            )?,
+                            Some(
+                                GraphValue::map(vec![(
+                                    "p".into(),
+                                    integer(if writing { 2 } else { 1 }),
+                                )])
+                                .unwrap()
+                            )
+                        );
+                        admitted = true;
+                        // Hydration succeeded, but authority ceased to be
+                        // live before this successful host callback returned.
+                        if retire {
+                            issuer.retire();
+                        } else {
+                            now.store(1000, Ordering::Relaxed);
+                        }
+                        Ok(())
+                    };
+                let error = if writing {
+                    owner.stage_chain(
+                        &mut db,
+                        query,
+                        &chain("MATCH (n:Visible) SET n.p=2 RETURN n"),
+                        admit,
+                    )
+                } else {
+                    owner.read(
+                        &mut db,
+                        query,
+                        &read("MATCH (n:Visible) RETURN n"),
+                        admit,
+                    )
+                }
+                .unwrap_err();
+                assert!(admitted);
+                assert!(has_error(&error, |error| match error {
+                    WriteTxnError::Authorization(Error::AuthorityRetired) => retire,
+                    WriteTxnError::Authorization(Error::Expired) => !retire,
+                    _ => false,
+                }));
+                assert!(!owner.is_active());
+                assert!(owner.statistics().is_none());
+                assert!(matches!(
+                    owner.commit(&mut db).await,
+                    Err(WriteTxnError::Finished)
+                ));
+                assert!(db.vertices().unwrap().is_empty());
+                assert_eq!(db.frontier().unwrap(), before);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn cancellation_after_output_admission_aborts_reads_writes_and_the_retained_prefix() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    run(async |commit, query, txn| {
+        for writing in [false, true] {
+            let mut output_checkpoint = None;
+            for interrupt in [false, true] {
+                let mut db = Database::open_memory(commit, keys()).await.unwrap();
+                let issuer = authority();
+                let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+                let before = db.frontier().unwrap();
+                let mut owner = db
+                    .begin_authorized_write(
+                        txn, commit, &issuer, &token, "main", policy(), 10, || NOW,
+                    )
+                    .unwrap();
+                owner
+                    .stage_chain(
+                        &mut db,
+                        query,
+                        &chain("CREATE (n:Visible {p:1})"),
+                        |_, _, _| Ok(()),
+                    )
+                    .unwrap();
+                let stop = if interrupt {
+                    Some(output_checkpoint.expect("the successful run observes hydration") + 1)
+                } else {
+                    None
+                };
+                let probe = Arc::new(SimulationCheckpointProbe::new(stop));
+                let query = query.with_checkpoint_probe(Arc::clone(&probe));
+                let mut admitted = false;
+                let mut calls_at_output = 0;
+                let admit =
+                    |rows: &[fgdb_gql::algebra::GraphValueRow],
+                     _: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+                     output: &mut dyn fgdb::AuthorizedWriteOutput| {
+                        let [GraphValue::Vertex(vertex)] = rows[0].values() else {
+                            panic!("vertex result")
+                        };
+                        assert!(
+                            output
+                                .metadata(
+                                    ElementId::Vertex(*vertex),
+                                    GraphElementMetadata::Properties,
+                                    &names(),
+                                )?
+                                .is_some()
+                        );
+                        admitted = true;
+                        calls_at_output = probe.calls();
+                        Ok(())
+                    };
+                let result = if writing {
+                    owner.stage_chain(
+                        &mut db,
+                        &query,
+                        &chain("MATCH (n:Visible) SET n.p=2 RETURN n"),
+                        admit,
+                    )
+                } else {
+                    owner.read(
+                        &mut db,
+                        &query,
+                        &read("MATCH (n:Visible) RETURN n"),
+                        admit,
+                    )
+                };
+                assert!(admitted, "interruption must follow successful hydration");
+                if interrupt {
+                    assert_eq!(Some(calls_at_output), output_checkpoint);
+                    let error = result.unwrap_err();
+                    assert!(has_error(&error, |error| matches!(
+                        error,
+                        WriteTxnError::Interrupted(_)
+                    )));
+                    assert!(!owner.is_active());
+                    assert!(owner.statistics().is_none());
+                    assert!(matches!(
+                        owner.commit(&mut db).await,
+                        Err(WriteTxnError::Finished)
+                    ));
+                } else {
+                    assert_eq!(result.unwrap().value.len(), 1);
+                    assert!(
+                        probe.calls() > calls_at_output,
+                        "output admission must be followed by a live cancellation check"
+                    );
+                    output_checkpoint = Some(calls_at_output);
+                    owner.rollback();
+                }
+                assert!(db.vertices().unwrap().is_empty());
+                assert_eq!(db.frontier().unwrap(), before);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
 fn cancellation_of_a_later_statement_aborts_the_entire_owner() {
     use fgdb_types::context::SimulationCheckpointProbe;
     run(async |commit, query, txn| {

@@ -201,6 +201,18 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         Ok(())
     }
 
+    /// Explicit statements return before the final commit checkpoints. Check
+    /// again after the host's fallible output admission, while this call still
+    /// owns the workspace, so expiry, retirement or cancellation during
+    /// hydration cannot release rows or restore an active transaction.
+    fn finish_statement(
+        state: &mut chain::ChainState<'_, '_, Clock>,
+        query_cx: &QueryCx,
+    ) -> Result<(), WriteTxnError> {
+        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+        state.execution.checkpoint()
+    }
+
     /// Stage a prepared native statement, including ordinary single CREATE,
     /// SET, DELETE and MERGE or a chain with WITH/read phases. The compiler
     /// entrypoint is `PreparedGraphWriteChainText::prepare_statement` followed by binding;
@@ -230,7 +242,7 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
             chain::admit_definition(
                 statement, None, query_cx, &self.scope, &mut state.execution,
             )?;
-            database.stage_authorized_chains(
+            let (mut state, result) = database.stage_authorized_chains(
                 query_cx,
                 core::slice::from_ref(statement),
                 None,
@@ -239,7 +251,9 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
                 state,
                 &mut None,
                 |_, rows, work, output| admit(rows, work, output),
-            )
+            )?;
+            Self::finish_statement(&mut state, query_cx).map_err(chain::source)?;
+            Ok::<_, chain::Fault>((state, result))
         })?;
         self.delivered_rows = self.delivered_rows.saturating_add(result.rows.result_rows);
         self.completed_statements += 1;
@@ -267,9 +281,11 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         let policy = self.statement_policy();
         let (state, result) = self.cx.with_restriction(|| {
             self.admit_statement(&mut state, database, query_cx).map_err(chain::source)?;
-            database.read_authorized_chain_state(
+            let (mut state, result) = database.read_authorized_chain_state(
                 query_cx, statement, policy, &self.scope, state, admit,
-            )
+            )?;
+            Self::finish_statement(&mut state, query_cx).map_err(chain::source)?;
+            Ok::<_, chain::Fault>((state, result))
         })?;
         self.delivered_rows = self.delivered_rows.saturating_add(result.rows.result_rows);
         self.completed_statements += 1;
