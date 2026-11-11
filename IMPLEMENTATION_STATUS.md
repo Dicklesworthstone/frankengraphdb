@@ -12,6 +12,65 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Bolt explicit native write transactions — qualification pending
+
+Source added 2026-11-11 under `fgdb-roadmap-bolt-v2-vb6e` and
+`fgdb-w2-txn-lifecycle-mhae`. The Bolt adapter now composes the native
+`AuthorizedWriteTransaction` owner across BEGIN, RUN and COMMIT.
+Write/default BEGIN with signed Write or ReadWrite rights opens a writer;
+read-only grants and read mode retain the existing pinned read session.
+
+Each accepted statement stages into the same private workspace. Later graph/set
+reads see earlier staged effects, while other connections see committed state.
+The checked output collector hydrates graph values before publishing a cursor.
+PULL/DISCARD consume provisional results marked `fgdb_transaction_local: true`;
+only COMMIT publishes and returns a commit bookmark. ROLLBACK, RESET,
+GOODBYE, disconnect and any failed statement discard the unpublished prefix.
+Outstanding result cursors must be consumed before COMMIT.
+
+Native authority, source/work/result/creation/mutation/statement allowances
+remain cumulative. Generation admission covers each operation and lock wait;
+no database lock or active-operation permit is held between messages.
+An explicit read mode on RUN cannot stage a write. Subscription notification
+follows native completion and writer-guard release. A fence after successful
+commit cannot be translated into a retryable precommit refusal.
+
+Regression sources cover the production state machine and real Bolt TCP with
+an independent FGP observer, including own-writes, isolation before commit,
+one publication, rollback/disconnect, restricted rights and output quotas.
+Source/API reviews completed. Formatting, compilation, runtime tests,
+Clippy, UBS and the full proof are **UNRUN** after executor loss during
+dependency setup. The broader roadmap beads remain open.
+
+This is a bounded local owner, not durable reattachment or full Bolt V2.
+Explicit writer reads use the native graph/set subset; standalone terminal
+aggregate reads (including count/sum), procedure hosts and historical/branch
+forms refuse and discard the staged prefix. Explicit read mode retains the
+broader committed-snapshot reader. Concurrent basis advancement retains the
+native conservative refusal, and full SSI remains separate.
+See `docs/bolt-autocommit-writes.md` for the protocol boundary.
+
+### Parameterized regular expressions — qualification pending
+
+Source added 2026-11-11 under `fgdb-20foe`. Literal and parameter patterns
+share the existing bounded regex compiler. Expressions such as
+`MATCH (n) WHERE n.name =~ $pattern RETURN n.name` now accept a typed text
+parameter; graph and row filters, RETURN/CASE, aggregate keys and mutation
+expressions use the existing scalar VM and execution metering.
+
+Binding compiles patterns before graph access, preserving template/argument
+identity. NULL yields UNKNOWN while retaining operand validation and lazy CASE
+evaluation. Malformed, oversized, unsupported-profile and wrongly typed
+patterns refuse at preparation/binding, including under LIMIT 0. Row-dependent
+pattern expressions remain outside this surface.
+
+Three new regression functions cover rebinding, literal-equivalent results
+and work, template/bound identities, row WHERE routing, grouping, NULL,
+invalid-pattern preflight and mutation selection/assignment. Source review
+completed; formatting, compilation, tests, Clippy and full proof are **UNRUN**
+because the execution environment became unavailable. The broader language
+bead remains open.
+
 ### Bolt write RETURN graph metadata — qualification pending
 
 Source added 2026-11-11 under `fgdb-roadmap-bolt-v2-vb6e`. Autocommit
@@ -34,8 +93,8 @@ initial exit 137 and a later `syn` SIGKILL); the executor then became unavailabl
 again before its formatted source could be retrieved. This commit preserves
 the complete reviewed source. The exact committed tree's formatting, product
 compilation, Clippy, tests, UBS and full proof remain **UNRUN**, not passing.
-The original roadmap bead remains open; this does not qualify complete Bolt V2
-or explicit write transactions.
+The original roadmap bead remains open; this does not qualify complete Bolt V2.
+The explicit-transaction extension above has its own pending qualification.
 
 ### Prism label and relationship unions — qualification pending
 
@@ -150,9 +209,13 @@ A foreign database handle refuses before its frontier is observed. New
 statements conservatively refuse if the original database basis has advanced;
 the final commit still uses the existing native conflict/completion owner.
 
-Ten native regression sources cover own-writes, one final commit,
+Twelve native regression tests cover own-writes, one final commit,
 rollback/drop/deletion, masking and rights, cumulative quotas, output failures,
-unwind/cancellation, foreign handles, stale basis and retirement/expiry. Two
+unwind/cancellation, foreign handles, stale basis and retirement/expiry. The
+output-boundary additions recheck cancellation and live authority after a
+successful admission callback, before returning provisional rows or restoring
+active ownership. Tests inject expiry, retirement and cancellation immediately
+after hydration and require the whole earlier prefix to be discarded. Two
 Warden tests cover movable permits and retained terminal behavior. Independent
 source review verified the shared staging/output body against the existing
 autocommit implementation and reviewed the public API and regressions.
@@ -160,9 +223,9 @@ Compilation, runtime tests and exact-tree formatting/Clippy/UBS/full proof are
 **UNRUN** because dependency compilation was killed by resource exhaustion and
 the executor became unavailable before product validation.
 
-This is a local native API. Bolt/FGP explicit write adapters, durable ownership
-leases, reattachment and full SSI remain separate work; the lifecycle roadmap
-bead remains open. Ambiguous commit outcomes retain their native meaning and
+This is a local native API. The Bolt adapter above uses this owner. FGP explicit
+write adapters, durable ownership leases, reattachment and full SSI remain
+separate work; the lifecycle roadmap bead remains open. Ambiguous commit outcomes retain their native meaning and
 are never automatically replayed.
 
 ### Durable embedded database

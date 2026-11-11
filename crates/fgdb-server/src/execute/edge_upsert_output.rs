@@ -39,7 +39,7 @@ fn body_refusal(error: BodyError) -> Refusal {
 /// The codec may retain a temporary row-sized encoding; this is not a new
 /// byte-memory bound. Negotiated frame sizes, flow credit, delivery/revocation
 /// and I/O failures remain transport responsibilities after native completion.
-pub(super) fn collect(
+pub(crate) fn collect(
     columns: &[String],
     input: &[GraphValueRow],
     work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,

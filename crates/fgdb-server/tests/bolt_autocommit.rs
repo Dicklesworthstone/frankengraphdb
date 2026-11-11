@@ -1,4 +1,4 @@
-//! Bolt autocommit over real TCP, observed through an independent FGP client.
+//! Bolt writes over real TCP, observed through an independent FGP client.
 //! Both listeners use the same on-disk Chronicle-backed database and authority.
 
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
@@ -249,6 +249,10 @@ async fn login(address: SocketAddr, grant: &Grant) -> Bolt {
         get(&ready, "fgdb_autocommit_writes"),
         Some(&Value::Bool(true))
     );
+    assert_eq!(
+        get(&ready, "fgdb_explicit_write_transactions"),
+        Some(&Value::Bool(true))
+    );
     client
 }
 
@@ -452,7 +456,7 @@ fn bolt_reset_disconnect_and_read_boundaries_preserve_an_unexecuted_queue() {
                 client
                     .expect(
                         0x11,
-                        vec![Value::Map(vec![("mode".into(), Value::string("w"))])],
+                        vec![Value::Map(vec![("mode".into(), Value::string("r"))])],
                         SUCCESS,
                     )
                     .await;
@@ -1333,6 +1337,200 @@ fn bolt_write_returning_admits_every_row_before_publication_or_delivery() {
             .unwrap();
         assert_eq!(published.rows.len(), 2);
         assert_eq!(published.outcome, Outcome::Rows { seq: 1 });
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
+        observer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+
+#[test]
+fn bolt_explicit_transactions_publish_once_and_isolate_rollback_and_disconnect() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "explicit-transactions").await;
+        let mut observer = Client::connect(cx, fgp, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        let read = "MATCH (n:Person) RETURN n.name AS name, n.age AS age ORDER BY name";
+        let mut client = login(address, &grant(Rights::ReadWrite)).await;
+        client
+            .expect(0x11, vec![Value::Map(vec![])], SUCCESS)
+            .await;
+        let empty = client.expect(0x12, vec![], SUCCESS).await;
+        assert_eq!(
+            get(&empty, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:0")
+        );
+        client
+            .expect(
+                0x11,
+                vec![Value::Map(vec![("mode".into(), Value::string("w"))])],
+                SUCCESS,
+            )
+            .await;
+        let prepared = client
+            .expect(
+                0x10,
+                request(
+                    "CREATE (n:Person {name:$name,age:$age}) RETURN n",
+                    vec![
+                        ("name".into(), Value::string("Ann")),
+                        ("age".into(), Value::Int(1)),
+                    ],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(get(&prepared, "qid"), Some(&Value::Int(0)));
+        let (created, summary) = client.pull_all().await;
+        assert_eq!(created.len(), 1);
+        assert_eq!(get(node_properties(&created[0][0]), "age"), Some(&Value::Int(1)));
+        assert_eq!(
+            get(&summary, "fgdb_transaction_local"),
+            Some(&Value::Bool(true))
+        );
+        assert!(get(&summary, "bookmark").is_none());
+        let before = observer.execute(cx, ExecuteMode::Read, read, vec![]).await.unwrap();
+        assert!(before.rows.is_empty());
+        assert_eq!(before.outcome, Outcome::Rows { seq: 0 });
+        client
+            .expect(
+                0x10,
+                request(
+                    "MATCH (n:Person) SET n.age=2 RETURN n.age AS age",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let (changed, summary) = client.pull_all().await;
+        assert_eq!(changed, vec![vec![Value::Int(2)]]);
+        assert!(get(&summary, "bookmark").is_none());
+        client
+            .expect(0x10, request(read, vec![], vec![]), SUCCESS)
+            .await;
+        let (own, summary) = client.pull_all().await;
+        assert_eq!(own, vec![vec![Value::string("Ann"), Value::Int(2)]]);
+        assert!(get(&summary, "bookmark").is_none());
+        let still_private = observer
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert!(still_private.rows.is_empty());
+        assert_eq!(still_private.outcome, Outcome::Rows { seq: 0 });
+        let committed = client.expect(0x12, vec![], SUCCESS).await;
+        assert_eq!(
+            get(&committed, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        let expected = vec![vec![text("Ann"), WireValue::Int(2)]];
+        let visible = observer.execute(cx, ExecuteMode::Read, read, vec![]).await.unwrap();
+        assert_eq!(visible.rows, expected);
+        assert_eq!(visible.outcome, Outcome::Rows { seq: 1 });
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
+        for rollback in [true, false] {
+            let mut abandoned = login(address, &grant(Rights::ReadWrite)).await;
+            abandoned
+                .expect(0x11, vec![Value::Map(vec![])], SUCCESS)
+                .await;
+            abandoned
+                .expect(
+                    0x10,
+                    request(
+                        "CREATE (:Person {name:'Abandoned',age:99})",
+                        vec![],
+                        vec![],
+                    ),
+                    SUCCESS,
+                )
+                .await;
+            let (rows, summary) = abandoned.pull_all().await;
+            assert!(rows.is_empty());
+            assert!(get(&summary, "bookmark").is_none());
+            if rollback {
+                abandoned.expect(0x13, vec![], SUCCESS).await;
+                abandoned.send(0x02, vec![]).await;
+                assert!(abandoned.receive().await.is_none());
+            } else {
+                drop(abandoned);
+            }
+            let observed = observer
+                .execute(cx, ExecuteMode::Read, read, vec![])
+                .await
+                .unwrap();
+            assert_eq!(observed.rows, expected);
+            assert_eq!(observed.outcome, Outcome::Rows { seq: 1 });
+        }
+        observer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
+fn bolt_explicit_write_only_grants_commit_without_rows_and_refuse_read_followups() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "explicit-write-only").await;
+        let mut write_grant = grant(Rights::Write);
+        write_grant.limits.max_rows = 0;
+        let mut client = login(address, &write_grant).await;
+        client
+            .expect(0x11, vec![Value::Map(vec![])], SUCCESS)
+            .await;
+        client
+            .expect(
+                0x10,
+                request("CREATE (:Person {name:'Kept',age:7})", vec![], vec![]),
+                SUCCESS,
+            )
+            .await;
+        let (rows, provisional) = client.pull_all().await;
+        assert!(rows.is_empty());
+        assert!(get(&provisional, "bookmark").is_none());
+        let committed = client.expect(0x12, vec![], SUCCESS).await;
+        assert_eq!(
+            get(&committed, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        client
+            .expect(0x11, vec![Value::Map(vec![])], SUCCESS)
+            .await;
+        client
+            .expect(
+                0x10,
+                request("CREATE (:Person {name:'Aborted',age:9})", vec![], vec![]),
+                SUCCESS,
+            )
+            .await;
+        assert!(client.pull_all().await.0.is_empty());
+        client
+            .expect(
+                0x10,
+                request("RETURN 1 AS forbidden", vec![], vec![]),
+                FAILURE,
+            )
+            .await;
+        client.expect(0x12, vec![], IGNORED).await;
+        client.expect(0x0f, vec![], SUCCESS).await;
+        let mut observer = Client::connect(cx, fgp, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        let observed = observer
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN n.name AS name",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(observed.rows, vec![vec![text("Kept")]]);
+        assert_eq!(observed.outcome, Outcome::Rows { seq: 1 });
         client.send(0x02, vec![]).await;
         assert!(client.receive().await.is_none());
         observer.close(cx).await.unwrap();
