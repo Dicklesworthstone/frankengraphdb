@@ -61,6 +61,48 @@ broader committed-snapshot reader. Concurrent basis advancement retains the
 native conservative refusal, and full SSI remains separate.
 See `docs/bolt-autocommit-writes.md` for the protocol boundary.
 
+### Correlated COLLECT subqueries — qualification pending
+
+Source added 2026-11-11, related to `fgdb-1f8f7`. A scalar
+`COLLECT { ... RETURN value }` expression now lowers through the existing
+governed Collect Apply operator and relational List continuation. It builds
+nested graph results without another executor, dependency or transcript tag.
+
+```cypher
+MATCH (n:Person)
+RETURN n.name AS name,
+       COLLECT {
+           MATCH (n)-[:KNOWS]->(friend)
+           RETURN friend.name AS name ORDER BY name
+       } AS friends
+ORDER BY name
+```
+
+Bodies may be source-free or correlated, use WITH/filter/grouping/DISTINCT
+and ordered pages, nest further collection subqueries, and capture list-local
+bindings. An explicit one-column RETURN is required. Body variables remain
+private; parameters, catalog admission, depth and execution budgets retain
+their existing owners. Body order, outer occurrence order, duplicate rows and
+NULL members are preserved. Empty bodies yield `[]`; a NULL imported binding
+still permits `COLLECT { RETURN binding }` to yield `[NULL]`. This differs from
+the aggregate `collect(binding)`, which drops NULL inputs.
+
+The current expression owner gathers graph bodies before scalar evaluation.
+Direct COLLECT subqueries inside CASE/COALESCE therefore refuse during
+preparation. A collection first bound in WITH is an ordinary list and can be
+used in either lazy expression. UNION inside a collection body is also outside
+this bounded slice.
+
+Six added regression functions cover those semantics, ordered outer and body
+rows, nested/list-local capture, schema and scope refusals before catalog
+callbacks, rebinding, resource ceilings, cancellation and late errors under
+LIMIT 0. Independent source review caught and corrected private-projection
+ordering and lazy-arm lexical edge cases. Targeted pinned formatting and
+`git diff --check` passed. Compiler attempts were killed by SIGKILL in the
+pinned `asupersync` dependency before project diagnostics; compilation,
+runtime tests, Clippy and exact-tree qualification remain **UNRUN**. The
+broader graph-list language bead remains open.
+
 ### Parameterized regular expressions — qualification pending
 
 Source added 2026-11-11 under `fgdb-20foe`. Literal and parameter patterns
