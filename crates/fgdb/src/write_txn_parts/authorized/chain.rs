@@ -30,7 +30,8 @@ mod merges;
 #[path = "chain_vertex_merges.rs"]
 mod vertices;
 
-type Fault = GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
+pub(super) type Fault =
+    GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
 type Receipt = (
     GraphInsertStats,
     GqlQueryExecution<GraphValueRow>,
@@ -39,10 +40,42 @@ type Receipt = (
 type BatchFault =
     fgdb_gql::GraphWriteScriptExecutionError<WriteTxnError, WriteTxnError, WriteTxnError>;
 
-fn source(error: WriteTxnError) -> Fault {
+pub(super) fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphWriteChainError::Insert(
         GraphInsertQueryError::Insertion(GraphInsertError::Source(error)),
     ))
+}
+
+/// The same unpublished workspace and live allowance can either complete an
+/// autocommit operation or remain private for another explicit statement.
+/// Moving this owner into staging makes any failure or unwind abort it.
+pub(super) struct ChainState<'cx, 'permit, Clock> {
+    pub(super) workspace: Workspace,
+    pub(super) execution: Execution<'cx, 'permit, Clock>,
+    pub(super) used: GraphInsertStats,
+    pub(super) mutation_effects: u64,
+}
+
+impl<'cx, 'permit, Clock> ChainState<'cx, 'permit, Clock> {
+    pub(super) fn new(transaction: WriteTxn, execution: Execution<'cx, 'permit, Clock>) -> Self {
+        let mut workspace = Workspace(Some(transaction));
+        workspace.transaction().program_multi_relation = true;
+        workspace.transaction().chain_retirements = Some(Default::default());
+        Self {
+            workspace,
+            execution,
+            used: GraphInsertStats {
+                selection: GqlExecutionStats {
+                    snapshot_records: 0,
+                    result_rows: 0,
+                },
+                evaluator: GlaExecutionStats::default(),
+                created_vertices: 0,
+                created_edges: 0,
+            },
+            mutation_effects: 0,
+        }
+    }
 }
 
 pub(super) fn batch_error(
@@ -982,22 +1015,55 @@ impl<V: Vfs + Clone> Database<V> {
         *active_record = None;
         commit_cx
             .with_restriction_async(async {
-                let mut workspace = Workspace(Some(
+                let state = ChainState::new(
                     self.begin(txn_cx)
                         .map_err(|error| source(WriteTxnError::Write(error)))?,
-                ));
-                workspace.transaction().program_multi_relation = true;
-                workspace.transaction().chain_retirements = Some(Default::default());
-                let mut used = GraphInsertStats {
-                    selection: GqlExecutionStats {
-                        snapshot_records: 0,
-                        result_rows: 0,
-                    },
-                    evaluator: GlaExecutionStats::default(),
-                    created_vertices: 0,
-                    created_edges: 0,
-                };
-                let mut mutation_effects = 0;
+                    execution,
+                );
+                let (mut state, result) = self.stage_authorized_chains(
+                    query_cx, chains, continuation, policy, scope, state, active_record, admit,
+                )?;
+                state.execution.bind_decision(state.workspace.transaction());
+                let completion = state
+                    .workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        state.execution.checkpoint()
+                    })
+                    .await
+                    .map_err(source)?;
+                Ok((state.used, result, completion))
+            })
+            .await
+    }
+
+    /// Stage definitions already admitted under this state's live permit.
+    /// The native collectors, original image checks and checked output are
+    /// shared with autocommit; this function has no publication boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn stage_authorized_chains<'cx, 'permit, Clock: FnMut() -> u64>(
+        &mut self,
+        query_cx: &QueryCx,
+        chains: &[PreparedGraphWriteChain],
+        continuation: Option<&fgdb_gql::PreparedGraphSet>,
+        policy: GraphInsertPolicy,
+        scope: &PlannerPredicates,
+        state: ChainState<'cx, 'permit, Clock>,
+        active_record: &mut Option<usize>,
+        admit: impl FnOnce(
+            fgdb_gql::GraphWriteProgramStats,
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<(ChainState<'cx, 'permit, Clock>, GqlQueryExecution<GraphValueRow>), Fault> {
+                let ChainState {
+                    mut workspace,
+                    mut execution,
+                    mut used,
+                    mut mutation_effects,
+                } = state;
                 let mut last_result = None;
                 for (argument_set, chain) in chains.iter().enumerate() {
                 *active_record = Some(argument_set);
@@ -1614,16 +1680,86 @@ impl<V: Vfs + Clone> Database<V> {
                 .map_err(source)?;
                 used.evaluator = result.evaluator;
                 execution.bind_decision(workspace.transaction());
-                let completion = workspace
-                    .transaction()
-                    .complete_controlled(self, commit_cx, None, false, || {
+                Ok((ChainState {
+                    workspace,
+                    execution,
+                    used,
+                    mutation_effects,
+                }, result))
+    }
+
+    /// A standalone read retains the same masked overlay and signed allowance
+    /// as preceding writes. It never opens another snapshot or read permit.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn read_authorized_chain_state<'cx, 'permit, Clock: FnMut() -> u64>(
+        &mut self,
+        query_cx: &QueryCx,
+        read: &fgdb_gql::PreparedGraphSet,
+        policy: GraphInsertPolicy,
+        scope: &PlannerPredicates,
+        mut state: ChainState<'cx, 'permit, Clock>,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<(ChainState<'cx, 'permit, Clock>, GqlQueryExecution<GraphValueRow>), Fault> {
+        if !scope.rights().can_read() {
+            return Err(source(WriteTxnError::Authorization(Error::PermissionDenied)));
+        }
+        read.admit_patterns(&mut |pattern| {
+            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+            state.execution.checkpoint()?;
+            admit_pattern(pattern, scope)
+        })
+        .map_err(source)?;
+        let allowance = remaining(policy, &state.used, state.mutation_effects, true).query;
+        let mut result = query_cx
+            .with_restriction(|| {
+                let controls = RefCell::new(&mut state.execution);
+                let database = RefCell::new(&mut *self);
+                read.execute_governed_from_source(
+                    allowance,
+                    ChainSource {
+                        transaction: state.workspace.transaction(),
+                        database: &database,
+                        cx: query_cx,
+                        scope,
+                        execution: &controls,
+                    },
+                    || {
                         query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                        execution.checkpoint()
-                    })
-                    .await
-                    .map_err(source)?;
-                Ok((used, result, completion))
+                        controls.borrow_mut().checkpoint()
+                    },
+                )
             })
-            .await
+            .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
+        // The collector used the remaining allowance. Hydration must see the
+        // complete execution bill, including every preceding statement.
+        result.rows.snapshot_records = result.rows.snapshot_records
+            .saturating_add(state.used.selection.snapshot_records);
+        result.evaluator.work_units = result.evaluator.work_units
+            .saturating_add(state.used.evaluator.work_units);
+        result.evaluator.scratch_entries = result.evaluator.scratch_entries
+            .saturating_add(state.used.evaluator.scratch_entries);
+        let delivered = u64::try_from(result.value.len())
+            .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?;
+        state.execution.permit
+            .charge_rows_at((state.execution.clock)(), delivered)
+            .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+        super::output::admit_output(
+            state.workspace.transaction(),
+            self,
+            query_cx,
+            scope,
+            &mut state.execution,
+            policy.query,
+            &mut result,
+            admit,
+        )
+        .map_err(source)?;
+        state.used.selection = result.rows;
+        state.used.evaluator = result.evaluator;
+        Ok((state, result))
     }
 }

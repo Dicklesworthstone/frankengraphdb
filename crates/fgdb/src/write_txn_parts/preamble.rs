@@ -592,6 +592,10 @@ pub enum WriteTxnError {
     /// in this native write chain. Carrying its identity alone stays legal.
     DeletedElementRead,
     Finished,
+    /// The explicit authorized execution exhausted its cumulative statement count.
+    StatementLimit {
+        limit: usize,
+    },
     /// The supplied database is not the opened handle that began this txn.
     /// Refusal preserves the transaction for use with its actual owner.
     WrongDatabase,
@@ -673,6 +677,9 @@ impl core::fmt::Display for WriteTxnError {
             Self::NoPreparedWrite => formatter.write_str("write transaction has no batch"),
             Self::DeletedElementRead => formatter.write_str("read of a deleted graph element"),
             Self::Finished => formatter.write_str("write transaction is already finished"),
+            Self::StatementLimit { limit } => {
+                write!(formatter, "authorized transaction statement limit {limit} reached")
+            }
             Self::WrongDatabase => {
                 formatter.write_str("write transaction belongs to a different database handle")
             }
@@ -750,6 +757,7 @@ impl core::error::Error for WriteTxnError {
             | Self::NoPreparedWrite
             | Self::DeletedElementRead
             | Self::Finished
+            | Self::StatementLimit { .. }
             | Self::WrongDatabase
             | Self::UnknownSavepoint
             | Self::SavepointLimit { .. }

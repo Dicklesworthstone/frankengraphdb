@@ -6,6 +6,7 @@ pub use write::{EdgeWriteImage, VertexWriteFields, VertexWriteImage, WriteEndpoi
 use crate::{Authority, Error, LimitDimension, QueryLimits, Rights, Scope};
 use core::marker::PhantomData;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 /// Immutable result of authenticated caveat compilation.
@@ -430,7 +431,7 @@ pub enum ReadAccess {}
 #[derive(Debug)]
 pub enum WriteAccess {}
 
-/// One non-cloneable execution allowance borrowed from a verified capability.
+/// One non-cloneable execution allowance issued by a verified capability.
 ///
 /// A failed charge or validity check terminally stops this execution; catching
 /// an error does not permit continued work or a later smaller charge. A new
@@ -441,7 +442,7 @@ pub enum WriteAccess {}
 /// metadata, not an independent live execution allowance.
 #[derive(Debug)]
 pub struct ExecutionPermit<'a, Access> {
-    program: &'a PlannerPredicates,
+    program: Cow<'a, PlannerPredicates>,
     authority: &'a Authority,
     usage: Usage,
     stopped: bool,
@@ -456,7 +457,25 @@ impl<'a, Access> ExecutionPermit<'a, Access> {
         now_ms: u64,
     ) -> Self {
         Self {
-            program,
+            program: Cow::Borrowed(program),
+            authority,
+            usage: Usage::default(),
+            stopped: false,
+            last_now_ms: now_ms,
+            access: PhantomData,
+        }
+    }
+
+    /// Move an authenticated program into its one live allowance. This keeps
+    /// a long-lived execution movable without borrowing a local verifier or
+    /// cloning its usage. Retirement still belongs to the issuing authority.
+    pub(crate) fn owning(
+        program: PlannerPredicates,
+        authority: &'a Authority,
+        now_ms: u64,
+    ) -> Self {
+        Self {
+            program: Cow::Owned(program),
             authority,
             usage: Usage::default(),
             stopped: false,
@@ -467,7 +486,7 @@ impl<'a, Access> ExecutionPermit<'a, Access> {
 
     #[must_use]
     pub fn predicates(&self) -> &PlannerPredicates {
-        self.program
+        &self.program
     }
 
     #[must_use]

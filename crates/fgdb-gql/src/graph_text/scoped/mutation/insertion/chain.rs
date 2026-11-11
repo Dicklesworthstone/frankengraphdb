@@ -1187,7 +1187,41 @@ impl PreparedGraphWriteChainText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
+        resolve: impl GraphSymbolResolver,
+    ) -> Result<Self, GraphWriteChainTextError> {
+        Self::prepare_statement_core(statement, relation, declarations, resolve, false)
+    }
+
+    /// Compile one native write statement for an explicit transaction owner.
+    /// Ordinary CREATE, SET/REMOVE/DELETE and MERGE use precisely the same
+    /// typed steps and binding as multi-clause chains. This does not alter
+    /// `is_chain` or the existing autocommit routing contract.
+    pub fn prepare_statement(
+        statement: &str,
+        relation: RelationId,
+        resolve: impl GraphSymbolResolver,
+    ) -> Result<Self, GraphWriteChainTextError> {
+        Self::prepare_statement_with_parameter_types(statement, relation, &[], resolve)
+    }
+
+    /// The parameterized explicit-statement compiler. Declaration validation,
+    /// original offsets and every write-family diagnostic stay in the shared
+    /// parser; only the requirement for a second write is relaxed.
+    pub fn prepare_statement_with_parameter_types(
+        statement: &str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: impl GraphSymbolResolver,
+    ) -> Result<Self, GraphWriteChainTextError> {
+        Self::prepare_statement_core(statement, relation, declarations, resolve, true)
+    }
+
+    fn prepare_statement_core(
+        statement: &str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
         mut resolve: impl GraphSymbolResolver,
+        allow_single: bool,
     ) -> Result<Self, GraphWriteChainTextError> {
         let body = query::statement_body(statement)?;
         let first_write = Self::matched_write(Lexer {
@@ -1407,7 +1441,8 @@ impl PreparedGraphWriteChainText {
         let returning_row_mutation = matches!(steps.as_slice(), [ChainTextStep::Mutation(step)]
             if step.1.is_some())
             && Self::is_chain(body)?;
-        if steps.len() < 2
+        if !allow_single
+            && steps.len() < 2
             && !first_foreach
             && !first_unit_call
             && !unwound_merge

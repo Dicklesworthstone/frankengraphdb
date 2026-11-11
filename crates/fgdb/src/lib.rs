@@ -192,6 +192,7 @@ pub use query::{
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteOutput, AuthorizedWriteSession,
+    AuthorizedWriteTransaction,
     IdentityPermutation, WriteTxn, WriteTxnError,
 };
 

@@ -34,6 +34,9 @@ pub use mutation::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, Authorize
 #[path = "authorized/output.rs"]
 mod output;
 pub use output::AuthorizedWriteOutput;
+#[path = "authorized/transaction.rs"]
+mod transaction;
+pub use transaction::AuthorizedWriteTransaction;
 #[path = "authorized/selection.rs"]
 mod selection;
 

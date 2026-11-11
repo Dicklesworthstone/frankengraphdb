@@ -118,6 +118,53 @@ inside dependencies, and the executor became unavailable. The standalone
 canonical selector's two tests passed under the pinned compiler. This does not
 qualify durable maintained views or multi-relation sealed sources.
 
+### Explicit authorized native transactions — qualification pending
+
+Source added 2026-11-11 under `fgdb-w2-txn-lifecycle-mhae`.
+`Database::begin_authorized_write` returns an
+`AuthorizedWriteTransaction<'issuer, Clock>` that stages multiple statements
+and commits once. Its `stage_chain`, `read`, `statistics`, `commit` and
+`rollback` methods expose local explicit ownership of the existing native
+workspace. Dropping the owner discards the unpublished prefix.
+
+The owner retains one live Warden permit, a cloned commit context and the
+canonical transaction workspace. It holds no database borrow or lock while
+idle. Statements reuse the existing authorized chain collectors, original
+before/after image checks, masked overlay reads, conflict witnesses and checked
+graph-output admission. No statement autocommits. Later statements read their
+own earlier effects, while ordinary database reads still see committed state.
+
+`PreparedGraphWriteChainText::prepare_statement` and its
+`prepare_statement_with_parameter_types` counterpart admit ordinary single
+CREATE, SET/REMOVE/DELETE and MERGE statements through the existing chain
+compiler. The original `prepare` and `is_chain` routing contracts are retained.
+`VerifiedCapability::into_write_at` moves verified predicates into a
+non-clonable permit while preserving the live issuer and cumulative usage.
+
+Native source/work/scratch, result-row, creation, mutation and statement
+allowances accumulate across calls. Standalone reads and RETURN require read
+authority. A failed statement, output callback, swallowed metadata/work error,
+cancellation or unwind terminally aborts the entire prefix. Capability expiry,
+issuer retirement and monotonic-clock checks remain live through COMMIT.
+A foreign database handle refuses before its frontier is observed. New
+statements conservatively refuse if the original database basis has advanced;
+the final commit still uses the existing native conflict/completion owner.
+
+Ten native regression sources cover own-writes, one final commit,
+rollback/drop/deletion, masking and rights, cumulative quotas, output failures,
+unwind/cancellation, foreign handles, stale basis and retirement/expiry. Two
+Warden tests cover movable permits and retained terminal behavior. Independent
+source review verified the shared staging/output body against the existing
+autocommit implementation and reviewed the public API and regressions.
+Compilation, runtime tests and exact-tree formatting/Clippy/UBS/full proof are
+**UNRUN** because dependency compilation was killed by resource exhaustion and
+the executor became unavailable before product validation.
+
+This is a local native API. Bolt/FGP explicit write adapters, durable ownership
+leases, reattachment and full SSI remain separate work; the lifecycle roadmap
+bead remains open. Ambiguous commit outcomes retain their native meaning and
+are never automatically replayed.
+
 ### Durable embedded database
 
 `fgdb::Database` can:
@@ -531,7 +578,7 @@ Endpoint eligibility now crosses the native transaction and standalone CLI surfa
 
 Standalone `search --eligible <vid,...>` accepts at most 100,000 unsigned-u128 input occurrences before sorting and deduplicating; an empty value selects no results. The new `Database`/`EmbeddedReadView::beacon_search_graph_indexed_filtered` APIs retain seed-directed incidence expansion and filter graph/text/vector candidate populations before truncation and fusion. Regression sources in `query_beacon/indexed.rs`, `fgdb-cli/src/search.rs` and `fgdb-cli/tests/cli_robot.rs` cover excluded transit, disconnected edge limits, historical pinning, parsing and each retrieval lane. This remains per-call resident retrieval with the existing candidate-limited exact-RRF and ANN contracts. Validation in this session: pinned Rust formatting and whitespace checks passed for the implementation; Rust compilation, all new regression execution, Clippy and the full gate remain **UNRUN** after two guarded Cargo attempts stopped at the environment's memory ceiling before first-party diagnostics. Static-only UBS returned nonzero on test panic/assertion and other heuristic findings; it is not a passing gate.
 
-Full SSI, merge-ladder integration and transaction ownership/session policy remain incomplete.
+Full SSI, merge-ladder integration and durable transaction ownership/session policy remain incomplete. Local capability-scoped explicit ownership is described in the native transaction vertical above; wire adapters and reattachment remain open.
 
 ### Supervised served-database recovery
 

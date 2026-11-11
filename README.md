@@ -175,6 +175,33 @@ RETURN person, neighbors
 
 The right-hand source is first restricted to keys needed by current outer rows, then grouped once per key before its count is joined back to the original outer bag. This also prevents unused groups from causing conditional count-overflow errors. Witness rows use the existing private aggregate-input budget; counts retain native checked Int64 conversion. Value counts require a safely projected column of the independent graph source, including copied or reordered aliases. Typed equality correlation and keyless counts qualify; computed/property arguments, outer-only arguments, additional correlated predicates, HAVING, local pages and relational DISTINCT remain unsupported.
 
+### Explicit capability-scoped native transactions
+
+Trusted embedding hosts can use `Database::begin_authorized_write` to stage
+several statements under one Warden capability and publish them with one
+explicit `commit`. The returned `AuthorizedWriteTransaction` exposes
+`stage_chain`, `read`, cumulative `statistics`, `commit` and `rollback`.
+Dropping it rolls back the unpublished prefix.
+
+Compile a single CREATE, mutation or MERGE with
+`PreparedGraphWriteChainText::prepare_statement`, then bind its parameters.
+The same entrypoint accepts existing multi-clause write chains. For example,
+one owner can stage a CREATE, update that node in a later statement, and read
+the updated value before committing. Its database borrow is released between
+calls; its private workspace and cumulative authorization allowance remain.
+
+Every stage keeps the existing field/endpoint masking and checked graph-output
+admission. A statement error, cancellation, output refusal or unwind aborts
+all preceding staged effects. Read operations and RETURN require read
+authority. Further statements refuse a different database handle or an
+advanced write basis; COMMIT preserves the native conflict and ambiguous
+outcome semantics.
+
+This local API still awaits compilation and runtime qualification. Bolt/FGP
+explicit write adapters and durable transaction reattachment remain open.
+See [the native regression scenarios](crates/fgdb/tests/authorized_explicit_transactions.rs)
+and [implementation status](IMPLEMENTATION_STATUS.md).
+
 ### Exact counts inside write transactions
 
 Eligible transaction counts read exact metadata pinned to the transaction's own snapshot, plus its canonical staged changes. They do not scan the full vertex or edge population:
