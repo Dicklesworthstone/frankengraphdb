@@ -293,7 +293,9 @@ fn commit_with_unread_results_fails_and_reset_releases_the_failed_transaction() 
             Request::Rollback,
             Request::Pull { n: -1, qid: 0 },
             Request::Discard { n: -1, qid: -1 },
-            Request::Begin { extra: read_extra() },
+            Request::Begin {
+                extra: read_extra(),
+            },
             Request::Run {
                 query: "CREATE (n)".into(),
                 parameters: vec![],
@@ -474,7 +476,6 @@ fn dropping_partial_delivery_cannot_reassign_its_id_or_restart_the_wire() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 async fn explicit_fixture(cx: &Cx, name: &str) -> (Server, CapabilityToken) {
     let (mut server, token, _) = served(cx, name).await;
     let db = std::sync::Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
@@ -607,7 +608,10 @@ fn explicit_write_transactions_stage_own_reads_and_publish_once_on_commit() {
             &root,
             &mut client,
             &mut io,
-            Request::Pull { n: -1, qid: created },
+            Request::Pull {
+                n: -1,
+                qid: created,
+            },
         )
         .await;
         let rows = records(&original);
@@ -629,7 +633,10 @@ fn explicit_write_transactions_stage_own_reads_and_publish_once_on_commit() {
             &root,
             &mut client,
             &mut io,
-            Request::Discard { n: -1, qid: updated },
+            Request::Discard {
+                n: -1,
+                qid: updated,
+            },
         )
         .await;
         summary(&changed, 0x70);
@@ -664,11 +671,149 @@ fn explicit_write_transactions_stage_own_reads_and_publish_once_on_commit() {
 }
 
 #[test]
+fn explicit_aggregates_read_staged_rows_and_freeze_collected_graph_metadata() {
+    let ((), report) = run_async_under_lab(0xb017_e009, |root| async move {
+        let (server, token) = explicit_fixture(&root, "bolt-explicit-aggregates").await;
+        let db = &server.databases["test"];
+        let mut client = connection(&server, token);
+        let mut io = io();
+        client.begin(&root, &extra()).await.unwrap();
+        let empty = stage_explicit(
+            &root,
+            &mut client,
+            &mut io,
+            "MATCH (n:Visible) RETURN count(*) AS count, sum(n.p) AS total, avg(n.p) AS mean",
+            vec![],
+        )
+        .await;
+        let empty = send(
+            &root,
+            &mut client,
+            &mut io,
+            Request::Pull { n: -1, qid: empty },
+        )
+        .await;
+        assert_eq!(
+            records(&empty),
+            vec![vec![Value::Int(0), Value::Null, Value::Null]]
+        );
+        let created = stage_explicit(
+            &root,
+            &mut client,
+            &mut io,
+            "CREATE (:Visible {p:1,secret:0}), (:Visible {p:2,secret:0}), (:Visible {p:4,secret:1})",
+            vec![],
+        )
+        .await;
+        for (query, expected) in [
+            (
+                "MATCH (create:Visible) RETURN count(create) AS count, sum(create.p) AS total, avg(create.p) AS mean",
+                vec![vec![Value::Int(3), Value::Int(7), Value::Float(7.0 / 3.0)]],
+            ),
+            (
+                "MATCH (n:Visible) RETURN sum(n.p) AS total, n.secret AS bucket, count(*) AS count, avg(n.p) AS mean ORDER BY bucket",
+                vec![
+                    vec![
+                        Value::Int(3),
+                        Value::Int(0),
+                        Value::Int(2),
+                        Value::Float(1.5),
+                    ],
+                    vec![
+                        Value::Int(4),
+                        Value::Int(1),
+                        Value::Int(1),
+                        Value::Float(4.0),
+                    ],
+                ],
+            ),
+            (
+                "MATCH (n:Visible) WITH n.p AS p WHERE p >= 2 RETURN avg(p) AS mean, count(*) AS count, sum(p) AS total",
+                vec![vec![Value::Float(3.0), Value::Int(2), Value::Int(6)]],
+            ),
+            (
+                "CALL db.labels() YIELD label RETURN count(*) AS count",
+                vec![vec![Value::Int(1)]],
+            ),
+        ] {
+            let qid = stage_explicit(&root, &mut client, &mut io, query, vec![]).await;
+            let response = send(&root, &mut client, &mut io, Request::Pull { n: -1, qid }).await;
+            assert_eq!(records(&response), expected, "{query}");
+            let metadata = summary(&response, 0x70);
+            assert!(get(metadata, "bookmark").is_none());
+            assert_eq!(get(metadata, "type"), Some(&Value::string("r")));
+            assert_eq!(
+                get(metadata, "fgdb_transaction_local"),
+                Some(&Value::Bool(true))
+            );
+            assert_committed_vertices(&root, db, 0, 0).await;
+        }
+        let collected = stage_explicit(
+            &root,
+            &mut client,
+            &mut io,
+            "MATCH (n:Visible) WITH n ORDER BY n.p RETURN collect(n) AS nodes",
+            vec![],
+        )
+        .await;
+        let changed = stage_explicit(
+            &root,
+            &mut client,
+            &mut io,
+            "MATCH (n:Visible) SET n.p=n.p+10",
+            vec![],
+        )
+        .await;
+        let response = send(
+            &root,
+            &mut client,
+            &mut io,
+            Request::Pull {
+                n: -1,
+                qid: collected,
+            },
+        )
+        .await;
+        let rows = records(&response);
+        let [row] = rows.as_slice() else {
+            panic!("one aggregate group: {rows:?}");
+        };
+        let [Value::List(nodes)] = row.as_slice() else {
+            panic!("collected node values: {row:?}");
+        };
+        assert_eq!(nodes.len(), 3);
+        for (node, expected) in nodes.iter().zip([1, 2, 4]) {
+            let Value::Struct { tag: 0x4e, fields } = node else {
+                panic!("a hydrated node: {node:?}");
+            };
+            let Value::Map(properties) = &fields[2] else {
+                panic!("node properties: {fields:?}");
+            };
+            // Hydration belongs to the aggregate statement, not this later PULL.
+            assert_eq!(get(properties, "p"), Some(&Value::Int(expected)));
+        }
+        for qid in [created, changed] {
+            let discarded =
+                send(&root, &mut client, &mut io, Request::Discard { n: -1, qid }).await;
+            assert!(records(&discarded).is_empty());
+            assert!(get(summary(&discarded, 0x70), "bookmark").is_none());
+        }
+        assert_committed_vertices(&root, db, 0, 0).await;
+        let rolled_back = send(&root, &mut client, &mut io, Request::Rollback).await;
+        summary(&rolled_back, 0x70);
+        assert!(client.transaction.is_none());
+        assert_committed_vertices(&root, db, 0, 0).await;
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn explicit_write_terminal_paths_discard_the_entire_unpublished_prefix() {
     let ((), report) = run_async_under_lab(0xb017_e002, |root| async move {
         let (server, token) = explicit_fixture(&root, "bolt-explicit-abandonment").await;
         let db = &server.databases["test"];
-        for terminal in 0..8 {
+        for terminal in 0..6 {
             let mut client = connection(&server, token.clone());
             let mut io = io();
             client.begin(&root, &extra()).await.unwrap();
@@ -706,12 +851,9 @@ fn explicit_write_terminal_paths_discard_the_entire_unpublished_prefix() {
                         Request::Run {
                             query: match terminal {
                                 4 => "MATCH (n) RETURN id(n)",
-                                // No procedure or terminal aggregate host is
-                                // present in this bounded native workspace.
-                                // A refusal must never fall back to autocommit.
-                                5 => "CALL db.labels()",
-                                6 => "MATCH (n) RETURN count(*) AS count",
-                                _ => "MATCH (n:Visible) RETURN sum(n.p) AS total",
+                                // Algorithm procedures still have no staged
+                                // graph host and must never run as autocommit.
+                                _ => "CALL fnx.pagerank() YIELD node RETURN node",
                             }
                             .into(),
                             parameters: vec![],
@@ -719,13 +861,7 @@ fn explicit_write_terminal_paths_discard_the_entire_unpublished_prefix() {
                         },
                     )
                     .await;
-                    let refused = summary(&response, 0x7f);
-                    if terminal >= 6 {
-                        assert_eq!(
-                            get(refused, "code").and_then(Value::as_str),
-                            Some("Neo.ClientError.Statement.SyntaxError")
-                        );
-                    }
+                    summary(&response, 0x7f);
                     assert!(records(&response).is_empty());
                     assert!(client.failed);
                 }
@@ -831,21 +967,9 @@ fn explicit_read_mode_and_read_only_capabilities_never_gain_write_authority() {
             let mut client = connection(&server, token);
             let mut io = io();
             client.begin(&root, &options).await.unwrap();
-            let qid = stage_explicit(
-                &root,
-                &mut client,
-                &mut io,
-                "RETURN 7 AS marker",
-                vec![],
-            )
-            .await;
-            let result = send(
-                &root,
-                &mut client,
-                &mut io,
-                Request::Pull { n: -1, qid },
-            )
-            .await;
+            let qid =
+                stage_explicit(&root, &mut client, &mut io, "RETURN 7 AS marker", vec![]).await;
+            let result = send(&root, &mut client, &mut io, Request::Pull { n: -1, qid }).await;
             assert_eq!(records(&result), vec![vec![Value::Int(7)]]);
             let refused = send(
                 &root,
@@ -870,7 +994,6 @@ fn explicit_read_mode_and_read_only_capabilities_never_gain_write_authority() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 #[test]
 fn explicit_write_transactions_honor_the_read_only_run_ceiling() {
     let ((), report) = run_async_under_lab(0xb017_e005, |root| async move {
@@ -879,10 +1002,8 @@ fn explicit_write_transactions_honor_the_read_only_run_ceiling() {
         let mut client = connection(&server, token);
         let mut io = io();
         client.begin(&root, &extra()).await.unwrap();
-        let prefix = stage_explicit(
-            &root, &mut client, &mut io, "CREATE (n:Visible)", vec![],
-        )
-        .await;
+        let prefix =
+            stage_explicit(&root, &mut client, &mut io, "CREATE (n:Visible)", vec![]).await;
         let read = send(
             &root,
             &mut client,
@@ -898,13 +1019,7 @@ fn explicit_write_transactions_honor_the_read_only_run_ceiling() {
             panic!("missing read qid");
         };
         let qid = *qid;
-        let rows = send(
-            &root,
-            &mut client,
-            &mut io,
-            Request::Pull { n: -1, qid },
-        )
-        .await;
+        let rows = send(&root, &mut client, &mut io, Request::Pull { n: -1, qid }).await;
         assert_eq!(records(&rows), vec![vec![Value::Int(7)]]);
         let discarded = send(
             &root,
@@ -940,10 +1055,8 @@ fn explicit_write_transactions_honor_the_read_only_run_ceiling() {
 fn explicit_transaction_cumulative_limits_and_late_output_failure_abort_prefix() {
     let ((), report) = run_async_under_lab(0xb017_e006, |root| async move {
         for case in 0..3 {
-            let (mut server, token) = explicit_fixture(
-                &root, &format!("bolt-explicit-cumulative-{case}"),
-            )
-            .await;
+            let (mut server, token) =
+                explicit_fixture(&root, &format!("bolt-explicit-cumulative-{case}")).await;
             if case == 1 {
                 std::sync::Arc::get_mut(server.databases.get_mut("test").unwrap())
                     .unwrap()
@@ -962,7 +1075,11 @@ fn explicit_transaction_cumulative_limits_and_late_output_failure_abort_prefix()
             let mut io = io();
             client.begin(&root, &extra()).await.unwrap();
             let prefix = stage_explicit(
-                &root, &mut client, &mut io, "CREATE (n:Visible {p:1})", vec![],
+                &root,
+                &mut client,
+                &mut io,
+                "CREATE (n:Visible {p:1})",
+                vec![],
             )
             .await;
             let discarded = send(
@@ -975,7 +1092,11 @@ fn explicit_transaction_cumulative_limits_and_late_output_failure_abort_prefix()
             summary(&discarded, 0x70);
             if case == 0 {
                 let first = stage_explicit(
-                    &root, &mut client, &mut io, "RETURN 1 AS value", vec![],
+                    &root,
+                    &mut client,
+                    &mut io,
+                    "MATCH (n:Visible) RETURN count(*) AS value",
+                    vec![],
                 )
                 .await;
                 let consumed = send(
@@ -988,7 +1109,7 @@ fn explicit_transaction_cumulative_limits_and_late_output_failure_abort_prefix()
                 assert_eq!(records(&consumed), vec![vec![Value::Int(1)]]);
             }
             let (query, parameters) = match case {
-                0 => ("RETURN 2 AS value", vec![]),
+                0 => ("MATCH (n:Visible) RETURN count(*) AS value", vec![]),
                 1 => ("CREATE (n)", vec![]),
                 // A small request whose computed output exceeds the frame.
                 _ => ("RETURN range(1,512) AS value", vec![]),
@@ -1031,6 +1152,112 @@ fn explicit_transaction_cumulative_limits_and_late_output_failure_abort_prefix()
 }
 
 #[test]
+fn explicit_preparation_refusals_abort_the_prefix_before_any_result_escapes() {
+    let ((), report) = run_async_under_lab(0xb017_e00a, |root| async move {
+        let (server, all) = explicit_fixture(&root, "bolt-explicit-preparation").await;
+        let db = &server.databases["test"];
+        let metered_text = format!("/*{}*/ RETURN 9 AS value", "x".repeat(8192));
+        // The statement is valid under ample work. Its comment still consumes
+        // the original ingress-byte allowance before the compiler runs.
+        let mut control = connection(&server, all.clone());
+        let mut io = io();
+        control.begin(&root, &extra()).await.unwrap();
+        let qid = stage_explicit(&root, &mut control, &mut io, &metered_text, vec![]).await;
+        let accepted = send(&root, &mut control, &mut io, Request::Pull { n: -1, qid }).await;
+        assert_eq!(records(&accepted), vec![vec![Value::Int(9)]]);
+        summary(
+            &send(&root, &mut control, &mut io, Request::Rollback).await,
+            0x70,
+        );
+        let work_limited = db
+            .authority
+            .issue_at(
+                &Grant {
+                    branch: crate::TRUNK.into(),
+                    labels: Scope::All,
+                    relations: Scope::All,
+                    properties: Scope::All,
+                    rights: Rights::ReadWrite,
+                    limits: QueryLimits {
+                        max_nodes: 1_000_000,
+                        max_work: 8192,
+                        max_rows: 100,
+                    },
+                    expires_at_ms: u64::MAX / 2,
+                },
+                crate::unix_millis(),
+            )
+            .unwrap();
+        let scoped = explicit_token(
+            db,
+            Rights::ReadWrite,
+            100,
+            Scope::only([fgdb_delta_types::PropertyKeyId(1)]),
+        );
+        for (token, query, parameters, expected_code) in [
+            (
+                work_limited,
+                metered_text.as_str(),
+                vec![],
+                "Neo.ClientError.Statement.ExecutionFailed",
+            ),
+            (
+                scoped,
+                "MATCH (n:Visible) RETURN sum(n.secret) AS hidden",
+                vec![],
+                "Neo.ClientError.Security.Forbidden",
+            ),
+            (
+                all,
+                "MATCH (n:Visible) RETURN 'Ann' =~ $pattern AS matches",
+                vec![("pattern".into(), Value::string("["))],
+                "Neo.ClientError.Statement.SyntaxError",
+            ),
+        ] {
+            let mut client = connection(&server, token);
+            client.begin(&root, &extra()).await.unwrap();
+            // Leave this successful result outstanding: failure must release
+            // both its cursor and the staged write it describes.
+            stage_explicit(
+                &root,
+                &mut client,
+                &mut io,
+                "CREATE (n:Visible {p:1}) RETURN n.p",
+                vec![],
+            )
+            .await;
+            let refused = send(
+                &root,
+                &mut client,
+                &mut io,
+                Request::Run {
+                    query: query.into(),
+                    parameters,
+                    extra: vec![],
+                },
+            )
+            .await;
+            assert_eq!(
+                get(summary(&refused, 0x7f), "code").and_then(Value::as_str),
+                Some(expected_code)
+            );
+            assert!(records(&refused).is_empty());
+            assert!(client.failed);
+            assert!(client.transaction.is_none());
+            assert!(client.pending.is_none());
+            let ignored = send(&root, &mut client, &mut io, Request::Commit).await;
+            assert!(matches!(
+                ignored.as_slice(),
+                [Value::Struct { tag: 0x7e, .. }]
+            ));
+            assert_committed_vertices(&root, db, 0, 0).await;
+        }
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn explicit_write_owners_release_idle_locks_and_fail_on_stale_or_recovered_bases() {
     let ((), report) = run_async_under_lab(0xb017_e007, |root| async move {
         let (server, token) = explicit_fixture(&root, "bolt-explicit-stale-generation").await;
@@ -1039,7 +1266,11 @@ fn explicit_write_owners_release_idle_locks_and_fail_on_stale_or_recovered_bases
         let mut io = io();
         client.begin(&root, &extra()).await.unwrap();
         let prefix = stage_explicit(
-            &root, &mut client, &mut io, "CREATE (n:Visible {p:1})", vec![],
+            &root,
+            &mut client,
+            &mut io,
+            "CREATE (n:Visible {p:1})",
+            vec![],
         )
         .await;
         send(
@@ -1051,7 +1282,10 @@ fn explicit_write_owners_release_idle_locks_and_fail_on_stale_or_recovered_bases
         .await;
         // This separate writer must run while the explicit owner is idle.
         let mut writer = connection(&server, token.clone());
-        writer.run(&root, "CREATE (n)", &vec![], &extra()).await.unwrap();
+        writer
+            .run(&root, "CREATE (n)", &vec![], &extra())
+            .await
+            .unwrap();
         writer.pull(&root, &mut io, -1, true).await.unwrap();
         let refused = send(
             &root,
@@ -1070,7 +1304,11 @@ fn explicit_write_owners_release_idle_locks_and_fail_on_stale_or_recovered_bases
         let mut recovered = connection(&server, token);
         recovered.begin(&root, &extra()).await.unwrap();
         let prefix = stage_explicit(
-            &root, &mut recovered, &mut io, "CREATE (n:Visible {p:2})", vec![],
+            &root,
+            &mut recovered,
+            &mut io,
+            "CREATE (n:Visible {p:2})",
+            vec![],
         )
         .await;
         send(
@@ -1104,7 +1342,11 @@ fn cancelled_explicit_statement_or_commit_wait_drops_the_native_owner() {
             let mut io = io();
             client.begin(&root, &extra()).await.unwrap();
             let prefix = stage_explicit(
-                &root, &mut client, &mut io, "CREATE (n:Visible {p:1})", vec![],
+                &root,
+                &mut client,
+                &mut io,
+                "CREATE (n:Visible {p:1})",
+                vec![],
             )
             .await;
             send(
@@ -1117,21 +1359,23 @@ fn cancelled_explicit_statement_or_commit_wait_drops_the_native_owner() {
             let held = db.db.write(&root).await.unwrap();
             if commit {
                 let mut committing = Box::pin(client.commit_transaction(&root));
-                assert!(committing
-                    .as_mut()
-                    .poll(&mut Context::from_waker(Waker::noop()))
-                    .is_pending());
+                assert!(
+                    committing
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
                 drop(committing);
             } else {
                 let parameters = vec![];
                 let extra = vec![];
-                let mut staging = Box::pin(client.run(
-                    &root, "CREATE (n)", &parameters, &extra,
-                ));
-                assert!(staging
-                    .as_mut()
-                    .poll(&mut Context::from_waker(Waker::noop()))
-                    .is_pending());
+                let mut staging = Box::pin(client.run(&root, "CREATE (n)", &parameters, &extra));
+                assert!(
+                    staging
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
                 drop(staging);
             }
             assert!(client.transaction.is_none());

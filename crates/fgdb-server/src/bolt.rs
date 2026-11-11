@@ -62,8 +62,10 @@ use fgdb_bolt::message::{
 use fgdb_bolt::packstream::{Value, get};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlMapArgumentText, GqlParameters, GqlTextOffsets, PreparedGraphBranchText,
-    PreparedGraphSetText, PreparedGraphWriteChainText,
+    GqlMapArgumentText, GqlParameters, GqlTextOffsets, GraphAggregateTextSlot, GraphSymbol,
+    GraphSymbolKind, GraphSymbolResolver, PreparedGraphAggregateText, PreparedGraphBranchText,
+    PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate, PreparedGraphSetText,
+    PreparedGraphWriteChainText, ReverseSymbolCatalog,
 };
 use fgdb_protocol::body::{Body, ErrorCode, Execute, ExecuteMode, WireTimestamp, WireValue};
 use fgdb_protocol::transport::DuplexIo;
@@ -72,6 +74,7 @@ use fgdb_types::{
     CommitSeq, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 use fgdb_warden::{Authority, CapabilityToken};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -362,6 +365,11 @@ struct Transaction<'s> {
 
 enum TransactionStatement {
     Read(Box<fgdb_gql::PreparedGraphSet>),
+    Aggregate {
+        statement: Box<PreparedGraphSetAggregate>,
+        columns: Vec<String>,
+        slots: Vec<GraphAggregateTextSlot>,
+    },
     Write(Box<fgdb_gql::PreparedGraphWriteChain>),
 }
 
@@ -369,6 +377,7 @@ impl TransactionStatement {
     fn columns(&self) -> &[String] {
         match self {
             Self::Read(statement) => statement.columns(),
+            Self::Aggregate { columns, .. } => columns,
             Self::Write(statement) => statement.columns(),
         }
     }
@@ -384,55 +393,236 @@ fn transaction_statement_error<E: GqlTextOffsets + core::fmt::Display>(
     Failure::from_refusal(Refusal::new(ErrorCode::Statement, error.to_string()))
 }
 
+/// The native owner's meter latches its first refusal. Resolver methods have
+/// an Option return contract, so no failed lookup may continue observing the
+/// catalog or turn the original control refusal into a syntax diagnostic.
+/// Reverse names are copied only after admission and retain the signed scope.
+struct TransactionCatalog<'a> {
+    symbols: &'a crate::Symbols,
+    scope: &'a fgdb_warden::PlannerPredicates,
+    work: RefCell<&'a mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>>,
+    failed: Cell<bool>,
+    denied: Cell<bool>,
+}
+
+impl TransactionCatalog<'_> {
+    fn charge(&self, units: u64) -> Result<(), fgdb::WriteTxnError> {
+        if self.failed.get() {
+            return Err(fgdb::WriteTxnError::AuthorizedMutationRefused);
+        }
+        let result = (self.work.borrow_mut())(units);
+        if result.is_err() {
+            self.failed.set(true);
+        }
+        result
+    }
+
+    fn check(&self) -> Result<(), Failure> {
+        self.charge(0)
+            .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
+        if self.denied.get() {
+            return Err(Failure::from_refusal(crate::execute::write_refusal(
+                &fgdb::WriteTxnError::Authorization(fgdb_warden::Error::ScopeDenied),
+            )));
+        }
+        Ok(())
+    }
+
+    fn admits(&self, symbol: GraphSymbol) -> bool {
+        match symbol {
+            GraphSymbol::Label(id) => self.scope.allows_label(id),
+            GraphSymbol::Relation(id) => self.scope.allows_relation(id),
+            GraphSymbol::Property(id) => self.scope.allows_property(id),
+        }
+    }
+
+    fn copy_name(&self, name: &str) -> Option<String> {
+        self.charge((name.len().div_ceil(64) as u64).saturating_add(1))
+            .ok()?;
+        Some(name.to_owned())
+    }
+}
+
+impl GraphSymbolResolver for &TransactionCatalog<'_> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        if self.denied.get() || self.failed.get() {
+            return None;
+        }
+        self.charge((name.len().div_ceil(64) as u64).saturating_add(1))
+            .ok()?;
+        let symbol = self.symbols.resolve(kind, name);
+        self.charge(0).ok()?;
+        if symbol.is_some_and(|symbol| !self.admits(symbol)) {
+            self.denied.set(true);
+            return None;
+        }
+        symbol
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        if self.denied.get() || self.failed.get() {
+            return None;
+        }
+        self.charge(1).ok()?;
+        let source = self.symbols.borrowed_reverse_catalog();
+        let mut catalog = ReverseSymbolCatalog::new();
+        for (id, name) in &source.labels {
+            // Hidden catalog growth must not change the signed work bill.
+            // Poll live controls during traversal; charge only visible copies.
+            self.charge(0).ok()?;
+            if self.scope.allows_label(*id) {
+                catalog.labels.insert(*id, self.copy_name(name)?);
+            }
+        }
+        for (id, name) in &source.relations {
+            self.charge(0).ok()?;
+            if self.scope.allows_relation(*id) {
+                catalog.relations.insert(*id, self.copy_name(name)?);
+            }
+        }
+        for (id, name) in &source.properties {
+            self.charge(0).ok()?;
+            if self.scope.allows_property(*id) {
+                catalog.properties.insert(*id, self.copy_name(name)?);
+            }
+        }
+        Some(catalog)
+    }
+
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        if self.denied.get() || self.failed.get() || !self.scope.allows_label(id) {
+            return None;
+        }
+        self.charge(1).ok()?;
+        let name = self.symbols.borrowed_reverse_catalog().labels.get(&id)?;
+        self.copy_name(name)
+    }
+
+    fn reverse_relation(&self, id: fgdb_delta_types::RelationId) -> Option<String> {
+        if self.denied.get() || self.failed.get() || !self.scope.allows_relation(id) {
+            return None;
+        }
+        self.charge(1).ok()?;
+        let name = self.symbols.borrowed_reverse_catalog().relations.get(&id)?;
+        self.copy_name(name)
+    }
+}
+
 /// Native read preparation wins over keyword hints: an alias or literal
-/// spelling CREATE cannot turn a read into a write. Both compilers retain the
-/// ordinary map-argument and once-per-statement clock binding contracts.
+/// spelling CREATE cannot turn a read into a write. Every compiler and binding
+/// spends the retained owner allowance. Parameters already carry that owner's
+/// trusted once-per-statement clock; no adapter clock is captured again.
 fn prepare_transaction_statement(
-    cx: &fgdb_types::QueryCx,
     db: &Served,
     text: &str,
     parameters: &GqlParameters,
+    scope: &fgdb_warden::PlannerPredicates,
+    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
 ) -> Result<TransactionStatement, Failure> {
+    let catalog = TransactionCatalog {
+        symbols: &db.symbols,
+        scope,
+        work: RefCell::new(work),
+        failed: Cell::new(false),
+        denied: Cell::new(false),
+    };
+    let charge = |units| {
+        catalog
+            .charge(units)
+            .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))
+    };
+    charge(1)?;
     let lowered_read = GqlMapArgumentText::lower_fields(text, parameters);
     let (read_text, read_parameters) = lowered_read
         .as_ref()
         .map_or((text, parameters), |(lowered, derived)| {
             (lowered.text(), derived)
         });
-    let declarations: Vec<_> = read_parameters.parameter_types().collect();
-    let read = cx.with_restriction(|| {
-        PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
-            read_text,
-            &declarations,
-            &mut db.symbols.clone(),
-        )
-    });
+    let recipe = lowered_read.as_ref().map(|(lowered, _)| lowered);
+    let mut declarations = Vec::new();
+    for declaration in read_parameters.parameter_types() {
+        charge(1)?;
+        declarations.push(declaration);
+    }
+    charge(read_text.len().saturating_sub(text.len()) as u64)?;
+    let read = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+        read_text,
+        &declarations,
+        &mut &catalog,
+    );
+    catalog.check()?;
     let read_error = match read {
         Ok(template) => {
-            let arguments = db
-                .statement_clock
-                .capture_for_template(cx, template.parameter_schema(), read_parameters)
-                .map_err(|error| {
-                    Failure::from_refusal(crate::execute::write_refusal(&error))
-                })?;
-            return cx
-                .with_restriction(|| template.bind_parameters(&arguments))
+            charge(1)?;
+            return template
+                .bind_parameters(read_parameters)
                 .map(|statement| TransactionStatement::Read(Box::new(statement)))
-                .map_err(|error| {
-                    transaction_statement_error(
-                        lowered_read.as_ref().map(|(lowered, _)| lowered),
-                        error,
-                    )
-                });
+                .map_err(|error| transaction_statement_error(recipe, error));
         }
         Err(error) => error,
     };
-    if !looks_like_write(text) {
-        return Err(transaction_statement_error(
-            lowered_read.as_ref().map(|(lowered, _)| lowered),
-            read_error,
-        ));
+    let mut offset = read_error.offset;
+    let mut read_error = transaction_statement_error(recipe, read_error);
+    charge(1)?;
+    let aggregate = PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
+        read_text,
+        &declarations,
+        &catalog,
+    );
+    catalog.check()?;
+    match aggregate {
+        Ok(template) => {
+            charge(1)?;
+            let statement = template
+                .bind_relation_parameters(read_parameters)
+                .map_err(|error| transaction_statement_error(recipe, error))?;
+            return Ok(TransactionStatement::Aggregate {
+                statement: Box::new(statement),
+                columns: template.columns().to_vec(),
+                slots: template.output_slots().to_vec(),
+            });
+        }
+        Err(error) if error.offset > offset => {
+            offset = error.offset;
+            read_error = transaction_statement_error(recipe, error);
+        }
+        Err(_) => {}
     }
+    charge(1)?;
+    let aggregate = PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
+        read_text,
+        &declarations,
+        &catalog,
+    );
+    catalog.check()?;
+    match aggregate {
+        Ok(template) => {
+            charge(1)?;
+            let statement = template
+                .bind_parameters(read_parameters)
+                .map_err(|error| transaction_statement_error(recipe, error))?;
+            let statement =
+                PreparedGraphSetAggregate::from_complete_input(statement).ok_or_else(|| {
+                    Failure::from_refusal(Refusal::new(
+                        ErrorCode::Statement,
+                        "aggregate input is unsupported in an explicit write transaction",
+                    ))
+                })?;
+            return Ok(TransactionStatement::Aggregate {
+                statement: Box::new(statement),
+                columns: template.columns().to_vec(),
+                slots: template.output_slots().to_vec(),
+            });
+        }
+        Err(error) if error.offset > offset => {
+            read_error = transaction_statement_error(recipe, error);
+        }
+        Err(_) => {}
+    }
+    if !looks_like_write(text) {
+        return Err(read_error);
+    }
+    charge(1)?;
     let lowered = GqlMapArgumentText::lower(text, parameters);
     let (text, parameters) = lowered
         .as_ref()
@@ -440,22 +630,22 @@ fn prepare_transaction_statement(
             (lowered.text(), derived)
         });
     let recipe = lowered.as_ref().map(|(lowered, _)| lowered);
-    let declarations: Vec<_> = parameters.parameter_types().collect();
-    let template = cx
-        .with_restriction(|| {
-            PreparedGraphWriteChainText::prepare_statement_with_parameter_types(
-                text,
-                db.write_relation,
-                &declarations,
-                db.symbols.clone(),
-            )
-        })
-        .map_err(|error| transaction_statement_error(recipe, error))?;
-    let arguments = db
-        .statement_clock
-        .capture_for_template(cx, &template.parameter_schema(), parameters)
-        .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
-    cx.with_restriction(|| template.bind_parameters(&arguments))
+    let mut declarations = Vec::new();
+    for declaration in parameters.parameter_types() {
+        charge(1)?;
+        declarations.push(declaration);
+    }
+    let template = PreparedGraphWriteChainText::prepare_statement_with_parameter_types(
+        text,
+        db.write_relation,
+        &declarations,
+        &catalog,
+    );
+    catalog.check()?;
+    let template = template.map_err(|error| transaction_statement_error(recipe, error))?;
+    charge(1)?;
+    template
+        .bind_parameters(parameters)
         .map(|statement| TransactionStatement::Write(Box::new(statement)))
         .map_err(|error| transaction_statement_error(recipe, error))
 }
@@ -685,7 +875,10 @@ impl<'s> Connection<'s> {
             ("hints".to_owned(), Value::Map(Vec::new())),
             ("fgdb_profile".to_owned(), Value::string(fgdb_bolt::PROFILE)),
             ("fgdb_autocommit_writes".to_owned(), Value::Bool(true)),
-            ("fgdb_explicit_write_transactions".to_owned(), Value::Bool(true)),
+            (
+                "fgdb_explicit_write_transactions".to_owned(),
+                Value::Bool(true),
+            ),
         ])
     }
 
@@ -826,12 +1019,9 @@ impl<'s> Connection<'s> {
                 generation
                     .check()
                     .map_err(|error| Failure::from_refusal(error.into()))?;
-                let completion = (*owner)
-                    .commit(&mut guard)
-                    .await
-                    .map_err(|error| {
-                        Failure::from_refusal(crate::execute::write_refusal(&error))
-                    })?;
+                let completion = (*owner).commit(&mut guard).await.map_err(|error| {
+                    Failure::from_refusal(crate::execute::write_refusal(&error))
+                })?;
                 drop(guard);
                 match completion {
                     EmbeddedTxnCompletion::WriteCommitted { commit_seq } => {
@@ -889,15 +1079,6 @@ impl<'s> Connection<'s> {
         query_cx
             .checkpoint()
             .map_err(|_| Failure::invalid("transaction preparation cancelled"))?;
-        let statement = prepare_transaction_statement(&query_cx, db, text, parameters)?;
-        let columns = statement.columns().to_vec();
-        let is_write = matches!(&statement, TransactionStatement::Write(_));
-        if is_write && request_read_only {
-            return Err(read_only());
-        }
-        let before = owner
-            .statistics()
-            .ok_or_else(|| Failure::invalid("transaction is finished"))?;
         let mut guard = db
             .db
             .write(cx)
@@ -907,38 +1088,97 @@ impl<'s> Connection<'s> {
             .check()
             .map_err(|error| Failure::from_refusal(error.into()))?;
         crate::execute::authorize_write(db, token).map_err(Failure::from_refusal)?;
+        let mut preparation_refusal = None;
+        let statement = owner
+            .prepare_statement(
+                &guard,
+                &query_cx,
+                text,
+                parameters,
+                |parameters, scope, work| match prepare_transaction_statement(
+                    db, text, parameters, scope, work,
+                ) {
+                    Ok(statement) => Ok(statement),
+                    Err(error) => {
+                        preparation_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    }
+                },
+            )
+            .map_err(|error| {
+                // The native owner retains control failures even if a parser's
+                // Option resolver reports an unrelated missing-symbol error.
+                if matches!(&error, fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    && let Some(refusal) = preparation_refusal
+                {
+                    return refusal;
+                }
+                Failure::from_refusal(crate::execute::write_refusal(&error))
+            })?;
+        let columns = statement.columns().to_vec();
+        let is_write = matches!(&statement, TransactionStatement::Write(_));
+        if is_write && request_read_only {
+            return Err(read_only());
+        }
+        let before = owner
+            .statistics()
+            .ok_or_else(|| Failure::invalid("transaction is finished"))?;
         let mut admitted = None;
         let mut output_refusal = None;
-        let collect = |rows: &[fgdb_gql::algebra::GraphValueRow],
-                       work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
-                       metadata: &mut dyn fgdb::AuthorizedWriteOutput| {
-            let output = crate::execute::graph_output_rows(&columns, rows, work).and_then(|rows| {
-                autocommit::collect_returning(
-                    rows,
-                    self.server.limits.max_frame_len as usize,
-                    work,
-                    metadata,
-                    db.symbols.borrowed_reverse_catalog(),
-                )
-            });
-            match output {
-                Ok(rows) => {
-                    admitted = Some(rows);
-                    Ok(())
+        let mut collect =
+            |rows: Result<Vec<Vec<WireValue>>, Refusal>,
+             work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+             metadata: &mut dyn fgdb::AuthorizedWriteOutput| {
+                let output = rows.and_then(|rows| {
+                    autocommit::collect_returning(
+                        rows,
+                        self.server.limits.max_frame_len as usize,
+                        work,
+                        metadata,
+                        db.symbols.borrowed_reverse_catalog(),
+                    )
+                });
+                match output {
+                    Ok(rows) => {
+                        admitted = Some(rows);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        output_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    }
                 }
-                Err(error) => {
-                    output_refusal = Some(error);
-                    Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
-                }
-            }
-        };
+            };
         let result = match &statement {
-            TransactionStatement::Read(statement) => {
-                owner.read(&mut guard, &query_cx, statement, collect)
-            }
-            TransactionStatement::Write(statement) => {
-                owner.stage_chain(&mut guard, &query_cx, statement, collect)
-            }
+            TransactionStatement::Read(statement) => owner
+                .read(&mut guard, &query_cx, statement, |rows, work, metadata| {
+                    collect(
+                        crate::execute::graph_output_rows(&columns, rows, work),
+                        work,
+                        metadata,
+                    )
+                })
+                .map(|_| ()),
+            TransactionStatement::Aggregate {
+                statement, slots, ..
+            } => owner
+                .read_aggregate(&mut guard, &query_cx, statement, |rows, work, metadata| {
+                    collect(
+                        crate::execute::graph_output_aggregate(&columns, slots, rows, work),
+                        work,
+                        metadata,
+                    )
+                })
+                .map(|_| ()),
+            TransactionStatement::Write(statement) => owner
+                .stage_chain(&mut guard, &query_cx, statement, |rows, work, metadata| {
+                    collect(
+                        crate::execute::graph_output_rows(&columns, rows, work),
+                        work,
+                        metadata,
+                    )
+                })
+                .map(|_| ()),
         };
         drop(guard);
         result.map_err(|error| {
@@ -2261,6 +2501,126 @@ mod tests {
                 START,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn transaction_catalog_hidden_growth_preserves_visible_output_and_signed_work() {
+        use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+        use fgdb_warden::{PlannerPredicates, Rights, Scope};
+
+        fn observe(
+            symbols: &crate::Symbols,
+            scope: &PlannerPredicates,
+        ) -> (ReverseSymbolCatalog, u64, usize) {
+            let mut units = 0;
+            let mut polls = 0;
+            let visible = {
+                let mut work = |bill| {
+                    units += bill;
+                    polls += 1;
+                    Ok(())
+                };
+                let catalog = TransactionCatalog {
+                    symbols,
+                    scope,
+                    work: RefCell::new(&mut work),
+                    failed: Cell::new(false),
+                    denied: Cell::new(false),
+                };
+                let visible = (&catalog).reverse_catalog().unwrap();
+                catalog.check().unwrap();
+                visible
+            };
+            (visible, units, polls)
+        }
+
+        let issuer = authority(0xb017_ca7a);
+        let token = issuer
+            .issue_at(
+                &Grant {
+                    branch: crate::TRUNK.into(),
+                    labels: Scope::only([LabelId(1), LabelId(2)]),
+                    relations: Scope::only([RelationId(1), RelationId(2)]),
+                    properties: Scope::only([PropertyKeyId(1), PropertyKeyId(2)]),
+                    rights: Rights::ReadWrite,
+                    limits: QueryLimits {
+                        max_nodes: 100,
+                        max_work: 1000,
+                        max_rows: 100,
+                    },
+                    expires_at_ms: EXPIRES,
+                },
+                START,
+            )
+            .unwrap();
+        let verified = issuer.verify_at(&token, crate::TRUNK, START).unwrap();
+        let scope = verified.predicates();
+        let kinds = [
+            GraphSymbolKind::Label,
+            GraphSymbolKind::Relation,
+            GraphSymbolKind::Property,
+        ];
+        let mut symbols = crate::Symbols::new();
+        for kind in kinds {
+            symbols.bind(kind, "visible", 1).unwrap();
+        }
+        let (before, before_units, before_polls) = observe(&symbols, scope);
+        assert_eq!(before.labels[&LabelId(1)], "visible");
+        assert_eq!(before.relations[&RelationId(1)], "visible");
+        assert_eq!(before.properties[&PropertyKeyId(1)], "visible");
+        for id in 3..131 {
+            for kind in kinds {
+                symbols
+                    .bind(kind, &format!("hidden_{id}_{}", "x".repeat(96)), id)
+                    .unwrap();
+            }
+        }
+        let (hidden, hidden_units, hidden_polls) = observe(&symbols, scope);
+        assert_eq!(hidden, before);
+        assert_eq!(hidden_units, before_units);
+        assert!(
+            hidden_polls > before_polls,
+            "hidden traversal must still poll live controls"
+        );
+        for kind in kinds {
+            symbols.bind(kind, "also_visible", 2).unwrap();
+        }
+        let (expanded, expanded_units, _) = observe(&symbols, scope);
+        assert_eq!(expanded.labels.len(), 2);
+        assert_eq!(expanded.relations.len(), 2);
+        assert_eq!(expanded.properties.len(), 2);
+        assert!(
+            expanded_units > hidden_units,
+            "permitted catalog copies must spend signed work"
+        );
+
+        // A zero-cost hidden-entry poll is still a live control boundary.
+        // Its refusal latches and prevents both output and any later callback.
+        let calls = Cell::new(0);
+        let polls = Cell::new(0);
+        let mut work = |units| {
+            calls.set(calls.get() + 1);
+            if units == 0 {
+                polls.set(polls.get() + 1);
+                if polls.get() == 3 {
+                    // The first two label IDs are visible; the third is hidden.
+                    return Err(fgdb::WriteTxnError::AuthorizedMutationRefused);
+                }
+            }
+            Ok(())
+        };
+        let catalog = TransactionCatalog {
+            symbols: &symbols,
+            scope,
+            work: RefCell::new(&mut work),
+            failed: Cell::new(false),
+            denied: Cell::new(false),
+        };
+        assert!((&catalog).reverse_catalog().is_none());
+        let stopped = calls.get();
+        assert!(catalog.check().is_err());
+        assert!((&catalog).reverse_catalog().is_none());
+        assert_eq!(calls.get(), stopped);
     }
 
     fn framed_output() -> Vec<u8> {

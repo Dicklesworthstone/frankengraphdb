@@ -5,6 +5,7 @@
 
 use super::{Refusal, body_refusal};
 use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::{GraphAggregateRow, GraphAggregateTextSlot, GraphAggregateValue};
 use fgdb_protocol::body::{
     BodyError, ErrorCode, MAX_DATE_BYTES, MAX_DURATION_BYTES, MAX_LOCAL_DATETIME_BYTES,
     MAX_LOCAL_TIME_BYTES, MAX_NAME_BYTES, MAX_SCALAR_BYTES, MAX_TIME_BYTES, MAX_VALUE_DEPTH,
@@ -19,6 +20,39 @@ pub(super) fn row(cells: &[GraphValue], charge: Charge<'_>) -> Result<(), Refusa
     let mut admission = Admission { charge, nodes: 0 };
     for cell in cells {
         admission.value(cell, 0)?;
+    }
+    Ok(())
+}
+
+/// RETURN ordinals may repeat or interleave keys and exact aggregate cells.
+/// Admit the visible tuple with one shared node budget before copying any
+/// payload, including graph values nested inside COLLECT.
+pub(super) fn aggregate(
+    row: &GraphAggregateRow,
+    slots: &[GraphAggregateTextSlot],
+    charge: Charge<'_>,
+) -> Result<(), Refusal> {
+    let mut admission = Admission { charge, nodes: 0 };
+    let invalid = || {
+        Refusal::new(
+            ErrorCode::Execution,
+            "native aggregate output slot mismatch",
+        )
+    };
+    for slot in slots {
+        match *slot {
+            GraphAggregateTextSlot::GroupKey(at) => {
+                admission.value(row.keys().get(at).ok_or_else(invalid)?, 0)?;
+            }
+            GraphAggregateTextSlot::Aggregate(at) => {
+                match row.values().get(at).ok_or_else(invalid)? {
+                    GraphAggregateValue::Value(value) => admission.value(value, 0)?,
+                    GraphAggregateValue::Count(_)
+                    | GraphAggregateValue::Integer(_)
+                    | GraphAggregateValue::Average(_) => admission.node(0)?,
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -63,7 +97,7 @@ impl Admission<'_> {
         bounded(len, MAX_VALUE_NODES - self.nodes)
     }
 
-    fn value(&mut self, value: &GraphValue, depth: usize) -> Result<(), Refusal> {
+    fn node(&mut self, depth: usize) -> Result<(), Refusal> {
         (self.charge)(1)?;
         if depth > MAX_VALUE_DEPTH {
             return Err(body_refusal(BodyError::TooDeep));
@@ -72,6 +106,11 @@ impl Admission<'_> {
             return Err(body_refusal(BodyError::TooLarge));
         }
         self.nodes += 1;
+        Ok(())
+    }
+
+    fn value(&mut self, value: &GraphValue, depth: usize) -> Result<(), Refusal> {
+        self.node(depth)?;
         match value {
             GraphValue::Scalar(scalar) => match scalar {
                 CanonicalScalar::Text(text) => self.payload(text.as_str().len(), MAX_SCALAR_BYTES),

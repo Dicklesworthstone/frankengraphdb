@@ -21,7 +21,11 @@ Write/default BEGIN with signed Write or ReadWrite rights opens a writer;
 read-only grants and read mode retain the existing pinned read session.
 
 Each accepted statement stages into the same private workspace. Later graph/set
-reads see earlier staged effects, while other connections see committed state.
+and exact terminal aggregate reads see earlier staged effects, while other
+connections see committed state. Aggregate inputs retain their complete
+patterns, row pipelines, grouping and output clauses; counts, wide sums and
+rational means preserve their native exact domains. Collected graph values
+are hydrated from the staged workspace. Catalog calls use the retained scope.
 The checked output collector hydrates graph values before publishing a cursor.
 PULL/DISCARD consume provisional results marked `fgdb_transaction_local: true`;
 only COMMIT publishes and returns a commit bookmark. ROLLBACK, RESET,
@@ -31,6 +35,8 @@ Outstanding result cursors must be consumed before COMMIT.
 Native authority, source/work/result/creation/mutation/statement allowances
 remain cumulative. Generation admission covers each operation and lock wait;
 no database lock or active-operation permit is held between messages.
+Statement preparation also uses the retained permit, including original text,
+parameter admission, trusted statement time, scoped symbol lookup and binding.
 An explicit read mode on RUN cannot stage a write. Subscription notification
 follows native completion and writer-guard release. A fence after successful
 commit cannot be translated into a retryable precommit refusal.
@@ -38,14 +44,19 @@ commit cannot be translated into a retryable precommit refusal.
 Regression sources cover the production state machine and real Bolt TCP with
 an independent FGP observer, including own-writes, isolation before commit,
 one publication, rollback/disconnect, restricted rights and output quotas.
-Source/API reviews completed. Formatting, compilation, runtime tests,
-Clippy, UBS and the full proof are **UNRUN** after executor loss during
-dependency setup. The broader roadmap beads remain open.
+Source/API reviews completed. The aggregate and preparation extension adds
+state-machine and TCP regressions for empty/grouped summaries, exact native
+values, staged collection hydration, original-text budgets and failure rollback.
+Targeted pinned formatting and `git diff --check` passed. Server and smaller
+query-library compile attempts were killed by SIGKILL while checking the pinned
+`asupersync` dependency, before project diagnostics. Runtime tests, Clippy and
+the exact-tree proof remain **UNRUN**; whole-workspace formatting also reports
+pre-existing differences. The broader roadmap beads remain open.
 
 This is a bounded local owner, not durable reattachment or full Bolt V2.
-Explicit writer reads use the native graph/set subset; standalone terminal
-aggregate reads (including count/sum), procedure hosts and historical/branch
-forms refuse and discard the staged prefix. Explicit read mode retains the
+Explicit writer reads use the native graph/set and exact aggregate subset;
+non-catalog procedure hosts and historical/branch forms refuse and discard
+the staged prefix. Explicit read mode retains the
 broader committed-snapshot reader. Concurrent basis advancement retains the
 native conservative refusal, and full SSI remains separate.
 See `docs/bolt-autocommit-writes.md` for the protocol boundary.
@@ -182,9 +193,10 @@ qualify durable maintained views or multi-relation sealed sources.
 Source added 2026-11-11 under `fgdb-w2-txn-lifecycle-mhae`.
 `Database::begin_authorized_write` returns an
 `AuthorizedWriteTransaction<'issuer, Clock>` that stages multiple statements
-and commits once. Its `stage_chain`, `read`, `statistics`, `commit` and
-`rollback` methods expose local explicit ownership of the existing native
-workspace. Dropping the owner discards the unpublished prefix.
+and commits once. Its `prepare_statement`, `stage_chain`, `read`,
+`read_aggregate`, `statistics`, `commit` and `rollback` methods expose local
+explicit ownership of the existing native workspace. Dropping the owner
+discards the unpublished prefix.
 
 The owner retains one live Warden permit, a cloned commit context and the
 canonical transaction workspace. It holds no database borrow or lock while
@@ -192,6 +204,13 @@ idle. Statements reuse the existing authorized chain collectors, original
 before/after image checks, masked overlay reads, conflict witnesses and checked
 graph-output admission. No statement autocommits. Later statements read their
 own earlier effects, while ordinary database reads still see committed state.
+
+Preparation retains the live permit through text admission, parameter capture,
+trusted statement-clock observation and the compiler callback. Meter refusals
+are latched even when the compiler swallows them. Exact terminal aggregates
+reuse the complete authorized staged source and preserve wide integer sums,
+rational averages, grouping and collected graph values. Scoped catalog calls
+are available in both row and aggregate inputs.
 
 `PreparedGraphWriteChainText::prepare_statement` and its
 `prepare_statement_with_parameter_types` counterpart admit ordinary single
@@ -209,9 +228,10 @@ A foreign database handle refuses before its frontier is observed. New
 statements conservatively refuse if the original database basis has advanced;
 the final commit still uses the existing native conflict/completion owner.
 
-Twelve native regression tests cover own-writes, one final commit,
+Native regression sources cover own-writes, one final commit,
 rollback/drop/deletion, masking and rights, cumulative quotas, output failures,
-unwind/cancellation, foreign handles, stale basis and retirement/expiry. The
+unwind/cancellation, foreign handles, stale basis, retirement/expiry, metered
+preparation and exact staged aggregate reads. The
 output-boundary additions recheck cancellation and live authority after a
 successful admission callback, before returning provisional rows or restoring
 active ownership. Tests inject expiry, retirement and cancellation immediately

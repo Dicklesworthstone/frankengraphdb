@@ -5,7 +5,10 @@
 mod conditional;
 mod difference;
 mod edge_upsert_output;
-pub(crate) use edge_upsert_output::{collect as graph_output_rows, metadata as graph_output_value};
+pub(crate) use edge_upsert_output::{
+    collect as graph_output_rows, collect_aggregate as graph_output_aggregate,
+    metadata as graph_output_value,
+};
 pub(crate) mod ordered;
 mod prepared;
 mod read_batch;
@@ -434,8 +437,10 @@ async fn write_inner(
                 "a deferred write cannot return rows",
             ));
         }
-        return write_returning_checked(cx, db, token, returning, deferred, |_, rows, _, _| Ok(rows))
-            .await;
+        return write_returning_checked(cx, db, token, returning, deferred, |_, rows, _, _| {
+            Ok(rows)
+        })
+        .await;
     }
     let guard = db.db.write(cx).await.map_err(Refusal::from)?;
     if let Some((generation, minimum_seq)) = deferred {
@@ -954,13 +959,12 @@ async fn write_returning_in_guard<R: Send>(
     let policy = db.write_policy;
     let mut admitted_rows = None;
     let mut output_refusal = None;
-    let mut output =
-        |rows: &[fgdb_gql::algebra::GraphValueRow],
-         work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
-         metadata: &mut dyn fgdb::AuthorizedWriteOutput| {
-            let rows = edge_upsert_output::collect(&columns, rows, work)?;
-            collect(&columns, rows, work, metadata)
-        };
+    let mut output = |rows: &[fgdb_gql::algebra::GraphValueRow],
+                      work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+                      metadata: &mut dyn fgdb::AuthorizedWriteOutput| {
+        let rows = edge_upsert_output::collect(&columns, rows, work)?;
+        collect(&columns, rows, work, metadata)
+    };
     let result = match &prepared {
         Returning::Chain(prepared) => guard
             .execute_graph_write_chain_authorized_checked(

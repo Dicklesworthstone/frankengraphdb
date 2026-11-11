@@ -44,7 +44,9 @@
 //!   `RETURN` and explicit native write transactions) over the same authorized
 //!   execution boundary; optional TLS 1.3 protects every configured listener.
 //!   Explicit writes retain one private workspace across statements, expose
-//!   read-your-own-writes and publish only at `COMMIT`. Provisional output
+//!   read-your-own-writes for graph reads and exact aggregates, and publish
+//!   only at `COMMIT`. Preparation shares the retained capability allowance.
+//!   Provisional output
 //!   remains bounded and capability-masked; `ROLLBACK`, `RESET` and disconnect
 //!   discard the unpublished workspace.
 //! - Trusted embedding hosts can compact and scrub a served database through

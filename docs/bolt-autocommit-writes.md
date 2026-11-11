@@ -50,8 +50,9 @@ Each RUN in a writable transaction prepares and stages one native statement.
 Successful statements share the original snapshot, earlier unpublished
 effects, conflict observations and cumulative resource allowance. Ordinary
 single CREATE, INSERT, MERGE, SET, REMOVE and DELETE statements use the same
-chain compiler as compound native writes. Standalone reads use the existing
-authorized graph/set reader over that private workspace.
+chain compiler as compound native writes. Standalone graph/set reads and exact
+terminal aggregates use the same authorized private workspace. Scoped catalog
+procedures such as `CALL db.labels()` use the retained capability scope.
 
 A transaction can therefore perform the following separate RUN statements:
 
@@ -67,8 +68,21 @@ MATCH (n:Person {name:$name}) SET n.age=n.age+1 RETURN n
 MATCH (n:Person {name:$name}) RETURN n.name, n.age
 ```
 
+```cypher
+MATCH (n:Person) RETURN count(*) AS people, sum(n.age) AS total_age,
+                       avg(n.age) AS mean_age
+```
+
 The transaction sees its own changes. Other connections continue to see only
 committed state until COMMIT succeeds.
+
+Aggregate inputs retain their complete patterns, `WITH` stages, filters and
+grouping. Collected nodes and relationships are hydrated from the staged
+workspace. Counts, wide integer sums and rational averages retain their exact
+native domains until the existing Bolt conversion boundary. As with ordinary
+Bolt aggregate reads, counts and sums fitting signed 64-bit integers use Int,
+larger integers use decimal text, and averages use Float. Native and FGP readers
+retain the exact rational numerator and denominator.
 
 RUN/PULL/DISCARD results are **provisional**. Statement summaries carry
 `fgdb_transaction_local: true` and no commit bookmark. Their counters describe
@@ -91,7 +105,11 @@ owner selected by BEGIN; `mode: "w"` cannot widen a read-only owner.
 
 The native owner retains one live capability permit. Source work, evaluator
 work, result rows, creation, mutation and statement limits apply cumulatively
-across statements. Field masking, graph metadata and output conversion reuse
+across statements. Preparation also spends that permit: original statement
+text, parameter admission, scoped symbol resolution and binding are metered,
+and statement time comes from the database's trusted clock. A swallowed
+compiler-meter refusal still aborts the transaction. Field masking, graph
+metadata and output conversion reuse
 the existing authorized collectors. A final query-cancellation and live-permit
 check follows each successful output-admission callback, before provisional
 rows are released or the active owner is restored.
@@ -118,14 +136,13 @@ the statement prefix.
 
 ## Current boundaries
 
-Explicit writer reads use the supported native graph/set subset. Standalone
-terminal aggregate reads such as `RETURN count(*)` or `RETURN sum(n.p)`,
-procedure hosts such as `CALL fnx.*`, hybrid retrieval and catalog calls,
-historical or branch selectors unsupported by that owner, and other unsupported
-syntax refuse and discard the entire staged prefix. They do not fall back to
-a committed-state reader or autocommit path. Explicit `mode: "r"` transactions
-retain the existing broader read-session behavior, including aggregate and
-procedure reads over committed snapshots.
+Explicit writer reads use the supported native graph/set and exact aggregate
+subset. Procedure hosts such as `CALL fnx.*`, hybrid retrieval, historical or
+branch selectors unsupported by that owner, and other unsupported syntax
+refuse and discard the entire staged prefix. They do not fall back to a
+committed-state reader or autocommit path. Explicit `mode: "r"` transactions
+retain the existing broader read-session behavior, including procedure reads
+over committed snapshots.
 
 Durable ownership leases, reconnect/reattach, durable result delivery,
 impersonation and non-null `tx_timeout` are outside this extension. The
@@ -144,12 +161,19 @@ Bolt state-machine regressions cover provisional output, own-writes,
 single-commit publication, rollback/reset/GOODBYE/drop, read and write rights,
 mode narrowing, cursor budgets, generation fencing and cumulative limits.
 The real Bolt TCP tests use an independent FGP observer to distinguish
-provisional state from committed state.
+provisional state from committed state. Aggregate regressions exercise empty
+and grouped summaries, WITH pipelines, collected-node hydration, wide sums and
+the exact-native/Bolt-float average boundary. Preparation regressions cover
+original text budgets, restricted catalog entries and binding failures after
+an earlier staged write.
 
-These changes have undergone source and API review. The execution environment
-became unavailable during dependency setup. Formatting, compilation, runtime
-tests, Clippy, UBS and the full exact-tree proof are therefore **UNRUN** for
-this source cut. No broader roadmap bead is closed by this implementation.
+These changes have undergone source and API review. Targeted pinned formatting
+and `git diff --check` passed. Two local compile attempts (server and the smaller
+query library) were killed by SIGKILL while checking the pinned `asupersync`
+dependency, before project diagnostics. Compilation, runtime tests, Clippy and
+the full exact-tree proof remain **UNRUN** for this source cut. Whole-workspace
+formatting reports pre-existing differences. No broader roadmap bead is closed
+by this implementation.
 
 Focused verification targets, in the repository's pinned execution lane:
 
