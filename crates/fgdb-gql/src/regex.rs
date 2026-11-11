@@ -4,7 +4,8 @@
 //! Thompson construction and a Pike VM. Matching costs O(text x program) time
 //! and O(program) memory, with no backtracking, so no pattern has a
 //! catastrophic case. The program size is capped when the pattern is compiled,
-//! which happens once, at query preparation. A match is a WHOLE-string match,
+//! which happens at query preparation for literals or at parameter binding.
+//! Matching never compiles a pattern per row. A match is a WHOLE-string match,
 //! as openCypher defines `=~`.
 //!
 //! Profile 1 syntax:

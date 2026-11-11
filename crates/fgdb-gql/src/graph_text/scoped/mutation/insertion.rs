@@ -898,6 +898,9 @@ fn bind_fields(
                                 MutationIntegerTemplateOp::ListMembers { .. } => {
                                     GraphIntegerOp::InList { members: 0 }
                                 }
+                                MutationIntegerTemplateOp::RegexParameter { .. } => {
+                                    integer::regex_parameter_shape()
+                                }
                             })
                             .collect();
                         GraphIntegerExpression::prepare_scalar(&shape).map_err(|kind| {

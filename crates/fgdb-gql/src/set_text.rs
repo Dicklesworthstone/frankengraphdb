@@ -321,6 +321,7 @@ impl ReadValueTemplate {
             Self::Integer { program, .. } => program.iter().any(|op| match op {
                 Op::Parameter { index, .. }
                 | Op::ParameterField { index, .. }
+                | Op::RegexParameter { index, .. }
                 | Op::ListMembers { index, .. } => *index == parameter,
                 Op::Bound(_) => false,
             }),

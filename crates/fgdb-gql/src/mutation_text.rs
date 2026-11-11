@@ -32,6 +32,12 @@ pub(crate) enum MutationIntegerTemplateOp {
         index: usize,
         at: usize,
     },
+    /// `=~ $pattern`: compile the bounded text argument during binding,
+    /// before graph access. Execution retains only the native regex program.
+    RegexParameter {
+        index: usize,
+        at: usize,
+    },
 }
 
 impl MutationIntegerTemplateOp {
@@ -58,6 +64,10 @@ impl MutationIntegerTemplateOp {
             }
             Self::ListMembers { index, .. } => {
                 bytes.push(3);
+                bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+            }
+            Self::RegexParameter { index, .. } => {
+                bytes.push(4);
                 bytes.extend_from_slice(&(*index as u64).to_be_bytes());
             }
         }

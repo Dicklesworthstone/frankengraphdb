@@ -64,6 +64,10 @@ fn same_value(left: &ReadValueTemplate, right: &ReadValueTemplate) -> bool {
                         MutationIntegerTemplateOp::ListMembers { index: a, .. },
                         MutationIntegerTemplateOp::ListMembers { index: b, .. },
                     ) => a == b,
+                    (
+                        MutationIntegerTemplateOp::RegexParameter { index: a, .. },
+                        MutationIntegerTemplateOp::RegexParameter { index: b, .. },
+                    ) => a == b,
                     _ => false,
                 })
         }

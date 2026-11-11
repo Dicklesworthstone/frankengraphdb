@@ -84,6 +84,7 @@ fn admit_literal_template(
                 Integer::Bound(_) => charge(left, 1),
                 Integer::Parameter { index, .. }
                 | Integer::ParameterField { index, .. }
+                | Integer::RegexParameter { index, .. }
                 | Integer::ListMembers { index, .. } => argument(*index, parameters, left),
             }),
             _ => false,
