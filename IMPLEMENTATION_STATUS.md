@@ -64,10 +64,9 @@ RETURN node, score ORDER BY score DESC
 
 The existing sealed source owns one physical relationship partition: it accepts
 label unions but requires exactly that one relationship type. It explicitly
-refuses relationship unions. Maintained analytics whose topology owner still
-has scalar selectors likewise explicitly refuse unions; they never silently
-widen a request to the whole graph. Dynamic projection maps and named graph
-catalogs remain outside this surface.
+refuses relationship unions. The maintained extension below carries complete
+union selectors through six analytic owners. Dynamic projection maps and
+named graph catalogs remain outside this surface.
 
 The standalone canonical selector tests passed (2/2) under the pinned compiler
 before the environment failure. Added regression sources cover binding and
@@ -77,6 +76,47 @@ query refusal. Source/caller reviews and a recovered local formatting pass
 completed. The exact committed tree's formatting, product compilation,
 integration tests, Clippy, UBS and full proof remain **UNRUN** after resource
 exhaustion and the subsequent executor loss. The broader beads remain open.
+
+### Maintained analytics over schema unions — qualification pending
+
+Source added 2026-11-11 under `fgdb-w8-projection-sd7`. Native standing
+queries and server subscriptions now accept the same bounded label/type unions
+for connected components, weakly connected components, strongly connected
+components, core numbers, triangle counts and clustering coefficients.
+
+The compiler builds a shared DISTINCT selected-vertex relation, preserves
+counted edge support across disjoint relationship-selector chunks, filters both
+edge endpoints with the existing Semi joins, and retains isolated vertices.
+These ordinary maintained row operators feed the existing selected analytic
+owners. Removing one overlapping label or one parallel edge does not remove
+support that remains through another selected label or relationship. Later
+label/type changes, deletions and rebuilds use the same dependencies.
+
+```cypher
+CALL fnx.core_number(
+  {labels:['Person','Company'], relations:['KNOWS','WORKS_WITH'],
+   direction:'undirected', parallel:'collapse', self_loops:'drop'})
+YIELD vertex, core
+RETURN vertex, core
+```
+
+Both dimensions retain the full 16-distinct-ID bound. The complete private
+circuit participates in subscription admission, including shared children,
+endpoint joins, isolate projection and analytic output. Failed registration or
+rebuild discards the entire private suffix. Existing algorithm, direction,
+weight, loop and per-owner limits remain in force. Server subscriptions still
+require unrestricted label, relationship and property scope; this extension
+does not introduce capability-masked maintained subscriptions.
+
+Regression sources include independent connectivity/motif expectations,
+overlapping labels, cross-type parallel support, isolates, the ninth and
+sixteenth relationship types, full-bound registration/rebuild rollback,
+subscription replay and signed admission. Production and test source review
+completed. Product compilation, integration tests and exact-tree formatting/
+Clippy/UBS/full proof remain **UNRUN**: resource-constrained builds were killed
+inside dependencies, and the executor became unavailable. The standalone
+canonical selector's two tests passed under the pinned compiler. This does not
+qualify durable maintained views or multi-relation sealed sources.
 
 ### Durable embedded database
 

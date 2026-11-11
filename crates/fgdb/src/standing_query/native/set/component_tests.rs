@@ -28,7 +28,16 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Label, "M") => Some(GraphSymbol::Label(LabelId(2))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        (GraphSymbolKind::Label, name) => name
+            .strip_prefix('L')
+            .and_then(|id| id.parse::<u64>().ok())
+            .map(|id| GraphSymbol::Label(LabelId(id))),
+        (GraphSymbolKind::Relation, name) => name
+            .strip_prefix('R')
+            .and_then(|id| id.parse::<u64>().ok())
+            .map(|id| GraphSymbol::Relation(RelationId(id))),
         _ => None,
     }
 }
@@ -91,11 +100,19 @@ fn selected_oracle(
     relation: Option<RelationId>,
     label: Option<LabelId>,
 ) -> ZSet<Vec<QueryValue>> {
+    union_oracle(db, strong, relation.as_slice(), label.as_slice())
+}
+fn union_oracle(
+    db: &Database<MemVfs>,
+    strong: bool,
+    relations: &[RelationId],
+    labels: &[LabelId],
+) -> ZSet<Vec<QueryValue>> {
     let vertices: BTreeSet<_> = db
         .vertices()
         .unwrap()
         .iter()
-        .filter(|row| label.is_none_or(|label| row.labels.contains(&label)))
+        .filter(|row| labels.is_empty() || labels.iter().any(|label| row.labels.contains(label)))
         .map(|row| row.vid)
         .collect();
     let edges = db.edges().unwrap();
@@ -105,7 +122,7 @@ fn selected_oracle(
         let mut todo = VecDeque::from([vertex]);
         while let Some(from) = todo.pop_front() {
             for edge in edges.iter().filter(|edge| {
-                relation.is_none_or(|selected| edge.entry.relation == selected)
+                (relations.is_empty() || relations.contains(&edge.entry.relation))
                     && vertices.contains(&edge.entry.src)
                     && vertices.contains(&edge.entry.dst)
             }) {
@@ -143,6 +160,134 @@ fn selected_oracle(
         &mut |_| Ok::<_, ()>(()),
     )
     .unwrap()
+}
+
+#[test]
+fn component_unions_share_endpoint_selection_and_maintain_exact_signed_membership() {
+    let ((), report) = run_async_under_lab(0x6e63_6109, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut select = WriteBatch::new(R);
+        select.set_vertex_label(VId(0), LabelId(1), true);
+        select.set_vertex_label(VId(1), LabelId(2), true);
+        for label in [LabelId(1), LabelId(2)] {
+            select.set_vertex_label(VId(2), label, true);
+        }
+        select.set_vertex_label(VId(u128::MAX), LabelId(2), true);
+        select.delete_edge(EId(13));
+        db.write(&commit, select).await.unwrap();
+        let mut second = WriteBatch::new(S);
+        second.add_edge(EId(30), VId(2), VId(0), vec![]);
+        second.add_edge(EId(31), VId(0), VId(1), vec![]);
+        db.write(&commit, second).await.unwrap();
+        let mut excluded = WriteBatch::new(RelationId(3));
+        excluded.add_edge(EId(40), VId(2), VId(u128::MAX), vec![]);
+        excluded.add_edge(EId(41), VId(u128::MAX), VId(0), vec![]);
+        let mut after = db.write(&commit, excluded).await.unwrap();
+        let params = GqlParameters::new();
+        let allowance = GqlQueryPolicy::new(100_000, 5, 10_000_000, 10_000_000);
+        let mut cases = Vec::new();
+        for (name, strong) in [
+            ("connected_components", false),
+            ("weakly_connected_components", false),
+            ("strongly_connected_components", true),
+        ] {
+            for loops in ["drop", "keep"] {
+                let direction = if name == "connected_components" {
+                    "undirected"
+                } else {
+                    "reversed"
+                };
+                let text = format!(
+                    "CALL fnx.{name}({{labels:['M','L','M'],relations:['S','R','S'],\
+                     direction:'{direction}',parallel:'collapse',self_loops:'{loops}'}}) \
+                     YIELD component AS group_id,vertex AS node RETURN group_id,node"
+                );
+                let prepared = PreparedNativeRead::prepare(&text, &params, symbols).unwrap();
+                let (bound, width) = prepared.subscription_footprint(&cx, &params).unwrap();
+                let first = db.standing_queries.len();
+                let handle = prepared
+                    .register_standing(&mut db, &cx, &params, allowance)
+                    .unwrap();
+                let actual = u64::try_from(db.standing_queries.len() - first).unwrap();
+                assert_eq!(width, 2);
+                assert_eq!(bound, actual + 1, "complete composition plus reserved window");
+                let (_, delivered) = db.standing_native_bag(&cx, &handle, policy()).unwrap();
+                assert_eq!(
+                    delivered,
+                    union_oracle(&db, strong, &[R, S], &[LabelId(1), LabelId(2)])
+                );
+                assert_eq!(delivered, eager(&db, &cx, &text));
+                cases.push((text, strong, handle, delivered));
+            }
+        }
+        for tick in 0..10 {
+            let mut change = WriteBatch::new(if tick == 2 { S } else { R });
+            match tick {
+                0 => {
+                    change.set_vertex_label(VId(2), LabelId(1), false);
+                }
+                1 => {
+                    change.delete_edge(EId(10));
+                    change.delete_edge(EId(11));
+                }
+                2 => {
+                    change.delete_edge(EId(31));
+                }
+                3 => {
+                    change.set_vertex_label(VId(2), LabelId(2), false);
+                }
+                4 => {
+                    change.set_vertex_label(VId(3), LabelId(2), true);
+                    change.add_edge(EId(50), VId(3), VId(0), vec![]);
+                }
+                5 => {
+                    change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(9)));
+                }
+                6 => {
+                    change.set_vertex_label(VId(2), LabelId(1), true);
+                    change.add_edge(EId(51), VId(0), VId(1), vec![]);
+                }
+                7 => {
+                    change.set_vertex_label(VId(u128::MAX), LabelId(2), false);
+                }
+                8 => {
+                    change.set_vertex_label(VId(u128::MAX), LabelId(1), true);
+                }
+                _ => {
+                    change.delete_vertex(VId(2));
+                }
+            }
+            let at = db.write(&commit, change).await.unwrap();
+            for (text, strong, handle, delivered) in &mut cases {
+                let expected = union_oracle(&db, *strong, &[R, S], &[LabelId(1), LabelId(2)]);
+                assert_eq!(
+                    db.standing_native_bag(&cx, handle, policy()).unwrap(),
+                    (at, copied(&expected)),
+                    "{text}, tick {tick}"
+                );
+                assert_eq!(eager(&db, &cx, text), expected, "{text}, tick {tick}");
+                let (frontier, delta) = db
+                    .standing_native_delta(&cx, handle, after, policy())
+                    .unwrap();
+                assert_eq!(frontier, at);
+                if matches!(tick, 0 | 1 | 5) {
+                    assert!(delta.is_empty(), "unchanged support: {text}, tick {tick}");
+                }
+                delivered.integrate(&delta, LIMBS, &mut |_| Ok::<_, ()>(())).unwrap();
+                assert_eq!(&*delivered, &expected);
+                if tick == 3 {
+                    db.rebuild_standing_query(&cx, handle, allowance).unwrap();
+                    assert_eq!(db.standing_native_bag(&cx, handle, policy()).unwrap().1, expected);
+                }
+            }
+            after = at;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -1015,6 +1160,7 @@ fn addresses(db: &Database<MemVfs>, first: usize, root: usize) -> Vec<usize> {
             StandingQuery::Projection(query) => query.as_ref() as *const _ as usize,
             StandingQuery::Rows { output, .. } => output.as_ref() as *const _ as usize,
             StandingQuery::Set(query) => query.as_ref() as *const _ as usize,
+            StandingQuery::Join(query) => query.as_ref() as *const _ as usize,
             _ => panic!("component source, induced topology and ordinary projections only"),
         })
         .collect()
@@ -1033,6 +1179,19 @@ fn every_component_registration_and_rebuild_stage_rolls_back_its_private_suffix(
             labels.set_vertex_label(VId(vertex), LabelId(1), true);
         }
         db.write(&commit, labels).await.unwrap();
+        let names = |prefix: char| {
+            (1..=16)
+                .map(|id| format!("'{prefix}{id}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let wide = format!(
+            "CALL fnx.strongly_connected_components(\
+             {{labels:[{}],relations:[{}],parallel:'collapse',self_loops:'drop'}}) \
+             YIELD component AS group_id,vertex AS node RETURN group_id,node",
+            names('L'),
+            names('R'),
+        );
         for text in [
             call("strongly_connected_components"),
             labelled_call(
@@ -1040,6 +1199,7 @@ fn every_component_registration_and_rebuild_stage_rolls_back_its_private_suffix(
                 "relations:['R'],",
                 "self_loops:'drop'",
             ),
+            wide,
         ] {
             let query = PreparedGraphSetText::prepare(&text, symbols)
                 .unwrap()
@@ -1052,6 +1212,34 @@ fn every_component_registration_and_rebuild_stage_rolls_back_its_private_suffix(
             let (first, root) = (*first, handle.index);
             let before = db.standing_queries.len();
             let answer = db.standing_native_bag(&cx, &handle, policy()).unwrap();
+            let prepared = PreparedNativeRead::prepare(&text, &GqlParameters::new(), symbols).unwrap();
+            let (bound, width) = prepared
+                .subscription_footprint(&cx, &GqlParameters::new())
+                .unwrap();
+            assert_eq!(width, 2);
+            assert_eq!(bound, u64::try_from(root - first + 2).unwrap());
+            if text.contains("'L16'") {
+                // The topology and analytic leaf need forty owners:
+                // sixteen label leaves, fifteen DISTINCT owners, two edge
+                // leaves and UNION ALL, four topology owners and two analytic
+                // owners. Any outer RETURN projection is counted as well.
+                assert!(root - first + 1 >= 40);
+                assert!(bound >= 41);
+            }
+            for tight in [
+                GqlQueryPolicy::new(0, 100_000, 10_000_000, 10_000_000),
+                GqlQueryPolicy::new(100_000, 0, 10_000_000, 10_000_000),
+                GqlQueryPolicy::new(100_000, 100_000, 0, 10_000_000),
+                GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 0),
+            ] {
+                assert!(register(&mut db, &cx, &query, tight).is_err());
+                assert_eq!(db.standing_queries.len(), before);
+                let identity = addresses(&db, first, root);
+                assert!(db.rebuild_standing_query(&cx, &handle, tight).is_err());
+                assert_eq!(addresses(&db, first, root), identity);
+                assert_eq!(db.standing_queries.len(), before);
+                assert_eq!(db.standing_native_bag(&cx, &handle, policy()).unwrap(), answer);
+            }
             let mut calls = 0;
             {
                 let mut staged = Staging::new(&mut db);

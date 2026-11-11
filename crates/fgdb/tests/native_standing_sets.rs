@@ -152,11 +152,22 @@ fn selected_analytic_oracle(
     metric: &str,
     relation: Option<RelationId>,
 ) -> QueryResult {
+    union_analytic_oracle(db, metric, &[LabelId(1)], relation.as_slice())
+}
+
+fn union_analytic_oracle(
+    db: &Database<MemVfs>,
+    metric: &str,
+    labels: &[LabelId],
+    relations: &[RelationId],
+) -> QueryResult {
     let vertices: BTreeSet<_> = db
         .vertices()
         .unwrap()
         .iter()
-        .filter(|vertex| vertex.labels.contains(&LabelId(1)))
+        .filter(|vertex| {
+            labels.is_empty() || labels.iter().any(|label| vertex.labels.contains(label))
+        })
         .map(|vertex| vertex.vid)
         .collect();
     let edges: BTreeSet<_> = db
@@ -165,7 +176,7 @@ fn selected_analytic_oracle(
         .iter()
         .filter(|edge| {
             let edge = &edge.entry;
-            relation.is_none_or(|relation| edge.relation == relation)
+            (relations.is_empty() || relations.contains(&edge.relation))
                 && edge.src != edge.dst
                 && vertices.contains(&edge.src)
                 && vertices.contains(&edge.dst)
@@ -919,25 +930,276 @@ fn one_root_handle_repairs_failed_hidden_operands_and_preserves_independent_circ
 }
 
 #[test]
-fn maintained_analytics_refuse_union_selections_without_widening_the_graph() {
+fn maintained_motif_unions_follow_membership_and_parallel_support() {
     let ((), report) = run_async_under_lab(0x6e73_7204, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let params = GqlParameters::new();
-        for projection in ["labels:['L','R']", "relations:['R','S']"] {
+        let allowance = GqlQueryPolicy::new(100_000, 6, 10_000_000, 10_000_000);
+        let profiles: [(&str, &[LabelId], &[RelationId]); 3] = [
+            ("labels:['R','L','R'],", &[LabelId(1), LabelId(2)], &[]),
+            ("relations:['S','R','S'],", &[], &[RelationId(1), RelationId(2)]),
+            (
+                "labels:['R','L','R'],relations:['S','R','S'],",
+                &[LabelId(1), LabelId(2)],
+                &[RelationId(1), RelationId(2)],
+            ),
+        ];
+        let mut handles = Vec::new();
+        for metric in ["triangles", "clustering_coefficient", "core_number"] {
+            for &(projection, labels, relations) in &profiles {
+                let field = analytic_field(metric);
+                let text = format!(
+                    "CALL fnx.{metric}({{{projection}direction:'undirected',\
+                     parallel:'collapse',self_loops:'drop'}}) \
+                     YIELD vertex AS node,{field} AS value RETURN node,value"
+                );
+                let handle = db
+                    .register_standing_native(&cx, &text, &params, symbols, allowance)
+                    .unwrap();
+                let (_, delivered) = db.standing_native_bag(&cx, &handle, policy()).unwrap();
+                handles.push((metric, labels, relations, text, handle, delivered));
+            }
+        }
+        let mut after = db.frontier().unwrap();
+        for tick in 0..13 {
+            let relation = match tick {
+                1 | 6 => RelationId(2),
+                2 => RelationId(3),
+                _ => RelationId(1),
+            };
+            let mut change = WriteBatch::new(relation);
+            match tick {
+                0 => {
+                    for (id, labels) in [
+                        (0, vec![LabelId(1)]),
+                        (1, vec![LabelId(2)]),
+                        (2, vec![LabelId(1), LabelId(2)]),
+                        (3, vec![]),
+                        (4, vec![LabelId(3)]),
+                        (u128::MAX, vec![LabelId(2)]),
+                    ] {
+                        change.create_vertex(VId(id), labels, vec![]);
+                    }
+                    for (id, a, b) in [
+                        (10, 0, 1),
+                        (11, 1, 2),
+                        (12, 3, 0),
+                        (13, u128::MAX, u128::MAX),
+                        (14, 0, 1),
+                    ] {
+                        change.add_edge(EId(id), VId(a), VId(b), vec![]);
+                    }
+                }
+                1 => {
+                    for (id, a, b) in [(20, 2, 0), (21, 0, 1), (22, 2, 3)] {
+                        change.add_edge(EId(id), VId(a), VId(b), vec![]);
+                    }
+                }
+                2 => {
+                    // An excluded third type would change the motif counts
+                    // if a union were widened to the whole graph.
+                    change.add_edge(EId(30), VId(0), VId(u128::MAX), vec![]);
+                    change.add_edge(EId(31), VId(u128::MAX), VId(1), vec![]);
+                }
+                3 => {
+                    change.set_vertex_label(VId(2), LabelId(1), false);
+                }
+                4 => {
+                    // Both membership inputs change in one atomic tick.
+                    change.set_vertex_label(VId(0), LabelId(1), false);
+                    change.set_vertex_label(VId(0), LabelId(2), true);
+                }
+                5 => {
+                    change.delete_edge(EId(10));
+                    change.delete_edge(EId(14));
+                }
+                6 => {
+                    change.delete_edge(EId(21));
+                }
+                7 => {
+                    change.set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(99)));
+                }
+                8 => {
+                    change.set_vertex_label(VId(3), LabelId(2), true);
+                }
+                9 => {
+                    // Endpoint selection and edge removal share a successor;
+                    // no transient half-selected topology may be published.
+                    change.set_vertex_label(VId(2), LabelId(2), false);
+                    change.delete_edge(EId(11));
+                }
+                10 => {
+                    change.set_vertex_label(VId(u128::MAX), LabelId(2), false);
+                }
+                11 => {
+                    change.set_vertex_label(VId(u128::MAX), LabelId(1), true);
+                }
+                _ => {
+                    change.delete_vertex(VId(3));
+                }
+            }
+            let at = db.write(&commit, change).await.unwrap();
+            for (metric, labels, relations, text, handle, delivered) in &mut handles {
+                let expected = union_analytic_oracle(&db, metric, labels, relations);
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap(),
+                    (at, expected),
+                    "{text}, tick {tick}"
+                );
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                    db.query(&cx, text, &params, symbols, policy()).unwrap(),
+                    "fresh projection: {text}, tick {tick}"
+                );
+                let (frontier, delta) = db
+                    .standing_native_delta(&cx, handle, after, policy())
+                    .unwrap();
+                assert_eq!(frontier, at);
+                if matches!(tick, 3 | 4 | 5 | 7) {
+                    assert!(delta.is_empty(), "unchanged support: {text}, tick {tick}");
+                }
+                delivered
+                    .integrate(&delta, fgdb_delta_types::LimbLimit::new(4), &mut |_| {
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                let (_, current) = db.standing_native_bag(&cx, handle, policy()).unwrap();
+                assert_eq!(&*delivered, &current);
+                if tick == 6 {
+                    // Rebuild must remap the shared vertex dependency once.
+                    db.rebuild_standing_query(&cx, handle, allowance).unwrap();
+                    assert_eq!(
+                        db.standing_native_bag(&cx, handle, policy()).unwrap().1,
+                        current
+                    );
+                }
+            }
+            after = at;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn maintained_motif_unions_accept_all_sixteen_selected_ids_without_widening() {
+    let ((), report) = run_async_under_lab(0x6e73_7205, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let params = GqlParameters::new();
+        let resolve = |kind, name: &str| match kind {
+            GraphSymbolKind::Label => name
+                .strip_prefix('L')
+                .and_then(|id| id.parse::<u64>().ok())
+                .map(|id| GraphSymbol::Label(LabelId(id))),
+            GraphSymbolKind::Relation => name
+                .strip_prefix('R')
+                .and_then(|id| id.parse::<u64>().ok())
+                .map(|id| GraphSymbol::Relation(RelationId(id))),
+            _ => None,
+        };
+        let mut seed = WriteBatch::new(RelationId(1));
+        for (id, labels) in [
+            (0, vec![LabelId(1)]),
+            (1, vec![LabelId(9)]),
+            (2, vec![LabelId(1), LabelId(16)]),
+            (3, vec![LabelId(17)]),
+            (u128::MAX, vec![LabelId(16)]),
+        ] {
+            seed.create_vertex(VId(id), labels, vec![]);
+        }
+        seed.add_edge(EId(10), VId(0), VId(1), vec![]);
+        db.write(&commit, seed).await.unwrap();
+        let mut ninth = WriteBatch::new(RelationId(9));
+        ninth.add_edge(EId(11), VId(1), VId(2), vec![]);
+        db.write(&commit, ninth).await.unwrap();
+        let mut sixteenth = WriteBatch::new(RelationId(16));
+        for (id, a, b) in [(12, 2, 0), (13, 0, 3), (14, 3, 1)] {
+            sixteenth.add_edge(EId(id), VId(a), VId(b), vec![]);
+        }
+        db.write(&commit, sixteenth).await.unwrap();
+        let mut excluded = WriteBatch::new(RelationId(17));
+        excluded.add_edge(EId(15), VId(0), VId(u128::MAX), vec![]);
+        excluded.add_edge(EId(16), VId(u128::MAX), VId(1), vec![]);
+        db.write(&commit, excluded).await.unwrap();
+        let labels: Vec<_> = (1..=16).map(LabelId).collect();
+        let relations: Vec<_> = (1..=16).map(RelationId).collect();
+        let names = |prefix: char, count: u64| {
+            (1..=count)
+                .rev()
+                .map(|id| format!("'{prefix}{id}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mut handles = Vec::new();
+        for metric in ["triangles", "clustering_coefficient", "core_number"] {
+            let field = analytic_field(metric);
             let text = format!(
-                "CALL fnx.triangles({{{projection},parallel:'collapse',self_loops:'drop'}}) \
+                "CALL fnx.{metric}({{labels:[{},'L16'],relations:[{},'R9'],\
+                 direction:'undirected',parallel:'collapse',self_loops:'drop'}}) \
+                 YIELD vertex AS node,{field} AS value RETURN node,value",
+                names('L', 16),
+                names('R', 16),
+            );
+            let handle = db
+                .register_standing_native(&cx, &text, &params, resolve, policy())
+                .unwrap();
+            assert_eq!(
+                db.standing_native_query(&cx, &handle, policy()).unwrap().1,
+                union_analytic_oracle(&db, metric, &labels, &relations)
+            );
+            assert_eq!(
+                db.standing_native_query(&cx, &handle, policy()).unwrap().1,
+                db.query(&cx, &text, &params, resolve, policy()).unwrap()
+            );
+            handles.push((metric, text, handle));
+        }
+        for tick in 0..3 {
+            let mut change = WriteBatch::new(RelationId(9));
+            match tick {
+                0 => {
+                    change.delete_edge(EId(11));
+                }
+                1 => {
+                    change.set_vertex_label(VId(1), LabelId(9), false);
+                }
+                _ => {
+                    change.set_vertex_label(VId(1), LabelId(16), true);
+                    change.add_edge(EId(17), VId(1), VId(2), vec![]);
+                }
+            }
+            db.write(&commit, change).await.unwrap();
+            for (metric, text, handle) in &handles {
+                let expected = union_analytic_oracle(&db, metric, &labels, &relations);
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                    expected,
+                    "{text}, tick {tick}"
+                );
+                db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                    expected
+                );
+            }
+        }
+        // Seventeen DISTINCT labels or types still refuse during preparation.
+        for selection in [
+            format!("labels:[{}]", names('L', 17)),
+            format!("relations:[{}]", names('R', 17)),
+        ] {
+            let text = format!(
+                "CALL fnx.triangles({{{selection},parallel:'collapse',self_loops:'drop'}}) \
                  YIELD vertex,triangles RETURN vertex,triangles"
             );
-            // The batch host accepts the graph; its maintained derivative
-            // still requires a scalar selector in each identity domain.
-            assert!(db.query(&cx, &text, &params, symbols, policy()).is_ok());
-            assert!(matches!(
-                db.register_standing_native(&cx, &text, &params, symbols, policy()),
-                Err(StandingQueryError::Unsupported)
-            ));
+            assert!(
+                db.register_standing_native(&cx, &text, &params, resolve, policy())
+                    .is_err()
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

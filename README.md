@@ -232,8 +232,13 @@ allowed by the session.
 These selections apply to ordinary, authorized, transactional and decoded
 buffered analytics. A sealed view still holds one relationship partition, so
 it supports label unions with exactly one matching relationship type.
-Maintained analytics with scalar selectors reject unions explicitly. The
-new union integration remains pending runtime qualification; see
+Native standing queries and server subscriptions carry these unions through
+connected components, weakly/strongly connected components, core numbers,
+triangle counts and clustering coefficients. They preserve isolated vertices,
+overlapping label membership and counted parallel-edge support as commits
+change the graph. Server subscriptions retain their existing requirement for
+unrestricted label, relationship and property scope. The new integration
+remains pending runtime qualification; see
 [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).
 
 ## The six bets

@@ -4,13 +4,14 @@
 //! Rebuild prepares a complete replacement suffix before swapping any old node.
 
 use super::*;
-use fgdb_delta_types::{LabelId, zset::set::SetOperation};
+use fgdb_delta_types::{LabelId, SchemaSelection, zset::set::SetOperation};
 use fgdb_gql::PreparedGraphSetAggregate;
 use fgdb_gql::algebra::{
-    EdgeRelation, GlaDirection, GraphColumn, GraphPatternBuilder, VertexPredicate,
+    EdgeRelation, GlaDirection, GraphColumn, GraphPatternBuilder, MAX_EDGE_RELATION_ALTERNATIVES,
+    VertexPredicate,
 };
 use fgdb_gql::row_aggregate::definition::GroupDefinition;
-use fgdb_gql::row_join::RowJoinKind;
+use fgdb_gql::row_join::{RowJoinKind, RowJoinSpec};
 use fgdb_gql::row_projection::RowProjectionSpec;
 use fgdb_gql::row_window::RowWindowSpec;
 use fgdb_gql::{
@@ -21,40 +22,149 @@ use fgdb_prism::{
     FnxAlgorithm, FnxOutput, FnxWeightSpec, FoundationAlgorithm, ParallelEdgePolicy, SelfLoopPolicy,
 };
 
+pub(super) enum AnalyticTopology {
+    Pattern(Box<PreparedGraphSet>),
+    // Compile each source once, then share the selected vertex relation
+    // between both endpoint semijoins and the isolate lifetime projection.
+    Union {
+        vertices: Box<PreparedGraphSet>,
+        edges: Box<PreparedGraphSet>,
+    },
+}
+
 pub(super) enum AnalyticSource {
     Components(components::ComponentRelation),
     SelectedComponents {
-        input: Box<PreparedGraphSet>,
+        input: AnalyticTopology,
         strong: bool,
     },
     CoreNumbers(Option<RelationId>),
     SelectedCoreNumbers {
-        input: Box<PreparedGraphSet>,
+        input: AnalyticTopology,
     },
     TriangleCounts(Option<RelationId>, triangle_counts::Output),
     SelectedTriangleCounts {
-        input: Box<PreparedGraphSet>,
+        input: AnalyticTopology,
         output: triangle_counts::Output,
     },
 }
 
 fn component_source(
-    relation: Option<RelationId>,
-    label: Option<LabelId>,
+    relations: SchemaSelection<RelationId>,
+    labels: SchemaSelection<LabelId>,
     strong: bool,
 ) -> Result<AnalyticSource, StandingQueryError> {
-    let Some(label) = label else {
-        return Ok(AnalyticSource::Components(match (strong, relation) {
+    if labels.is_all() && (relations.is_all() || relations.single().is_some()) {
+        return Ok(AnalyticSource::Components(match (strong, relations.single()) {
             (false, Some(relation)) => components::ComponentRelation::Weak(relation),
             (true, Some(relation)) => components::ComponentRelation::Strong(relation),
             (false, None) => components::ComponentRelation::WeakAll,
             (true, None) => components::ComponentRelation::StrongAll,
         }));
-    };
+    }
     Ok(AnalyticSource::SelectedComponents {
-        input: selected_topology(relation, label)?,
+        input: analytic_topology(relations, labels)?,
         strong,
     })
+}
+
+fn analytic_topology(
+    relations: SchemaSelection<RelationId>,
+    labels: SchemaSelection<LabelId>,
+) -> Result<AnalyticTopology, StandingQueryError> {
+    if let Some(label) = labels.single()
+        && (relations.is_all() || relations.single().is_some())
+    {
+        // Preserve the existing compact source and its admission footprint.
+        return Ok(AnalyticTopology::Pattern(selected_topology(
+            relations.single(),
+            label,
+        )?));
+    }
+    let vertices = match labels.members() {
+        None => topology_vertices(None)?,
+        Some(labels) => {
+            let (first, rest) = labels.split_first().ok_or(StandingQueryError::Unsupported)?;
+            let mut vertices = topology_vertices(Some(*first))?;
+            for &label in rest {
+                // ANY label is one vertex lifetime, even if several selected
+                // labels overlap or change together on a committed tick.
+                vertices = vertices
+                    .combine(
+                        GraphSetOperation::Union,
+                        GraphSetQuantifier::Distinct,
+                        topology_vertices(Some(label))?,
+                    )
+                    .map_err(StandingQueryError::SetSchema)?;
+            }
+            vertices
+        }
+    };
+    let edges = match relations.members() {
+        None => topology_edges(EdgeRelation::Any)?,
+        Some(relations) => {
+            // A graph atom admits eight types; the Prism selector admits
+            // sixteen. Disjoint canonical chunks preserve every edge's
+            // counted support without changing either public bound.
+            let mut chunks = relations.chunks(MAX_EDGE_RELATION_ALTERNATIVES);
+            let first = chunks.next().ok_or(StandingQueryError::Unsupported)?;
+            let mut edges = topology_edges(
+                EdgeRelation::alternation(first).ok_or(StandingQueryError::Unsupported)?,
+            )?;
+            for chunk in chunks {
+                edges = edges
+                    .combine(
+                        GraphSetOperation::Union,
+                        GraphSetQuantifier::All,
+                        topology_edges(
+                            EdgeRelation::alternation(chunk)
+                                .ok_or(StandingQueryError::Unsupported)?,
+                        )?,
+                    )
+                    .map_err(StandingQueryError::SetSchema)?;
+            }
+            edges
+        }
+    };
+    Ok(AnalyticTopology::Union {
+        vertices: Box::new(vertices),
+        edges: Box::new(edges),
+    })
+}
+
+fn topology_vertices(label: Option<LabelId>) -> Result<PreparedGraphSet, StandingQueryError> {
+    let mut pattern = GraphPatternBuilder::new();
+    pattern
+        .vertex("v")
+        .map_err(|_| StandingQueryError::Unsupported)?;
+    if let Some(label) = label {
+        pattern
+            .filter("v", VertexPredicate::HasLabel(label))
+            .map_err(|_| StandingQueryError::Unsupported)?;
+    }
+    Ok(pattern
+        .prepare_values(&[GraphColumn::vertex("v", "v")], 0, None)
+        .map_err(|_| StandingQueryError::Unsupported)?
+        .with_duplicates()
+        .into())
+}
+
+fn topology_edges(relation: EdgeRelation) -> Result<PreparedGraphSet, StandingQueryError> {
+    let mut pattern = GraphPatternBuilder::new();
+    pattern
+        .vertex("a")
+        .and_then(|pattern| pattern.vertex("b"))
+        .and_then(|pattern| pattern.edge("a", relation, GlaDirection::Forward, "b"))
+        .map_err(|_| StandingQueryError::Unsupported)?;
+    Ok(pattern
+        .prepare_values(
+            &[GraphColumn::vertex("a", "a"), GraphColumn::vertex("b", "b")],
+            0,
+            None,
+        )
+        .map_err(|_| StandingQueryError::Unsupported)?
+        .with_duplicates()
+        .into())
 }
 
 fn selected_topology(
@@ -109,28 +219,28 @@ fn selected_topology(
 }
 
 fn core_source(
-    relation: Option<RelationId>,
-    label: Option<LabelId>,
+    relations: SchemaSelection<RelationId>,
+    labels: SchemaSelection<LabelId>,
 ) -> Result<AnalyticSource, StandingQueryError> {
-    Ok(match label {
-        Some(label) => AnalyticSource::SelectedCoreNumbers {
-            input: selected_topology(relation, label)?,
-        },
-        None => AnalyticSource::CoreNumbers(relation),
+    if labels.is_all() && (relations.is_all() || relations.single().is_some()) {
+        return Ok(AnalyticSource::CoreNumbers(relations.single()));
+    }
+    Ok(AnalyticSource::SelectedCoreNumbers {
+        input: analytic_topology(relations, labels)?,
     })
 }
 
 fn triangle_source(
-    relation: Option<RelationId>,
-    label: Option<LabelId>,
+    relations: SchemaSelection<RelationId>,
+    labels: SchemaSelection<LabelId>,
     output: triangle_counts::Output,
 ) -> Result<AnalyticSource, StandingQueryError> {
-    Ok(match label {
-        Some(label) => AnalyticSource::SelectedTriangleCounts {
-            input: selected_topology(relation, label)?,
-            output,
-        },
-        None => AnalyticSource::TriangleCounts(relation, output),
+    if labels.is_all() && (relations.is_all() || relations.single().is_some()) {
+        return Ok(AnalyticSource::TriangleCounts(relations.single(), output));
+    }
+    Ok(AnalyticSource::SelectedTriangleCounts {
+        input: analytic_topology(relations, labels)?,
+        output,
     })
 }
 
@@ -151,31 +261,15 @@ pub(super) fn analytic_procedure(
     // Read the immutable input recipe only; no source is pinned or executed
     // at this placeholder cut. The analytic owner admits the live snapshot.
     let options = bound.options_at(CommitSeq(0));
-    // A union is supported by batch projection, but the current maintained
-    // topology owner has scalar selectors. Never widen a union to All while
-    // compiling a derivative that cannot yet retain that exact selection.
-    if options
-        .selection
-        .relations
-        .members()
-        .is_some_and(|ids| ids.len() > 1)
-        || options
-            .selection
-            .vertex_labels
-            .members()
-            .is_some_and(|ids| ids.len() > 1)
-    {
-        return Err(StandingQueryError::Unsupported);
-    }
-    let relation = options.selection.relations.single();
-    let label = options.selection.vertex_labels.single();
+    let relations = options.selection.relations;
+    let labels = options.selection.vertex_labels;
     if options.selection.weight != FnxWeightSpec::Unit
         || options.projection.parallel_edges != ParallelEdgePolicy::CollapseUnit
         || options.projection.self_loops == SelfLoopPolicy::Reject
     {
         return Err(StandingQueryError::Unsupported);
     }
-    if label.is_some()
+    if !labels.is_all()
         && !matches!(
             bound.algorithm(),
             FnxAlgorithm::ConnectedComponents
@@ -193,12 +287,12 @@ pub(super) fn analytic_procedure(
     // neither changes reachability between distinct vertices.
     let (source, value_type, value_field) = match bound.algorithm() {
         FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => (
-            component_source(relation, label, false)?,
+            component_source(relations, labels, false)?,
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
         FnxAlgorithm::StronglyConnectedComponents => (
-            component_source(relation, label, true)?,
+            component_source(relations, labels, true)?,
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
@@ -206,15 +300,15 @@ pub(super) fn analytic_procedure(
             if options.projection.self_loops == SelfLoopPolicy::Drop =>
         {
             (
-                core_source(relation, label)?,
+                core_source(relations, labels)?,
                 GraphSetColumnType::Scalar,
                 FnxOutput::Core,
             )
         }
         FnxAlgorithm::Triangles if options.projection.self_loops == SelfLoopPolicy::Drop => (
             triangle_source(
-                relation,
-                label,
+                relations,
+                labels,
                 triangle_counts::Output::Triangles,
             )?,
             GraphSetColumnType::Scalar,
@@ -222,8 +316,8 @@ pub(super) fn analytic_procedure(
         ),
         FnxAlgorithm::ClusteringCoefficient => (
             triangle_source(
-                relation,
-                label,
+                relations,
+                labels,
                 triangle_counts::Output::Clustering,
             )?,
             GraphSetColumnType::Scalar,
@@ -295,6 +389,77 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         let result = self.compile(cx, query, policy, checkpoint);
         self.group_input = previous;
         result
+    }
+
+    fn compile_topology(
+        &mut self,
+        cx: &QueryCx,
+        topology: &AnalyticTopology,
+        policy: GqlQueryPolicy,
+        checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
+    ) -> Result<usize, StandingQueryError> {
+        // Topology rows are private analytic input, including dense parallel
+        // edges. Every source/work/scratch ceiling still applies; only the
+        // final analytic/YIELD owners spend the delivered-row allowance.
+        let policy = group::input_policy(policy);
+        match topology {
+            AnalyticTopology::Pattern(input) => {
+                self.compile_group_input(cx, input, policy, checkpoint)
+            }
+            AnalyticTopology::Union { vertices, edges } => {
+                let vertices = self.compile_group_input(cx, vertices, policy, checkpoint)?;
+                let mut edges = self.compile_group_input(cx, edges, policy, checkpoint)?;
+                for endpoint in [0, 1] {
+                    let spec = RowJoinSpec::new(
+                        &[GraphSetColumnType::Vertex, GraphSetColumnType::Vertex],
+                        &[GraphSetColumnType::Vertex],
+                        &[(endpoint, 0)],
+                    )
+                    .map_err(StandingQueryError::JoinSchema)?
+                    .with_kind(RowJoinKind::Semi);
+                    let state = self.database.prepare_standing_join_spec(
+                        cx,
+                        [edges, vertices],
+                        &spec,
+                        policy,
+                        self.database.standing_queries.len(),
+                    )?;
+                    edges = self.append_private(StandingQuery::Join(Box::new(state)));
+                    checkpoint()?;
+                }
+                let spec = RowProjectionSpec::new(
+                    vec![GraphSetColumnType::Vertex],
+                    vec![
+                        GraphSetProjection::new("a", GraphSetValue::Column(0)),
+                        GraphSetProjection::new("b", GraphSetValue::Column(0)),
+                    ],
+                    GraphSetQuantifier::All,
+                )
+                .map_err(StandingQueryError::ProjectionSchema)?;
+                let state = self.database.prepare_standing_projection(
+                    cx,
+                    vertices,
+                    spec,
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                let lifetimes = self.append_private(StandingQuery::Projection(Box::new(state)));
+                checkpoint()?;
+                // Positional union retains the lifetime branch's a,b schema.
+                // Semijoins preserve exact left multiplicity; a label overlap
+                // never multiplies edge support, and isolated vertices remain.
+                let state = self.database.prepare_standing_set(
+                    cx,
+                    [lifetimes, edges],
+                    SetOperation::UnionAll,
+                    policy,
+                    self.database.standing_queries.len(),
+                )?;
+                let input = self.append_private(StandingQuery::Set(Box::new(state)));
+                checkpoint()?;
+                Ok(input)
+            }
+        }
     }
 
     // Internal consumers need the selected bag; native delivery also needs
@@ -417,12 +582,7 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                     // Selected topology is private input, not delivered rows.
                     // A dense component may contain far more edges than the
                     // final vertex membership allowance permits as results.
-                    let input = self.compile_group_input(
-                        cx,
-                        &input,
-                        group::input_policy(policy),
-                        checkpoint,
-                    )?;
+                    let input = self.compile_topology(cx, &input, policy, checkpoint)?;
                     StandingQuery::Components(Box::new(self.database.prepare_standing_components(
                         cx,
                         components::ComponentRelation::selected_rows(input, strong),
@@ -434,12 +594,7 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                         .prepare_standing_core_numbers(cx, relation, policy, true)?,
                 )),
                 AnalyticSource::SelectedCoreNumbers { input } => {
-                    let input = self.compile_group_input(
-                        cx,
-                        &input,
-                        group::input_policy(policy),
-                        checkpoint,
-                    )?;
+                    let input = self.compile_topology(cx, &input, policy, checkpoint)?;
                     StandingQuery::CoreNumbers(Box::new(
                         self.database.prepare_standing_selected_core_numbers(
                             cx,
@@ -460,12 +615,7 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                     ))
                 }
                 AnalyticSource::SelectedTriangleCounts { input, output } => {
-                    let input = self.compile_group_input(
-                        cx,
-                        &input,
-                        group::input_policy(policy),
-                        checkpoint,
-                    )?;
+                    let input = self.compile_topology(cx, &input, policy, checkpoint)?;
                     StandingQuery::TriangleCounts(Box::new(
                         self.database.prepare_standing_selected_triangle_counts(
                             cx,

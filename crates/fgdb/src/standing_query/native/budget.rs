@@ -96,9 +96,16 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
         | set::AnalyticSource::SelectedCoreNumbers { input }
         | set::AnalyticSource::SelectedTriangleCounts { input, .. } = source
         {
-            // The induced graph owns both labelled source leaves and their
-            // union, then the shared analytic engine and YIELD projection.
-            return circuit(cx, &input)?.append(2);
+            let topology = match input {
+                set::AnalyticTopology::Pattern(input) => circuit(cx, &input)?,
+                set::AnalyticTopology::Union { vertices, edges } => {
+                    // The vertex subtree is shared by both endpoint Semi
+                    // joins and the isolate projection, never compiled three
+                    // times. Count both subtrees and all four private owners.
+                    circuit(cx, &vertices)?.combine(circuit(cx, &edges)?, 4)?
+                }
+            };
+            return topology.append(2);
         }
         // One topology/analytics owner plus its exact YIELD projection.
         // The source binding has the two endpoint identity columns; outer
