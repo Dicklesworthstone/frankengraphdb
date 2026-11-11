@@ -73,6 +73,25 @@ impl PreparedGraphSetAggregate {
             .then_some(Self { summary })
     }
 
+    /// Retain an aggregate's entire input behind one source-aware owner.
+    /// Existing relational definitions keep every operand unchanged. Native
+    /// graph definitions use the same checked complete-input normalization as
+    /// external grouping, including COLLECT's separate occurrence-order proof.
+    /// Counts, wide sums, exact averages, hidden HAVING inputs and output
+    /// clauses retain their original aggregate domains and semantics.
+    ///
+    /// The caller must admit every returned source at the same snapshot and
+    /// authority. Unsupported source shapes or widths return `None` before any
+    /// source access; this never substitutes a synthetic schema-only graph.
+    #[must_use]
+    pub fn from_complete_input(summary: PreparedGraphAggregate) -> Option<Self> {
+        if summary.input_relation().is_some() {
+            Some(Self { summary })
+        } else {
+            summary.complete_group_relation()
+        }
+    }
+
     /// Keep source ownership private while the native physical compiler reuses
     /// complete-group normalization. Every input and output clause remains in
     /// this definition; the consumer separately admits the entire relation.
