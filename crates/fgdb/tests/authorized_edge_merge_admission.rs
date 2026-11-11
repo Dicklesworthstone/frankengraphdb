@@ -123,7 +123,7 @@ fn refusing_final_rows_or_empty_output_discards_all_pair_creations() {
                     &prepared,
                     policy(),
                     || NOW,
-                    |rows, work| {
+                    |rows, work, _| {
                         calls += 1;
                         assert_eq!(
                             values(rows),
@@ -202,7 +202,7 @@ fn no_op_checked_admission_preserves_native_results_stats_and_clock_charges() {
                     &prepared,
                     policy(),
                     clock,
-                    |rows, _| {
+                    |rows, _, _| {
                         assert_eq!(
                             values(rows),
                             vec![vec![GraphValue::Scalar(CanonicalScalar::Int(7))]; 2]
@@ -269,7 +269,7 @@ fn output_meter_and_final_completion_recheck_the_same_live_permit() {
                     &prepared("RETURN r.value AS value LIMIT 0"),
                     policy(),
                     || now.get(),
-                    |rows, work| {
+                    |rows, work, _| {
                         entered = true;
                         assert!(rows.is_empty());
                         match mode {
@@ -325,7 +325,7 @@ fn native_failures_never_enter_host_admission_or_publish_a_prefix() {
                     &prepared(tail),
                     policy(),
                     || NOW,
-                    |_, _| {
+                    |_, _, _| {
                         entered = true;
                         Ok(())
                     },

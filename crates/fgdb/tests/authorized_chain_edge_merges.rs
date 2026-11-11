@@ -4247,7 +4247,7 @@ fn vertex_merge_native_limits_and_late_expiry_or_output_refusal_abort_every_step
                     &program,
                     policy(1),
                     || now.load(Ordering::Relaxed),
-                    |rows, meter| {
+                    |rows, meter, _| {
                         called += 1;
                         assert_eq!(rows.len(), 1);
                         assert_eq!(rows[0].values(), &[int(2)]);
@@ -4394,7 +4394,7 @@ fn terminal_vertex_merge_rows_stay_private_with_and_without_frozen_execution() {
                     &program,
                     policy(0).with_mutation_limit(0),
                     || NOW,
-                    |rows, meter| {
+                    |rows, meter, _| {
                         admitted += 1;
                         assert!(
                             rows.is_empty(),

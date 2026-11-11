@@ -74,7 +74,7 @@ impl<V: Vfs + Clone> Database<V> {
             query,
             policy,
             clock,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         )
         .await
     }
@@ -108,6 +108,7 @@ impl<V: Vfs + Clone> Database<V> {
         admit: impl FnOnce(
             &[fgdb_gql::algebra::GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<
         (
@@ -156,7 +157,7 @@ impl<V: Vfs + Clone> Database<V> {
                     &mut execution,
                     false,
                 )?;
-                let result = query_cx.with_restriction(|| {
+                let mut result = query_cx.with_restriction(|| {
                     let controls = RefCell::new(&mut execution);
                     let transaction = &*workspace.transaction();
                     vertex_upsert_returning(
@@ -259,14 +260,17 @@ impl<V: Vfs + Clone> Database<V> {
                     .permit
                     .charge_rows_at((execution.clock)(), rows)
                     .map_err(|error| source(WriteTxnError::Authorization(error)))?;
-                query_cx
-                    .with_restriction(|| {
-                        admit(&result.value, &mut |work| {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.work(work)
-                        })
-                    })
-                    .map_err(source)?;
+                crate::write_txn::authorized::output::admit_output(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    verified.predicates(),
+                    &mut execution,
+                    policy.merge.query,
+                    &mut result,
+                    admit,
+                )
+                .map_err(source)?;
                 execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
@@ -580,7 +584,7 @@ mod all_targets {
                 query,
                 policy,
                 clock,
-                |_, _| Ok(()),
+                |_, _, _| Ok(()),
             )
             .await
         }
@@ -605,6 +609,7 @@ mod all_targets {
             admit: impl FnOnce(
                 &[GraphValueRow],
                 &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+                &mut dyn crate::AuthorizedWriteOutput,
             ) -> Result<(), WriteTxnError>,
         ) -> Result<Receipt, UpsertFault> {
             let refusal = |error| staging(WriteTxnError::Authorization(error));
@@ -630,7 +635,7 @@ mod all_targets {
                             .map_err(WriteTxnError::Write)
                             .map_err(staging)?,
                     ));
-                    let (stats, result) = query_cx.with_restriction(|| {
+                    let (stats, mut result) = query_cx.with_restriction(|| {
                         apply_all(
                             workspace.transaction(),
                             self,
@@ -647,14 +652,17 @@ mod all_targets {
                         .permit
                         .charge_rows_at((execution.clock)(), rows)
                         .map_err(refusal)?;
-                    query_cx
-                        .with_restriction(|| {
-                            admit(&result.value, &mut |work| {
-                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                                execution.work(work)
-                            })
-                        })
-                        .map_err(staging)?;
+                    crate::write_txn::authorized::output::admit_output(
+                        workspace.transaction(),
+                        self,
+                        query_cx,
+                        verified.predicates(),
+                        &mut execution,
+                        policy.merge.query,
+                        &mut result,
+                        admit,
+                    )
+                    .map_err(staging)?;
                     execution.bind_decision(workspace.transaction());
                     let completion = workspace
                         .transaction()

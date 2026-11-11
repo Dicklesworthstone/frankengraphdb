@@ -295,7 +295,7 @@ fn declared_hidden_writes_refuse_before_post_write_metadata_or_empty_targets() {
                         &statement,
                         policy(),
                         || NOW,
-                        |_, _| {
+                        |_, _, _| {
                             admitted = true;
                             Ok(())
                         },

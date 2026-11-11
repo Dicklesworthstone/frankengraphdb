@@ -942,17 +942,31 @@ application output is admitted.
   `fgdb_protocol::json` holds the one strict JSON grammar and the cell
   encoding the CLI and the adapter share.
 - **The Bolt-compat subset** (`fgdbd serve --bolt-listen`, crate
-  `fgdb-bolt` plus `fgdb-server/src/bolt.rs`): `BoltCompatProfileV1`, the
-  plan's read-only negotiated downgrade, at Bolt 5.0. HELLO carries the hex
+  `fgdb-bolt` plus `fgdb-server/src/bolt.rs`): Bolt 5.0 read sessions and
+  bounded autocommit writes. This implemented extension does not qualify the
+  complete planned `BoltCompatProfileV2`. HELLO carries the hex
   capability token as a `bearer` credential or a `basic` password; a token no
   served database accepts is refused (`Neo.ClientError.Security.Unauthorized`)
   and the connection closes. RUN/PULL/DISCARD, BEGIN/COMMIT/ROLLBACK, RESET,
   GOODBYE and ROUTE (a single-server table, so `neo4j://` works) are served.
-  Every RUN executes on an authorized read session, which cannot express a
-  write: a mutating statement refuses before graph access with
-  `Neo.ClientError.Statement.AccessMode`. An explicit transaction holds one
-  read session, so all its statements read one generation; no lock is held
-  across round trips. Vertices, relationships and paths are returned as Bolt
+  Read RUN executes on an authorized read session, which cannot express a
+  write. An explicit transaction holds one read session, so all its statements
+  read one generation; writes inside it refuse with
+  `Neo.ClientError.Statement.AccessMode`, and no lock is held across round trips.
+  Autocommit write RUN binds a bounded request without effects; PULL or DISCARD
+  consumes it exactly once through the native authorized transaction owner.
+  RESET, GOODBYE or disconnect before consumption abandons that request.
+  Scalar, list, map and graph-valued write RETURN are admitted in full before
+  publication, even for PULL 1 or DISCARD. The graph values' labels, types,
+  endpoints and visible properties come from the final unpublished overlay,
+  through the same signed permit and cumulative native work/scratch allowance.
+  A deleted, absent or hidden identity cannot be hydrated. Metadata, depth,
+  frame-size, budget or authority failure aborts every staged effect. Once
+  committed, retained rows contain their own metadata and never issue a later
+  hydration query or replay the write. Graph-output regression sources are in
+  `tests/bolt_autocommit.rs`; the 2026-11-11 implementation remains unqualified
+  by runtime gates after the execution environment became unavailable.
+  Read vertices, relationships and paths are returned as Bolt
   graph values, including inside lists and maps. Their labels, relationship
   types, endpoints and properties are read through the same authorized
   session at the statement's selected sequence, including historical reads.
@@ -974,8 +988,8 @@ Not served, and refused with a typed error rather than approximated: the
 durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE,
 durable transaction preparation,
 explicit multi-statement transactions with ownership and
-reattachment, durable subscriptions with resume across reconnects, Bolt
-writes (`BoltCompatProfileV2`, post-1.0), and the
+reattachment, durable subscriptions with resume across reconnects, the full
+`BoltCompatProfileV2` contract, and the
 HTTP/2, gRPC and WebSocket adapters. Because results are ephemeral, a disconnect can lose undelivered
 rows but never a commit: a write's outcome is decided before its first frame.
 

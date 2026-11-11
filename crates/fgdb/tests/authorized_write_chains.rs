@@ -1230,7 +1230,7 @@ fn a_late_scope_expression_quota_or_output_refusal_discards_every_step() {
                 &program,
                 policy(1),
                 || NOW,
-                |rows, meter| {
+                |rows, meter, _| {
                     called += 1;
                     assert_eq!(rows.len(), 1);
                     meter(1)?;
@@ -1618,7 +1618,7 @@ fn selected_mutation_chains_preserve_hidden_fields_and_abort_every_late_refusal(
                 &program,
                 policy(1).with_mutation_limit(1),
                 || NOW,
-                |rows, meter| {
+                |rows, meter, _| {
                     calls += 1;
                     assert_eq!(
                         rows[0].values(),
@@ -2353,7 +2353,7 @@ fn authorized_post_write_read_charges_only_final_rows_and_admits_them_before_com
                     &continuation,
                     policy(1),
                     || NOW,
-                    |rows, meter| {
+                    |rows, meter, _| {
                         called += 1;
                         assert_eq!(rows.len(), 1);
                         assert_eq!(rows[0].values().len(), 3);
@@ -2923,7 +2923,7 @@ fn textual_read_authority_and_final_host_admission_precede_publication() {
                     &program,
                     policy(100),
                     || NOW,
-                    |rows, meter| {
+                    |rows, meter, _| {
                         called += 1;
                         assert_eq!(
                             case, 3,

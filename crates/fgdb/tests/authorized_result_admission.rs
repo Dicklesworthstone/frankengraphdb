@@ -1,9 +1,11 @@
 //! Host result admission shares the native transaction's rollback and permit.
 //! The callback sees final projected rows, not a rematch or a committed read.
 
+#![recursion_limit = "256"]
+
 use asupersync::security::key::AuthKey;
 use asupersync::{Budget, runtime::RuntimeBuilder};
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch, WriteTxnError};
+use fgdb::{AuthorizedWriteOutput, Database, DatabaseKeys, MemVfs, WriteBatch, WriteTxnError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::insertion::GraphInsertPolicy;
@@ -114,6 +116,7 @@ async fn checked(
     admit: impl FnOnce(
         &[GraphValueRow],
         &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        &mut dyn AuthorizedWriteOutput,
     ) -> Result<(), WriteTxnError>,
 ) -> Result<(Vec<GraphValueRow>, EmbeddedTxnCompletion), String> {
     let text = format!(
@@ -205,7 +208,7 @@ fn refusing_any_native_result_discards_all_private_effects_and_pins() {
                 &token,
                 kind,
                 false,
-                |rows, work| {
+                |rows, work, _| {
                     calls += 1;
                     assert_eq!(rows.len(), 1);
                     assert_eq!(
@@ -242,7 +245,7 @@ fn successful_admission_preserves_exact_rows_and_limit_zero_still_checks() {
                     &token,
                     kind,
                     empty,
-                    |rows, work| {
+                    |rows, work, _| {
                         assert!(admitted.is_none());
                         work(1)?;
                         admitted = Some(rows.to_vec());
@@ -281,7 +284,7 @@ fn admission_uses_the_same_live_work_budget_even_for_an_empty_result() {
                     &token,
                     kind,
                     true,
-                    |rows, work| {
+                    |rows, work, _| {
                         entered = true;
                         assert!(rows.is_empty());
                         work(u64::MAX)
@@ -313,7 +316,7 @@ fn issuer_retirement_inside_result_admission_is_not_followed_by_commit() {
                     &token,
                     kind,
                     false,
-                    |_, work| {
+                    |_, work, _| {
                         authority.retire();
                         work(0)
                     },
@@ -661,7 +664,7 @@ mod all_target_merge {
                     &prepared,
                     upsert_policy(2),
                     || NOW,
-                    |rows, work| {
+                    |rows, work, _| {
                         calls += 1;
                         assert_eq!(rows.len(), 2);
                         assert_eq!(
@@ -720,6 +723,470 @@ mod all_target_merge {
                 assert_eq!(db.frontier().unwrap().0, before.0 + 1);
                 assert_eq!(txn.outstanding_obligations(), 0);
             }
+        });
+    }
+}
+
+
+mod graph_output_metadata {
+    use super::*;
+    use fgdb_delta_types::ElementId;
+    use fgdb_gql::{
+        GlaExecutionStats, GlaLimitDimension, GraphElementMetadata, PreparedGraphWriteChainText,
+        ReverseSymbolCatalog,
+    };
+    use fgdb_types::EId;
+
+    fn catalog() -> ReverseSymbolCatalog {
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_label(L, "Item");
+        catalog.insert_relation(R, "LINK");
+        catalog.insert_property(K, "key");
+        catalog.insert_property(P, "value");
+        catalog
+    }
+
+    fn text(value: &str) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap())
+    }
+
+    fn properties(key: i64, value: i64) -> GraphValue {
+        GraphValue::map(vec![
+            ("key".into(), GraphValue::Scalar(CanonicalScalar::Int(key))),
+            ("value".into(), GraphValue::Scalar(CanonicalScalar::Int(value))),
+        ])
+        .unwrap()
+    }
+
+    fn vertex(rows: &[GraphValueRow]) -> ElementId {
+        let [GraphValue::Vertex(vertex)] = rows[0].values() else {
+            panic!("the native CREATE result must retain its vertex identity")
+        };
+        ElementId::Vertex(*vertex)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create(
+        db: &mut Database<MemVfs>,
+        commit: &CommitCx,
+        query: &QueryCx,
+        txn: &TxnCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        query_policy: GqlQueryPolicy,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<fgdb_gql::GqlQueryExecution<GraphValueRow>, String> {
+        let prepared = PreparedGraphInsertQueryText::prepare(
+            "CREATE (n:Item {key:2,value:20}) RETURN n",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        db.execute_graph_insert_query_authorized_checked(
+            txn,
+            query,
+            commit,
+            authority,
+            token,
+            "main",
+            &prepared,
+            GraphInsertPolicy::new(query_policy, 100, 100),
+            || NOW,
+            admit,
+        )
+        .await
+        .map(|(_, result, _)| result)
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn created_nodes_relationship_and_endpoints_hydrate_before_publication() {
+        run(async |commit, query, txn| {
+            let (mut db, authority, token) = fixture(commit).await;
+            let before = db.frontier().unwrap();
+            let prepared = PreparedGraphInsertQueryText::prepare(
+                "CREATE (a:Item {key:2,value:20})-[r:LINK {value:30}]->\
+                 (b:Item {key:3,value:40}) RETURN a,r,b",
+                R,
+                |kind, name: &str| match (kind, name) {
+                    (GraphSymbolKind::Relation, "LINK") => Some(GraphSymbol::Relation(R)),
+                    _ => symbols(kind, name),
+                },
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let names = catalog();
+            let mut admitted = false;
+            let (_, result, completion) = db
+                .execute_graph_insert_query_authorized_checked(
+                    txn,
+                    query,
+                    commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &prepared,
+                    GraphInsertPolicy::new(policy(), 100, 100),
+                    || NOW,
+                    |rows, work, output| {
+                        work(1)?;
+                        let [GraphValue::Vertex(a), GraphValue::Edge(edge), GraphValue::Vertex(b)] =
+                            rows[0].values()
+                        else {
+                            panic!("CREATE must preserve all three identity domains")
+                        };
+                        for (vertex, key, value) in [(*a, 2, 20), (*b, 3, 40)] {
+                            assert_eq!(
+                                output.metadata(
+                                    ElementId::Vertex(vertex),
+                                    GraphElementMetadata::Labels,
+                                    &names,
+                                )?,
+                                Some(GraphValue::List(vec![text("Item")].into_boxed_slice()))
+                            );
+                            assert_eq!(
+                                output.metadata(
+                                    ElementId::Vertex(vertex),
+                                    GraphElementMetadata::Properties,
+                                    &names,
+                                )?,
+                                Some(properties(key, value))
+                            );
+                        }
+                        for (kind, expected) in [
+                            (GraphElementMetadata::Type, text("LINK")),
+                            (GraphElementMetadata::StartNode, GraphValue::Vertex(*a)),
+                            (GraphElementMetadata::EndNode, GraphValue::Vertex(*b)),
+                            (
+                                GraphElementMetadata::Properties,
+                                GraphValue::map(vec![(
+                                    "value".into(),
+                                    GraphValue::Scalar(CanonicalScalar::Int(30)),
+                                )])
+                                .unwrap(),
+                            ),
+                        ] {
+                            assert_eq!(
+                                output.metadata(ElementId::Edge(*edge), kind, &names)?,
+                                Some(expected)
+                            );
+                        }
+                        admitted = true;
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(admitted);
+            assert_eq!(result.value.len(), 1);
+            assert!(matches!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { .. }
+            ));
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert_eq!(db.vertices().unwrap().len(), 3);
+            assert_eq!(db.edges().unwrap().len(), 1);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        });
+    }
+
+    #[test]
+    fn mutation_and_merge_metadata_read_the_final_staged_property_value() {
+        run(async |commit, query, txn| {
+            for kind in [Kind::Mutation, Kind::Merge] {
+                let (mut db, authority, token) = fixture(commit).await;
+                let names = catalog();
+                checked(
+                    &mut db,
+                    commit,
+                    query,
+                    txn,
+                    &authority,
+                    &token,
+                    kind,
+                    false,
+                    |_, _, output| {
+                        assert_eq!(
+                            output.metadata(
+                                ElementId::Vertex(VId(1)),
+                                GraphElementMetadata::Properties,
+                                &names,
+                            )?,
+                            Some(properties(1, 20))
+                        );
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn hidden_fields_and_relationship_endpoints_are_masked_before_catalog_access() {
+        run(async |commit, query, txn| {
+            let mut observations = Vec::new();
+            for hidden in [false, true] {
+                let (mut db, authority, _) = fixture(commit).await;
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(3), vec![L], vec![]);
+                if hidden {
+                    seed.set_vertex_label(VId(1), LabelId(2), true);
+                    seed.set_vertex_property(
+                        VId(1),
+                        PropertyKeyId(3),
+                        Some(CanonicalScalar::Int(999)),
+                    );
+                    seed.create_vertex(VId(2), vec![LabelId(2)], vec![]);
+                    seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+                }
+                db.write(commit, seed).await.unwrap();
+                let token = authority
+                    .issue_at(
+                        &Grant {
+                            branch: "main".into(),
+                            labels: Scope::only([L]),
+                            relations: Scope::only([R]),
+                            properties: Scope::only([K, P]),
+                            rights: Rights::ReadWrite,
+                            limits: QueryLimits {
+                                max_nodes: 1_000_000,
+                                max_work: 100_000_000,
+                                max_rows: 100_000,
+                            },
+                            expires_at_ms: 1000,
+                        },
+                        NOW,
+                    )
+                    .unwrap();
+                // Deliberately omit the protected label and property names.
+                let names = catalog();
+                let result = create(
+                    &mut db,
+                    commit,
+                    query,
+                    txn,
+                    &authority,
+                    &token,
+                    policy(),
+                    |_, _, output| {
+                        assert_eq!(
+                            output.metadata(
+                                ElementId::Vertex(VId(1)),
+                                GraphElementMetadata::Properties,
+                                &names,
+                            )?,
+                            Some(properties(1, 10))
+                        );
+                        assert_eq!(
+                            output.metadata(
+                                ElementId::Vertex(VId(1)),
+                                GraphElementMetadata::Labels,
+                                &names,
+                            )?,
+                            Some(GraphValue::List(vec![text("Item")].into_boxed_slice()))
+                        );
+                        for kind in [
+                            GraphElementMetadata::Type,
+                            GraphElementMetadata::Properties,
+                            GraphElementMetadata::StartNode,
+                            GraphElementMetadata::EndNode,
+                        ] {
+                            assert_eq!(
+                                output.metadata(ElementId::Edge(EId(1)), kind, &names)?,
+                                None,
+                                "an edge with a hidden endpoint must observe like an absent edge"
+                            );
+                        }
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+                observations.push(result.evaluator);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+            assert_eq!(observations[0], observations[1]);
+        });
+    }
+
+    #[test]
+    fn metadata_spends_the_cumulative_native_work_and_scratch_allowance() {
+        run(async |commit, query, txn| {
+            let mut baseline = None;
+            let mut measured: Option<GlaExecutionStats> = None;
+            for mode in 0..5 {
+                let (mut db, authority, token) = fixture(commit).await;
+                let before = (db.frontier().unwrap(), db.vertices().unwrap());
+                let mut limits = policy();
+                if mode >= 2 {
+                    let used = measured.unwrap();
+                    limits.evaluator.max_work_units = used.work_units - u64::from(mode == 3);
+                    limits.evaluator.max_scratch_entries =
+                        used.scratch_entries - u64::from(mode == 4);
+                }
+                let names = catalog();
+                let mut refusal = None;
+                let result = create(
+                    &mut db,
+                    commit,
+                    query,
+                    txn,
+                    &authority,
+                    &token,
+                    limits,
+                    |rows, _, output| {
+                        if mode == 0 {
+                            return Ok(());
+                        }
+                        let value = match output.metadata(
+                            vertex(rows),
+                            GraphElementMetadata::Properties,
+                            &names,
+                        ) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                if let WriteTxnError::OutputLimit(limit) = &error {
+                                    refusal = Some(limit.dimension);
+                                }
+                                return Err(error);
+                            }
+                        };
+                        assert_eq!(value, Some(properties(2, 20)));
+                        Ok(())
+                    },
+                )
+                .await;
+                if mode >= 3 {
+                    assert!(result.is_err());
+                    assert_eq!(
+                        refusal,
+                        Some(if mode == 3 {
+                            GlaLimitDimension::WorkUnits
+                        } else {
+                            GlaLimitDimension::ScratchEntries
+                        })
+                    );
+                    assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+                } else {
+                    let used = result.unwrap().evaluator;
+                    match mode {
+                        0 => baseline = Some(used),
+                        1 => {
+                            let base = baseline.unwrap();
+                            assert!(used.work_units > base.work_units);
+                            assert!(used.scratch_entries > base.scratch_entries);
+                            measured = Some(used);
+                        }
+                        _ => assert_eq!(Some(used), measured),
+                    }
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn swallowed_work_metadata_and_live_authority_refusals_cannot_publish() {
+        run(async |commit, query, txn| {
+            for kind in [Kind::Create, Kind::Mutation, Kind::Merge] {
+                for mode in 0..3 {
+                    let (mut db, authority, token) = fixture(commit).await;
+                    let before = (db.frontier().unwrap(), db.vertices().unwrap());
+                    let mut refused = false;
+                    let result = checked(
+                        &mut db,
+                        commit,
+                        query,
+                        txn,
+                        &authority,
+                        &token,
+                        kind,
+                        false,
+                        |_, work, output| {
+                            if mode == 0 {
+                                assert!(work(u64::MAX).is_err());
+                            } else {
+                                let names = if mode == 1 {
+                                    ReverseSymbolCatalog::new()
+                                } else {
+                                    authority.retire();
+                                    catalog()
+                                };
+                                let error = output
+                                    .metadata(
+                                        ElementId::Vertex(VId(1)),
+                                        GraphElementMetadata::Properties,
+                                        &names,
+                                    )
+                                    .unwrap_err();
+                                if mode == 2 {
+                                    assert!(matches!(error, WriteTxnError::Authorization(_)));
+                                }
+                            }
+                            refused = true;
+                            Ok(())
+                        },
+                    )
+                    .await;
+                    assert!(refused);
+                    assert!(result.is_err(), "{kind:?}, refusal mode {mode}");
+                    assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+                    assert_eq!(txn.outstanding_obligations(), 0);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn hydrating_a_retired_chain_identity_refuses_and_rolls_back_the_delete() {
+        run(async |commit, query, txn| {
+            let (mut db, authority, token) = fixture(commit).await;
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            let chain = PreparedGraphWriteChainText::prepare(
+                "MATCH (n:Item {key:1}) FOREACH (i IN [1] | DELETE n) RETURN n",
+                R,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let names = catalog();
+            let mut refused = false;
+            let result = db
+                .execute_graph_write_chain_authorized_checked(
+                    txn,
+                    query,
+                    commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &chain,
+                    GraphInsertPolicy::new(policy(), 100, 100).with_mutation_limit(100),
+                    || NOW,
+                    |rows, _, output| {
+                        let error = output
+                            .metadata(vertex(rows), GraphElementMetadata::Properties, &names)
+                            .unwrap_err();
+                        assert!(matches!(error, WriteTxnError::DeletedElementRead));
+                        refused = true;
+                        Err(error)
+                    },
+                )
+                .await;
+            assert!(refused);
+            assert!(result.is_err());
+            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            assert_eq!(txn.outstanding_obligations(), 0);
         });
     }
 }

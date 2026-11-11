@@ -572,6 +572,9 @@ pub enum WriteTxnError {
     /// diagnostics can contain protected identities or CAS values and do not
     /// escape this boundary. Never used for an admitted commit's outcome.
     AuthorizedMutationRefused,
+    /// Final host graph-value hydration exhausted the cumulative native
+    /// evaluator policy before any write could be published.
+    OutputLimit(fgdb_gql::GlaLimitExceeded),
     /// An authorized write named a client-chosen identity for a creation or
     /// ensure intent. Authorized creations take engine-allocated identities
     /// only (fgdb-hxgm1, owner ruling 2026-10-07): a chosen identity would let
@@ -659,6 +662,7 @@ impl core::fmt::Display for WriteTxnError {
                 write!(formatter, "write authorization refused: {source}")
             }
             Self::AuthorizedMutationRefused => formatter.write_str("authorized mutation refused"),
+            Self::OutputLimit(source) => source.fmt(formatter),
             Self::AuthorizedClientIdentity => formatter.write_str(
                 "authorized creation takes an engine-allocated identity, not a chosen one",
             ),
@@ -734,6 +738,7 @@ impl core::error::Error for WriteTxnError {
         match self {
             Self::StatementTime(source) => Some(source),
             Self::Authorization(source) => Some(source),
+            Self::OutputLimit(source) => Some(source),
             Self::Interrupted(source) => Some(source.as_ref()),
             Self::BasisRebuild(source) => Some(source.as_ref()),
             Self::Read(source) => Some(source),

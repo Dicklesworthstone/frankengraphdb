@@ -5,6 +5,7 @@
 mod conditional;
 mod difference;
 mod edge_upsert_output;
+pub(crate) use edge_upsert_output::metadata as graph_output_value;
 pub(crate) mod ordered;
 mod prepared;
 mod read_batch;
@@ -433,7 +434,7 @@ async fn write_inner(
                 "a deferred write cannot return rows",
             ));
         }
-        return write_returning_checked(cx, db, token, returning, deferred, |_, rows, _| Ok(rows))
+        return write_returning_checked(cx, db, token, returning, deferred, |_, rows, _, _| Ok(rows))
             .await;
     }
     let guard = db.db.write(cx).await.map_err(Refusal::from)?;
@@ -872,7 +873,7 @@ async fn write_returning(
     token: &CapabilityToken,
     prepared: Returning,
 ) -> Result<Answer, Refusal> {
-    write_returning_checked(cx, db, token, prepared, None, |_, rows, _| Ok(rows)).await
+    write_returning_checked(cx, db, token, prepared, None, |_, rows, _, _| Ok(rows)).await
 }
 
 /// A surface owns its final representation BEFORE the native commit, not a
@@ -895,6 +896,7 @@ pub(crate) async fn write_returning_checked<R: Send>(
         &[String],
         Vec<Vec<WireValue>>,
         &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+        &mut dyn fgdb::AuthorizedWriteOutput,
     ) -> Result<R, Refusal>
     + Send,
 ) -> Result<Answer<R>, Refusal> {
@@ -932,6 +934,7 @@ async fn write_returning_in_guard<R: Send>(
         &[String],
         Vec<Vec<WireValue>>,
         &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+        &mut dyn fgdb::AuthorizedWriteOutput,
     ) -> Result<R, Refusal>
     + Send,
 ) -> Result<Answer<R>, Refusal> {
@@ -953,9 +956,10 @@ async fn write_returning_in_guard<R: Send>(
     let mut output_refusal = None;
     let mut output =
         |rows: &[fgdb_gql::algebra::GraphValueRow],
-         work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>| {
+         work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+         metadata: &mut dyn fgdb::AuthorizedWriteOutput| {
             let rows = edge_upsert_output::collect(&columns, rows, work)?;
-            collect(&columns, rows, work)
+            collect(&columns, rows, work, metadata)
         };
     let result = match &prepared {
         Returning::Chain(prepared) => guard
@@ -969,7 +973,7 @@ async fn write_returning_in_guard<R: Send>(
                 prepared,
                 policy.insertion_policy(),
                 unix_millis,
-                |rows, work| match output(rows, work) {
+                |rows, work, metadata| match output(rows, work, metadata) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -1000,7 +1004,7 @@ async fn write_returning_in_guard<R: Send>(
                 prepared,
                 policy.insertion_policy(),
                 unix_millis,
-                |rows, work| match output(rows, work) {
+                |rows, work, metadata| match output(rows, work, metadata) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -1034,7 +1038,7 @@ async fn write_returning_in_guard<R: Send>(
                 prepared,
                 policy.mutations,
                 unix_millis,
-                |rows, work| match output(rows, work) {
+                |rows, work, metadata| match output(rows, work, metadata) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -1063,7 +1067,7 @@ async fn write_returning_in_guard<R: Send>(
                 prepared,
                 policy.vertex_upsert_policy(),
                 unix_millis,
-                |rows, work| match output(rows, work) {
+                |rows, work, metadata| match output(rows, work, metadata) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -1097,7 +1101,7 @@ async fn write_returning_in_guard<R: Send>(
                 prepared,
                 policy.edge_upsert_policy(),
                 unix_millis,
-                |rows, work| match output(rows, work) {
+                |rows, work, metadata| match output(rows, work, metadata) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -1131,7 +1135,7 @@ async fn write_returning_in_guard<R: Send>(
                 prepared,
                 policy.edge_merge_policy(),
                 unix_millis,
-                |rows, work| match output(rows, work) {
+                |rows, work, metadata| match output(rows, work, metadata) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -1351,6 +1355,10 @@ pub(crate) fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refus
                 }
                 fgdb::WriteTxnError::Authorization(warden) => {
                     code = warden_code(*warden);
+                    break;
+                }
+                fgdb::WriteTxnError::OutputLimit(_) => {
+                    code = ErrorCode::Budget;
                     break;
                 }
                 fgdb::WriteTxnError::AuthorizedChainStepUnsupported { .. } => {

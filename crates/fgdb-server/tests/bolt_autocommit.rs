@@ -12,7 +12,7 @@ use fgdb_gql::GraphSymbolKind;
 use fgdb_protocol::body::{ExecuteMode, Outcome, WireValue};
 use fgdb_protocol::client::Client;
 use fgdb_server::{DatabaseConfig, Server, ServerLimits, Symbols, issue_token, issuer};
-use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{DatabaseSecurityNamespaceId, PropertyKeyId, PurposeContexts};
 use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -268,6 +268,25 @@ fn consume() -> Vec<Value> {
     vec![Value::Map(vec![("n".into(), Value::Int(-1))])]
 }
 
+fn graph_fields(value: &Value, expected_tag: u8) -> &[Value] {
+    let Value::Struct { tag, fields } = value else {
+        panic!("expected a Bolt graph structure, got {value:?}");
+    };
+    assert_eq!(*tag, expected_tag);
+    fields
+}
+
+fn node_properties(value: &Value) -> &[(String, Value)] {
+    let fields = graph_fields(value, 0x4e);
+    assert_eq!(fields.len(), 4, "Bolt 5 nodes carry their full element ID");
+    assert_eq!(fields[1], Value::List(vec![Value::string("Person")]));
+    assert!(fields[3].as_str().is_some_and(|id| !id.is_empty()));
+    let Value::Map(properties) = &fields[2] else {
+        panic!("node properties must be a map");
+    };
+    properties
+}
+
 #[test]
 fn bolt_document_upserts_publish_on_pull_and_discard_honors_the_returned_bookmark() {
     run(async |cx| {
@@ -517,20 +536,6 @@ fn bolt_late_script_failure_rolls_back_every_statement_and_cannot_be_pulled_agai
         );
         client.expect(0x3f, consume(), IGNORED).await;
         client.expect(0x0f, vec![], SUCCESS).await;
-        // Never commit RETURN and then hydrate its graph from a newer view.
-        client
-            .expect(
-                0x10,
-                request(
-                    "CREATE (n:Person {name:'NotReturned'}) RETURN n",
-                    vec![],
-                    vec![],
-                ),
-                SUCCESS,
-            )
-            .await;
-        let failure = client.expect(0x3f, consume(), FAILURE).await;
-        assert!(get(&failure, "bookmark").is_none());
         let after = observer
             .execute(cx, ExecuteMode::Read, read, vec![])
             .await
@@ -973,6 +978,265 @@ fn bolt_write_returning_publishes_once_and_streams_the_committed_result() {
 }
 
 #[test]
+fn bolt_graph_returning_uses_final_mutations_and_masks_nested_entity_properties() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "returning-graph").await;
+        let mut client = login(address, &grant(Rights::ReadWrite)).await;
+        let mut observer = Client::connect(cx, fgp, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        let read = "MATCH (n:Person) RETURN n,n.name AS name,n.age AS age";
+        let columns = client
+            .expect(
+                0x10,
+                request(
+                    "CREATE (n:Person {name:'Ada',age:1}) \
+                     RETURN n AS node,[n] AS nodes,{node:n} AS metadata",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(
+            get(&columns, "fields"),
+            Some(&Value::List(vec![
+                Value::string("node"),
+                Value::string("nodes"),
+                Value::string("metadata"),
+            ])),
+        );
+        let queued = observer
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert!(
+            queued.rows.is_empty(),
+            "RUN must leave the graph unpublished"
+        );
+        assert_eq!(queued.outcome, Outcome::Rows { seq: 0 });
+        let (rows, done) = client.pull_all().await;
+        assert_eq!(rows.len(), 1);
+        let [node, nodes, metadata] = rows[0].as_slice() else {
+            panic!("the returning projection has three columns");
+        };
+        assert_eq!(
+            get(node_properties(node), "name"),
+            Some(&Value::string("Ada"))
+        );
+        assert_eq!(get(node_properties(node), "age"), Some(&Value::Int(1)));
+        assert_eq!(nodes, &Value::List(vec![node.clone()]));
+        assert_eq!(
+            metadata,
+            &Value::Map(vec![("node".into(), node.clone())])
+        );
+        let element_id = graph_fields(node, 0x4e)[3].clone();
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1"),
+        );
+        let published = observer
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert_eq!(published.rows.len(), 1);
+        let [WireValue::Vertex(id), name, age] = published.rows[0].as_slice() else {
+            panic!("the independent native reader must see the created node");
+        };
+        assert_eq!(element_id, Value::string(id.to_string()));
+        assert_eq!((name, age), (&text("Ada"), &WireValue::Int(1)));
+        assert_eq!(published.outcome, Outcome::Rows { seq: 1 });
+
+        client
+            .expect(
+                0x10,
+                request(
+                    "MERGE (n:Person {name:'Ada'}) ON MATCH SET n.age=2 RETURN n",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let (rows, done) = client.pull_all().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(graph_fields(&rows[0][0], 0x4e)[3], element_id);
+        assert_eq!(
+            get(node_properties(&rows[0][0]), "age"),
+            Some(&Value::Int(2))
+        );
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:2"),
+        );
+
+        let mut restricted = grant(Rights::ReadWrite);
+        restricted.properties = Scope::only([PropertyKeyId(1)]);
+        let mut masked = login(address, &restricted).await;
+        masked
+            .expect(
+                0x10,
+                request(
+                    "MATCH (n:Person {name:'Ada'}) SET n.name='Ada masked' \
+                     RETURN {nodes:[n]} AS metadata",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let (rows, done) = masked.pull_all().await;
+        assert_eq!(rows.len(), 1);
+        let Value::Map(metadata) = &rows[0][0] else {
+            panic!("metadata must remain a nested map");
+        };
+        let Some(Value::List(nodes)) = get(metadata, "nodes") else {
+            panic!("metadata must hold the returned node list");
+        };
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(graph_fields(&nodes[0], 0x4e)[3], element_id);
+        assert_eq!(
+            node_properties(&nodes[0]),
+            &[("name".into(), Value::string("Ada masked"))],
+            "graph hydration must not disclose a property the token masks",
+        );
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:3"),
+        );
+        let after = observer
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert_eq!(after.rows.len(), 1);
+        assert_eq!(
+            &after.rows[0][1..],
+            &[text("Ada masked"), WireValue::Int(2)]
+        );
+        assert_eq!(after.outcome, Outcome::Rows { seq: 3 });
+        for writer in [&mut client, &mut masked] {
+            writer.send(0x02, vec![]).await;
+            assert!(writer.receive().await.is_none());
+        }
+        observer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
+fn bolt_graph_returning_keeps_relationship_endpoints_and_reverse_path_orientation() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "returning-path").await;
+        let mut client = login(address, &grant(Rights::ReadWrite)).await;
+        let mut observer = Client::connect(cx, fgp, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        client
+            .expect(
+                0x10,
+                request(
+                    "CREATE (a:Person {name:'Ann'})-[r:KNOWS {age:7}]->\
+                     (b:Person {name:'Bob'}) RETURN a,r,b",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let (created, done) = client.pull_all().await;
+        assert_eq!(created.len(), 1);
+        let [ann, relationship, bob] = created[0].as_slice() else {
+            panic!("creation returns both endpoints and their relationship");
+        };
+        assert_eq!(
+            get(node_properties(ann), "name"),
+            Some(&Value::string("Ann"))
+        );
+        assert_eq!(
+            get(node_properties(bob), "name"),
+            Some(&Value::string("Bob"))
+        );
+        let edge = graph_fields(relationship, 0x52);
+        assert_eq!(edge.len(), 8);
+        assert_eq!(edge[3], Value::string("KNOWS"));
+        assert_eq!(
+            edge[4],
+            Value::Map(vec![("age".into(), Value::Int(7))])
+        );
+        assert_eq!(edge[6], graph_fields(ann, 0x4e)[3]);
+        assert_eq!(edge[7], graph_fields(bob, 0x4e)[3]);
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1"),
+        );
+        client
+            .expect(
+                0x10,
+                request(
+                    "MATCH p=(b:Person {name:'Bob'})<-[r:KNOWS]-(a:Person {name:'Ann'}) \
+                     SET r.age=8 RETURN p,r",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let (rows, done) = client.pull_all().await;
+        assert_eq!(rows.len(), 1);
+        let [path, updated_relationship] = rows[0].as_slice() else {
+            panic!("mutation returns a path and its relationship");
+        };
+        let path = graph_fields(path, 0x50);
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0], Value::List(vec![bob.clone(), ann.clone()]));
+        assert_eq!(
+            path[2],
+            Value::List(vec![Value::Int(-1), Value::Int(1)])
+        );
+        let Value::List(relationships) = &path[1] else {
+            panic!("the path must carry its unbound relationships");
+        };
+        assert_eq!(relationships.len(), 1);
+        let unbound = graph_fields(&relationships[0], 0x72);
+        assert_eq!(unbound.len(), 4);
+        assert_eq!(unbound[1], Value::string("KNOWS"));
+        assert_eq!(
+            unbound[2],
+            Value::Map(vec![("age".into(), Value::Int(8))])
+        );
+        assert_eq!(unbound[3], edge[5]);
+        let updated = graph_fields(updated_relationship, 0x52);
+        assert_eq!(updated[4], unbound[2]);
+        assert_eq!(&updated[5..], &edge[5..]);
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:2"),
+        );
+        let after = observer
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (a:Person)-[r:KNOWS]->(b:Person) \
+                 RETURN a.name AS source,r.age AS age,b.name AS target",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            after.rows,
+            vec![vec![text("Ann"), WireValue::Int(8), text("Bob")]]
+        );
+        assert_eq!(after.outcome, Outcome::Rows { seq: 2 });
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
+        observer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
 fn bolt_write_returning_admits_every_row_before_publication_or_delivery() {
     run(async |cx| {
         let (fgp, address, shutdown, serving) = start_both(cx, "returning-rollback").await;
@@ -981,22 +1245,37 @@ fn bolt_write_returning_admits_every_row_before_publication_or_delivery() {
             .await
             .unwrap();
         observer.select(cx, "social").await.unwrap();
-        for (statement, discard) in [
+        let graph_statement =
+            "UNWIND $rows AS row CREATE (n:Person) SET n += row RETURN [n,n] AS nodes";
+        let rows_parameter = |length| {
+            vec![(
+                "rows".into(),
+                Value::List(vec![
+                    Value::Map(vec![
+                        ("name".into(), Value::string("short")),
+                        ("age".into(), Value::Int(1)),
+                    ]),
+                    Value::Map(vec![
+                        ("name".into(), Value::string("x".repeat(length))),
+                        ("age".into(), Value::Int(2)),
+                    ]),
+                ]),
+            )]
+        };
+        // The request is below the 4096-byte frame limit. The second RECORD
+        // hydrates the same large node twice and exceeds that limit; the
+        // first RECORD fits. PULL 1 and DISCARD must still reject every effect.
+        for (statement, parameters, discard) in [
             (
                 "UNWIND [2,0] AS x CREATE (n:Person {name:'Late',age:x}) RETURN 10/n.age AS value",
+                vec![],
                 false,
             ),
-            (
-                "CREATE (n:Person {name:'NestedList'}) RETURN [n] AS value",
-                false,
-            ),
-            (
-                "CREATE (n:Person {name:'NestedMap'}) RETURN {node:n} AS value",
-                true,
-            ),
+            (graph_statement, rows_parameter(2300), false),
+            (graph_statement, rows_parameter(2300), true),
         ] {
             client
-                .expect(0x10, request(statement, vec![], vec![]), SUCCESS)
+                .expect(0x10, request(statement, parameters, vec![]), SUCCESS)
                 .await;
             let failure = client
                 .expect(
@@ -1020,6 +1299,40 @@ fn bolt_write_returning_admits_every_row_before_publication_or_delivery() {
             assert!(answer.rows.is_empty(), "{statement}");
             assert_eq!(answer.outcome, Outcome::Rows { seq: 0 }, "{statement}");
         }
+        // The identical graph-returning shape with smaller properties must
+        // succeed, distinguishing frame admission from a syntax/type refusal.
+        client
+            .expect(
+                0x10,
+                request(graph_statement, rows_parameter(32), vec![]),
+                SUCCESS,
+            )
+            .await;
+        let (rows, done) = client.pull_all().await;
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            let [Value::List(nodes)] = row.as_slice() else {
+                panic!("each admitted RECORD must contain a node list");
+            };
+            assert_eq!(nodes.len(), 2);
+            assert_eq!(nodes[0], nodes[1]);
+            assert!(get(node_properties(&nodes[0]), "name").is_some());
+        }
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        let published = observer
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN n.name AS name",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(published.rows.len(), 2);
+        assert_eq!(published.outcome, Outcome::Rows { seq: 1 });
         client.send(0x02, vec![]).await;
         assert!(client.receive().await.is_none());
         observer.close(cx).await.unwrap();

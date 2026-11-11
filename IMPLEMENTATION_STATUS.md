@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest is 2026-11-09.
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-11 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,31 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Bolt write RETURN graph metadata — qualification pending
+
+Source added 2026-11-11 under `fgdb-roadmap-bolt-v2-vb6e`. Autocommit
+`CREATE`/`INSERT`, mutations, vertex and relationship MERGE, and native write
+chains can return nodes, relationships, paths and nested collections over
+Bolt. The narrow `AuthorizedWriteOutput` reader uses the final unpublished
+workspace and the existing masked metadata owner, including endpoint visibility,
+deletion witnesses, live authority and cumulative native work/scratch limits.
+The output collector owns and admits every Bolt record before the sole native
+commit. A later metadata, depth, frame, signed budget or cancellation failure
+therefore cannot publish an earlier write or row. RUN remains deferred;
+completed results retain their exact metadata without a postcommit query.
+
+Regression sources cover final-state metadata, nested values, masked properties,
+full-width identities, reverse path orientation, cumulative metadata quotas,
+swallowed admission errors and late oversized output under PULL 1 and DISCARD.
+Source and caller reviews completed. A recovered local candidate passed the
+pinned formatter, but resource exhaustion killed dependency compilation (an
+initial exit 137 and a later `syn` SIGKILL); the executor then became unavailable
+again before its formatted source could be retrieved. This commit preserves
+the complete reviewed source. The exact committed tree's formatting, product
+compilation, Clippy, tests, UBS and full proof remain **UNRUN**, not passing.
+The original roadmap bead remains open; this does not qualify complete Bolt V2
+or explicit write transactions.
 
 ### Durable embedded database
 
@@ -494,9 +519,9 @@ The embedded library posture is live. The CLI binary is real, but the robot cont
 - Live subscriptions: `SUBSCRIBE TO <read>` over FGP pushes the engine's maintained-query baseline and exact per-commit deltas as SUBSCRIPTION_BATCH frames under flow credit (`fgdb remote subscribe`). They require an unrestricted-scope capability (maintained queries are not capability-masked yet) and are in-process only: no durable resume across reconnects.
 - Signed subscription budgets (2026-10-10): preparation reserves one work grant and divides its remainder across the native circuit, replay sink, initial compressed baseline and checked wire conversion. Native work and scratch control events share each reservation. A compiler-shaped prepass counts circuit nodes and obtains graph-source widths from the admitted maintainer shape; conservative work ceilings bound graph-node admissions without claiming exact Warden hooks in native maintenance. Private intermediate rows retain server ceilings, while signed final-row limits govern the entire compressed delivered bag, including cached and unacknowledged batches. A later poll shares one reservation across the normal pull, a possible `ReplayGap`/`DeltaGap`/`DeltaUnavailable` replacement baseline and conversion. Registered maintenance keeps its original bounded policy. Setup, replay, baseline and final host admission form one rollback boundary; refusal removes only the private registry suffix and restores the registration count, and no handle escapes before acceptance. Source-free grouping works with a zero signed graph-node grant. New native and server regressions cover footprint bounds, rollback, zero grants, pending redelivery, retained maintenance limits and replay eviction; they remain unexecuted because the local process service is unavailable. These are per-registration/tick/poll ceilings, not lifetime accounting, capability masking or durable resume.
 
-- The read-only Bolt-compat subset (`BoltCompatProfileV1`, `fgdbd serve --bolt-listen`, crate `fgdb-bolt`): official Neo4j drivers run autocommit and explicit read transactions over Bolt 5.0 under a capability token. Nodes, relationships and paths include capability-visible metadata from the same session and selected historical sequence; paths preserve direction and repeated identities, also inside collections. Writes refuse with `Neo.ClientError.Statement.AccessMode` before graph access. The base driver surface was verified with the official Python driver (`execute_query`, `execute_read`, sessions, `neo4j://` routing); graph-value coverage lives in `tests/loopback.rs` and the adapter's unit tests.
+- The Bolt-compat surface (`fgdbd serve --bolt-listen`, crate `fgdb-bolt`): official Neo4j drivers run autocommit reads, bounded autocommit writes and explicit read transactions over Bolt 5.0 under a capability token. Nodes, relationships and paths include capability-visible metadata from the same session and selected historical sequence; paths preserve direction and repeated identities, also inside collections. Writes inside explicit transactions refuse with `Neo.ClientError.Statement.AccessMode` before graph access. Autocommit writes execute once on PULL/DISCARD; graph-valued write RETURN and its current qualification limits are described above. The base driver surface was verified with the official Python driver (`execute_query`, `execute_read`, sessions, `neo4j://` routing); graph-value coverage lives in `tests/loopback.rs` and the adapter's unit tests.
 
-Not yet: durable result retention with ACK/release/resume, durable transaction preparation, explicit multi-statement write transactions and reattachment, capability-masked and durable subscriptions, multi-tenant admission/QoS, Bolt writes, and the HTTP/2, gRPC and WebSocket adapters. Names resolve through operator-declared bindings because there is no durable catalog.
+Not yet: durable result retention with ACK/release/resume, durable transaction preparation, explicit multi-statement write transactions and reattachment, capability-masked and durable subscriptions, multi-tenant admission/QoS, the complete Bolt V2 contract, and the HTTP/2, gRPC and WebSocket adapters. Names resolve through operator-declared bindings because there is no durable catalog.
 
 ## Query evidence tower
 

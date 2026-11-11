@@ -636,7 +636,7 @@ impl<V: Vfs + Clone> Database<V> {
             chain,
             policy,
             clock,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         )
         .await
     }
@@ -661,6 +661,7 @@ impl<V: Vfs + Clone> Database<V> {
         admit: impl FnOnce(
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<Receipt, Fault> {
         self.execute_graph_write_chain_authorized_with_read(
@@ -709,7 +710,7 @@ impl<V: Vfs + Clone> Database<V> {
             continuation,
             policy,
             clock,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         )
         .await
     }
@@ -734,6 +735,7 @@ impl<V: Vfs + Clone> Database<V> {
         admit: impl FnOnce(
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<Receipt, Fault> {
         self.execute_graph_write_chain_authorized_with_read(
@@ -768,6 +770,7 @@ impl<V: Vfs + Clone> Database<V> {
         admit: impl FnOnce(
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<Receipt, Fault> {
         if authority.namespace() != self.keys.namespace {
@@ -794,7 +797,7 @@ impl<V: Vfs + Clone> Database<V> {
             policy,
             verified.predicates(),
             execution,
-            |_, rows, work| admit(rows, work),
+            |_, rows, work, output| admit(rows, work, output),
         )
         .await
     }
@@ -889,7 +892,7 @@ impl<V: Vfs + Clone> Database<V> {
                 verified.predicates(),
                 execution,
                 &mut active_record,
-                |value, _, work| {
+                |value, _, work, _| {
                     admit(&value, work)?;
                     stats = Some(value);
                     Ok(())
@@ -920,6 +923,7 @@ impl<V: Vfs + Clone> Database<V> {
             fgdb_gql::GraphWriteProgramStats,
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<Receipt, Fault> {
         let mut active_record = None;
@@ -959,6 +963,7 @@ impl<V: Vfs + Clone> Database<V> {
             fgdb_gql::GraphWriteProgramStats,
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<Receipt, Fault> {
         *active_record = None;
@@ -1579,34 +1584,35 @@ impl<V: Vfs + Clone> Database<V> {
                 last_result = Some(result);
                 }
                 *active_record = None;
-                let result = last_result.expect("a nonempty chain batch was admitted");
+                let mut result = last_result.expect("a nonempty chain batch was admitted");
                 let delivered = u64::try_from(result.value.len())
                     .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?;
                 execution
                     .permit
                     .charge_rows_at((execution.clock)(), delivered)
                     .map_err(|error| source(WriteTxnError::Authorization(error)))?;
-                query_cx
-                    .with_restriction(|| {
-                        admit(
-                            fgdb_gql::GraphWriteProgramStats {
-                                completed_statements: chains.len(),
-                                selection: used.selection,
-                                evaluator: used.evaluator,
-                                target_vertex_visits: 0,
-                                target_edge_visits: 0,
-                                mutation_effects,
-                                created_vertices: used.created_vertices,
-                                created_edges: used.created_edges,
-                            },
-                            &result.value,
-                            &mut |work| {
-                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                                execution.work(work)
-                            },
-                        )
-                    })
-                    .map_err(source)?;
+                let stats = fgdb_gql::GraphWriteProgramStats {
+                    completed_statements: chains.len(),
+                    selection: used.selection,
+                    evaluator: used.evaluator,
+                    target_vertex_visits: 0,
+                    target_edge_visits: 0,
+                    mutation_effects,
+                    created_vertices: used.created_vertices,
+                    created_edges: used.created_edges,
+                };
+                super::output::admit_output(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    scope,
+                    &mut execution,
+                    policy.query,
+                    &mut result,
+                    |rows, work, output| admit(stats, rows, work, output),
+                )
+                .map_err(source)?;
+                used.evaluator = result.evaluator;
                 execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()

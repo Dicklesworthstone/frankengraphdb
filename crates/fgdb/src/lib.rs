@@ -191,7 +191,7 @@ pub use query::{
     SealedReadView, StatementClock, StatementTimeError,
 };
 pub use write_txn::{
-    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,
+    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteOutput, AuthorizedWriteSession,
     IdentityPermutation, WriteTxn, WriteTxnError,
 };
 

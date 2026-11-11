@@ -699,7 +699,7 @@ fn checked_output_refusal_and_zero_row_admission_stay_inside_rollback_boundary()
                 &query,
                 policy(1),
                 || NOW,
-                |rows, work| {
+                |rows, work, _| {
                     calls += 1;
                     assert_eq!(rows.len(), 1);
                     work(1)?;
@@ -740,7 +740,7 @@ fn checked_output_refusal_and_zero_row_admission_stay_inside_rollback_boundary()
                 &zero,
                 policy(0),
                 || NOW,
-                |rows, _| {
+                |rows, _, _| {
                     admitted += 1;
                     assert!(rows.is_empty());
                     Ok(())

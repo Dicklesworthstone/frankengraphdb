@@ -171,7 +171,7 @@ fn hidden_return_fields_are_null_and_host_admission_cannot_publish_a_refused_wri
                     &query("RETURN r.secret AS hidden"),
                     query_policy(),
                     || NOW,
-                    |rows, work| {
+                    |rows, work, _| {
                         called += 1;
                         assert_eq!(rows.len(), 5);
                         assert!(

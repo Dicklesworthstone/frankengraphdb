@@ -35,7 +35,7 @@ fn representation_refusal_rolls_back_the_complete_native_write() {
                 "UNWIND [1,2,3] AS x CREATE (n) RETURN x AS value ORDER BY value",
             ),
             None,
-            |columns, rows, _| {
+            |columns, rows, _, _| {
                 calls += 1;
                 assert_eq!(columns, &[String::from("value")]);
                 assert_eq!(
@@ -78,7 +78,7 @@ fn chain_representation_refusal_rolls_back_all_prior_creations() {
             &token,
             prepare(db, "CREATE (a) WITH a CREATE (b) RETURN 7 AS value"),
             None,
-            |columns, rows, _| {
+            |columns, rows, _, _| {
                 calls += 1;
                 assert_eq!(columns, &[String::from("value")]);
                 assert_eq!(rows, [vec![WireValue::Int(7)]]);
@@ -113,7 +113,7 @@ fn converted_output_and_empty_output_both_precede_one_completion() {
                     &token,
                     prepare(db, text),
                     None,
-                    |columns, rows, work| {
+                    |columns, rows, work, _| {
                         calls += 1;
                         work(1).map_err(|error| write_refusal(&error))?;
                         assert_eq!(columns, &[String::from("value")]);
@@ -161,7 +161,7 @@ fn representation_work_uses_the_native_signed_allowance() {
             &token,
             prepare(db, "CREATE (n) RETURN 7 AS value"),
             None,
-            |_, _, work| {
+            |_, _, work, _| {
                 charged = true;
                 work(u64::MAX).map_err(|error| write_refusal(&error))
             },
@@ -187,7 +187,7 @@ fn deferred_returning_checks_its_floor_and_never_crosses_recovery_generations() 
             &token,
             prepare(db, "CREATE (n) RETURN 7 AS value"),
             Some((&generation, CommitSeq(1))),
-            |_, _, _| -> Result<(), Refusal> { panic!("unmet floor must not reach output") },
+            |_, _, _, _| -> Result<(), Refusal> { panic!("unmet floor must not reach output") },
         )
         .await;
         assert_eq!(result.err().expect("unmet floor").code, ErrorCode::Busy);
@@ -205,7 +205,7 @@ fn deferred_returning_checks_its_floor_and_never_crosses_recovery_generations() 
             &token,
             definition,
             Some((&generation, CommitSeq(0))),
-            |_, _, _| -> Result<(), Refusal> { panic!("stale generation must not execute") },
+            |_, _, _, _| -> Result<(), Refusal> { panic!("stale generation must not execute") },
         )
         .await;
         assert_eq!(
@@ -279,7 +279,7 @@ fn retained_returning_definitions_are_not_authority_or_an_identity_bypass() {
             &token,
             definition,
             None,
-            |_, _, _| -> Result<(), Refusal> { panic!("retired authority must not produce rows") },
+            |_, _, _, _| -> Result<(), Refusal> { panic!("retired authority must not produce rows") },
         )
         .await;
         assert!(result.is_err());

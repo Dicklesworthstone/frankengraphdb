@@ -31,6 +31,9 @@ mod insert;
 #[path = "authorized/mutation.rs"]
 mod mutation;
 pub use mutation::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
+#[path = "authorized/output.rs"]
+mod output;
+pub use output::AuthorizedWriteOutput;
 #[path = "authorized/selection.rs"]
 mod selection;
 
