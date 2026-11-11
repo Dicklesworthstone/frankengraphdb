@@ -151,14 +151,31 @@ pub(super) fn analytic_procedure(
     // Read the immutable input recipe only; no source is pinned or executed
     // at this placeholder cut. The analytic owner admits the live snapshot.
     let options = bound.options_at(CommitSeq(0));
-    let relation = options.selection.relation;
+    // A union is supported by batch projection, but the current maintained
+    // topology owner has scalar selectors. Never widen a union to All while
+    // compiling a derivative that cannot yet retain that exact selection.
+    if options
+        .selection
+        .relations
+        .members()
+        .is_some_and(|ids| ids.len() > 1)
+        || options
+            .selection
+            .vertex_labels
+            .members()
+            .is_some_and(|ids| ids.len() > 1)
+    {
+        return Err(StandingQueryError::Unsupported);
+    }
+    let relation = options.selection.relations.single();
+    let label = options.selection.vertex_labels.single();
     if options.selection.weight != FnxWeightSpec::Unit
         || options.projection.parallel_edges != ParallelEdgePolicy::CollapseUnit
         || options.projection.self_loops == SelfLoopPolicy::Reject
     {
         return Err(StandingQueryError::Unsupported);
     }
-    if options.selection.vertex_label.is_some()
+    if label.is_some()
         && !matches!(
             bound.algorithm(),
             FnxAlgorithm::ConnectedComponents
@@ -176,12 +193,12 @@ pub(super) fn analytic_procedure(
     // neither changes reachability between distinct vertices.
     let (source, value_type, value_field) = match bound.algorithm() {
         FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => (
-            component_source(relation, options.selection.vertex_label, false)?,
+            component_source(relation, label, false)?,
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
         FnxAlgorithm::StronglyConnectedComponents => (
-            component_source(relation, options.selection.vertex_label, true)?,
+            component_source(relation, label, true)?,
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
@@ -189,7 +206,7 @@ pub(super) fn analytic_procedure(
             if options.projection.self_loops == SelfLoopPolicy::Drop =>
         {
             (
-                core_source(relation, options.selection.vertex_label)?,
+                core_source(relation, label)?,
                 GraphSetColumnType::Scalar,
                 FnxOutput::Core,
             )
@@ -197,7 +214,7 @@ pub(super) fn analytic_procedure(
         FnxAlgorithm::Triangles if options.projection.self_loops == SelfLoopPolicy::Drop => (
             triangle_source(
                 relation,
-                options.selection.vertex_label,
+                label,
                 triangle_counts::Output::Triangles,
             )?,
             GraphSetColumnType::Scalar,
@@ -206,7 +223,7 @@ pub(super) fn analytic_procedure(
         FnxAlgorithm::ClusteringCoefficient => (
             triangle_source(
                 relation,
-                options.selection.vertex_label,
+                label,
                 triangle_counts::Output::Clustering,
             )?,
             GraphSetColumnType::Scalar,

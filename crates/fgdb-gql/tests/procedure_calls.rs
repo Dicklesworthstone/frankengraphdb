@@ -2,7 +2,7 @@
 //! pipeline whose rows the host supplies. Every law here drives the real text
 //! grammar, binder and relational executor; only the procedure is a test host.
 
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaSelection};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError, GqlQueryExecution,
@@ -587,7 +587,9 @@ fn successive_constant_calls_preserve_incoming_bags_and_share_source_allowance()
 fn projection_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(LabelId(11))),
+        (GraphSymbolKind::Label, "Other") => Some(GraphSymbol::Label(LabelId(u64::MAX))),
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(17))),
+        (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(u64::MAX))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         _ => None,
     }
@@ -616,8 +618,8 @@ fn inline_projection_is_catalog_bound_and_never_an_algorithm_argument() {
     );
     assert_eq!(template.parameter_schema().len(), 1);
     let expected = ProcedureGraphProjection {
-        vertex_label: Some(LabelId(11)),
-        relation: Some(RelationId(17)),
+        vertex_labels: Some(LabelId(11)).into(),
+        relations: Some(RelationId(17)).into(),
         weight: ProcedureGraphWeight::Property {
             key: P,
             missing: ProcedureMissingWeight::Unit,
@@ -647,10 +649,118 @@ fn inline_projection_is_catalog_bound_and_never_an_algorithm_argument() {
 }
 
 #[test]
+fn graph_projection_unions_canonicalize_names_and_keep_full_width_identities() {
+    let prepare = |projection: &str| {
+        PreparedGraphSetText::prepare(
+            &format!("CALL fnx.test({projection}, 7) YIELD value RETURN value"),
+            projection_symbols,
+        )
+        .unwrap()
+    };
+    let canonical = prepare("{labels:['Person','Other'],relations:['R','S']}");
+    let params = GqlParameters::new();
+    let canonical_bound = canonical.bind_parameters(&params).unwrap();
+    for projection in [
+        "{relations:['S','R','S'],labels:['Other','Person','Person']}",
+        "{labels:['Other','Person'],relations:['S','R']}",
+    ] {
+        let reordered = prepare(projection);
+        assert_eq!(
+            reordered.canonical_template_bytes(),
+            canonical.canonical_template_bytes()
+        );
+        assert_eq!(
+            reordered.bind_parameters(&params).unwrap().canonical_bytes(),
+            canonical_bound.canonical_bytes()
+        );
+    }
+    canonical_bound
+        .execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |call, arguments, _| {
+                let projection = call.graph_projection().unwrap();
+                assert_eq!(
+                    projection.vertex_labels,
+                    SchemaSelection::any_of(&[LabelId(11), LabelId(u64::MAX)]).unwrap()
+                );
+                assert_eq!(
+                    projection.relations,
+                    SchemaSelection::any_of(&[RelationId(17), RelationId(u64::MAX)]).unwrap()
+                );
+                assert_eq!(arguments, [int(7)]);
+                rows(vec![vec![int(1)]])
+            },
+            || Ok::<_, usize>(()),
+        )
+        .unwrap();
+    for changed in [
+        "{}",
+        "{labels:['Person','Other'],relations:['R']}",
+        "{labels:['Person'],relations:['R','S']}",
+    ] {
+        assert_ne!(
+            canonical.canonical_template_bytes(),
+            prepare(changed).canonical_template_bytes()
+        );
+    }
+    // A duplicate singleton has exactly the pre-union recipe identity.
+    assert_eq!(
+        prepare("{labels:['Person'],relations:['R']}").canonical_template_bytes(),
+        prepare("{labels:['Person','Person'],relations:['R','R']}").canonical_template_bytes()
+    );
+}
+
+#[test]
+fn graph_projection_union_bound_counts_distinct_resolved_ids_without_truncation() {
+    for field in ["labels", "relations"] {
+        for count in [16, 17] {
+            let mut names: Vec<_> = (0..count).map(|id| format!("'id{id}'")).collect();
+            // Duplicates beyond the capacity do not consume another identity.
+            names.extend(["'id0'".to_owned(), "'id15'".to_owned()]);
+            let text = format!(
+                "CALL fnx.test({{{field}:[{}]}}) YIELD value RETURN value",
+                names.join(",")
+            );
+            let prepared = PreparedGraphSetText::prepare(&text, |kind, name: &str| {
+                let id = name.strip_prefix("id")?.parse::<u64>().ok()?;
+                Some(match kind {
+                    GraphSymbolKind::Label => GraphSymbol::Label(LabelId(id)),
+                    GraphSymbolKind::Relation => GraphSymbol::Relation(RelationId(id)),
+                    GraphSymbolKind::Property => return None,
+                })
+            });
+            assert_eq!(prepared.is_ok(), count == 16, "{text}");
+            if let Ok(prepared) = prepared {
+                prepared
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap()
+                    .execute_governed_with_procedures(
+                        wide(),
+                        no_graph,
+                        |call, _, _| {
+                            let projection = call.graph_projection().unwrap();
+                            let length = if field == "labels" {
+                                projection.vertex_labels.members().unwrap().len()
+                            } else {
+                                projection.relations.members().unwrap().len()
+                            };
+                            assert_eq!(length, 16);
+                            rows(vec![vec![int(1)]])
+                        },
+                        || Ok::<_, usize>(()),
+                    )
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
 fn graph_projection_defaults_and_every_option_have_one_typed_meaning() {
     let base = ProcedureGraphProjection {
-        vertex_label: None,
-        relation: None,
+        vertex_labels: None.into(),
+        relations: None.into(),
         weight: ProcedureGraphWeight::Unit,
         direction: None,
         parallel_edges: ProcedureParallelEdges::Reject,
@@ -747,8 +857,8 @@ fn graph_projection_defaults_and_every_option_have_one_typed_meaning() {
 fn invalid_graph_options_refuse_before_any_schema_lookup() {
     for projection in [
         "{labels:['Person'], unknown:'x'}",
-        "{labels:['Person','Other']}",
-        "{relations:['R','R']}",
+        "{labels:['Person',17]}",
+        "{relations:['R',$relation]}",
         "{labels:'Person'}",
         "{relations:[17]}",
         "{labels:[$label]}",

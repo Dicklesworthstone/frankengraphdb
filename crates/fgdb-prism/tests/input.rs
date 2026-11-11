@@ -1,4 +1,4 @@
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaSelection};
 use fgdb_prism::{FnxSelection, FnxWeightError, FnxWeightSpec, MissingWeightPolicy};
 use fgdb_types::{
     CanonicalF64, CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue,
@@ -118,19 +118,84 @@ fn numeric_values_do_not_coerce_booleans_or_accept_nonfinite_floats() {
 }
 
 #[test]
+fn selection_digest_preserves_legacy_bytes_and_canonical_union_membership() {
+    let base = FnxSelection {
+        vertex_labels: SchemaSelection::ALL,
+        relations: SchemaSelection::ALL,
+        weight: FnxWeightSpec::Unit,
+    };
+    let legacy = |label: Option<LabelId>, relation: Option<RelationId>| {
+        let mut hash = fgdb_crypto::Hasher::new();
+        hash.update(b"fgdb:prism:induced-selection:v1");
+        for id in [label.map(|id| id.0), relation.map(|id| id.0)] {
+            if let Some(id) = id {
+                hash.update(&[1]);
+                hash.update(&id.to_le_bytes());
+            } else {
+                hash.update(&[0]);
+            }
+        }
+        hash.update(&[0]);
+        hash.finalize()
+    };
+    for (label, relation) in [
+        (None, None),
+        (Some(LabelId(u64::MAX)), Some(RelationId(0))),
+        (None, Some(RelationId(u64::MAX))),
+    ] {
+        assert_eq!(
+            FnxSelection {
+                vertex_labels: label.into(),
+                relations: relation.into(),
+                ..base
+            }
+            .digest(),
+            legacy(label, relation)
+        );
+    }
+    let union = FnxSelection {
+        vertex_labels: SchemaSelection::any_of(&[LabelId(7), LabelId(u64::MAX)]).unwrap(),
+        relations: SchemaSelection::any_of(&[RelationId(1), RelationId(2)]).unwrap(),
+        ..base
+    };
+    let reordered = FnxSelection {
+        vertex_labels: SchemaSelection::any_of(&[LabelId(u64::MAX), LabelId(7), LabelId(7)])
+            .unwrap(),
+        relations: SchemaSelection::any_of(&[RelationId(2), RelationId(1), RelationId(2)])
+            .unwrap(),
+        ..base
+    };
+    assert_eq!(union, reordered);
+    assert_eq!(union.digest(), reordered.digest());
+    for different in [
+        base,
+        FnxSelection {
+            vertex_labels: SchemaSelection::one(LabelId(7)),
+            ..union
+        },
+        FnxSelection {
+            relations: SchemaSelection::any_of(&[RelationId(1), RelationId(3)]).unwrap(),
+            ..union
+        },
+    ] {
+        assert_ne!(union.digest(), different.digest());
+    }
+}
+
+#[test]
 fn selection_identity_binds_filters_property_and_missing_value_law() {
     let base = FnxSelection {
-        vertex_label: None,
-        relation: None,
+        vertex_labels: None.into(),
+        relations: None.into(),
         weight: FnxWeightSpec::Unit,
     };
     let variants = [
         FnxSelection {
-            vertex_label: Some(LabelId(0)),
+            vertex_labels: Some(LabelId(0)).into(),
             ..base
         },
         FnxSelection {
-            relation: Some(RelationId(0)),
+            relations: Some(RelationId(0)).into(),
             ..base
         },
         FnxSelection {

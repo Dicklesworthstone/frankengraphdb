@@ -69,7 +69,7 @@ impl Source {
             && self.owner.ptr_eq(&Arc::downgrade(snapshot))
             && self.binding == binding
             && options.as_of.is_none_or(|at| at == binding.as_of)
-            && options.selection.relation == Some(self.relation)
+            && options.selection.relations.single() == Some(self.relation)
             && call
                 .validate_sealed_projection(options.projection.directedness)
                 .is_ok()
@@ -285,11 +285,7 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
                     let labels =
                         u32::try_from(row.labels.len()).map_err(|_| Error::SizeOverflow)?;
                     admit(Step::Vertex(labels))?;
-                    if options
-                        .selection
-                        .vertex_label
-                        .is_some_and(|label| row.labels.binary_search(&label).is_err())
-                    {
+                    if !options.selection.vertex_labels.intersects_sorted(&row.labels) {
                         return Ok(());
                     }
                     push_staged(

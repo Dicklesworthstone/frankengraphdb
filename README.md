@@ -219,6 +219,23 @@ Path modes such as `TRAIL` and `ACYCLIC` apply their own restrictions inside
 that match mode. Open-ended routes require a supported termination rule;
 the cold-query profile below lists the admitted combinations.
 
+### Analytics over multiple labels and relationship types
+
+Native `CALL fnx.*` accepts an initial literal graph map such as
+`{labels:['Person','Company'], relations:['KNOWS','WORKS_WITH']}`.
+This selects vertices carrying either label and edges of either relationship
+type whose two endpoints are selected. Isolated selected vertices remain in
+the graph. Each list admits up to 16 distinct names; duplicates and list order
+do not change the selection, and an empty list keeps all identities already
+allowed by the session.
+
+These selections apply to ordinary, authorized, transactional and decoded
+buffered analytics. A sealed view still holds one relationship partition, so
+it supports label unions with exactly one matching relationship type.
+Maintained analytics with scalar selectors reject unions explicitly. The
+new union integration remains pending runtime qualification; see
+[IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).
+
 ## The six bets
 
 No single trick makes this a leapfrog. The **composition** of six bets does, each at or beyond the current frontier, each feasible only because the foundation libraries already exist.
@@ -446,10 +463,12 @@ fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys --rebuild-derived
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --relation KNOWS=1 \
   --graph-relation KNOWS --direction undirected "CALL fnx.connected_components() YIELD vertex, component"
 
-# Weighted analytics as part of a query, with a query-local induced graph
+# Weighted analytics over vertices with either label and either relationship type
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys \
-  --label Person=1 --relation KNOWS=1 --property name=1 --property weight=2 \
-  "CALL fnx.pagerank({labels:['Person'], relations:['KNOWS'], weight:'weight',
+  --label Person=1 --label Company=2 --relation KNOWS=1 --relation WORKS_WITH=2 \
+  --property name=1 --property weight=2 \
+  "CALL fnx.pagerank({labels:['Person','Company'],
+      relations:['KNOWS','WORKS_WITH'], weight:'weight',
       missing:'reject', direction:'directed', parallel:'sum', self_loops:'drop'},
       0.85, 100, 1e-9, true) YIELD node, score
    RETURN node.name, score ORDER BY score DESC LIMIT 10"
@@ -522,7 +541,7 @@ fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
 curl -H "Authorization: Bearer $(cat token)" -d '{"statement":"MATCH (p:Person) RETURN p.name"}' \
   http://127.0.0.1:7474/v1/databases/social/query
 
-# ...or from any official Neo4j driver: reads, plus bounded no-RETURN autocommit writes
+# ...or from an official Neo4j driver: reads and bounded autocommit writes with RETURN
 # (add --bolt-listen 127.0.0.1:7688)
 python3 -c 'from neo4j import GraphDatabase, bearer_auth
 d = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=bearer_auth(open("token").read().strip()))

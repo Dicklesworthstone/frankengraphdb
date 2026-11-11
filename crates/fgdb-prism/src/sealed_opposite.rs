@@ -81,7 +81,8 @@ impl<'a> SealedRowView<'a> {
         let relation = self
             .config
             .selection
-            .relation
+            .relations
+            .single()
             .ok_or(SealedProjectionError::RelationRequired)?;
         if !self.graph.0.mask.relation_visible {
             return Ok(0);

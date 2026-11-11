@@ -111,8 +111,8 @@ fn explicit(undirected: bool) -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: None,
-            relation: None,
+            vertex_labels: None.into(),
+            relations: None.into(),
             weight: FnxWeightSpec::Unit,
         },
         projection: ProjectionSpec {
@@ -1817,8 +1817,8 @@ fn named_projection_reads_the_selected_weighted_graph_and_staged_changes() {
         let before = expected(&[(1, 0.0), (2, 10.0), (3, 12.0)]);
         let mut options = explicit(false);
         options.selection = FnxSelection {
-            vertex_label: Some(PERSON),
-            relation: Some(R),
+            vertex_labels: Some(PERSON).into(),
+            relations: Some(R).into(),
             weight: FnxWeightSpec::Property {
                 key: P,
                 missing: MissingWeightPolicy::Reject,
@@ -2373,8 +2373,8 @@ fn projection_identity_and_algorithm_parameters_survive_certified_replay() {
         assert_ne!(certificate.procedures, different.procedures);
         let mut standalone_options = explicit(false);
         standalone_options.selection = FnxSelection {
-            vertex_label: Some(PERSON),
-            relation: Some(R),
+            vertex_labels: Some(PERSON).into(),
+            relations: Some(R).into(),
             weight: FnxWeightSpec::Property {
                 key: P,
                 missing: MissingWeightPolicy::Reject,
@@ -2629,8 +2629,8 @@ fn directed_load_projection_composes_and_replays_the_pinned_snapshot() {
             )
             .unwrap();
             let mut options = explicit(false);
-            options.selection.vertex_label = Some(PERSON);
-            options.selection.relation = Some(R);
+            options.selection.vertex_labels = Some(PERSON).into();
+            options.selection.relations = Some(R).into();
             options.projection.directedness = direction;
             options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
             options.projection.self_loops = SelfLoopPolicy::Drop;

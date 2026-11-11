@@ -614,9 +614,9 @@ impl SealedReadView {
             return Err(refuse(ProcedureError::ResultDomain));
         }
         let mut options = procedure_options(&bound, self.as_of, policy);
-        if options.selection.relation != Some(self.relation) {
+        if options.selection.relations.single() != Some(self.relation) {
             return Err(refuse(ProcedureError::SealedRelationMismatch {
-                requested: options.selection.relation,
+                requested: options.selection.relations,
                 retained: self.relation,
             }));
         }
@@ -717,11 +717,7 @@ impl SealedReadView {
             },
             |row, control| {
                 control(SourceEvent::SnapshotRecord)?;
-                if options
-                    .selection
-                    .vertex_label
-                    .is_some_and(|label| row.labels.binary_search(&label).is_err())
-                {
+                if !options.selection.vertex_labels.intersects_sorted(&row.labels) {
                     return Ok(());
                 }
                 control(SourceEvent::ScratchEntry)?;

@@ -467,8 +467,8 @@ fn options(direction: Directedness) -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: Some(LabelId(1)),
-            relation: Some(RelationId(1)),
+            vertex_labels: Some(LabelId(1)).into(),
+            relations: Some(RelationId(1)).into(),
             weight: FnxWeightSpec::Property {
                 key: PropertyKeyId(1),
                 missing: MissingWeightPolicy::Reject,
@@ -1057,8 +1057,8 @@ fn fixed_iteration_pagerank_and_cdlp_reach_public_and_prepared_authorized_calls(
         let mut native_options = options(Directedness::Directed);
         // Native calls rely on the signed mask, while GQL below supplies the
         // same induced graph explicitly as its projection selection.
-        native_options.selection.vertex_label = None;
-        native_options.selection.relation = None;
+        native_options.selection.vertex_labels = None.into();
+        native_options.selection.relations = None.into();
         native_options.projection.parallel_edges = ParallelEdgePolicy::Minimum;
         native_options.source_limits = FnxSourceLimits {
             max_work_units: 100_000,

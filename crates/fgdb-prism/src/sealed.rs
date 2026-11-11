@@ -379,7 +379,8 @@ impl SealedGraphView {
         schedule.check(cx).await?;
         let relation = config
             .selection
-            .relation
+            .relations
+            .single()
             .ok_or(SealedProjectionError::RelationRequired)?;
         partition.anchor().check_relation(relation)?;
         let scope = partition.anchor().scope();
@@ -1106,8 +1107,8 @@ mod tests {
         SealedProjectionSpec {
             as_of: CommitSeq(3),
             selection: FnxSelection {
-                vertex_label: None,
-                relation: Some(RelationId(7)),
+                vertex_labels: None.into(),
+                relations: Some(RelationId(7)).into(),
                 weight: FnxWeightSpec::Property {
                     key: PropertyKeyId(2),
                     missing: MissingWeightPolicy::Reject,

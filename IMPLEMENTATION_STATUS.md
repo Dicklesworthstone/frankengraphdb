@@ -37,6 +37,47 @@ compilation, Clippy, tests, UBS and full proof remain **UNRUN**, not passing.
 The original roadmap bead remains open; this does not qualify complete Bolt V2
 or explicit write transactions.
 
+### Prism label and relationship unions — qualification pending
+
+Source added 2026-11-11 for `fgdb-luq0b` and `fgdb-w8-projection-sd7`.
+A literal procedure graph map now selects up to 16 distinct labels and 16
+distinct relationship types. A vertex qualifies when it carries ANY selected
+label; an edge qualifies when its type is selected and both endpoints qualify.
+Selected isolated vertices remain. Empty lists retain all already admitted
+identities, and the graph map never grants additional capability scope.
+
+The same canonical selection is used by native and pinned reads, authorized
+reads, transaction overlays and decoded buffered reads. Input order and repeated
+identities do not change the selection, its cache key or its projection
+transcript. Existing all/singleton transcript and digest bytes are preserved.
+Transaction selection sees staged labels and relationship changes and retains
+the underlying read/conflict witnesses.
+
+```cypher
+CALL fnx.pagerank(
+  {labels:['Person','Company'], relations:['KNOWS','WORKS_WITH'],
+   weight:'weight', parallel:'sum', self_loops:'drop'},
+  0.85, 100, 1e-9, true)
+YIELD node, score
+RETURN node, score ORDER BY score DESC
+```
+
+The existing sealed source owns one physical relationship partition: it accepts
+label unions but requires exactly that one relationship type. It explicitly
+refuses relationship unions. Maintained analytics whose topology owner still
+has scalar selectors likewise explicitly refuse unions; they never silently
+widen a request to the whole graph. Dynamic projection maps and named graph
+catalogs remain outside this surface.
+
+The standalone canonical selector tests passed (2/2) under the pinned compiler
+before the environment failure. Added regression sources cover binding and
+canonical transcripts, historical reads, staged overlays and relation phantoms,
+hidden labels, buffered cache identity, sealed source boundaries and maintained
+query refusal. Source/caller reviews and a recovered local formatting pass
+completed. The exact committed tree's formatting, product compilation,
+integration tests, Clippy, UBS and full proof remain **UNRUN** after resource
+exhaustion and the subsequent executor loss. The broader beads remain open.
+
 ### Durable embedded database
 
 `fgdb::Database` can:
@@ -65,7 +106,7 @@ Reads, through `Database::query` → `PreparedNativeRead::prepare` (`crates/fgdb
 - `count`/`sum`/`avg`/`min`/`max`/`collect` with `DISTINCT`, grouping and `HAVING` (`crates/fgdb-gql/tests/aggregate_text.rs`, `crates/fgdb-gql/tests/having_text.rs`); `sum`/`avg` over float (or mixed integer and float) values return the correctly rounded exact sum or mean, one rounding whatever the row order, with no cancellation loss or intermediate overflow (`crates/fgdb-gql/tests/exact_averages.rs`, `fgdb_types::ExactBinary64Sum`); unaliased RETURN items are named as openCypher names them (`a.title`, `count(b)`, `size(a.title)`) when the GQL-derived name would repeat (`crates/fgdb-gql/src/graph_text.rs` tests); `WITH` pipelines, `UNWIND` and a `MATCH` after `WITH`, including grouped `WITH` (`crates/fgdb-gql/tests/multipart_reads.rs`, `crates/fgdb/tests/with_grouping.rs`).
 - `UNION [ALL]`, `INTERSECT`, `EXCEPT` (`crates/fgdb-gql/tests/set_text.rs`, `crates/fgdb/tests/set_text_queries.rs`).
 - `FOR SYSTEM_TIME AS OF SEQ` (`crates/fgdb/tests/temporal_graph_text.rs`); `AT BRANCH` through a host resolver (`crates/fgdb/tests/query_branches.rs`); `CALL fnx.* ... YIELD` composed into reads, including capability-authorized reads over the masked projection (`crates/fgdb/tests/gql_call_fnx.rs`, `crates/fgdb/tests/authorized_prism.rs`); `EXPLAIN (CERTIFICATE)` (`crates/fgdb/tests/embedded_query_explain.rs`).
-- Query-local Prism graph maps (`fgdb-luq0b`, source added 2026-10-11; Rust compilation, regression execution and final formatting **unverified here** after ENOSPC and executor shutdown): `CALL fnx.pagerank({labels:['Person'], relations:['KNOWS'], weight:'weight', parallel:'sum', self_loops:'drop'}, 0.85, 100, 1e-9, true) YIELD node, score RETURN node, score` binds literal schema names into the prepared plan, then applies the same projection in ordinary, pinned, capability-authorized and transaction read hosts. Template and bound plan identity retain every projection option and full-width schema identity; unprojected call transcripts retain their existing encoding. Algorithm parameters remain independently rebindable. Literal empty/singleton `labels` and `relations` lists match the current native induced-selection model; larger lists, dynamic maps and named graph catalogs are not implemented by this slice. Regressions cover weighted/reversed paths, all parallel reductions, missing-weight policies, excluded malformed weights, isolated vertices, staged changes/conflicts, capability masking and certified replay in `procedure_calls.rs`, `gql_call_fnx.rs`, `authorized_prism.rs` and `cli_robot.rs`.
+- Query-local Prism graph maps (`fgdb-luq0b`, source added 2026-10-11; Rust compilation, regression execution and final formatting **unverified here** after ENOSPC and executor shutdown): `CALL fnx.pagerank({labels:['Person'], relations:['KNOWS'], weight:'weight', parallel:'sum', self_loops:'drop'}, 0.85, 100, 1e-9, true) YIELD node, score RETURN node, score` binds literal schema names into the prepared plan, then applies the same projection in ordinary, pinned, capability-authorized and transaction read hosts. Template and bound plan identity retain every projection option and full-width schema identity; unprojected call transcripts retain their existing encoding. Algorithm parameters remain independently rebindable. The 2026-11-11 union extension admits up to 16 distinct identities in each literal `labels` and `relations` list, with ANY-label selection and both selected endpoints required; empty lists retain all admitted identities. Dynamic maps and named graph catalogs remain unimplemented. See the union vertical above for validation and sealed/maintained-source boundaries. Regressions cover weighted/reversed paths, all parallel reductions, missing-weight policies, excluded malformed weights, isolated vertices, staged changes/conflicts, capability masking and certified replay in `procedure_calls.rs`, `gql_call_fnx.rs`, `authorized_prism.rs` and `cli_robot.rs`.
 - Single- and double-quoted text, `//` and `/* */` comments, and backtick-delimited identifiers, under one lexical rule (`crates/fgdb-gql/tests/scalar_text.rs`). Three scanners sit outside it (re-checked 2026-10-05): the `SUBSCRIBE TO` header takes `--` and nested `/* */` comments but not `//` (`crates/fgdb/src/standing_query/native/changes/statement.rs`); the standalone `CALL fnx.*` parser takes no comments and reads numbers such as `1.` and `.5`, which native text refuses (native text reads exponent literals `1e5`, `1.5e-3`, `2E+10` as floats) (`crates/fgdb-prism/src/call.rs`); and the legacy `BoundPlan` parser has its own (`crates/fgdb-gql/src/parser.rs`).
 
 Source additions on 2026-10-11, with Rust compilation and regression execution **unverified here**:

@@ -350,8 +350,12 @@ impl ProjectionFlags {
         }
         Ok(FnxReadOptions {
             selection: FnxSelection {
-                vertex_label: lookup(&self.label, &bindings.labels, "label")?.map(LabelId),
-                relation: lookup(&self.relation, &bindings.relations, "relation")?.map(RelationId),
+                vertex_labels: lookup(&self.label, &bindings.labels, "label")?
+                    .map(LabelId)
+                    .into(),
+                relations: lookup(&self.relation, &bindings.relations, "relation")?
+                    .map(RelationId)
+                    .into(),
                 weight,
             },
             projection: ProjectionSpec {
@@ -437,7 +441,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     if sealed.is_some() {
         // All graph-law and scheduling checks precede either read-only open.
         // Unsupported algorithms never fall back to decoded adjacency.
-        if read.selection.relation.is_none() {
+        if read.selection.relations.single().is_none() {
             return Err(Failure::usage("--sealed requires --graph-relation"));
         }
         if !options.buffered.enabled() && options.budget != super::QueryBudget::default() {

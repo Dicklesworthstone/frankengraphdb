@@ -148,8 +148,12 @@ pub(crate) fn bind_procedure<C>(
     for (index, (name, value)) in names.iter().zip(arguments).enumerate() {
         match name.as_str() {
             "args" => {}
-            "label" => options.selection.vertex_label = Some(LabelId(symbol_id(value, index)?)),
-            "relation" => options.selection.relation = Some(RelationId(symbol_id(value, index)?)),
+            "label" => {
+                options.selection.vertex_labels = Some(LabelId(symbol_id(value, index)?)).into();
+            }
+            "relation" => {
+                options.selection.relations = Some(RelationId(symbol_id(value, index)?)).into();
+            }
             "weight" => weight = Some(PropertyKeyId(symbol_id(value, index)?)),
             "direction" => {
                 options.projection.directedness = match text(value, index)? {
@@ -199,8 +203,8 @@ pub(crate) fn bind_procedure<C>(
         ));
     }
     if let Some(projection) = call.graph_projection() {
-        options.selection.vertex_label = projection.vertex_label;
-        options.selection.relation = projection.relation;
+        options.selection.vertex_labels = projection.vertex_labels;
+        options.selection.relations = projection.relations;
         options.selection.weight = match projection.weight {
             ProcedureGraphWeight::Unit => FnxWeightSpec::Unit,
             ProcedureGraphWeight::Property { key, missing } => FnxWeightSpec::Property {

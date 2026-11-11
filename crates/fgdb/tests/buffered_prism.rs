@@ -10,7 +10,7 @@ use fgdb::{
     BufferLimits, BufferedReadError, BufferedReadLimits, BufferedReadView, Database, DatabaseKeys,
     MemVfs, MemoryPool, WriteBatch,
 };
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaSelection};
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxExecutionError, FnxParameters, FnxReadError, FnxReadOptions,
     FnxSelection, FnxWeightError, FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy,
@@ -60,8 +60,8 @@ fn pool() -> MemoryPool {
 fn options() -> FnxReadOptions {
     let mut options = FnxReadOptions::whole_graph(None);
     options.selection = FnxSelection {
-        vertex_label: Some(L),
-        relation: Some(R),
+        vertex_labels: Some(L).into(),
+        relations: Some(R).into(),
         weight: FnxWeightSpec::Property {
             key: P,
             missing: MissingWeightPolicy::Reject,
@@ -443,7 +443,7 @@ fn buffered_analytics_preserve_graph_law_refusals_and_all_admission_layers() {
                 .rows
                 .is_empty()
         );
-        opt.selection.relation = None;
+        opt.selection.relations = None.into();
         assert!(matches!(
             view.call_fnx(&cx, RANK, &parameters, opt).await,
             Err(FnxReadError::SourceLimit {
@@ -573,7 +573,7 @@ fn selected_relation_analytics_skip_unrelated_payloads_under_a_tighter_source_bu
                 .unwrap();
             let selected_faults = view.buffer_stats().misses - before.misses;
             let mut all = selected;
-            all.selection.relation = None;
+            all.selection.relations = None.into();
             // The full scan is the incumbent in this invocation. Its induced
             // graph is identical: all other-relation endpoints lack L.
             assert!(matches!(
@@ -879,6 +879,82 @@ fn every_buffered_analytics_checkpoint_cancels_without_publishing_a_partial_proj
 }
 
 #[test]
+fn decoded_unions_match_independent_topology_and_reuse_only_the_same_canonical_selection() {
+    let ((), report) = run_async_under_lab(0x6270_7214, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let db = seed(&contexts, &vfs).await;
+        let mut view = cold(&contexts, &vfs, pool()).await;
+        let mut opt = options();
+        opt.selection.vertex_labels = SchemaSelection::any_of(&[L, LabelId(11)]).unwrap();
+        opt.selection.relations = SchemaSelection::any_of(&[R, RelationId(8)]).unwrap();
+        opt.selection.weight = FnxWeightSpec::Unit;
+        opt.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+        let first = project_buffered(&mut view, &cx, opt).await.unwrap();
+        let vertices = [VId(1), VId(2), VId(3), VId(99), VId(u128::MAX)];
+        let edges: Vec<_> = [
+            (EId(0), 1, 2),
+            (HIGH_EDGE, 1, 2),
+            (EId(2), 2, 3),
+            (EId(3), 3, 1),
+            (EId(5), 3, 99),
+            (EId(6), 1, 3),
+        ]
+        .into_iter()
+        .map(|(eid, source, target)| ProjectionEdge {
+            eid,
+            source: VId(source),
+            target: VId(target),
+            weight: 1.0,
+        })
+        .collect();
+        let expected = SnapshotGraphView::build(
+            first.binding(),
+            &vertices,
+            &edges,
+            opt.projection,
+            opt.projection_limits,
+        )
+        .unwrap();
+        assert_eq!(first.vertex_ids(), vertices);
+        assert_eq!(first.digest(), expected.digest());
+        let params = FnxParameters::new();
+        let call = FnxCallSpec::bind(DIJKSTRA, &params).unwrap();
+        let actual = view.call_fnx(&cx, DIJKSTRA, &params, opt).await.unwrap();
+        assert_eq!(
+            actual.analytics,
+            call.execute(&expected, opt.execution_limits, || cx.checkpoint())
+                .unwrap()
+        );
+        assert_eq!(actual, db.call_fnx(&cx, DIJKSTRA, &params, opt).unwrap());
+        let faults = view.buffer_stats();
+        let mut reordered = opt;
+        reordered.selection.vertex_labels =
+            SchemaSelection::any_of(&[LabelId(11), L, L]).unwrap();
+        reordered.selection.relations =
+            SchemaSelection::any_of(&[RelationId(8), R, RelationId(8)]).unwrap();
+        assert!(
+            first.shares_cache_with(&project_buffered(&mut view, &cx, reordered).await.unwrap())
+        );
+        assert_eq!(view.buffer_stats(), faults);
+        for labels in [false, true] {
+            let mut narrower = opt;
+            if labels {
+                narrower.selection.vertex_labels = SchemaSelection::one(L);
+            } else {
+                narrower.selection.relations = SchemaSelection::one(R);
+            }
+            let graph = project_buffered(&mut view, &cx, narrower).await.unwrap();
+            assert!(!first.shares_cache_with(&graph));
+            assert_ne!(first.digest(), graph.digest());
+        }
+        assert_eq!(view.projection_read_cache_usage().entries, 3);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn decoded_reuse_skips_source_faults_across_calls_and_keeps_its_exact_generation() {
     let ((), report) = run_async_under_lab(0x6270_7210, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -1059,8 +1135,8 @@ fn decoded_reuse_keys_every_construction_dimension_and_preserves_kernel_refusals
                 5 => opt.projection_limits.max_adjacency_entries += 1,
                 6 => opt.projection_limits.max_workspace_bytes += 1,
                 7 => opt.as_of = Some(CommitSeq(1)),
-                8 => opt.selection.vertex_label = Some(LabelId(11)),
-                9 => opt.selection.relation = Some(RelationId(9)),
+                8 => opt.selection.vertex_labels = Some(LabelId(11)).into(),
+                9 => opt.selection.relations = Some(RelationId(9)).into(),
                 10 => opt.selection.weight = FnxWeightSpec::Unit,
                 11 => {
                     opt.selection.weight = FnxWeightSpec::Property {

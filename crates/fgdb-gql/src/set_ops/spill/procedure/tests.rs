@@ -44,8 +44,8 @@ fn wide() -> GqlQueryPolicy {
 #[test]
 fn explicit_capability_preserves_original_call_metadata_and_source_clauses() {
     let projection = ProcedureGraphProjection {
-        vertex_label: Some(LabelId(11)),
-        relation: Some(RelationId(17)),
+        vertex_labels: Some(LabelId(11)).into(),
+        relations: Some(RelationId(17)).into(),
         weight: ProcedureGraphWeight::Property {
             key: PropertyKeyId(23),
             missing: ProcedureMissingWeight::Unit,

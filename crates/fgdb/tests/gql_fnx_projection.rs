@@ -4,7 +4,7 @@
 
 use asupersync::{Budget, runtime::RuntimeBuilder, security::key::AuthKey};
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch, SchemaSelection};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
 use fgdb_prism::{
@@ -25,6 +25,10 @@ const S: RelationId = RelationId(12);
 const COST: PropertyKeyId = PropertyKeyId(13);
 const PRIVATE: PropertyKeyId = PropertyKeyId(14);
 const BRANCH: &str = "projection-test";
+const UNION_WEIGHTED: &str =
+    "CALL fnx.single_source_dijkstra_path_length(\
+     {labels:['Other','Person','Person'],relations:['S','R','S'],weight:'cost'},1) \
+     YIELD node,distance RETURN node,distance ORDER BY node";
 const WEIGHTED: &str = "CALL fnx.single_source_dijkstra_path_length(args => [1], label => 'Person', \
      relation => 'R', weight => 'cost') YIELD node, distance \
      RETURN node, distance ORDER BY node";
@@ -140,8 +144,8 @@ fn named_projection_selects_labels_relations_weights_and_direction() {
         // choose any of the input/reduction fields in this control.
         let mut options = FnxReadOptions::whole_graph(None);
         options.selection = FnxSelection {
-            vertex_label: Some(PERSON),
-            relation: Some(R),
+            vertex_labels: Some(PERSON).into(),
+            relations: Some(R).into(),
             weight: FnxWeightSpec::Property {
                 key: COST,
                 missing: MissingWeightPolicy::Reject,
@@ -225,6 +229,177 @@ fn named_projection_selects_labels_relations_weights_and_direction() {
                 vec![GraphValue::Vertex(VId(5)), GraphValue::Vertex(VId(5))],
             ]
         );
+    });
+}
+
+#[test]
+fn union_projection_preserves_any_label_exact_relations_and_pinned_replay() {
+    run(async |commit, cx, _| {
+        let mut db = database(commit, true).await;
+        let mut values = WriteBatch::new(R);
+        values.set_edge_property(EId(3), COST, Some(CanonicalScalar::Int(1)));
+        values.set_edge_property(EId(4), COST, Some(CanonicalScalar::Int(10)));
+        values.create_vertex(VId(6), vec![LabelId(99)], vec![]);
+        values.add_edge(
+            EId(30),
+            VId(1),
+            VId(6),
+            vec![(COST, CanonicalScalar::Bool(true))],
+        );
+        db.write(commit, values).await.unwrap();
+        let mut unselected = WriteBatch::new(RelationId(99));
+        unselected.add_edge(
+            EId(31),
+            VId(1),
+            VId(2),
+            vec![(COST, CanonicalScalar::Bool(true))],
+        );
+        db.write(commit, unselected).await.unwrap();
+        let params = GqlParameters::new();
+        let expected = expected_distances(&[(1, 0.0), (2, 3.0), (3, 2.0), (4, 1.0)]);
+        let (before, certificate) = db
+            .execute_certified(cx, UNION_WEIGHTED, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(rows(before.clone()), expected);
+
+        let mut options = FnxReadOptions::whole_graph(None);
+        options.selection = FnxSelection {
+            vertex_labels: SchemaSelection::any_of(&[PERSON, OTHER]).unwrap(),
+            relations: SchemaSelection::any_of(&[R, S]).unwrap(),
+            weight: FnxWeightSpec::Property {
+                key: COST,
+                missing: MissingWeightPolicy::Reject,
+            },
+        };
+        let standalone = db
+            .call_fnx(
+                cx,
+                "CALL fnx.single_source_dijkstra_path_length(1) YIELD node,distance",
+                &FnxParameters::new(),
+                options,
+            )
+            .unwrap();
+        assert_eq!(
+            standalone.analytics.rows,
+            vec![
+                vec![FnxValue::Vertex(VId(1)), FnxValue::Float(0.0)],
+                vec![FnxValue::Vertex(VId(2)), FnxValue::Float(3.0)],
+                vec![FnxValue::Vertex(VId(3)), FnxValue::Float(2.0)],
+                vec![FnxValue::Vertex(VId(4)), FnxValue::Float(1.0)],
+            ]
+        );
+        assert_eq!(
+            certificate.procedures,
+            [fgdb::NativeProcedureEvidence::from_fnx(
+                &standalone.analytics.certificate
+            )]
+        );
+        let view = db.read_session().unwrap();
+        let mut update = WriteBatch::new(S);
+        update.set_edge_property(EId(5), COST, Some(CanonicalScalar::Int(20)));
+        db.write(commit, update).await.unwrap();
+        assert_eq!(
+            rows(query(&db, cx, UNION_WEIGHTED)),
+            expected_distances(&[(1, 0.0), (2, 3.0), (3, 7.0), (4, 1.0)])
+        );
+        assert_eq!(
+            view.query(cx, UNION_WEIGHTED, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            db.replay(cx, &certificate, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
+    });
+}
+
+#[test]
+fn union_projection_reads_staged_label_and_relation_membership_after_rollback() {
+    run(async |commit, cx, txcx| {
+        let mut db = database(commit, false).await;
+        let params = GqlParameters::new();
+        let before = query(&db, cx, UNION_WEIGHTED);
+        let mut txn = db.begin(txcx).unwrap();
+        txn.savepoint(&db, "before_union").unwrap();
+        let mut first = WriteBatch::new(R);
+        first.create_vertex(VId(4), vec![OTHER], vec![]);
+        first.add_edge(
+            EId(3),
+            VId(1),
+            VId(4),
+            vec![(COST, CanonicalScalar::Int(1))],
+        );
+        let mut second = WriteBatch::new(S);
+        second.add_edge(
+            EId(4),
+            VId(4),
+            VId(3),
+            vec![(COST, CanonicalScalar::Int(1))],
+        );
+        txn.write_ordered(&mut db, vec![first, second]).unwrap();
+        assert_eq!(
+            rows(
+                txn.query(&db, cx, UNION_WEIGHTED, &params, symbols, policy())
+                    .unwrap()
+            ),
+            expected_distances(&[(1, 0.0), (2, 3.0), (3, 2.0), (4, 1.0)])
+        );
+        assert_eq!(query(&db, cx, UNION_WEIGHTED), before);
+        txn.rollback_to_savepoint(&db, "before_union").unwrap();
+        assert_eq!(
+            txn.query(&db, cx, UNION_WEIGHTED, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn union_projection_keeps_phantom_dependencies_for_every_selected_relation() {
+    run(async |commit, cx, txcx| {
+        for relation in [R, S] {
+            let mut db = database(commit, false).await;
+            let mut txn = db.begin(txcx).unwrap();
+            let params = GqlParameters::new();
+            let before = txn
+                .query(&db, cx, UNION_WEIGHTED, &params, symbols, policy())
+                .unwrap();
+            assert_eq!(
+                rows(before.clone()),
+                expected_distances(&[(1, 0.0), (2, 3.0), (3, 7.0)])
+            );
+            let mut local = WriteBatch::new(R);
+            local.create_vertex(VId(9), vec![PERSON], vec![]);
+            txn.write(&mut db, local).unwrap();
+            // S has no existing edge at the read cut: its new edge is a
+            // phantom, not an update to an edge already returned by the read.
+            let mut concurrent = WriteBatch::new(relation);
+            concurrent.add_edge(
+                EId(99),
+                VId(1),
+                VId(5),
+                vec![(COST, CanonicalScalar::Int(1))],
+            );
+            db.write(commit, concurrent).await.unwrap();
+            assert_eq!(
+                txn.query(&db, cx, UNION_WEIGHTED, &params, symbols, policy())
+                    .unwrap(),
+                before
+            );
+            let frontier = db.frontier().unwrap();
+            assert!(matches!(
+                txn.finish(&mut db, commit).await,
+                Err(fgdb::WriteTxnError::Write(
+                    fgdb::WriteError::FirstCommitterWins { .. }
+                ))
+            ));
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
     });
 }
 
@@ -473,6 +648,7 @@ fn query_projection_cannot_widen_capability_scope_or_observe_hidden_weights() {
         let token = issuer.issue_at(&grant, 100).unwrap();
         for text in [
             WEIGHTED,
+            UNION_WEIGHTED,
             "CALL fnx.single_source_dijkstra_path_length(args => [1], weight => 'cost') \
              YIELD node, distance RETURN node, distance ORDER BY node",
             "CALL fnx.single_source_dijkstra_path_length(args => [1], weight => 'private', \

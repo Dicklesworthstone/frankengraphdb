@@ -1180,8 +1180,8 @@ fn independent_source_receipts_and_external_limits_remain_cumulative_on_reuse() 
         assert!(
             matches!(&error, NativeSpoolError::Procedure(error)
                 if matches!(error.as_ref(), GqlQueryError::Source(
-                    GqlError::Procedure(ProcedureError::SealedRelationMismatch { requested: Some(requested), retained })
-                ) if *requested == S && *retained == R)),
+                    GqlError::Procedure(ProcedureError::SealedRelationMismatch { requested, retained })
+                ) if requested.single() == Some(S) && *retained == R)),
             "{error:?}",
         );
         assert_eq!(spill_pool.used(), 0);
@@ -1682,8 +1682,8 @@ fn changed_projection_sources_replay_raw_history_and_fresh_query_admission() {
         // Its retained image cannot turn missing raw admission into zero cost.
         let mut standalone = view(&commit, &vfs, &source_pool).await;
         let mut options = fgdb_prism::FnxReadOptions::whole_graph(None);
-        options.selection.vertex_label = Some(PERSON);
-        options.selection.relation = Some(R);
+        options.selection.vertex_labels = Some(PERSON).into();
+        options.selection.relations = Some(R).into();
         options.projection.directedness = fgdb_prism::Directedness::Directed;
         options.projection.parallel_edges = fgdb_prism::ParallelEdgePolicy::CollapseUnit;
         options.projection.self_loops = fgdb_prism::SelfLoopPolicy::Drop;

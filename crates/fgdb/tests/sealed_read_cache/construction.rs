@@ -414,7 +414,7 @@ fn construction_cancellation_live_guards_limits_and_every_drop_preserve_the_sour
             assert_eq!(format!("{cooperative:?}"), format!("{immediate:?}"));
         }
         let mut wrong = config;
-        wrong.selection.relation = Some(RelationId(99));
+        wrong.selection.relations = Some(RelationId(99)).into();
         assert!(matches!(SealedGraphView::build_cooperative_with_checkpoint(
             &cx, &image, &[], wrong,
             SealedProjectionMask { relation_visible: false, weight_property_visible: false },

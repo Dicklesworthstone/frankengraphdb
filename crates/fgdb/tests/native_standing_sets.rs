@@ -919,6 +919,31 @@ fn one_root_handle_repairs_failed_hidden_operands_and_preserves_independent_circ
 }
 
 #[test]
+fn maintained_analytics_refuse_union_selections_without_widening_the_graph() {
+    let ((), report) = run_async_under_lab(0x6e73_7204, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let params = GqlParameters::new();
+        for projection in ["labels:['L','R']", "relations:['R','S']"] {
+            let text = format!(
+                "CALL fnx.triangles({{{projection},parallel:'collapse',self_loops:'drop'}}) \
+                 YIELD vertex,triangles RETURN vertex,triangles"
+            );
+            // The batch host accepts the graph; its maintained derivative
+            // still requires a scalar selector in each identity domain.
+            assert!(db.query(&cx, &text, &params, symbols, policy()).is_ok());
+            assert!(matches!(
+                db.register_standing_native(&cx, &text, &params, symbols, policy()),
+                Err(StandingQueryError::Unsupported)
+            ));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn parameters_freeze_per_circuit_and_unsupported_final_pages_refuse_without_fallback() {
     let ((), report) = run_async_under_lab(0x6e73_7203, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

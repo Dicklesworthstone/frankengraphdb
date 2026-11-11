@@ -258,7 +258,7 @@ fn admitted_empty_rows_skip_history_and_preserve_complete_kernel_results() {
             )
         };
         let mut invalid = options();
-        invalid.selection.vertex_label = None;
+        invalid.selection.vertex_labels = None.into();
         assert!(matches!(
             build(invalid),
             Err(SealedReadError::Projection(SealedProjectionError::Weight {
@@ -1246,7 +1246,7 @@ fn incoming_endpoint_masks_and_loop_discard_precede_weight_observation() {
             assert!(
                 !cursor_row(&graph, &query, graph.vertex_ordinal(VId(2)).unwrap(), None).is_empty()
             );
-            opt.selection.vertex_label = None;
+            opt.selection.vertex_labels = None.into();
             assert!(matches!(
                 db.prism_sealed_projection_at(
                     &query,

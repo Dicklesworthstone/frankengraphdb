@@ -5,7 +5,7 @@
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryError, ReadError, WriteBatch};
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch, SchemaSelection};
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxExecutionError, FnxExecutionLimits, FnxGraphKind, FnxParameters,
     FnxReadError, FnxReadOptions, FnxSelection, FnxSourceLimits, FnxValue, FnxWeightError,
@@ -77,8 +77,8 @@ fn options(direction: Directedness) -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: None,
-            relation: None,
+            vertex_labels: None.into(),
+            relations: None.into(),
             weight: FnxWeightSpec::Property {
                 key: PropertyKeyId(1),
                 missing: MissingWeightPolicy::Reject,
@@ -295,8 +295,8 @@ fn hidden_weight_values_and_label_names_are_absent_before_selection_or_reduction
         ));
         // Restrict the raw control's graph to authorized endpoints, not fields.
         let mut raw = opt;
-        raw.selection.vertex_label = Some(LabelId(1));
-        raw.selection.relation = Some(RelationId(1));
+        raw.selection.vertex_labels = Some(LabelId(1)).into();
+        raw.selection.relations = Some(RelationId(1)).into();
         assert!(matches!(
             db.call_fnx(&cx, DIJKSTRA, &FnxParameters::new(), raw),
             Err(FnxReadError::Weight {
@@ -337,20 +337,30 @@ fn hidden_weight_values_and_label_names_are_absent_before_selection_or_reduction
             vec![vec![FnxValue::Vertex(VId(1)), FnxValue::Vertex(VId(1))]]
         );
         for label in [LabelId(1), LabelId(99)] {
-            opt.selection.vertex_label = Some(label);
+            opt.selection.vertex_labels = Some(label).into();
             assert!(read(&db, &cx, &issuer, &both, CC, opt).is_empty());
         }
-        opt.selection.vertex_label = Some(LabelId(99));
-        assert!(read(&db, &cx, &issuer, &token, CC, opt).is_empty());
+        for labels in [
+            SchemaSelection::one(LabelId(99)),
+            SchemaSelection::any_of(&[LabelId(99), LabelId(100)]).unwrap(),
+        ] {
+            opt.selection.vertex_labels = labels;
+            assert!(read(&db, &cx, &issuer, &token, CC, opt).is_empty());
+        }
+        opt.selection.vertex_labels = SchemaSelection::ALL;
+        let visible = read(&db, &cx, &issuer, &token, CC, opt);
+        opt.selection.vertex_labels =
+            SchemaSelection::any_of(&[LabelId(1), LabelId(99)]).unwrap();
+        assert_eq!(read(&db, &cx, &issuer, &token, CC, opt), visible);
         let denied_relations = token
             .attenuate(Restriction::Relations(Scope::only([])))
             .unwrap();
         opt = options(Directedness::Undirected);
-        opt.selection.relation = Some(RelationId(2));
+        opt.selection.relations = Some(RelationId(2)).into();
         let isolates = read(&db, &cx, &issuer, &token, CC, opt);
         assert_eq!(isolates.len(), 4);
         assert!(isolates.iter().all(|row| row[0] == row[1]));
-        opt.selection.relation = None;
+        opt.selection.relations = None.into();
         assert_eq!(
             read(&db, &cx, &issuer, &denied_relations, CC, opt),
             isolates
@@ -665,7 +675,7 @@ fn signed_limits_and_native_limits_are_cumulative_and_independent() {
             }
         }
         let mut empty = opt;
-        empty.selection.vertex_label = Some(LabelId(99));
+        empty.selection.vertex_labels = Some(LabelId(99)).into();
         assert!(
             read(
                 &db,
@@ -1148,7 +1158,7 @@ fn every_source_builder_kernel_and_delivery_clock_observes_expiry_and_retirement
                 let token = issuer.issue_at(&grant(), 100).unwrap();
                 let mut opt = options(Directedness::Undirected);
                 if empty {
-                    opt.selection.vertex_label = Some(LabelId(99));
+                    opt.selection.vertex_labels = Some(LabelId(99)).into();
                 }
                 let mut calls = 0;
                 let expected = db
@@ -1540,7 +1550,7 @@ fn hidden_records_move_no_signed_or_source_limit_threshold() {
                 )
             };
             let mut opt = options(direction);
-            opt.selection.relation = relation;
+            opt.selection.relations = relation.into();
             assert_eq!(
                 run(&db, &token, opt).unwrap(),
                 run(&oracle, &token, opt).unwrap(),

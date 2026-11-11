@@ -299,7 +299,8 @@ impl<V: Vfs + Clone> Database<V> {
                     .map_err(SealedReadError::from)?;
                 let relation = options
                     .selection
-                    .relation
+                    .relations
+                    .single()
                     .ok_or(SealedReadError::Projection(
                         SealedProjectionError::RelationRequired,
                     ))?;
@@ -430,7 +431,7 @@ pub enum ProcedureError {
     /// A query must explicitly select this prepared source's relation; the
     /// source never substitutes its relation for a different or whole graph.
     SealedRelationMismatch {
-        requested: Option<fgdb_delta_types::RelationId>,
+        requested: fgdb_delta_types::SchemaSelection<fgdb_delta_types::RelationId>,
         retained: fgdb_delta_types::RelationId,
     },
     /// A count beyond the GQL Int64 domain.
@@ -1160,7 +1161,7 @@ impl<V: Vfs + Clone> Database<V> {
             let view = self.read_session().map_err(Error::Read)?;
             let as_of = as_of.unwrap_or(view.frontier());
             view.check_sealed_request(cx, as_of, selection)?;
-            let relation = selection.relation.ok_or(SealedReadError::Projection(
+            let relation = selection.relations.single().ok_or(SealedReadError::Projection(
                 SealedProjectionError::RelationRequired,
             ))?;
             let request = SealedProjectionRequest {
@@ -1469,7 +1470,7 @@ impl EmbeddedReadView {
     ) -> Result<(), SealedReadError> {
         cx.checkpoint().map_err(Error::Cancelled)?;
         self.snapshot.check_frontier(as_of).map_err(Error::Read)?;
-        if selection.relation.is_none() {
+        if selection.relations.single().is_none() {
             return Err(SealedReadError::Projection(
                 SealedProjectionError::RelationRequired,
             ));
@@ -1673,11 +1674,12 @@ impl EmbeddedReadView {
             source::visit_edges_in_relation_with_properties(
                 &self.snapshot,
                 as_of,
-                selection.relation,
+                selection.relations.single(),
                 &mut control,
                 |entry, props, control| {
                     control(SourceEvent::Work)?;
-                    if !selected_vertices.contains(entry.src)
+                    if !selection.relations.contains(entry.relation)
+                        || !selected_vertices.contains(entry.src)
                         || !selected_vertices.contains(entry.dst)
                     {
                         return Ok(());
@@ -1763,10 +1765,7 @@ fn select_prism_vertices(
     let mut vertices = Vec::new();
     source::visit_projection_vertices(patches, index, as_of, control, |row, control| {
         control(SourceEvent::Work)?;
-        if selection
-            .vertex_label
-            .is_some_and(|label| row.labels.binary_search(&label).is_err())
-        {
+        if !selection.vertex_labels.intersects_sorted(&row.labels) {
             return Ok(());
         }
         debug_assert!(vertices.last().is_none_or(|last| *last < row.vid));

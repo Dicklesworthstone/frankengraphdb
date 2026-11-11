@@ -73,7 +73,7 @@ fn memory() -> FnxMemoryLimits {
 
 fn options(cut: CommitSeq) -> FnxReadOptions {
     let mut options = FnxReadOptions::whole_graph(Some(cut));
-    options.selection.relation = Some(R);
+    options.selection.relations = Some(R).into();
     options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
     options
 }

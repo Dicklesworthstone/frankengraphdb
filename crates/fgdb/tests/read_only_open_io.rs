@@ -843,7 +843,7 @@ fn a_read_only_open_heals_a_create_interrupted_before_its_block_directory() {
 
 fn sealed_options(call: &FnxCallSpec, as_of: Option<CommitSeq>) -> FnxReadOptions {
     let mut options = FnxReadOptions::whole_graph_for(call, as_of);
-    options.selection.relation = Some(RELATION);
+    options.selection.relations = Some(RELATION).into();
     options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
     options
 }
@@ -1314,7 +1314,7 @@ fn sealed_open_preserves_historical_weighted_label_selection_and_directions() {
             let mut historical_rows = None;
             for cut in [old_cut, view.frontier()] {
                 let mut options = sealed_options(&call, Some(cut));
-                options.selection.vertex_label = Some(LabelId(1));
+                options.selection.vertex_labels = Some(LabelId(1)).into();
                 options.selection.weight = FnxWeightSpec::Property {
                     key: PROPERTY,
                     missing: MissingWeightPolicy::Reject,

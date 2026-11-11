@@ -424,7 +424,7 @@ fn measured_options<Rs: GraphSymbolResolver, C: FnMut() -> u64>(
             .unwrap();
             let at = selected_cut(view, execution);
             options.as_of = Some(at);
-            options.selection.relation = Some(R);
+            options.selection.relations = Some(R).into();
             let mut usage = crate::gql_exec::AdmissionUsage::default();
             let rows = crate::query::authorized::analytics::execute(
                 &view.snapshot,
@@ -891,7 +891,7 @@ fn every_compressed_construction_query_checkpoint_has_one_live_guard() {
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let cx = c.query().with_checkpoint_probe(Arc::clone(&probe));
             let mut options = FnxReadOptions::whole_graph(Some(as_of));
-            options.selection.relation = Some(R);
+            options.selection.relations = Some(R).into();
             options.projection.directedness = direction;
             let mut observed = Vec::new();
             let graph = SealedGraphView::build_with_checkpoint(
@@ -1113,8 +1113,8 @@ fn full_scope_compressed_work_pays_the_declared_kernel_model_and_all_host_events
         )
         .unwrap();
         let mut options = FnxReadOptions::whole_graph_for(&call, Some(owner.snapshot_seq()));
-        options.selection.relation = Some(R);
-        options.selection.vertex_label = Some(L);
+        options.selection.relations = Some(R).into();
+        options.selection.vertex_labels = Some(L).into();
         let (_, partition, at, _) = owner.authorized_parts();
         assert_eq!(partition.incidence_count(), 3);
         // Count public projection and kernel guard events without using any

@@ -32,6 +32,7 @@ mod canonical;
 pub mod catalog;
 mod fold;
 mod index;
+mod schema_selection;
 pub mod zset;
 mod zweight;
 
@@ -47,6 +48,7 @@ pub use canonical::{
 pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
 pub use fold::fold_target_disjoint;
 pub use index::{INDEX_FORMAT_V1, IndexError, LocalDeltaBatchIndex};
+pub use schema_selection::{MAX_SCHEMA_SELECTION_IDS, SchemaSelection, SchemaSelectionLimit};
 pub use zset::{ZSet, ZSetError, ZSetEvent};
 pub use zweight::{ZWeight, ZWeightError};
 

@@ -686,7 +686,7 @@ fn indexed_vertex_projection_preserves_labels_history_and_pinned_generations() {
                     ] {
                         let mut selected = opt;
                         selected.as_of = Some(cut);
-                        selected.selection.vertex_label = label;
+                        selected.selection.vertex_labels = label.into();
                         selected.projection.directedness = direction;
                         let graph = assert_indexed_vertex_projection(view, &query, selected);
                         if cut == CommitSeq(0) || label == Some(LabelId(404)) {

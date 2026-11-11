@@ -776,9 +776,16 @@ fn build(
         admit(Step::Vertex(
             u32::try_from(labels).map_err(|_| Error::SizeOverflow)?,
         ))?;
-        if options.selection.vertex_label.is_some_and(|label| {
-            !scope.allows_label(label) || row.labels.binary_search(&label).is_err()
-        }) {
+        if options
+            .selection
+            .vertex_labels
+            .members()
+            .is_some_and(|labels| {
+                !labels.iter().any(|label| {
+                    scope.allows_label(*label) && row.labels.binary_search(label).is_ok()
+                })
+            })
+        {
             return Ok(());
         }
         push_staged(
@@ -795,10 +802,11 @@ fn build(
     source::visit_edges_in_relation_with_properties(
         snapshot,
         binding.as_of,
-        options.selection.relation,
+        options.selection.relations.single(),
         &mut scan,
         |entry, props, _| {
             if !scope.allows_relation(entry.relation)
+                || !options.selection.relations.contains(entry.relation)
                 || !selected_vertices.contains(entry.src)
                 || !selected_vertices.contains(entry.dst)
             {
