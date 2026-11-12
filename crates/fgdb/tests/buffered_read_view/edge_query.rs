@@ -1365,3 +1365,397 @@ fn persisted_native_match_joins_and_correlated_probes_reuse_the_root_run() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+async fn native_incident_history(
+    commit: &CommitCx,
+    cx: &QueryCx,
+) -> (
+    MemVfs,
+    Database<MemVfs>,
+    AdjRunSegmentVersion,
+    AdjRunSegmentVersion,
+) {
+    let (vfs, mut db, run) = native_run_history(commit, cx, CommitSeq(0)).await;
+    let other = db
+        .seal_relation(
+            commit,
+            cx,
+            RelationId(8),
+            CommitSeq(0),
+            native_run_limits(),
+            RootReadLimits::default(),
+        )
+        .await
+        .unwrap();
+    let mut vertex = WriteBatch::new(RelationId(99));
+    vertex.create_vertex(
+        VId(5),
+        vec![LabelId(1)],
+        vec![(PROPERTY, CanonicalScalar::Int(5))],
+    );
+    vertex.set_vertex_property(VId(1), PROPERTY, Some(CanonicalScalar::Int(41)));
+    assert_eq!(db.write(commit, vertex).await.unwrap(), CommitSeq(5));
+    (vfs, db, run, other)
+}
+
+fn native_vertex_probe(direction: usize, anti: bool) -> PreparedGraphPattern<GraphValueRow> {
+    let atom = match direction {
+        0 => "-[s:R]->(b)",
+        1 => "<-[s:R]-(b)",
+        _ => "-[s:R]-(b)",
+    };
+    query(&format!(
+        "MATCH (a) WHERE {}EXISTS {{ MATCH (a){atom} }} RETURN a,a.p AS value",
+        if anti { "NOT " } else { "" },
+    ))
+}
+
+fn native_vertex_probe_expected(cut: u64, direction: usize, anti: bool) -> Vec<Vec<GraphValue>> {
+    // Explicit visible roots, including the old vertex retired at 2 and the
+    // isolated vertex born at 5. Missing incident descriptors prove no edges,
+    // not an absent root record; the root's own properties must survive.
+    let ids: &[u128] = match (cut, direction, anti) {
+        (0, _, _) => &[],
+        (1, 0, false) => &[1, 4],
+        (1, 0, true) => &[2, 3],
+        (1, 1, false) => &[1, 2, 3],
+        (1, 1, true) => &[4],
+        (1, 2, false) => &[1, 2, 3, 4],
+        (1, 2, true) => &[],
+        (5, 0, false) => &[1, 4],
+        (5, 0, true) => &[2, 5],
+        (5, 1, false) => &[1, 2],
+        (5, 1, true) => &[4, 5],
+        (5, 2, false) => &[1, 2, 4],
+        (5, 2, true) => &[5],
+        _ => unreachable!(),
+    };
+    ids.iter()
+        .map(|&id| {
+            vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Int(if id == 1 && cut == 5 {
+                    41
+                } else {
+                    id as i64
+                })),
+            ]
+        })
+        .collect()
+}
+
+async fn native_vertex_probe_rows(
+    view: &mut BufferedReadView<MemVfs>,
+    cx: &QueryCx,
+    plan: &PreparedGraphPattern<GraphValueRow>,
+    cut: u64,
+) -> Vec<Vec<GraphValue>> {
+    let mut cursor = view
+        .stream_graph_probes_governed_at(cx, plan, CommitSeq(cut), native_run_policy(1000))
+        .unwrap();
+    let mut rows = Vec::new();
+    while let Some(row) = cursor.next().await {
+        rows.push(row.unwrap().values().to_vec());
+    }
+    assert_eq!(cursor.snapshot_seq(), CommitSeq(cut));
+    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+    assert!(cursor.next().await.is_none());
+    rows
+}
+
+#[test]
+fn persisted_incident_runs_serve_vertex_probes_and_mixed_relation_children() {
+    let ((), report) = run_async_under_lab(0x6275_e015, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, db, run, other) = native_incident_history(&commit, &cx).await;
+        let store = BlockStore::open_existing_for_read_with_vfs(
+            &commit,
+            vfs.clone(),
+            vfs.database_dir(),
+            [0xb1; 32],
+            DatabaseSecurityNamespaceId([0xb2; 32]),
+        )
+        .await
+        .unwrap();
+        let root = store
+            .get_root(&commit, db.partition_root().unwrap())
+            .await
+            .unwrap();
+        let run_path = store.path(run.0);
+        let run_bytes = vfs.read(&run_path).await.unwrap();
+        let other_path = store.path(other.0);
+        let other_bytes = vfs.read(&other_path).await.unwrap();
+        let mut redundant = Vec::new();
+        for reference in root.blocks {
+            let path = store.path(reference.block_id);
+            redundant.push((path.clone(), vfs.read(&path).await.unwrap()));
+        }
+        assert!(!redundant.is_empty());
+        let (mut view, memory) = native_run_view(&commit, &cx, &vfs).await;
+        let baseline = memory.used();
+        // Both R and S have eligible carried runs, but vertex roots have no
+        // edge root from which an incident request can borrow a locator.
+        // Destroy all Tier-D topology only after full owner admission.
+        for (path, _) in &redundant {
+            vfs.write(path, b"typed incident requests must load their own run")
+                .await
+                .unwrap();
+        }
+        for cut in [0, 1, 5] {
+            for direction in 0..3 {
+                for anti in [false, true] {
+                    let plan = native_vertex_probe(direction, anti);
+                    assert_eq!(
+                        native_vertex_probe_rows(&mut view, &cx, &plan, cut).await,
+                        native_vertex_probe_expected(cut, direction, anti),
+                        "cut {cut}, direction {direction}, anti {anti}"
+                    );
+                    assert_eq!(memory.used(), baseline);
+                }
+            }
+        }
+
+        // Once the first visible vertex has opened R, later roots must reuse
+        // its retained locator. Reopening the now-damaged FGRN would fail just
+        // as a Tier-D refault would; neither is needed by this active query.
+        let plan = native_vertex_probe(0, false);
+        let mut cursor = view
+            .stream_graph_probes_governed(&cx, &plan, native_run_policy(1000))
+            .unwrap();
+        let first = cursor.next().await.unwrap().unwrap();
+        assert_eq!(
+            first.values(),
+            native_vertex_probe_expected(5, 0, false)[0].as_slice()
+        );
+        drop(first);
+        vfs.write(
+            &run_path,
+            b"active vertex probes must retain their incident run",
+        )
+        .await
+        .unwrap();
+        let second = cursor.next().await.unwrap().unwrap();
+        assert_eq!(
+            second.values(),
+            native_vertex_probe_expected(5, 0, false)[1].as_slice()
+        );
+        drop(second);
+        assert!(cursor.next().await.is_none());
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        drop(cursor);
+        assert_eq!(memory.used(), baseline);
+        vfs.write(&run_path, &run_bytes).await.unwrap();
+
+        // A typed R root cannot supply S's neighborhood. S is independently
+        // admitted once and reused for later roots, including the final MAX.
+        let text = "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN r,a,s,b,c,s.p AS sp";
+        let plan = PreparedGraphText::prepare(text, |kind, name| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RELATION)),
+            (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(8))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PROPERTY)),
+            _ => None,
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        for cut in [1, 5] {
+            let mut cursor = view
+                .stream_graph_edge_joins_governed_at(
+                    &cx,
+                    &plan,
+                    CommitSeq(cut),
+                    native_run_policy(1000),
+                )
+                .unwrap();
+            let mut actual = Vec::new();
+            while let Some(row) = cursor.next().await {
+                actual.push(row.unwrap().values().to_vec());
+                if cut == 5 && actual.len() == 1 {
+                    vfs.write(
+                        &other_path,
+                        b"later R roots must reuse their admitted S run",
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            let expected = if cut == 1 {
+                Vec::new()
+            } else {
+                [(0, 4), (103, 4), (u128::MAX, 1)]
+                    .into_iter()
+                    .map(|(root, a)| {
+                        vec![
+                            GraphValue::Edge(EId(root)),
+                            GraphValue::Vertex(VId(a)),
+                            GraphValue::Edge(EId(105)),
+                            GraphValue::Vertex(VId(1)),
+                            GraphValue::Vertex(VId(4)),
+                            GraphValue::Scalar(CanonicalScalar::Int(20)),
+                        ]
+                    })
+                    .collect()
+            };
+            assert_eq!(actual, expected, "mixed relation cut {cut}");
+            assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+            assert!(cursor.next().await.is_none());
+            drop(cursor);
+            assert_eq!(memory.used(), baseline);
+            vfs.write(&other_path, &other_bytes).await.unwrap();
+        }
+        for (path, bytes) in redundant {
+            vfs.write(&path, &bytes).await.unwrap();
+        }
+        drop(view);
+        assert_eq!(memory.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn independent_incident_run_errors_cancel_and_refund_without_establishing_absence() {
+    let ((), report) = run_async_under_lab(0x6275_e016, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _, run, _) = native_incident_history(&commit, &cx).await;
+        let store = BlockStore::open_existing_for_read_with_vfs(
+            &commit,
+            vfs.clone(),
+            vfs.database_dir(),
+            [0xb1; 32],
+            DatabaseSecurityNamespaceId([0xb2; 32]),
+        )
+        .await
+        .unwrap();
+        let path = store.path(run.0);
+        let original = vfs.read(&path).await.unwrap();
+        let (mut view, memory) = native_run_view(&commit, &cx, &vfs).await;
+        let baseline = memory.used();
+        vfs.write(&path, b"selected independent incident run is damaged")
+            .await
+            .unwrap();
+        for anti in [false, true] {
+            let plan = native_vertex_probe(0, anti);
+            let mut cursor = view
+                .stream_graph_probes_governed(&cx, &plan, native_run_policy(0))
+                .unwrap();
+            assert!(matches!(
+                cursor.next().await,
+                Some(Err(GqlQueryError::Rows(_)))
+            ));
+            assert_eq!(cursor.row_stats().snapshot_records, 0);
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+            assert!(cursor.next().await.is_none());
+            drop(cursor);
+            let mut cursor = view
+                .stream_graph_probes_governed(&cx, &plan, native_run_policy(1000))
+                .unwrap();
+            let error = cursor.next().await.unwrap().unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    GqlQueryError::Source(VertexScanError::Source(BufferedReadError::Store(_)))
+                ),
+                "{error:?}"
+            );
+            assert_eq!(cursor.row_stats().result_rows, 0);
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+            assert!(cursor.next().await.is_none());
+            drop(cursor);
+            assert_eq!(memory.used(), baseline);
+        }
+        vfs.write(&path, &original).await.unwrap();
+        let plan = native_vertex_probe(0, false);
+        let expected = native_vertex_probe_expected(5, 0, false);
+        assert_eq!(
+            native_vertex_probe_rows(&mut view, &cx, &plan, 5).await,
+            expected
+        );
+
+        // Keep enough for the ordinary vertex workspace, but not for a full
+        // run decoder plus its retained vertex source and incident directory.
+        let hold = memory
+            .reserve(&cx, memory.limit() - memory.used() - 3 * 1024 * 1024)
+            .unwrap();
+        let held = memory.used();
+        let mut cursor = view
+            .stream_graph_probes_governed(&cx, &plan, native_run_policy(1000))
+            .unwrap();
+        let error = cursor.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                error,
+                GqlQueryError::Source(VertexScanError::Source(
+                    BufferedReadError::Memory(_)
+                        | BufferedReadError::Buffer(
+                            fgdb_strata::tiered::buffer::BufferError::Memory(_)
+                        )
+                ))
+            ),
+            "{error:?}"
+        );
+        assert!(cursor.row_stats().snapshot_records >= 1);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
+        assert_eq!(memory.used(), held);
+        drop(hold);
+        drop(view);
+        assert_eq!(memory.used(), 0);
+
+        let (mut view, memory) = native_run_view(&commit, &cx, &vfs).await;
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let observed = cx.with_checkpoint_probe(Arc::clone(&probe));
+        let mut cursor = view
+            .stream_graph_probes_governed(&observed, &plan, native_run_policy(1000))
+            .unwrap();
+        let first = cursor.next().await.unwrap().unwrap();
+        assert_eq!(first.values(), expected[0].as_slice());
+        let checkpoints = probe.calls();
+        assert!(checkpoints > 1);
+        cursor.close();
+        drop(cursor);
+        drop(view);
+        assert!(memory.used() > 0);
+        drop(first);
+        assert_eq!(memory.used(), 0);
+        let mut stops = vec![
+            1,
+            2,
+            checkpoints / 4,
+            checkpoints / 2,
+            checkpoints - checkpoints / 4,
+            checkpoints.saturating_sub(8),
+            checkpoints - 1,
+            checkpoints,
+        ];
+        stops.retain(|stop| *stop > 0);
+        stops.sort_unstable();
+        stops.dedup();
+        for stop in stops {
+            let (mut view, memory) = native_run_view(&commit, &cx, &vfs).await;
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let interrupted = cx.with_checkpoint_probe(Arc::clone(&probe));
+            match view.stream_graph_probes_governed(&interrupted, &plan, native_run_policy(1000)) {
+                Err(_) => {}
+                Ok(mut cursor) => {
+                    assert!(cursor.next().await.unwrap().is_err(), "checkpoint {stop}");
+                    assert_eq!(cursor.state(), VertexScanState::Failed);
+                    assert!(cursor.next().await.is_none());
+                }
+            }
+            assert_eq!(probe.calls(), stop);
+            assert_eq!(
+                native_vertex_probe_rows(&mut view, &cx, &plan, 5).await,
+                expected,
+                "healthy retry after incident checkpoint {stop}"
+            );
+            drop(view);
+            assert_eq!(memory.used(), 0, "incident checkpoint {stop}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

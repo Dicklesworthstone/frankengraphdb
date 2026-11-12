@@ -874,14 +874,17 @@ impl<V: Vfs> BufferedPartition<V> {
         self.buffer.stats()
     }
 
-    /// Opt into native typed-edge scans from a complete durable relation run.
-    /// The first demanded candidate admits the configured decode capacity and
-    /// a compact identity locator through this reader's source pool. No image
-    /// is loaded by this setter or by constructing an unpolled cursor.
+    /// Opt into native typed-edge scans and join/probe incidence requests from
+    /// complete durable relation runs. The first demanded source admits the
+    /// configured decode capacity and a compact identity locator through this
+    /// reader's source pool. No image is loaded by this setter or by constructing
+    /// an unpolled cursor. A join driver retains at most one independent incident
+    /// relation beside its root source, with both charged to the same pool.
     ///
     /// Only floor-zero runs covering this entire pinned generation may replace
     /// its historical candidate domain. Stale, pruned, untyped and selected-root
-    /// scans keep their ordinary source. Encoded extents retain that source too;
+    /// scans keep their ordinary root source; independently typed incidents may
+    /// still select an eligible run. Encoded extents retain ordinary sources too;
     /// this profile does not yet account the erasure decoder's workspace.
     /// A selected run's corruption, cancellation or quota failure is terminal.
     pub fn set_native_run_limits(

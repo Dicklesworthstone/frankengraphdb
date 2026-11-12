@@ -3,7 +3,7 @@
 //! this module supplies only historical candidates and same-cut stored rows.
 
 use super::*;
-use crate::tiered::sealed::{AdjRunError, SealedEdgeLocator, SealedError};
+use crate::tiered::sealed::{AdjRunError, SealedEdgeLocator, SealedError, SealedLimits};
 
 pub(super) struct RunCursor {
     locator: SealedEdgeLocator,
@@ -34,6 +34,113 @@ fn sealed_error<C>(error: SealedError) -> BufferedScanError<C> {
         ))),
     }
     .into()
+}
+
+/// Construct one admitted image and locator after its source has been selected.
+/// The caller owns candidate admission: root construction admits its first
+/// global identity beforehand, while incidents admit only endpoint successors.
+async fn load_run<V: Vfs, C: Send>(
+    partition: &mut BufferedPartition<V>,
+    work: &mut EdgeScanWork,
+    cx: &QueryCx,
+    as_of: CommitSeq,
+    relation: RelationId,
+    limits: SealedLimits,
+    observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+) -> Result<RunCursor, BufferedScanError<C>> {
+    let loaded = partition
+        .native_run(cx, relation, limits, work, observe)
+        .await?;
+    // Declare the reservation first: on every later early return, the
+    // decoded run (and then the locator) drops before its allowance.
+    let image_charge = loaded.1;
+    let run = loaded.0;
+    run.partition()
+        .anchor()
+        .authorize(as_of)
+        .map_err(sealed_error)?;
+    let bytes = SealedEdgeLocator::required_bytes(run.partition().incidence_count())
+        .map_err(sealed_error)?;
+    work.step(cx, observe)?;
+    let directory_charge = partition.reserve_scan_bytes(cx, bytes)?;
+    let locator = SealedEdgeLocator::build_with(
+        run.into_partition(),
+        relation,
+        directory_charge,
+        cx,
+        &mut || work.step(cx, observe),
+        sealed_error,
+    )?;
+    Ok(RunCursor {
+        locator,
+        relation,
+        after: None,
+        admitted_first: None,
+        finished: false,
+        _image_charge: image_charge,
+    })
+}
+
+/// Select and admit an independently demanded typed incidence source. This
+/// does not emit a global-root identity or imply that any endpoint has a
+/// candidate. The driver retains at most one such relation decision.
+pub(super) async fn load_incident_run<V: Vfs, C: Send>(
+    partition: &mut BufferedPartition<V>,
+    work: &mut EdgeScanWork,
+    cx: &QueryCx,
+    as_of: CommitSeq,
+    relation: RelationId,
+    observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+) -> Result<Option<RunCursor>, BufferedScanError<C>> {
+    let Some(limits) = partition
+        .native_run_limits_for(cx, relation, work, observe)
+        .await?
+    else {
+        return Ok(None);
+    };
+    load_run(partition, work, cx, as_of, relation, limits, observe)
+        .await
+        .map(Some)
+}
+
+/// Admit exactly the next historical identity in the requested incidence,
+/// before resolving its visible version or cloning any selected properties.
+pub(super) fn incident_candidate<V: Vfs, C>(
+    partition: &mut BufferedPartition<V>,
+    work: &mut EdgeScanWork,
+    run: &RunCursor,
+    cx: &QueryCx,
+    as_of: CommitSeq,
+    request: incidence::Incidence,
+    observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
+    if request.relation != Some(run.relation) {
+        return Err(sealed_error(SealedError::ImageMismatch));
+    }
+    let eid = run.locator.next_incident_with(
+        cx,
+        as_of,
+        request.endpoint,
+        request.direction,
+        request.after,
+        &mut || work.step(cx, observe),
+        sealed_error,
+    )?;
+    let Some(eid) = eid else {
+        return Ok(None);
+    };
+    observe(BufferedEdgeScanEvent::Identity(eid)).map_err(BufferedScanError::Control)?;
+    row(
+        partition,
+        work,
+        &run.locator,
+        cx,
+        as_of,
+        eid,
+        EdgePropertyAccess::Read,
+        observe,
+    )
+    .map(Some)
 }
 
 impl<V: Vfs> BufferedEdgeScan<'_, V> {
@@ -86,27 +193,17 @@ impl<V: Vfs> BufferedEdgeScan<'_, V> {
             self.work.step(cx, observe)?;
             observe(BufferedEdgeScanEvent::Identity(eid)).map_err(BufferedScanError::Control)?;
         }
-        let loaded = self
-            .partition
-            .native_run(cx, relation, limits, &mut self.work, observe)
-            .await?;
-        // Declare the reservation first: on every later early return, the
-        // decoded run (and then the locator) drops before its allowance.
-        let image_charge = loaded.1;
-        let run = loaded.0;
-        let bytes = SealedEdgeLocator::required_bytes(run.partition().incidence_count())
-            .map_err(sealed_error)?;
-        self.work.step(cx, observe)?;
-        let directory_charge = self.partition.reserve_scan_bytes(cx, bytes)?;
-        let locator = SealedEdgeLocator::build_with(
-            run.into_partition(),
-            relation,
-            directory_charge,
+        let mut run = load_run(
+            self.partition,
+            &mut self.work,
             cx,
-            &mut || self.work.step(cx, observe),
-            sealed_error,
-        )?;
-        let observed = locator.next_root_with(
+            self.as_of,
+            relation,
+            limits,
+            observe,
+        )
+        .await?;
+        let observed = run.locator.next_root_with(
             cx,
             self.as_of,
             None,
@@ -116,21 +213,15 @@ impl<V: Vfs> BufferedEdgeScan<'_, V> {
         if observed != first {
             return Err(sealed_error(SealedError::ImageMismatch));
         }
-        state.run = Some(RunCursor {
-            locator,
-            relation,
-            after: None,
-            admitted_first: first,
-            finished: false,
-            _image_charge: image_charge,
-        });
+        run.admitted_first = first;
+        state.run = Some(run);
         state.initialized = true;
         Ok(())
     }
 
     /// Reuse the same admitted locator for nested reads in its relation. A
-    /// different relation or an untyped request keeps the independent routed
-    /// Tier-D source; it cannot inherit the root's narrower relation scope.
+    /// different relation or an untyped request requires the driver's own
+    /// source selection; it cannot inherit the root's narrower relation scope.
     pub(super) fn published_incident<C>(
         &mut self,
         cx: &QueryCx,
@@ -143,30 +234,16 @@ impl<V: Vfs> BufferedEdgeScan<'_, V> {
         if request.relation != Some(run.relation) {
             return Ok(None);
         }
-        let eid = run.locator.next_incident_with(
-            cx,
-            self.as_of,
-            request.endpoint,
-            request.direction,
-            request.after,
-            &mut || self.work.step(cx, observe),
-            sealed_error,
-        )?;
-        let Some(eid) = eid else {
-            return Ok(Some(None));
-        };
-        observe(BufferedEdgeScanEvent::Identity(eid)).map_err(BufferedScanError::Control)?;
-        row(
+        incident_candidate(
             self.partition,
             &mut self.work,
-            &run.locator,
+            run,
             cx,
             self.as_of,
-            eid,
-            EdgePropertyAccess::Read,
+            request,
             observe,
         )
-        .map(|candidate| Some(Some(candidate)))
+        .map(Some)
     }
 }
 

@@ -72,6 +72,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             driver: active.then_some(Driver {
                 root: self,
                 vertices: None,
+                native_incident: None,
             }),
         }
     }

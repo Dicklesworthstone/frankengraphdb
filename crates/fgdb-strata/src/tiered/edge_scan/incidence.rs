@@ -46,6 +46,10 @@ impl Incidence {
 struct Driver<'source, V: Vfs> {
     root: BufferedEdgeScan<'source, V>,
     vertices: Option<BufferedVertexScanState>,
+    // One independently demanded relation beside a possible root run. A
+    // cached None records successful ineligibility, never a failed load.
+    // The pinned root/cut/profile cannot change while this driver borrows it.
+    native_incident: Option<(RelationId, Option<published::RunCursor>)>,
 }
 
 // At most one retained successor stream. `next` is the EXACT request that may
@@ -59,8 +63,8 @@ struct Continuation {
 }
 
 /// One root stream plus independently positioned indexed incidence requests.
-/// Every incidence request seeks the partition's authenticated descriptor
-/// directory. It does not scan graph payloads to construct query-local routing.
+/// Ordinary incidence requests seek the partition's authenticated descriptor
+/// directory. They do not scan graph payloads to construct query-local routing.
 /// Outgoing keys are exact; incoming ranges can admit unrelated rows within a
 /// selected block, which the ordinary incidence predicate then rejects.
 /// All histories in a routed block remain authoritative until native resolution.
@@ -71,8 +75,11 @@ struct Continuation {
 /// a durable index or an optimal I/O bound: broad incoming ranges can select
 /// many blocks, and each successor can refault its routed bounded blocks.
 /// The ordinary routed source keeps no full edge directory or neighborhood
-/// payload bag. When a typed root selects the opt-in complete-run profile,
-/// same-relation nested requests reuse its charged endpoint/EId locators;
+/// payload bag. Under the opt-in complete-run profile, same-relation requests
+/// reuse a typed root's charged endpoint/EId locators. Other typed requests can
+/// admit one independent relation image and locator, reused across outer roots.
+/// Switching the incident relation releases that source before its replacement
+/// is admitted. Both sources share the pool and cumulative work allowance;
 /// independent root positions and stored edge orientation remain unchanged.
 ///
 /// Root exhaustion does not disable nested reads: the final root edge may still
@@ -98,6 +105,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             driver: Some(Driver {
                 root: self,
                 vertices: None,
+                native_incident: None,
             }),
         }
     }
@@ -252,7 +260,9 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
     /// Positions belong to the caller's traversal prefix, never to the root.
     /// Emit Identity exactly once before resolving the winning history, even
     /// if it is invisible at the selected cut. EOF emits no identity. Discovery
-    /// reads only bounded block keys after routing, under the same work meter.
+    /// reads bounded block keys after routing or admits the selected complete
+    /// relation run, under the same work meter. It never reports a run's global
+    /// minimum as an incident identity for an unrelated endpoint.
     pub async fn next_incident_with_endpoints<C: Send>(
         &mut self,
         cx: &QueryCx,
@@ -303,8 +313,9 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
     /// exhausted continuation retains only its request, not heap or payload.
     /// Even repeated EOF checks observe the cumulative work/cancellation limit.
     ///
-    /// At most one additional routed heap and bounded decoded block remain
-    /// charged between calls, beside the independent root.
+    /// At most one additional routed heap and bounded decoded block, or one
+    /// complete run image and locator, remain charged beside the root. The run
+    /// locator can serve different endpoints without rebuilding its directory.
     /// A deep join may still reseed after switching incidences; this is not a
     /// per-depth cache, persistent index or optimal I/O guarantee. Errors never
     /// retry through the independent path. All state is taken before awaiting,
@@ -349,6 +360,68 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
 }
 
 impl<V: Vfs> Driver<'_, V> {
+    fn may_select_native_incident(&self, relation: Option<RelationId>) -> bool {
+        let Some(relation) = relation else {
+            return false;
+        };
+        self.root.has_published_relation(Some(relation))
+            || self
+                .native_incident
+                .as_ref()
+                .is_none_or(|(selected, run)| *selected != relation || run.is_some())
+    }
+
+    // Discovery may read one admitted image before an incident identity is
+    // known, just as ordinary routed preparation reads block keys first.
+    // Only the matching endpoint successor emits Identity. Never admit the
+    // run's unrelated global minimum as a child of this traversal prefix.
+    async fn published_incident<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        request: Incidence,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<Option<BufferedEdgeCandidate>>, BufferedScanError<C>> {
+        if self.root.has_published_relation(request.relation) {
+            self.native_incident = None;
+            return self.root.published_incident(cx, request, observe);
+        }
+        let Some(relation) = request.relation else {
+            self.native_incident = None;
+            return Ok(None);
+        };
+        if self
+            .native_incident
+            .as_ref()
+            .is_none_or(|(selected, _)| *selected != relation)
+        {
+            // Refund the preceding source before admitting its replacement.
+            self.native_incident = None;
+            let run = published::load_incident_run(
+                self.root.partition,
+                &mut self.root.work,
+                cx,
+                self.root.as_of,
+                relation,
+                observe,
+            )
+            .await?;
+            self.native_incident = Some((relation, run));
+        }
+        let Some((_, Some(run))) = self.native_incident.as_ref() else {
+            return Ok(None);
+        };
+        published::incident_candidate(
+            self.root.partition,
+            &mut self.root.work,
+            run,
+            cx,
+            self.root.as_of,
+            request,
+            observe,
+        )
+        .map(Some)
+    }
+
     async fn continue_incident<C: Send>(
         &mut self,
         cx: &QueryCx,
@@ -357,12 +430,12 @@ impl<V: Vfs> Driver<'_, V> {
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
         self.root.work.step(cx, observe)?;
-        if self.root.has_published_relation(request.relation) {
+        if self.may_select_native_incident(request.relation) {
             // A changed source drops its preceding Tier-D child workspace
-            // before reserving a row from the already admitted run.
+            // before admitting a native image or reserving its selected row.
             *continuation = None;
         }
-        if let Some(candidate) = self.root.published_incident(cx, request, observe)? {
+        if let Some(candidate) = self.published_incident(cx, request, observe).await? {
             return match candidate {
                 Some(candidate) => self
                     .root
@@ -419,7 +492,7 @@ impl<V: Vfs> Driver<'_, V> {
         request: Incidence,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
-        if let Some(candidate) = self.root.published_incident(cx, request, observe)? {
+        if let Some(candidate) = self.published_incident(cx, request, observe).await? {
             return match candidate {
                 Some(candidate) => self
                     .root

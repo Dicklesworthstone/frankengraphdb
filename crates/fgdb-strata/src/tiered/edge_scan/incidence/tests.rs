@@ -45,6 +45,7 @@ fn only_retained_incidence_positions_allocate_displaced_order_memos() {
         let mut driver = Driver {
             root: view.edge_scan(&cx, CommitSeq(3)).unwrap(),
             vertices: None,
+            native_incident: None,
         };
         for (endpoint, direction, selected_rows) in [
             (VId(1), BufferedEdgeDirection::Outgoing, 4),

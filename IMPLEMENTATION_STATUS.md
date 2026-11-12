@@ -16,8 +16,8 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 Source added 2026-11-12 for `fgdb-teypc`, `fgdb-w3-tier-r-0tj` and
 `fgdb-w3-buffer-g2v`. `BufferedReadView::set_native_run_limits` enables a real
-native source arm for typed edge MATCH, aggregate input and same-relation
-nested joins and correlated probes. The existing GQL operators still own
+native source arm for typed edge MATCH, aggregate input, typed join children
+and vertex- or edge-rooted correlated probes. The existing GQL operators still own
 predicates, direction, captures, pagination and output. Exact-cut endpoints
 come from the same admitted buffered generation.
 
@@ -26,24 +26,33 @@ compressed image, with separate outgoing and incoming permutations. It keeps
 original CSR property locators, full-width IDs, parallel edges and every
 retained historical candidate. It never scans the whole EId directory for
 each incident successor. The first identity is admitted from root descriptors
-before FGRN loading; the completed locator must agree with it. LIMIT 0 and
-unpolled/closed sources do not load the run.
+before FGRN loading; the completed locator must agree with it. Independently
+demanded typed incidents select their own source without admitting that global
+minimum: only an actual endpoint successor emits an incident identity. One
+incident relation image and locator may remain charged beside the root source,
+reused across outer vertices and edges. Switching relations releases the old
+incident source before admitting its replacement. LIMIT 0 and unpolled/closed
+sources do not load the run.
 
 This explicit profile currently requires plain, non-ECS storage, a floor-zero
 run and verification through the entire pinned frontier, including for a query
-at an older cut. Pruned or stale runs, untyped/alternate relations, selected
-vertex roots and independent vertex-rooted probes retain ordinary sources.
+at an older cut. Pruned or stale runs and untyped/alternate root relations
+retain ordinary sources. Vertex roots and explicitly selected root positions
+keep their ordinary readers; typed incidents can independently select an
+eligible run. The standalone incidence-stream API retains its ordinary merge.
 No selected-run error retries through Tier D. The decoder's declared capacity
 and byte/population work are admitted before payload I/O, and the source pool
 owns both the complete decode/image allowance and the locator. Packed reads
 bypass whole-pack payload caches. Returned properties are measured and reserved
 before cloning; output records retain their independent charges.
 
-Seven locator unit regressions, five native MATCH integration regressions and
+Seven locator unit regressions, seven native MATCH integration regressions and
 one packed-read regression cover historical candidate counts, literal order
 and values, V7/V8 carry, compaction/reopen, directed joins and probes, actual
-run reuse after redundant Tier-D damage, selected-run corruption refusal,
-quota precedence, cancellation and memory lifetimes. Pinned targeted formatting,
+run reuse after redundant Tier-D damage, vertex-rooted EXISTS/NOT EXISTS,
+mixed-relation joins, selected-run corruption refusal, quota precedence,
+cancellation and memory lifetimes. Failed incident loads never establish
+absence or become cached ineligibility. Pinned targeted formatting,
 diff hygiene and independent source/API reviews pass. First-party compilation,
 runtime tests, Clippy, UBS and exact-tree qualification remain UNRUN: the prior
 pinned test and metadata builds were killed in `asupersync` before any fgdb

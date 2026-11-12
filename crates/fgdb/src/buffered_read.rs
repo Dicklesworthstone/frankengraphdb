@@ -133,15 +133,18 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     }
 
     /// Enable durable relation runs for native typed-edge MATCH streams, their
-    /// aggregate inputs and same-relation nested joins/probes. This is an
-    /// explicit source profile: construction
-    /// reserves the configured decoder capacity and an EId locator in this
-    /// view's MemoryPool before loading a selected run. The reservation remains
-    /// owned by the cursor; returned records retain independent charges.
+    /// aggregate inputs, typed join children and vertex/edge-rooted probes.
+    /// This explicit source profile reserves decoder capacity before loading
+    /// a selected run and an EId locator before building its directory. A join
+    /// driver retains at most one independent incident relation beside its
+    /// root source, reusing it across outer roots. All source reservations stay
+    /// in this view's MemoryPool until their cursor releases them; returned
+    /// records retain independent charges.
     ///
     /// Floor-zero runs must cover the complete pinned frontier, even for a
     /// historical query, so invisible historical candidates keep their normal
-    /// identity admission. Other source shapes keep ordinary buffered scans.
+    /// identity admission. Other root shapes keep ordinary buffered scans;
+    /// their typed incidents may still select independently eligible runs.
     /// Source selection is lazy; LIMIT 0, unpolled pulls and early close do not
     /// load a run. Selected-run failures never retry through Tier D. Encoded
     /// extents and post-seal native merging remain outside this first profile.
