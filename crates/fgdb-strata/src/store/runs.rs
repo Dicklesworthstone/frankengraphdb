@@ -234,12 +234,11 @@ impl<V: Vfs> BlockStore<V> {
                 },
             )
             .await?;
-        if source_root != base_source_root
-            || run_publication != base_publication
-            || verified_through != run_publication
-        {
-            run.bind_envelope(root, base_publication, verified_through);
-        }
+        // The selected root authenticates both this run and the graph's other
+        // state. Retain that binding even for a native V7 wrapper: analytics
+        // combine its adjacency with vertices from this selected generation.
+        // The run header continues to name its original immutable source.
+        run.bind_envelope(root, base_publication, verified_through);
         Ok(Some(run))
     }
 

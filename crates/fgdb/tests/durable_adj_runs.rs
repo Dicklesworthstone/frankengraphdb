@@ -226,6 +226,10 @@ fn durable_runs_reopen_native_authorized_and_prism_history_without_changing_orig
             .unwrap();
         assert_eq!(run.header().scope.source_root, source_root);
         assert_eq!(
+            run.partition().anchor().admitted_envelope_root(),
+            db.partition_root().ok()
+        );
+        assert_eq!(
             run.origin(EDGE),
             Some(OriginBirthOrder::new(CommitSeq(1), 6, 0, EDGE))
         );
@@ -480,6 +484,10 @@ fn durable_runs_reopen_native_authorized_and_prism_history_without_changing_orig
             let sealed = bfs
                 .execute_sealed(&query, &graph, options.execution_limits, memory())
                 .unwrap();
+            assert_eq!(graph.binding().root, published_root.0);
+            assert_eq!(live_graph.binding(), graph.binding());
+            assert_eq!(sealed.certificate.snapshot.root, published_root.0);
+            assert_eq!(sealed.certificate.snapshot.as_of, cut);
             assert_eq!(
                 bfs.execute_sealed(&query, &live_graph, options.execution_limits, memory())
                     .unwrap()
@@ -1474,6 +1482,22 @@ fn post_seal_commits_persist_runs_across_reopen_other_relations_and_scrub() {
                 .source_root,
             base_3
         );
+        // The immutable R run still comes from commit 3, while the projection
+        // includes the selected commit-5 vertices. Its certificate must name
+        // the selected root and exact cut, not the older adjacency source.
+        let bfs = FnxCallSpec::bind(
+            "CALL fnx.single_source_shortest_path_length(1) YIELD vertex,distance",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        for graph in [&live_proj, &cold_proj] {
+            assert_eq!(graph.binding().root, root_5.0);
+            assert_eq!(graph.binding().as_of, CommitSeq(5));
+            let result = bfs
+                .execute_sealed(&query, graph, opts_5.execution_limits, memory())
+                .unwrap();
+            assert_eq!(result.certificate.snapshot, graph.binding());
+        }
 
         // Seal OTHER at Commit 5 while R remains carried from Commit 3.
         let other_run_id = db
@@ -1830,7 +1854,6 @@ fn published_fgrn_v2_dual_face_and_post_seal_delta_overlay_serve_both_directions
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 #[test]
 fn compaction_carries_native_multi_relation_runs_through_reopen_and_damage() {
     use fgdb_strata::root::runs::{AdjRunRef, ROOT_FORMAT_V7, ROOT_FORMAT_V8};
@@ -2045,7 +2068,6 @@ fn compaction_carries_native_multi_relation_runs_through_reopen_and_damage() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
-
 
 #[test]
 fn compaction_preserves_mixed_run_lineages_and_post_seal_overlay_horizons() {
@@ -2436,17 +2458,9 @@ fn checkpoint_suffix_recovery_retains_v7_v8_runs_and_unverified_deltas() {
                     .await
                     .unwrap();
                 if checkpoint_kind != 0 {
-                    let mut advance = WriteBatch::new(if checkpoint_kind == 1 {
-                        OTHER
-                    } else {
-                        R
-                    });
+                    let mut advance = WriteBatch::new(if checkpoint_kind == 1 { OTHER } else { R });
                     if checkpoint_kind == 1 {
-                        advance.set_vertex_property(
-                            VId(1),
-                            P,
-                            Some(CanonicalScalar::Int(100)),
-                        );
+                        advance.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(100)));
                     } else {
                         advance.add_edge(
                             EId(401),
@@ -2455,10 +2469,7 @@ fn checkpoint_suffix_recovery_retains_v7_v8_runs_and_unverified_deltas() {
                             vec![(P, CanonicalScalar::Int(41))],
                         );
                     }
-                    assert_eq!(
-                        db.write(&cx, advance.clone()).await.unwrap(),
-                        CommitSeq(4)
-                    );
+                    assert_eq!(db.write(&cx, advance.clone()).await.unwrap(), CommitSeq(4));
                     assert_eq!(oracle.write(&cx, advance).await.unwrap(), CommitSeq(4));
                 }
                 let basis = db.frontier().unwrap();
@@ -2533,10 +2544,9 @@ fn checkpoint_suffix_recovery_retains_v7_v8_runs_and_unverified_deltas() {
                 assert_eq!(sealed_answers(&pinned_sealed, &query), pinned_answers);
                 drop(db);
 
-                let mut db =
-                    Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
-                        .await
-                        .unwrap();
+                let mut db = Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
+                    .await
+                    .unwrap();
                 assert_eq!(db.frontier().unwrap(), recovered_cut);
                 let recovered_root = db.partition_root().unwrap();
                 assert_ne!(recovered_root, selected);
@@ -2550,7 +2560,10 @@ fn checkpoint_suffix_recovery_retains_v7_v8_runs_and_unverified_deltas() {
                     vec![expected_reference],
                     "replay preserves the selected run's original provenance and coverage"
                 );
-                assert_eq!(store.get_adj_run_bytes(&cx, run_id).await.unwrap(), run_bytes);
+                assert_eq!(
+                    store.get_adj_run_bytes(&cx, run_id).await.unwrap(),
+                    run_bytes
+                );
                 assert!(
                     store
                         .get_published_adj_run(

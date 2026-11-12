@@ -478,7 +478,14 @@ impl SealedGraphView {
             }
         };
         let binding = SnapshotBinding {
-            root: scope.source_root.0,
+            // Carried adjacency can predate the selected vertex generation.
+            // Certificates identify the root that authenticated the complete
+            // projection; the partition retains its original source receipt.
+            root: partition
+                .anchor()
+                .admitted_envelope_root()
+                .unwrap_or(scope.source_root)
+                .0,
             as_of: config.as_of,
         };
         let mut hash = Hasher::new();
