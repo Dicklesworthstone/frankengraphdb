@@ -233,6 +233,33 @@ pub(crate) async fn prepare_read(
     })
 }
 
+/// Convert one wire transcript, recheck live controls, then reserve its original
+/// canonical bytes before deriving map fields or capturing statement time.
+fn write_arguments(
+    query: &fgdb_types::QueryCx,
+    permit: &mut fgdb_warden::ExecutionPermit<'_, fgdb_warden::WriteAccess>,
+    generation: &Generation,
+    parameters: &[(String, WireValue)],
+) -> Result<GqlParameters, Refusal> {
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    let converted = query.with_restriction(|| {
+        convert::parameters(parameters, None)
+            .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
+    });
+    permit
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    generation.check().map_err(Refusal::from)?;
+    let converted = converted?;
+    admit_write_parameters(permit, &converted)?;
+    Ok(converted)
+}
+
 async fn prepare_write(
     cx: &Cx,
     db: &Served,
@@ -260,8 +287,7 @@ async fn prepare_write(
     query
         .checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-    let parameters = convert::parameters(&request.parameters, None)
-        .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+    let parameters = write_arguments(&query, &mut permit, &generation, &request.parameters)?;
     // Map arguments standing for property maps splice with the representative
     // arguments' keys; the template keeps the keys, never the values.
     let lowered = fgdb_gql::GqlMapArgumentText::lower(&request.statement, &parameters);
@@ -352,9 +378,8 @@ fn prepare_row_write(
     query
         .checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    let parameters = write_arguments(&query, &mut permit, &generation, &request.parameters)?;
     let definition = query.with_restriction(|| {
-        let parameters = convert::parameters(&request.parameters, None)
-            .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
         let template = ReturningTemplate::prepare(db, &request.statement, &parameters)?
             .filter(|template| template.returns_rows() == returns_rows)
             .ok_or_else(mode_refusal)?;
@@ -491,25 +516,46 @@ async fn write_chain_prepared_batch(
         permit
             .charge_work_at(unix_millis(), argument_sets.len() as u64)
             .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
-        let mut chains = Vec::new();
-        chains.try_reserve(argument_sets.len()).map_err(|_| {
+        let mut admitted = Vec::new();
+        admitted.try_reserve(argument_sets.len()).map_err(|_| {
             Refusal::new(
                 ErrorCode::Budget,
-                "native chain batch capacity could not be reserved",
+                "native chain argument capacity could not be reserved",
             )
         })?;
         for (index, parameters) in argument_sets.iter().enumerate() {
             permit
                 .charge_work_at(unix_millis(), parameters.len() as u64 + 1)
                 .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+            admitted.push(
+                write_arguments(&query, &mut permit, &prepared.generation, parameters).map_err(
+                    |error| {
+                        Refusal::new(
+                            error.code,
+                            format!("argument set {index}: {}", error.message),
+                        )
+                    },
+                )?,
+            );
+        }
+        // A later record's byte refusal wins before the first record can
+        // lower fields, capture a calendar value or report a binding error.
+        let mut chains = Vec::new();
+        chains.try_reserve(admitted.len()).map_err(|_| {
+            Refusal::new(
+                ErrorCode::Budget,
+                "native chain batch capacity could not be reserved",
+            )
+        })?;
+        for (index, parameters) in admitted.iter().enumerate() {
             query
                 .checkpoint()
                 .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-            let bound = (|| {
-                let parameters = convert::parameters(parameters, None)
-                    .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-                prepared.template.bind_current(&query, db, &parameters)
-            })();
+            permit
+                .checkpoint_at(unix_millis())
+                .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+            prepared.generation.check().map_err(Refusal::from)?;
+            let bound = prepared.template.bind_current(&query, db, parameters);
             // Expiry or generation fencing wins over a binding error as it
             // does for one prepared chain. Representative values are never
             // reused as defaults for a missing argument in a later record.
@@ -531,17 +577,7 @@ async fn write_chain_prepared_batch(
             };
             chains.push(*chain);
         }
-        let remaining = permit.predicates().limits().max_work - permit.usage().work;
-        let execution_token = token
-            .attenuate(fgdb_warden::Restriction::MaxWork(remaining))
-            .map_err(|error| {
-                let code = if matches!(error, fgdb_warden::Error::TooLarge) {
-                    ErrorCode::Budget
-                } else {
-                    warden_code(error)
-                };
-                Refusal::new(code, error.to_string())
-            })?;
+        let execution_token = write_execution_token(&permit, token)?;
         (chains, execution_token)
     };
     let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
@@ -635,11 +671,8 @@ async fn write_returning_prepared(
         query
             .checkpoint()
             .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-        let bound = (|| {
-            let parameters = convert::parameters(parameters, None)
-                .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-            prepared.template.bind_current(&query, db, &parameters)
-        })();
+        let parameters = write_arguments(&query, &mut permit, &prepared.generation, parameters)?;
+        let bound = prepared.template.bind_current(&query, db, &parameters);
         permit
             .checkpoint_at(unix_millis())
             .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
@@ -650,17 +683,7 @@ async fn write_returning_prepared(
         let bound = bound?;
         // Carry the definition debit into the native owner's signed ceiling.
         // Appending a restriction can only narrow this verified capability.
-        let remaining = permit.predicates().limits().max_work - permit.usage().work;
-        let execution_token = token
-            .attenuate(fgdb_warden::Restriction::MaxWork(remaining))
-            .map_err(|error| {
-                let code = if matches!(error, fgdb_warden::Error::TooLarge) {
-                    ErrorCode::Budget
-                } else {
-                    warden_code(error)
-                };
-                Refusal::new(code, error.to_string())
-            })?;
+        let execution_token = write_execution_token(&permit, token)?;
         (bound, execution_token)
     };
     // Reuse the existing checked native owner: effect selection, RETURN,
@@ -688,6 +711,11 @@ enum NativeParameters {
     Batch(Vec<GqlParameters>),
 }
 
+enum BoundParameters {
+    Single(fgdb_gql::PreparedGraphWriteProgram),
+    Batch(fgdb_gql::BoundGraphWriteScriptBatch),
+}
+
 async fn write_prepared_inner(
     cx: &Cx,
     db: &Served,
@@ -696,21 +724,93 @@ async fn write_prepared_inner(
     parameters: PreparedParameters<'_>,
 ) -> Result<Answer, Refusal> {
     let _operation = prepared.generation.enter().map_err(Refusal::from)?;
-    let now = unix_millis();
-    db.authority
-        .verify_at(token, TRUNK, now)
-        .and_then(|capability| capability.begin_write_at(TRUNK, now).map(|_| ()))
-        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let mut permit = write_permit(db, token)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = crate::query_cx(&contexts);
-    // Each argument set's map arguments must carry the keys the template was
-    // lowered with; it binds through the fresh per-key arguments.
+    // Preserve the direct native script owner's immutable preflight before
+    // looking at values, even for an empty or otherwise malformed batch.
+    if prepared.script.requires_read() && !permit.predicates().rights().can_read() {
+        return Err(Refusal::new(
+            ErrorCode::PermissionDenied,
+            fgdb_warden::Error::PermissionDenied.to_string(),
+        ));
+    }
+    for statement in prepared.script.statements() {
+        query
+            .checkpoint()
+            .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+        permit
+            .checkpoint_at(unix_millis())
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        if matches!(
+            statement,
+            fgdb_gql::GraphWriteTemplateStatement::EdgeMerge(_)
+                | fgdb_gql::GraphWriteTemplateStatement::EdgeUpsert(_)
+        ) && !permit.predicates().allows_relation(statement.relation())
+        {
+            return Err(Refusal::new(
+                ErrorCode::PermissionDenied,
+                fgdb_warden::Error::ScopeDenied.to_string(),
+            ));
+        }
+    }
+    // Admit every original record before any map lowering or clock capture.
+    // The expanded statement bound also precedes the converted vector.
+    let parameters = match parameters {
+        PreparedParameters::Single(parameters) => NativeParameters::Single(write_arguments(
+            &query,
+            &mut permit,
+            &prepared.generation,
+            parameters,
+        )?),
+        PreparedParameters::Batch(argument_sets) => {
+            if argument_sets.is_empty() {
+                return Err(write_refusal(&fgdb_gql::GraphWriteScriptBatchError::Empty));
+            }
+            let expanded = argument_sets.len() as u128 * prepared.script.statements().len() as u128;
+            let limit = db
+                .max_statements
+                .min(PreparedGraphWriteScript::MAX_BATCH_STATEMENTS);
+            if expanded > limit as u128 {
+                return Err(write_refusal(
+                    &fgdb_gql::GraphWriteScriptBatchError::TooManyStatements {
+                        limit,
+                        observed: expanded,
+                    },
+                ));
+            }
+            permit
+                .charge_work_at(unix_millis(), expanded as u64)
+                .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+            let mut converted = Vec::new();
+            converted.try_reserve(argument_sets.len()).map_err(|_| {
+                Refusal::new(
+                    ErrorCode::Budget,
+                    "write argument capacity could not be reserved",
+                )
+            })?;
+            for (index, parameters) in argument_sets.iter().enumerate() {
+                converted.push(
+                    write_arguments(&query, &mut permit, &prepared.generation, parameters)
+                        .map_err(|error| {
+                            Refusal::new(
+                                error.code,
+                                format!("argument set {index}: {}", error.message),
+                            )
+                        })?,
+                );
+            }
+            NativeParameters::Batch(converted)
+        }
+    };
     let lowered = prepared.lowered.as_ref();
-    let derive = |parameters: fgdb_gql::GqlParameters| {
+    let derive = |parameters: GqlParameters| {
         let parameters = match lowered {
-            Some(lowered) => lowered
-                .arguments(&parameters)
-                .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?,
+            Some(lowered) => query.with_restriction(|| {
+                lowered
+                    .arguments(&parameters)
+                    .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
+            })?,
             None => parameters,
         };
         db.statement_clock
@@ -718,77 +818,129 @@ async fn write_prepared_inner(
             .map(std::borrow::Cow::into_owned)
             .map_err(statement_time_refusal)
     };
-    let parameters = match parameters {
-        PreparedParameters::Single(parameters) => NativeParameters::Single(
-            convert::parameters(parameters, None)
-                .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
-                .and_then(derive)?,
-        ),
-        PreparedParameters::Batch(argument_sets) => {
-            let mut converted = Vec::with_capacity(argument_sets.len());
-            for (index, parameters) in argument_sets.iter().enumerate() {
+    // Bind under the same allowance that admitted the original transcript.
+    // The native bound owners then execute without repricing derived fields.
+    let bound = match parameters {
+        NativeParameters::Single(parameters) => {
+            permit
+                .charge_work_at(unix_millis(), prepared.script.statements().len() as u64)
+                .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+            let parameters = derive(parameters)?;
+            let program = query.with_restriction(|| prepared.script.bind_parameters(&parameters));
+            query
+                .checkpoint()
+                .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+            permit
+                .charge_work_at(unix_millis(), 1)
+                .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+            prepared.generation.check().map_err(Refusal::from)?;
+            BoundParameters::Single(program.map_err(|error| restored_refusal(lowered, error))?)
+        }
+        NativeParameters::Batch(argument_sets) => {
+            let mut derived = Vec::new();
+            derived.try_reserve(argument_sets.len()).map_err(|_| {
+                Refusal::new(
+                    ErrorCode::Budget,
+                    "write argument capacity could not be reserved",
+                )
+            })?;
+            for (index, parameters) in argument_sets.into_iter().enumerate() {
                 query
                     .checkpoint()
                     .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-                let refusal = |error: &dyn core::fmt::Display| {
-                    Refusal::new(
-                        ErrorCode::Statement,
-                        format!("argument set {index}: {error}"),
-                    )
-                };
-                let parameters =
-                    convert::parameters(parameters, None).map_err(|error| refusal(&error))?;
-                converted.push(derive(parameters).map_err(|error| {
+                permit
+                    .checkpoint_at(unix_millis())
+                    .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+                prepared.generation.check().map_err(Refusal::from)?;
+                derived.push(derive(parameters).map_err(|error| {
                     Refusal::new(
                         error.code,
                         format!("argument set {index}: {}", error.message),
                     )
                 })?);
             }
-            NativeParameters::Batch(converted)
+            let mut before_allocation = true;
+            let batch = query.with_restriction(|| {
+                prepared
+                    .script
+                    .bind_parameter_sets_controlled(&derived, db.max_statements, |at| {
+                        query.checkpoint().map_err(|error| {
+                            Refusal::new(ErrorCode::Cancelled, error.to_string())
+                        })?;
+                        if at.is_none() && before_allocation {
+                            before_allocation = false;
+                            // The complete expanded bill was reserved before
+                            // conversion. This boundary only rechecks validity.
+                            permit.checkpoint_at(unix_millis())
+                        } else {
+                            permit.charge_work_at(unix_millis(), 1)
+                        }
+                        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+                        prepared.generation.check().map_err(Refusal::from)
+                    })
+            });
+            let batch = match batch {
+                Ok(batch) => batch,
+                Err(fgdb_gql::GraphWriteScriptBatchBindError::Interrupted { source, .. }) => {
+                    return Err(source);
+                }
+                Err(fgdb_gql::GraphWriteScriptBatchBindError::Binding(mut error)) => {
+                    permit
+                        .checkpoint_at(unix_millis())
+                        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+                    query
+                        .checkpoint()
+                        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+                    prepared.generation.check().map_err(Refusal::from)?;
+                    if let (
+                        Some(lowered),
+                        fgdb_gql::GraphWriteScriptBatchError::Arguments { source, .. },
+                    ) = (lowered, &mut error)
+                    {
+                        lowered.restore(source);
+                    }
+                    return Err(write_refusal(&error));
+                }
+            };
+            BoundParameters::Batch(batch)
         }
     };
+    let execution_token = write_execution_token(&permit, token)?;
     let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
-    // Waiting for another writer cannot revive metadata from an old recovery
-    // generation. No binding or identity allocation precedes this fence.
+    // Waiting for a writer cannot revive metadata from an old generation.
+    // Bound values carry no authority and have allocated no graph identities.
     prepared.generation.check().map_err(Refusal::from)?;
     let generation = guard.generation();
-    let (stats, completion) = match parameters {
-        NativeParameters::Single(parameters) => {
-            guard
-                .execute_graph_write_script_authorized(
-                    &contexts.txn(),
-                    &query,
-                    &contexts.commit(),
-                    &db.authority,
-                    token,
-                    TRUNK,
-                    &prepared.script,
-                    &parameters,
-                    db.write_policy,
-                    unix_millis,
-                )
-                .await
-        }
-        NativeParameters::Batch(argument_sets) => {
-            guard
-                .execute_graph_write_script_batch_authorized(
-                    &contexts.txn(),
-                    &query,
-                    &contexts.commit(),
-                    &db.authority,
-                    token,
-                    TRUNK,
-                    &prepared.script,
-                    &argument_sets,
-                    db.max_statements,
-                    db.write_policy,
-                    unix_millis,
-                )
-                .await
-        }
-    }
-    .map_err(|error| write_refusal(&restored_fault(lowered, error)))?;
+    let (stats, completion) = match bound {
+        BoundParameters::Single(program) => guard
+            .execute_graph_write_program_authorized(
+                &contexts.txn(),
+                &query,
+                &contexts.commit(),
+                &db.authority,
+                &execution_token,
+                TRUNK,
+                &program,
+                db.write_policy,
+                unix_millis,
+            )
+            .await
+            .map_err(|error| write_refusal(&error))?,
+        BoundParameters::Batch(batch) => guard
+            .execute_bound_graph_write_script_batch_authorized(
+                &contexts.txn(),
+                &query,
+                &contexts.commit(),
+                &db.authority,
+                &execution_token,
+                TRUNK,
+                &batch,
+                db.write_policy,
+                unix_millis,
+            )
+            .await
+            .map_err(|error| write_refusal(&error))?,
+    };
     drop(guard);
     let statements = stats.completed_statements as u64;
     let outcome = match completion {

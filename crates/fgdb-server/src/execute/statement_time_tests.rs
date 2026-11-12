@@ -538,3 +538,178 @@ fn statement_time_http_and_subscription_reuse_the_native_binding() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn write_original_input_refuses_before_clock_capture_or_first_batch_binding() {
+    let ((), report) = run_async_under_lab(0xc10c_0005, |root| async move {
+        let (mut server, token, _) = served(&root, "write-original-input-before-clock").await;
+        let (clock, calls) = counted_clock();
+        install_clock(&root, &mut server, clock).await;
+        {
+            let db = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+            db.symbols
+                .bind(GraphSymbolKind::Property, "stamp", 1)
+                .unwrap();
+            db.symbols
+                .bind(GraphSymbolKind::Property, "need", 2)
+                .unwrap();
+        }
+        let db = &server.databases["test"];
+        let limited = token
+            .attenuate(fgdb_warden::Restriction::MaxWork(1024))
+            .unwrap();
+        let large = vec![("unused".into(), WireValue::Text("雪".repeat(2048)))];
+        for (mode, execution, text) in [
+            (
+                PrepareMode::Write,
+                PreparedExecutionMode::Write,
+                "CREATE (n {stamp:datetime()})",
+            ),
+            (
+                PrepareMode::Write,
+                PreparedExecutionMode::Write,
+                "CREATE (a {stamp:datetime()}) WITH a CREATE (b {stamp:datetime()})",
+            ),
+            (
+                PrepareMode::WriteReturning,
+                PreparedExecutionMode::WriteReturning,
+                "CREATE (n {stamp:datetime()}) RETURN n.stamp AS stored",
+            ),
+        ] {
+            let statement = Execute {
+                mode: ExecuteMode::Write,
+                statement: text.into(),
+                parameters: large.clone(),
+            };
+            assert_eq!(
+                write(&root, db, &limited, &statement)
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                ErrorCode::Budget
+            );
+            for (expected_seq, code) in [(0, ErrorCode::Budget), (1, ErrorCode::Conflict)] {
+                assert_eq!(
+                    write_if_current(
+                        &root,
+                        db,
+                        &limited,
+                        &ExecuteConditionalWrite {
+                            expected_seq,
+                            statement: text.into(),
+                            parameters: large.clone(),
+                        },
+                    )
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                    code,
+                    "frontier comparison still precedes conditional input binding"
+                );
+            }
+            assert_eq!(
+                prepare_statement(
+                    &root,
+                    db,
+                    &limited,
+                    &Prepare {
+                        mode,
+                        statement: text.into(),
+                        parameters: large.clone(),
+                    },
+                )
+                .await
+                .err()
+                .unwrap()
+                .code,
+                ErrorCode::Budget
+            );
+            let prepared = accepted(
+                prepare_statement(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        mode,
+                        statement: text.into(),
+                        parameters: vec![],
+                    },
+                )
+                .await,
+            );
+            assert_eq!(
+                run_prepared(&root, db, &limited, &prepared, execution, &large)
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                ErrorCode::Budget
+            );
+            if mode == PrepareMode::Write {
+                assert_eq!(
+                    run_prepared_batch(&root, db, &limited, &prepared, &[vec![], large.clone()],)
+                        .await
+                        .err()
+                        .unwrap()
+                        .code,
+                    ErrorCode::Budget,
+                    "all original transcripts precede any record's calendar observation"
+                );
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(state(&root, db).await, (CommitSeq(0), 0));
+        }
+        for text in [
+            "CREATE (n {stamp:datetime(), need:$required})",
+            "CREATE (a {stamp:datetime(), need:$required}) WITH a CREATE (b)",
+        ] {
+            let prepared = accepted(
+                prepare_statement(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        mode: PrepareMode::Write,
+                        statement: text.into(),
+                        parameters: vec![("required".into(), WireValue::Int(7))],
+                    },
+                )
+                .await,
+            );
+            // The first record cannot bind. The second record's original
+            // payload must nevertheless be admitted before that error or any
+            // clock observation can escape from binding the first record.
+            let mut last = large.clone();
+            last.push(("required".into(), WireValue::Int(7)));
+            assert_eq!(
+                run_prepared_batch(&root, db, &limited, &prepared, &[vec![], last])
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                ErrorCode::Budget
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(state(&root, db).await, (CommitSeq(0), 0));
+        }
+        let answer = accepted(
+            write(
+                &root,
+                db,
+                &token,
+                &request(
+                    ExecuteMode::Write,
+                    "CREATE (n {stamp:datetime()}) RETURN n.stamp AS stored",
+                ),
+            )
+            .await,
+        );
+        assert_eq!(answer.rows, [vec![instant(0)]]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state(&root, db).await, (CommitSeq(1), 1));
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

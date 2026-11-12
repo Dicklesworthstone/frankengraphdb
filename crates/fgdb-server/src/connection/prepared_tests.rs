@@ -1041,7 +1041,11 @@ fn prepared_returning_binding_and_native_execution_share_one_signed_work_ceiling
                 }
             }
         }
-        for (work, succeeds) in [(high, false), (high + 1, true)] {
+        let binding_work = 1 + fgdb_gql::GqlParameters::new().canonical_byte_len() as u64;
+        for (work, succeeds) in [
+            (high + binding_work - 1, false),
+            (high + binding_work, true),
+        ] {
             let scoped = token
                 .attenuate(fgdb_warden::Restriction::MaxWork(work))
                 .unwrap();
@@ -1531,6 +1535,191 @@ fn prepared_read_original_argument_bytes_share_the_execution_allowance() {
             ErrorCode::Budget
         );
         drop(session);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_write_original_bytes_share_single_and_batch_execution_allowances() {
+    let ((), report) = run_async_under_lab(0x79a0_0444, |root| async move {
+        let (mut server, token, _) = served(&root, "prepared-write-original-bytes").await;
+        let db = std::sync::Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+        db.symbols
+            .bind(fgdb_gql::GraphSymbolKind::Property, "p", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut seed = fgdb::WriteBatch::new(fgdb_delta_types::RelationId(1));
+        seed.create_vertex(
+            fgdb_types::VId(1),
+            vec![],
+            vec![(
+                fgdb_delta_types::PropertyKeyId(1),
+                fgdb_types::CanonicalScalar::Int(7),
+            )],
+        );
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), seed)
+            .await
+            .unwrap();
+        let arguments = |padding: &str| -> Vec<(String, WireValue)> {
+            vec![(
+                "m".into(),
+                WireValue::Map(vec![
+                    ("key".into(), WireValue::Int(7)),
+                    ("unused".into(), WireValue::Text(padding.into())),
+                ]),
+            )]
+        };
+        let small = arguments("");
+        let large = arguments(&"雪".repeat(1024));
+        let small_bytes = crate::convert::parameters(&small, None)
+            .unwrap()
+            .canonical_byte_len() as u64;
+        let large_bytes = crate::convert::parameters(&large, None)
+            .unwrap()
+            .canonical_byte_len() as u64;
+        let delta = large_bytes - small_bytes;
+        for (mode, execution, statement) in [
+            (
+                PrepareMode::Write,
+                PreparedExecutionMode::Write,
+                "MATCH (n {p:$m.key}) SET n.p=$m.key",
+            ),
+            (
+                PrepareMode::Write,
+                PreparedExecutionMode::Write,
+                "MATCH (n {p:$m.key}) SET n.p=$m.key WITH n SET n.p=$m.key",
+            ),
+            (
+                PrepareMode::WriteReturning,
+                PreparedExecutionMode::WriteReturning,
+                "MATCH (n {p:$m.key}) SET n.p=$m.key RETURN n.p AS value",
+            ),
+        ] {
+            let definition = ok(prepare_statement(
+                &root,
+                db,
+                &token,
+                &Prepare {
+                    mode,
+                    statement: statement.into(),
+                    parameters: small.clone(),
+                },
+            )
+            .await);
+            // Every SET writes the existing value. Native read-close leaves
+            // the graph and frontier fixed while finding its exact work floor.
+            let mut low = 0;
+            let mut high = 100_000;
+            while low + 1 < high {
+                let work = low + (high - low) / 2;
+                let scoped = token
+                    .attenuate(fgdb_warden::Restriction::MaxWork(work))
+                    .unwrap();
+                match run_prepared(&root, db, &scoped, &definition, execution, &small).await {
+                    Ok(answer) => {
+                        assert_eq!(
+                            answer.outcome,
+                            Outcome::ReadClosed {
+                                seq: 1,
+                                statements: 1
+                            }
+                        );
+                        high = work;
+                    }
+                    Err(error) => {
+                        assert_eq!(error.code, ErrorCode::Budget, "{}", error.message);
+                        low = work;
+                    }
+                }
+            }
+            assert!(high > small_bytes && high < 100_000);
+            for (work, succeeds) in [(high + delta - 1, false), (high + delta, true)] {
+                let scoped = token
+                    .attenuate(fgdb_warden::Restriction::MaxWork(work))
+                    .unwrap();
+                let result = run_prepared(&root, db, &scoped, &definition, execution, &large).await;
+                if succeeds {
+                    let answer = ok(result);
+                    assert_eq!(
+                        answer.outcome,
+                        Outcome::ReadClosed {
+                            seq: 1,
+                            statements: 1
+                        }
+                    );
+                    if mode == PrepareMode::WriteReturning {
+                        assert_eq!(answer.rows, [vec![WireValue::Int(7)]]);
+                    } else {
+                        assert!(answer.rows.is_empty());
+                    }
+                } else {
+                    assert_eq!(result.err().unwrap().code, ErrorCode::Budget);
+                }
+            }
+            if mode == PrepareMode::Write {
+                let records = [small.clone(), small.clone()];
+                let mut low = 0;
+                let mut high = 100_000;
+                while low + 1 < high {
+                    let work = low + (high - low) / 2;
+                    let scoped = token
+                        .attenuate(fgdb_warden::Restriction::MaxWork(work))
+                        .unwrap();
+                    match run_prepared_batch(&root, db, &scoped, &definition, &records).await {
+                        Ok(answer) => {
+                            assert_eq!(
+                                answer.outcome,
+                                Outcome::ReadClosed {
+                                    seq: 1,
+                                    statements: 2
+                                }
+                            );
+                            high = work;
+                        }
+                        Err(error) => {
+                            assert_eq!(error.code, ErrorCode::Budget, "{}", error.message);
+                            low = work;
+                        }
+                    }
+                }
+                assert!(high > 2 * small_bytes && high < 100_000);
+                let records = [large.clone(), large.clone()];
+                for (work, succeeds) in [(high + 2 * delta - 1, false), (high + 2 * delta, true)] {
+                    let scoped = token
+                        .attenuate(fgdb_warden::Restriction::MaxWork(work))
+                        .unwrap();
+                    let result =
+                        run_prepared_batch(&root, db, &scoped, &definition, &records).await;
+                    if succeeds {
+                        assert_eq!(
+                            ok(result).outcome,
+                            Outcome::ReadClosed {
+                                seq: 1,
+                                statements: 2
+                            }
+                        );
+                    } else {
+                        assert_eq!(result.err().unwrap().code, ErrorCode::Budget);
+                    }
+                }
+            }
+        }
+        let guard = db.db.read(&root).await.unwrap();
+        assert_eq!(guard.frontier().unwrap(), CommitSeq(1));
+        assert_eq!(
+            guard.vertex(fgdb_types::VId(1)).unwrap().unwrap().props,
+            vec![(
+                fgdb_delta_types::PropertyKeyId(1),
+                fgdb_types::CanonicalScalar::Int(7).into(),
+            )]
+        );
+        drop(guard);
         server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");

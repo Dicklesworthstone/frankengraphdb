@@ -2652,7 +2652,6 @@ fn independent_edge_rows_expire_before_composition_or_publication_without_a_pref
     });
 }
 
-
 #[test]
 fn frozen_relationship_upserts_preserve_authorized_parallel_images_and_receipts() {
     lab(0xa9c1, |contexts| async move {
@@ -2693,15 +2692,9 @@ fn frozen_relationship_upserts_preserve_authorized_parallel_images_and_receipts(
                 let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                 let mut seed = crate::WriteBatch::new(R);
                 for (id, key) in [(10, 1), (11, 1), (20, 2), (30, 3), (90, 9)] {
-                    seed.create_vertex(
-                        VId(id),
-                        vec![L],
-                        vec![(P, CanonicalScalar::Int(key))],
-                    );
+                    seed.create_vertex(VId(id), vec![L], vec![(P, CanonicalScalar::Int(key))]);
                 }
-                for (id, source, value) in
-                    [(10, 10, 3), (11, 10, 30), (12, 11, 1), (20, 20, -5)]
-                {
+                for (id, source, value) in [(10, 10, 3), (11, 10, 30), (12, 11, 1), (20, 20, -5)] {
                     seed.add_edge(
                         EId(id),
                         VId(source),
@@ -2838,17 +2831,16 @@ fn frozen_relationship_upserts_roll_back_late_scope_expression_and_budget_refusa
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut seed = crate::WriteBatch::new(R);
             for id in [1, 2, 9] {
-                seed.create_vertex(
-                    VId(id),
-                    vec![L],
-                    vec![(P, CanonicalScalar::Int(id as i64))],
-                );
+                seed.create_vertex(VId(id), vec![L], vec![(P, CanonicalScalar::Int(id as i64))]);
             }
             seed.add_edge(
                 EId(20),
                 VId(2),
                 VId(9),
-                vec![(SECRET, CanonicalScalar::Int(77)), (Q, CanonicalScalar::Int(4))],
+                vec![
+                    (SECRET, CanonicalScalar::Int(77)),
+                    (Q, CanonicalScalar::Int(4)),
+                ],
             );
             db.write(&commit, seed).await.unwrap();
             let before = db.frontier().unwrap();
@@ -2879,11 +2871,9 @@ fn frozen_relationship_upserts_roll_back_late_scope_expression_and_budget_refusa
                     error,
                     Fault::EdgeUpsert {
                         statement: 1,
-                        source: GqlQueryError::Source(
-                            fgdb_gql::GraphEdgeUpsertError::Staging(
-                                WriteTxnError::Authorization(Error::ScopeDenied)
-                            )
-                        ),
+                        source: GqlQueryError::Source(fgdb_gql::GraphEdgeUpsertError::Staging(
+                            WriteTxnError::Authorization(Error::ScopeDenied)
+                        )),
                     }
                 ));
             } else if effects == 1 {

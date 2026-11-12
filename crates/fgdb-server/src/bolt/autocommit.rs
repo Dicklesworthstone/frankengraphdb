@@ -371,6 +371,8 @@ impl<'s> Connection<'s> {
             query_cx
                 .checkpoint()
                 .map_err(|_| Failure::invalid("Bolt write preparation cancelled"))?;
+            crate::execute::admit_write_parameters(&mut permit, parameters)
+                .map_err(Failure::from_refusal)?;
             let template = query_cx.with_restriction(|| {
                 ReturningTemplate::prepare(db, query, parameters)
                     .map(|template| template.filter(ReturningTemplate::returns_rows))
@@ -395,10 +397,8 @@ impl<'s> Connection<'s> {
                     "the host write statement limit is zero",
                 ));
             }
-            let remaining = permit.predicates().limits().max_work - permit.usage().work;
-            let token = token
-                .attenuate(fgdb_warden::Restriction::MaxWork(remaining))
-                .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
+            let token = crate::execute::write_execution_token(&permit, token)
+                .map_err(Failure::from_refusal)?;
             let columns = definition.columns().to_vec();
             (WriteRequest::Returning { definition, token }, columns)
         };

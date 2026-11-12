@@ -12,6 +12,40 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Server write input and binding continuity — qualification pending
+
+Source added 2026-11-12 extends original canonical argument admission through
+raw, conditional, prepared and Bolt write ingress. Original payload bytes,
+including unused map fields, are admitted before lowering, statement-time
+capture or binding. Conditional writes retain the exact-frontier comparison
+before argument work. Prepared script and chain batches admit every original
+record before the first record binds, so an oversized later record cannot
+follow an already-observed calendar value or a first-record binding error.
+
+Prepared scripts bind under the server's retained allowance, then hand the
+complete program or batch to the existing native bound owner with a token
+attenuated by the consumed input and binding work. RETURN, chains and Bolt
+use the same remaining-budget handoff. Derived fields are not billed as
+another caller input. Raw stats writes pass unchanged originals to the native
+session, which retains their actual input debit through publication. Recovery
+generation, cancellation, authority, statement limits and atomic completion
+remain in their existing owners.
+
+Three added regression sources cover exact UTF-8 input deltas for single
+script, chain and RETURN execution and script/chain batches; pre-clock
+refusals across raw, conditional and prepared ingress; late-record admission
+before first binding; and Bolt pending-owner refusal. Existing prepared
+RETURN and Bolt exact-budget laws now include the canonical empty transcript.
+Independent source/API review found no remaining publication blocker. Pinned
+formatting and final formatting checks pass for all seven changed Rust files.
+Compilation, runtime tests, Clippy, UBS and exact-tree proof remain **UNRUN**.
+
+Definition-only script PREPARE retains its existing original-input preflight
+followed by the namespace compiler's lowered-input preparation. This does not
+establish an exact shared preparation allowance; the execution handoffs above
+do preserve the cumulative allowance. The broader authorization and surface
+beads remain open.
+
 ### Independent relationship-upsert batches — qualification pending
 
 Source added 2026-11-12 alongside the bulk-write work in `fgdb-d04vu` and
@@ -36,10 +70,10 @@ endpoint vertices, both ON branches followed by SET, empty selections and
 mixed plain-MERGE/upsert programs. Late arithmetic, field-scope and cumulative
 effect-budget refusals restore the prior workspace and publish no prefix.
 Invalid repeated allocator identities also reject atomically. Independent
-source/API review found no blocker. Formatting, compilation, runtime tests,
-Clippy, UBS and exact-tree proof remain **UNRUN** after the shared execution
-host disconnected; no measured speedup or broader bulk-workstream closure
-is claimed.
+source/API review found no blocker. Pinned formatting and the final formatting
+check pass for all six changed Rust files after execution-service recovery.
+Compilation, runtime tests, Clippy, UBS and exact-tree proof remain **UNRUN**;
+no measured speedup or broader bulk-workstream closure is claimed.
 
 ### Original write-parameter admission — qualification pending
 

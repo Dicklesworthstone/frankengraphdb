@@ -49,15 +49,53 @@ async fn write_if_current_inner(
             "the expected frontier is no longer current; no write was executed",
         ));
     }
+    let mut permit = write_permit(db, token)?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = crate::query_cx(&contexts);
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    permit
+        .charge_work_at(unix_millis(), statement.statement.len() as u64)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
     refuse_element_identity(&statement.statement)?;
-    let parameters = convert::parameters(&statement.parameters, None)
-        .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-    match ReturningTemplate::prepare(db, &statement.statement, &parameters)? {
-        Some(template) => {
-            let contexts = PurposeContexts::narrow_runtime_root(cx);
-            let query = crate::query_cx(&contexts);
-            let prepared = template.bind_current(&query, db, &parameters)?;
-            write_returning_in_guard(cx, db, token, prepared, guard, |_, rows, _, _| Ok(rows)).await
+    let parameters = query.with_restriction(|| {
+        convert::parameters(&statement.parameters, None)
+            .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
+    });
+    permit
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    let parameters = parameters?;
+    admit_write_parameters(&mut permit, &parameters)?;
+    let prepared = query
+        .with_restriction(|| ReturningTemplate::prepare(db, &statement.statement, &parameters));
+    let prepared = prepared.and_then(|template| {
+        template
+            .map(|template| template.bind_current(&query, db, &parameters))
+            .transpose()
+    });
+    permit
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    match prepared? {
+        Some(prepared) => {
+            let execution_token = write_execution_token(&permit, token)?;
+            write_returning_in_guard(
+                cx,
+                db,
+                &execution_token,
+                prepared,
+                guard,
+                |_, rows, _, _| Ok(rows),
+            )
+            .await
         }
         None => write_stats_in_guard(cx, db, token, &statement.statement, &parameters, guard).await,
     }

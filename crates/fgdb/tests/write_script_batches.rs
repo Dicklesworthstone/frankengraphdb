@@ -946,7 +946,6 @@ fn late_arithmetic_merge_error_restores_entry_effects_and_outer_prefix() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 #[test]
 fn frozen_relationship_upserts_keep_parallel_matches_actions_and_empty_rows() {
     let ((), report) = run_async_under_lab(0xba7c_0044, |root| async move {
@@ -976,11 +975,7 @@ fn frozen_relationship_upserts_keep_parallel_matches_actions_and_empty_rows() {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut seed = WriteBatch::new(R);
             for (id, key) in [(10, 1), (11, 1), (20, 2), (30, 3), (90, 9)] {
-                seed.create_vertex(
-                    VId(id),
-                    vec![],
-                    vec![(P, CanonicalScalar::Int(key))],
-                );
+                seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(key))]);
             }
             for (id, source, value) in [(10, 10, 3), (11, 10, 30), (12, 11, 1), (20, 20, -5)] {
                 seed.add_edge(
@@ -1084,11 +1079,7 @@ fn frozen_relationship_upserts_compose_with_plain_merges() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut seed = WriteBatch::new(R);
         for id in [1, 2, 9] {
-            seed.create_vertex(
-                VId(id),
-                vec![],
-                vec![(P, CanonicalScalar::Int(id as i64))],
-            );
+            seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
         }
         db.write(&commit, seed).await.unwrap();
         let (receipt, _) = db
@@ -1098,9 +1089,7 @@ fn frozen_relationship_upserts_compose_with_plain_merges() {
                 &commit,
                 batch.program(),
                 GraphWriteProgramPolicy::new(query_policy(), 1, 0, 2),
-                |request| {
-                    Ok::<_, ()>(ElementId::Edge(EId(100 + request.statement as u128)))
-                },
+                |request| Ok::<_, ()>(ElementId::Edge(EId(100 + request.statement as u128))),
             )
             .await
             .unwrap();
@@ -1146,11 +1135,7 @@ fn late_frozen_relationship_upsert_error_restores_the_entry_overlay() {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut seed = WriteBatch::new(R);
             for id in [1, 2, 3, 9] {
-                seed.create_vertex(
-                    VId(id),
-                    vec![],
-                    vec![(P, CanonicalScalar::Int(id as i64))],
-                );
+                seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
             }
             for (id, value) in [(1, 5), (3, 9)] {
                 seed.add_edge(
@@ -1200,7 +1185,6 @@ fn late_frozen_relationship_upsert_error_restores_the_entry_overlay() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 #[test]
 fn frozen_relationship_upserts_reject_reused_allocations_without_partial_effects() {
     let ((), report) = run_async_under_lab(0xba7c_0047, |root| async move {
@@ -1212,21 +1196,13 @@ fn frozen_relationship_upserts_reject_reused_allocations_without_partial_effects
             symbols,
         )
         .unwrap();
-        let arguments = [1, 2, 3].map(|key| {
-            GqlParameters::new()
-                .with_int64("key", key)
-                .unwrap()
-        });
+        let arguments = [1, 2, 3].map(|key| GqlParameters::new().with_int64("key", key).unwrap());
         let batch = script.bind_parameter_sets(&arguments).unwrap();
         assert!(batch.program().freezes_edge_merge_input());
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut seed = WriteBatch::new(R);
         for id in [1, 2, 3, 9] {
-            seed.create_vertex(
-                VId(id),
-                vec![],
-                vec![(P, CanonicalScalar::Int(id as i64))],
-            );
+            seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
         }
         db.write(&commit, seed).await.unwrap();
         let before = db.frontier().unwrap();

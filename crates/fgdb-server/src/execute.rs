@@ -424,6 +424,51 @@ pub(crate) fn refuse_element_identity(text: &str) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Start a movable allowance so binding and native publication cannot each
+/// receive the token's full work ceiling.
+fn write_permit<'a>(
+    db: &'a Served,
+    token: &CapabilityToken,
+) -> Result<fgdb_warden::ExecutionPermit<'a, fgdb_warden::WriteAccess>, Refusal> {
+    let now = unix_millis();
+    db.authority
+        .verify_at(token, TRUNK, now)
+        .and_then(|capability| capability.into_write_at(TRUNK, now))
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))
+}
+
+/// Price the caller's complete canonical transcript before map expansion,
+/// statement-time capture or value binding. Unused arguments still cost bytes.
+pub(crate) fn admit_write_parameters(
+    permit: &mut fgdb_warden::ExecutionPermit<'_, fgdb_warden::WriteAccess>,
+    parameters: &fgdb_gql::GqlParameters,
+) -> Result<(), Refusal> {
+    let bytes = u64::try_from(parameters.canonical_byte_len())
+        .map_err(|_| Refusal::new(ErrorCode::Budget, "write argument input is too large"))?;
+    permit
+        .charge_work_at(unix_millis(), bytes)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))
+}
+
+/// Bound native owners have no original argument transcript to charge again.
+/// Attenuation carries the successful binding debit into their live allowance.
+pub(crate) fn write_execution_token(
+    permit: &fgdb_warden::ExecutionPermit<'_, fgdb_warden::WriteAccess>,
+    token: &CapabilityToken,
+) -> Result<CapabilityToken, Refusal> {
+    let remaining = permit.predicates().limits().max_work - permit.usage().work;
+    token
+        .attenuate(fgdb_warden::Restriction::MaxWork(remaining))
+        .map_err(|error| {
+            let code = if matches!(error, fgdb_warden::Error::TooLarge) {
+                ErrorCode::Budget
+            } else {
+                warden_code(error)
+            };
+            Refusal::new(code, error.to_string())
+        })
+}
+
 async fn write_inner(
     cx: &Cx,
     db: &Served,
@@ -431,21 +476,56 @@ async fn write_inner(
     statement: &Execute,
     deferred: Option<(&Generation, fgdb_types::CommitSeq)>,
 ) -> Result<Answer, Refusal> {
-    authorize_write(db, token)?;
-    refuse_element_identity(&statement.statement)?;
+    let mut permit = write_permit(db, token)?;
     let _operation = match deferred {
         Some((generation, _)) => generation.enter(),
         None => db.db.enter(),
     }
     .map_err(Refusal::from)?;
-    let parameters = convert::parameters(&statement.parameters, None)
-        .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-    if let Some(template) = ReturningTemplate::prepare(db, &statement.statement, &parameters)? {
-        let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let query = crate::query_cx(&contexts);
-        let returning = template.bind_current(&query, db, &parameters)?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = crate::query_cx(&contexts);
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    permit
+        .charge_work_at(unix_millis(), statement.statement.len() as u64)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    refuse_element_identity(&statement.statement)?;
+    let parameters = query.with_restriction(|| {
+        convert::parameters(&statement.parameters, None)
+            .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
+    });
+    permit
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    if let Some((generation, _)) = deferred {
+        generation.check().map_err(Refusal::from)?;
+    }
+    let parameters = parameters?;
+    admit_write_parameters(&mut permit, &parameters)?;
+    let returning = query
+        .with_restriction(|| ReturningTemplate::prepare(db, &statement.statement, &parameters));
+    let returning = returning.and_then(|template| {
+        template
+            .map(|template| template.bind_current(&query, db, &parameters))
+            .transpose()
+    });
+    permit
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    if let Some((generation, _)) = deferred {
+        generation.check().map_err(Refusal::from)?;
+    }
+    if let Some(returning) = returning? {
+        let execution_token = write_execution_token(&permit, token)?;
         if deferred.is_none() {
-            return write_returning(cx, db, token, returning).await;
+            return write_returning(cx, db, &execution_token, returning).await;
         }
         // Bolt retains a no-RETURN definition at RUN and executes it only at
         // PULL/DISCARD. Chains use the same checked owner as projected writes,
@@ -457,11 +537,18 @@ async fn write_inner(
                 "a deferred write cannot return rows",
             ));
         }
-        return write_returning_checked(cx, db, token, returning, deferred, |_, rows, _, _| {
-            Ok(rows)
-        })
+        return write_returning_checked(
+            cx,
+            db,
+            &execution_token,
+            returning,
+            deferred,
+            |_, rows, _, _| Ok(rows),
+        )
         .await;
     }
+    // The stats owner receives these unchanged original parameters and text,
+    // and reserves this same input price on its retained execution permit.
     let guard = db.db.write(cx).await.map_err(Refusal::from)?;
     if let Some((generation, minimum_seq)) = deferred {
         // Another writer may have fenced the slot while this request waited

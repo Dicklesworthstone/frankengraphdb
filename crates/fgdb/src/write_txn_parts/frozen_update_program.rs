@@ -530,9 +530,8 @@ impl WriteTxn {
             .iter()
             .any(|statement| matches!(statement, GraphWriteStatement::EdgeUpsert(_)))
         {
-            return self.execute_frozen_edge_upsert_rows_governed(
-                database, cx, program, policy, allocate,
-            );
+            return self
+                .execute_frozen_edge_upsert_rows_governed(database, cx, program, policy, allocate);
         }
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
@@ -661,7 +660,9 @@ impl WriteTxn {
                                     allocate(GraphWriteIdentityRequest { statement, request })
                                 },
                             )
-                            .map(|(stats, receipt)| (GraphWriteStepStats::EdgeMerge(stats), receipt))
+                            .map(|(stats, receipt)| {
+                                (GraphWriteStepStats::EdgeMerge(stats), receipt)
+                            })
                             .map_err(GraphWriteStepError::EdgeMerge)?,
                         GraphWriteStatement::EdgeUpsert(upsert) => row
                             .txn
@@ -696,9 +697,11 @@ impl WriteTxn {
                             .txn
                             .write_ordered(database, core::mem::take(&mut batches))
                             .map_err(|error| match input {
-                                GraphWriteStatement::EdgeUpsert(_) => GraphWriteStepError::EdgeUpsert(
-                                    GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)),
-                                ),
+                                GraphWriteStatement::EdgeUpsert(_) => {
+                                    GraphWriteStepError::EdgeUpsert(GqlQueryError::Source(
+                                        GraphEdgeUpsertError::Staging(error),
+                                    ))
+                                }
                                 _ => GraphWriteStepError::EdgeMerge(GqlQueryError::Source(
                                     GraphEdgeMergeError::Source(error),
                                 )),

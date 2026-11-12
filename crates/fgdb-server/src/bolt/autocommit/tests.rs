@@ -591,7 +591,11 @@ fn deferred_return_keeps_preparation_debits_row_limits_and_live_authority() {
         for (name, restriction, retire) in [
             (
                 "bolt-return-binding-budget",
-                fgdb_warden::Restriction::MaxWork(statement.len() as u64 + 1),
+                fgdb_warden::Restriction::MaxWork(
+                    statement.len() as u64
+                        + fgdb_gql::GqlParameters::new().canonical_byte_len() as u64
+                        + 1,
+                ),
                 false,
             ),
             (
@@ -622,6 +626,46 @@ fn deferred_return_keeps_preparation_debits_row_limits_and_live_authority() {
             assert_eq!(frontier(&root, db).await, CommitSeq(0));
             server.join_database_workers(&root).await;
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn deferred_return_admits_original_argument_bytes_before_clock_or_pending_owner() {
+    let ((), report) = run_async_under_lab(0xb017_0015, |root| async move {
+        let (mut server, token, _) = served(&root, "bolt-return-original-input").await;
+        let (clock, calls) = crate::execute::statement_time_tests::counted_clock();
+        crate::execute::statement_time_tests::install_clock(&root, &mut server, clock).await;
+        let db = &server.databases["test"];
+        let limited = token
+            .attenuate(fgdb_warden::Restriction::MaxWork(1024))
+            .unwrap();
+        let mut client = connection(&server, limited);
+        let arguments = vec![("unused".into(), Value::string("雪".repeat(2048)))];
+        assert!(
+            client
+                .run(
+                    &root,
+                    "CREATE (n) RETURN datetime() AS value",
+                    &arguments,
+                    &extra(),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(client.pending.is_none());
+        assert_eq!(frontier(&root, db).await, CommitSeq(0));
+        assert!(
+            db.db
+                .read(&root)
+                .await
+                .unwrap()
+                .vertices()
+                .unwrap()
+                .is_empty()
+        );
+        server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
