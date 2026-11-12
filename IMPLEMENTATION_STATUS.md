@@ -12,6 +12,35 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Independent relationship-upsert batches — qualification pending
+
+Source added 2026-11-12 alongside the bulk-write work in `fgdb-d04vu` and
+`fgdb-2l3pt`. The existing frozen relationship profile now includes native
+edge upserts with ON CREATE, ON MATCH and trailing SET actions. Each row keeps
+its ordinary native workspace and ordered action semantics. The program
+evaluates independent rows against the entry overlay, then composes their
+original intents once in input order instead of preparing each growing
+inter-row prefix. Embedded owner and capability-authorized execution share
+the same profile and final publication boundary.
+
+Admission still proves a common directed relationship shape, equality-keyed
+endpoint scans and pairwise distinct endpoint keys. Duplicate or
+numeric-equivalent keys, undirected patterns, unkeyed scans and selections
+that read relationships retain the ordinary sequential path. Upsert actions
+are limited by the existing native type to the chosen relationship; the
+profile does not admit endpoint mutations or arbitrary graph-dependent rows.
+
+Regression sources compare final images, ordered receipts and allocation
+requests with ordinary execution, including parallel matches, duplicate
+endpoint vertices, both ON branches followed by SET, empty selections and
+mixed plain-MERGE/upsert programs. Late arithmetic, field-scope and cumulative
+effect-budget refusals restore the prior workspace and publish no prefix.
+Invalid repeated allocator identities also reject atomically. Independent
+source/API review found no blocker. Formatting, compilation, runtime tests,
+Clippy, UBS and exact-tree proof remain **UNRUN** after the shared execution
+host disconnected; no measured speedup or broader bulk-workstream closure
+is claimed.
+
 ### Original write-parameter admission — qualification pending
 
 Source added 2026-11-12 for the remaining input-admission gap under
@@ -32,10 +61,12 @@ Six added regression sources cover pre-catalog and pre-clock refusal, exact
 original-byte deltas, cumulative batch input, UNWIND admission, direct-script
 binding order and transaction-prefix rollback. Two existing exact-budget laws
 now include the original canonical input term. Independent source/API review
-found no blocker. Formatting, compilation, runtime tests, Clippy, UBS and the
-exact-tree proof are **UNRUN**: the shared host lost memory headroom during
-dependency acquisition and its execution transport disconnected before any
-compiler started. The broader authorization bead remains open.
+found no blocker. After the execution service recovered, pinned formatting
+and the final formatting check passed for all nine changed Rust files.
+Compilation, runtime tests, Clippy, UBS and exact-tree proof are **UNRUN**:
+the shared host lost memory headroom during dependency acquisition and its
+execution transport disconnected before any compiler started. The broader
+authorization bead remains open.
 
 ### Buffered durable runs and generation-bound analytics — qualification pending
 

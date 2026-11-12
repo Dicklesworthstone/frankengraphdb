@@ -946,29 +946,63 @@ fn original_script_arguments_are_admitted_before_any_record_binds() {
             let result = match mode {
                 0 => db
                     .execute_graph_write_script_authorized(
-                        &txn, &query, &commit, &issuer, &token, "main", &script,
-                        &arguments[0], policy(), || NOW,
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &script,
+                        &arguments[0],
+                        policy(),
+                        || NOW,
                     )
                     .await
                     .map(|_| ()),
                 1 => db
                     .execute_graph_write_script_returning_authorized(
-                        &txn, &query, &commit, &issuer, &token, "main", &script,
-                        &arguments[0], policy(), || NOW,
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &script,
+                        &arguments[0],
+                        policy(),
+                        || NOW,
                     )
                     .await
                     .map(|_| ()),
                 2 => db
                     .execute_graph_write_script_batch_authorized(
-                        &txn, &query, &commit, &issuer, &token, "main", &script,
-                        &arguments, 2, policy(), || NOW,
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &script,
+                        &arguments,
+                        2,
+                        policy(),
+                        || NOW,
                     )
                     .await
                     .map(|_| ()),
                 _ => db
                     .execute_graph_write_script_batch_returning_authorized(
-                        &txn, &query, &commit, &issuer, &token, "main", &script,
-                        &arguments, 2, policy(), || NOW,
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &script,
+                        &arguments,
+                        2,
+                        policy(),
+                        || NOW,
                     )
                     .await
                     .map(|_| ()),

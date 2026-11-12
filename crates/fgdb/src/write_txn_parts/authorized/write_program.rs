@@ -135,6 +135,17 @@ fn apply_independent_rows<V: Vfs + Clone, Clock: FnMut() -> u64>(
                             returning.then_some(receipt),
                         )
                     }
+                    GraphWriteStatement::EdgeUpsert(upsert) => edge_program::apply_many(
+                        row.txn,
+                        database,
+                        cx,
+                        upsert,
+                        remaining.edge_upsert_policy(),
+                        scope,
+                        execution,
+                        returning,
+                    )
+                    .map_err(GraphWriteStepError::EdgeUpsert)?,
                     _ => unreachable!("native independent profiles contain INSERT or MERGE rows"),
                 };
                 // Preserve original intents, not the normalized delta: final

@@ -2651,3 +2651,254 @@ fn independent_edge_rows_expire_before_composition_or_publication_without_a_pref
         }
     });
 }
+
+
+#[test]
+fn frozen_relationship_upserts_preserve_authorized_parallel_images_and_receipts() {
+    lab(0xa9c1, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer
+            .issue_at(
+                &Grant {
+                    labels: Scope::only([L]),
+                    relations: Scope::only([R]),
+                    properties: Scope::only([P, Q]),
+                    ..grant()
+                },
+                NOW,
+            )
+            .unwrap();
+        let script = fgdb_gql::PreparedGraphWriteScript::prepare(
+            "MATCH (a:Visible {p:$key}), (b:Visible {p:9}) MERGE (a)-[r:R]->(b) \
+             ON CREATE SET r.q=$value ON MATCH SET r.q=r.q+$value SET r.q=r.q*2",
+            R,
+            symbols,
+        )
+        .unwrap();
+        let arguments = [(1, 2), (2, 4), (3, 7), (99, 0)].map(|(key, value)| {
+            GqlParameters::new()
+                .with_int64("key", key)
+                .unwrap()
+                .with_int64("value", value)
+                .unwrap()
+        });
+        let batch = script.bind_parameter_sets(&arguments).unwrap();
+        assert!(batch.program().freezes_edge_merge_input());
+        let sequential =
+            PreparedGraphWriteProgram::prepare(batch.program().statements().to_vec()).unwrap();
+        for hidden in [false, true] {
+            let mut expected = None;
+            for program in [&sequential, batch.program()] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = crate::WriteBatch::new(R);
+                for (id, key) in [(10, 1), (11, 1), (20, 2), (30, 3), (90, 9)] {
+                    seed.create_vertex(
+                        VId(id),
+                        vec![L],
+                        vec![(P, CanonicalScalar::Int(key))],
+                    );
+                }
+                for (id, source, value) in
+                    [(10, 10, 3), (11, 10, 30), (12, 11, 1), (20, 20, -5)]
+                {
+                    seed.add_edge(
+                        EId(id),
+                        VId(source),
+                        VId(90),
+                        vec![
+                            (Q, CanonicalScalar::Int(value)),
+                            (SECRET, CanonicalScalar::Int(77)),
+                        ],
+                    );
+                }
+                if hidden {
+                    seed.create_vertex(
+                        VId(900),
+                        vec![LabelId(9)],
+                        vec![(P, CanonicalScalar::Int(3))],
+                    );
+                    seed.add_edge(
+                        EId(900),
+                        VId(900),
+                        VId(90),
+                        vec![(Q, CanonicalScalar::Int(999))],
+                    );
+                }
+                db.write(&commit, seed).await.unwrap();
+                let before = db.frontier().unwrap();
+                let hidden_before = db.edge(EId(900)).unwrap();
+                let (receipt, completion) = db
+                    .execute_graph_write_program_returning_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        program,
+                        policy(),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(receipt.stats().completed_statements, 4);
+                assert_eq!(receipt.stats().created_edges, 1);
+                assert_eq!(receipt.stats().mutation_effects, 10);
+                for (id, value) in [(10, 10), (11, 64), (12, 6), (20, -2)] {
+                    assert_eq!(
+                        db.edge(EId(id)).unwrap().unwrap().props,
+                        vec![
+                            (SECRET, CanonicalScalar::Int(77).into()),
+                            (Q, CanonicalScalar::Int(value).into()),
+                        ]
+                    );
+                }
+                assert_eq!(
+                    db.edge(issued_edge(1)).unwrap().unwrap().props,
+                    vec![(Q, CanonicalScalar::Int(14).into())]
+                );
+                assert_eq!(db.edge(EId(900)).unwrap(), hidden_before);
+                assert_eq!(
+                    receipt.steps(),
+                    &[
+                        GraphWriteStepReceipt::EdgeUpsertBatch {
+                            outcomes: vec![
+                                fgdb_gql::GraphEdgeMergeOutcome::Matched(EId(10)),
+                                fgdb_gql::GraphEdgeMergeOutcome::Matched(EId(11)),
+                                fgdb_gql::GraphEdgeMergeOutcome::Matched(EId(12)),
+                            ],
+                            created: vec![],
+                        },
+                        GraphWriteStepReceipt::EdgeUpsert {
+                            outcome: fgdb_gql::GraphEdgeMergeOutcome::Matched(EId(20)),
+                        },
+                        GraphWriteStepReceipt::EdgeUpsert {
+                            outcome: fgdb_gql::GraphEdgeMergeOutcome::Created(issued_edge(1)),
+                        },
+                        GraphWriteStepReceipt::EdgeUpsert {
+                            outcome: fgdb_gql::GraphEdgeMergeOutcome::NoInput,
+                        },
+                    ]
+                );
+                assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+                let actual = (
+                    db.edges().unwrap(),
+                    receipt.steps().to_vec(),
+                    db.delta_since(before)
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .coordinate_entries()
+                        .to_vec(),
+                    completion,
+                );
+                if let Some(expected) = &expected {
+                    assert_eq!(&actual, expected);
+                } else {
+                    expected = Some(actual);
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn frozen_relationship_upserts_roll_back_late_scope_expression_and_budget_refusals() {
+    lab(0xa9c2, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer
+            .issue_at(
+                &Grant {
+                    labels: Scope::only([L]),
+                    relations: Scope::only([R]),
+                    properties: Scope::only([P, Q]),
+                    ..grant()
+                },
+                NOW,
+            )
+            .unwrap();
+        for (action, effects, denied_scope) in [
+            ("r.q=r.q/0", 100, false),
+            // A forbidden no-op is still an original attempted field write.
+            ("r.secret=77", 100, true),
+            ("r.q=r.q+1", 1, false),
+        ] {
+            let text = format!(
+                "MATCH (a:Visible {{p:1}}), (b:Visible {{p:9}}) \
+                 MERGE (a)-[r:R]->(b) ON CREATE SET r.q=7; \
+                 MATCH (a:Visible {{p:2}}), (b:Visible {{p:9}}) \
+                 MERGE (a)-[r:R]->(b) ON MATCH SET {action}"
+            );
+            let script = fgdb_gql::PreparedGraphWriteScript::prepare(&text, R, symbols).unwrap();
+            let batch = script.bind_parameter_sets(&[GqlParameters::new()]).unwrap();
+            assert!(batch.program().freezes_edge_merge_input());
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = crate::WriteBatch::new(R);
+            for id in [1, 2, 9] {
+                seed.create_vertex(
+                    VId(id),
+                    vec![L],
+                    vec![(P, CanonicalScalar::Int(id as i64))],
+                );
+            }
+            seed.add_edge(
+                EId(20),
+                VId(2),
+                VId(9),
+                vec![(SECRET, CanonicalScalar::Int(77)), (Q, CanonicalScalar::Int(4))],
+            );
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let vertices = db.vertices().unwrap();
+            let edges = db.edges().unwrap();
+            let limits = GraphWriteProgramPolicy::new(
+                GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 100_000),
+                effects,
+                0,
+                1,
+            );
+            let error = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    batch.program(),
+                    limits,
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            if denied_scope {
+                assert!(matches!(
+                    error,
+                    Fault::EdgeUpsert {
+                        statement: 1,
+                        source: GqlQueryError::Source(
+                            fgdb_gql::GraphEdgeUpsertError::Staging(
+                                WriteTxnError::Authorization(Error::ScopeDenied)
+                            )
+                        ),
+                    }
+                ));
+            } else if effects == 1 {
+                assert!(matches!(
+                    error,
+                    Fault::Program(GraphMutationProgramError::Budget { statement: 1, .. })
+                ));
+            } else {
+                assert!(matches!(error, Fault::EdgeUpsert { statement: 1, .. }));
+            }
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(db.vertices().unwrap(), vertices);
+            assert_eq!(db.edges().unwrap(), edges);
+            assert!(db.edge(issued_edge(1)).unwrap().is_none());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}

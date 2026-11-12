@@ -797,12 +797,7 @@ impl<V: Vfs + Clone> Database<V> {
         commit_cx
             .with_restriction_async(async {
                 checkpoint(query_cx, &mut execution).map_err(admission)?;
-                reserve_input(
-                    query_cx,
-                    &mut execution,
-                    text,
-                    std::slice::from_ref(params),
-                )?;
+                reserve_input(query_cx, &mut execution, text, std::slice::from_ref(params))?;
                 let captured = statement_parameters(
                     self.statement_clock.as_ref(),
                     query_cx,

@@ -525,6 +525,15 @@ impl WriteTxn {
             GraphWriteStepError, GraphWriteStepStats,
         };
         debug_assert!(program.freezes_edge_merge_input());
+        if program
+            .statements()
+            .iter()
+            .any(|statement| matches!(statement, GraphWriteStatement::EdgeUpsert(_)))
+        {
+            return self.execute_frozen_edge_upsert_rows_governed(
+                database, cx, program, policy, allocate,
+            );
+        }
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
             workspace.txn.program_multi_relation = true;
@@ -602,6 +611,103 @@ impl WriteTxn {
                 ) => GraphMutationProgramError::Statement { statement, source }.into(),
                 (_, error) => error,
             })?;
+            workspace.accept();
+            Ok((stats, receipts))
+        })
+    }
+
+    /// Distinct endpoint-key pairs make different rows' relationship targets
+    /// disjoint. Keep each row's complete native MERGE/ON/SET execution, including
+    /// repeated MATCH occurrences and parallel relationships, against the entry
+    /// overlay. Only preparation of the growing inter-row prefix is deferred.
+    #[allow(clippy::type_complexity)]
+    fn execute_frozen_edge_upsert_rows_governed<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        program: &fgdb_gql::PreparedGraphWriteProgram,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+        mut allocate: impl FnMut(fgdb_gql::GraphWriteIdentityRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        (
+            fgdb_gql::GraphWriteProgramStats,
+            Vec<fgdb_gql::GraphWriteStepReceipt>,
+        ),
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>,
+    > {
+        use fgdb_gql::{
+            GqlQueryError, GraphEdgeMergeError, GraphEdgeUpsertError, GraphWriteIdentityRequest,
+            GraphWriteStatement, GraphWriteStepError, GraphWriteStepStats,
+        };
+        debug_assert!(program.freezes_edge_merge_input());
+        cx.with_restriction(|| {
+            let workspace = MutationProgramWorkspace::new(self);
+            workspace.txn.program_multi_relation = true;
+            let mut batches = Vec::new();
+            let mut receipts = Vec::new();
+            let stats = program.execute_governed(
+                policy,
+                |statement, input, remaining| {
+                    let row = MutationProgramWorkspace::new(workspace.txn);
+                    let (stats, receipt) = match input {
+                        GraphWriteStatement::EdgeMerge(merge) => row
+                            .txn
+                            .execute_graph_edge_merges_governed(
+                                database,
+                                cx,
+                                merge,
+                                remaining.edge_merge_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .map(|(stats, receipt)| (GraphWriteStepStats::EdgeMerge(stats), receipt))
+                            .map_err(GraphWriteStepError::EdgeMerge)?,
+                        GraphWriteStatement::EdgeUpsert(upsert) => row
+                            .txn
+                            .execute_graph_edge_upserts_governed(
+                                database,
+                                cx,
+                                upsert,
+                                remaining.edge_upsert_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .and_then(|output| {
+                                edge_upsert_program_result(
+                                    upsert,
+                                    output,
+                                    remaining.edge_upsert_policy(),
+                                    cx,
+                                )
+                            })
+                            .map_err(GraphWriteStepError::EdgeUpsert)?,
+                        _ => unreachable!("frozen relationship profiles contain MERGE rows"),
+                    };
+                    // A row's ordinary staging already admitted every original
+                    // value and recorded its reads. Restore effects alone before
+                    // the next row, retaining witnesses and issued identities.
+                    batches.extend(row.txn.staged[row.staged_len..].iter().cloned());
+                    drop(row);
+                    receipts.push(receipt);
+                    if statement + 1 == program.statements().len() && !batches.is_empty() {
+                        workspace
+                            .txn
+                            .write_ordered(database, core::mem::take(&mut batches))
+                            .map_err(|error| match input {
+                                GraphWriteStatement::EdgeUpsert(_) => GraphWriteStepError::EdgeUpsert(
+                                    GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)),
+                                ),
+                                _ => GraphWriteStepError::EdgeMerge(GqlQueryError::Source(
+                                    GraphEdgeMergeError::Source(error),
+                                )),
+                            })?;
+                    }
+                    Ok(stats)
+                },
+                || cx.checkpoint(),
+            )?;
             workspace.accept();
             Ok((stats, receipts))
         })

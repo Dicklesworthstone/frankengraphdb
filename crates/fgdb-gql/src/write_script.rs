@@ -995,4 +995,103 @@ mod controlled_binding_tests {
             assert!(!program.program().freezes_vertex_upsert_input(), "{text}");
         }
     }
+
+    #[test]
+    fn frozen_relationship_upserts_require_disjoint_native_endpoint_keys() {
+        let resolve = |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Label, "Entity") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+            (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            _ => None,
+        };
+        let frozen = |text: &str| {
+            PreparedGraphWriteScript::prepare(text, RelationId(1), resolve)
+                .unwrap_or_else(|error| panic!("{text}: {error}"))
+                .bind_parameter_sets(&[GqlParameters::new()])
+                .unwrap()
+                .program()
+                .freezes_edge_merge_input()
+        };
+        let step = |source, destination| {
+            format!(
+                "MATCH (a:Entity {{id:{source}}}), (b:Entity {{id:{destination}}}) \
+                 MERGE (a)-[r:R {{p:0}}]->(b) \
+                 ON CREATE SET r.p=1 ON MATCH SET r.p=r.p+2 SET r.p=r.p*3"
+            )
+        };
+        // A common endpoint is safe. Even changing the edge's match property
+        // cannot affect a different pair; reverse directed pairs are distinct.
+        assert!(frozen(&format!("{}; {}", step(1, 9), step(2, 9))));
+        assert!(frozen(&format!("{}; {}", step(1, 2), step(2, 1))));
+        assert!(frozen(&format!(
+            "{}; MATCH (a:Entity {{id:2}}), (b:Entity {{id:9}}) MERGE (a)-[:R]->(b)",
+            step(1, 9)
+        )));
+
+        let script = PreparedGraphWriteScript::prepare(
+            "MATCH (a:Entity {id:$source}), (b:Entity {id:$destination}) \
+             MERGE (a)-[r:R]->(b) ON CREATE SET r.p=$value \
+             ON MATCH SET r.p=r.p+$value SET r.p=r.p*2",
+            RelationId(1),
+            resolve,
+        )
+        .unwrap();
+        let arguments = [(1, 9, 2), (2, 9, 4)].map(|(source, destination, value)| {
+            GqlParameters::new()
+                .with_int64("source", source)
+                .unwrap()
+                .with_int64("destination", destination)
+                .unwrap()
+                .with_int64("value", value)
+                .unwrap()
+        });
+        assert!(
+            script
+                .bind_parameter_sets(&arguments)
+                .unwrap()
+                .program()
+                .freezes_edge_merge_input()
+        );
+
+        let action = "ON CREATE SET r.p=1 ON MATCH SET r.p=r.p+1";
+        for (first, second) in [
+            // Repeated pairs must see earlier actions and creations.
+            (
+                "MATCH (a {id:1}), (b {id:9}) MERGE (a)-[r:R]->(b)",
+                "MATCH (a {id:1}), (b {id:9}) MERGE (a)-[r:R]->(b)",
+            ),
+            // Equality across numeric encodings is not disjointness.
+            (
+                "MATCH (a {id:1}), (b {id:9}) MERGE (a)-[r:R]->(b)",
+                "MATCH (a {id:1.0}), (b {id:9}) MERGE (a)-[r:R]->(b)",
+            ),
+            // An undirected reverse pair can target the same edge.
+            (
+                "MATCH (a {id:1}), (b {id:2}) MERGE (a)-[r:R]-(b)",
+                "MATCH (a {id:2}), (b {id:1}) MERGE (a)-[r:R]-(b)",
+            ),
+            // Unkeyed or relationship-reading selections keep their owner.
+            (
+                "MATCH (a), (b {id:9}) MERGE (a)-[r:R]->(b)",
+                "MATCH (a), (b {id:8}) MERGE (a)-[r:R]->(b)",
+            ),
+            (
+                "MATCH (a {id:1})-[:S]->(b {id:9}) MERGE (a)-[r:R]->(b)",
+                "MATCH (a {id:2})-[:S]->(b {id:9}) MERGE (a)-[r:R]->(b)",
+            ),
+            // Different endpoint shapes are outside the existing proof.
+            (
+                "MATCH (a:Entity {id:1}), (b {id:9}) MERGE (a)-[r:R]->(b)",
+                "MATCH (a {id:2}), (b {id:9}) MERGE (a)-[r:R]->(b)",
+            ),
+        ] {
+            let text = format!("{first} {action}; {second} {action}");
+            assert!(!frozen(&text), "{text}");
+        }
+        assert!(!frozen(&format!(
+            "MATCH (a {{id:1}}), (b {{id:9}}) MERGE (a)-[r:R]->(b) {action}"
+        )));
+    }
 }

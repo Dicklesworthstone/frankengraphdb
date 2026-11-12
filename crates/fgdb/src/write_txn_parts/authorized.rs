@@ -100,8 +100,8 @@ impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
         parameters: &[fgdb_gql::GqlParameters],
     ) -> Result<(), WriteTxnError> {
         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-        let mut bytes = u64::try_from(text.len())
-            .map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?;
+        let mut bytes =
+            u64::try_from(text.len()).map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?;
         for parameters in parameters {
             cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
             self.poll()?;

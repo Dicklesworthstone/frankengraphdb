@@ -765,7 +765,9 @@ where
                     return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                 }
                 chain_batch_limit(arguments.len(), state.max_statements)?;
-                execution.admit_input(cx, "", arguments).map_err(admission)?;
+                execution
+                    .admit_input(cx, "", arguments)
+                    .map_err(admission)?;
                 let captured = statement_parameter_sets(
                     state.database.statement_clock.as_ref(),
                     cx,
@@ -1170,7 +1172,9 @@ where
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
                         chain_batch_limit(arguments.len(), *max_statements)?;
-                        execution.admit_input(cx, "", arguments).map_err(admission)?;
+                        execution
+                            .admit_input(cx, "", arguments)
+                            .map_err(admission)?;
                         let captured = statement_parameter_sets(
                             database.statement_clock.as_ref(),
                             cx,

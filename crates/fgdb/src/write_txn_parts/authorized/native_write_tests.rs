@@ -1198,8 +1198,7 @@ fn original_input_admission_precedes_catalog_and_statement_clock() {
         let query = contexts.query();
         let txn = contexts.txn();
         let issuer = authority();
-        let text =
-            "WITH $record.key AS key CREATE (n:Visible {p:key, q:datetime().epochMillis})";
+        let text = "WITH $record.key AS key CREATE (n:Visible {p:key, q:datetime().epochMillis})";
         let parameters = GqlParameters::new()
             .with_map(
                 "record",

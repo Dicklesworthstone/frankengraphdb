@@ -615,14 +615,18 @@ impl PreparedGraphWriteProgram {
         true
     }
 
-    /// Every statement is a directed relationship MERGE of one shape whose
-    /// two endpoints are independent equality-keyed vertex scans, and the
-    /// endpoint key tuples are pairwise distinct (fgdb-2l3pt). A row's
+    /// Every statement is a directed relationship MERGE or upsert of one
+    /// shape whose two endpoints are independent equality-keyed vertex scans,
+    /// and the endpoint key tuples are pairwise distinct (fgdb-2l3pt). A row's
     /// candidate endpoint pairs then belong to no other row, so no row's
     /// existence check can see another row's new relationship, and endpoint
-    /// selections read no relationship at all: evaluating every MERGE
-    /// against the entry overlay and staging once in input order is the
-    /// sequential program's result. A physical choice only, like the others.
+    /// selections read no relationship at all. Prepared edge-upsert actions
+    /// read and write only their chosen relationship; their ON and trailing
+    /// SET clauses still execute in order inside that row's ordinary workspace.
+    /// Even a changed relationship match key cannot affect a different endpoint
+    /// pair. Evaluating every row against the entry overlay and composing its
+    /// original intents once in input order is the sequential program's result.
+    /// A physical choice only, like the others.
     #[must_use]
     pub const fn freezes_edge_merge_input(&self) -> bool {
         self.frozen_edge_merge_input
@@ -640,8 +644,10 @@ impl PreparedGraphWriteProgram {
         let mut shape = None;
         let mut keys = std::collections::BTreeSet::new();
         for statement in &self.statements {
-            let GraphWriteStatement::EdgeMerge(merge) = statement else {
-                return false;
+            let merge = match statement {
+                GraphWriteStatement::EdgeMerge(merge) => merge,
+                GraphWriteStatement::EdgeUpsert(upsert) => upsert.merge(),
+                _ => return false,
             };
             let Some(key) = merge.endpoint_key() else {
                 return false;

@@ -1438,7 +1438,10 @@ fn every_session_input_reserves_original_bytes_before_capture_or_binding() {
                 let result = match mode {
                     0 => session.prepare(&query, text, &large).map(|_| ()),
                     1 => session.query_stats(&query, text, &large).await.map(|_| ()),
-                    2 => session.query_batch_stats(&query, text, &batch).await.map(|_| ()),
+                    2 => session
+                        .query_batch_stats(&query, text, &batch)
+                        .await
+                        .map(|_| ()),
                     3 => session
                         .execute_stats(&query, prepared.as_ref().unwrap(), &large)
                         .await
@@ -1515,7 +1518,9 @@ fn reusable_unwind_admits_original_input_before_clock_or_row_diagnostics() {
                 || NOW,
             )
             .unwrap();
-        let error = session.bind_unwind_batch(&query, text, &arguments).unwrap_err();
+        let error = session
+            .bind_unwind_batch(&query, text, &arguments)
+            .unwrap_err();
         assert_eq!(
             authorization(&error),
             Some(Error::LimitExceeded(LimitDimension::Work))
