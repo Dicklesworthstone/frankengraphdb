@@ -40,6 +40,26 @@ impl<V: Vfs + Clone> fgdb_gql::GraphSetSource<WriteTxnError, Box<asupersync::err
         ))
     }
 
+    fn procedure(
+        &mut self,
+        call: &fgdb_gql::PreparedProcedureCall,
+        arguments: &[fgdb_gql::algebra::GraphValue],
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Option<
+        Result<
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+            TxnGqlError<WriteTxnError>,
+        >,
+    > {
+        Some(self.transaction.execute_procedure_governed(
+            self.database,
+            self.cx,
+            call,
+            arguments,
+            policy,
+        ))
+    }
+
     fn element_property(
         &mut self,
         element: ElementId,
@@ -78,8 +98,8 @@ impl<V: Vfs + Clone> fgdb_gql::GraphSetSource<WriteTxnError, Box<asupersync::err
     }
 }
 
-/// A chained CREATE's input: its pattern leaves, plus the element reads a
-/// field needs for `x.key` of an element its row carries in a value (an
+/// A chained CREATE's input: its pattern and procedure leaves, plus the element
+/// reads a field needs for `x.key` of an element its row carries in a value (an
 /// UNWIND member, a collected list or path), as the chain's MERGE inputs
 /// read. It offers no factor capability, so the chain's selection is unchanged.
 fn chain_insert_source<'a, V: Vfs + Clone>(
@@ -90,11 +110,18 @@ fn chain_insert_source<'a, V: Vfs + Clone>(
 ) -> impl fgdb_gql::GraphSetSource<WriteTxnError, Box<asupersync::error::Error>> + 'a {
     fgdb_gql::with_element_metadata(
         fgdb_gql::WithElementReads {
-            source: move |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
-                fgdb_gql::algebra::GraphValueRow,
-            >,
-                          policy: fgdb_gql::GqlQueryPolicy| {
-                transaction.execute_graph_pattern_governed(database, cx, pattern, policy)
+            source: fgdb_gql::WithProcedures {
+                patterns: move |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                    fgdb_gql::algebra::GraphValueRow,
+                >,
+                                policy: fgdb_gql::GqlQueryPolicy| {
+                    transaction.execute_graph_pattern_governed(database, cx, pattern, policy)
+                },
+                procedures: move |call: &fgdb_gql::PreparedProcedureCall,
+                                  arguments: &[fgdb_gql::algebra::GraphValue],
+                                  policy: fgdb_gql::GqlQueryPolicy| {
+                    transaction.execute_procedure_governed(database, cx, call, arguments, policy)
+                },
             },
             elements: move |element, key| {
                 transaction.element_property_with_checkpoint(database, cx, failure, element, key)

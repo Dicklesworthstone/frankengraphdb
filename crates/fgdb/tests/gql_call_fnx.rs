@@ -8,17 +8,20 @@ use fgdb::{
     Database, DatabaseKeys, GqlError, MemVfs, ProcedureError, QueryError, QueryResult, QueryValue,
     WriteBatch, WriteTxnError,
 };
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSetExecutionError, GraphSymbol,
-    GraphSymbolKind,
+    GraphSymbolKind, PreparedGraphInsertQueryText, PreparedGraphInsertText,
+    PreparedGraphWriteChainText,
 };
 use fgdb_prism::*;
 use fgdb_types::{
     CanonicalF64, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
 };
 use std::cmp::Ordering;
+use std::convert::Infallible;
 
 const R: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(1);
@@ -1525,6 +1528,252 @@ fn transaction_calls_compose_over_staged_topology_properties_and_isolates() {
             actual
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn procedure_selected_creates_freeze_the_staged_graph_before_allocating() {
+    run_transaction(async |commit, cx, txcx| {
+        let text = "CALL fnx.single_source_shortest_path_length(1) \
+                    YIELD vertex AS reached, distance \
+                    CREATE (copy:Person {p:reached.p+distance})";
+        let params = GqlParameters::new();
+        let allowance = GraphInsertPolicy::new(policy(), 100, 100);
+        let expected = [10, 21, 32, 43, 54, 605];
+        // Exercise both source owners: a receipt-only insertion and a
+        // CREATE RETURN whose computed output reads the completed writes.
+        for returning in [false, true] {
+            let mut db = open(commit).await;
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.add_edge(EId(6), VId(5), VId(6), vec![]);
+            prefix.set_vertex_property(VId(6), P, Some(CanonicalScalar::Int(600)));
+            txn.write(&mut db, prefix).unwrap();
+            let mut allocated = 0_u128;
+            let allocator = |request| {
+                allocated += 1;
+                assert!(matches!(request, GraphInsertRequest::Vertex { .. }));
+                Ok::<_, Infallible>(ElementId::Vertex(VId(100 + allocated)))
+            };
+            let stats = if returning {
+                let query = PreparedGraphInsertQueryText::prepare(
+                    &format!("{text} RETURN copy.p AS value ORDER BY value"),
+                    R,
+                    symbols,
+                )
+                .unwrap()
+                .bind_parameters(&params)
+                .unwrap();
+                let (stats, output) = txn
+                    .execute_graph_insert_query_governed(&mut db, cx, &query, allowance, allocator)
+                    .unwrap();
+                let expected_rows: Vec<_> = expected
+                    .iter()
+                    .map(|&value| vec![GraphValue::Scalar(CanonicalScalar::Int(value))])
+                    .collect();
+                assert_eq!(
+                    output
+                        .value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    expected_rows,
+                );
+                stats
+            } else {
+                let insertion = PreparedGraphInsertText::prepare(text, R, symbols)
+                    .unwrap()
+                    .bind_parameters(&params)
+                    .unwrap();
+                txn.execute_graph_insert_governed(&mut db, cx, &insertion, allowance, allocator)
+                    .unwrap()
+            };
+            assert_eq!(allocated, 6);
+            assert_eq!(stats.created_vertices, 6);
+            assert_eq!(stats.created_edges, 0);
+            assert!(stats.selection.snapshot_records >= 12);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert_eq!(txn.vertices(&db).unwrap().len(), 12);
+            assert_eq!(db.vertices().unwrap().len(), 6);
+            let mut created = Vec::new();
+            for id in 101..=106 {
+                let vertex = txn.vertex(&db, VId(id)).unwrap().unwrap();
+                assert_eq!(vertex.labels, vec![PERSON]);
+                created.push(vertex.props);
+            }
+            created.sort();
+            assert_eq!(
+                created,
+                expected
+                    .iter()
+                    .map(|&value| vec![(P, CanonicalScalar::Int(value).into())])
+                    .collect::<Vec<_>>(),
+            );
+            assert!(matches!(
+                txn.finish(&mut db, commit).await.unwrap(),
+                fgdb_types::EmbeddedTxnCompletion::WriteCommitted { .. },
+            ));
+            assert_eq!(db.vertices().unwrap().len(), 12);
+            assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn procedure_reads_inside_write_calls_observe_earlier_body_writes() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(7), vec![PERSON], vec![(P, CanonicalScalar::Int(99))]);
+        txn.write(&mut db, prefix).unwrap();
+        let chain = PreparedGraphWriteChainText::prepare(
+            "CALL () { \
+                CREATE (a:Person {p:10}), (b:Person {p:20}), (a)-[:R]->(b) \
+                WITH a CALL fnx.single_source_shortest_path_length(a) \
+                YIELD vertex AS reached, distance \
+                CREATE (copy:Person {p:reached.p+distance}) \
+             } RETURN 7 AS marker",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let mut allocated = 0_u128;
+        let (stats, output, _) = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                cx,
+                &chain,
+                GraphInsertPolicy::new(policy(), 100, 100),
+                |request| {
+                    allocated += 1;
+                    Ok::<_, Infallible>(match request {
+                        GraphInsertRequest::Vertex { .. } => {
+                            ElementId::Vertex(VId(100 + allocated))
+                        }
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(100 + allocated)),
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(stats.created_vertices, 4);
+        assert_eq!(stats.created_edges, 1);
+        assert_eq!(allocated, 5);
+        assert_eq!(output.value.len(), 1);
+        assert_eq!(
+            output.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(7))],
+        );
+        assert_eq!(
+            txn.vertex(&db, VId(104)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(10).into())],
+        );
+        assert_eq!(
+            txn.vertex(&db, VId(105)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(21).into())],
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert!(db.vertices().unwrap().is_empty());
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 5);
+        assert_eq!(db.edges().unwrap().len(), 1);
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn procedure_failure_inside_a_write_call_restores_the_unpublished_prefix() {
+    run_transaction(async |commit, cx, txcx| {
+        for projection_failure in [false, true] {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(7), vec![PERSON], vec![(P, CanonicalScalar::Int(99))]);
+            txn.write(&mut db, prefix).unwrap();
+            let before = txn.staged_effect_digest().unwrap();
+            let extra_edge = if projection_failure {
+                ", (a)-[:R]->(b)"
+            } else {
+                ""
+            };
+            let chain = PreparedGraphWriteChainText::prepare(
+                &format!(
+                    "CALL () {{ CREATE (a:Person), (b:Person), (a)-[:R]->(b){extra_edge} \
+                     WITH a CALL fnx.pagerank() YIELD vertex \
+                     CREATE (:Person {{p:1}}) }} RETURN 7 AS marker",
+                ),
+                R,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let query = if projection_failure {
+                policy()
+            } else {
+                GqlQueryPolicy::new(0, 100, 100_000_000, 10_000_000)
+            };
+            let mut allocated = 0_u128;
+            let error = txn
+                .execute_graph_write_chain_governed(
+                    &mut db,
+                    cx,
+                    &chain,
+                    GraphInsertPolicy::new(query, 100, 100),
+                    |request| {
+                        allocated += 1;
+                        Ok::<_, Infallible>(match request {
+                            GraphInsertRequest::Vertex { .. } => {
+                                ElementId::Vertex(VId(100 + allocated))
+                            }
+                            GraphInsertRequest::Edge { .. } => {
+                                ElementId::Edge(EId(100 + allocated))
+                            }
+                        })
+                    },
+                )
+                .expect_err("an admitted procedure failure must abort the complete CALL");
+            if projection_failure {
+                // Retain the real host refusal through the insertion/read
+                // error wrappers; never replace it with an unavailable host.
+                let mut cause: &(dyn std::error::Error + 'static) = &error;
+                loop {
+                    if let Some(ProcedureError::Read(read)) = cause.downcast_ref::<ProcedureError>()
+                    {
+                        assert!(matches!(
+                            read.as_ref(),
+                            FnxReadError::Projection(ProjectionError::ParallelEdge { .. }),
+                        ));
+                        break;
+                    }
+                    cause = cause.source().unwrap_or_else(|| {
+                        panic!("expected the native projection refusal: {error:?}")
+                    });
+                }
+            } else {
+                assert!(matches!(error, GqlQueryError::Rows(_)), "{error:?}");
+            }
+            assert_eq!(allocated, if projection_failure { 4 } else { 3 });
+            assert_eq!(txn.staged_effect_digest().unwrap(), before);
+            assert_eq!(txn.vertices(&db).unwrap().len(), 1);
+            assert!(txn.edges(&db).unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), basis);
+            txn.finish(&mut db, commit).await.unwrap();
+            assert_eq!(db.vertices().unwrap().len(), 1);
+            assert!(db.edges().unwrap().is_empty());
+            assert_eq!(
+                db.vertex(VId(7)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(99).into())]
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
     });
 }
 
