@@ -135,19 +135,23 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// Enable durable relation runs for native typed-edge MATCH streams, their
     /// aggregate inputs, typed join children and vertex/edge-rooted probes.
     /// This explicit source profile reserves decoder capacity before loading
-    /// a selected run and an EId locator before building its directory. A join
+    /// a selected run and an EId locator before building its directory. If the
+    /// run predates relation writes, its authenticated post-seal blocks remain
+    /// separately charged and their original rows join that directory. A join
     /// driver retains at most one independent incident relation beside its
     /// root source, reusing it across outer roots. All source reservations stay
     /// in this view's MemoryPool until their cursor releases them; returned
     /// records retain independent charges.
     ///
-    /// Floor-zero runs must cover the complete pinned frontier, even for a
-    /// historical query, so invisible historical candidates keep their normal
-    /// identity admission. Other root shapes keep ordinary buffered scans;
+    /// A floor-zero run plus its complete post-seal history must cover the
+    /// pinned frontier, even for a historical query, so invisible historical
+    /// candidates keep their normal identity admission. `max_incidences` also
+    /// caps the combined base population and raw suffix statements before
+    /// suffix payload loading. Other root shapes keep ordinary buffered scans;
     /// their typed incidents may still select independently eligible runs.
     /// Source selection is lazy; LIMIT 0, unpolled pulls and early close do not
-    /// load a run. Selected-run failures never retry through Tier D. Encoded
-    /// extents and post-seal native merging remain outside this first profile.
+    /// load a run. Selected-run or suffix failures never retry another source.
+    /// Encoded extents remain outside this profile.
     pub fn set_native_run_limits(
         &mut self,
         cx: &QueryCx,

@@ -77,7 +77,8 @@ struct Continuation {
 /// The ordinary routed source keeps no full edge directory or neighborhood
 /// payload bag. Under the opt-in complete-run profile, same-relation requests
 /// reuse a typed root's charged endpoint/EId locators. Other typed requests can
-/// admit one independent relation image and locator, reused across outer roots.
+/// admit one independent relation image, post-seal suffix and locator, reused
+/// across outer roots.
 /// Switching the incident relation releases that source before its replacement
 /// is admitted. Both sources share the pool and cumulative work allowance;
 /// independent root positions and stored edge orientation remain unchanged.
@@ -314,8 +315,9 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
     /// Even repeated EOF checks observe the cumulative work/cancellation limit.
     ///
     /// At most one additional routed heap and bounded decoded block, or one
-    /// complete run image and locator, remain charged beside the root. The run
-    /// locator can serve different endpoints without rebuilding its directory.
+    /// complete run image with its suffix and locator, remain charged beside
+    /// the root. The run locator can serve different endpoints without rebuilding
+    /// its directory.
     /// A deep join may still reseed after switching incidences; this is not a
     /// per-depth cache, persistent index or optimal I/O guarantee. Errors never
     /// retry through the independent path. All state is taken before awaiting,

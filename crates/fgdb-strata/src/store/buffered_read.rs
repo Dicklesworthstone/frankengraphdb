@@ -16,6 +16,8 @@ mod block_directory;
 mod patch_directory;
 mod scan_access;
 
+pub(crate) use scan_access::native_runs::NativeRunSuffix;
+
 use super::{BlockStore, RootReadEvent, RootWalk, StoreError};
 use crate::edge_props::{BlockProps, EdgePropertyRow};
 use crate::root::PartitionRoot;
@@ -875,18 +877,22 @@ impl<V: Vfs> BufferedPartition<V> {
     }
 
     /// Opt into native typed-edge scans and join/probe incidence requests from
-    /// complete durable relation runs. The first demanded source admits the
-    /// configured decode capacity and a compact identity locator through this
-    /// reader's source pool. No image is loaded by this setter or by constructing
-    /// an unpolled cursor. A join driver retains at most one independent incident
+    /// durable relation runs plus their complete post-seal histories. The first
+    /// demanded source admits the configured decode capacity, retained suffix
+    /// blocks and compact identity locator through this reader's source pool.
+    /// No image is loaded by this setter or by constructing an unpolled cursor.
+    /// A join driver retains at most one independent incident
     /// relation beside its root source, with both charged to the same pool.
     ///
-    /// Only floor-zero runs covering this entire pinned generation may replace
-    /// its historical candidate domain. Stale, pruned, untyped and selected-root
-    /// scans keep their ordinary root source; independently typed incidents may
-    /// still select an eligible run. Encoded extents retain ordinary sources too;
+    /// Only floor-zero runs with authenticated coverage through this pinned
+    /// generation, directly or with the complete suffix, may replace its
+    /// historical candidate domain. The incidence ceiling covers base versions
+    /// plus raw suffix statements before suffix payload loading. Pruned, untyped
+    /// and selected-root scans keep their ordinary root source; typed incidents
+    /// may still select an eligible run. Encoded extents retain ordinary sources too;
     /// this profile does not yet account the erasure decoder's workspace.
-    /// A selected run's corruption, cancellation or quota failure is terminal.
+    /// A selected run or suffix corruption, cancellation or quota failure is
+    /// terminal.
     pub fn set_native_run_limits(
         &mut self,
         cx: &QueryCx,

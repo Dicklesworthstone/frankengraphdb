@@ -12,7 +12,7 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
-### Native MATCH over complete durable relation runs — qualification pending
+### Native MATCH over durable runs and post-seal histories — qualification pending
 
 Source added 2026-11-12 for `fgdb-teypc`, `fgdb-w3-tier-r-0tj` and
 `fgdb-w3-buffer-g2v`. `BufferedReadView::set_native_run_limits` enables a real
@@ -34,30 +34,46 @@ reused across outer vertices and edges. Switching relations releases the old
 incident source before admitting its replacement. LIMIT 0 and unpolled/closed
 sources do not load the run.
 
-This explicit profile currently requires plain, non-ECS storage, a floor-zero
-run and verification through the entire pinned frontier, including for a query
-at an older cut. Pruned or stale runs and untyped/alternate root relations
-retain ordinary sources. Vertex roots and explicitly selected root positions
+After a relation changes, the same source combines the unchanged run with only
+its authenticated post-horizon Tier-D blocks. The locator indexes original
+base and suffix coordinates, collapses exact EId/birth restatements in root
+publication order and retains every distinct historical birth. It borrows the
+winning source's properties, including empty replacements, without resealing
+the base or constructing a visible-only graph. The store-minted suffix receipt
+binds root, relation, horizon and publication; it authorizes the composed read
+without changing the immutable base's verified horizon.
+
+This explicit profile currently requires plain, non-ECS storage and a floor-zero
+run. The run and complete suffix cover the entire pinned frontier even for a
+query at an older cut, preserving future and retired candidate identities.
+Pruned runs and untyped/alternate root relations retain ordinary sources.
+Vertex roots and explicitly selected root positions
 keep their ordinary readers; typed incidents can independently select an
 eligible run. The standalone incidence-stream API retains its ordinary merge.
-No selected-run error retries through Tier D. The decoder's declared capacity
+No selected-run or suffix error retries another source. The decoder's declared capacity
 and byte/population work are admitted before payload I/O, and the source pool
-owns both the complete decode/image allowance and the locator. Packed reads
+owns the complete decode/image allowance, suffix blocks and locator. The base
+population plus raw suffix statements must fit the incidence ceiling before
+the first suffix payload is read; owner vectors and individual block decoders
+are admitted before allocation. Packed reads
 bypass whole-pack payload caches. Returned properties are measured and reserved
 before cloning; output records retain their independent charges.
 
-Seven locator unit regressions, seven native MATCH integration regressions and
-one packed-read regression cover historical candidate counts, literal order
+Locator unit regressions, native MATCH integration regressions and the
+packed-read regression cover historical candidate counts, literal order
 and values, V7/V8 carry, compaction/reopen, directed joins and probes, actual
 run reuse after redundant Tier-D damage, vertex-rooted EXISTS/NOT EXISTS,
-mixed-relation joins, selected-run corruption refusal, quota precedence,
-cancellation and memory lifetimes. Failed incident loads never establish
+mixed-relation joins, post-seal property removal and retirement, new IDs before
+the base's first ID, raw-suffix admission before damaged-payload reads,
+selected-source corruption refusal, quota precedence, cancellation and memory
+lifetimes. Failed incident loads never establish
 absence or become cached ineligibility. Pinned targeted formatting,
 diff hygiene and independent source/API reviews pass. First-party compilation,
 runtime tests, Clippy, UBS and exact-tree qualification remain UNRUN: the prior
 pinned test and metadata builds were killed in `asupersync` before any fgdb
 crate, and the unchanged constrained host supplies no new execution proof.
-Whole-run decoding, conservative capacity reservation, opt-in selection and
+Whole-run decoding, complete suffix retention, conservative capacity reservation,
+opt-in selection and
 initial full Tier-D admission remain; no larger-than-memory native Tier-R,
 measured speedup, or broader storage-bead closure is claimed.
 

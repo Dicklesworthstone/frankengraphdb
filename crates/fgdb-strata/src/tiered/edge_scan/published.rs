@@ -1,4 +1,5 @@
-//! A native source over complete, admitted durable relation history.
+//! A native source over complete, admitted durable relation history and its
+//! authenticated post-seal statements. Historical versions stay source-bound.
 //! The query operator still owns identity admission, predicates and ordering;
 //! this module supplies only historical candidates and same-cut stored rows.
 
@@ -52,25 +53,45 @@ async fn load_run<V: Vfs, C: Send>(
         .native_run(cx, relation, limits, work, observe)
         .await?;
     // Declare the reservation first: on every later early return, the
-    // decoded run (and then the locator) drops before its allowance.
+    // decoded run, suffix and locator drop before the image allowance.
     let image_charge = loaded.1;
+    let suffix = loaded.2;
     let run = loaded.0;
-    run.partition()
-        .anchor()
-        .authorize(as_of)
-        .map_err(sealed_error)?;
-    let bytes = SealedEdgeLocator::required_bytes(run.partition().incidence_count())
-        .map_err(sealed_error)?;
+    let anchor = run.partition().anchor();
+    if let Some(suffix) = &suffix {
+        suffix
+            .authorize(anchor, relation, as_of)
+            .map_err(sealed_error)?;
+    } else {
+        anchor.authorize(as_of).map_err(sealed_error)?;
+    }
+    let incidences = run
+        .partition()
+        .incidence_count()
+        .checked_add(suffix.as_ref().map_or(0, |suffix| suffix.incidence_count()))
+        .ok_or(BufferedReadError::SizeOverflow)?;
+    let bytes = SealedEdgeLocator::required_bytes(incidences).map_err(sealed_error)?;
     work.step(cx, observe)?;
     let directory_charge = partition.reserve_scan_bytes(cx, bytes)?;
-    let locator = SealedEdgeLocator::build_with(
-        run.into_partition(),
-        relation,
-        directory_charge,
-        cx,
-        &mut || work.step(cx, observe),
-        sealed_error,
-    )?;
+    let locator = match suffix {
+        Some(suffix) => SealedEdgeLocator::build_with_suffix(
+            run.into_partition(),
+            relation,
+            suffix,
+            directory_charge,
+            cx,
+            &mut || work.step(cx, observe),
+            sealed_error,
+        )?,
+        None => SealedEdgeLocator::build_with(
+            run.into_partition(),
+            relation,
+            directory_charge,
+            cx,
+            &mut || work.step(cx, observe),
+            sealed_error,
+        )?,
+    };
     Ok(RunCursor {
         locator,
         relation,

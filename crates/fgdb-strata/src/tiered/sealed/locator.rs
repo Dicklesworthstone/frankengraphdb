@@ -1,14 +1,15 @@
-//! Query-local EId access derived only from an admitted immutable image.
+//! Query-local EId access derived only from admitted immutable history.
 //!
 //! The directory retains content-version coordinates, not another adjacency or
 //! property image. Root and incidence candidates include invisible history;
 //! resolving a candidate is a separate exact-cut operation. A consumer needing
-//! the complete publication's candidate domain must additionally admit a
-//! floor-zero image verified through that publication. A materialized visible
-//! delta overlay does not prove that stronger domain.
+//! the complete publication's candidate domain admits a floor-zero image and
+//! either its verified publication or the complete authenticated post-seal
+//! suffix. A materialized visible delta overlay does not prove that domain.
 
 use super::{Image, RowScan, SealedEdge, SealedError, SealedPartition, check_limit};
 use crate::AdjacencyEntry;
+use crate::store::NativeRunSuffix;
 use crate::tiered::edge_scan::BufferedEdgeDirection;
 use crate::tiered::memory::MemoryCharge;
 use fgdb_delta_types::RelationId;
@@ -28,6 +29,7 @@ struct VersionRef {
 /// No coordinate, caller-provided identity map, or decoded property escapes.
 pub(crate) struct SealedEdgeLocator {
     source: SealedPartition,
+    suffix: Option<NativeRunSuffix>,
     relation: RelationId,
     versions: Vec<VersionRef>,
     outgoing: Vec<usize>,
@@ -38,8 +40,9 @@ pub(crate) struct SealedEdgeLocator {
 
 impl SealedEdgeLocator {
     /// Requested directory backing stores plus the explicit fixed owner.
-    /// `incidences` counts retained content versions, including invisible ones.
-    /// Source-image allocations and allocator metadata are not included.
+    /// `incidences` counts every base version and raw suffix statement before
+    /// restatement collapse, including invisible ones. Both source owners'
+    /// allocations and allocator metadata are separately admitted.
     pub(crate) fn required_bytes(incidences: usize) -> Result<usize, SealedError> {
         incidences
             .checked_mul(size_of::<VersionRef>() + 2 * size_of::<usize>())
@@ -59,10 +62,51 @@ impl SealedEdgeLocator {
         control: &mut impl FnMut() -> Result<(), E>,
         map_error: fn(SealedError) -> E,
     ) -> Result<Self, E> {
+        Self::build(source, relation, None, charge, cx, control, map_error)
+    }
+
+    /// Merge only coordinates from a complete, store-admitted suffix. The
+    /// receipt owns its decoded blocks and their reservations and binds them
+    /// to this exact base image and pinned envelope. It does not alter the
+    /// base run's floor, horizon, original provenance, or property storage.
+    pub(crate) fn build_with_suffix<E>(
+        source: SealedPartition,
+        relation: RelationId,
+        suffix: NativeRunSuffix,
+        charge: MemoryCharge,
+        cx: &QueryCx,
+        control: &mut impl FnMut() -> Result<(), E>,
+        map_error: fn(SealedError) -> E,
+    ) -> Result<Self, E> {
+        Self::build(
+            source,
+            relation,
+            Some(suffix),
+            charge,
+            cx,
+            control,
+            map_error,
+        )
+    }
+
+    fn build<E>(
+        source: SealedPartition,
+        relation: RelationId,
+        suffix: Option<NativeRunSuffix>,
+        charge: MemoryCharge,
+        cx: &QueryCx,
+        control: &mut impl FnMut() -> Result<(), E>,
+        map_error: fn(SealedError) -> E,
+    ) -> Result<Self, E> {
         cx.with_restriction(|| {
             let mut checkpoint = || checked(cx, control, map_error);
             checkpoint()?;
             source.anchor.check_relation(relation).map_err(map_error)?;
+            if let Some(suffix) = &suffix {
+                suffix
+                    .authorize(source.anchor, relation, source.anchor.scope.floor)
+                    .map_err(map_error)?;
+            }
             let mut count = 0usize;
             for row in &source.image.rows {
                 checkpoint()?;
@@ -72,6 +116,27 @@ impl SealedEdgeLocator {
                         .ok_or_else(|| map_error(SealedError::SizeOverflow))?;
                 }
             }
+            if let Some(suffix) = &suffix {
+                if suffix.blocks().len() != suffix.properties().len() {
+                    return Err(map_error(SealedError::NonCanonical));
+                }
+                let mut raw = 0usize;
+                for block in suffix.blocks() {
+                    checkpoint()?;
+                    if block.len() > crate::MAX_BLOCK_ENTRIES as usize {
+                        return Err(map_error(SealedError::NonCanonical));
+                    }
+                    raw = raw
+                        .checked_add(block.len())
+                        .ok_or_else(|| map_error(SealedError::SizeOverflow))?;
+                }
+                if raw != suffix.incidence_count() {
+                    return Err(map_error(SealedError::NonCanonical));
+                }
+                count = count
+                    .checked_add(raw)
+                    .ok_or_else(|| map_error(SealedError::SizeOverflow))?;
+            }
             check_limit(
                 "EId directory bytes",
                 Self::required_bytes(count).map_err(map_error)?,
@@ -80,6 +145,7 @@ impl SealedEdgeLocator {
             .map_err(map_error)?;
             let mut directory = Self {
                 source,
+                suffix,
                 relation,
                 versions: Vec::new(),
                 outgoing: Vec::new(),
@@ -106,6 +172,7 @@ impl SealedEdgeLocator {
             directory.check_capacities().map_err(map_error)?;
 
             let image = &directory.source.image;
+            let suffix = directory.suffix.as_ref();
             for (row_index, row) in image.rows.iter().enumerate() {
                 checkpoint()?;
                 if row.key.relation != relation {
@@ -133,13 +200,34 @@ impl SealedEdgeLocator {
                     });
                 }
             }
-            crate::tiered::edge_scan::sort(&mut directory.versions, &mut checkpoint)?;
-            for pair in directory.versions.windows(2) {
-                checkpoint()?;
-                if (pair[0].eid, pair[0].created_at) == (pair[1].eid, pair[1].created_at) {
-                    return Err(map_error(SealedError::NonCanonical));
+            if let Some(suffix) = suffix {
+                // Receipt slots preserve ascending root publication ordinal.
+                // The bounded row slot keeps every original property locator
+                // intact while placing all suffix coordinates after the base.
+                for (block_at, block) in suffix.blocks().iter().enumerate() {
+                    checkpoint()?;
+                    for (row_at, entry) in block.iter().enumerate() {
+                        checkpoint()?;
+                        if entry.relation != relation {
+                            return Err(map_error(SealedError::NonCanonical));
+                        }
+                        let position = suffix_position(image.incidences, block_at, row_at)
+                            .map_err(map_error)?;
+                        directory.versions.push(VersionRef {
+                            eid: entry.eid,
+                            created_at: entry.created_at,
+                            position,
+                        });
+                    }
                 }
             }
+            crate::tiered::edge_scan::sort(&mut directory.versions, &mut checkpoint)?;
+            collapse_restatements(
+                &mut directory.versions,
+                image.incidences,
+                &mut checkpoint,
+                map_error,
+            )?;
             for at in 0..directory.versions.len() {
                 checkpoint()?;
                 directory.outgoing.push(at);
@@ -152,14 +240,23 @@ impl SealedEdgeLocator {
                 sort_by(positions, &mut checkpoint, &mut |left, right| {
                     let left = directory.versions[*left];
                     let right = directory.versions[*right];
-                    let left_endpoint = endpoint(image, left, direction).map_err(map_error)?;
-                    let right_endpoint = endpoint(image, right, direction).map_err(map_error)?;
+                    let left_endpoint =
+                        endpoint(image, suffix, left, direction).map_err(map_error)?;
+                    let right_endpoint =
+                        endpoint(image, suffix, right, direction).map_err(map_error)?;
                     Ok((left_endpoint, left).cmp(&(right_endpoint, right)))
                 })?;
             }
             checkpoint()?;
             Ok(directory)
         })
+    }
+
+    fn authorize(&self, as_of: CommitSeq) -> Result<(), SealedError> {
+        match &self.suffix {
+            Some(suffix) => suffix.authorize(self.source.anchor, self.relation, as_of),
+            None => self.source.anchor.authorize(as_of),
+        }
     }
 
     fn check_capacities(&self) -> Result<(), SealedError> {
@@ -194,7 +291,7 @@ impl SealedEdgeLocator {
     ) -> Result<Option<EId>, E> {
         let mut checkpoint = || checked(cx, control, map_error);
         checkpoint()?;
-        self.source.anchor.authorize(as_of).map_err(map_error)?;
+        self.authorize(as_of).map_err(map_error)?;
         let at = upper_bound(self.versions.len(), &mut checkpoint, |at| {
             Ok(after.is_some_and(|after| self.versions[at].eid <= after))
         })?;
@@ -217,7 +314,7 @@ impl SealedEdgeLocator {
     ) -> Result<Option<EId>, E> {
         let mut checkpoint = || checked(cx, control, map_error);
         checkpoint()?;
-        self.source.anchor.authorize(as_of).map_err(map_error)?;
+        self.authorize(as_of).map_err(map_error)?;
         let mut seek =
             |direction| self.seek_incident(vertex, direction, after, &mut checkpoint, map_error);
         match direction {
@@ -248,7 +345,8 @@ impl SealedEdgeLocator {
         };
         let at = upper_bound(positions.len(), checkpoint, |at| {
             let version = self.versions[positions[at]];
-            let found = endpoint(&self.source.image, version, direction).map_err(map_error)?;
+            let found = endpoint(&self.source.image, self.suffix.as_ref(), version, direction)
+                .map_err(map_error)?;
             Ok(found < vertex
                 || (found == vertex && after.is_some_and(|after| version.eid <= after)))
         })?;
@@ -257,7 +355,8 @@ impl SealedEdgeLocator {
         };
         checkpoint()?;
         let version = self.versions[position];
-        let found = endpoint(&self.source.image, version, direction).map_err(map_error)?;
+        let found = endpoint(&self.source.image, self.suffix.as_ref(), version, direction)
+            .map_err(map_error)?;
         Ok((found == vertex).then_some(version.eid))
     }
 
@@ -273,7 +372,7 @@ impl SealedEdgeLocator {
     ) -> Result<Option<SealedEdge<'_>>, E> {
         let mut checkpoint = || checked(cx, control, map_error);
         checkpoint()?;
-        self.source.anchor.authorize(as_of).map_err(map_error)?;
+        self.authorize(as_of).map_err(map_error)?;
         let end = upper_bound(self.versions.len(), &mut checkpoint, |at| {
             let version = self.versions[at];
             Ok((version.eid, version.created_at) <= (eid, as_of))
@@ -285,7 +384,8 @@ impl SealedEdgeLocator {
             return Ok(None);
         }
         checkpoint()?;
-        let (entry, locator) = incidence(&self.source.image, *version).map_err(map_error)?;
+        let (entry, locator) =
+            incidence(&self.source.image, self.suffix.as_ref(), *version).map_err(map_error)?;
         if entry.relation != self.relation {
             return Err(map_error(SealedError::NonCanonical));
         }
@@ -294,6 +394,16 @@ impl SealedEdgeLocator {
         }
         let properties = if locator == 0 {
             &[][..]
+        } else if let Some((block, _)) =
+            suffix_location(self.source.image.incidences, version.position).map_err(map_error)?
+        {
+            self.suffix
+                .as_ref()
+                .and_then(|suffix| suffix.properties().get(block))
+                .and_then(Option::as_ref)
+                .and_then(|properties| properties.rows.get(locator as usize - 1))
+                .ok_or_else(|| map_error(SealedError::NonCanonical))?
+                .as_slice()
         } else {
             self.source
                 .image
@@ -322,21 +432,111 @@ fn checked<E>(
         .map_err(map_error)
 }
 
-fn incidence(image: &Image, version: VersionRef) -> Result<(AdjacencyEntry, u32), SealedError> {
-    let row_index = image
-        .offsets
-        .rank_le(version.position)
-        .checked_sub(1)
-        .ok_or(SealedError::NonCanonical)?;
-    let start = image
-        .offsets
-        .select(row_index)
-        .ok_or(SealedError::NonCanonical)?;
-    let row = image.rows.get(row_index).ok_or(SealedError::NonCanonical)?;
-    let local = usize::try_from(version.position - start).map_err(|_| SealedError::SizeOverflow)?;
-    let value = row
-        .incidence(image, local)
-        .ok_or(SealedError::NonCanonical)?;
+// The receipt's block slots are publication ordered; each block has at most
+// MAX_BLOCK_ENTRIES rows. Gaps between short blocks are intentional. They
+// avoid another resident offset table and cannot be mistaken for stable IDs.
+fn suffix_position(base: usize, block: usize, row: usize) -> Result<u64, SealedError> {
+    if row >= crate::MAX_BLOCK_ENTRIES as usize {
+        return Err(SealedError::NonCanonical);
+    }
+    let base = u64::try_from(base).map_err(|_| SealedError::SizeOverflow)?;
+    let block = u64::try_from(block).map_err(|_| SealedError::SizeOverflow)?;
+    let row = u64::try_from(row).map_err(|_| SealedError::SizeOverflow)?;
+    block
+        .checked_mul(u64::from(crate::MAX_BLOCK_ENTRIES))
+        .and_then(|offset| offset.checked_add(row))
+        .and_then(|offset| base.checked_add(offset))
+        .ok_or(SealedError::SizeOverflow)
+}
+
+fn suffix_location(base: usize, position: u64) -> Result<Option<(usize, usize)>, SealedError> {
+    let base = u64::try_from(base).map_err(|_| SealedError::SizeOverflow)?;
+    let Some(offset) = position.checked_sub(base) else {
+        return Ok(None);
+    };
+    let width = u64::from(crate::MAX_BLOCK_ENTRIES);
+    Ok(Some((
+        usize::try_from(offset / width).map_err(|_| SealedError::SizeOverflow)?,
+        usize::try_from(offset % width).map_err(|_| SealedError::SizeOverflow)?,
+    )))
+}
+
+// Sorted (eid, birth, position) puts base before suffix and earlier published
+// blocks before later ones. Collapse only exact content-version restatements;
+// every other birth, including an invisible or retired identity, must remain.
+fn collapse_restatements<E>(
+    versions: &mut Vec<VersionRef>,
+    base: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+    map_error: fn(SealedError) -> E,
+) -> Result<(), E> {
+    let base = u64::try_from(base).map_err(|_| map_error(SealedError::SizeOverflow))?;
+    let mut keep = 0;
+    for at in 0..versions.len() {
+        checkpoint()?;
+        let version = versions[at];
+        if keep != 0
+            && (versions[keep - 1].eid, versions[keep - 1].created_at)
+                == (version.eid, version.created_at)
+        {
+            // A sealed image is already canonical. Only receipt-owned suffix
+            // statements may replace a coordinate for the same version.
+            if version.position < base {
+                return Err(map_error(SealedError::NonCanonical));
+            }
+            versions[keep - 1] = version;
+        } else {
+            versions[keep] = version;
+            keep += 1;
+        }
+    }
+    versions.truncate(keep);
+    Ok(())
+}
+
+fn incidence(
+    image: &Image,
+    suffix: Option<&NativeRunSuffix>,
+    version: VersionRef,
+) -> Result<(AdjacencyEntry, u32), SealedError> {
+    let value = if let Some((block, row)) = suffix_location(image.incidences, version.position)? {
+        let suffix = suffix.ok_or(SealedError::NonCanonical)?;
+        let entry = suffix
+            .blocks()
+            .get(block)
+            .and_then(|entries| entries.get(row))
+            .copied()
+            .ok_or(SealedError::NonCanonical)?;
+        let properties = suffix
+            .properties()
+            .get(block)
+            .ok_or(SealedError::NonCanonical)?;
+        let locator = match properties {
+            Some(properties) => u32::from(
+                *properties
+                    .locators
+                    .get(row)
+                    .ok_or(SealedError::NonCanonical)?,
+            ),
+            None => 0,
+        };
+        (entry, locator)
+    } else {
+        let row_index = image
+            .offsets
+            .rank_le(version.position)
+            .checked_sub(1)
+            .ok_or(SealedError::NonCanonical)?;
+        let start = image
+            .offsets
+            .select(row_index)
+            .ok_or(SealedError::NonCanonical)?;
+        let row = image.rows.get(row_index).ok_or(SealedError::NonCanonical)?;
+        let local =
+            usize::try_from(version.position - start).map_err(|_| SealedError::SizeOverflow)?;
+        row.incidence(image, local)
+            .ok_or(SealedError::NonCanonical)?
+    };
     if value.0.eid != version.eid || value.0.created_at != version.created_at {
         return Err(SealedError::NonCanonical);
     }
@@ -345,10 +545,11 @@ fn incidence(image: &Image, version: VersionRef) -> Result<(AdjacencyEntry, u32)
 
 fn endpoint(
     image: &Image,
+    suffix: Option<&NativeRunSuffix>,
     version: VersionRef,
     direction: BufferedEdgeDirection,
 ) -> Result<VId, SealedError> {
-    let (entry, _) = incidence(image, version)?;
+    let (entry, _) = incidence(image, suffix, version)?;
     match direction {
         BufferedEdgeDirection::Outgoing => Ok(entry.src),
         BufferedEdgeDirection::Incoming => Ok(entry.dst),
@@ -433,6 +634,101 @@ mod tests {
 
     const R: RelationId = RelationId(5);
     const P: PropertyKeyId = PropertyKeyId(11);
+
+    #[test]
+    fn suffix_coordinates_keep_source_boundaries_and_original_row_slots() {
+        let width = crate::MAX_BLOCK_ENTRIES as usize;
+        for base in [0, 1, 17, 4096] {
+            if base != 0 {
+                assert_eq!(suffix_location(base, base as u64 - 1).unwrap(), None);
+            }
+            for block in [0, 1, 7] {
+                for row in [0, 1, width - 1] {
+                    let position = suffix_position(base, block, row).unwrap();
+                    assert_eq!(position, (base + block * width + row) as u64);
+                    assert_eq!(suffix_location(base, position).unwrap(), Some((block, row)));
+                }
+            }
+        }
+        assert!(matches!(
+            suffix_position(17, 1, width),
+            Err(SealedError::NonCanonical)
+        ));
+        if usize::BITS == u64::BITS {
+            assert!(matches!(
+                suffix_position(usize::MAX, 1, 0),
+                Err(SealedError::SizeOverflow)
+            ));
+        }
+    }
+
+    #[test]
+    fn suffix_restatement_collapse_keeps_every_birth_and_last_publication() {
+        let version = |eid, birth, position| VersionRef {
+            eid: EId(eid),
+            created_at: CommitSeq(birth),
+            position,
+        };
+        let base = 8;
+        let earlier = suffix_position(base, 0, 7).unwrap();
+        let later = suffix_position(base, 2, 0).unwrap();
+        let future = suffix_position(base, 3, 1).unwrap();
+        // Neighbor order need not follow EId order. The sparse later block
+        // wins an exact birth even though its original row number is smaller.
+        let mut versions = vec![
+            version(90, 1, 6),
+            version(4, 3, later),
+            version(u128::MAX, 2, 7),
+            version(0, 11, future),
+            version(4, 1, 2),
+            version(4, 3, earlier),
+            version(4, 3, 3),
+            version(4, 12, future + 1),
+        ];
+        crate::tiered::edge_scan::sort(&mut versions, &mut || Ok::<_, SealedError>(())).unwrap();
+        let mut checkpoints = 0;
+        collapse_restatements(
+            &mut versions,
+            base,
+            &mut || {
+                checkpoints += 1;
+                Ok(())
+            },
+            |error| error,
+        )
+        .unwrap();
+        assert_eq!(checkpoints, 8);
+        assert_eq!(
+            versions
+                .iter()
+                .map(|version| (version.eid.0, version.created_at.0, version.position))
+                .collect::<Vec<_>>(),
+            [
+                (0, 11, future),
+                (4, 1, 2),
+                (4, 3, later),
+                (4, 12, future + 1),
+                (90, 1, 6),
+                (u128::MAX, 2, 7),
+            ]
+        );
+
+        let mut duplicate_base = vec![version(4, 1, 2), version(4, 1, 3)];
+        assert!(matches!(
+            collapse_restatements(&mut duplicate_base, base, &mut || Ok(()), |error| error),
+            Err(SealedError::NonCanonical)
+        ));
+        let mut interrupted = vec![version(4, 1, 2), version(4, 1, earlier)];
+        assert!(matches!(
+            collapse_restatements(
+                &mut interrupted,
+                base,
+                &mut || Err(ControlledError::Stopped),
+                ControlledError::Source,
+            ),
+            Err(ControlledError::Stopped)
+        ));
+    }
 
     fn entry(id: u128, src: u128, dst: u128, born: u64, retired: Option<u64>) -> AdjacencyEntry {
         AdjacencyEntry {

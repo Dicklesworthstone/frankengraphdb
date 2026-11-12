@@ -997,28 +997,13 @@ fn ineligible_native_runs_preserve_the_complete_existing_candidate_domain() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let cx = contexts.query();
-        for case in 0..4 {
+        for case in 0..3 {
             let floor = if case == 0 {
                 CommitSeq(2)
             } else {
                 CommitSeq(0)
             };
-            let (vfs, mut db, run) = native_run_history(&commit, &cx, floor).await;
-            if case == 1 {
-                let mut vertex = WriteBatch::new(RELATION);
-                vertex.set_vertex_property(VId(1), PROPERTY, Some(CanonicalScalar::Int(41)));
-                assert_eq!(db.write(&commit, vertex).await.unwrap(), CommitSeq(5));
-                let mut suffix = WriteBatch::new(RELATION);
-                suffix.set_edge_property(EId(101), PROPERTY, Some(CanonicalScalar::Int(77)));
-                suffix.delete_edge(EId(103));
-                suffix.add_edge(
-                    EId(42),
-                    VId(2),
-                    VId(4),
-                    vec![(PROPERTY, CanonicalScalar::Int(62))],
-                );
-                assert_eq!(db.write(&commit, suffix).await.unwrap(), CommitSeq(6));
-            }
+            let (vfs, _db, run) = native_run_history(&commit, &cx, floor).await;
             let store = BlockStore::open_existing_for_read_with_vfs(
                 &commit,
                 vfs.clone(),
@@ -1033,17 +1018,16 @@ fn ineligible_native_runs_preserve_the_complete_existing_candidate_domain() {
                 .await
                 .unwrap();
             let selector = match case {
-                2 => "",
-                3 => ":R|S",
+                1 => "",
+                2 => ":R|S",
                 _ => ":R",
             };
             let plan = native_run_query(0, selector, "");
             let identities = if case == 0 { 6 } else { 7 };
-            let cuts: &[u64] = if case == 1 { &[1, 4, 6] } else { &[1, 4] };
-            for &cut in cuts {
+            for cut in [1, 4] {
                 assert_eq!(
                     native_run_rows(&mut view, &cx, &plan, cut, identities).await,
-                    native_run_expected(cut, 0, case >= 2),
+                    native_run_expected(cut, 0, case != 0),
                     "source eligibility case {case}, cut {cut}"
                 );
             }
@@ -1756,6 +1740,449 @@ fn independent_incident_run_errors_cancel_and_refund_without_establishing_absenc
             drop(view);
             assert_eq!(memory.used(), 0, "incident checkpoint {stop}");
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+async fn native_suffix_history(
+    commit: &CommitCx,
+    cx: &QueryCx,
+) -> (MemVfs, Database<MemVfs>, AdjRunSegmentVersion) {
+    let (vfs, reference) = history(commit).await;
+    drop(reference);
+    let mut db = Database::open_with_vfs(commit, vfs.clone(), vfs.database_dir(), keys())
+        .await
+        .unwrap();
+    // The base's first EId is 101. Both 0 and 42 arrive only after sealing;
+    // they must still precede it in every historical candidate stream.
+    let run = db
+        .seal_relation(
+            commit,
+            cx,
+            RELATION,
+            CommitSeq(0),
+            native_run_limits(),
+            RootReadLimits::default(),
+        )
+        .await
+        .unwrap();
+    let mut first = WriteBatch::new(RELATION);
+    first.set_edge_property(EId(101), PROPERTY, None);
+    first.delete_edge(EId(103));
+    for (eid, source, target, value) in [(0, 4, 1, 71), (42, 2, 4, 62), (u128::MAX, 1, 1, 72)] {
+        first.add_edge(
+            EId(eid),
+            VId(source),
+            VId(target),
+            vec![(PROPERTY, CanonicalScalar::Int(value))],
+        );
+    }
+    assert_eq!(db.write(commit, first).await.unwrap(), CommitSeq(4));
+    let mut second = WriteBatch::new(RELATION);
+    second.set_edge_property(EId(101), PROPERTY, Some(CanonicalScalar::Int(77)));
+    second.set_edge_property(EId(0), PROPERTY, None);
+    second.delete_edge(EId(42));
+    assert_eq!(db.write(commit, second).await.unwrap(), CommitSeq(5));
+    let mut vertices = WriteBatch::new(RelationId(99));
+    vertices.set_vertex_property(VId(1), PROPERTY, Some(CanonicalScalar::Int(41)));
+    vertices.create_vertex(
+        VId(5),
+        vec![LabelId(1)],
+        vec![(PROPERTY, CanonicalScalar::Int(5))],
+    );
+    assert_eq!(db.write(commit, vertices).await.unwrap(), CommitSeq(6));
+    (vfs, db, run)
+}
+
+fn native_suffix_expected(cut: u64, direction: usize) -> Vec<Vec<GraphValue>> {
+    if cut == 0 {
+        return Vec::new();
+    }
+    let one = if cut >= 6 {
+        41
+    } else if cut >= 2 {
+        11
+    } else {
+        1
+    };
+    let first = match cut {
+        1 => Some(7),
+        2 | 3 => Some(17),
+        4 => None,
+        _ => Some(77),
+    };
+    let mut rows = Vec::new();
+    for (eid, src, dst, property, ap, bp, visible) in [
+        (
+            0,
+            4,
+            1,
+            if cut == 4 { Some(71) } else { None },
+            4,
+            one,
+            cut >= 4,
+        ),
+        (42, 2, 4, Some(62), 2, 4, cut == 4),
+        (101, 1, 2, first, one, 2, true),
+        (102, 1, 3, Some(8), one, 3, cut == 1),
+        (103, 4, 1, Some(9), 4, one, cut < 4),
+        (104, 1, 2, Some(10), one, 2, true),
+        (u128::MAX, 1, 1, Some(72), one, one, cut >= 4),
+    ] {
+        if !visible {
+            continue;
+        }
+        let forward = (src, dst, ap, bp);
+        let reverse = (dst, src, bp, ap);
+        let orientations = match direction {
+            0 => vec![forward],
+            1 => vec![reverse],
+            _ if src == dst => vec![forward],
+            _ if src < dst => vec![forward, reverse],
+            _ => vec![reverse, forward],
+        };
+        for (src, dst, ap, bp) in orientations {
+            rows.push(vec![
+                GraphValue::Edge(EId(eid)),
+                GraphValue::Vertex(VId(src)),
+                GraphValue::Vertex(VId(dst)),
+                GraphValue::Scalar(property.map_or(CanonicalScalar::Null, CanonicalScalar::Int)),
+                GraphValue::Scalar(CanonicalScalar::Int(ap)),
+                GraphValue::Scalar(CanonicalScalar::Int(bp)),
+            ]);
+        }
+    }
+    rows
+}
+
+struct NativeSuffixObjects {
+    run: (std::path::PathBuf, Vec<u8>),
+    prefix: Vec<(std::path::PathBuf, Vec<u8>)>,
+    suffix: Vec<(std::path::PathBuf, Vec<u8>)>,
+    combined_rows: usize,
+}
+
+async fn native_suffix_objects(
+    commit: &CommitCx,
+    cx: &QueryCx,
+    vfs: &MemVfs,
+    db: &Database<MemVfs>,
+    run: AdjRunSegmentVersion,
+) -> NativeSuffixObjects {
+    let store = BlockStore::open_existing_for_read_with_vfs(
+        commit,
+        vfs.clone(),
+        vfs.database_dir(),
+        [0xb1; 32],
+        DatabaseSecurityNamespaceId([0xb2; 32]),
+    )
+    .await
+    .unwrap();
+    let root = db.partition_root().unwrap();
+    let base = store
+        .get_published_adj_run(
+            cx,
+            root,
+            RELATION,
+            CommitSeq(3),
+            native_run_limits(),
+            limits().max_root_bytes,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(base.partition().incidence_count(), 5);
+    assert_eq!(base.partition().anchor().verified_through(), CommitSeq(3));
+    let mut combined_rows = 5;
+    let mut prefix = Vec::new();
+    let mut suffix = Vec::new();
+    for reference in store.get_root(commit, root).await.unwrap().blocks {
+        let bytes = store
+            .get_bytes(commit, fgdb_strata::DeltaBlockVersion(reference.block_id))
+            .await
+            .unwrap();
+        let rows = fgdb_strata::decode_block(&bytes).unwrap();
+        if !rows.iter().any(|row| row.relation == RELATION) {
+            continue;
+        }
+        let path = store.path(reference.block_id);
+        let original = vfs.read(&path).await.unwrap();
+        if reference.last_seq > CommitSeq(3) {
+            // Count actual source statements, independently of the native
+            // locator's deduplication and visible/historical identity counts.
+            combined_rows += rows.len();
+            suffix.push((path, original));
+        } else {
+            prefix.push((path, original));
+        }
+    }
+    assert!(!prefix.is_empty());
+    assert!(suffix.len() > 1);
+    assert!(combined_rows > 7 && combined_rows <= native_run_limits().max_incidences);
+    let run_path = store.path(run.0);
+    NativeSuffixObjects {
+        run: (run_path.clone(), vfs.read(&run_path).await.unwrap()),
+        prefix,
+        suffix,
+        combined_rows,
+    }
+}
+
+#[test]
+fn native_post_seal_history_merges_properties_retirements_and_low_ids_through_reopen() {
+    let ((), report) = run_async_under_lab(0x6275_e017, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, mut db, run) = native_suffix_history(&commit, &cx).await;
+        let objects = native_suffix_objects(&commit, &cx, &vfs, &db, run).await;
+        let (mut view, memory) = native_run_view(&commit, &cx, &vfs).await;
+        let root = view.partition_root();
+        let baseline = memory.used();
+        for (path, _) in &objects.prefix {
+            vfs.write(
+                path,
+                b"post-seal native reads must not refault pre-seal history",
+            )
+            .await
+            .unwrap();
+        }
+        for cut in 0..=6 {
+            for direction in 0..3 {
+                let plan = native_run_query(direction, ":R", "");
+                assert_eq!(
+                    native_run_rows(&mut view, &cx, &plan, cut, 7).await,
+                    native_suffix_expected(cut, direction),
+                    "post-seal cut {cut}, direction {direction}"
+                );
+                assert_eq!(memory.used(), baseline);
+            }
+        }
+        for cut in [1, 6] {
+            for direction in 0..3 {
+                for anti in [false, true] {
+                    let plan = native_vertex_probe(direction, anti);
+                    assert_eq!(
+                        native_vertex_probe_rows(&mut view, &cx, &plan, cut).await,
+                        native_vertex_probe_expected(if cut == 6 { 5 } else { 1 }, direction, anti),
+                        "post-seal vertex probe cut {cut}, direction {direction}, anti {anti}"
+                    );
+                }
+            }
+        }
+        let maximum = u128::MAX;
+        for (cut, atom, expected) in [
+            (
+                6,
+                "-[s:R]->(c)",
+                vec![
+                    (0, 4, 101, 1, 2, Some(77)),
+                    (0, 4, 104, 1, 2, Some(10)),
+                    (0, 4, maximum, 1, 1, Some(72)),
+                    (maximum, 1, 101, 1, 2, Some(77)),
+                    (maximum, 1, 104, 1, 2, Some(10)),
+                ],
+            ),
+            (
+                4,
+                "<-[s:R]-(c)",
+                vec![
+                    (0, 4, maximum, 1, 1, Some(72)),
+                    (101, 1, 104, 2, 1, Some(10)),
+                    (104, 1, 101, 2, 1, None),
+                    (maximum, 1, 0, 1, 4, Some(71)),
+                ],
+            ),
+        ] {
+            let plan = query(&format!(
+                "MATCH (a)-[r:R]->(b){atom} RETURN r,a,s,b,c,s.p AS sp"
+            ));
+            let mut cursor = view
+                .stream_graph_edge_joins_governed_at(
+                    &cx,
+                    &plan,
+                    CommitSeq(cut),
+                    native_run_policy(1000),
+                )
+                .unwrap();
+            let mut actual = Vec::new();
+            while let Some(row) = cursor.next().await {
+                actual.push(row.unwrap().values().to_vec());
+            }
+            let expected: Vec<_> = expected
+                .into_iter()
+                .map(|(r, a, s, b, c, p)| {
+                    vec![
+                        GraphValue::Edge(EId(r)),
+                        GraphValue::Vertex(VId(a)),
+                        GraphValue::Edge(EId(s)),
+                        GraphValue::Vertex(VId(b)),
+                        GraphValue::Vertex(VId(c)),
+                        GraphValue::Scalar(p.map_or(CanonicalScalar::Null, CanonicalScalar::Int)),
+                    ]
+                })
+                .collect();
+            assert_eq!(actual, expected, "post-seal join at {cut}");
+            assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+            drop(cursor);
+            assert_eq!(memory.used(), baseline);
+        }
+        for (path, bytes) in &objects.prefix {
+            vfs.write(path, bytes).await.unwrap();
+        }
+        let before = db.partition_root().unwrap();
+        db.compact(&commit).await.unwrap();
+        assert_ne!(db.partition_root().unwrap(), before);
+        drop(db);
+        let plan = native_run_query(0, ":R", "");
+        assert_eq!(
+            native_run_rows(&mut view, &cx, &plan, 6, 7).await,
+            native_suffix_expected(6, 0)
+        );
+        assert_eq!(view.partition_root(), root);
+        drop(view);
+        assert_eq!(memory.used(), 0);
+        let (mut reopened, memory) = native_run_view(&commit, &cx, &vfs).await;
+        for cut in [1, 3, 4, 5, 6] {
+            assert_eq!(
+                native_run_rows(&mut reopened, &cx, &plan, cut, 7).await,
+                native_suffix_expected(cut, 0)
+            );
+        }
+        drop(reopened);
+        assert_eq!(memory.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_post_seal_admission_counts_raw_suffix_and_refuses_damaged_required_sources() {
+    let ((), report) = run_async_under_lab(0x6275_e018, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, db, run) = native_suffix_history(&commit, &cx).await;
+        let objects = native_suffix_objects(&commit, &cx, &vfs, &db, run).await;
+        let (mut view, memory) = native_run_view(&commit, &cx, &vfs).await;
+        let baseline = memory.used();
+        let plan = native_run_query(0, ":R", "");
+        let (suffix_path, suffix_bytes) = objects.suffix.last().unwrap();
+        let mut damaged = suffix_bytes.clone();
+        let middle = damaged.len() / 2;
+        damaged[middle] ^= 1;
+        vfs.write(suffix_path, &damaged).await.unwrap();
+        let mut smaller = native_run_limits();
+        smaller.max_incidences = objects.combined_rows - 1;
+        view.set_native_run_limits(&cx, Some(smaller)).unwrap();
+        let mut cursor = view
+            .stream_graph_edges_governed(&cx, &plan, native_run_policy(7))
+            .unwrap();
+        let error = cursor.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(error,
+                GqlQueryError::Source(EdgeScanError::Source(BufferedReadError::Limit {
+                    resource: "native run source incidences", requested, limit,
+                })) if requested == objects.combined_rows && limit == smaller.max_incidences
+            ),
+            "raw admission must precede the poisoned suffix: {error:?}"
+        );
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
+        assert_eq!(memory.used(), baseline);
+
+        view.set_native_run_limits(&cx, Some(native_run_limits()))
+            .unwrap();
+        let mut cursor = view
+            .stream_graph_edges_governed(&cx, &plan, native_run_policy(7))
+            .unwrap();
+        let error = cursor.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                error,
+                GqlQueryError::Source(EdgeScanError::Source(
+                    BufferedReadError::Buffer(
+                        fgdb_strata::tiered::buffer::BufferError::ChecksumMismatch
+                    ) | BufferedReadError::Store(_)
+                ))
+            ),
+            "required post-seal source: {error:?}"
+        );
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
+        assert_eq!(
+            memory.used(),
+            baseline,
+            "earlier suffix owners must unwind too"
+        );
+        vfs.write(
+            &objects.run.0,
+            b"selected stale run must not fall back to healthy Tier D",
+        )
+        .await
+        .unwrap();
+        let mut cursor = view
+            .stream_graph_edges_governed_at(&cx, &plan, CommitSeq(1), native_run_policy(0))
+            .unwrap();
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Rows(_)))
+        ));
+        assert_eq!(cursor.row_stats().snapshot_records, 0);
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        drop(cursor);
+        vfs.write(suffix_path, suffix_bytes).await.unwrap();
+        let mut cursor = view
+            .stream_graph_edges_governed(&cx, &plan, native_run_policy(7))
+            .unwrap();
+        let error = cursor.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                error,
+                GqlQueryError::Source(EdgeScanError::Source(BufferedReadError::Store(_)))
+            ),
+            "{error:?}"
+        );
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
+        let anti = native_vertex_probe(0, true);
+        let mut cursor = view
+            .stream_graph_probes_governed(&cx, &anti, native_run_policy(1000))
+            .unwrap();
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Source(VertexScanError::Source(
+                BufferedReadError::Store(_)
+            ))))
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        drop(cursor);
+        assert_eq!(memory.used(), baseline);
+        vfs.write(&objects.run.0, &objects.run.1).await.unwrap();
+        let mut cursor = view
+            .stream_graph_edges_governed(&cx, &plan, native_run_policy(6))
+            .unwrap();
+        loop {
+            match cursor.next().await {
+                Some(Ok(_)) => {}
+                Some(Err(GqlQueryError::Rows(_))) => break,
+                other => {
+                    panic!("seven complete historical identities require admission: {other:?}")
+                }
+            }
+        }
+        assert_eq!(cursor.row_stats().snapshot_records, 6);
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        drop(cursor);
+        assert_eq!(
+            native_run_rows(&mut view, &cx, &plan, 6, 7).await,
+            native_suffix_expected(6, 0)
+        );
+        drop(view);
+        assert_eq!(memory.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

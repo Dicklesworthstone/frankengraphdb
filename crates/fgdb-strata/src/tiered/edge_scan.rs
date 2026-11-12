@@ -7,7 +7,8 @@
 //! bytes but need not sort a block's positions again.
 //! The ordinary history merge keeps no full edge directory or result table.
 //! The opt-in complete-run profile instead owns a charged EId/version locator
-//! over one immutable compressed relation, including incoming/outgoing seeks.
+//! over one immutable compressed relation and its admitted post-seal statements,
+//! including incoming/outgoing seeks without copying their property rows.
 
 use crate::AdjacencyEntry;
 use crate::edge_props::BlockProps;
@@ -321,9 +322,11 @@ fn restore_positions<C>(
 /// resolution laws are unchanged.
 ///
 /// `BufferedPartition::set_native_run_limits` may select a complete durable
-/// run for a typed root. That profile reserves its decoder capacity and a
-/// compact EId/version directory on first demand; the cursor owns those
-/// charges until exhaustion, error or close. Other source shapes retain the
+/// run and its post-seal history for a typed root. That profile reserves its
+/// decoder capacity, retained suffix blocks and compact EId/version directory
+/// on first demand; the cursor owns those charges until exhaustion, error or
+/// close. Every historical birth remains a candidate; later restatements of
+/// the same birth retain publication precedence. Other source shapes retain the
 /// ordinary bounded-block merge described above.
 pub struct BufferedEdgeScan<'source, V: Vfs> {
     partition: &'source mut BufferedPartition<V>,
