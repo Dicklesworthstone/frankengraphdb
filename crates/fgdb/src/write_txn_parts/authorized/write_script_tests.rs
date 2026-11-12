@@ -746,11 +746,16 @@ fn binding_work_is_not_forgotten_when_the_shared_program_starts() {
             assert!(low > 0 && low < 8192);
             floors.push(low);
         }
-        // Independent input-derived bill: four statement slots admitted before
-        // expansion, two record checkpoints, one final binding checkpoint.
+        // The complete original transcripts and four statement slots are
+        // admitted before expansion, then two record checkpoints and one final
+        // binding checkpoint. Prebound execution never recharges those inputs.
+        let input_bytes: u64 = args
+            .iter()
+            .map(|arguments| arguments.canonical_byte_len() as u64)
+            .sum();
         assert_eq!(
             floors[1],
-            floors[0] + 4 + 2 + 1,
+            floors[0] + input_bytes + 4 + 2 + 1,
             "binding obtained a second permit"
         );
     });
@@ -906,5 +911,81 @@ fn explicit_larger_batch_uses_one_write_only_transaction_not_per_record_commits(
             "refused count admission must reserve no ID"
         );
         assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn original_script_arguments_are_admitted_before_any_record_binds() {
+    lab(0xa9d1, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let script = prepare("CREATE (n:Visible {p:$key})");
+        let padding = "雪".repeat(500);
+        let arguments = [
+            GqlParameters::new().with_text("unused", &padding).unwrap(),
+            GqlParameters::new()
+                .with_int64("key", 7)
+                .unwrap()
+                .with_text("unused", &padding)
+                .unwrap(),
+        ];
+        for mode in 0..4 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut scope = grant();
+            scope.limits.max_work = if mode < 2 {
+                arguments[0].canonical_byte_len() as u64 - 1
+            } else {
+                // Either record fits alone. The complete batch does not, so
+                // admission must precede the missing-key error in record zero.
+                arguments[1].canonical_byte_len() as u64 + 100
+            };
+            let token = issuer.issue_at(&scope, NOW).unwrap();
+            let result = match mode {
+                0 => db
+                    .execute_graph_write_script_authorized(
+                        &txn, &query, &commit, &issuer, &token, "main", &script,
+                        &arguments[0], policy(), || NOW,
+                    )
+                    .await
+                    .map(|_| ()),
+                1 => db
+                    .execute_graph_write_script_returning_authorized(
+                        &txn, &query, &commit, &issuer, &token, "main", &script,
+                        &arguments[0], policy(), || NOW,
+                    )
+                    .await
+                    .map(|_| ()),
+                2 => db
+                    .execute_graph_write_script_batch_authorized(
+                        &txn, &query, &commit, &issuer, &token, "main", &script,
+                        &arguments, 2, policy(), || NOW,
+                    )
+                    .await
+                    .map(|_| ()),
+                _ => db
+                    .execute_graph_write_script_batch_returning_authorized(
+                        &txn, &query, &commit, &issuer, &token, "main", &script,
+                        &arguments, 2, policy(), || NOW,
+                    )
+                    .await
+                    .map(|_| ()),
+            };
+            assert_eq!(
+                authorization(&result.unwrap_err()),
+                Some(Error::LimitExceeded(LimitDimension::Work)),
+                "mode {mode}"
+            );
+            assert_eq!(db.frontier().unwrap(), before);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(
+                db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                    .unwrap(),
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
     });
 }

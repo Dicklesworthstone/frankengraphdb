@@ -1567,3 +1567,70 @@ fn catalog_calls_use_the_same_scope_in_explicit_rows_and_aggregate_sources() {
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
+
+#[test]
+fn canonical_parameter_bytes_accumulate_and_refusal_aborts_the_unpublished_prefix() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let clock_calls = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&clock_calls);
+        db.set_statement_clock(Some(fgdb::StatementClock::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Some(fgdb_types::CanonicalTimestamp::offset_only(1_000_000, 0).unwrap())
+        })));
+        let issuer = authority();
+        let mut scope = grant(Rights::ReadWrite);
+        scope.limits.max_work = 6000;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let before = db.frontier().unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("CREATE (n:Visible {p:1})"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        let text = "CREATE (n:Visible {p:datetime().epochMillis})";
+        let parameters = GqlParameters::new()
+            .with_text("unused", &"雪".repeat(1000))
+            .unwrap();
+        // One original transcript fits after staging; two do not. No native
+        // operation reads the unused value, so only ingress can impose this bill.
+        owner
+            .prepare_statement(&db, query, text, &parameters, |params, _, work| {
+                assert!(params.statement_time().is_some());
+                work(1)
+            })
+            .unwrap();
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
+        let mut reached = false;
+        let error = owner
+            .prepare_statement(&db, query, text, &parameters, |_, _, _| {
+                reached = true;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            WriteTxnError::Authorization(Error::LimitExceeded(fgdb_warden::LimitDimension::Work))
+        ));
+        assert!(!reached);
+        assert_eq!(
+            clock_calls.load(Ordering::SeqCst),
+            1,
+            "input admission precedes the second host clock capture"
+        );
+        assert!(!owner.is_active());
+        assert!(matches!(
+            owner.commit(&mut db).await,
+            Err(WriteTxnError::Finished)
+        ));
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}

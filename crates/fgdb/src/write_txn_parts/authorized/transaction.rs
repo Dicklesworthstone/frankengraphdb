@@ -231,9 +231,9 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
     /// Prepare one statement under this transaction's retained allowance.
     ///
     /// The trusted host supplies the compiler and capability-safe catalog, as
-    /// it does for native authorized autocommit. Original text and parameter
-    /// declarations are charged before compilation; the callback must charge
-    /// additional catalog/binding work through the supplied meter. It receives
+    /// it does for native authorized autocommit. Original text, canonical
+    /// argument bytes and declarations are charged before compilation. The
+    /// callback charges additional catalog/binding work through the meter. It receives
     /// the original non-widenable scope and parameters with a fresh observation
     /// of the database's trusted statement clock, never a client-supplied one.
     /// No prepared definition grants authority: `stage_chain` and `read` still
@@ -263,10 +263,9 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         let mut state = idle.enter(&self.cx);
         let prepared = self.cx.with_restriction(|| {
             self.admit_statement(&mut state, database, query_cx)?;
-            state.execution.work(
-                u64::try_from(text.len())
-                    .map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?,
-            )?;
+            state
+                .execution
+                .admit_input(query_cx, text, std::slice::from_ref(parameters))?;
             if fgdb_gql::reads_element_identity(text) {
                 return Err(WriteTxnError::Authorization(Error::ScopeDenied));
             }

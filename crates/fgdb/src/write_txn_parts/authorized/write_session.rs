@@ -519,7 +519,7 @@ where
                 clock: tracked_clock(&mut state.clock, &mut state.last_now_ms),
             };
             let (definition, schema) = cx.with_restriction(|| {
-                super::reserve_text(cx, &mut execution, text)?;
+                super::reserve_input(cx, &mut execution, text, std::slice::from_ref(params))?;
                 let sample =
                     super::preparation_parameters(params, fgdb_gql::statement_time_required(text))?;
                 let params = sample.as_ref();
@@ -764,6 +764,8 @@ where
                 if !Arc::ptr_eq(&self.owner, &prepared.owner) {
                     return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                 }
+                chain_batch_limit(arguments.len(), state.max_statements)?;
+                execution.admit_input(cx, "", arguments).map_err(admission)?;
                 let captured = statement_parameter_sets(
                     state.database.statement_clock.as_ref(),
                     cx,
@@ -846,6 +848,15 @@ where
                 clock: tracked_clock(&mut state.clock, &mut state.last_now_ms),
             };
             checkpoint(cx, &mut execution).map_err(admission)?;
+            cx.with_restriction(|| {
+                super::reserve_input(cx, &mut execution, text, std::slice::from_ref(arguments))?;
+                if super::is_chain_admitted(cx, &mut execution, text)? {
+                    // A chain requires its own atomic owner, not the reusable
+                    // script-batch representation this operation promises.
+                    return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+                }
+                Ok(())
+            })?;
             let captured = super::statement_parameters(
                 state.database.statement_clock.as_ref(),
                 cx,
@@ -853,7 +864,7 @@ where
                 arguments,
             )?;
             let arguments = captured.as_ref();
-            let bound = super::bind_native(
+            let bound = super::bind_native_admitted(
                 cx,
                 &mut execution,
                 text,
@@ -979,7 +990,12 @@ where
                 let bound = match request {
                     Request::Text(text, params) => {
                         let chain = cx.with_restriction(|| {
-                            super::reserve_text(cx, &mut execution, text)?;
+                            super::reserve_input(
+                                cx,
+                                &mut execution,
+                                text,
+                                std::slice::from_ref(params),
+                            )?;
                             super::is_chain_admitted(cx, &mut execution, text)
                         })?;
                         let captured = super::statement_parameters(
@@ -1020,8 +1036,9 @@ where
                         }
                     }
                     Request::TextBatch(text, arguments) => {
+                        chain_batch_limit(arguments.len(), *max_statements)?;
                         let is_chain = cx.with_restriction(|| {
-                            super::reserve_text(cx, &mut execution, text)?;
+                            super::reserve_input(cx, &mut execution, text, arguments)?;
                             super::is_chain_admitted(cx, &mut execution, text)
                         })?;
                         let captured = statement_parameter_sets(
@@ -1062,7 +1079,8 @@ where
                             // Map arguments standing for property maps splice
                             // with the first set's keys, and every set must carry
                             // exactly those keys (fgdb-0s2pq). The original text
-                            // pays the byte bill; each fresh key is a declaration.
+                            // and argument sets have paid the byte bill; each
+                            // fresh key is a declaration, not a second input.
                             let lowered = fgdb_gql::GqlMapArgumentText::lower(text, first);
                             let derived = match &lowered {
                                 Some((recipe, _)) => Some(
@@ -1106,6 +1124,9 @@ where
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
+                        execution
+                            .admit_input(cx, "", std::slice::from_ref(params))
+                            .map_err(admission)?;
                         let captured = super::statement_parameters(
                             database.statement_clock.as_ref(),
                             cx,
@@ -1148,6 +1169,8 @@ where
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
+                        chain_batch_limit(arguments.len(), *max_statements)?;
+                        execution.admit_input(cx, "", arguments).map_err(admission)?;
                         let captured = statement_parameter_sets(
                             database.statement_clock.as_ref(),
                             cx,

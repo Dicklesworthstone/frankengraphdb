@@ -12,6 +12,31 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Original write-parameter admission — qualification pending
+
+Source added 2026-11-12 for the remaining input-admission gap under
+`fgdb-4iiho`. Native authorized text, prepared-session, script and explicit
+transaction ingress reserve the original text and complete canonical parameter
+transcripts before map lowering, statement-time capture or binding. Unused map
+members and UTF-8 payload bytes remain part of that price. Batches reserve every
+original record before capture; derived fields and previously bound programs
+are not treated as another caller input.
+
+The debit stays on the permit that stages and publishes the write. Immutable
+ReadWrite and relationship-scope checks still precede direct-script argument
+inspection. Explicit transaction exhaustion discards its unpublished prefix.
+No parameter-count proxy or fresh per-statement allowance replaces the byte
+reservation.
+
+Six added regression sources cover pre-catalog and pre-clock refusal, exact
+original-byte deltas, cumulative batch input, UNWIND admission, direct-script
+binding order and transaction-prefix rollback. Two existing exact-budget laws
+now include the original canonical input term. Independent source/API review
+found no blocker. Formatting, compilation, runtime tests, Clippy, UBS and the
+exact-tree proof are **UNRUN**: the shared host lost memory headroom during
+dependency acquisition and its execution transport disconnected before any
+compiler started. The broader authorization bead remains open.
+
 ### Buffered durable runs and generation-bound analytics — qualification pending
 
 Source added 2026-11-12 for `fgdb-teypc`, `fgdb-w3-tier-r-0tj` and

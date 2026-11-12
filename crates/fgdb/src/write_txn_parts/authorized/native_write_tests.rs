@@ -298,8 +298,8 @@ fn definition_admission_precedes_catalog_and_cannot_reset_before_execution() {
                 "the pre-lookup checkpoint shares the ingress bill"
             );
             assert_eq!(db.frontier().unwrap(), before);
-            // With caller-owned preparation there is no byte bill. The exact
-            // same token can execute this small program, so text rejection is
+            // Caller-owned preparation avoids the text bill; original arguments
+            // are still admitted. The same token executes this small program, so text rejection is
             // not merely an impossibly small execution quota.
             db.execute_graph_write_script_returning_authorized(
                 &txn,
@@ -1188,5 +1188,200 @@ fn computed_property_maps_preserve_authority_and_prepared_session_catalogs() {
             before
         );
         assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn original_input_admission_precedes_catalog_and_statement_clock() {
+    lab(0xaa21, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let text =
+            "WITH $record.key AS key CREATE (n:Visible {p:key, q:datetime().epochMillis})";
+        let parameters = GqlParameters::new()
+            .with_map(
+                "record",
+                vec![
+                    ("key".into(), GraphValue::Scalar(CanonicalScalar::Int(7))),
+                    (
+                        "unused".into(),
+                        GraphValue::Scalar(
+                            CanonicalScalar::ucs_basic_text(&"雪".repeat(500)).unwrap(),
+                        ),
+                    ),
+                ],
+            )
+            .unwrap();
+        let mut scope = grant();
+        scope.limits.max_work = (text.len() + parameters.canonical_byte_len()) as u64 - 1;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        for route in 0..3 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let clock_calls = std::sync::Arc::new(AtomicU64::new(0));
+            let observed = std::sync::Arc::clone(&clock_calls);
+            db.set_statement_clock(Some(crate::StatementClock::new(move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Some(fgdb_types::CanonicalTimestamp::offset_only(1_000_000, 0).unwrap())
+            })));
+            let mut catalog_calls = 0;
+            let catalog = |kind, name: &str| {
+                catalog_calls += 1;
+                symbols(kind, name)
+            };
+            let result = match route {
+                0 => db
+                    .query_write_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        text,
+                        &parameters,
+                        catalog,
+                        R,
+                        policy(),
+                        || NOW,
+                    )
+                    .await
+                    .map(|_| ()),
+                1 => db
+                    .prepare_graph_write_script_authorized(
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        text,
+                        &parameters,
+                        catalog,
+                        R,
+                        64,
+                        || NOW,
+                    )
+                    .map(|_| ()),
+                _ => db
+                    .pinned_read_view()
+                    .unwrap()
+                    .prepare_graph_write_script_authorized(
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        text,
+                        &parameters,
+                        catalog,
+                        R,
+                        64,
+                        || NOW,
+                    )
+                    .map(|_| ()),
+            };
+            assert_eq!(
+                authorization(&result.unwrap_err()),
+                Some(Error::LimitExceeded(fgdb_warden::LimitDimension::Work)),
+                "route {route}"
+            );
+            assert_eq!(catalog_calls, 0);
+            assert_eq!(clock_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(db.frontier().unwrap(), before);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(
+                db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                    .unwrap(),
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn native_write_prices_original_utf8_payload_once_before_map_lowering() {
+    lab(0xaa22, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let arguments = |padding: &str| {
+            GqlParameters::new()
+                .with_map(
+                    "record",
+                    vec![
+                        ("key".into(), GraphValue::Scalar(CanonicalScalar::Int(7))),
+                        (
+                            "unused".into(),
+                            GraphValue::Scalar(CanonicalScalar::ucs_basic_text(padding).unwrap()),
+                        ),
+                    ],
+                )
+                .unwrap()
+        };
+        let small = arguments("");
+        let large = arguments(&"雪".repeat(100));
+        for text in [
+            "CREATE (n:Visible {p:$record.key})",
+            "WITH $record.key AS key CREATE (n:Visible {p:key})",
+        ] {
+            let mut floors = Vec::new();
+            for params in [&small, &large] {
+                let (mut low, mut high) = (0_u64, 8192_u64);
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    let mut scope = grant();
+                    scope.limits.max_work = middle;
+                    let token = issuer.issue_at(&scope, NOW).unwrap();
+                    let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                    let before = db.frontier().unwrap();
+                    let result = db
+                        .query_write_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &issuer,
+                            &token,
+                            "main",
+                            text,
+                            params,
+                            symbols,
+                            R,
+                            policy(),
+                            || NOW,
+                        )
+                        .await;
+                    match result {
+                        Ok(_) => {
+                            high = middle;
+                            let rows = db.vertices().unwrap();
+                            assert_eq!(rows.len(), 1);
+                            assert_eq!(rows[0].props, vec![(P, CanonicalScalar::Int(7).into())]);
+                        }
+                        Err(error) => {
+                            assert_eq!(
+                                authorization(&error),
+                                Some(Error::LimitExceeded(fgdb_warden::LimitDimension::Work)),
+                                "{text}: {error:?}"
+                            );
+                            low = middle + 1;
+                            assert_eq!(db.frontier().unwrap(), before);
+                            assert!(db.vertices().unwrap().is_empty());
+                        }
+                    }
+                    assert_eq!(txn.outstanding_obligations(), 0);
+                }
+                assert!(low > 0 && low < 8192);
+                floors.push(low);
+            }
+            assert_eq!(
+                floors[1] - floors[0],
+                (large.canonical_byte_len() - small.canonical_byte_len()) as u64,
+                "unused original UTF-8 payload must be priced once even when lowering discards it"
+            );
+        }
     });
 }

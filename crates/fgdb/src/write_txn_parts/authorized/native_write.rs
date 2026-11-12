@@ -177,19 +177,15 @@ fn chain_statement_limit(limit: usize) -> Result<(), Fault> {
 }
 
 #[allow(clippy::result_large_err)]
-fn reserve_text<Clock: FnMut() -> u64>(
+fn reserve_input<Clock: FnMut() -> u64>(
     cx: &QueryCx,
     execution: &mut Execution<'_, '_, Clock>,
     text: &str,
+    params: &[GqlParameters],
 ) -> Result<(), Fault> {
-    cx.checkpoint()
-        .map_err(WriteTxnError::Interrupted)
-        .map_err(admission)?;
-    let bytes = u64::try_from(text.len())
-        .map_err(|_| admission(WriteTxnError::Authorization(Error::TooLarge)))?;
-    // Reserve original UTF-8 bytes BEFORE lexical classification, parsing or
-    // declaration allocation. This is an ingress price, not compiler telemetry.
-    execution.work(bytes).map_err(admission)?;
+    // Reserve original text and complete argument transcripts BEFORE lexical
+    // classification, map lowering, parameter capture or declaration allocation.
+    execution.admit_input(cx, text, params).map_err(admission)?;
     // Engine identities are not masked, so a capability cannot observe them
     // through id()/elementId() (fgdb-j687q, owner ruling 2026-09-30).
     if fgdb_gql::reads_element_identity(text) {
@@ -227,7 +223,7 @@ fn prepare<Clock: FnMut() -> u64>(
     resolver: impl GraphSymbolResolver,
 ) -> Result<PreparedGraphWriteScript, Fault> {
     cx.with_restriction(|| {
-        reserve_text(cx, execution, text)?;
+        reserve_input(cx, execution, text, std::slice::from_ref(params))?;
         prepare_admitted(cx, execution, text, params, relation, resolver)
     })
 }
@@ -452,39 +448,6 @@ fn map_argument_fault(argument_set: usize, error: &fgdb_gql::GqlMapArgumentError
                 fgdb_gql::GraphPatternTextErrorKind::Expected(expected),
             ),
         },
-    })
-}
-
-// The only outputs are the existing OWNED program/batch variants. No borrow of
-// a temporary script, unchecked raw writer or independent permit can escape.
-#[allow(clippy::too_many_arguments, clippy::result_large_err)]
-fn bind_native<Clock: FnMut() -> u64>(
-    cx: &QueryCx,
-    execution: &mut Execution<'_, '_, Clock>,
-    text: &str,
-    params: &GqlParameters,
-    relation: RelationId,
-    scope: &PlannerPredicates,
-    max_statements: usize,
-    resolver: impl GraphSymbolResolver,
-) -> Result<super::Bound<'static>, Fault> {
-    cx.with_restriction(|| {
-        reserve_text(cx, execution, text)?;
-        if is_chain_admitted(cx, execution, text)? {
-            // This entry returns scripts or reusable bound batches. A chain
-            // requires its own atomic owner, never a partial script fallback.
-            return Err(admission(WriteTxnError::AuthorizedMutationRefused));
-        }
-        bind_native_admitted(
-            cx,
-            execution,
-            text,
-            params,
-            relation,
-            scope,
-            max_statements,
-            resolver,
-        )
     })
 }
 
@@ -760,9 +723,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// retain BatchProgram's input coordinates and native publication cause.
     /// Control failures take precedence over a refused lookup's parser error.
     ///
-    /// Preparation reserves one signed work unit per original UTF-8 byte, then
-    /// one per parameter and each pre/post resolver/final checkpoint. Binding
-    /// retains the prepared-script statement-instance price. These are ingress
+    /// Preparation reserves original UTF-8 text and canonical argument bytes,
+    /// then one work unit per parameter and each pre/post resolver/final
+    /// checkpoint. Binding retains the prepared-script statement-instance price.
+    /// These are ingress
     /// prices, not measured compiler operations, allocator-byte limits or
     /// preemption inside parsing or a trusted host callback. Native syntax limits
     /// still apply. No stage receives another permit or resets an allowance.
@@ -833,6 +797,12 @@ impl<V: Vfs + Clone> Database<V> {
         commit_cx
             .with_restriction_async(async {
                 checkpoint(query_cx, &mut execution).map_err(admission)?;
+                reserve_input(
+                    query_cx,
+                    &mut execution,
+                    text,
+                    std::slice::from_ref(params),
+                )?;
                 let captured = statement_parameters(
                     self.statement_clock.as_ref(),
                     query_cx,
@@ -841,7 +811,6 @@ impl<V: Vfs + Clone> Database<V> {
                 )?;
                 let params = captured.as_ref();
                 let chain = query_cx.with_restriction(|| {
-                    reserve_text(query_cx, &mut execution, text)?;
                     let classified = fgdb_gql::PreparedGraphWriteChainText::is_chain(text);
                     checkpoint(query_cx, &mut execution).map_err(admission)?;
                     classified.map_err(|error| {

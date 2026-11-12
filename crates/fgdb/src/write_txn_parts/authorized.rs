@@ -9,7 +9,7 @@ use super::{WriteTxn, WriteTxnError};
 use crate::{Database, PendingRow, VertexRow, WriteBatch, WriteError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId};
-use fgdb_types::{CommitCx, CommitSeq, EmbeddedTxnCompletion, TxnCx, VId};
+use fgdb_types::{CommitCx, CommitSeq, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
 use fgdb_warden::{
     Authority, CapabilityToken, Error, ExecutionPermit, VertexWriteFields, VertexWriteImage,
     WriteAccess,
@@ -86,6 +86,32 @@ impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
         self.permit
             .charge_work_at((self.clock)(), amount)
             .map_err(WriteTxnError::Authorization)
+    }
+
+    /// Admit the original caller input on the execution's retained permit,
+    /// before binding, field lowering or statement-time capture can copy it.
+    /// Cached transcript lengths include names and complete collection values,
+    /// including unused arguments. Generated arguments are not a second input.
+    /// Prepared definitions pass empty text; batches reserve every set together.
+    fn admit_input(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        parameters: &[fgdb_gql::GqlParameters],
+    ) -> Result<(), WriteTxnError> {
+        cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+        let mut bytes = u64::try_from(text.len())
+            .map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?;
+        for parameters in parameters {
+            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+            self.poll()?;
+            let parameter_bytes = u64::try_from(parameters.canonical_byte_len())
+                .map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?;
+            bytes = bytes
+                .checked_add(parameter_bytes)
+                .ok_or(WriteTxnError::Authorization(Error::TooLarge))?;
+        }
+        self.work(bytes)
     }
 
     fn checkpoint(&mut self) -> Result<(), WriteTxnError> {

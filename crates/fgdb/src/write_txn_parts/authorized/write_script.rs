@@ -52,6 +52,45 @@ impl Bound<'_> {
 }
 
 impl<'a> Input<'a> {
+    #[allow(clippy::result_large_err)]
+    fn preflight<Clock: FnMut() -> u64>(
+        &self,
+        cx: &QueryCx,
+        scope: &PlannerPredicates,
+        execution: &mut Execution<'_, '_, Clock>,
+    ) -> Result<(), Fault> {
+        // Check immutable operation classes before touching argument values
+        // or billing input/definition work. Empty MATCH cannot grant Write-only
+        // authority a read, and a forbidden relationship tail cannot reserve
+        // identities through an earlier, otherwise legal creation record.
+        let script = match self {
+            Self::Script(script, _) | Self::Batch(script, _, _) => Some(*script),
+            Self::Bound(_) => None,
+        };
+        if let Some(script) = script {
+            if script.requires_read() && !scope.rights().can_read() {
+                return Err(admission(WriteTxnError::Authorization(
+                    Error::PermissionDenied,
+                )));
+            }
+            for statement in script.statements() {
+                cx.checkpoint()
+                    .map_err(WriteTxnError::Interrupted)
+                    .map_err(admission)?;
+                execution.poll().map_err(admission)?;
+                if matches!(
+                    statement,
+                    GraphWriteTemplateStatement::EdgeMerge(_)
+                        | GraphWriteTemplateStatement::EdgeUpsert(_)
+                ) && !scope.allows_relation(statement.relation())
+                {
+                    return Err(admission(WriteTxnError::Authorization(Error::ScopeDenied)));
+                }
+            }
+        }
+        Ok(())
+    }
+
     // Once-per-script report retains original binding/program diagnostics,
     // following the native write_scripts.rs boundary rather than boxing them.
     #[allow(clippy::result_large_err)]
@@ -61,36 +100,20 @@ impl<'a> Input<'a> {
         scope: &PlannerPredicates,
         execution: &mut Execution<'_, '_, Clock>,
     ) -> Result<Bound<'a>, Fault> {
+        self.preflight(cx, scope, execution)?;
+        self.bind_admitted(cx, execution)
+    }
+
+    // Input admission belongs to the ingress owner: native text/session callers
+    // may pass derived fields, while direct script calls pass original arguments.
+    // Neither this binder nor already-bound batches charge those bytes again.
+    #[allow(clippy::result_large_err)]
+    fn bind_admitted<Clock: FnMut() -> u64>(
+        self,
+        cx: &QueryCx,
+        execution: &mut Execution<'_, '_, Clock>,
+    ) -> Result<Bound<'a>, Fault> {
         cx.with_restriction(|| {
-            // Check immutable operation classes before touching argument values
-            // or billing definition work. Empty MATCH cannot grant Write-only
-            // authority a read, and a forbidden relationship tail cannot reserve
-            // identities through an earlier, otherwise legal creation record.
-            let script = match &self {
-                Self::Script(script, _) | Self::Batch(script, _, _) => Some(*script),
-                Self::Bound(_) => None,
-            };
-            if let Some(script) = script {
-                if script.requires_read() && !scope.rights().can_read() {
-                    return Err(admission(WriteTxnError::Authorization(
-                        Error::PermissionDenied,
-                    )));
-                }
-                for statement in script.statements() {
-                    cx.checkpoint()
-                        .map_err(WriteTxnError::Interrupted)
-                        .map_err(admission)?;
-                    execution.poll().map_err(admission)?;
-                    if matches!(
-                        statement,
-                        GraphWriteTemplateStatement::EdgeMerge(_)
-                            | GraphWriteTemplateStatement::EdgeUpsert(_)
-                    ) && !scope.allows_relation(statement.relation())
-                    {
-                        return Err(admission(WriteTxnError::Authorization(Error::ScopeDenied)));
-                    }
-                }
-            }
             match self {
                 Self::Script(script, arguments) => {
                     cx.checkpoint()
@@ -158,8 +181,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// mutation. The same permit then enters the ordinary authorized program;
     /// binding costs cannot reset its signed work, node or result allowance.
     ///
-    /// One signed work unit is admitted per bound statement, plus final binding
-    /// acceptance. Native GLA counters retain their query/proposal meaning.
+    /// Original canonical argument bytes, one signed work unit per bound
+    /// statement and final binding acceptance share the execution allowance.
+    /// Native GLA counters retain their query/proposal meaning.
     /// Stats-only execution delivers no identities and accepts max_rows=0.
     /// Script preparation, name resolution and parameter-map construction are
     /// caller-owned definition work, outside this call's allowance. No allocator
@@ -414,7 +438,17 @@ impl<V: Vfs + Clone> Database<V> {
         };
         commit_cx
             .with_restriction_async(async {
-                let bound = input.bind(query_cx, verified.predicates(), &mut execution)?;
+                input.preflight(query_cx, verified.predicates(), &mut execution)?;
+                match &input {
+                    Input::Script(_, arguments) => execution
+                        .admit_input(query_cx, "", std::slice::from_ref(*arguments))
+                        .map_err(admission)?,
+                    Input::Batch(_, arguments, _) => execution
+                        .admit_input(query_cx, "", arguments)
+                        .map_err(admission)?,
+                    Input::Bound(_) => {}
+                }
+                let bound = input.bind_admitted(query_cx, &mut execution)?;
                 self.complete_authorized_program(
                     txn_cx,
                     query_cx,

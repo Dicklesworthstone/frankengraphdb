@@ -1075,7 +1075,11 @@ fn batch_binding_and_execution_share_the_exact_signed_work_allowance() {
             assert!(low > 0 && low < 16384);
             floors.push(low);
         }
-        assert_eq!(floors[0], floors[1] + 6 + 3 + 1);
+        let input_bytes: u64 = args
+            .iter()
+            .map(|arguments| arguments.canonical_byte_len() as u64)
+            .sum();
+        assert_eq!(floors[0], floors[1] + input_bytes + 6 + 3 + 1);
         assert!(
             floors[2] > floors[0],
             "text-batch preparation must consume the same allowance as binding and execution"
@@ -1370,5 +1374,158 @@ fn session_writes_commit_the_capability_decision_digest_and_owner_writes_stay_ze
             .await
             .unwrap();
         assert_eq!(digests(&db), written);
+    });
+}
+
+#[test]
+fn every_session_input_reserves_original_bytes_before_capture_or_binding() {
+    lab(0xac21, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let sample = GqlParameters::new().with_text("unused", "").unwrap();
+        let large = GqlParameters::new()
+            .with_text("unused", &"雪".repeat(1000))
+            .unwrap();
+        let batch = [large.clone(), large.clone()];
+        for text in [
+            "CREATE (n:Visible {p:datetime().epochMillis})",
+            "WITH datetime().epochMillis AS stamp CREATE (n:Visible {p:stamp})",
+        ] {
+            for mode in 0..6 {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let before = db.frontier().unwrap();
+                let clock_calls = Arc::new(AtomicUsize::new(0));
+                let observed = Arc::clone(&clock_calls);
+                db.set_statement_clock(Some(crate::StatementClock::new(move |_| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Some(fgdb_types::CanonicalTimestamp::offset_only(1_000_000, 0).unwrap())
+                })));
+                let mut scope = grant();
+                scope.limits.max_work = if matches!(mode, 2 | 4 | 5) {
+                    // Each input fits alone. Their sum must be reserved before
+                    // the first timestamp capture or bound-program allocation.
+                    large.canonical_byte_len() as u64 + 500
+                } else {
+                    large.canonical_byte_len() as u64 - 1
+                };
+                let token = issuer.issue_at(&scope, NOW).unwrap();
+                let catalog_calls = AtomicUsize::new(0);
+                let mut session = db
+                    .authorized_write_session(
+                        &txn,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "host-branch",
+                        |kind, name: &str| {
+                            catalog_calls.fetch_add(1, Ordering::SeqCst);
+                            symbols(kind, name)
+                        },
+                        R,
+                        policy(),
+                        64,
+                        || NOW,
+                    )
+                    .unwrap();
+                let prepared = if mode >= 3 {
+                    Some(session.prepare(&query, text, &sample).unwrap())
+                } else {
+                    None
+                };
+                catalog_calls.store(0, Ordering::SeqCst);
+                let result = match mode {
+                    0 => session.prepare(&query, text, &large).map(|_| ()),
+                    1 => session.query_stats(&query, text, &large).await.map(|_| ()),
+                    2 => session.query_batch_stats(&query, text, &batch).await.map(|_| ()),
+                    3 => session
+                        .execute_stats(&query, prepared.as_ref().unwrap(), &large)
+                        .await
+                        .map(|_| ()),
+                    4 => session
+                        .execute_batch_stats(&query, prepared.as_ref().unwrap(), &batch)
+                        .await
+                        .map(|_| ()),
+                    _ => session
+                        .bind_batch(&query, prepared.as_ref().unwrap(), &batch)
+                        .map(|_| ()),
+                };
+                assert_eq!(
+                    authorization(&result.unwrap_err()),
+                    Some(Error::LimitExceeded(LimitDimension::Work)),
+                    "{text}, mode {mode}"
+                );
+                assert!(session.is_closed());
+                drop(session);
+                assert_eq!(catalog_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(clock_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(db.frontier().unwrap(), before);
+                assert!(db.vertices().unwrap().is_empty());
+                assert_eq!(
+                    db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                        .unwrap(),
+                    ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
+                );
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn reusable_unwind_admits_original_input_before_clock_or_row_diagnostics() {
+    lab(0xac22, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let text = "UNWIND $rows AS row MERGE (n:Visible {p:row.key}) ON CREATE SET n.q=datetime().epochMillis";
+        // Missing $rows would normally be a native binding diagnostic. The
+        // oversized original argument must be refused before inspecting it.
+        let arguments = GqlParameters::new()
+            .with_text("unused", &"雪".repeat(1000))
+            .unwrap();
+        let mut scope = grant();
+        scope.limits.max_work = (text.len() + arguments.canonical_byte_len()) as u64;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let clock_calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&clock_calls);
+        db.set_statement_clock(Some(crate::StatementClock::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Some(fgdb_types::CanonicalTimestamp::offset_only(1_000_000, 0).unwrap())
+        })));
+        let catalog_calls = AtomicUsize::new(0);
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "host-branch",
+                |kind, name: &str| {
+                    catalog_calls.fetch_add(1, Ordering::SeqCst);
+                    symbols(kind, name)
+                },
+                R,
+                policy(),
+                64,
+                || NOW,
+            )
+            .unwrap();
+        let error = session.bind_unwind_batch(&query, text, &arguments).unwrap_err();
+        assert_eq!(
+            authorization(&error),
+            Some(Error::LimitExceeded(LimitDimension::Work))
+        );
+        assert!(session.is_closed());
+        drop(session);
+        assert_eq!(catalog_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
