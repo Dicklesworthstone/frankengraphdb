@@ -110,13 +110,15 @@ fn unit_call_imports_and_body_bindings_never_widen_outer_scope() {
 }
 
 #[test]
-fn union_or_malformed_write_bodies_refuse_before_catalog_resolution() {
+fn malformed_write_bodies_refuse_before_catalog_resolution() {
     for text in [
-        "CALL() { CREATE (:F) RETURN 1 AS value UNION RETURN 2 AS value }",
-        "CALL() { CREATE (:F) UNION CREATE (:F) }",
         "CALL() { CREATE (:F)",
         "CALL() { CREATE (:F]; }",
         "CALL() { CREATE (:F); CREATE (:F) }",
+        "CALL() { CREATE (:F) UNION }",
+        "CALL() { UNION CREATE (:F) }",
+        "CALL() { CREATE (:F) UNION ALL UNION ALL CREATE (:F) }",
+        "CALL() { CREATE (:F) UNION ALL CREATE (:F) UNION CREATE (:F) }",
     ] {
         let lookups = Cell::new(0);
         let result =
@@ -127,6 +129,232 @@ fn union_or_malformed_write_bodies_refuse_before_catalog_resolution() {
         assert!(result.is_err(), "{text}");
         assert_eq!(lookups.get(), 0, "{text}");
     }
+}
+
+#[test]
+fn call_union_framing_preserves_identifier_operands_aliases_and_native_read_classification() {
+    for text in [
+        "WITH 3 AS union CALL(union) { CREATE (:F {p:union}) \
+         RETURN union AS value } RETURN value",
+        "WITH 3 AS union CALL(union) { CREATE (:F) RETURN 1+union AS value \
+         UNION ALL RETURN union AS value } RETURN value",
+        "WITH 3 AS union CALL(union) { CREATE (:F) RETURN 2*union AS value \
+         UNION ALL RETURN union AS value } RETURN value",
+        "WITH 3 AS union CALL(union) { CREATE (:F) \
+         RETURN CASE WHEN true THEN union ELSE 2 END AS value \
+         UNION ALL RETURN union AS value } RETURN value",
+        "WITH 3 AS union CALL(union) { WITH union AS local CREATE (:F {p:local}) \
+         RETURN local AS value UNION ALL RETURN union AS value } RETURN value",
+        "WITH [1,2] AS union CALL(union) { UNWIND union AS local CREATE (:F {p:local}) \
+         RETURN local AS value UNION ALL RETURN 0 AS value } RETURN value",
+        "WITH 3 AS union CALL(union) { CREATE (:F) RETURN union AS value ORDER BY union \
+         UNION ALL RETURN 0 AS value } RETURN value",
+        "CALL() { CREATE (:F) RETURN 1 AS union \
+         UNION ALL RETURN 2 AS union } RETURN union",
+        "CALL() { WITH 3 AS delete CREATE (:F) RETURN delete \
+         UNION ALL RETURN 2 AS delete } RETURN delete",
+        "CALL() { WITH 3 AS `not` CREATE (:F) RETURN `not` \
+         UNION ALL RETURN 2 AS `not` } RETURN `not`",
+        "CALL() { WITH 3 AS on RETURN on \
+         UNION ALL CREATE (:F) RETURN 2 AS on } RETURN on",
+        "CALL() { WITH 3 AS starts RETURN starts \
+         UNION ALL CREATE (:F) RETURN 2 AS starts } RETURN starts",
+        "CALL() { WITH 3 AS ends RETURN ends \
+         UNION ALL CREATE (:F) RETURN 2 AS ends } RETURN ends",
+        "WITH true AS union CALL(union) { CREATE (:F) RETURN NOT union AS value \
+         UNION ALL RETURN false AS value } RETURN value",
+        "WITH {union:3} AS item CALL(item) { CREATE (:F) RETURN item.union AS value \
+         UNION ALL RETURN 0 AS value } RETURN value",
+        "CALL() { CREATE (:F) WITH 1 AS value RETURN * \
+         UNION ALL RETURN 2 AS value } RETURN value",
+    ] {
+        prepare(text);
+    }
+    for text in [
+        "CALL { WITH 1 AS union,2 AS delete RETURN union+delete AS value } RETURN value",
+        "CALL { WITH 1 AS union,2 AS delete RETURN 2*union+delete AS value } RETURN value",
+        "CALL { WITH 1 AS union,2 AS delete \
+         RETURN CASE WHEN true THEN union ELSE delete END AS value } RETURN value",
+        "CALL { WITH true AS union RETURN NOT union AS value } RETURN value",
+    ] {
+        assert!(
+            !PreparedGraphWriteChainText::is_chain(text).unwrap(),
+            "identifier operands must not reopen a completed read branch: {text}",
+        );
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_ok(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn call_union_arms_keep_native_read_write_owners_and_one_checked_export_schema() {
+    use fgdb_gql::GraphSetColumnType::{Any, Scalar};
+
+    for (text, read_arms, kind) in [
+        (
+            "CALL() { CREATE (:F) RETURN 1 AS value UNION RETURN 2 AS value }",
+            vec![false, true],
+            Scalar,
+        ),
+        (
+            "CALL() { RETURN 1 AS value UNION ALL CREATE (:F) RETURN 2 AS value }",
+            vec![true, false],
+            Scalar,
+        ),
+        (
+            "CALL() { CREATE (n:F {p:1}) RETURN n.p AS value \
+             UNION RETURN [1] AS value UNION RETURN {p:1} AS value }",
+            vec![false, true, true],
+            Any,
+        ),
+    ] {
+        let chain = prepare(text);
+        let GraphWriteChainStep::ReturningCall(call) = &chain.steps()[0] else {
+            panic!("UNION must retain the native returning CALL owner: {text}");
+        };
+        assert_eq!(call.export_columns(), &["value"], "{text}");
+        assert_eq!(call.export_column_types(), &[kind], "{text}");
+        assert_eq!(
+            call.arms()
+                .iter()
+                .map(|arm| arm.read_body().is_some())
+                .collect::<Vec<_>>(),
+            read_arms,
+            "a read arm must never be represented by an empty write: {text}",
+        );
+        for arm in call.arms() {
+            if let Some(body) = arm.write_body() {
+                assert!(!body.steps().is_empty());
+            }
+        }
+    }
+    let unit = prepare("CALL() { CREATE (:F) UNION CREATE (:F) }");
+    let GraphWriteChainStep::UnitCall(call) = &unit.steps()[0] else {
+        panic!("unit UNION preserves its outer occurrence without exporting rows");
+    };
+    assert_eq!(call.arms().len(), 2);
+    assert!(call.arms().iter().all(|arm| arm.write_body().is_some()));
+    assert!(!unit.returns_rows());
+}
+
+#[test]
+fn call_creation_metadata_keeps_static_fields_and_lazy_carried_element_read_demand() {
+    let constant =
+        prepare("CALL() { CREATE (a:F {p:1}),(b),(a)-[:R {q:2}]->(b) UNION CREATE (:F) }");
+    let GraphWriteChainStep::UnitCall(call) = &constant.steps()[0] else {
+        panic!("unit CALL owner");
+    };
+    let GraphWriteChainStep::Insert(insertion) = &call.arms()[0].write_body().unwrap().steps()[0]
+    else {
+        panic!("native constant creation owner");
+    };
+    assert!(!insertion.requires_read());
+    assert_eq!(
+        insertion.created_vertex_label_sets().collect::<Vec<_>>(),
+        vec![&[LabelId(1)][..], &[][..]],
+    );
+    assert_eq!(
+        insertion.created_property_keys().collect::<Vec<_>>(),
+        vec![PropertyKeyId(1), PropertyKeyId(2)],
+    );
+    assert_eq!(
+        insertion.created_edge_relations().collect::<Vec<_>>(),
+        vec![RelationId(1)],
+    );
+
+    let carried = prepare(
+        "MATCH (n:F) CALL(n) { UNWIND [] AS unused CREATE (:F {p:n.p}) \
+         UNION CREATE (:F) }",
+    );
+    let GraphWriteChainStep::UnitCall(call) = &carried.steps()[0] else {
+        panic!("correlated unit CALL owner");
+    };
+    let GraphWriteChainStep::Insert(insertion) = &call.arms()[0].write_body().unwrap().steps()[0]
+    else {
+        panic!("native carried-element creation owner");
+    };
+    assert!(
+        insertion.requires_read(),
+        "a zero-row source cannot erase the declared property read from n",
+    );
+}
+
+#[test]
+fn call_union_arms_refuse_scope_schema_and_parameter_contract_drift() {
+    for text in [
+        "CALL() { CREATE (:F) UNION RETURN 1 AS value }",
+        "CALL() { CREATE (:F) RETURN 1 AS value UNION CREATE (:F) }",
+        "CALL() { CREATE (:F) RETURN 1 AS value UNION RETURN 2 AS other }",
+        "CALL() { CREATE (:F) RETURN 1 AS value UNION RETURN 2 AS value,3 AS extra }",
+        "CALL() { CREATE (n:F) RETURN n AS value UNION RETURN 2 AS value }",
+        "CALL() { CREATE (:F) RETURN 1 AS value UNION RETURN [1] AS value }",
+        "WITH 1 AS x CALL { WITH x CREATE (:F {p:x}) RETURN 1 AS value \
+         UNION RETURN x AS value } RETURN value",
+        "WITH 1 AS x,2 AS y CALL { WITH x CREATE (:F {p:x}) RETURN 1 AS value \
+         UNION WITH y RETURN x AS value } RETURN value",
+        "CALL() { CREATE (local:F) RETURN 1 AS value UNION RETURN local AS value }",
+        "CALL() { CREATE (:F {p:$arg}) RETURN 1 AS value \
+         UNION UNWIND $arg AS member RETURN member AS value }",
+    ] {
+        assert!(
+            PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols).is_err(),
+            "unexpectedly admitted {text}",
+        );
+    }
+
+    let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+        "CALL() { CREATE (:F {p:$value}) RETURN $value AS value \
+         UNION ALL RETURN $value+1 AS value } RETURN value",
+        RelationId(1),
+        &[("value", GqlParameterType::Int64)],
+        symbols,
+    )
+    .unwrap();
+    let schema = template.parameter_schema();
+    assert_eq!(schema.len(), 1);
+    assert_eq!(schema[0].name, "value");
+    assert_eq!(schema[0].parameter_type, GqlParameterType::Int64);
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+    let first = template
+        .bind_parameters(&GqlParameters::new().with_int64("value", 7).unwrap())
+        .unwrap();
+    let retained = first.clone();
+    let second = template
+        .bind_parameters(&GqlParameters::new().with_int64("value", 11).unwrap())
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(first, retained);
+}
+
+#[test]
+fn call_union_arm_limits_precede_catalog_work_and_errors_keep_original_byte_offsets() {
+    let body = std::iter::repeat_n("CREATE (:F)", fgdb_gql::MAX_GRAPH_SET_DEPTH + 1)
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    let lookups = Cell::new(0);
+    assert!(
+        PreparedGraphWriteChainText::prepare(
+            &format!("CALL() {{ {body} }}"),
+            RelationId(1),
+            |kind, name: &str| {
+                lookups.set(lookups.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(lookups.get(), 0);
+
+    let text = "CALL() { RETURN '雪' AS value \
+                UNION ALL CREATE (:Missing) RETURN 'x' AS value }";
+    let fgdb_gql::GraphWriteChainTextError::Insert(error) =
+        PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols).unwrap_err()
+    else {
+        panic!("the second arm keeps its native insertion diagnostic");
+    };
+    assert_eq!(error.offset, text.find("Missing").unwrap());
 }
 
 #[test]
@@ -152,7 +380,7 @@ fn unit_call_parameters_keep_one_typed_contract_across_body_and_outer_tail() {
         panic!("unit CALL must retain its native owner");
     };
     assert_eq!(call.columns(), &["value"]);
-    assert_eq!(call.body().steps().len(), 2);
+    assert_eq!(call.arms()[0].write_body().unwrap().steps().len(), 2);
 }
 
 #[test]
@@ -530,6 +758,12 @@ fn scheduler_executes_native_insert_plans_and_preserves_empty_duplicate_outer_ro
             vec![int(1), int(1), int(2)],
             vec![1, 1, 2, 11, 11, 12],
         ),
+        (
+            "UNWIND [1,1] AS x CALL(x) { CREATE (:F {p:x}) \
+             UNION ALL CREATE (:F {p:x+10}) } RETURN x",
+            vec![int(1), int(1)],
+            vec![1, 1, 11, 11],
+        ),
     ] {
         let chain = prepare(text);
         let mut cursor = GraphWriteChainCursor::new(&chain, true);
@@ -652,8 +886,9 @@ fn returning_calls_retain_typed_exports_from_every_native_write_owner() {
         };
         assert_eq!(call.export_columns(), &["value"], "{text}");
         assert_eq!(call.export_column_types(), &[kind], "{text}");
-        assert_eq!(call.body().columns(), &["value"], "{text}");
-        assert_eq!(call.body().column_types(), &[kind], "{text}");
+        let body = call.arms()[0].write_body().unwrap();
+        assert_eq!(body.columns(), &["value"], "{text}");
+        assert_eq!(body.column_types(), &[kind], "{text}");
         assert_eq!(chain.columns(), &["value"], "{text}");
         assert_eq!(chain.column_types(), &[kind], "{text}");
         assert!(
@@ -803,6 +1038,28 @@ fn returning_scheduler_executes_native_writes_and_joins_each_outer_occurrence() 
             vec![vec![1], vec![1], vec![2]],
             3,
             0,
+        ),
+        (
+            "UNWIND [1,1,2] AS x CALL(x) { UNWIND [x,x] AS y \
+             CREATE (:F {p:y}) RETURN y AS value UNION RETURN x AS value } RETURN x,value",
+            vec![vec![1, 1], vec![1, 1], vec![2, 2]],
+            6,
+            3,
+        ),
+        (
+            "WITH 1 AS x,2 AS y CALL { WITH x CREATE (:F {p:x}) \
+             RETURN x AS lhs,10 AS rhs UNION ALL WITH y RETURN 20 AS rhs,y AS lhs \
+             } RETURN x,y,lhs,rhs",
+            vec![vec![1, 2, 1, 10], vec![1, 2, 2, 20]],
+            1,
+            1,
+        ),
+        (
+            "CALL() { RETURN 7 AS value UNION ALL UNWIND [] AS x CREATE (:F) \
+             RETURN x AS value UNION ALL CREATE (:F) RETURN 8 AS value } RETURN value",
+            vec![vec![7], vec![8]],
+            1,
+            1,
         ),
     ] {
         let chain = prepare(text);

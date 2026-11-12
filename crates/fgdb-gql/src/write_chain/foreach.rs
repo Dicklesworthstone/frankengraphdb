@@ -264,11 +264,19 @@ impl<'a> ScopedWrite<'a> {
         }
     }
 
-    fn body(self) -> &'a PreparedGraphWriteChain {
+    fn body(self, arm: usize) -> Option<&'a PreparedGraphWriteChain> {
         match self {
-            Self::Foreach(foreach) => &foreach.body,
-            Self::UnitCall(call) => &call.body,
-            Self::ReturningCall(call) => &call.body,
+            Self::Foreach(foreach) => Some(&foreach.body),
+            Self::UnitCall(call) => call.arms.get(arm).and_then(|arm| arm.write_body()),
+            Self::ReturningCall(call) => call.arms.get(arm).and_then(|arm| arm.write_body()),
+        }
+    }
+
+    fn body_read(self, arm: usize) -> Option<&'a PreparedGraphSet> {
+        match self {
+            Self::Foreach(foreach) => foreach.body.read_continuation(),
+            Self::UnitCall(call) => call.arms.get(arm).and_then(|arm| arm.read_output()),
+            Self::ReturningCall(call) => call.arms.get(arm).and_then(|arm| arm.read_output()),
         }
     }
 
@@ -280,11 +288,11 @@ impl<'a> ScopedWrite<'a> {
         }
     }
 
-    fn imports(self) -> &'a [usize] {
+    fn imports(self, arm: usize) -> Option<&'a [usize]> {
         match self {
-            Self::Foreach(foreach) => &foreach.imports,
-            Self::UnitCall(call) => &call.imports,
-            Self::ReturningCall(call) => &call.imports,
+            Self::Foreach(foreach) => Some(&foreach.imports),
+            Self::UnitCall(call) => call.arms.get(arm).map(|arm| arm.imports.as_slice()),
+            Self::ReturningCall(call) => call.arms.get(arm).map(|arm| arm.imports.as_slice()),
         }
     }
 
@@ -306,6 +314,7 @@ struct Iteration<'a> {
     body_running: bool,
     body_read_running: bool,
     collection_running: bool,
+    returned: Option<Vec<GraphValueRow>>,
     restored: Vec<GraphValueRow>,
 }
 
@@ -358,6 +367,7 @@ impl<'a> GraphWriteChainCursor<'a> {
                 body_running: false,
                 body_read_running: false,
                 collection_running: false,
+                returned: None,
                 restored: Vec::new(),
             });
         }
@@ -376,10 +386,13 @@ impl<'a> GraphWriteChainCursor<'a> {
                     iteration.outer = Some(outer);
                     iteration.collection_running = false;
                 }
-                if iteration.body_running && iteration.body_at < iteration.scope.body().steps.len()
+                let arm = iteration.member.saturating_sub(1);
+                if iteration.body_running
+                    && let Some(body) = iteration.scope.body(arm)
+                    && iteration.body_at < body.steps.len()
                 {
                     control(Work)?;
-                    let step = &iteration.scope.body().steps[iteration.body_at];
+                    let step = &body.steps[iteration.body_at];
                     iteration.body_at += 1;
                     if let Some(scope) = ScopedWrite::from_step(step) {
                         if depth >= crate::MAX_GRAPH_SET_DEPTH {
@@ -397,8 +410,8 @@ impl<'a> GraphWriteChainCursor<'a> {
                     }
                     return Ok(Some(GraphWriteChainTask::Write {
                         step,
-                        continues: iteration.body_at < iteration.scope.body().steps.len()
-                            || iteration.scope.body().read_continuation().is_some(),
+                        continues: iteration.body_at < body.steps.len()
+                            || body.read_continuation().is_some(),
                         delivers: false,
                     }));
                 }
@@ -407,7 +420,7 @@ impl<'a> GraphWriteChainCursor<'a> {
                     // runs even over zero input rows: native global aggregates
                     // may still produce their zero/null/empty-list group.
                     if !iteration.body_read_running
-                        && let Some(read) = iteration.scope.body().read_continuation()
+                        && let Some(read) = iteration.scope.body_read(arm)
                     {
                         control(Work)?;
                         iteration.body_read_running = true;
@@ -418,16 +431,34 @@ impl<'a> GraphWriteChainCursor<'a> {
                         })));
                     }
                     if let ScopedWrite::ReturningCall(call) = iteration.scope {
-                        call.join_returned_controlled(
-                            iteration.outer.as_ref().ok_or_else(invalid)?,
-                            rows.take().ok_or_else(invalid)?,
-                            &mut iteration.restored,
-                            control,
-                        )?;
-                        // Only joined rows survive. In particular, an empty
-                        // returned bag removes this outer occurrence while
-                        // retaining the body's already-staged effects.
-                        iteration.outer = None;
+                        let returned = rows.take().ok_or_else(invalid)?;
+                        if call.arms.len() == 1 {
+                            call.join_returned_controlled(
+                                iteration.outer.as_ref().ok_or_else(invalid)?,
+                                returned,
+                                &mut iteration.restored,
+                                control,
+                            )?;
+                            iteration.outer = None;
+                        } else {
+                            call.collect_returned_controlled(
+                                arm,
+                                returned,
+                                &mut iteration.returned,
+                                control,
+                            )?;
+                            if iteration.member == call.arms.len() {
+                                call.join_returned_controlled(
+                                    iteration.outer.as_ref().ok_or_else(invalid)?,
+                                    iteration.returned.take().ok_or_else(invalid)?,
+                                    &mut iteration.restored,
+                                    control,
+                                )?;
+                                // Empty UNION output removes only this outer
+                                // occurrence, after every arm's effects ran.
+                                iteration.outer = None;
+                            }
+                        }
                     } else {
                         // Unit CALL and FOREACH ignore all body-local rows.
                         *rows = None;
@@ -469,8 +500,9 @@ impl<'a> GraphWriteChainCursor<'a> {
                 }
                 if let Some(outer) = &iteration.outer {
                     control(Work)?;
-                    // Unit CALL has one invocation and no collection or loop
-                    // member. Its imported row is the native body input.
+                    // CALL invokes every arm from a fresh import of this
+                    // saved outer row. Prior arm writes remain in the host's
+                    // staged graph; prior arm local rows never become imports.
                     let collection = match iteration.scope {
                         ScopedWrite::Foreach(_) => Some(outer.values().last().ok_or_else(invalid)?),
                         ScopedWrite::UnitCall(_) | ScopedWrite::ReturningCall(_) => None,
@@ -480,13 +512,22 @@ impl<'a> GraphWriteChainCursor<'a> {
                         Some(GraphValue::List(values)) => values.len(),
                         Some(GraphValue::Vertices(values)) => values.len(),
                         Some(GraphValue::Edges(values)) => values.len(),
+                        None => match iteration.scope {
+                            ScopedWrite::UnitCall(call) => call.arms.len(),
+                            ScopedWrite::ReturningCall(call) => call.arms.len(),
+                            ScopedWrite::Foreach(_) => return Err(invalid().into()),
+                        },
                         _ => 1,
                     };
                     if iteration.member < length {
                         control(Work)?; // includes a body that later produces no effects
                         control(ScratchEntry)?;
                         let mut values = Vec::new();
-                        for &column in iteration.scope.imports() {
+                        for &column in iteration
+                            .scope
+                            .imports(iteration.member)
+                            .ok_or_else(invalid)?
+                        {
                             control(ScratchEntry)?;
                             values.push(
                                 outer
@@ -516,7 +557,12 @@ impl<'a> GraphWriteChainCursor<'a> {
                         iteration.member += 1;
                         iteration.body_at = 0;
                         iteration.body_running = true;
-                        if iteration.scope.body().steps.is_empty() {
+                        if iteration
+                            .scope
+                            .body(iteration.member - 1)
+                            .is_none_or(|body| body.steps.is_empty())
+                            && iteration.scope.body_read(iteration.member - 1).is_none()
+                        {
                             return Err(invalid().into());
                         }
                         continue;

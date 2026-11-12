@@ -268,7 +268,11 @@ fn preflight_steps<Clock: FnMut() -> u64>(
             call.admit_patterns(|pattern| admit_pattern(pattern, scope))
                 .map_err(source)?;
             reads |= call.requires_read();
-            reads |= preflight_chain(call.body(), None, query_cx, scope, execution)?;
+            for arm in call.arms() {
+                if let Some(body) = arm.write_body() {
+                    reads |= preflight_chain(body, None, query_cx, scope, execution)?;
+                }
+            }
             continue;
         }
         if let GraphWriteChainStep::ReturningCall(call) = statement {
@@ -285,7 +289,11 @@ fn preflight_steps<Clock: FnMut() -> u64>(
             // The call reports actual graph/element demand, including its
             // body's terminal read, separately from its returned bindings.
             reads |= call.requires_read();
-            reads |= preflight_chain(call.body(), None, query_cx, scope, execution)?;
+            for arm in call.arms() {
+                if let Some(body) = arm.write_body() {
+                    reads |= preflight_chain(body, None, query_cx, scope, execution)?;
+                }
+            }
             continue;
         }
         if merges::preflight(statement, scope)? || vertices::preflight(statement, scope)? {
@@ -333,9 +341,49 @@ fn preflight_steps<Clock: FnMut() -> u64>(
                 }));
             }
         };
+        // Immutable creation declarations remain attempted fields even when
+        // an enclosing CALL/FOREACH selects no occurrences. Match staging's
+        // complete label-set visibility and every individual field/type check
+        // before evaluating any source or property expression.
+        execution.checkpoint().map_err(source)?;
+        if !scope.allows_relation(insertion.relation()) {
+            return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+        }
+        for labels in insertion.created_vertex_label_sets() {
+            execution.checkpoint().map_err(source)?;
+            if !scope.allows_vertex(labels) {
+                return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+            }
+            for label in labels {
+                execution.checkpoint().map_err(source)?;
+                if !scope.allows_label(*label) {
+                    return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+                }
+            }
+        }
+        for key in insertion.created_property_keys() {
+            execution.checkpoint().map_err(source)?;
+            if !scope.allows_property(key) {
+                return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+            }
+        }
+        for relation in insertion.created_edge_relations() {
+            execution.checkpoint().map_err(source)?;
+            if !scope.allows_relation(relation) {
+                return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+            }
+        }
         reads |= insertion.requires_read();
         if let Some(pattern) = insertion.selection() {
             admit_pattern(pattern, scope).map_err(source)?;
+        }
+        if let Some(relation) = insertion.relational_selection() {
+            relation
+                .admit_patterns(|pattern| {
+                    execution.checkpoint()?;
+                    admit_pattern(pattern, scope)
+                })
+                .map_err(source)?;
         }
     }
     Ok(reads)

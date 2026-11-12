@@ -22,8 +22,11 @@ pub use foreach::{
     GraphWriteChainCursor, GraphWriteChainRead, GraphWriteChainReadPhase, GraphWriteChainTask,
     PreparedGraphForeach,
 };
-pub(crate) use unit_call::PreparedGraphCallText;
-pub use unit_call::{PreparedGraphReturningCall, PreparedGraphUnitCall};
+pub use unit_call::{PreparedGraphCallArm, PreparedGraphReturningCall, PreparedGraphUnitCall};
+pub(crate) use unit_call::{
+    PreparedGraphCallArmText, PreparedGraphCallBody, PreparedGraphCallBodyText,
+    PreparedGraphCallText,
+};
 
 use crate::insertion::PreparedGraphInsert;
 use crate::insertion_query_text::InsertReturnTemplate;
@@ -525,7 +528,15 @@ impl PreparedGraphWriteChain {
                     foreach.body().independent_create_relation()?
                 }
                 GraphWriteChainStep::UnitCall(call) if !call.requires_read() => {
-                    call.body().independent_create_relation()?
+                    let mut current = None;
+                    for arm in call.arms() {
+                        let relation = arm.write_body()?.independent_create_relation()?;
+                        if current.is_some_and(|previous| previous != relation) {
+                            return None;
+                        }
+                        current = Some(relation);
+                    }
+                    current?
                 }
                 _ => return None,
             };

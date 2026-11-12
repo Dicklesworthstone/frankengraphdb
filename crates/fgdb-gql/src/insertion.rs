@@ -555,14 +555,16 @@ impl PreparedGraphInsert {
     pub const fn is_standalone(&self) -> bool {
         matches!(self.input, Input::Unit)
     }
-    /// Whether evaluating this input requires access to a graph source.
+    /// Whether evaluating the complete creation reads a graph source or a
+    /// carried element, including lazy expressions and procedure operands.
     #[must_use]
-    pub const fn requires_read(&self) -> bool {
-        match &self.input {
-            Input::Unit => false,
-            Input::Pattern(_) => true,
-            Input::Relation(relation) => relation.operand_count() != 0,
-        }
+    pub fn requires_read(&self) -> bool {
+        self.properties_read_elements()
+            || match &self.input {
+                Input::Unit => false,
+                Input::Pattern(_) => true,
+                Input::Relation(relation) => relation.reads_graph() || relation.reads_elements(),
+            }
     }
     #[must_use]
     pub const fn relation(&self) -> RelationId {
@@ -585,6 +587,30 @@ impl PreparedGraphInsert {
         self.vertices
             .iter()
             .flat_map(|vertex| vertex.labels.iter().copied())
+    }
+
+    /// Each complete declared vertex label set, including empty sets. Hosts
+    /// use these to admit creation visibility before an empty source can skip
+    /// its body; individual attempted memberships still need field admission.
+    pub fn created_vertex_label_sets(&self) -> impl Iterator<Item = &[LabelId]> + '_ {
+        self.vertices.iter().map(|vertex| vertex.labels.as_slice())
+    }
+
+    /// Every statically declared creation property, without evaluating an RHS
+    /// or inspecting selected rows. Repeated fields across declarations remain
+    /// visible to the caller's cumulative admission meter.
+    pub fn created_property_keys(&self) -> impl Iterator<Item = PropertyKeyId> + '_ {
+        self.vertices
+            .iter()
+            .map(|vertex| &vertex.properties)
+            .chain(self.edges.iter().map(|edge| &edge.properties))
+            .flat_map(|properties| properties.keys.iter().copied())
+    }
+
+    /// The actual declared relationship types, independent of the coordinate
+    /// in which this creation places its vertices.
+    pub fn created_edge_relations(&self) -> impl Iterator<Item = RelationId> + '_ {
+        self.edges.iter().map(|edge| edge.relation)
     }
 
     fn properties_read_elements(&self) -> bool {

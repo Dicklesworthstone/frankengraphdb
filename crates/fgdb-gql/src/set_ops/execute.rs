@@ -13,6 +13,27 @@ use crate::{
 };
 use core::cmp::Ordering;
 
+impl PreparedGraphSet {
+    /// Combine already admitted private CALL rows with exactly the native
+    /// set comparator, tie ordering and allocation controls. The caller owns
+    /// schema validation and keeps one meter across all arms and occurrences.
+    pub(crate) fn union_rows_controlled<E>(
+        left: Vec<GraphValueRow>,
+        right: Vec<GraphValueRow>,
+        quantifier: GraphSetQuantifier,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<GraphValueRow>, E> {
+        merge::combine(
+            left,
+            right,
+            GraphSetOperation::Union,
+            quantifier,
+            control,
+            &mut |left, right, control| compare_rows(left, right, &[], control),
+        )
+    }
+}
+
 /// The native Cartesian occurrence copy, shared by materialized, folded and
 /// external execution. Both input rows already belong to complete children.
 /// This owns no ordering, filtering, pagination or public result admission.

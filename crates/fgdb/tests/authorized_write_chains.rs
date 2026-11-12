@@ -786,6 +786,231 @@ where
     result
 }
 
+mod call_unions {
+    use super::*;
+    use fgdb_warden::LimitDimension;
+
+    #[test]
+    fn all_union_arms_preflight_before_empty_or_failing_input() {
+        lab(0xc4a1_2201, |contexts| async move {
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            for (text, rights, expected) in [
+                (
+                    "UNWIND [] AS x CALL(x) { \
+                     CREATE (:Visible {p:x}) RETURN 1 AS value \
+                     UNION ALL MATCH (n:Visible) RETURN n.p AS value \
+                     } RETURN value LIMIT 0",
+                    Rights::Write,
+                    Error::PermissionDenied,
+                ),
+                (
+                    "UNWIND [] AS x CALL(x) { \
+                     CREATE (:Visible {p:x}) RETURN 1 AS value \
+                     UNION ALL MATCH (n:Visible) RETURN n.secret AS value \
+                     } RETURN value LIMIT 0",
+                    Rights::ReadWrite,
+                    Error::ScopeDenied,
+                ),
+                (
+                    "UNWIND [] AS x CALL(x) { \
+                     CREATE (:Visible {p:x}) RETURN 1 AS value \
+                     UNION ALL CREATE (:Visible {secret:2}) RETURN 2 AS value \
+                     } RETURN value LIMIT 0",
+                    Rights::ReadWrite,
+                    Error::ScopeDenied,
+                ),
+                (
+                    "UNWIND [] AS x CALL(x) { \
+                     CREATE (:Visible {p:x}) RETURN 1 AS value \
+                     UNION ALL CREATE (:Hidden {p:2}) RETURN 2 AS value \
+                     } RETURN value LIMIT 0",
+                    Rights::ReadWrite,
+                    Error::ScopeDenied,
+                ),
+                (
+                    "UNWIND [] AS x CALL(x) { \
+                     CREATE (:Visible {p:x}) RETURN 1 AS value \
+                     UNION ALL CREATE (:Visible:Hidden {p:2}) RETURN 2 AS value \
+                     } RETURN value LIMIT 0",
+                    Rights::ReadWrite,
+                    Error::ScopeDenied,
+                ),
+                (
+                    "UNWIND [] AS x CALL(x) { \
+                     CREATE (:Visible {p:x}) RETURN 1 AS value \
+                     UNION ALL CREATE (:Visible)-[:S]->(:Visible) RETURN 2 AS value \
+                     } RETURN value LIMIT 0",
+                    Rights::ReadWrite,
+                    Error::ScopeDenied,
+                ),
+                (
+                    "UNWIND [0] AS x CALL(x) { \
+                     CREATE (:Visible {p:1/x}) RETURN 1 AS value \
+                     UNION ALL MATCH (n:Visible) RETURN n.p AS value \
+                     } RETURN value LIMIT 0",
+                    Rights::Write,
+                    Error::PermissionDenied,
+                ),
+            ] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let basis = db.frontier().unwrap();
+                let mut capability = grant(rights, 0);
+                capability.relations = Scope::only([R]);
+                let token = issuer.issue_at(&capability, NOW).unwrap();
+                let error = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &chain(text),
+                        policy(0),
+                        || NOW,
+                    )
+                    .await
+                    .expect_err("every arm is admitted before evaluating the first source");
+                assert_eq!(authorization(&error), Some(expected), "{text}: {error:?}");
+                assert_eq!(db.frontier().unwrap(), basis);
+                assert!(db.vertices().unwrap().is_empty());
+                assert!(db.edges().unwrap().is_empty());
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        });
+    }
+
+    #[test]
+    fn read_only_union_arms_observe_masked_staged_writes() {
+        lab(0xc4a1_2202, |contexts| async move {
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite, 3), NOW).unwrap();
+            let program = chain(
+                "CALL() { CREATE (:Visible {p:11}) RETURN 11 AS value \
+                 UNION ALL MATCH (n:Visible) RETURN n.p AS value \
+                 } RETURN value ORDER BY value",
+            );
+            let mut reference = None;
+            for hidden in [false, true] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(10), vec![L], vec![(P, CanonicalScalar::Int(7))]);
+                if hidden {
+                    seed.create_vertex(VId(90), vec![HIDDEN], vec![(P, CanonicalScalar::Int(900))]);
+                    seed.set_vertex_property(VId(10), SECRET, Some(CanonicalScalar::Int(99)));
+                }
+                db.write(&commit, seed).await.unwrap();
+                let before = (db.frontier().unwrap(), db.vertices().unwrap());
+                let (stats, rows, completion) = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        policy(3),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(stats.created_vertices, 1);
+                assert_eq!(rows.rows.result_rows, 3);
+                assert_eq!(
+                    rows.value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    [7, 11, 11].map(|value| vec![GraphValue::Scalar(CanonicalScalar::Int(value))])
+                );
+                assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: db.frontier().unwrap()
+                    }
+                );
+                assert_eq!(db.vertices().unwrap().len(), before.1.len() + 1);
+                for original in before.1 {
+                    assert_eq!(db.vertex(original.vid).unwrap().as_ref(), Some(&original));
+                }
+                if let Some(reference) = &reference {
+                    assert_eq!(
+                        &(stats, rows),
+                        reference,
+                        "hidden state cannot change union work"
+                    );
+                } else {
+                    reference = Some((stats, rows));
+                }
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        });
+    }
+
+    #[test]
+    fn private_union_rows_do_not_spend_final_delivery_allowance() {
+        lab(0xc4a1_2203, |contexts| async move {
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            let text = "CALL() { UNWIND [0,0] AS x CREATE (:Visible {p:1}) \
+                        RETURN 1 AS value \
+                        UNION MATCH (n:Visible) RETURN 1 AS value } RETURN value";
+            for (suffix, allowance, public_rows, succeeds) in [
+                ("", 1, 1, true),
+                ("", 0, 1, false),
+                (" LIMIT 0", 0, 0, true),
+            ] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let basis = db.frontier().unwrap();
+                let token = issuer
+                    .issue_at(&grant(Rights::ReadWrite, allowance), NOW)
+                    .unwrap();
+                let program = chain(&format!("{text}{suffix}"));
+                let result = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        policy(public_rows),
+                        || NOW,
+                    )
+                    .await;
+                if succeeds {
+                    let (stats, rows, _) = result.unwrap();
+                    assert_eq!(stats.created_vertices, 2);
+                    assert_eq!(rows.rows.result_rows, public_rows);
+                    assert_eq!(rows.value.len() as u64, public_rows);
+                    if public_rows == 1 {
+                        assert_eq!(
+                            rows.value[0].values(),
+                            &[GraphValue::Scalar(CanonicalScalar::Int(1))]
+                        );
+                    }
+                    assert_eq!(db.vertices().unwrap().len(), 2);
+                    assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+                } else {
+                    let error = result.expect_err("final delivery refusal rolls back both arms");
+                    assert_eq!(
+                        authorization(&error),
+                        Some(Error::LimitExceeded(LimitDimension::Rows))
+                    );
+                    assert_eq!(db.frontier().unwrap(), basis);
+                    assert!(db.vertices().unwrap().is_empty());
+                }
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        });
+    }
+}
+
 mod staged_procedures {
     use super::*;
     use fgdb_gql::algebra::GraphValueRow;

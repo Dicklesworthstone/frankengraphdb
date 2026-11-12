@@ -1031,7 +1031,7 @@ impl PreparedGraphWriteChainText {
             return Ok(PreparedContinuation::Returned(from.row));
         }
         let reading = matches!(clause, TokenKind::Word(word)
-            if ["MATCH", "OPTIONAL", "CALL", "WITH", "UNWIND"].iter().any(|read| word.eq_ignore_ascii_case(read)));
+            if ["MATCH", "OPTIONAL", "CALL", "WITH", "UNWIND", "RETURN"].iter().any(|read| word.eq_ignore_ascii_case(read)));
         let matched = if reading {
             Self::matched_write(lexer.clone())?
         } else {

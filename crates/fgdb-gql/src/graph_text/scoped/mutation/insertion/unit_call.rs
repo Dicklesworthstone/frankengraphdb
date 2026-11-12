@@ -8,11 +8,19 @@ use crate::graph_text::parameters::UnresolvedGraphText;
 use crate::graph_text::scoped::mutation::return_projection::pipeline::multipart::UnresolvedReadInput;
 use crate::set_text::multipart::BoundReadInput;
 use crate::set_text::{ElementKeySlot, ReadProjectionTemplate};
-use crate::write_chain::{ChainTextStep, PreparedGraphCallText};
-use crate::{
-    GraphWriteChainStep, GraphWriteChainTextError, PreparedGraphReturningCall,
-    PreparedGraphUnitCall, PreparedGraphWriteChainText,
+use crate::write_chain::{
+    ChainTextStep, PreparedGraphCallArmText, PreparedGraphCallBody, PreparedGraphCallBodyText,
+    PreparedGraphCallText,
 };
+use crate::{
+    GraphWriteChainStep, GraphWriteChainTextError, PreparedGraphCallArm,
+    PreparedGraphReturningCall, PreparedGraphUnitCall, PreparedGraphWriteChainText,
+};
+
+struct CallArmRange {
+    start: usize,
+    end: usize,
+}
 
 struct CallPreparation<'a> {
     statement: &'a str,
@@ -21,13 +29,21 @@ struct CallPreparation<'a> {
     outer: Vec<(Name<'a>, GraphSetColumnType)>,
     outer_columns: Vec<String>,
     outer_types: Vec<GraphSetColumnType>,
+    scoped_imports: Option<Vec<usize>>,
     imports: Vec<usize>,
+    ranges: Vec<CallArmRange>,
+    arm: usize,
+    arms: Vec<PreparedGraphCallArmText>,
+    quantifier: Option<crate::GraphSetQuantifier>,
+    parameters: Vec<GqlParameterSpec>,
     slots: Vec<ElementKeySlot>,
     next: Option<ChainContinuation<'a>>,
     steps: Vec<ChainTextStep>,
     read: Option<BoundReadInput>,
     read_keys: Vec<PropertyKeyId>,
+    arm_read_keys: Vec<PropertyKeyId>,
     exports: Option<Vec<(Name<'a>, GraphSetColumnType)>>,
+    combined_exports: Option<Vec<(Name<'a>, GraphSetColumnType)>>,
     close_at: usize,
 }
 
@@ -53,7 +69,7 @@ impl PreparedGraphCallText {
                 .last_mut()
                 .ok_or_else(|| expected(statement.len(), "an unfinished unit CALL"))?;
             if let Some(from) = frame.next_nested(relation, declarations, resolve)? {
-                let statement = &frame.statement[..frame.close_at];
+                let statement = &frame.statement[..frame.ranges[frame.arm].end];
                 let depth = pending.len();
                 pending.push(Self::prepare_at_depth(
                     statement,
@@ -147,50 +163,49 @@ impl PreparedGraphCallText {
             parser.punct(b')', ") after CALL imports")?;
         }
         parser.punct(b'{', "{ before a unit CALL body")?;
-        if !scoped && parser.unit_call_legacy_imports(&outer)? {
-            parser.word("WITH")?;
-            if parser.take(b'*')? {
-                imports.extend(0..outer.len());
-            } else {
-                imports = parser.unit_call_import_names(&outer)?;
-            }
-        }
-        let body_at = parser.current.at;
-        let close_at = parser.unit_call_body_end(depth)?;
+        let (ranges, quantifier, close_at) = parser.unit_call_body_arms(depth)?;
         let outer_columns: Vec<_> = outer.iter().map(|(name, _)| name.text.to_owned()).collect();
         let outer_types: Vec<_> = outer.iter().map(|(_, kind)| *kind).collect();
         source.share_parameters(&parser.syntax.parameters, &parser.syntax.parameter_offsets);
         let slots = source.element_key_slots();
         let mut input = source.resolve(resolve)?;
         input.first.owned = owned;
-        let local = imports.iter().map(|&column| outer[column]).collect();
-        let next = Some(ChainContinuation {
-            at: body_at,
-            row: local,
-            boundary: None,
-            parameters: parser.syntax.parameters.clone(),
-        });
-        Ok(CallPreparation {
+        let parameters = parser.syntax.parameters.clone();
+        let mut frame = CallPreparation {
             statement,
             parser,
             input,
             outer,
             outer_columns,
             outer_types,
-            imports,
+            scoped_imports: scoped.then_some(imports),
+            imports: Vec::new(),
+            ranges,
+            arm: 0,
+            arms: Vec::new(),
+            quantifier,
+            parameters,
             slots,
-            next,
+            next: None,
             steps: Vec::new(),
             read: None,
             read_keys: Vec::new(),
+            arm_read_keys: Vec::new(),
             exports: None,
+            combined_exports: None,
             close_at,
-        })
+        };
+        frame.start_arm(declarations, resolve)?;
+        Ok(frame)
     }
 
     pub(crate) fn parameter_schema(&self) -> Vec<GqlParameterSpec> {
         let mut schema: Vec<GqlParameterSpec> = Vec::new();
-        let body_schema = self.body.parameter_schema();
+        let body_schema: Vec<_> = self
+            .arms
+            .iter()
+            .flat_map(|arm| arm.body.parameter_schema())
+            .collect();
         for spec in self
             .input
             .parameter_schema()
@@ -224,37 +239,88 @@ impl PreparedGraphCallText {
         let input = self
             .input
             .bind_parameters(&arguments.subset_for(self.input.parameter_schema()))?;
-        let types = self
-            .imports
-            .iter()
-            .map(|&column| self.outer_types[column])
-            .collect();
-        let body = self.body.bind_parameters_with_input(
-            &arguments.subset_for(&self.body.parameter_schema()),
-            Some(types),
-        )?;
+        let mut arms = Vec::new();
+        for arm in &self.arms {
+            let types: Vec<_> = arm
+                .imports
+                .iter()
+                .map(|&column| self.outer_types[column])
+                .collect();
+            let own = arguments.subset_for(&arm.body.parameter_schema());
+            let body = match &arm.body {
+                PreparedGraphCallBodyText::Write(body) => PreparedGraphCallBody::Write(
+                    body.bind_parameters_with_input(&own, Some(types))?,
+                ),
+                PreparedGraphCallBodyText::Read(body) => {
+                    let imported = body.first.owned.as_deref();
+                    if !imported
+                        .is_some_and(|(_, expected)| expected.as_slice() == types.as_slice())
+                    {
+                        return Err(expected(
+                            self.input.first.return_at,
+                            "the CALL arm's independent import row",
+                        )
+                        .into());
+                    }
+                    let read = body.bind_parameters(&own)?;
+                    if !imported
+                        .is_some_and(|(columns, types)| read.has_one_owned_input(columns, types))
+                        || read.check_parent_depth().is_err()
+                    {
+                        return Err(expected(
+                            self.input.first.return_at,
+                            "one complete import row for the CALL read arm",
+                        )
+                        .into());
+                    }
+                    PreparedGraphCallBody::Read(read)
+                }
+            };
+            let alignment = if let Some((columns, types)) = &arm.exports {
+                let (actual_columns, actual_types) = match &body {
+                    PreparedGraphCallBody::Write(body) => (body.columns(), body.column_types()),
+                    PreparedGraphCallBody::Read(body) => (body.columns(), body.column_types()),
+                };
+                if actual_columns != columns || actual_types != types {
+                    return Err(expected(
+                        self.input.first.return_at,
+                        "the prepared CALL arm export schema",
+                    )
+                    .into());
+                }
+                let (common, _) = self.exports.as_ref().ok_or_else(|| {
+                    expected(self.input.first.return_at, "RETURN in every CALL arm")
+                })?;
+                crate::set_text::union_column_order(common, columns).map_err(|()| {
+                    crate::GraphSetTextError {
+                        offset: self.input.first.return_at,
+                        kind: crate::GraphSetTextErrorKind::DifferentColumnsInUnion,
+                    }
+                })?
+            } else {
+                Vec::new()
+            };
+            arms.push(PreparedGraphCallArm {
+                body,
+                imports: arm.imports.clone(),
+                alignment,
+            });
+        }
         let output = self
             .output
             .as_ref()
             .map(|output| output.bind_parameters(&arguments.subset_for(output.parameter_schema())))
             .transpose()?;
         if let Some((columns, types)) = &self.exports {
-            if body.columns() != columns || body.column_types() != types {
-                return Err(expected(
-                    self.input.first.return_at,
-                    "the prepared CALL export schema",
-                )
-                .into());
-            }
             let joined_columns = self.outer_columns.iter().chain(columns).cloned().collect();
             let joined_types = self.outer_types.iter().chain(types).copied().collect();
             Ok(GraphWriteChainStep::ReturningCall(Box::new(
                 PreparedGraphReturningCall {
                     input,
                     output,
-                    body,
+                    arms,
+                    quantifier: self.quantifier,
                     outer_types: self.outer_types.clone(),
-                    imports: self.imports.clone(),
                     export_columns: columns.clone(),
                     export_types: types.clone(),
                     joined_columns,
@@ -268,10 +334,9 @@ impl PreparedGraphCallText {
                 PreparedGraphUnitCall {
                     input,
                     output,
-                    body,
+                    arms,
                     outer_columns: self.outer_columns.clone(),
                     outer_types: self.outer_types.clone(),
-                    imports: self.imports.clone(),
                     read_keys: self.read_keys.clone(),
                     returning: self.returning,
                 },
@@ -281,44 +346,179 @@ impl PreparedGraphCallText {
 }
 
 impl<'a> CallPreparation<'a> {
+    fn start_arm(
+        &mut self,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut impl GraphSymbolResolver,
+    ) -> Result<(), GraphWriteChainTextError> {
+        let range = &self.ranges[self.arm];
+        let mut parser =
+            Parser::new_with_parameter_types(&self.statement[..range.end], declarations)?
+                .with_zones(resolve.time_zones())
+                .resume_after(None, &self.parameters, range.start)?;
+        self.imports = if let Some(imports) = &self.scoped_imports {
+            imports.clone()
+        } else if parser.unit_call_legacy_imports(&self.outer)? {
+            parser.word("WITH")?;
+            if parser.take(b'*')? {
+                (0..self.outer.len()).collect()
+            } else {
+                parser.unit_call_import_names(&self.outer)?
+            }
+        } else {
+            Vec::new()
+        };
+        self.next = Some(ChainContinuation {
+            at: parser.current.at,
+            row: self
+                .imports
+                .iter()
+                .map(|&column| self.outer[column])
+                .collect(),
+            boundary: None,
+            parameters: self.parameters.clone(),
+        });
+        Ok(())
+    }
+
+    fn finish_arm(&mut self) -> Result<(), GraphWriteChainTextError> {
+        let range = &self.ranges[self.arm];
+        let body = if self.steps.is_empty() {
+            let read = self
+                .read
+                .take()
+                .ok_or_else(|| expected(range.start, "a nonempty native CALL arm"))?;
+            self.arm_read_keys.append(&mut self.read_keys);
+            PreparedGraphCallBodyText::Read(read)
+        } else {
+            PreparedGraphCallBodyText::Write(PreparedGraphWriteChainText {
+                statement: self.statement[..range.end].to_owned(),
+                steps: core::mem::take(&mut self.steps),
+                read: self.read.take(),
+                read_keys: core::mem::take(&mut self.read_keys),
+            })
+        };
+        for spec in body.parameter_schema() {
+            if let Some(known) = self
+                .parameters
+                .iter_mut()
+                .find(|known| known.name == spec.name)
+            {
+                if known.parameter_type != spec.parameter_type {
+                    return Err(error(
+                        range.start,
+                        GraphPatternTextErrorKind::ConflictingParameterTypes,
+                    )
+                    .into());
+                }
+                known.requires_positive |= spec.requires_positive;
+                known.occurrences = known.occurrences.max(spec.occurrences);
+            } else {
+                self.parameters.push(spec);
+            }
+        }
+        let exports = self.exports.take();
+        if self.arms.is_empty() {
+            self.combined_exports.clone_from(&exports);
+        } else {
+            match (&mut self.combined_exports, &exports) {
+                (None, None) => {}
+                (Some(common), Some(exported)) => {
+                    let left: Vec<_> = common
+                        .iter()
+                        .map(|(name, _)| name.text.to_owned())
+                        .collect();
+                    let right: Vec<_> = exported
+                        .iter()
+                        .map(|(name, _)| name.text.to_owned())
+                        .collect();
+                    let alignment =
+                        crate::set_text::union_column_order(&left, &right).map_err(|()| {
+                            crate::GraphSetTextError {
+                                offset: range.start,
+                                kind: crate::GraphSetTextErrorKind::DifferentColumnsInUnion,
+                            }
+                        })?;
+                    for (column, (_, left)) in common.iter_mut().enumerate() {
+                        let right = exported[alignment[column]].1;
+                        *left = left
+                            .common_set_domain(right)
+                            .ok_or(crate::GraphSetTextError {
+                                offset: range.start,
+                                kind: crate::GraphSetTextErrorKind::SetBuild(
+                                    crate::GraphSetBuildError::ColumnType {
+                                        column,
+                                        left: *left,
+                                        right,
+                                    },
+                                ),
+                            })?;
+                    }
+                }
+                _ => {
+                    return Err(expected(range.start, "RETURN in all UNION arms or in none").into());
+                }
+            }
+        }
+        self.arms.push(PreparedGraphCallArmText {
+            body,
+            imports: core::mem::take(&mut self.imports),
+            exports: exports.map(|exports| {
+                exports
+                    .into_iter()
+                    .map(|(name, kind)| (name.text.to_owned(), kind))
+                    .unzip()
+            }),
+        });
+        Ok(())
+    }
+
     fn next_nested(
         &mut self,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
         resolve: &mut impl GraphSymbolResolver,
     ) -> Result<Option<ChainContinuation<'a>>, GraphWriteChainTextError> {
-        let body_text = &self.statement[..self.close_at];
-        while let Some(from) = self.next.take() {
-            if self.steps.len() >= crate::MAX_GRAPH_SET_DEPTH && from.at != self.close_at {
-                return Err(expected(from.at, "bounded unit CALL body step count").into());
-            }
-            match PreparedGraphWriteChainText::prepare_continuation(
-                body_text,
-                relation,
-                declarations,
-                resolve,
-                from,
-                true,
-            )? {
-                PreparedContinuation::UnitCall(from) => return Ok(Some(from)),
-                PreparedContinuation::Write(step, after) => {
-                    self.steps.push(step);
-                    self.next = after;
+        loop {
+            let end = self.ranges[self.arm].end;
+            let body_text = &self.statement[..end];
+            while let Some(from) = self.next.take() {
+                if self.steps.len() >= crate::MAX_GRAPH_SET_DEPTH && from.at != end {
+                    return Err(expected(from.at, "bounded unit CALL body step count").into());
                 }
-                PreparedContinuation::Read(read) => {
-                    let PreparedReadContinuation {
-                        input,
-                        keys,
-                        output,
-                    } = *read;
-                    self.read = Some(input);
-                    self.read_keys = keys;
-                    self.exports = Some(output);
+                match PreparedGraphWriteChainText::prepare_continuation(
+                    body_text,
+                    relation,
+                    declarations,
+                    resolve,
+                    from,
+                    true,
+                )? {
+                    PreparedContinuation::UnitCall(from) => return Ok(Some(from)),
+                    PreparedContinuation::Write(step, after) => {
+                        self.steps.push(step);
+                        self.next = after;
+                    }
+                    PreparedContinuation::Read(read) => {
+                        let PreparedReadContinuation {
+                            input,
+                            keys,
+                            output,
+                        } = *read;
+                        self.read = Some(input);
+                        self.read_keys = keys;
+                        self.exports = Some(output);
+                    }
+                    PreparedContinuation::Returned(exports) => self.exports = Some(exports),
                 }
-                PreparedContinuation::Returned(exports) => self.exports = Some(exports),
             }
+            self.finish_arm()?;
+            self.arm += 1;
+            if self.arm == self.ranges.len() {
+                return Ok(None);
+            }
+            self.start_arm(declarations, resolve)?;
         }
-        Ok(None)
     }
 
     fn finish(
@@ -333,24 +533,21 @@ impl<'a> CallPreparation<'a> {
             outer,
             outer_columns,
             outer_types,
-            imports,
             mut slots,
-            steps,
-            read,
-            read_keys,
-            exports,
+            arms,
+            quantifier,
+            parameters,
+            arm_read_keys,
+            combined_exports: exports,
             close_at,
-            next: _,
+            ..
         } = self;
-        if steps.is_empty() {
-            return Err(expected(close_at, "a nonempty unit CALL write body").into());
+        if !arms
+            .iter()
+            .any(|arm| matches!(arm.body, PreparedGraphCallBodyText::Write(_)))
+        {
+            return Err(expected(close_at, "a CALL containing a native write arm").into());
         }
-        let body = PreparedGraphWriteChainText {
-            statement: statement[..close_at].to_owned(),
-            steps,
-            read,
-            read_keys,
-        };
         let mut combined = outer;
         if let Some(exports) = &exports {
             for &(name, kind) in exports {
@@ -371,12 +568,6 @@ impl<'a> CallPreparation<'a> {
             .iter()
             .map(|(name, kind)| (name.text.to_owned(), *kind))
             .unzip();
-        let mut parameters = parser.syntax.parameters.clone();
-        for spec in body.parameter_schema() {
-            if !parameters.iter().any(|known| known.name == spec.name) {
-                parameters.push(spec);
-            }
-        }
         parser
             .syntax
             .parameter_offsets
@@ -442,21 +633,22 @@ impl<'a> CallPreparation<'a> {
             output.first.owned = Some(Box::new((joined_columns, joined_types)));
             (Some(output), continuation, true)
         };
-        let read_keys = slots
+        let mut read_keys: Vec<_> = slots
             .iter()
             .filter_map(|slot| match slot.bind() {
                 crate::GraphElementKey::Property(key) => Some(key),
                 crate::GraphElementKey::Unbound | crate::GraphElementKey::Missing => None,
             })
             .collect();
+        read_keys.extend(arm_read_keys);
         Ok((
             PreparedGraphCallText {
                 input,
                 output,
-                body,
+                arms,
+                quantifier,
                 outer_columns,
                 outer_types,
-                imports,
                 read_keys,
                 returning,
                 exports: exports.map(|exports| {
@@ -517,11 +709,15 @@ impl<'a> Parser<'a> {
                 continue;
             }
             return Ok(matches!(next.kind, TokenKind::Word(word)
-                if ["MATCH", "OPTIONAL", "WITH", "UNWIND", "CALL", "CREATE", "INSERT", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "FOREACH"].iter().any(|clause| word.eq_ignore_ascii_case(clause))));
+                if ["MATCH", "OPTIONAL", "WITH", "UNWIND", "CALL", "CREATE", "INSERT", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "FOREACH", "RETURN"].iter().any(|clause| word.eq_ignore_ascii_case(clause))));
         }
     }
 
-    fn unit_call_body_end(&self, outer_depth: usize) -> Result<usize, GraphPatternTextError> {
+    fn unit_call_body_arms(
+        &self,
+        outer_depth: usize,
+    ) -> Result<(Vec<CallArmRange>, Option<crate::GraphSetQuantifier>, usize), GraphPatternTextError>
+    {
         let mut lexer = Lexer {
             text: self.lexer.text,
             at: self.current.at,
@@ -531,7 +727,12 @@ impl<'a> Parser<'a> {
         let mut scope_starts = std::collections::BTreeSet::new();
         let mut scopes = outer_depth + 1;
         let mut previous = None;
+        let mut before_previous = None;
+        let mut previous_delimited = false;
         let mut nonempty = false;
+        let mut start = self.current.at;
+        let mut arms = Vec::new();
+        let mut union_quantifier = None;
         loop {
             let token = lexer.next()?;
             match token.kind {
@@ -548,7 +749,11 @@ impl<'a> Parser<'a> {
                             GraphPatternTextErrorKind::Expected("nonempty unit CALL write body"),
                         ));
                     }
-                    return Ok(token.at);
+                    arms.push(CallArmRange {
+                        start,
+                        end: token.at,
+                    });
+                    return Ok((arms, union_quantifier, token.at));
                 }
                 TokenKind::Punct(open @ (b'(' | b'[' | b'{')) => {
                     let scoped = scope_starts.remove(&token.at);
@@ -589,15 +794,47 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Word(word)
                     if brackets.is_empty()
-                        && !matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
-                        && !matches!(previous, Some(TokenKind::Word(prior))
-                            if ["AS", "STARTS", "ENDS", "ON"].iter().any(|word| prior.eq_ignore_ascii_case(word)))
-                        && word.eq_ignore_ascii_case("UNION") =>
+                        && word.eq_ignore_ascii_case("UNION")
+                        && PreparedGraphWriteChainText::call_union_separator(
+                            token,
+                            previous,
+                            before_previous,
+                            previous_delimited,
+                            &lexer,
+                        )? =>
                 {
-                    return Err(error(
-                        token.at,
-                        GraphPatternTextErrorKind::Expected("a write CALL body without UNION"),
-                    ));
+                    if !nonempty {
+                        return Err(expected(token.at, "a nonempty UNION arm"));
+                    }
+                    if arms.len() + 1 >= crate::MAX_GRAPH_SET_DEPTH {
+                        return Err(expected(token.at, "bounded CALL UNION arm count"));
+                    }
+                    let next = lexer.clone().next()?;
+                    let quantifier = match next.kind {
+                        TokenKind::Word(word) if word.eq_ignore_ascii_case("ALL") => {
+                            lexer.next()?;
+                            crate::GraphSetQuantifier::All
+                        }
+                        TokenKind::Word(word) if word.eq_ignore_ascii_case("DISTINCT") => {
+                            lexer.next()?;
+                            crate::GraphSetQuantifier::Distinct
+                        }
+                        _ => crate::GraphSetQuantifier::Distinct,
+                    };
+                    if union_quantifier.is_some_and(|previous| previous != quantifier) {
+                        return Err(expected(token.at, "one quantifier across CALL UNION arms"));
+                    }
+                    union_quantifier = Some(quantifier);
+                    arms.push(CallArmRange {
+                        start,
+                        end: token.at,
+                    });
+                    start = lexer.clone().next()?.at;
+                    nonempty = false;
+                    previous = None;
+                    before_previous = None;
+                    previous_delimited = false;
+                    continue;
                 }
                 TokenKind::Word(word)
                     if !matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
@@ -619,12 +856,102 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
             nonempty = true;
+            before_previous = previous;
             previous = Some(token.kind);
+            previous_delimited = lexer.text.as_bytes().get(token.at) == Some(&b'`');
         }
     }
 }
 
 impl PreparedGraphWriteChainText {
+    /// As in the native set framer, a separator introduces a branch head.
+    /// UNION remains an identifier in operand, alias and property positions.
+    /// Empty trailing/middle arms still count as separators so the structural
+    /// scan refuses them before any catalog resolution. The native compiler
+    /// subsequently validates each complete expression and clause sequence.
+    fn call_union_separator(
+        token: Token<'_>,
+        previous: Option<TokenKind<'_>>,
+        before_previous: Option<TokenKind<'_>>,
+        previous_delimited: bool,
+        lexer: &Lexer<'_>,
+    ) -> Result<bool, GraphPatternTextError> {
+        if lexer.text.as_bytes().get(token.at) == Some(&b'`') {
+            return Ok(false);
+        }
+        let after_operand_prefix = matches!(
+            before_previous,
+            Some(TokenKind::Punct(
+                b',' | b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'<' | b'>' | b'!' | b'|' | b'&'
+            ))
+        ) || matches!(before_previous, Some(TokenKind::Word(word)) if [
+            "RETURN", "WITH", "UNWIND", "WHERE", "BY", "SKIP", "LIMIT", "ALL", "DISTINCT",
+            "AND", "OR", "XOR", "NOT", "IN", "IS", "WHEN", "THEN", "ELSE", "CASE",
+            "CONTAINS", "STARTS", "ENDS", "SET", "REMOVE", "DELETE", "DETACH",
+        ].iter().any(|prefix| word.eq_ignore_ascii_case(prefix)));
+        // A nonreserved word such as DELETE can itself finish the preceding
+        // expression (`RETURN delete UNION ...`). NOT and CASE still start
+        // native prefix expressions, so `RETURN NOT union` keeps its operand.
+        let completed_keyword_operand = after_operand_prefix
+            && matches!(previous, Some(TokenKind::Word(word))
+                if !crate::graph_text::RESERVED_NAMES.iter().any(|reserved| word.eq_ignore_ascii_case(reserved))
+                    && !word.eq_ignore_ascii_case("NOT")
+                    && !word.eq_ignore_ascii_case("CASE"));
+        let previous_is_name = previous_delimited
+            || completed_keyword_operand
+            || matches!(before_previous, Some(TokenKind::Punct(b'.' | b':')))
+            || matches!(before_previous, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"));
+        if matches!(
+            previous,
+            Some(TokenKind::Punct(
+                b'.' | b':'
+                    | b','
+                    | b'+'
+                    | b'-'
+                    | b'/'
+                    | b'%'
+                    | b'='
+                    | b'<'
+                    | b'>'
+                    | b'!'
+                    | b'|'
+                    | b'&'
+            ))
+        ) || (!previous_is_name
+            && matches!(previous, Some(TokenKind::Word(word)) if [
+                "AS", "RETURN", "WITH", "UNWIND", "WHERE", "BY", "SKIP", "LIMIT", "ALL",
+                "DISTINCT", "AND", "OR", "XOR", "NOT", "IN", "IS", "WHEN", "THEN", "ELSE",
+                "CASE", "CONTAINS", "STARTS", "ENDS", "ON", "SET", "REMOVE", "DELETE",
+                "DETACH",
+            ].iter().any(|prefix| word.eq_ignore_ascii_case(prefix))))
+        {
+            return Ok(false);
+        }
+        // A standalone projection wildcard completes an expression; the
+        // multiplication operator still requires its right-hand operand.
+        if matches!(previous, Some(TokenKind::Punct(b'*')))
+            && !matches!(before_previous, Some(TokenKind::Punct(b'.')))
+            && !matches!(before_previous, Some(TokenKind::Word(word))
+                if ["RETURN", "WITH", "ALL", "DISTINCT"].iter().any(|prefix| word.eq_ignore_ascii_case(prefix)))
+        {
+            return Ok(false);
+        }
+        let mut next = lexer.clone();
+        let mut token = script::next_script_token(&mut next)?;
+        if matches!(token.kind, TokenKind::Word(word)
+            if word.eq_ignore_ascii_case("ALL") || word.eq_ignore_ascii_case("DISTINCT"))
+        {
+            token = script::next_script_token(&mut next)?;
+        }
+        Ok(
+            matches!(token.kind, TokenKind::End | TokenKind::Punct(b'}' | b';'))
+                || matches!(token.kind, TokenKind::Word(word) if [
+                "UNION", "RETURN", "WITH", "UNWIND", "MATCH", "OPTIONAL", "CALL", "CREATE",
+                "INSERT", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "FOREACH",
+            ].iter().any(|clause| word.eq_ignore_ascii_case(clause))),
+        )
+    }
+
     /// Locate an inline CALL's opening brace, leaving the lexer just after it.
     /// This does not admit the import list; the scoped parser owns that grammar.
     fn call_body_open(lexer: &mut Lexer<'_>) -> Result<Option<usize>, GraphPatternTextError> {
@@ -656,6 +983,8 @@ impl PreparedGraphWriteChainText {
         }
         let mut brackets = vec![b'{'];
         let mut previous = None;
+        let mut before_previous = None;
+        let mut previous_delimited = false;
         // A RETURN's expressions may use write words as ordinary identifiers
         // (`RETURN delete + 1`, for example). Its branch cannot write again,
         // but a sibling UNION branch or enclosing CALL still can.
@@ -685,23 +1014,40 @@ impl PreparedGraphWriteChainText {
                     returning_at = returning_at.filter(|&depth| depth <= brackets.len());
                 }
                 TokenKind::Word(word)
+                    if word.eq_ignore_ascii_case("UNION")
+                        && returning_at == Some(brackets.len())
+                        && brackets.iter().all(|&open| open == b'{') =>
+                {
+                    // A completed expression may itself be named ON, STARTS
+                    // or ENDS. Separator framing is independent of the guard
+                    // that keeps those words from introducing write clauses.
+                    if Self::call_union_separator(
+                        token,
+                        previous,
+                        before_previous,
+                        previous_delimited,
+                        &lexer,
+                    )? {
+                        returning_at = None;
+                    }
+                }
+                TokenKind::Word(word)
                     if brackets.iter().all(|&open| open == b'{')
                         && !matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
                         && !matches!(previous, Some(TokenKind::Word(prior))
                             if ["AS", "ON", "STARTS", "ENDS"].iter().any(|not| prior.eq_ignore_ascii_case(not))) =>
                 {
                     if returning_at.is_some() {
-                        if returning_at == Some(brackets.len())
-                            && word.eq_ignore_ascii_case("UNION")
-                        {
-                            returning_at = None;
-                        }
+                        before_previous = previous;
                         previous = Some(token.kind);
+                        previous_delimited = lexer.text.as_bytes().get(token.at) == Some(&b'`');
                         continue;
                     }
                     if word.eq_ignore_ascii_case("RETURN") {
                         returning_at = Some(brackets.len());
+                        before_previous = previous;
                         previous = Some(token.kind);
+                        previous_delimited = lexer.text.as_bytes().get(token.at) == Some(&b'`');
                         continue;
                     }
                     if ["CREATE", "INSERT", "MERGE", "FOREACH"]
@@ -738,7 +1084,9 @@ impl PreparedGraphWriteChainText {
                 }
                 _ => {}
             }
+            before_previous = previous;
             previous = Some(token.kind);
+            previous_delimited = lexer.text.as_bytes().get(token.at) == Some(&b'`');
         }
     }
 }

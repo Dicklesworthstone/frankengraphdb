@@ -12,6 +12,44 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### UNION inside write-bearing CALL — qualification pending
+
+Source added 2026-11-12 extends the native scoped write-chain owner for
+`fgdb-unit-write-call-z7amx`. A CALL body can contain independently scoped
+read and write arms, with a common RETURN schema or unit bodies throughout.
+Explicit imports and legacy importing WITH are resolved independently for each
+arm. Returned column names are aligned before the existing typed set kernel
+applies UNION ALL or DISTINCT. Deduplication belongs to one outer occurrence;
+duplicate outer rows still invoke every arm and retain their effects.
+
+Arms execute in textual order against the same transaction overlay. A later
+arm sees earlier staged writes; imported identities observe current properties
+while separately captured scalar values keep their original values. Nested
+CALL and FOREACH retain the bounded native scheduler. Prepared CALL metadata
+exposes typed arms through `arms()` and `PreparedGraphCallArm` instead of one
+write-only `body()`. Read-only arms keep the existing relational executor, and
+entirely read-only CALL retains its original owner.
+
+Authorized execution admits every arm before evaluating its outer source,
+including empty sources and LIMIT 0. Static creation label sets, property keys
+and relationship types receive the same scope checks as staging; creation
+read demand also includes carried-element expressions and procedures. Visible
+reads stay masked and intermediate UNION rows remain private. All arms share
+work, scratch and effect allowances, one statement rollback boundary and one
+final publication. Only delivered statement rows spend the public row allowance.
+
+Regression sources in `fgdb-gql/tests/unit_call_text.rs`,
+`fgdb/tests/unit_call_write_chain.rs` and
+`fgdb/tests/authorized_write_chains.rs` cover arm framing and schemas, fresh
+imports, staged reads, typed DISTINCT equality, duplicate outer occurrences,
+private row quotas, exact resource refusals and complete rollback after late
+failures. Pinned formatting and independent source/API review are source-level
+checks only. The full workspace formatting gate reports existing differences in
+14 files unchanged by this session. First-party compilation, runtime tests, Clippy, UBS and exact-tree
+qualification remain **UNRUN**: both the pinned test build and a lighter
+metadata-only check were killed in the unchanged `asupersync` dependency before
+first-party compilation. No broader language or transaction bead is closed.
+
 ### Procedures over staged write graphs — qualification pending
 
 Source added 2026-11-12 connects standalone CREATE, SET and MERGE and scoped write-chain
