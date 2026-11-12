@@ -34,8 +34,8 @@ fn options() -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: Some(LabelId(1)),
-            relation: Some(RelationId(1)),
+            vertex_labels: Some(LabelId(1)).into(),
+            relations: Some(RelationId(1)).into(),
             weight: FnxWeightSpec::Property {
                 key: PropertyKeyId(1),
                 missing: MissingWeightPolicy::Reject,
@@ -440,7 +440,7 @@ fn graph_kind_and_induced_selection_remain_authoritative_for_topology_calls() {
                 ));
             }
             let mut opt = options();
-            opt.selection.vertex_label = None;
+            opt.selection.vertex_labels = None.into();
             assert!(matches!(
                 db.call_fnx_sealed(
                     &cx,

@@ -379,7 +379,7 @@ fn validate_weighted_input(
 
 fn read_options(call: &FnxCallSpec, algorithm: &str) -> FnxReadOptions {
     let mut options = FnxReadOptions::whole_graph_for(call, None);
-    options.selection.relation = Some(KNOWS);
+    options.selection.relations = Some(KNOWS).into();
     options.projection.self_loops = SelfLoopPolicy::Drop;
     options.projection.parallel_edges = if algorithm == "sssp" {
         options.selection.weight = FnxWeightSpec::Property {

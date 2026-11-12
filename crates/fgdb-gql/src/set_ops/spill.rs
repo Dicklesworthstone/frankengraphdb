@@ -677,12 +677,14 @@ impl AsyncSpillSetPlan {
             // Choose the source contract from the complete native program,
             // never by retrying a failed single-edge plan or storage operation.
             // A capture-only probe still requires the asynchronous join driver.
-            if pattern
-                .plan()
-                .operators()
-                .iter()
-                .any(|op| matches!(op, GlaOperator::Expand { .. } | GlaOperator::Probe { .. }))
-            {
+            if pattern.plan().operators().iter().any(|op| {
+                matches!(
+                    op,
+                    GlaOperator::Expand { .. }
+                        | GlaOperator::Probe { .. }
+                        | GlaOperator::Optional { .. }
+                )
+            }) {
                 let (plan, tail) = AsyncEdgeJoinPlan::compile_sort_input(pattern.plan())
                     .map_err(SpillSetBuildError::Edge)?;
                 (AsyncSpillSetSourcePlan::Join(plan), tail)

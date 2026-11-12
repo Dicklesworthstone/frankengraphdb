@@ -35,7 +35,7 @@ fn native_phase_reservations_share_work_and_keep_rows_at_final_delivery() {
         max_work: 4096,
         max_rows: 1,
     };
-    for nodes in [1, 2, 7, 20] {
+    for nodes in [1, 2, 7, 20, 41] {
         for width in [0, 1, 2, 65] {
             let reservation = success(reserve(policy, limits, 4096, 8192, nodes, width));
             let maintained = reservation.setup.maintenance.evaluator;
@@ -1029,7 +1029,7 @@ fn clustering_subscription_refuses_hidden_topology_before_registration_or_delive
 }
 
 #[test]
-fn selected_analytics_subscriptions_replay_label_changes_without_exposing_excluded_vertices() {
+fn selected_union_analytics_subscriptions_replay_exact_changes_without_exposing_excluded_vertices() {
     use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
     use fgdb_types::{CanonicalScalar, EId, VId};
     use fgdb_warden::Scope;
@@ -1046,29 +1046,58 @@ fn selected_analytics_subscriptions_replay_label_changes_without_exposing_exclud
             .symbols
             .bind(fgdb_gql::GraphSymbolKind::Label, "L", 1)
             .unwrap();
+        served
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Label, "M", 2)
+            .unwrap();
+        served
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Relation, "S", 2)
+            .unwrap();
         let db = &server.databases["test"];
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let wide = u128::MAX;
         let mut seed = vertex(1);
-        for id in [2, 3, wide] {
+        for id in [2, 3, 4, wide] {
             seed.create_vertex(VId(id), vec![], vec![]);
         }
         for (eid, a, b) in [
             (1, 1, 2),
             (2, 2, 3),
-            (3, 3, 1),
             (4, 1, 2),
             (5, 2, 1),
             (6, wide, wide),
+            (10, 1, 4),
+            (11, 4, 2),
         ] {
             seed.add_edge(EId(eid), VId(a), VId(b), vec![]);
         }
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), seed)
+            .await
+            .unwrap();
+        let mut second = fgdb::WriteBatch::new(RelationId(2));
+        second.add_edge(EId(3), VId(3), VId(1), vec![]);
+        second.add_edge(EId(7), VId(1), VId(2), vec![]);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), second)
+            .await
+            .unwrap();
+        let mut excluded = fgdb::WriteBatch::new(RelationId(3));
+        excluded.add_edge(EId(8), VId(1), VId(wide), vec![]);
+        excluded.add_edge(EId(9), VId(wide), VId(2), vec![]);
         let mut after = db
             .db
             .write(&root)
             .await
             .unwrap()
-            .write(&contexts.commit(), seed)
+            .write(&contexts.commit(), excluded)
             .await
             .unwrap();
         let scoped = token
@@ -1082,7 +1111,7 @@ fn selected_analytics_subscriptions_replay_label_changes_without_exposing_exclud
         ] {
             let statement = request(&format!(
                 "SUBSCRIBE TO CALL fnx.{metric}(\
-                 {{relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'}}) \
+                 {{relations:['S','R','S'],labels:['M','L','M'],parallel:'collapse',self_loops:'drop'}}) \
                  YIELD vertex AS node,{field} AS value RETURN node,value"
             ));
             // Selecting a label does not relax the analytic authorization gate.
@@ -1100,33 +1129,43 @@ fn selected_analytics_subscriptions_replay_label_changes_without_exposing_exclud
         }
         assert_eq!(db.subscriptions.load(Ordering::Acquire), 3);
 
-        for tick in 0..5 {
-            let mut change = fgdb::WriteBatch::new(RelationId(1));
+        for tick in 0..7 {
+            let relation = if tick == 3 { RelationId(2) } else { RelationId(1) };
+            let mut change = fgdb::WriteBatch::new(relation);
             match tick {
                 0 => {
-                    for id in [1, 2] {
-                        change.set_vertex_label(VId(id), LabelId(1), true);
-                    }
+                    change.set_vertex_label(VId(1), LabelId(1), true);
+                    change.set_vertex_label(VId(2), LabelId(2), true);
                 }
                 1 => {
-                    for id in [3, wide] {
-                        change.set_vertex_label(VId(id), LabelId(1), true);
-                    }
+                    change.set_vertex_label(VId(3), LabelId(1), true);
+                    change.set_vertex_label(VId(3), LabelId(2), true);
+                    change.set_vertex_label(VId(wide), LabelId(2), true);
                 }
                 2 => {
-                    change.set_vertex_label(VId(2), LabelId(1), false);
+                    // The second label and the second relation retain support.
+                    change.set_vertex_label(VId(3), LabelId(1), false);
+                    for id in [1, 4, 5] {
+                        change.delete_edge(EId(id));
+                    }
                 }
                 3 => {
+                    change.delete_edge(EId(7));
+                }
+                4 => {
+                    change.set_vertex_label(VId(3), LabelId(2), false);
+                }
+                5 => {
                     change.set_vertex_property(
-                        VId(2),
+                        VId(3),
                         PropertyKeyId(1),
                         Some(CanonicalScalar::Int(7)),
                     );
                 }
                 _ => {
-                    for id in [1, 3, wide] {
-                        change.set_vertex_label(VId(id), LabelId(1), false);
-                    }
+                    change.set_vertex_label(VId(1), LabelId(1), false);
+                    change.set_vertex_label(VId(2), LabelId(2), false);
+                    change.set_vertex_label(VId(wide), LabelId(2), false);
                 }
             }
             let at = db
@@ -1157,7 +1196,7 @@ fn selected_analytics_subscriptions_replay_label_changes_without_exposing_exclud
                     0 => [(1, i64::from(core)), (2, i64::from(core))]
                         .into_iter()
                         .collect(),
-                    1 => [
+                    1 | 2 => [
                         (1, if core { 2 } else { 1 }),
                         (2, if core { 2 } else { 1 }),
                         (3, if core { 2 } else { 1 }),
@@ -1165,7 +1204,15 @@ fn selected_analytics_subscriptions_replay_label_changes_without_exposing_exclud
                     ]
                     .into_iter()
                     .collect(),
-                    2 | 3 => [(1, i64::from(core)), (3, i64::from(core)), (wide, 0)]
+                    3 => [
+                        (1, i64::from(core)),
+                        (2, i64::from(core)),
+                        (3, i64::from(core)),
+                        (wide, 0),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    4 | 5 => [(1, 0), (2, 0), (wide, 0)]
                         .into_iter()
                         .collect(),
                     _ => BTreeMap::new(),

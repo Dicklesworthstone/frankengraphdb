@@ -161,7 +161,7 @@ impl<V: Vfs + Clone> Database<V> {
         // Unwrap only the selected native lane so the shared delivery gate
         // charges actual hit rows, not one enum wrapper or a duplicated copy.
         match query {
-            Search::Text { .. } => search(
+            Search::Text { .. } | Search::BooleanText { .. } => search(
                 self,
                 cx,
                 authority,

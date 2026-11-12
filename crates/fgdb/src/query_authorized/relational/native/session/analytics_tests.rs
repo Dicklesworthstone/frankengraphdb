@@ -60,8 +60,8 @@ fn options(direction: Directedness) -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: None,
-            relation: None,
+            vertex_labels: None.into(),
+            relations: None.into(),
             weight: FnxWeightSpec::Property {
                 key: W,
                 missing: MissingWeightPolicy::Reject,
@@ -382,7 +382,7 @@ fn foreign_prepared_calls_refuse_even_with_equal_authority_and_empty_projection(
             .authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || NOW)
             .unwrap();
         let mut opt = options(Directedness::Undirected);
-        opt.selection.vertex_label = Some(H);
+        opt.selection.vertex_labels = Some(H).into();
         let prepared = first.prepare_fnx(&c.query(), CC, &params(), opt).unwrap();
         assert!(first.execute_fnx(&c.query(), &prepared).unwrap().is_empty());
         authorization(

@@ -5,7 +5,7 @@
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryError, ReadError, WriteBatch};
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch, SchemaSelection};
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxExecutionError, FnxExecutionLimits, FnxGraphKind, FnxParameters,
     FnxReadError, FnxReadOptions, FnxSelection, FnxSourceLimits, FnxValue, FnxWeightError,
@@ -35,7 +35,7 @@ const DIJKSTRA: &str =
     "CALL fnx.single_source_dijkstra_path_length(1,NULL,true) YIELD vertex,distance";
 const CC: &str = "CALL fnx.connected_components() YIELD vertex,component";
 const TRIANGLES: &str = "CALL fnx.triangles() YIELD vertex,triangles";
-const CALLS: [&str; 10] = [
+const CALLS: [&str; 11] = [
     "CALL fnx.pagerank(0.85,1000,1e-12,true) YIELD score AS rank,vertex AS id",
     BFS,
     DIJKSTRA,
@@ -46,6 +46,7 @@ const CALLS: [&str; 10] = [
     "CALL fnx.clustering_coefficient() YIELD score,vertex",
     "CALL fnx.articulation_points() YIELD node AS cut",
     "CALL fnx.bridges() YIELD neighbor AS target,node AS source",
+    "CALL fnx.louvain_communities() YIELD vertex,component",
 ];
 fn authority(seed: u64, namespace: DatabaseSecurityNamespaceId) -> Authority {
     Authority::new(
@@ -76,8 +77,8 @@ fn options(direction: Directedness) -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: None,
-            relation: None,
+            vertex_labels: None.into(),
+            relations: None.into(),
             weight: FnxWeightSpec::Property {
                 key: PropertyKeyId(1),
                 missing: MissingWeightPolicy::Reject,
@@ -294,8 +295,8 @@ fn hidden_weight_values_and_label_names_are_absent_before_selection_or_reduction
         ));
         // Restrict the raw control's graph to authorized endpoints, not fields.
         let mut raw = opt;
-        raw.selection.vertex_label = Some(LabelId(1));
-        raw.selection.relation = Some(RelationId(1));
+        raw.selection.vertex_labels = Some(LabelId(1)).into();
+        raw.selection.relations = Some(RelationId(1)).into();
         assert!(matches!(
             db.call_fnx(&cx, DIJKSTRA, &FnxParameters::new(), raw),
             Err(FnxReadError::Weight {
@@ -336,20 +337,30 @@ fn hidden_weight_values_and_label_names_are_absent_before_selection_or_reduction
             vec![vec![FnxValue::Vertex(VId(1)), FnxValue::Vertex(VId(1))]]
         );
         for label in [LabelId(1), LabelId(99)] {
-            opt.selection.vertex_label = Some(label);
+            opt.selection.vertex_labels = Some(label).into();
             assert!(read(&db, &cx, &issuer, &both, CC, opt).is_empty());
         }
-        opt.selection.vertex_label = Some(LabelId(99));
-        assert!(read(&db, &cx, &issuer, &token, CC, opt).is_empty());
+        for labels in [
+            SchemaSelection::one(LabelId(99)),
+            SchemaSelection::any_of(&[LabelId(99), LabelId(100)]).unwrap(),
+        ] {
+            opt.selection.vertex_labels = labels;
+            assert!(read(&db, &cx, &issuer, &token, CC, opt).is_empty());
+        }
+        opt.selection.vertex_labels = SchemaSelection::ALL;
+        let visible = read(&db, &cx, &issuer, &token, CC, opt);
+        opt.selection.vertex_labels =
+            SchemaSelection::any_of(&[LabelId(1), LabelId(99)]).unwrap();
+        assert_eq!(read(&db, &cx, &issuer, &token, CC, opt), visible);
         let denied_relations = token
             .attenuate(Restriction::Relations(Scope::only([])))
             .unwrap();
         opt = options(Directedness::Undirected);
-        opt.selection.relation = Some(RelationId(2));
+        opt.selection.relations = Some(RelationId(2)).into();
         let isolates = read(&db, &cx, &issuer, &token, CC, opt);
         assert_eq!(isolates.len(), 4);
         assert!(isolates.iter().all(|row| row[0] == row[1]));
-        opt.selection.relation = None;
+        opt.selection.relations = None.into();
         assert_eq!(
             read(&db, &cx, &issuer, &denied_relations, CC, opt),
             isolates
@@ -443,6 +454,90 @@ fn label_propagation_uses_the_masked_graph_and_signed_result_limit() {
             )
             .unwrap_err();
         authorization(failure, Error::LimitExceeded(LimitDimension::Rows));
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn louvain_native_call_masks_topology_before_weights_and_obeys_signed_limits() {
+    use fgdb::{QueryResult, QueryValue};
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0x5ec0_3028, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = database(&contexts.commit(), true).await;
+        let control = database(&contexts.commit(), false).await;
+        let issuer = authority(328, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let text = "CALL fnx.louvain_communities(\
+                    {weight:'weight', parallel:'min', self_loops:'drop'}) \
+                    YIELD node,component RETURN node,component ORDER BY node";
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |kind, name: &str| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Property, "weight") => {
+                Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(1)))
+            }
+            _ => None,
+        };
+        let expected = QueryResult::Rows {
+            columns: vec!["node".to_owned(), "component".to_owned()],
+            rows: [1, 2, 3, u128::MAX]
+                .into_iter()
+                .map(|id| {
+                    [id, if id == u128::MAX { id } else { 1 }]
+                        .map(|value| QueryValue::Value(GraphValue::Vertex(VId(value))))
+                        .to_vec()
+                })
+                .collect(),
+        };
+        assert_eq!(
+            control.query(&cx, text, &params, symbols, policy).unwrap(),
+            expected
+        );
+        assert_eq!(
+            db.query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                text,
+                &params,
+                symbols,
+                policy,
+                || 100,
+            )
+            .unwrap(),
+            expected
+        );
+        // The physically present hidden vertices and relation carry Boolean
+        // weights. An unmasked read observes and refuses them; the authorized
+        // call must exclude them before any numeric weight validation.
+        assert!(db.query(&cx, text, &params, symbols, policy).is_err());
+        for (restriction, dimension) in [
+            (Restriction::MaxNodes(3), LimitDimension::Nodes),
+            (Restriction::MaxRows(3), LimitDimension::Rows),
+            (Restriction::MaxWork(0), LimitDimension::Work),
+        ] {
+            let restricted = token.attenuate(restriction).unwrap();
+            assert!(matches!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &restricted,
+                    BRANCH,
+                    text,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
+                ),
+                Err(QueryError::Authorization(Error::LimitExceeded(actual)))
+                    if actual == dimension
+            ));
+        }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -580,7 +675,7 @@ fn signed_limits_and_native_limits_are_cumulative_and_independent() {
             }
         }
         let mut empty = opt;
-        empty.selection.vertex_label = Some(LabelId(99));
+        empty.selection.vertex_labels = Some(LabelId(99)).into();
         assert!(
             read(
                 &db,
@@ -1063,7 +1158,7 @@ fn every_source_builder_kernel_and_delivery_clock_observes_expiry_and_retirement
                 let token = issuer.issue_at(&grant(), 100).unwrap();
                 let mut opt = options(Directedness::Undirected);
                 if empty {
-                    opt.selection.vertex_label = Some(LabelId(99));
+                    opt.selection.vertex_labels = Some(LabelId(99)).into();
                 }
                 let mut calls = 0;
                 let expected = db
@@ -1455,7 +1550,7 @@ fn hidden_records_move_no_signed_or_source_limit_threshold() {
                 )
             };
             let mut opt = options(direction);
-            opt.selection.relation = relation;
+            opt.selection.relations = relation.into();
             assert_eq!(
                 run(&db, &token, opt).unwrap(),
                 run(&oracle, &token, opt).unwrap(),

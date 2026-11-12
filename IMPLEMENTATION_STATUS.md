@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest is 2026-11-05.
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-11 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,284 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Bolt explicit native write transactions — qualification pending
+
+Source added 2026-11-11 under `fgdb-roadmap-bolt-v2-vb6e` and
+`fgdb-w2-txn-lifecycle-mhae`. The Bolt adapter now composes the native
+`AuthorizedWriteTransaction` owner across BEGIN, RUN and COMMIT.
+Write/default BEGIN with signed Write or ReadWrite rights opens a writer;
+read-only grants and read mode retain the existing pinned read session.
+
+Each accepted statement stages into the same private workspace. Later graph/set
+and exact terminal aggregate reads see earlier staged effects, while other
+connections see committed state. Aggregate inputs retain their complete
+patterns, row pipelines, grouping and output clauses; counts, wide sums and
+rational means preserve their native exact domains. Collected graph values
+are hydrated from the staged workspace. Catalog calls use the retained scope.
+The checked output collector hydrates graph values before publishing a cursor.
+PULL/DISCARD consume provisional results marked `fgdb_transaction_local: true`;
+only COMMIT publishes and returns a commit bookmark. ROLLBACK, RESET,
+GOODBYE, disconnect and any failed statement discard the unpublished prefix.
+Outstanding result cursors must be consumed before COMMIT.
+
+Native authority, source/work/result/creation/mutation/statement allowances
+remain cumulative. Generation admission covers each operation and lock wait;
+no database lock or active-operation permit is held between messages.
+Statement preparation also uses the retained permit, including original text,
+parameter admission, trusted statement time, scoped symbol lookup and binding.
+An explicit read mode on RUN cannot stage a write. Subscription notification
+follows native completion and writer-guard release. A fence after successful
+commit cannot be translated into a retryable precommit refusal.
+
+Regression sources cover the production state machine and real Bolt TCP with
+an independent FGP observer, including own-writes, isolation before commit,
+one publication, rollback/disconnect, restricted rights and output quotas.
+Source/API reviews completed. The aggregate and preparation extension adds
+state-machine and TCP regressions for empty/grouped summaries, exact native
+values, staged collection hydration, original-text budgets and failure rollback.
+Targeted pinned formatting and `git diff --check` passed. Server and smaller
+query-library compile attempts were killed by SIGKILL while checking the pinned
+`asupersync` dependency, before project diagnostics. Runtime tests, Clippy and
+the exact-tree proof remain **UNRUN**; whole-workspace formatting also reports
+pre-existing differences. The broader roadmap beads remain open.
+
+This is a bounded local owner, not durable reattachment or full Bolt V2.
+Explicit writer reads use the native graph/set and exact aggregate subset;
+non-catalog procedure hosts and historical/branch forms refuse and discard
+the staged prefix. Explicit read mode retains the
+broader committed-snapshot reader. Concurrent basis advancement retains the
+native conservative refusal, and full SSI remains separate.
+See `docs/bolt-autocommit-writes.md` for the protocol boundary.
+
+### Correlated COLLECT subqueries — qualification pending
+
+Source added 2026-11-11, related to `fgdb-1f8f7`. A scalar
+`COLLECT { ... RETURN value }` expression now lowers through the existing
+governed Collect Apply operator and relational List continuation. It builds
+nested graph results without another executor, dependency or transcript tag.
+
+```cypher
+MATCH (n:Person)
+RETURN n.name AS name,
+       COLLECT {
+           MATCH (n)-[:KNOWS]->(friend)
+           RETURN friend.name AS name ORDER BY name
+       } AS friends
+ORDER BY name
+```
+
+Bodies may be source-free or correlated, use WITH/filter/grouping/DISTINCT
+and ordered pages, nest further collection subqueries, and capture list-local
+bindings. An explicit one-column RETURN is required. Body variables remain
+private; parameters, catalog admission, depth and execution budgets retain
+their existing owners. Body order, outer occurrence order, duplicate rows and
+NULL members are preserved. Empty bodies yield `[]`; a NULL imported binding
+still permits `COLLECT { RETURN binding }` to yield `[NULL]`. This differs from
+the aggregate `collect(binding)`, which drops NULL inputs.
+
+The current expression owner gathers graph bodies before scalar evaluation.
+Direct COLLECT subqueries inside CASE/COALESCE therefore refuse during
+preparation. A collection first bound in WITH is an ordinary list and can be
+used in either lazy expression. UNION inside a collection body is also outside
+this bounded slice.
+
+Six added regression functions cover those semantics, ordered outer and body
+rows, nested/list-local capture, schema and scope refusals before catalog
+callbacks, rebinding, resource ceilings, cancellation and late errors under
+LIMIT 0. Independent source review caught and corrected private-projection
+ordering and lazy-arm lexical edge cases. Targeted pinned formatting and
+`git diff --check` passed. Compiler attempts were killed by SIGKILL in the
+pinned `asupersync` dependency before project diagnostics; compilation,
+runtime tests, Clippy and exact-tree qualification remain **UNRUN**. The
+broader graph-list language bead remains open.
+
+### Parameterized regular expressions — qualification pending
+
+Source added 2026-11-11 under `fgdb-20foe`. Literal and parameter patterns
+share the existing bounded regex compiler. Expressions such as
+`MATCH (n) WHERE n.name =~ $pattern RETURN n.name` now accept a typed text
+parameter; graph and row filters, RETURN/CASE, aggregate keys and mutation
+expressions use the existing scalar VM and execution metering.
+
+Binding compiles patterns before graph access, preserving template/argument
+identity. NULL yields UNKNOWN while retaining operand validation and lazy CASE
+evaluation. Malformed, oversized, unsupported-profile and wrongly typed
+patterns refuse at preparation/binding, including under LIMIT 0. Row-dependent
+pattern expressions remain outside this surface.
+
+Three new regression functions cover rebinding, literal-equivalent results
+and work, template/bound identities, row WHERE routing, grouping, NULL,
+invalid-pattern preflight and mutation selection/assignment. Source review
+completed; formatting, compilation, tests, Clippy and full proof are **UNRUN**
+because the execution environment became unavailable. The broader language
+bead remains open.
+
+### Bolt write RETURN graph metadata — qualification pending
+
+Source added 2026-11-11 under `fgdb-roadmap-bolt-v2-vb6e`. Autocommit
+`CREATE`/`INSERT`, mutations, vertex and relationship MERGE, and native write
+chains can return nodes, relationships, paths and nested collections over
+Bolt. The narrow `AuthorizedWriteOutput` reader uses the final unpublished
+workspace and the existing masked metadata owner, including endpoint visibility,
+deletion witnesses, live authority and cumulative native work/scratch limits.
+The output collector owns and admits every Bolt record before the sole native
+commit. A later metadata, depth, frame, signed budget or cancellation failure
+therefore cannot publish an earlier write or row. RUN remains deferred;
+completed results retain their exact metadata without a postcommit query.
+
+Regression sources cover final-state metadata, nested values, masked properties,
+full-width identities, reverse path orientation, cumulative metadata quotas,
+swallowed admission errors and late oversized output under PULL 1 and DISCARD.
+Source and caller reviews completed. A recovered local candidate passed the
+pinned formatter, but resource exhaustion killed dependency compilation (an
+initial exit 137 and a later `syn` SIGKILL); the executor then became unavailable
+again before its formatted source could be retrieved. This commit preserves
+the complete reviewed source. The exact committed tree's formatting, product
+compilation, Clippy, tests, UBS and full proof remain **UNRUN**, not passing.
+The original roadmap bead remains open; this does not qualify complete Bolt V2.
+The explicit-transaction extension above has its own pending qualification.
+
+### Prism label and relationship unions — qualification pending
+
+Source added 2026-11-11 for `fgdb-luq0b` and `fgdb-w8-projection-sd7`.
+A literal procedure graph map now selects up to 16 distinct labels and 16
+distinct relationship types. A vertex qualifies when it carries ANY selected
+label; an edge qualifies when its type is selected and both endpoints qualify.
+Selected isolated vertices remain. Empty lists retain all already admitted
+identities, and the graph map never grants additional capability scope.
+
+The same canonical selection is used by native and pinned reads, authorized
+reads, transaction overlays and decoded buffered reads. Input order and repeated
+identities do not change the selection, its cache key or its projection
+transcript. Existing all/singleton transcript and digest bytes are preserved.
+Transaction selection sees staged labels and relationship changes and retains
+the underlying read/conflict witnesses.
+
+```cypher
+CALL fnx.pagerank(
+  {labels:['Person','Company'], relations:['KNOWS','WORKS_WITH'],
+   weight:'weight', parallel:'sum', self_loops:'drop'},
+  0.85, 100, 1e-9, true)
+YIELD node, score
+RETURN node, score ORDER BY score DESC
+```
+
+The existing sealed source owns one physical relationship partition: it accepts
+label unions but requires exactly that one relationship type. It explicitly
+refuses relationship unions. The maintained extension below carries complete
+union selectors through six analytic owners. Dynamic projection maps and
+named graph catalogs remain outside this surface.
+
+The standalone canonical selector tests passed (2/2) under the pinned compiler
+before the environment failure. Added regression sources cover binding and
+canonical transcripts, historical reads, staged overlays and relation phantoms,
+hidden labels, buffered cache identity, sealed source boundaries and maintained
+query refusal. Source/caller reviews and a recovered local formatting pass
+completed. The exact committed tree's formatting, product compilation,
+integration tests, Clippy, UBS and full proof remain **UNRUN** after resource
+exhaustion and the subsequent executor loss. The broader beads remain open.
+
+### Maintained analytics over schema unions — qualification pending
+
+Source added 2026-11-11 under `fgdb-w8-projection-sd7`. Native standing
+queries and server subscriptions now accept the same bounded label/type unions
+for connected components, weakly connected components, strongly connected
+components, core numbers, triangle counts and clustering coefficients.
+
+The compiler builds a shared DISTINCT selected-vertex relation, preserves
+counted edge support across disjoint relationship-selector chunks, filters both
+edge endpoints with the existing Semi joins, and retains isolated vertices.
+These ordinary maintained row operators feed the existing selected analytic
+owners. Removing one overlapping label or one parallel edge does not remove
+support that remains through another selected label or relationship. Later
+label/type changes, deletions and rebuilds use the same dependencies.
+
+```cypher
+CALL fnx.core_number(
+  {labels:['Person','Company'], relations:['KNOWS','WORKS_WITH'],
+   direction:'undirected', parallel:'collapse', self_loops:'drop'})
+YIELD vertex, core
+RETURN vertex, core
+```
+
+Both dimensions retain the full 16-distinct-ID bound. The complete private
+circuit participates in subscription admission, including shared children,
+endpoint joins, isolate projection and analytic output. Failed registration or
+rebuild discards the entire private suffix. Existing algorithm, direction,
+weight, loop and per-owner limits remain in force. Server subscriptions still
+require unrestricted label, relationship and property scope; this extension
+does not introduce capability-masked maintained subscriptions.
+
+Regression sources include independent connectivity/motif expectations,
+overlapping labels, cross-type parallel support, isolates, the ninth and
+sixteenth relationship types, full-bound registration/rebuild rollback,
+subscription replay and signed admission. Production and test source review
+completed. Product compilation, integration tests and exact-tree formatting/
+Clippy/UBS/full proof remain **UNRUN**: resource-constrained builds were killed
+inside dependencies, and the executor became unavailable. The standalone
+canonical selector's two tests passed under the pinned compiler. This does not
+qualify durable maintained views or multi-relation sealed sources.
+
+### Explicit authorized native transactions — qualification pending
+
+Source added 2026-11-11 under `fgdb-w2-txn-lifecycle-mhae`.
+`Database::begin_authorized_write` returns an
+`AuthorizedWriteTransaction<'issuer, Clock>` that stages multiple statements
+and commits once. Its `prepare_statement`, `stage_chain`, `read`,
+`read_aggregate`, `statistics`, `commit` and `rollback` methods expose local
+explicit ownership of the existing native workspace. Dropping the owner
+discards the unpublished prefix.
+
+The owner retains one live Warden permit, a cloned commit context and the
+canonical transaction workspace. It holds no database borrow or lock while
+idle. Statements reuse the existing authorized chain collectors, original
+before/after image checks, masked overlay reads, conflict witnesses and checked
+graph-output admission. No statement autocommits. Later statements read their
+own earlier effects, while ordinary database reads still see committed state.
+
+Preparation retains the live permit through text admission, parameter capture,
+trusted statement-clock observation and the compiler callback. Meter refusals
+are latched even when the compiler swallows them. Exact terminal aggregates
+reuse the complete authorized staged source and preserve wide integer sums,
+rational averages, grouping and collected graph values. Scoped catalog calls
+are available in both row and aggregate inputs.
+
+`PreparedGraphWriteChainText::prepare_statement` and its
+`prepare_statement_with_parameter_types` counterpart admit ordinary single
+CREATE, SET/REMOVE/DELETE and MERGE statements through the existing chain
+compiler. The original `prepare` and `is_chain` routing contracts are retained.
+`VerifiedCapability::into_write_at` moves verified predicates into a
+non-clonable permit while preserving the live issuer and cumulative usage.
+
+Native source/work/scratch, result-row, creation, mutation and statement
+allowances accumulate across calls. Standalone reads and RETURN require read
+authority. A failed statement, output callback, swallowed metadata/work error,
+cancellation or unwind terminally aborts the entire prefix. Capability expiry,
+issuer retirement and monotonic-clock checks remain live through COMMIT.
+A foreign database handle refuses before its frontier is observed. New
+statements conservatively refuse if the original database basis has advanced;
+the final commit still uses the existing native conflict/completion owner.
+
+Native regression sources cover own-writes, one final commit,
+rollback/drop/deletion, masking and rights, cumulative quotas, output failures,
+unwind/cancellation, foreign handles, stale basis, retirement/expiry, metered
+preparation and exact staged aggregate reads. The
+output-boundary additions recheck cancellation and live authority after a
+successful admission callback, before returning provisional rows or restoring
+active ownership. Tests inject expiry, retirement and cancellation immediately
+after hydration and require the whole earlier prefix to be discarded. Two
+Warden tests cover movable permits and retained terminal behavior. Independent
+source review verified the shared staging/output body against the existing
+autocommit implementation and reviewed the public API and regressions.
+Compilation, runtime tests and exact-tree formatting/Clippy/UBS/full proof are
+**UNRUN** because dependency compilation was killed by resource exhaustion and
+the executor became unavailable before product validation.
+
+This is a local native API. The Bolt adapter above uses this owner. FGP explicit
+write adapters, durable ownership leases, reattachment and full SSI remain
+separate work; the lifecycle roadmap bead remains open. Ambiguous commit outcomes retain their native meaning and
+are never automatically replayed.
 
 ### Durable embedded database
 
@@ -40,7 +318,7 @@ Reads, through `Database::query` → `PreparedNativeRead::prepare` (`crates/fgdb
 - `count`/`sum`/`avg`/`min`/`max`/`collect` with `DISTINCT`, grouping and `HAVING` (`crates/fgdb-gql/tests/aggregate_text.rs`, `crates/fgdb-gql/tests/having_text.rs`); `sum`/`avg` over float (or mixed integer and float) values return the correctly rounded exact sum or mean, one rounding whatever the row order, with no cancellation loss or intermediate overflow (`crates/fgdb-gql/tests/exact_averages.rs`, `fgdb_types::ExactBinary64Sum`); unaliased RETURN items are named as openCypher names them (`a.title`, `count(b)`, `size(a.title)`) when the GQL-derived name would repeat (`crates/fgdb-gql/src/graph_text.rs` tests); `WITH` pipelines, `UNWIND` and a `MATCH` after `WITH`, including grouped `WITH` (`crates/fgdb-gql/tests/multipart_reads.rs`, `crates/fgdb/tests/with_grouping.rs`).
 - `UNION [ALL]`, `INTERSECT`, `EXCEPT` (`crates/fgdb-gql/tests/set_text.rs`, `crates/fgdb/tests/set_text_queries.rs`).
 - `FOR SYSTEM_TIME AS OF SEQ` (`crates/fgdb/tests/temporal_graph_text.rs`); `AT BRANCH` through a host resolver (`crates/fgdb/tests/query_branches.rs`); `CALL fnx.* ... YIELD` composed into reads, including capability-authorized reads over the masked projection (`crates/fgdb/tests/gql_call_fnx.rs`, `crates/fgdb/tests/authorized_prism.rs`); `EXPLAIN (CERTIFICATE)` (`crates/fgdb/tests/embedded_query_explain.rs`).
-- Query-local Prism graph maps (`fgdb-luq0b`, source added 2026-10-11; Rust compilation, regression execution and final formatting **unverified here** after ENOSPC and executor shutdown): `CALL fnx.pagerank({labels:['Person'], relations:['KNOWS'], weight:'weight', parallel:'sum', self_loops:'drop'}, 0.85, 100, 1e-9, true) YIELD node, score RETURN node, score` binds literal schema names into the prepared plan, then applies the same projection in ordinary, pinned, capability-authorized and transaction read hosts. Template and bound plan identity retain every projection option and full-width schema identity; unprojected call transcripts retain their existing encoding. Algorithm parameters remain independently rebindable. Literal empty/singleton `labels` and `relations` lists match the current native induced-selection model; larger lists, dynamic maps and named graph catalogs are not implemented by this slice. Regressions cover weighted/reversed paths, all parallel reductions, missing-weight policies, excluded malformed weights, isolated vertices, staged changes/conflicts, capability masking and certified replay in `procedure_calls.rs`, `gql_call_fnx.rs`, `authorized_prism.rs` and `cli_robot.rs`.
+- Query-local Prism graph maps (`fgdb-luq0b`, source added 2026-10-11; Rust compilation, regression execution and final formatting **unverified here** after ENOSPC and executor shutdown): `CALL fnx.pagerank({labels:['Person'], relations:['KNOWS'], weight:'weight', parallel:'sum', self_loops:'drop'}, 0.85, 100, 1e-9, true) YIELD node, score RETURN node, score` binds literal schema names into the prepared plan, then applies the same projection in ordinary, pinned, capability-authorized and transaction read hosts. Template and bound plan identity retain every projection option and full-width schema identity; unprojected call transcripts retain their existing encoding. Algorithm parameters remain independently rebindable. The 2026-11-11 union extension admits up to 16 distinct identities in each literal `labels` and `relations` list, with ANY-label selection and both selected endpoints required; empty lists retain all admitted identities. Dynamic maps and named graph catalogs remain unimplemented. See the union vertical above for validation and sealed/maintained-source boundaries. Regressions cover weighted/reversed paths, all parallel reductions, missing-weight policies, excluded malformed weights, isolated vertices, staged changes/conflicts, capability masking and certified replay in `procedure_calls.rs`, `gql_call_fnx.rs`, `authorized_prism.rs` and `cli_robot.rs`.
 - Single- and double-quoted text, `//` and `/* */` comments, and backtick-delimited identifiers, under one lexical rule (`crates/fgdb-gql/tests/scalar_text.rs`). Three scanners sit outside it (re-checked 2026-10-05): the `SUBSCRIBE TO` header takes `--` and nested `/* */` comments but not `//` (`crates/fgdb/src/standing_query/native/changes/statement.rs`); the standalone `CALL fnx.*` parser takes no comments and reads numbers such as `1.` and `.5`, which native text refuses (native text reads exponent literals `1e5`, `1.5e-3`, `2E+10` as floats) (`crates/fgdb-prism/src/call.rs`); and the legacy `BoundPlan` parser has its own (`crates/fgdb-gql/src/parser.rs`).
 
 Source additions on 2026-10-11, with Rust compilation and regression execution **unverified here**:
@@ -130,6 +408,35 @@ changes, runtime tests, Clippy and exact-tree proof therefore remain UNRUN.
 UBS was also unavailable. Neither bead is closed or claimed fully qualified.
 The dependency pins and required gates are unchanged.
 
+### Relationship MERGE property maps
+
+Added 2026-11-09 for `fgdb-2jw3z`. The current relationship write owners already
+execute `MERGE RETURN`, including plural input and bare `properties(r)`/`keys(r)`.
+The earlier broad refusal summaries above describe older cuts. This addition
+closes the remaining map-projection syntax gap: wildcard and selective maps,
+explicit overrides and shorthand fields in plain relationship `MERGE RETURN`,
+including endpoint maps and identities carried through `WITH`, plus wildcard
+maps in the dedicated `ON CREATE`/`ON MATCH`/`SET` owner.
+
+The compiler uses the existing final-overlay metadata expression and point
+property bindings. It adds no second graph reader, interpreter or transaction
+owner. Every complete map retains current authority masking before reverse
+naming/payload admission, complete-field conflict observations, cumulative
+budgets and the statement rollback workspace. Grouping and tails retain frozen
+final values for every selected occurrence. A NULL optional identity produces a
+NULL map; a map override changes the result, not storage. Invalid source scopes,
+path-as-map sources and duplicate field names refuse before catalog resolution.
+
+Eight regression functions in `fgdb-gql/tests/edge_merge_text.rs`,
+`fgdb-gql/tests/edge_upsert_return_text.rs`, `fgdb/tests/edge_upsert_returning.rs`
+and authorized `edge_upsert_query_tests.rs` cover both branches, prior staging,
+plural multiplicity, grouping/tails, NULL guards, missing reverse names and late
+errors beneath `LIMIT 0`, and equal visible work for absent versus hidden large
+properties. Pinned rustfmt and whitespace checks passed. Product typechecking,
+runtime tests, Clippy and exact-tree proof remain **UNRUN**: the pinned foundation
+previously exhausted the shared 8 GiB compiler limit, and no approved remote
+compiler is available. The broader map bead remains open.
+
 ### List predicates inside aggregates
 
 `COUNT(ALL(x IN values WHERE predicate))` and `COLLECT(ALL(...))` retain the list predicate through native read pipelines, aggregating `WITH`, and simple or computed write `RETURN` expressions (`fgdb-xv0sy`). All aggregate argument owners use the shared lexical lookahead that distinguishes the list predicate from an explicit set quantifier such as `COUNT(ALL n.p)`. Both forms compose, including `COUNT(ALL ALL(...))`; comments and keyword case follow the ordinary lexer. NULL predicates remain absent from COUNT/COLLECT, false remains a value, and an empty list retains ALL's vacuous truth. Regression sources are `fgdb-gql/tests/multipart_aggregates.rs` and `fgdb-gql/tests/write_return_aggregates.rs`.
@@ -144,7 +451,25 @@ Regression sources are `fgdb-gql/tests/write_return_aggregates.rs`, `fgdb/tests/
 
 Added 2026-11-02 for `fgdb-nu3mt`. `CALL fnx.label_propagation_communities() YIELD node, component` is appended at procedure ordinal 26 in registry epoch 28. It implements the pinned foundation's semi-synchronous algorithm: canonical greedy coloring, color-ordered majority updates, current-label retention on maximal ties, otherwise the smallest maximal label, and a 100-round cap returning the final partition. Each community is represented by its minimum full-width vertex identity. The signature admits an undirected, simple, loop-free projection and takes no parameters or randomness.
 
-One bounded integer state machine drives decoded, compressed and cooperative execution. Five vertex-sized integer vectors retain colors, labels, vote stamps, counts and traversal order; graph rows remain borrowed cursors. Existing admissions cover iteration, work, workspace and output limits, and scalar/coloring/vote phases remain cancellable. Engine hosts retain masked topology, transaction overlays, historical cuts and certificate replay. The CLI robot catalog lists the new procedure. The broader `fgdb-nu3mt` catalog remains incomplete; Louvain and other unregistered algorithms remain outside this slice.
+One bounded integer state machine drives decoded, compressed and cooperative execution. Five vertex-sized integer vectors retain colors, labels, vote stamps, counts and traversal order; graph rows remain borrowed cursors. Existing admissions cover iteration, work, workspace and output limits, and scalar/coloring/vote phases remain cancellable. Engine hosts retain masked topology, transaction overlays, historical cuts and certificate replay. The CLI robot catalog lists the new procedure. The broader `fgdb-nu3mt` catalog remains incomplete; other unregistered algorithms remain outside this slice.
+
+### Deterministic multilevel Louvain communities
+
+Source added 2026-11-09 for `fgdb-nu3mt`. `CALL fnx.louvain_communities() YIELD node, component` is procedure ordinal 29 in registry epoch 32. The typed `LouvainOptions::new(resolution, threshold, max_levels, weighted)` and four positional/named query arguments share validation and call identity. Defaults are `(1.0, 1e-7, NULL, true)`; resolution must be positive, threshold nonnegative, both finite, and a level ceiling positive. The named-only `max_iter` defaults to 100 positive total sweeps; `LouvainOptions::with_max_iter` sets the same control without changing the constructor or positional signature, and every value participates in call identity. Native projection fields select the graph and optional weight property, for example `CALL fnx.louvain_communities(weight => 'weight', resolution => 1.0, threshold => 1e-7, max_levels => NULL, weighted => true, max_iter => 100) YIELD node, component RETURN node, component ORDER BY node`.
+
+The kernel performs positive-gain local optimization and weighted graph coarsening across completed levels. It reads an undirected simple projection with finite nonnegative weights, counts a retained self-loop twice in degree, and retains isolated vertices. First-level canonical vertex order and stable edge encounter order replace RNG; each returned community is named by its minimum full-width `VId`. The threshold limits interlevel modularity improvement, while `max_levels` deliberately returns that completed level. Exhausting `max_iter` refuses unfinished optimization. Host iteration and work ceilings independently admit that requested allowance before execution, so the estimate uses the algorithm's bounded request rather than the host's potentially much larger maximum.
+
+`crates/fgdb-prism/src/louvain.rs` owns the shared state machine; `sealed_louvain.rs` supplies authenticated compressed rows and cooperative control. Compressed input is read once into an admitted `O(V+E)` working graph, with bounded reusable edge buffers for coarsening. Work, kernel workspace and result admissions remain separate, and all phases are cancellable. This is not an external-memory algorithm. Generic native, capability-authorized, transaction, historical and certified-replay hosts use the same registered call; standing-query maintenance is not included.
+
+Regression sources compare small weighted graphs and a coarsening fixture with the pinned foundation, and cover options, named sweep controls and digest identity, numeric refusals, sweep exhaustion, host admission and every cancellation boundary. `fgdb/tests/gql_call_fnx.rs`, `authorized_prism.rs`, `prism_cooperative.rs` and `buffered_sealed_prism.rs` cover composition, weighted overlays, historical replay, scope masking, signed limits and cooperative cursor release. Compilation and runtime qualification are blocked by SIGKILL while compiling the pinned `asupersync` dependency, including a metadata-only attempt, before product typechecking. Full integration tests and validation gates remain **UNRUN**; this source addition is not runtime-qualified.
+
+### Correlated graph expressions in OPTIONAL MATCH filters
+
+Source added 2026-11-09, extending the correlated-query work in `fgdb-og3db` and `fgdb-2ht8c`. An OPTIONAL continuation after `WITH`, `UNWIND` or returning `CALL` now admits `EXISTS`/`NOT EXISTS`, `COUNT { ... }`, pattern comprehensions and list predicates in its WHERE, including supported multi-clause subquery bodies. The existing parser identifies graph-expression sources before parsing the optional clause, retains its complete typed candidate row, and lowers those sources plus the Boolean predicate inside the existing optional `Apply`. Only the optional clause's local bindings are exported. Each input occurrence therefore keeps all qualifying matches or exactly one NULL extension; filtering never runs after the left join and erases an unmatched outer row.
+
+The shared native operators retain imported-value typing, subquery scope privacy, eager governed graph-source evaluation, scalar CASE laziness, parameter binding and definition limits. No new runtime interpreter or host-specific query path is added. Tests in `fgdb-gql/tests/multipart_optional_reads.rs` assert literal bags, parallel edges, duplicate and NULL imports, following-clause boundaries, private names, parameters, exact resource limits and every cancellation checkpoint. `fgdb/tests/native_optional_subqueries.rs` adds staged-overlay, pinned-view, exact-history, reopen, capability-pruned-oracle and conflict-witness cases.
+
+Pinned formatting and patch applicability checks are available for this source addition. Rust compilation and these regression executions remain **UNRUN**: the pinned foundation compilation previously exhausted the environment's memory allowance, and the canonical filesystem is full. These sources do not close either broader bead or claim a completed exact-tree proof.
 
 ### Pinned embedded read views
 
@@ -212,6 +537,101 @@ Attach each analytic with endpoint indexes `[1, 3]`. Changing only `e.enabled` c
 
 Regression sources in `crates/fgdb/tests/native_standing_sets.rs`, `crates/fgdb/src/standing_query/kcore/tests.rs` and `crates/fgdb/src/standing_query/triangle_counts/tests.rs` cover independent graph oracles, label/property changes, counted support, signed-delta integration, source admission, cancellation, quota refusals and parent-first rebuilds. `crates/fgdb-server/src/execute/subscription/tests.rs` covers selected analytics through wire delivery, acknowledgement/replay and capability refusal. These tests are authored but uncompiled and unrun: both focused Cargo attempts stopped when the unchanged pinned asupersync dependency compiler was killed for exceeding available memory, before first-party compilation. Formatting and whitespace checks pass; typechecking, runtime tests and Clippy remain unverified.
 
+### Maintained correlated Apply
+
+Source added 2026-11-09 extends the maintained native query circuit (`fgdb-w6-views-2wz`, `fgdb-og3db`) with a bounded inner/optional Apply profile. The GQL definition owner proves the entire correlated body and returns a recipe over its original complete children, the existing row join and ordinary row projections. The database compiler and subscription-footprint calculation consume the same recipe. Committed changes flow through the existing dependency-ordered signed-bag derivatives; this adds no per-commit query replay or separate subquery interpreter.
+
+Imported positions may be reordered or repeated, and the original outer-row multiplicity remains intact. Optional bodies keep their predicates inside the join. A private TRUE witness distinguishes a real match whose values are NULL from an absent match, and lazy output guards produce NULL for every unmatched export, including constants and expressions over imported values. The original definition and native transcript remain unchanged. Existing private registration guards, maintenance failure fencing and whole-circuit rebuild cover the added nodes.
+
+The initial profile admits a single independently safe graph source with identity/path outputs, total column/literal wrappers, imported arguments, supported joins, filters and ALL projections. Independent property and catalog outputs are refused because valid stored values or missing names can otherwise raise errors when an empty outer input would never execute the original body. General per-invocation aggregation, pages, nested Apply, graph-reading exports and positional random values remain unsupported. Relational DISTINCT has the separate profile below. Each child must also pass its ordinary maintained-source admission; no first-leaf substitute or source omission is used. Width limits and existing per-node maintenance allowances remain in force. Registrations are resident and session-local, without durable catalog ownership or spill.
+
+The native `EXISTS`/`NOT EXISTS` and existence-valued RETURN lowering now has its own maintained presence recipe. Only an optional Apply ending in one literal TRUE column with ALL, LIMIT 1, zero offset and no order qualifies. The proof retains the entire input below that compiler-generated wrapper, including all refusal and effect boundaries. Its complete left/right children compile once; existing Semi and Anti joins partition the original outer bag, project TRUE or typed NULL, and combine through UNION ALL before restoring exact public names. Six derived stages preserve outer multiplicity even with parallel witnesses, repeated/nonprefix imports and actual NULL-valued matches. The shared sequence gate ignores only that proven presence page; child/outer pages and ordering remain subject to their existing admission. Predicates may cross only column-copy projections; later total column/literal exports preserve nonemptiness, and discarded computed expressions are never optimized away. This is a presence rewrite, with no generic pagination admission.
+
+A separate bounded count recipe admits correlated `COUNT { ... }` and returning `CALL ... count(*)`, `count(value)` or `count(DISTINCT value)` bodies. It requires one untransformed, keyless count over a safe imported-argument/graph join, with total ALL projections and no extra ON or postfilter conditions. Value counts trace their argument backwards through every copy/reorder projection to an original RHS column; arbitrary outer-only values cannot substitute for a per-key RHS value. Every discarded projection cell still has to be total. Existing RHS-Semi-outer matching restricts the counted relation to currently requested keys before native grouping and checked Int64 conversion. The native aggregate owner retains nonnull/distinct support and its last-occurrence deletion law. Grouping deduplicates RHS key positions while retaining every original typed equality constraint in both joins; duplicate outer rows never scale the count. The original outer bag then Left-joins the groups, and the existing integer COALESCE VM fills missing counts with scalar zero. Keyless and NULL-import cases follow the same recipe. The grouping owner retains the actual complete active-input definition. Both original children compile once, with five derived nodes; subscription admission counts the same nodes. RHS/restriction/group stages use the established private aggregate-input policy, so a large witness bag or the internal keyless zero group does not spend the final-result-row allowance. Additional correlated predicates, computed/property count arguments, HAVING, relational DISTINCT, local pages and computed/discarded effects remain refused.
+
+Regression sources cover literal bags, parallel witnesses, duplicate and NULL imports, native CALL/OPTIONAL/EXISTS/COUNT continuations, first/last-witness transitions, actual NULL-valued matches, guarded output expressions and domains, signed-delta integration, subscription footprint and atomic registration/rebuild refusal. The existence suite includes an independent 256-transition presence oracle, numeric-versus-typed equality checks and exact literal-page/effect refusal boundaries. Count regressions add an independent 256-transition weighted-count oracle, inactive counts above Int64, simultaneous last-outer removal, repeated key constraints, zero defaults and private-witness/public-row quota checks. The value-count extension adds 2,048 weighted transitions through reordered aliases, NULL exclusion, distinct support above Int64 occurrence counts, and twelve native topology transitions distinguishing parallel edges from unique neighbors. Focused pinned formatting and whitespace checks pass for these source additions. A single-job, single-thread pinned `cargo check -p fgdb --lib` stopped at the foundation `asupersync` compile with SIGKILL under the shared 8 GiB memory limit, before product typechecking. Compilation, Clippy and regression execution remain **UNRUN**; no broader bead or exact-tree qualification is claimed.
+
+### Maintained per-invocation DISTINCT
+
+Source added 2026-11-09 extends `fgdb-w6-views-2wz` with native correlated
+Inner/Optional Apply bodies containing DISTINCT projections. Both complete
+sources compile once. A private projection retains distinct imported argument
+tuples, and existing joins/projections execute the body once per tuple. Every
+DISTINCT barrier carries an exact private invocation key; a final join restores
+the ORIGINAL outer bag and its multiplicities. Later ALL projections preserve
+their resulting counts. Optional null extension occurs only at this final join,
+after all real body filters and projections. A true all-NULL export remains a
+matching witness, while absence never evaluates a fabricated expression row.
+
+Invocation keys encode each scalar/stored/vertex/edge import as its NULL flag
+and a nonnull value in the same domain. A specifically checked column-default
+constructor proves the output type without a general type assertion. Ordinary
+typed join equality remains unchanged; false, numeric zero, vertex/edge zero
+and NULL cannot collide. Stored bounded collections retain canonical identity.
+Reordered/repeated imports and no-import bodies use the same recipe. Local
+pages/order, grouping, nested invocation, unsupported import domains and
+reader/ordinal effects refuse. The independent RHS effect proof is unchanged.
+
+Circuit layouts now retain explicit private/public roles for every compiled
+node. Rebuild consumes those immutable roles, preserving private witness
+allowances even after an initially unbounded policy changes to a small public
+row limit. Shared public outer sources remain subject to their quotas. Count's
+private restriction/group states retain the same explicit distinction. This
+replaces inference from transitive group dependencies; failed rebuilds still
+publish no replacement state. All four public Apply recipe types have public
+crate-root names, as required by the workspace's `unnameable_types` lint.
+
+Nine GQL regression functions include an independent 2,048-transition oracle,
+NULL/filler collisions, stored collections, multiple DISTINCT barriers,
+filter/error ordering, residual ON remapping and every preparation checkpoint.
+Three database regressions cover native legacy/scoped CALL text, committed
+parallel-witness/label/cascade changes, literal and eager expected bags, repeated
+deltas, Optional NULL behavior and atomic registration/rebuild failures. The
+quota regression keeps over 64 private witnesses under two public output rows,
+including a rebuild from an unbounded allowance. Existing rebuild tests now
+pass the captured role map. Pinned formatting, whitespace and independent
+source reviews passed; product typechecking, Clippy, runtime assertions and
+exact-tree proof remain **UNRUN** under the foundation compiler memory blocker.
+The broader durable-view bead remains open.
+
+### Buffered terminal OPTIONAL execution
+
+Source added 2026-11-09 extends the larger-than-memory row path from plan §8.7.
+`AsyncEdgeJoinPlan` admits an
+edge-rooted fixed-hop prefix followed by exactly one terminal correlated GLA
+OPTIONAL scope. The scope supports copied outer bindings, fixed expansion,
+native vertex/property/Boolean predicates, clause-local different-edge rules
+and fixed path/edge captures. It exports original and nullable local identities,
+properties and captures through the original final projection. The existing
+external owner applies its complete sort, DISTINCT, hidden-key and page tail.
+
+The async probe traversal is now a resumable witness state shared with existing
+EXISTS/collection execution. Each optional witness escapes once; only successful
+exhaustion can emit the one NULL extension. Source refusal, malformed admission,
+cancellation and resource errors cannot become absence. The cursor retains a
+definition-bounded prefix/local traversal, with source-owned record guards and
+an independent output reservation grown before payload/capture copies. Dropping
+a pending pull drops the entire private traversal and permanently fails that
+cursor. Historical buffered reads use one selected cut throughout.
+
+Admission proves the complete prefix, optional body and exact final tail;
+extra instructions or duplicate projections cannot be silently discarded.
+Independent optional scans, variable-length paths inside the scope, nested or
+multiple OPTIONAL, later filters/clauses, prefix probes/collections, foreign
+capture operands in optional predicates and catalog/map projections still
+refuse. This extension selects the async external-order source; ordinary
+synchronous streams and aggregate source profiles retain their prior contracts.
+
+Regression sources in `edge_stream/join/asynchronous/tests/optional.rs` and
+`query_spool/sort/buffered_optional_tests.rs` cover 135 directional/filter
+differentials, literal parallel/no-match outputs, captures and repetition,
+invisible candidates, every cancellation checkpoint, pending-pull drop, all
+four query limits, malformed programs and historical cold-spool results with
+DISTINCT/pages. Late body errors refuse publication even under LIMIT 0. Pinned
+rustfmt and whitespace checks pass. Product compilation, runtime tests, Clippy
+and exact-tree proof remain **UNRUN** under the shared foundation compiler
+memory blocker; no performance or full external-memory GQL claim is made.
+
 ### Reusable plan-only execution
 
 `BoundPlan` is the executor-ready plan-only form. It is appropriate when statement spelling and the caller's name-to-ID map are intentionally outside the value's identity.
@@ -261,6 +681,16 @@ The current implementation materializes and counts the relevant table before ord
 
 Text execution binds once and delegates to the plan-only overlay executor. Owned preparation delegates to the same body. The implementation is decomposed under `crates/fgdb/src/write_txn_parts/` while retaining one private module and one `WriteTxn` state authority.
 
+Source added 2026-11-09 extends exact count metadata to this transaction source (`fgdb-61p1n`, `fgdb-rc1017-bridge-wvze5.18`). `WriteTxn` captures the immutable generation's discardable `ExactCounts` at begin. Eligible all-vertex, single-label, all-directed-edge and single-relation counts use that exact basis, with the existing recognizer also admitting proven nonnull/distinct identity counts and universally true endpoint-label filters. A sparse per-identity membership fold adjusts the answer from canonical staged effects, borrowing only touched historical label/incidence before-images and deduplicating cascade retirements. It never copies the population or its property payloads. Raw staged proposals are used only as conflict observations, including conditional ENSURE no-ops; they never supply numeric effects.
+
+The new count-domain witnesses retain both positive and negative populations through failed finalization, zero output pages and savepoint rollback. The shared completion/refresh/rebase validator checks every intervening committed effect, including label exits and actual historical edge relations for deletions and cross-relation cascades. Conditional staged identities remain observed so idempotent replay cannot activate or remove a counted local birth when the concurrent winner lies outside the counted label domain. Accepted refresh and all four native rebase preparation routes advance the pinned metadata together with the basis; refusal retains the prior generation. The existing native aggregate finalizer still owns HAVING, output expressions, paging, checked conversion, cancellation and all four query allowances. Unknown or ineligible metadata falls back to the ordinary overlay source, without changing capability-scoped owners or claiming full SSI, degree histograms, persisted statistics or a competitive performance result.
+
+`fgdb/tests/write_txn_count_metadata.rs` adds twelve public regressions covering 1/32/512-element populations with one metadata record, pinned concurrent changes, staged effects/savepoints, 25 count-domain conflict cases, first-member arrivals, universal-label proof invalidation, exact budgets, late errors, every stable query checkpoint, safe fallback, all four public rebase policies and both conditional ENSURE counterexamples. A private four-policy regression verifies accepted rebase preparations carry the new count generation before completion. Pinned formatting, whitespace and independent source/API review pass. Product typechecking, Clippy and all added runtime regressions remain **UNRUN**: the single-job, single-thread pinned build was killed while compiling `asupersync` under the shared 8 GiB memory limit. The broader metadata-count beads and exact-tree qualification remain open.
+
+Source added 2026-11-09 extends MAP field arguments (`fgdb-8srlm`) to `WriteTxn::query` and CLI transaction read steps. Both owners reuse `GqlMapArgumentText::lower_fields` for nested node and relationship property operands, preserving source byte positions and caller parameters still used by other expressions. The CLI stores the derived arguments with each prepared read; the embedded owner validates transaction ownership and lifecycle before lowering. Statement time, overlay observations, historical basis bounds and exact-cut metadata retain their existing owners. Primitive `PreparedNativeRead` and certificate schemas are unchanged.
+
+`fgdb/tests/native_transaction_map_fields.rs` adds literal overlay/history laws, fresh arguments across calls, aggregate/set families, missing and NULL fields, generated-name collisions, owner/lifecycle precedence, resource refusals, retained staged effects and statement-clock cases. `fgdb-cli/src/transaction/tests.rs` adds per-step parameter and view assertions plus buffered rollback on binding or late execution errors. Pinned formatting, patch applicability and source review passed; compilation and regression execution remain **UNRUN** under the environment's existing memory and disk constraints. This source increment does not close the broader MAP-argument bead or establish exact-tree qualification.
+
 Native `CALL fnx.* ... YIELD` now composes into transaction set queries and aggregates over that same canonical overlay. Staged edges across relations, cascading deletions, changed properties and isolated vertices remain visible to analytics and subsequent `MATCH` stages. Source admission, projection, kernel execution and result conversion share the query's work and scratch allowances; `UNION` also shares its snapshot-record allowance. Full vertex/edge-table witnesses and observed element dependencies survive empty results, failed calls and savepoint rollback. `crates/fgdb/tests/gql_call_fnx.rs` includes all 14 registered procedures plus staged-topology, conflict and budget boundary regressions. Query-local projection maps now select a label/relation-induced graph, effective edge weights, direction, parallel-edge reduction and self-loop policies in this same overlay. Excluded endpoints and dropped loops are filtered before weight inspection, selected isolated vertices remain, and staged label/property changes participate in selection. Conservative source witnesses still detect changes to observed rows and table phantoms. This remains a bounded resident projection; it exposes no durable snapshot certificate for uncommitted graph data.
 
 Native `CALL hybrid.search(...) YIELD` also composes into transaction reads and aggregates, including the CLI's ordered `transaction --write ... --query ...` path. It reuses the transaction Beacon engine over the pinned basis and canonical staged effects: text, coordinate or packed vectors, labels and graph topology participate in the same retrieval, and later projections read staged properties. Canonical source records, search work and source/conversion scratch continue the enclosing query's allowance; private search hits do not consume the final aggregate-row page. Beacon's index and expansion retain their own bounded engine ceilings. Search observations survive failed calls and savepoint rollback, while ordinary transaction completion still validates conflicts. Regression sources are `crates/fgdb/tests/gql_call_hybrid.rs` and `crates/fgdb-cli/src/transaction/tests.rs`. This is per-execution resident search with the existing exact-RRF candidate fusion and ANN semantics, not a durable index or an exhaustive hybrid top-k certificate.
@@ -273,7 +703,7 @@ Endpoint eligibility now crosses the native transaction and standalone CLI surfa
 
 Standalone `search --eligible <vid,...>` accepts at most 100,000 unsigned-u128 input occurrences before sorting and deduplicating; an empty value selects no results. The new `Database`/`EmbeddedReadView::beacon_search_graph_indexed_filtered` APIs retain seed-directed incidence expansion and filter graph/text/vector candidate populations before truncation and fusion. Regression sources in `query_beacon/indexed.rs`, `fgdb-cli/src/search.rs` and `fgdb-cli/tests/cli_robot.rs` cover excluded transit, disconnected edge limits, historical pinning, parsing and each retrieval lane. This remains per-call resident retrieval with the existing candidate-limited exact-RRF and ANN contracts. Validation in this session: pinned Rust formatting and whitespace checks passed for the implementation; Rust compilation, all new regression execution, Clippy and the full gate remain **UNRUN** after two guarded Cargo attempts stopped at the environment's memory ceiling before first-party diagnostics. Static-only UBS returned nonzero on test panic/assertion and other heuristic findings; it is not a passing gate.
 
-Full SSI, merge-ladder integration and transaction ownership/session policy remain incomplete.
+Full SSI, merge-ladder integration and durable transaction ownership/session policy remain incomplete. Local capability-scoped explicit ownership is described in the native transaction vertical above; wire adapters and reattachment remain open.
 
 ### Supervised served-database recovery
 
@@ -342,9 +772,9 @@ The embedded library posture is live. The CLI binary is real, but the robot cont
 - Live subscriptions: `SUBSCRIBE TO <read>` over FGP pushes the engine's maintained-query baseline and exact per-commit deltas as SUBSCRIPTION_BATCH frames under flow credit (`fgdb remote subscribe`). They require an unrestricted-scope capability (maintained queries are not capability-masked yet) and are in-process only: no durable resume across reconnects.
 - Signed subscription budgets (2026-10-10): preparation reserves one work grant and divides its remainder across the native circuit, replay sink, initial compressed baseline and checked wire conversion. Native work and scratch control events share each reservation. A compiler-shaped prepass counts circuit nodes and obtains graph-source widths from the admitted maintainer shape; conservative work ceilings bound graph-node admissions without claiming exact Warden hooks in native maintenance. Private intermediate rows retain server ceilings, while signed final-row limits govern the entire compressed delivered bag, including cached and unacknowledged batches. A later poll shares one reservation across the normal pull, a possible `ReplayGap`/`DeltaGap`/`DeltaUnavailable` replacement baseline and conversion. Registered maintenance keeps its original bounded policy. Setup, replay, baseline and final host admission form one rollback boundary; refusal removes only the private registry suffix and restores the registration count, and no handle escapes before acceptance. Source-free grouping works with a zero signed graph-node grant. New native and server regressions cover footprint bounds, rollback, zero grants, pending redelivery, retained maintenance limits and replay eviction; they remain unexecuted because the local process service is unavailable. These are per-registration/tick/poll ceilings, not lifetime accounting, capability masking or durable resume.
 
-- The read-only Bolt-compat subset (`BoltCompatProfileV1`, `fgdbd serve --bolt-listen`, crate `fgdb-bolt`): official Neo4j drivers run autocommit and explicit read transactions over Bolt 5.0 under a capability token. Nodes, relationships and paths include capability-visible metadata from the same session and selected historical sequence; paths preserve direction and repeated identities, also inside collections. Writes refuse with `Neo.ClientError.Statement.AccessMode` before graph access. The base driver surface was verified with the official Python driver (`execute_query`, `execute_read`, sessions, `neo4j://` routing); graph-value coverage lives in `tests/loopback.rs` and the adapter's unit tests.
+- The Bolt-compat surface (`fgdbd serve --bolt-listen`, crate `fgdb-bolt`): official Neo4j drivers run autocommit reads, bounded autocommit writes and explicit read transactions over Bolt 5.0 under a capability token. Nodes, relationships and paths include capability-visible metadata from the same session and selected historical sequence; paths preserve direction and repeated identities, also inside collections. Writes inside explicit transactions refuse with `Neo.ClientError.Statement.AccessMode` before graph access. Autocommit writes execute once on PULL/DISCARD; graph-valued write RETURN and its current qualification limits are described above. The base driver surface was verified with the official Python driver (`execute_query`, `execute_read`, sessions, `neo4j://` routing); graph-value coverage lives in `tests/loopback.rs` and the adapter's unit tests.
 
-Not yet: durable result retention with ACK/release/resume, durable transaction preparation, explicit multi-statement write transactions and reattachment, capability-masked and durable subscriptions, multi-tenant admission/QoS, Bolt writes, and the HTTP/2, gRPC and WebSocket adapters. Names resolve through operator-declared bindings because there is no durable catalog.
+Not yet: durable result retention with ACK/release/resume, durable transaction preparation, explicit multi-statement write transactions and reattachment, capability-masked and durable subscriptions, multi-tenant admission/QoS, the complete Bolt V2 contract, and the HTTP/2, gRPC and WebSocket adapters. Names resolve through operator-declared bindings because there is no durable catalog.
 
 ## Query evidence tower
 

@@ -1,6 +1,8 @@
 // Included inside query_source, so aggregates and sets use its private canonical
 // source directly. No visibility widening or second transaction overlay is required.
 
+include!("query_count.rs");
+
 impl WriteTxn {
     /// Summarize complete matches over the pinned basis plus canonical staged
     /// effects. Observed rows and insertion witnesses survive later arithmetic,
@@ -31,6 +33,31 @@ impl WriteTxn {
                 .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             let mut usage = crate::gql_exec::AdmissionUsage::default();
+            let count = aggregate.prepare_count_metadata_with_universal_labels(|source| {
+                self.query_count_metadata(snapshot, source, &mut |event| {
+                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    usage.observe::<GraphAggregateError<WriteTxnError>, _>(policy, event)
+                })
+            })?;
+            if let Some(count) = count {
+                let element_failure = std::cell::RefCell::new(None);
+                let result = count.execute_governed_with_element_reads(
+                    usage.snapshot_records(),
+                    self.element_reader_with_checkpoint(database, cx, &element_failure),
+                    usage.remaining(policy),
+                    || {
+                        let stopped = element_failure.borrow_mut().take();
+                        match stopped {
+                            Some(error) => Err(error),
+                            None => cx.checkpoint(),
+                        }
+                    },
+                );
+                if let Some(error) = element_failure.into_inner() {
+                    return Err(GqlQueryError::Interrupted(error));
+                }
+                return usage.finish(policy, result);
+            }
             let pattern = aggregate.input_pattern();
             let source = self.query_source_with_witnesses(
                 snapshot,

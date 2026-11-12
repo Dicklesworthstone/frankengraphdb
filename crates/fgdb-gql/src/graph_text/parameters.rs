@@ -646,13 +646,13 @@ fn resolve_fnx_projection(
     else {
         return Err(expected("an inline literal procedure graph projection"));
     };
-    let mut label = None;
-    let mut relation = None;
+    let mut labels = &[][..];
+    let mut relations = &[][..];
     let mut weight = None;
     let mut missing = None;
     let mut projection = ProcedureGraphProjection {
-        vertex_label: None,
-        relation: None,
+        vertex_labels: fgdb_delta_types::SchemaSelection::ALL,
+        relations: fgdb_delta_types::SchemaSelection::ALL,
         weight: ProcedureGraphWeight::Unit,
         direction: None,
         parallel_edges: Parallel::Reject,
@@ -660,8 +660,8 @@ fn resolve_fnx_projection(
     };
     for (key, value) in keys.iter().zip(values) {
         match key.as_ref() {
-            "labels" => label = projection_selection_name(value, at)?,
-            "relations" => relation = projection_selection_name(value, at)?,
+            "labels" => labels = projection_selection_names(value, at)?,
+            "relations" => relations = projection_selection_names(value, at)?,
             "weight" => weight = Some(projection_text(value, at)?),
             "missing" => {
                 missing = Some(match projection_text(value, at)? {
@@ -735,12 +735,22 @@ fn resolve_fnx_projection(
             GraphSymbol::Property(id) => id.0,
         })
     };
-    if let Some(name) = label {
-        projection.vertex_label = Some(LabelId(symbol(GraphSymbolKind::Label, name)?));
-    }
-    if let Some(name) = relation {
-        projection.relation = Some(RelationId(symbol(GraphSymbolKind::Relation, name)?));
-    }
+    let labels = labels
+        .iter()
+        .map(|name| {
+            symbol(GraphSymbolKind::Label, projection_text(name, at)?).map(LabelId)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let relations = relations
+        .iter()
+        .map(|name| {
+            symbol(GraphSymbolKind::Relation, projection_text(name, at)?).map(RelationId)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    projection.vertex_labels = fgdb_delta_types::SchemaSelection::any_of(&labels)
+        .map_err(|_| expected("at most 16 distinct labels in the induced projection"))?;
+    projection.relations = fgdb_delta_types::SchemaSelection::any_of(&relations)
+        .map_err(|_| expected("at most 16 distinct relations in the induced projection"))?;
     if let Some(name) = weight {
         projection.weight = ProcedureGraphWeight::Property {
             key: PropertyKeyId(symbol(GraphSymbolKind::Property, name)?),
@@ -762,26 +772,20 @@ fn projection_text(value: &ReadValueTemplate, at: usize) -> Result<&str, GraphPa
     ))
 }
 
-fn projection_selection_name(
+fn projection_selection_names(
     value: &ReadValueTemplate,
     at: usize,
-) -> Result<Option<&str>, GraphPatternTextError> {
+) -> Result<&[ReadValueTemplate], GraphPatternTextError> {
     let ReadValueTemplate::List(names) = value else {
         return Err(error(
             at,
-            GraphPatternTextErrorKind::Expected("an empty or singleton list of schema names"),
+            GraphPatternTextErrorKind::Expected("a literal list of schema names"),
         ));
     };
-    match names.as_slice() {
-        [] => Ok(None),
-        [name] => projection_text(name, at).map(Some),
-        _ => Err(error(
-            at,
-            GraphPatternTextErrorKind::Expected(
-                "at most one schema name in the induced projection",
-            ),
-        )),
+    for name in names {
+        projection_text(name, at)?;
     }
+    Ok(names)
 }
 
 #[cfg(test)]

@@ -63,7 +63,7 @@ fn graph() -> WriteBatch {
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected. An empty value field names a
 /// vertex-only result, such as the sparse set of articulation points.
-const CALLS: [(&str, &str, &str, bool); 29] = [
+const CALLS: [(&str, &str, &str, bool); 30] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -102,6 +102,7 @@ const CALLS: [(&str, &str, &str, bool); 29] = [
         "distance",
         false,
     ),
+    ("louvain_communities", "", "component", true),
 ];
 
 /// The whole graph spelled out field by field, independent of
@@ -110,8 +111,8 @@ fn explicit(undirected: bool) -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: None,
-            relation: None,
+            vertex_labels: None.into(),
+            relations: None.into(),
             weight: FnxWeightSpec::Unit,
         },
         projection: ProjectionSpec {
@@ -741,6 +742,119 @@ fn label_propagation_composes_with_staged_topology_and_replays_the_pinned_cut() 
         assert_eq!(
             db.query(cx, text, &params, symbols, policy()).unwrap(),
             before
+        );
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            db.query(cx, text, &params, symbols, policy()).unwrap(),
+            staged
+        );
+        assert_eq!(
+            old.query(cx, text, &params, symbols, policy()).unwrap(),
+            before
+        );
+        assert_eq!(
+            db.replay(cx, &certificate, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn louvain_composes_with_weighted_staged_topology_and_replays_the_pinned_cut() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = Database::<MemVfs>::open_memory(commit, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=7 {
+            seed.create_vertex(VId(id), vec![PERSON], vec![]);
+        }
+        // Two disconnected triangles and an isolate have unambiguous
+        // communities. Identical positive weights preserve that partition.
+        for (edge, source, target) in [
+            (1, 1, 2),
+            (2, 2, 3),
+            (3, 3, 1),
+            (4, 4, 5),
+            (5, 5, 6),
+            (6, 6, 4),
+        ] {
+            seed.add_edge(
+                EId(edge),
+                VId(source),
+                VId(target),
+                vec![(P, CanonicalScalar::Int(10))],
+            );
+        }
+        db.write(commit, seed).await.unwrap();
+        let old = db.read_session().unwrap();
+        let text = "CALL fnx.louvain_communities({weight:'p'}) YIELD node,component \
+                    RETURN node,component ORDER BY node";
+        let params = GqlParameters::new();
+        let expected = |components: [u128; 7]| -> Vec<Vec<GraphValue>> {
+            components
+                .into_iter()
+                .enumerate()
+                .map(|(index, component)| {
+                    vec![
+                        GraphValue::Vertex(VId(index as u128 + 1)),
+                        GraphValue::Vertex(VId(component)),
+                    ]
+                })
+                .collect()
+        };
+        let (before, certificate) = db
+            .execute_certified(cx, text, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(rows(before.clone()).0, vec!["node", "component"]);
+        assert_eq!(rows(before.clone()).1, expected([1, 1, 1, 4, 4, 4, 7]));
+        assert_eq!(certificate.procedures.len(), 1);
+        let separate = "CALL fnx.louvain_communities(\
+                        weight => 'p', resolution => $resolution, threshold => 1e-7, \
+                        max_levels => NULL, weighted => true) YIELD node,component \
+                        RETURN node,component ORDER BY node";
+        let resolution = GqlParameters::new().with_int64("resolution", 4).unwrap();
+        assert_eq!(
+            rows(
+                db.query(cx, separate, &resolution, symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            expected([1, 2, 3, 4, 5, 6, 7]),
+            "higher resolution must change the partition through typed native arguments"
+        );
+
+        let mut txn = db.begin(txcx).unwrap();
+        let mut change = WriteBatch::new(R);
+        change.add_edge(EId(7), VId(6), VId(7), vec![(P, CanonicalScalar::Int(10))]);
+        txn.write(&mut db, change).unwrap();
+        let staged = txn
+            .query(&db, cx, text, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(rows(staged.clone()).1, expected([1, 1, 1, 4, 4, 4, 4]));
+        assert_eq!(
+            db.query(cx, text, &params, symbols, policy()).unwrap(),
+            before
+        );
+        let groups = "CALL fnx.louvain_communities({weight:'p'}) YIELD component \
+                      RETURN component,count(*) AS members \
+                      GROUP BY component ORDER BY component";
+        assert_eq!(
+            txn.query(&db, cx, groups, &params, symbols, policy())
+                .unwrap(),
+            QueryResult::Rows {
+                columns: vec!["component".to_owned(), "members".to_owned()],
+                rows: [(1, 3), (4, 4)]
+                    .map(|(component, members)| {
+                        vec![
+                            QueryValue::Value(GraphValue::Vertex(VId(component))),
+                            QueryValue::Count(members),
+                        ]
+                    })
+                    .to_vec(),
+            }
         );
         txn.finish(&mut db, commit).await.unwrap();
         assert_eq!(
@@ -1703,8 +1817,8 @@ fn named_projection_reads_the_selected_weighted_graph_and_staged_changes() {
         let before = expected(&[(1, 0.0), (2, 10.0), (3, 12.0)]);
         let mut options = explicit(false);
         options.selection = FnxSelection {
-            vertex_label: Some(PERSON),
-            relation: Some(R),
+            vertex_labels: Some(PERSON).into(),
+            relations: Some(R).into(),
             weight: FnxWeightSpec::Property {
                 key: P,
                 missing: MissingWeightPolicy::Reject,
@@ -2259,8 +2373,8 @@ fn projection_identity_and_algorithm_parameters_survive_certified_replay() {
         assert_ne!(certificate.procedures, different.procedures);
         let mut standalone_options = explicit(false);
         standalone_options.selection = FnxSelection {
-            vertex_label: Some(PERSON),
-            relation: Some(R),
+            vertex_labels: Some(PERSON).into(),
+            relations: Some(R).into(),
             weight: FnxWeightSpec::Property {
                 key: P,
                 missing: MissingWeightPolicy::Reject,
@@ -2491,5 +2605,66 @@ fn bellman_ford_native_weights_keep_exact_sums_until_final_distance_rounding() {
             *error,
             FnxReadError::Execution(FnxExecutionError::NonFiniteDistanceSum)
         ));
+    });
+}
+
+#[test]
+fn directed_load_projection_composes_and_replays_the_pinned_snapshot() {
+    run(async |commit, cx| {
+        for (name, direction) in [
+            ("directed", Directedness::Directed),
+            ("reversed", Directedness::Reversed),
+        ] {
+            let mut db = open(commit).await;
+            let old = db.read_session().unwrap();
+            let text = format!(
+                "CALL fnx.load_centrality({{labels:['Person'], relations:['R'], \
+                 direction:'{name}', parallel:'collapse', self_loops:'drop'}}) \
+                 YIELD vertex AS node, score AS rank \
+                 WHERE rank >= 0 RETURN node, rank ORDER BY node"
+            );
+            let call = FnxCallSpec::bind(
+                "CALL fnx.load_centrality() YIELD vertex AS node, score AS rank",
+                &FnxParameters::new(),
+            )
+            .unwrap();
+            let mut options = explicit(false);
+            options.selection.vertex_labels = Some(PERSON).into();
+            options.selection.relations = Some(R).into();
+            options.projection.directedness = direction;
+            options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+            options.projection.self_loops = SelfLoopPolicy::Drop;
+            let expected: Vec<Vec<_>> = old
+                .execute_fnx(cx, &call, options)
+                .unwrap()
+                .analytics
+                .rows
+                .into_iter()
+                .map(|row| row.into_iter().map(value).collect())
+                .collect();
+            let params = GqlParameters::new();
+            let (before, certificate) = db
+                .execute_certified(cx, &text, &params, symbols, policy())
+                .unwrap();
+            let (columns, actual) = rows(before.clone());
+            assert_eq!(columns, vec!["node", "rank"]);
+            assert_eq!(actual, expected);
+            let mut more = WriteBatch::new(R);
+            more.add_edge(EId(6), VId(5), VId(6), vec![]);
+            db.write(commit, more).await.unwrap();
+            assert_ne!(
+                rows(db.query(cx, &text, &params, symbols, policy()).unwrap()).1,
+                actual
+            );
+            assert_eq!(
+                old.query(cx, &text, &params, symbols, policy()).unwrap(),
+                before
+            );
+            assert_eq!(
+                db.replay(cx, &certificate, &params, symbols, policy())
+                    .unwrap(),
+                before
+            );
+        }
     });
 }

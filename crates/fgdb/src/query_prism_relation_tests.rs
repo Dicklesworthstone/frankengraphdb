@@ -341,7 +341,7 @@ fn selected_image_and_raw_source_have_independent_exact_limits() {
         assert_eq!(empty.anchor().relation(), Some(RelationId(99)));
         assert_eq!(empty.stats().incidences, 0);
         let mut opts = options();
-        opts.selection.relation = Some(RelationId(99));
+        opts.selection.relations = Some(RelationId(99)).into();
         opts.projection_limits.max_input_edges = 0;
         let graph = db
             .prism_sealed_projection_with_source_limits(
@@ -378,7 +378,7 @@ fn wrong_relation_is_refused_before_empty_directory_or_hidden_mask_shortcuts() {
                 &query, view.partition_root(), view.frontier(), retained, SealedLimits::default(),
             ).await.unwrap();
             let mut opts = options();
-            opts.selection.relation = Some(RelationId(2));
+            opts.selection.relations = Some(RelationId(2)).into();
             for vertices in [&[][..], &[VId(1), VId(2)][..]] {
                 for visible in [false, true] {
                     let result = SealedGraphView::build_with_checkpoint(
@@ -392,7 +392,7 @@ fn wrong_relation_is_refused_before_empty_directory_or_hidden_mask_shortcuts() {
                     )) if actual == retained));
                 }
             }
-            opts.selection.vertex_label = Some(LabelId(999));
+            opts.selection.vertex_labels = Some(LabelId(999)).into();
             assert!(matches!(view.execute_fnx_sealed(&query, &image, &dijkstra_call(), opts, memory()),
                 Err(SealedReadError::Projection(SealedProjectionError::Read(
                     SealedError::RelationOutsideAnchor { .. },

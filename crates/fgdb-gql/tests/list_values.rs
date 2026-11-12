@@ -1098,3 +1098,230 @@ mod element_metadata_values {
         assert_eq!(run(&b), vec![vec![list(vec![text("Renamed")])]]);
     }
 }
+
+mod inferred_collection_parameters {
+    use super::int;
+    use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+    use fgdb_gql::{GqlParameterType, GqlParameters, GqlQueryPolicy, PreparedGraphSetText};
+    use fgdb_types::{CanonicalScalar, VId};
+
+    fn list(values: &[i64]) -> GraphValue {
+        GraphValue::List(values.iter().copied().map(int).collect())
+    }
+
+    fn run(template: &PreparedGraphSetText, parameters: &GqlParameters) -> Vec<GraphValueRow> {
+        template
+            .bind_parameters(parameters)
+            .unwrap()
+            .execute_governed(
+                GqlQueryPolicy::new(100, 100, 1_000_000, 1_000_000),
+                |pattern, policy| {
+                    pattern.plan().execute_governed_with_properties(
+                        1,
+                        [VId(1)],
+                        [],
+                        |_, _| Ok::<_, ()>(true),
+                        |_, _| Ok(None),
+                        policy,
+                        || Ok::<_, ()>(()),
+                    )
+                },
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+    }
+
+    #[test]
+    fn direct_list_sources_infer_in_graph_and_row_scopes() {
+        let yes = GraphValue::Scalar(CanonicalScalar::Bool(true));
+        let arguments = GqlParameters::new()
+            .with_list("items", vec![int(1), int(2), int(3)])
+            .unwrap();
+        let cases = [
+            ("[x IN $items | x + 1]", list(&[2, 3, 4])),
+            ("[x IN $items WHERE x > 1 | x * 2]", list(&[4, 6])),
+            ("any(x IN $items WHERE x = 2)", yes.clone()),
+            ("all(x IN $items WHERE x > 0)", yes.clone()),
+            ("none(x IN $items WHERE x < 0)", yes.clone()),
+            ("single(x IN $items WHERE x = 2)", yes),
+            ("head($items)", int(1)),
+            ("last($items)", int(3)),
+            ("tail($items)", list(&[2, 3])),
+            ("reduce(total = 0, x IN $items | total + x)", int(6)),
+        ];
+        for prefix in ["", "MATCH (n) ", "WITH 1 AS seed "] {
+            for (expression, expected) in &cases {
+                let text = format!("{prefix}RETURN {expression} AS value");
+                let inferred = PreparedGraphSetText::prepare(&text, |_, _| None).unwrap();
+                let declared = PreparedGraphSetText::prepare_with_parameter_types(
+                    &text,
+                    &[("items", GqlParameterType::List)],
+                    |_, _| None,
+                )
+                .unwrap();
+                assert_eq!(
+                    inferred.parameter_schema()[0].parameter_type,
+                    GqlParameterType::List,
+                    "{text}"
+                );
+                assert_eq!(
+                    inferred.canonical_template_bytes(),
+                    declared.canonical_template_bytes(),
+                    "{text}"
+                );
+                assert_eq!(
+                    run(&inferred, &arguments),
+                    vec![GraphValueRow::from_owned_values(vec![expected.clone()])],
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inferred_lists_rebind_and_preserve_empty_null_and_repeated_uses() {
+        let text = "RETURN [x IN $items | x] AS copy, head($items) AS first, \
+                    tail($items) AS rest, $items AS original";
+        let template = PreparedGraphSetText::prepare(text, |_, _| None).unwrap();
+        let definition = template.canonical_template_bytes();
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        for values in [vec![], vec![2, 2, 7], vec![9]] {
+            let arguments = GqlParameters::new()
+                .with_list("items", values.iter().copied().map(int).collect())
+                .unwrap();
+            let first = values.first().copied().map_or_else(|| null.clone(), int);
+            let rest = &values[values.len().min(1)..];
+            assert_eq!(
+                run(&template, &arguments),
+                vec![GraphValueRow::from_owned_values(vec![
+                    list(&values),
+                    first,
+                    list(rest),
+                    list(&values),
+                ])]
+            );
+            assert_eq!(template.canonical_template_bytes(), definition);
+        }
+        assert_eq!(
+            run(&template, &GqlParameters::new().with_null("items").unwrap()),
+            vec![GraphValueRow::from_owned_values(vec![null; 4])]
+        );
+        for invalid in [
+            GqlParameters::new().with_int64("items", 1).unwrap(),
+            GqlParameters::new().with_text("items", "list").unwrap(),
+            GqlParameters::new().with_map("items", vec![]).unwrap(),
+        ] {
+            assert!(template.bind_parameters(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn map_functions_infer_the_whole_parameter_without_retaining_values() {
+        let text = "RETURN keys($props) AS names, properties($props) AS value";
+        let template = PreparedGraphSetText::prepare(text, |_, _| None).unwrap();
+        assert_eq!(
+            template.parameter_schema()[0].parameter_type,
+            GqlParameterType::Map
+        );
+        let declared = PreparedGraphSetText::prepare_with_parameter_types(
+            text,
+            &[("props", GqlParameterType::Map)],
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            template.canonical_template_bytes(),
+            declared.canonical_template_bytes()
+        );
+        for value in [1, 9] {
+            let entries = vec![("a".into(), int(value)), ("b".into(), list(&[2, 3]))];
+            let arguments = GqlParameters::new()
+                .with_map("props", entries.clone())
+                .unwrap();
+            assert_eq!(
+                run(&template, &arguments),
+                vec![GraphValueRow::from_owned_values(vec![
+                    GraphValue::List(
+                        ["a", "b"]
+                            .map(|key| {
+                                GraphValue::Scalar(CanonicalScalar::ucs_basic_text(key).unwrap())
+                            })
+                            .into(),
+                    ),
+                    GraphValue::map(entries).unwrap(),
+                ])]
+            );
+        }
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        assert_eq!(
+            run(&template, &GqlParameters::new().with_null("props").unwrap()),
+            vec![GraphValueRow::from_owned_values(vec![null; 2])]
+        );
+    }
+
+    #[test]
+    fn collection_context_does_not_retype_fields_arithmetic_or_declared_arguments() {
+        let map = GqlParameters::new()
+            .with_map("payload", vec![("items".into(), list(&[3, 4]))])
+            .unwrap();
+        for expression in [
+            "[x IN $payload.items | x]",
+            "tail($payload.items)",
+            "reduce(total = 0, x IN $payload.items | total + x)",
+        ] {
+            let text = format!("RETURN {expression} AS value");
+            let inferred = PreparedGraphSetText::prepare(&text, |_, _| None).unwrap();
+            assert_eq!(
+                inferred.parameter_schema()[0].parameter_type,
+                GqlParameterType::Map
+            );
+            assert!(inferred.bind_parameters(&map).is_ok());
+        }
+        let text = "RETURN head($value + [7]) AS value";
+        let template = PreparedGraphSetText::prepare(text, |_, _| None).unwrap();
+        assert_eq!(
+            template.parameter_schema()[0].parameter_type,
+            GqlParameterType::Int64
+        );
+        assert_eq!(
+            run(&template, &GqlParameters::new().with_int64("value", 5).unwrap()),
+            vec![GraphValueRow::from_owned_values(vec![int(5)])]
+        );
+        let scalar = PreparedGraphSetText::prepare(
+            "WITH $value AS k RETURN k + 1 AS value",
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            scalar.parameter_schema()[0].parameter_type,
+            GqlParameterType::Int64
+        );
+        let declared = PreparedGraphSetText::prepare_with_parameter_types(
+            "RETURN head($items) AS value",
+            &[(
+                "items",
+                GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Null),
+            )],
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            declared.parameter_schema()[0].parameter_type,
+            GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Null)
+        );
+        assert_eq!(
+            run(&declared, &GqlParameters::new().with_null("items").unwrap()),
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                CanonicalScalar::Null,
+            )])]
+        );
+        assert!(
+            PreparedGraphSetText::prepare(
+                "RETURN $items + 1 AS scalar, head($items) AS value",
+                |_, _| None,
+            )
+            .is_err()
+        );
+    }
+}

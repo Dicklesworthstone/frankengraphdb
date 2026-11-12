@@ -237,10 +237,10 @@ mod tests {
         other.binding.as_of = CommitSeq(0);
         variants.push(other);
         other = base;
-        other.selection.vertex_label = Some(LabelId(1));
+        other.selection.vertex_labels = Some(LabelId(1)).into();
         variants.push(other);
         other = base;
-        other.selection.relation = Some(RelationId(1));
+        other.selection.relations = Some(RelationId(1)).into();
         variants.push(other);
         other = base;
         other.selection.weight = FnxWeightSpec::Property {

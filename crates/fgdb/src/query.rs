@@ -272,11 +272,6 @@ pub enum QueryError {
     },
     /// Ownership or lifecycle refused before transaction-read preparation.
     Transaction(Box<WriteTxnError>),
-    /// Historical selectors have no defined staged-overlay semantics. A
-    /// transaction read must not silently fall back to a database read.
-    TemporalTransactionUnsupported {
-        facade: crate::NativeReadClass,
-    },
     TransactionPattern(Box<GqlQueryError<WriteTxnError, Cancel>>),
     TransactionAggregate(Box<GqlQueryError<GraphAggregateError<WriteTxnError>, Cancel>>),
     TransactionSet(Box<GqlQueryError<GraphSetExecutionError<WriteTxnError>, Cancel>>),
@@ -311,10 +306,6 @@ impl core::fmt::Display for QueryError {
                 write!(f, "native {facade:?} read has no supported pull execution")
             }
             Self::Transaction(e) => e.fmt(f),
-            Self::TemporalTransactionUnsupported { facade } => write!(
-                f,
-                "native {facade:?} read cannot select history inside a staged transaction"
-            ),
             Self::TransactionPattern(e) => e.fmt(f),
             Self::TransactionAggregate(e) => e.fmt(f),
             Self::TransactionSet(e) => e.fmt(f),

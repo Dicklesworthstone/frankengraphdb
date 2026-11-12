@@ -94,6 +94,138 @@ EXPLAIN (CERTIFICATE) MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*);
 
 ---
 
+### Correlated filters in OPTIONAL MATCH
+
+An `OPTIONAL MATCH` after `WITH`, `UNWIND` or a returning `CALL` can filter its candidate matches with correlated `EXISTS`/`NOT EXISTS`, `COUNT { ... }`, and pattern-comprehension or list predicates. For example:
+
+```cypher
+MATCH (person:Person)
+WITH person
+OPTIONAL MATCH (person)-[:KNOWS]->(friend)
+WHERE COUNT { MATCH (friend)-[:KNOWS]->(other) } >= 2
+RETURN person, friend
+```
+
+Each person keeps qualifying friends, including parallel-edge occurrences, or one row with a NULL friend when none qualify. The predicate runs inside the optional match before null extension. Subquery-local names remain private; later clauses retain the original outer bindings. Multi-clause subquery bodies use the same native expression and correlated `Apply` operators as ordinary reads, with their existing work, scratch, cancellation and authorization controls. Source was added on 2026-11-09; full runtime qualification remains open as recorded in [implementation status](IMPLEMENTATION_STATUS.md).
+
+### Maintained correlated graph queries
+
+Standing queries and native subscriptions can maintain eligible returning `CALL` subqueries and `OPTIONAL MATCH` continuations through the existing incremental joins and projections:
+
+```cypher
+SUBSCRIBE TO
+MATCH (person:Person)
+CALL (person) {
+    MATCH (person)-[:KNOWS]->(friend)
+    RETURN friend
+}
+RETURN person, friend
+```
+
+The maintained circuit preserves duplicate occurrences and updates its result from committed changes. Optional continuations retain one NULL-extended row per outer occurrence when the last matching witness disappears. The initial profile requires a complete graph source whose independent evaluation cannot introduce a data error; graph identity outputs and safe constant/column projections qualify. General per-invocation aggregation, pagination, nested correlation and fallible independent property/catalog outputs remain outside this profile. DISTINCT and count bodies have the additional profiles below. Registrations retain the existing session-local, resident-state contract. These source additions are not runtime-qualified; see [implementation status](IMPLEMENTATION_STATUS.md).
+
+Per-invocation `DISTINCT` can remove parallel witnesses inside an eligible returning subquery while preserving each occurrence of its outer row:
+
+```cypher
+SUBSCRIBE TO
+MATCH (person:Person)
+CALL (person) {
+    MATCH (person)-[:KNOWS]->(friend)
+    RETURN DISTINCT friend
+}
+RETURN person, friend
+```
+
+The circuit maintains one body result for each distinct imported argument tuple and rejoins it to the original outer bag. Each DISTINCT barrier retains its invocation identity, so results from different arguments cannot collapse together. NULL arguments remain distinct from ordinary false/zero values; repeated or reordered imports retain their exact meaning. Later filters and projections stay in order, and optional bodies extend missing results only after the complete body finishes. Parallel-edge deletions change a distinct friend result only when its last witness disappears. Private witness allowances survive rebuilds independently of final-result quotas. The source-effect, finite-width and no-local-page restrictions still apply.
+
+Eligible `EXISTS`, `NOT EXISTS` and existence-valued return expressions also have a maintained path, including after `WITH` and `UNWIND`:
+
+```cypher
+SUBSCRIBE TO
+MATCH (person:Person)
+WITH person
+WHERE NOT EXISTS { MATCH (person)-[:KNOWS]->(friend) }
+RETURN person
+```
+
+Matching and nonmatching branches share the same complete sources and use the existing semi-join and anti-join derivatives. Additional witnesses do not duplicate an outer result; only a first or last matching witness changes its Boolean presence. The compiler recognizes its literal-TRUE, LIMIT-one existence wrapper specifically. General per-invocation pages, aggregates and fallible discarded expressions still refuse.
+
+Eligible correlated `COUNT { ... }` expressions and returning `CALL` bodies with `count(*)`, `count(value)` or `count(DISTINCT value)` also use maintained native grouping:
+
+```cypher
+SUBSCRIBE TO
+MATCH (person:Person)
+WITH person
+RETURN person,
+       COUNT { MATCH (person)-[:KNOWS]->(friend) } AS degree
+```
+
+Counts return zero for an absent match and remain independent of duplicate outer occurrences. `count(*)` includes parallel witnesses; `count(friend)` excludes NULL values; `count(DISTINCT friend)` counts unique neighbors and changes only when a neighbor's first or last witness changes. For example:
+
+```cypher
+SUBSCRIBE TO
+MATCH (person:Person)
+WITH person
+CALL (person) {
+    MATCH (person)-[:KNOWS]->(friend)
+    RETURN count(DISTINCT friend) AS neighbors
+}
+RETURN person, neighbors
+```
+
+The right-hand source is first restricted to keys needed by current outer rows, then grouped once per key before its count is joined back to the original outer bag. This also prevents unused groups from causing conditional count-overflow errors. Witness rows use the existing private aggregate-input budget; counts retain native checked Int64 conversion. Value counts require a safely projected column of the independent graph source, including copied or reordered aliases. Typed equality correlation and keyless counts qualify; computed/property arguments, outer-only arguments, additional correlated predicates, HAVING, local pages and relational DISTINCT remain unsupported.
+
+### Explicit capability-scoped native transactions
+
+Trusted embedding hosts can use `Database::begin_authorized_write` to stage
+several statements under one Warden capability and publish them with one
+explicit `commit`. The returned `AuthorizedWriteTransaction` exposes
+`stage_chain`, `read`, cumulative `statistics`, `commit` and `rollback`.
+Dropping it rolls back the unpublished prefix.
+
+Compile a single CREATE, mutation or MERGE with
+`PreparedGraphWriteChainText::prepare_statement`, then bind its parameters.
+The same entrypoint accepts existing multi-clause write chains. For example,
+one owner can stage a CREATE, update that node in a later statement, and read
+the updated value before committing. Its database borrow is released between
+calls; its private workspace and cumulative authorization allowance remain.
+
+Every stage keeps the existing field/endpoint masking and checked graph-output
+admission. A statement error, cancellation, output refusal or unwind aborts
+all preceding staged effects. Read operations and RETURN require read
+authority. Further statements refuse a different database handle or an
+advanced write basis; COMMIT preserves the native conflict and ambiguous
+outcome semantics.
+
+This local API still awaits compilation and runtime qualification. Bolt/FGP
+explicit write adapters and durable transaction reattachment remain open.
+See [the native regression scenarios](crates/fgdb/tests/authorized_explicit_transactions.rs)
+and [implementation status](IMPLEMENTATION_STATUS.md).
+
+### Exact counts inside write transactions
+
+Eligible transaction counts read exact metadata pinned to the transaction's own snapshot, plus its canonical staged changes. They do not scan the full vertex or edge population:
+
+```cypher
+MATCH (person:Person) RETURN count(*) AS people
+MATCH (a)-[edge:KNOWS]->(b) RETURN count(edge) AS relationships
+```
+
+This includes all-vertex, single-label, all-directed-edge and single-relation populations, and identity counts whose nonnull or distinct semantics the existing binder proves. Staged creations, label changes, edge deletions and vertex cascades participate immediately; savepoint rollback restores the corresponding answer. An advancing database head cannot change a transaction's pinned count. Accepted snapshot refresh and native rebase preparations advance the metadata with the basis.
+
+Counts retain population conflict witnesses, so a relevant concurrent deletion, insertion or label change cannot be missed just because no rows were enumerated. Unrelated property or relation changes can remain independent. Conditional staged `ENSURE` proposals retain identity observations too, preventing replay from changing a previously observed local count. Unknown metadata, property filters and unproved endpoint-label intersections keep their ordinary source execution. This uses the existing bounded transaction and aggregate owners; it does not establish full SSI or a new durable statistics format. Runtime qualification remains open as recorded in [implementation status](IMPLEMENTATION_STATUS.md).
+
+### Nested MAP parameters in transaction reads
+
+`WriteTxn::query` and the CLI's `transaction --query` accept nested MAP fields in node and relationship property patterns, using the same argument handling as ordinary reads:
+
+```cypher
+MATCH (person:Person {id: $request.person.id})
+RETURN person
+```
+
+Each CLI read step keeps its own parameters. Ordinary transaction reads include staged changes; an explicit `FOR SYSTEM_TIME AS OF SEQ` selects retained committed history at or before the transaction's original basis. MAP fields remain available in other expressions, and generated bindings avoid collisions with caller parameters. Source and regression coverage were added on 2026-11-09; runtime qualification remains open in [implementation status](IMPLEMENTATION_STATUS.md).
+
 ### Relationship reuse in MATCH
 
 A positive `MATCH` uses each relationship ID at most once across the entire
@@ -113,6 +245,28 @@ MATCH REPEATABLE ELEMENTS (a)-[:KNOWS*1..4]-(b) RETURN a, b
 Path modes such as `TRAIL` and `ACYCLIC` apply their own restrictions inside
 that match mode. Open-ended routes require a supported termination rule;
 the cold-query profile below lists the admitted combinations.
+
+### Analytics over multiple labels and relationship types
+
+Native `CALL fnx.*` accepts an initial literal graph map such as
+`{labels:['Person','Company'], relations:['KNOWS','WORKS_WITH']}`.
+This selects vertices carrying either label and edges of either relationship
+type whose two endpoints are selected. Isolated selected vertices remain in
+the graph. Each list admits up to 16 distinct names; duplicates and list order
+do not change the selection, and an empty list keeps all identities already
+allowed by the session.
+
+These selections apply to ordinary, authorized, transactional and decoded
+buffered analytics. A sealed view still holds one relationship partition, so
+it supports label unions with exactly one matching relationship type.
+Native standing queries and server subscriptions carry these unions through
+connected components, weakly/strongly connected components, core numbers,
+triangle counts and clustering coefficients. They preserve isolated vertices,
+overlapping label membership and counted parallel-edge support as commits
+change the graph. Server subscriptions retain their existing requirement for
+unrestricted label, relationship and property scope. The new integration
+remains pending runtime qualification; see
+[IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).
 
 ## The six bets
 
@@ -189,7 +343,7 @@ DPOR, chaos, seed-replayable failures. Same code, a different Cx.
 - **Loom (B3):** one Graph-Logical Algebra, one cost model, no "graph engine bolted to SQL engine" seam. The `FreeJoin` operator is a continuum from binary hash joins to worst-case-optimal Generic Join; for graph atoms, sealed runs *already are* the tries, so intersections run as SIMD galloping over compressed neighbor lists. Factorization is a *type* in the algebra, not an executor trick: a 3-hop friends-of-friends result that would be 10⁸ flat rows stays ~10⁴ run slices, even over the wire.
 - **Ripple (B4):** a from-scratch DBSP-style Z-set circuit engine. Recursion is incremental fixpoint (semi-naïve for free). `CREATE MATERIALIZED VIEW … REFRESH INCREMENTAL` installs a circuit whose output is snapshot-consistent at a published watermark. `SUBSCRIBE TO MATCH …` is the same circuit fanned out over broadcast channels. Incremental analytics maintainers keep PageRank, connected components, and statistics warm under updates, each with a declared staleness contract.
 - **Beacon:** the index fabric. It holds property B-trees/hash, A+-style adjacency views, segment-based FTS/BM25, and a **transactional HNSW** vector index (the Strata pattern applied to the index itself, so vector search respects your snapshot, honors `AS OF`, is branch-scoped, and is fresh in commit-latency, not reindex-hours). All indexes share one lifecycle and one optimizer registration surface.
-- **Prism:** the entire `franken_networkx` catalog (`CALL fnx.pagerank`, `fnx.louvain`, …) exposed inside queries via an authorized `SnapshotGraphView`: algorithms traverse borrowed neighbor cursors without whole-graph materialization (an honest, explicit copy boundary where a trait contract requires one), under full snapshot isolation, with CGSE witnesses folded into the query certificate.
+- **Prism:** the entire `franken_networkx` catalog (`CALL fnx.pagerank`, `fnx.louvain_communities`, …) exposed inside queries via an authorized `SnapshotGraphView`: algorithms traverse borrowed neighbor cursors without whole-graph materialization (an honest, explicit copy boundary where a trait contract requires one), under full snapshot isolation, with CGSE witnesses folded into the query certificate.
 - **Warden:** capability tokens (macaroons) with graph caveats (`labels⊆{…}`, `subgraph=MATCH-predicate`, `asof≤seq`, `ops⊆{…}`) that compile to mandatory planner predicates. Row/subgraph security with index-aware pushdown, encrypt-then-code at rest, TLS 1.3 in flight, per-branch DEK derivation for cryptographic branch hand-off.
 - **Fabric:** the surface. Embedded API, the native **FGP** wire protocol (with optional factorized frames and RaptorQ FEC for lossy links), HTTP/2 + gRPC + WebSocket, a Bolt-compat subset for Neo4j drivers/tools, Python bindings, and format import/export for the whole legacy graph ecosystem plus a Parquet-lite reader/writer.
 - **Aegis:** replication as *Chronicle over the network*. Raft sequences the ~100-byte marker stream while capsule bytes ride the fountain-coded plane; deterministic apply makes replicas **bit-identical** (divergence is detectable by `ObjectId` comparison). New replicas seed via bonded multi-donor ATP pulls. Sharding is designed-in but sequenced last (see [Limitations](#limitations)).
@@ -341,10 +495,12 @@ fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys --rebuild-derived
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --relation KNOWS=1 \
   --graph-relation KNOWS --direction undirected "CALL fnx.connected_components() YIELD vertex, component"
 
-# Weighted analytics as part of a query, with a query-local induced graph
+# Weighted analytics over vertices with either label and either relationship type
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys \
-  --label Person=1 --relation KNOWS=1 --property name=1 --property weight=2 \
-  "CALL fnx.pagerank({labels:['Person'], relations:['KNOWS'], weight:'weight',
+  --label Person=1 --label Company=2 --relation KNOWS=1 --relation WORKS_WITH=2 \
+  --property name=1 --property weight=2 \
+  "CALL fnx.pagerank({labels:['Person','Company'],
+      relations:['KNOWS','WORKS_WITH'], weight:'weight',
       missing:'reject', direction:'directed', parallel:'sum', self_loops:'drop'},
       0.85, 100, 1e-9, true) YIELD node, score
    RETURN node.name, score ORDER BY score DESC LIMIT 10"
@@ -417,7 +573,7 @@ fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
 curl -H "Authorization: Bearer $(cat token)" -d '{"statement":"MATCH (p:Person) RETURN p.name"}' \
   http://127.0.0.1:7474/v1/databases/social/query
 
-# ...or from any official Neo4j driver: reads, plus bounded no-RETURN autocommit writes
+# ...or from an official Neo4j driver: reads and bounded autocommit writes with RETURN
 # (add --bolt-listen 127.0.0.1:7688)
 python3 -c 'from neo4j import GraphDatabase, bearer_auth
 d = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=bearer_auth(open("token").read().strip()))
@@ -455,7 +611,23 @@ The map's schema names resolve when the statement is prepared; algorithm paramet
 
 The same procedure runs on decoded adjacency and authenticated compressed cursors, including cooperative execution. Its five vertex-sized integer vectors, result rows and traversal work are admitted under the existing Prism limits. Compressed execution does not reconstruct a decoded adjacency copy. Source storage, compressed images, kernel vectors and result storage retain their separate bounds; this is not an overall RSS guarantee. In composed GQL, the procedure supports capability masking, transaction-local edges, retained historical reads and certified replay through the ordinary hosts.
 
+**Louvain communities.** `CALL fnx.louvain_communities() YIELD node, component` performs full multilevel modularity optimization, including weighted graph coarsening. It is procedure ordinal 29 in registry epoch 32. Its four positional or named arguments are `resolution` (positive, default `1.0`), `threshold` (nonnegative, default `1e-7`), `max_levels` (positive or `NULL`, default `NULL`) and `weighted` (default `true`). The named-only `max_iter` sets a positive total optimization-sweep allowance, defaulting to `100`. A query can select an edge-weight property through the ordinary projection:
+
+```cypher
+CALL fnx.louvain_communities(
+  weight => 'weight', resolution => 1.0, threshold => 1e-7,
+  max_levels => NULL, weighted => true, max_iter => 100
+) YIELD node, component
+RETURN node, component ORDER BY node
+```
+
+The projection is undirected and simple after any requested parallel-edge reduction. Weighted execution requires finite nonnegative weights; without a selected weight property, edges have unit weight. Retained self-loops contribute twice to degree. Canonical vertex and stable edge encounter order make the result deterministic without RNG; each component is named by its minimum full-width vertex identity, with isolated vertices retained. `max_levels` deliberately returns the partition after that many completed levels. Exhausting `max_iter` returns a refusal rather than an unfinished partition. The host independently admits the requested sweep allowance against its iteration and work limits.
+
+Decoded, compressed and cooperative execution share one cancellable kernel. Compressed input is consumed once into an explicitly admitted `O(V+E)` working graph for coarsening; this procedure has no external-memory analytics claim. Native calls retain capability masking, transaction overlays, historical reads and certified replay. Standing-query maintenance is not included. Regression sources cover these paths and the pinned foundation oracle. Full integration and validation gates remain **UNRUN**: compiling the pinned `asupersync` dependency was terminated by SIGKILL before product typechecking, so this addition is not runtime-qualified.
+
 **Computed ordering of write results.** A terminal write `RETURN` accepts expressions over returned aliases, projected source spellings such as `n.p`, and returned graph identities. For example, `MATCH (n:Person) SET n.score=n.score+1 RETURN n.score AS score ORDER BY -score LIMIT 10` ranks the post-write scores while updating every matched vertex. `CREATE`, matched mutations, vertex `MERGE` and relationship `MERGE` share this result path, including grouped outputs. Private sort keys are removed from the result schema; `DISTINCT` still identifies only the returned values, and only the final selected rows consume the result-row allowance. A sort-expression failure, cancellation or resource refusal rolls back the statement even beneath `LIMIT 0`. Unreturned bindings remain unavailable to these write sort expressions. Write `WITH` heads also accept computed ordering through the native row pipeline, after establishing their complete projected or grouped rows and carried identities' frozen post-write fields. Their selected page feeds the following clause, including another write, while every earlier effect remains applied. Without its own `ORDER BY`, the final `RETURN` emits rows in canonical order.
+
+**Relationship maps after MERGE.** Relationship `MERGE` results support `r{.*}`, selective maps such as `r{.score}`, and explicit overrides such as `r{.*,score:r.score+1}`. Plain relationship merges also project endpoint maps and graph identities carried through `WITH`. Complete maps use the selected relationship's final transaction state after `ON CREATE`, `ON MATCH` and trailing `SET`; repeated input occurrences remain repeated results, including in grouped output. Projection overrides affect the returned map. They do not write properties. NULL optional bindings yield NULL maps, and catalog or expression failures roll back the statement even under `LIMIT 0`. Authorized execution masks fields before naming or inspecting their payloads. These compiler additions have regression sources and formatter checks; runtime qualification remains open in [implementation status](IMPLEMENTATION_STATUS.md).
 
 `SealedReadView::execute_prepared` accepts all seven native read classes at the owner's selected sequence. Pattern and property reads retain the resident snapshot; composed FnX calls use its authenticated compressed relation. Temporal selectors must match that sequence, even for an empty result. For composed `fgdb query --sealed` calls, a bound `FOR SYSTEM_TIME AS OF SEQ` also selects the source before storage opens; a conflicting `--as-of` is refused. This owner API does not provide an external-memory query engine or capability-scoped session.
 
@@ -501,7 +673,18 @@ Ordinary resident reads also support a whole `WHERE` relationship-existence pred
 
 `--buffer-memory-bytes` defaults to 64 MiB and covers graph admission, cache contents, native source evaluation and retained source rows. The root byte ceiling is `min(1 MiB, memory/64)`; decoded root metadata reserves sixteen times that ceiling, with cache bookkeeping and compact history metadata charged separately. `--buffer-source-bytes` defaults to 1 GiB and bounds initial admission reads, including exact birth-patch refaults. `--max-work-units` independently bounds initial admission and the cumulative source and native expression evaluation; relational stages continue that allowance. In combined mode, buffered input encoding checks the frame size and reserves its overlapping row, cell and scalar encoding workspaces from the scratch pool before allocation. Relational stage decoding, expression workspaces and output encoding also reserve scratch memory before allocation. Every stage's decoding, encoding, sorting, copying and pagination shares one cumulative `--max-sort-work` allowance, and every intermediate append spends disk quota. Only the final selected rows spend `--max-result-rows`. Chronicle recovery, query preparation and parameters, and the CLI row transport workspace remain outside the graph-memory cap; final sorted-result decoding remains outside both pools. A missing or lagging checkpoint requires ordinary recovery; this mode does not fall back to a resident graph. Admission can still refuse when the metadata for distinct historical versions exceeds the pool.
 
-`query --spill-dir <existing-directory>` uses the native external sorter for vertex and fixed-edge scans, including property-only projections, local predicates, `DISTINCT`, terminal `SKIP`/`LIMIT`, and historical cuts. `ORDER BY` may use unreturned vertex or edge properties and supported path functions: these private cells determine ordering and pagination, then are removed before result rows and column names are published. Multiple sort keys, direction and null placement use the ordinary query semantics. Under `DISTINCT`, sort keys must be projected. Optional or variable-length joins and other unsupported native instructions refuse without an eager retry. It cannot be combined with `--stream`, `--certify-to`, or a standalone `CALL fnx`. Adding `--buffered` selects the bounded vertex/single-edge source profile above.
+`query --spill-dir <existing-directory>` uses the native external sorter for vertex and fixed-edge scans, including property-only projections, local predicates, `DISTINCT`, terminal `SKIP`/`LIMIT`, and historical cuts. `ORDER BY` may use unreturned vertex or edge properties and supported path functions: these private cells determine ordering and pagination, then are removed before result rows and column names are published. Multiple sort keys, direction and null placement use the ordinary query semantics. Under `DISTINCT`, sort keys must be projected. Unsupported native instructions refuse without an eager retry. It cannot be combined with `--stream`, `--certify-to`, or a standalone `CALL fnx`. Adding `--buffered` selects the bounded cold source and also admits the terminal OPTIONAL profile below.
+
+**Buffered OPTIONAL matches.** The asynchronous external-order path accepts a fixed-hop edge pattern followed by one terminal correlated `OPTIONAL MATCH`, for example:
+
+```cypher
+MATCH (a)-[r:KNOWS]->(b)
+OPTIONAL MATCH (b)-[s:KNOWS]->(c)
+WHERE s.score >= 10
+RETURN r, b, s, c ORDER BY r, s
+```
+
+The cursor pulls each optional witness through the existing indexed traversal and predicate engine. Parallel witnesses retain their occurrences; successful exhaustion without a witness emits one NULL extension. Original and optional properties and fixed paths can be projected at the same historical cut. Private traversal records remain bounded by the query's fixed depth, and each returned row retains its own memory reservation after those records are released. The shared external sorter applies final `DISTINCT`, ordering and paging. A source error, resource refusal or cancellation remains an error; `LIMIT 0` still executes and validates the body. Nested/multiple OPTIONAL scopes, independent optional scans, variable-length optional paths and post-scope clauses remain outside this profile. Ordinary synchronous source streams retain their existing admission. Regression sources and pinned formatter checks are present; runtime qualification remains open in [implementation status](IMPLEMENTATION_STATUS.md).
 
 The same flag supports numeric grouping over vertex and fixed-edge inputs: `count`, `sum`, `avg`, `min`, and `max`, including global summaries and historical cuts. Computed grouping keys and aggregate arguments, such as `sum(n.quantity * n.price)` or `avg(n.p + $weights.delta)`, run through the native expression evaluator before partitioning. `COUNT`, `SUM`, and `AVG` also accept `DISTINCT` arguments, including computed values and hidden `HAVING`/ordering arguments. Membership uses exact native value types: integer `1` and floating `1.0` are distinct members; nulls are ignored. Each distinct argument column is externally sorted within a completed group partition, so membership needs no resident seen-set. Ordinary aggregates in the same query still count all occurrences. Every declared input expression runs, including hidden columns and when `LIMIT 0` requests no output. Input occurrences are written into deterministic partitions, and a partition that exceeds the resident group allowance is split again before reduction. Every group finishes before `HAVING`, computed output expressions, output `DISTINCT`, exact typed `ORDER BY`, and `SKIP`/`LIMIT`; even `LIMIT 0` cannot hide a later invalid qualified group. Computed outputs such as `sum(n.p) * 2`, conditional scalar expressions, lists and maps use the native evaluator once per qualified group and remain in scratch beside the complete hidden ranking cells. `RETURN DISTINCT` externally sorts the final visible tuples by native equality, retains the first complete group under the original ordering for each tuple, and then ranks those representatives before pagination. Equal numeric summaries use their exact native comparison domain; the selected representative keeps its original count, wide integer, scalar or rational value type. Ordering can use hidden aggregate columns, and visible grouping keys may be omitted or repeated. Full canonical grouping keys determine expression evaluation order, break ordering ties, and select representatives when no explicit order is supplied; hidden cells are removed before delivery. Counts remain unsigned counts, integer sums retain their full wide range, and exact averages retain their numerator and denominator. `COLLECT` and relational aggregate inputs still refuse before source execution. Hash collisions or skew that cannot fit within the bounded partition contract return a resource refusal.
 
@@ -511,7 +694,7 @@ Grouping and sorting finish before delivery begins. Rows are decoded and flushed
 
 Native `CREATE`/`INSERT`, matched mutations and vertex `MERGE` also support aggregate `RETURN`: for example, `UNWIND [1,1,2] AS x CREATE (n:Person {p:x}) RETURN n.p AS p,count(*) AS created ORDER BY p`. Grouping uses the exact statement occurrences and their frozen post-effect values, including duplicates; it does not rescan the graph. `COUNT`, `SUM`, `MIN`, `MAX` and `COLLECT` use the existing native aggregate engine, including supported `DISTINCT` arguments. Work and scratch quotas remain cumulative, final rows share the normal transaction output allowance, and `LIMIT 0` cannot skip effects or conceal an aggregate error. Counts and integer sums must fit the ordinary Int64 row domain; nonnull exact integer-domain averages still refuse rather than silently round.
 
-`fgdbd` (`crates/fgdb-server`) serves the FGP handshake, `AUTH_REFRESH`, one autocommit GQL read or write per `EXECUTE`, atomic parameterized `EXECUTE_BATCH` writes, reusable prepared read templates, ephemeral flow-controlled result streams, and live `SUBSCRIBE TO` changefeeds (a baseline, then one exact delta per commit), plus the HTTP/1.1 JSON adapter (`/v1/health`, `/v1/databases/<name>/schema`, `/query`, `/write`, `/write-batch`). `CREATE`/`INSERT`, matched `SET`/`REMOVE`/deletion, and vertex `MERGE` can return rows with their native transaction outcome over FGP and HTTP. Their `RETURN` expressions run against the authorized statement result before commit, so expression or result-quota failures discard the writes; `LIMIT 0` still applies effects. The Bolt-compat subset (`BoltCompatProfileV1`, `--bolt-listen`) accepts official Neo4j drivers: autocommit and explicit read transactions each use one pinned generation, bounded no-`RETURN` autocommit writes execute as one atomic authorized program on `PULL`/`DISCARD`, nodes/relationships/paths include authorized metadata from the statement's selected sequence (including historical reads), and write `RETURN` or explicit write transactions refuse with `Neo.ClientError.Statement.AccessMode`. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion. It does not yet serve durable result retention (ACK/release/resume), explicit multi-statement write transactions, durable or capability-masked subscriptions, or the HTTP/2, gRPC and WebSocket adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
+`fgdbd` (`crates/fgdb-server`) serves the FGP handshake, `AUTH_REFRESH`, one autocommit GQL read or write per `EXECUTE`, atomic parameterized `EXECUTE_BATCH` writes, reusable prepared read templates, ephemeral flow-controlled result streams, and live `SUBSCRIBE TO` changefeeds (a baseline, then one exact delta per commit), plus the HTTP/1.1 JSON adapter (`/v1/health`, `/v1/databases/<name>/schema`, `/query`, `/write`, `/write-batch`). `CREATE`/`INSERT`, matched `SET`/`REMOVE`/deletion, and vertex `MERGE` can return rows with their native transaction outcome over FGP and HTTP. Their `RETURN` expressions run against the authorized statement result before commit, so expression or result-quota failures discard the writes; `LIMIT 0` still applies effects. The Bolt-compat subset (`BoltCompatProfileV1`, `--bolt-listen`) accepts official Neo4j drivers: autocommit and explicit read transactions each use one pinned generation, bounded autocommit writes execute as one atomic authorized program on `PULL`/`DISCARD`, and write `RETURN` supports scalar values, lists, maps, nodes, relationships and paths. Write graph metadata is hydrated from the final unpublished overlay under the same capability and budgets before commit; a late conversion or output-limit failure rolls back all effects, even with `PULL 1` or `DISCARD`. Read graph values retain their statement's selected historical sequence. Explicit write transactions still refuse with `Neo.ClientError.Statement.AccessMode`. The graph-valued write output added on 2026-11-11 has source regressions but awaits runtime qualification after the execution environment went offline; it is not a full `BoltCompatProfileV2` conformance claim. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion. It does not yet serve durable result retention (ACK/release/resume), explicit multi-statement write transactions, durable or capability-masked subscriptions, or the HTTP/2, gRPC and WebSocket adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
 
 FGP also supports reusable native read templates through `Client::prepare_read`, `execute_prepared`/`execute_prepared_streaming`, and `release_prepared`. Preparation binds syntax and operand types without executing or pinning a snapshot; each execution supplies its parameters again and opens a fresh authorized read. Handles belong to one connection, are invalidated by authority refresh or database recovery, and cannot be used to execute writes. Each connection retains at most 64 templates and 4 MiB of original query text. Both schema and row callbacks return `Result<(), ClientError>`; a callback error cancels and drains its result before the client can execute another request.
 

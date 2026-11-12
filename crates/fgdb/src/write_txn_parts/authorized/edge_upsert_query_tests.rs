@@ -7,7 +7,7 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphEdgeMergePolicy, GraphSymbol, GraphSymbolKind,
-    PreparedGraphEdgeUpsertQueryText,
+    GraphSymbolResolver, PreparedGraphEdgeUpsertQueryText, ReverseSymbolCatalog,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
@@ -64,6 +64,20 @@ fn prepared(text: &str) -> PreparedGraphEdgeUpsertQuery {
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap()
+}
+
+struct VisibleCatalog;
+impl GraphSymbolResolver for VisibleCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = ReverseSymbolCatalog::new();
+        // The hidden property intentionally has no reverse name. Reading it
+        // before applying authority must fail, even for a tiny hidden payload.
+        catalog.insert_property(P, "p");
+        Some(catalog)
+    }
 }
 fn lab<F>(seed: u64, body: impl FnOnce(PurposeContexts) -> F + Send + 'static)
 where
@@ -185,6 +199,107 @@ fn projected_branches_read_final_state_and_hidden_payloads_never_enter_return() 
             );
             assert_eq!(contexts.txn().outstanding_obligations(), 0);
         }
+    });
+}
+
+#[test]
+fn wildcard_relationship_maps_mask_before_naming_and_keep_singular_and_batch_work_identical() {
+    lab(0xa9cf, |contexts| async move {
+        let authority = authority();
+        let token = authority.issue_at(&grant(2), NOW).unwrap();
+        let query = PreparedGraphEdgeUpsertQueryText::prepare(
+            &format!(
+                "{HEAD} ON MATCH SET r.p=r.p+3 SET r.p=r.p*2 \
+                 RETURN properties(r) AS full,keys(r) AS names,r{{.*,p:r.p+1}} AS projected"
+            ),
+            S,
+            VisibleCatalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let document = |value| {
+            GraphValue::map(vec![(
+                "p".into(),
+                GraphValue::Scalar(CanonicalScalar::Int(value)),
+            )])
+            .unwrap()
+        };
+        for plural in [false, true] {
+            let mut baseline = None;
+            for secret in [
+                None,
+                Some(CanonicalScalar::Int(99)),
+                Some(CanonicalScalar::ucs_basic_text(&"x".repeat(8_192)).unwrap()),
+            ] {
+                let mut db = Database::open_memory(&contexts.commit(), keys())
+                    .await
+                    .unwrap();
+                seed(&mut db, &contexts.commit(), None).await;
+                let mut original = vec![(P, CanonicalScalar::Int(7))];
+                if let Some(secret) = &secret {
+                    original.push((SECRET, secret.clone()));
+                }
+                let mut edge = WriteBatch::new(R);
+                edge.add_edge(EId(13), VId(1), VId(2), original);
+                db.write(&contexts.commit(), edge).await.unwrap();
+                let output = if plural {
+                    db.execute_graph_edge_upserts_query_authorized(
+                        &contexts.txn(),
+                        &contexts.query(),
+                        &contexts.commit(),
+                        &authority,
+                        &token,
+                        "main",
+                        &query,
+                        policy(2),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap()
+                    .1
+                } else {
+                    db.execute_graph_edge_upsert_query_authorized(
+                        &contexts.txn(),
+                        &contexts.query(),
+                        &contexts.commit(),
+                        &authority,
+                        &token,
+                        "main",
+                        &query,
+                        policy(2),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap()
+                    .2
+                };
+                let expected = if plural { 46 } else { 20 };
+                let row = fgdb_gql::algebra::GraphValueRow::from_owned_values(vec![
+                    document(expected),
+                    GraphValue::List(
+                        vec![GraphValue::Scalar(
+                            CanonicalScalar::ucs_basic_text("p").unwrap(),
+                        )]
+                        .into_boxed_slice(),
+                    ),
+                    document(expected + 1),
+                ]);
+                assert_eq!(output.value, vec![row; if plural { 2 } else { 1 }]);
+                let costs = (output.rows, output.evaluator);
+                if let Some(baseline) = baseline {
+                    assert_eq!(costs, baseline, "hidden fields cannot spend public work");
+                } else {
+                    baseline = Some(costs);
+                }
+                let mut expected_props = vec![(P, CanonicalScalar::Int(expected).into())];
+                if let Some(secret) = secret {
+                    expected_props.push((SECRET, secret.into()));
+                }
+                assert_eq!(db.edge(EId(13)).unwrap().unwrap().props, expected_props);
+            }
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
 }
 
@@ -584,7 +699,7 @@ fn checked_output_refusal_and_zero_row_admission_stay_inside_rollback_boundary()
                 &query,
                 policy(1),
                 || NOW,
-                |rows, work| {
+                |rows, work, _| {
                     calls += 1;
                     assert_eq!(rows.len(), 1);
                     work(1)?;
@@ -625,7 +740,7 @@ fn checked_output_refusal_and_zero_row_admission_stay_inside_rollback_boundary()
                 &zero,
                 policy(0),
                 || NOW,
-                |rows, _| {
+                |rows, _, _| {
                     admitted += 1;
                     assert!(rows.is_empty());
                     Ok(())

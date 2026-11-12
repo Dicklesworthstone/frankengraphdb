@@ -387,7 +387,7 @@ fn compressed_load_preserves_history_flow_bits_quanta_and_every_live_cancellatio
                 assert_eq!(expected.rows, native.rows);
                 assert_eq!(expected.certificate.result_digest, native.certificate.result_digest);
                 assert_eq!(expected.certificate.adapter, AdapterPath::CompressedCursor);
-                assert_eq!(expected.certificate.execution_kernel, "fgdb-prism/sealed-newman-load-v2");
+                assert_eq!(expected.certificate.execution_kernel, "fgdb-prism/sealed-newman-load-v3");
                 assert_eq!(expected.certificate.kernel_workspace_bytes,
                     graph.node_count() * (3 * size_of::<usize>() + 2 * size_of::<f64>()));
                 if at == current {
@@ -401,7 +401,7 @@ fn compressed_load_preserves_history_flow_bits_quanta_and_every_live_cancellatio
                     ), &probe, q);
                     let actual = actual.unwrap();
                     compare_execution(&actual, &expected);
-                    assert_eq!(actual.certificate.execution_kernel, "fgdb-prism/sealed-newman-load-cooperative-v2");
+                    assert_eq!(actual.certificate.execution_kernel, "fgdb-prism/sealed-newman-load-cooperative-v3");
                     if q == 1 { assert!(pending > 700); }
                 }
                 assert_eq!(db.execute_fnx_sealed(&cx, &call, opt, memory(), SealedLimits::default()).await.unwrap().analytics, expected);
@@ -469,7 +469,7 @@ fn compressed_load_reached_passes_admit_isolates_with_linear_work() {
                 .unwrap();
             assert_eq!(
                 expected.certificate.execution_kernel,
-                "fgdb-prism/sealed-newman-load-v2"
+                "fgdb-prism/sealed-newman-load-v3"
             );
             assert_eq!(expected.rows.len(), n);
             assert!(

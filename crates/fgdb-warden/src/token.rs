@@ -301,7 +301,7 @@ impl fmt::Debug for VerifiedCapability<'_> {
     }
 }
 
-impl VerifiedCapability<'_> {
+impl<'a> VerifiedCapability<'a> {
     #[must_use]
     pub fn predicates(&self) -> &PlannerPredicates {
         &self.program
@@ -350,6 +350,23 @@ impl VerifiedCapability<'_> {
             return Err(Error::PermissionDenied);
         }
         Ok(ExecutionPermit::new(&self.program, self._authority, now_ms))
+    }
+
+    /// Consume this verified definition into a movable write execution.
+    /// The allowance remains unique, cumulative and tied to the live issuer;
+    /// moving it between statements never renews its limits or validity.
+    /// Native transaction owners still authorize every original write image.
+    pub fn into_write_at(
+        self,
+        branch: &str,
+        now_ms: u64,
+    ) -> Result<ExecutionPermit<'a, WriteAccess>, Error> {
+        self._authority.check_active()?;
+        self.program.check_at(branch, now_ms)?;
+        if !self.program.rights.can_write() {
+            return Err(Error::PermissionDenied);
+        }
+        Ok(ExecutionPermit::owning(self.program, self._authority, now_ms))
     }
 }
 

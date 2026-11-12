@@ -179,6 +179,9 @@ struct Projection {
     // Proven over every final reduced weight during complete admission, not
     // inferred from the selected property or a later source's reachable set.
     nonnegative_weights: bool,
+    // Derived from final reduced neighbors, after visibility and loop policy.
+    // Directed edge/arc counts alone cannot establish the absence of loops.
+    self_loops: bool,
     scan_bound: usize,
     workspace_bytes: usize,
     resident_bytes: usize,
@@ -376,7 +379,8 @@ impl SealedGraphView {
         schedule.check(cx).await?;
         let relation = config
             .selection
-            .relation
+            .relations
+            .single()
             .ok_or(SealedProjectionError::RelationRequired)?;
         partition.anchor().check_relation(relation)?;
         let scope = partition.anchor().scope();
@@ -508,6 +512,7 @@ impl SealedGraphView {
         let mut adjacency_entries = 0usize;
         let mut unit_weights = true;
         let mut nonnegative_weights = true;
+        let mut self_loops = false;
         let mut input_edges = 0usize;
         for source in 0..n {
             schedule.check(cx).await?;
@@ -572,6 +577,7 @@ impl SealedGraphView {
                     // alone is insufficient: Sum may combine several edges.
                     unit_weights &= weight == 1.0;
                     nonnegative_weights &= weight.is_finite() && weight >= 0.0;
+                    self_loops |= source == target;
                     degree = add(degree, 1)?;
                     adjacency_entries = add(adjacency_entries, 1)?;
                     admit(
@@ -636,6 +642,7 @@ impl SealedGraphView {
             adjacency_entries,
             unit_weights,
             nonnegative_weights,
+            self_loops,
             scan_bound,
             workspace_bytes,
             resident_bytes,
@@ -675,6 +682,11 @@ impl SealedGraphView {
     /// reductions are immutable for this projection's entire lifetime.
     pub(crate) fn has_nonnegative_weights(&self) -> bool {
         self.0.nonnegative_weights
+    }
+    /// Exact loop presence in the immutable final projection; dropped or
+    /// invisible loops do not participate in this admission-time fact.
+    pub(crate) fn has_self_loops(&self) -> bool {
+        self.0.self_loops
     }
     /// The exact source index retained by reversed/undirected projections.
     /// Includes construction-peak evidence; not an allocator/RSS guarantee.
@@ -1095,8 +1107,8 @@ mod tests {
         SealedProjectionSpec {
             as_of: CommitSeq(3),
             selection: FnxSelection {
-                vertex_label: None,
-                relation: Some(RelationId(7)),
+                vertex_labels: None.into(),
+                relations: Some(RelationId(7)).into(),
                 weight: FnxWeightSpec::Property {
                     key: PropertyKeyId(2),
                     missing: MissingWeightPolicy::Reject,

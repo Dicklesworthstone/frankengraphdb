@@ -243,7 +243,7 @@ fn source_compatible(cached: Request, request: Request, retained: &Retained) -> 
     // separate: this path never reuses selected vertices or graph laws.
     let mut compatible = cached;
     compatible.query_policy = request.query_policy;
-    compatible.projection.selection.vertex_label = request.projection.selection.vertex_label;
+    compatible.projection.selection.vertex_labels = request.projection.selection.vertex_labels;
     compatible.projection.selection.weight = request.projection.selection.weight;
     compatible.projection.projection = request.projection.projection;
     compatible.projection.projection_limits = request.projection.projection_limits;
@@ -408,7 +408,7 @@ mod tests {
 
     fn request() -> Request {
         let mut options = FnxReadOptions::whole_graph(Some(CommitSeq(2)));
-        options.selection.relation = Some(RelationId(1));
+        options.selection.relations = Some(RelationId(1)).into();
         options.source_limits.max_work_units = 100;
         options.source_limits.max_scratch_entries = 100;
         options.projection.directedness = Directedness::Directed;
@@ -493,8 +493,8 @@ mod tests {
             match dimension {
                 0 => other.projection.binding.root = ObjectId([2; 32]),
                 1 => other.projection.binding.as_of = CommitSeq(1),
-                2 => other.projection.selection.vertex_label = Some(LabelId(1)),
-                3 => other.projection.selection.relation = Some(RelationId(2)),
+                2 => other.projection.selection.vertex_labels = Some(LabelId(1)).into(),
+                3 => other.projection.selection.relations = Some(RelationId(2)).into(),
                 4 => {
                     other.projection.selection.weight = FnxWeightSpec::Property {
                         key: PropertyKeyId(1),

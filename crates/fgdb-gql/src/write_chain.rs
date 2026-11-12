@@ -66,9 +66,11 @@ pub(crate) enum ChainTextStep {
     ),
 }
 
-/// A parsed chain: two or more writes, each but the last with a (written or
-/// implicit) WITH head whose tail ends at the next write. The last write may
-/// have a RETURN.
+/// A parsed native write sequence. Chain preparation admits two or more
+/// writes plus the supported scoped single-step forms; `prepare_statement`
+/// also admits an ordinary single CREATE, mutation or MERGE for an explicit
+/// transaction. Each nonfinal write has a written or implicit WITH head, and
+/// the last write may have a RETURN. Autocommit classification is unchanged.
 #[derive(Clone)]
 pub struct PreparedGraphWriteChainText {
     pub(crate) statement: String,

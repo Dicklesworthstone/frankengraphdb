@@ -1,11 +1,20 @@
-//! Optional bounded identity roots from a fully completed leading relation.
+//! Optional bounded identity/property roots from a completed leading relation.
 //! The original left spool survives unchanged for occurrence-preserving joins.
 
 use super::*;
 use crate::buffered_read::BufferedVertexSeeds;
+use crate::gql_exec::source::PropertySeedValues;
 use crate::query::view::spool::sort::ChargedVec;
 use fgdb_strata::tiered::memory::MemoryError;
 use fgdb_types::VId;
+
+pub(in crate::query::view::spool::sort) enum Roots {
+    Identities(BufferedVertexSeeds),
+    Property {
+        key: PropertyKeyId,
+        values: PropertySeedValues,
+    },
+}
 
 #[derive(Clone, Copy)]
 pub(in crate::query::view::spool::sort) enum SeedPlan<'a> {
@@ -18,6 +27,13 @@ impl SeedPlan<'_> {
         match self {
             Self::Cross(plan) => plan.vertex_seed_column(),
             Self::Join(plan) => plan.vertex_seed_column(),
+        }
+    }
+
+    fn property_column(self) -> Option<(usize, PropertyKeyId)> {
+        match self {
+            Self::Cross(plan) => plan.property_seed_column(),
+            Self::Join(_) => None,
         }
     }
 
@@ -80,17 +96,35 @@ pub(in crate::query::view::spool::sort) async fn prepare<H, F>(
     left_work: &mut u64,
     max_sort_work: u64,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
-) -> Result<Option<BufferedVertexSeeds>>
+) -> Result<Option<Roots>>
 where
     H: ExternalOrderHost,
     F: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
-    let Some(column) = plan.column() else {
-        return Ok(None);
-    };
-    if !host.supports_vertex_seeds() || u128::from(left.row_count()) > run_rows as u128 {
+    if u128::from(left.row_count()) > run_rows as u128 {
         return Ok(None);
     }
+    let Some(column) = plan.column().filter(|_| host.supports_vertex_seeds()) else {
+        if host.supports_property_seeds()
+            && let Some((column, key)) = plan.property_column()
+        {
+            return prepare_properties(
+                plan,
+                column,
+                key,
+                left,
+                host,
+                cx,
+                policy,
+                source,
+                left_work,
+                max_sort_work,
+                resolver,
+            )
+            .await;
+        }
+        return Ok(None);
+    };
     host.checkpoint()?;
     cx.with_restriction(|| cx.checkpoint())
         .map_err(SpillError::Interrupted)?;
@@ -171,9 +205,9 @@ where
     }
     let Some(mut seeds) = seeds else {
         *left_work = work.used;
-        return Ok(Some(
+        return Ok(Some(Roots::Identities(
             single.map_or(BufferedVertexSeeds::Empty, BufferedVertexSeeds::One),
-        ));
+        )));
     };
     let mut step = || {
         work.charge(1)?;
@@ -201,9 +235,135 @@ where
         _charge,
         _extra,
     } = seeds;
-    Ok(Some(BufferedVertexSeeds::Many {
+    Ok(Some(Roots::Identities(BufferedVertexSeeds::Many {
         remaining: values.into_iter(),
         _charge,
         _extra,
+    })))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_properties<H, F>(
+    plan: SeedPlan<'_>,
+    column: usize,
+    key: PropertyKeyId,
+    left: &mut NativeResultSpool,
+    host: &mut H,
+    cx: &QueryCx,
+    policy: GqlQueryPolicy,
+    source: &mut SpillFile<F>,
+    left_work: &mut u64,
+    max_sort_work: u64,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+) -> Result<Option<Roots>>
+where
+    H: ExternalOrderHost,
+    F: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+{
+    host.checkpoint()?;
+    cx.with_restriction(|| cx.checkpoint())
+        .map_err(SpillError::Interrupted)?;
+    let count = usize::try_from(left.row_count()).map_err(|_| SpillError::SizeOverflow)?;
+    let pool = source.memory_pool().clone();
+    let mut values = match ChargedVec::<fgdb_types::CanonicalScalar>::new(&pool, cx, count) {
+        Ok(values) => values,
+        Err(NativeSpoolError::Spill(SpillError::Memory(MemoryError::ResourceExhausted {
+            ..
+        }))) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut work = Work {
+        cx,
+        used: *left_work,
+        limit: max_sort_work,
+    };
+    let mut input = position(left);
+    let mut seen = 0_u64;
+    loop {
+        let bytes = match input.next(source, cx).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => break,
+            Err(NativeSpoolError::Spill(SpillError::Memory(MemoryError::ResourceExhausted {
+                ..
+            }))) => {
+                // This optional seed owner can make an otherwise affordable
+                // page/frame decode exceed the pool. The complete left run
+                // still exists and no right source has started, so release
+                // the seeds and retain the ordinary lane and all spent work.
+                *left_work = work.used;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        seen = seen.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+        if seen > left.row_count() {
+            return Err(NativeSpoolError::IncompleteCursor);
+        }
+        let row = match decode(bytes, &pool, &mut work, resolver) {
+            Ok(row) => row,
+            Err(NativeSpoolError::Spill(SpillError::Memory(MemoryError::ResourceExhausted {
+                ..
+            }))) => {
+                *left_work = work.used;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        plan.validate(&row.row, &mut |event| {
+            host::event(host, cx, policy, &mut left.evaluator, event)
+        })
+        .map_err(|error| match error {
+            SpillSetRowError::Control(error) => error,
+            SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
+        })?;
+        match &row.row.values()[column] {
+            GraphValue::Scalar(fgdb_types::CanonicalScalar::Null) => {}
+            GraphValue::Scalar(value) => {
+                let bytes = value.owned_heap_bytes().ok_or(SpillError::SizeOverflow)?;
+                match values._charge.grow(cx, bytes) {
+                    Ok(()) => {}
+                    Err(MemoryError::ResourceExhausted { .. }) => {
+                        *left_work = work.used;
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(SpillError::Memory(error).into()),
+                }
+                host::event(
+                    host,
+                    cx,
+                    policy,
+                    &mut left.evaluator,
+                    GlaExecutionEvent::ScratchEntry,
+                )?;
+                if values.values.len() == count {
+                    return Err(NativeSpoolError::IncompleteCursor);
+                }
+                values.values.push(value.clone());
+            }
+            GraphValue::List(_) | GraphValue::Map { .. } => {
+                // Stored collections have no scalar posting. Keep the exact
+                // ordinary leaf instead of silently losing a possible match.
+                *left_work = work.used;
+                return Ok(None);
+            }
+            _ => {}
+        }
+    }
+    if seen != left.row_count() {
+        return Err(NativeSpoolError::IncompleteCursor);
+    }
+    *left_work = work.used;
+    let ChargedVec {
+        values,
+        _charge,
+        _extra,
+    } = values;
+    Ok(Some(Roots::Property {
+        key,
+        values: PropertySeedValues {
+            values,
+            _charge,
+            _extra,
+        },
     }))
 }

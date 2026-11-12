@@ -42,6 +42,8 @@ pub struct FnxExecutionLimits {
     /// retains the original target FIFO when its existing work bound fits.
     /// Bellman-Ford includes at most |V| full row sweeps and fixed 34-limb
     /// exact additions/comparisons, plus final rounding and output conversion.
+    /// Louvain includes its requested optimization-sweep cap, bounded stable
+    /// coarsening sorts, initialization and output, not the host iteration ceiling.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -1672,6 +1674,9 @@ impl FnxCallSpec {
             FnxAlgorithm::KatzCentrality(options) => {
                 admit("iterations", options.max_iter(), limits.max_iterations)?;
             }
+            FnxAlgorithm::LouvainCommunities(options) => {
+                admit("iterations", options.max_iter(), limits.max_iterations)?;
+            }
             FnxAlgorithm::HitsCentrality => {
                 admit(
                     "iterations",
@@ -1813,6 +1818,13 @@ impl FnxCallSpec {
             FnxAlgorithm::LabelPropagationCommunities => Some(
                 crate::label_propagation::estimated_work::<C>(n, arcs, n, self.outputs().len())?,
             ),
+            FnxAlgorithm::LouvainCommunities(options) => Some(crate::louvain::estimated_work::<C>(
+                n,
+                arcs,
+                n,
+                options.max_iter(),
+                self.outputs().len(),
+            )?),
             FnxAlgorithm::KatzCentrality(options) => Some(crate::katz::estimated_work::<C>(
                 n,
                 arcs,
@@ -1864,6 +1876,7 @@ impl FnxCallSpec {
             | FnxAlgorithm::OutDegreeCentrality
             | FnxAlgorithm::HitsCentrality
             | FnxAlgorithm::LabelPropagationCommunities
+            | FnxAlgorithm::LouvainCommunities(_)
             | FnxAlgorithm::KatzCentrality(_)
             | FnxAlgorithm::ArticulationPoints
             | FnxAlgorithm::Bridges
@@ -1994,10 +2007,19 @@ impl FnxCallSpec {
                 let (output, workspace_bytes) =
                     crate::foundation::run(graph, algorithm, arcs, &mut checkpoint)?;
                 kernel_workspace_bytes = workspace_bytes;
-                if graph.is_directed()
-                    && algorithm == crate::FoundationAlgorithm::EigenvectorCentrality
-                {
-                    execution_kernel = "fgdb-prism/eigenvector-csr-incoming-gather-v1";
+                if graph.is_directed() {
+                    match algorithm {
+                        crate::FoundationAlgorithm::DegreeCentrality => {
+                            execution_kernel = "fgdb-prism/degree-centrality-total-degree-csr-v1";
+                        }
+                        crate::FoundationAlgorithm::EigenvectorCentrality => {
+                            execution_kernel = "fgdb-prism/eigenvector-csr-incoming-gather-v1";
+                        }
+                        crate::FoundationAlgorithm::CoreNumber => {
+                            execution_kernel = "fgdb-prism/core-number-total-degree-csr-v1";
+                        }
+                        _ => {}
+                    }
                 }
                 output
             }
@@ -2031,6 +2053,13 @@ impl FnxCallSpec {
                 let (output, workspace_bytes) =
                     crate::label_propagation::run(graph, &mut checkpoint)?;
                 kernel_workspace_bytes = workspace_bytes;
+                output
+            }
+            FnxAlgorithm::LouvainCommunities(options) => {
+                let (output, workspace_bytes) =
+                    crate::louvain::run(graph, options, options.max_iter(), &mut checkpoint)?;
+                kernel_workspace_bytes = workspace_bytes;
+                execution_kernel = crate::louvain::KERNEL;
                 output
             }
             FnxAlgorithm::KatzCentrality(options) => {

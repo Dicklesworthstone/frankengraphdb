@@ -89,9 +89,12 @@ mod procedures {
             let mut vertices = Vec::new();
             for &(vertex, ref view) in &source.vertices {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                if let Some(label) = options.selection.vertex_label {
+                if let Some(labels) = options.selection.vertex_labels.members() {
                     usage.observe(policy, SourceEvent::Work)?;
-                    if !view.matches(&VertexPredicate::HasLabel(label)) {
+                    if !labels
+                        .iter()
+                        .any(|label| view.matches(&VertexPredicate::HasLabel(*label)))
+                    {
                         continue;
                     }
                 }
@@ -109,13 +112,11 @@ mod procedures {
             let mut edges = Vec::new();
             for &((eid, from, relation, to), ref view) in &source.edges {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                if options.selection.relation.is_some() || options.selection.vertex_label.is_some()
+                if !options.selection.relations.is_all()
+                    || !options.selection.vertex_labels.is_all()
                 {
                     usage.observe(policy, SourceEvent::Work)?;
-                    if options
-                        .selection
-                        .relation
-                        .is_some_and(|selected| selected != relation)
+                    if !options.selection.relations.contains(relation)
                         || vertices.binary_search(&from).is_err()
                         || vertices.binary_search(&to).is_err()
                     {

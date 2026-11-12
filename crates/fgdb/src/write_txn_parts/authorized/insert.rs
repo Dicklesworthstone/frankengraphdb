@@ -264,7 +264,7 @@ impl<V: Vfs + Clone> Database<V> {
             query,
             policy,
             clock,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         )
         .await
     }
@@ -275,7 +275,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// results, after image and signed row admission and BEFORE completion. It
     /// may encode a private result or refuse an unsupported representation. It
     /// must not publish tentative rows or perform external effects: completion
-    /// may still fail. It cannot access the database or alter the native result.
+    /// may still fail. The read-only output view resolves graph metadata from
+    /// the final masked overlay; it cannot alter the transaction or result.
     /// The meter polls cancellation and prices host work on the existing signed
     /// permit, with live expiry/retirement checks. Hosts must use it before their
     /// bounded traversal/encoding work. A no-op callback adds no new charges.
@@ -295,6 +296,7 @@ impl<V: Vfs + Clone> Database<V> {
         admit: impl FnOnce(
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<QueryReceipt, QueryFault> {
         if authority.namespace() != self.keys.namespace {
@@ -360,7 +362,7 @@ impl<V: Vfs + Clone> Database<V> {
                     None,
                 )
                 .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
-                let result = finish_output(
+                let mut result = finish_output(
                     workspace.transaction(),
                     self,
                     query_cx,
@@ -377,14 +379,17 @@ impl<V: Vfs + Clone> Database<V> {
                     .permit
                     .charge_rows_at((execution.clock)(), rows)
                     .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
-                query_cx
-                    .with_restriction(|| {
-                        admit(&result.value, &mut |work| {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.work(work)
-                        })
-                    })
-                    .map_err(query_source)?;
+                super::output::admit_output(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    verified.predicates(),
+                    &mut execution,
+                    policy.query,
+                    &mut result,
+                    admit,
+                )
+                .map_err(query_source)?;
                 execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()

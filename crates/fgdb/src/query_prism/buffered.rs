@@ -240,10 +240,10 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 )));
             }
             let mut options = procedure_options(&bound, as_of, policy);
-            if options.selection.relation != Some(relation) {
+            if options.selection.relations.single() != Some(relation) {
                 return Err(GqlQueryError::Source(GqlError::Procedure(
                     ProcedureError::SealedRelationMismatch {
-                        requested: options.selection.relation,
+                        requested: options.selection.relations,
                         retained: relation,
                     },
                 )));
@@ -410,7 +410,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     ) -> Result<SealedGraphView, FnxSealedReadError<BufferedReadError, Cancel>> {
         cx.with_restriction_async(async {
             cx.checkpoint().map_err(FnxReadError::Cancelled)?;
-            let relation = selection.relation.ok_or(FnxSealedReadError::Projection(
+            let relation = selection.relations.single().ok_or(FnxSealedReadError::Projection(
                 SealedProjectionError::RelationRequired,
             ))?;
             if as_of > self.frontier() {
@@ -531,7 +531,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         quantum: NonZeroUsize,
     ) -> Result<(SealedGraphView, AdmissionUsage), QueryFailure> {
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-        let relation = options.selection.relation.ok_or_else(|| {
+        let relation = options.selection.relations.single().ok_or_else(|| {
             query_sealed_failure(FnxSealedReadError::Projection(
                 SealedProjectionError::RelationRequired,
             ))
@@ -720,10 +720,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 control(SourceEvent::SnapshotRecord)?;
             }
             control(SourceEvent::Work)?;
-            if selection
-                .vertex_label
-                .is_some_and(|label| row.labels().binary_search(&label).is_err())
-            {
+            if !selection.vertex_labels.intersects_sorted(row.labels()) {
                 continue;
             }
             debug_assert!(vertices.last().is_none_or(|last| *last < row.vid()));
@@ -832,7 +829,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 .property_key()
                 .filter(|_| spec.parallel_edges != ParallelEdgePolicy::CollapseUnit);
             {
-                let mut scan = match selection.relation {
+                let mut scan = match selection.relations.single() {
                     Some(relation) => self.partition.edge_scan_relation(cx, as_of, relation),
                     None => self.partition.edge_scan(cx, as_of),
                 }
@@ -871,9 +868,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                     };
                     control(SourceEvent::Work)?;
                     let entry = row.entry();
-                    if selection
-                        .relation
-                        .is_some_and(|relation| relation != entry.relation)
+                    if !selection.relations.contains(entry.relation)
                         || !selected_vertices.contains(entry.src)
                         || !selected_vertices.contains(entry.dst)
                     {

@@ -15,7 +15,7 @@ use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphSetValue, GraphSymbol, GraphSymbolKind,
 };
-use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaSelection};
 use fgdb_types::VId;
 
 macro_rules! forward_metadata_to_source {
@@ -36,13 +36,13 @@ macro_rules! forward_metadata_to_source {
 /// A procedure's induced graph, resolved during preparation. The selection
 /// narrows the host's already authorized snapshot; it grants no authority and
 /// never chooses another branch, generation, or database. The current native
-/// projection admits one optional label and one optional relation, preserving
+/// projection admits canonical label/type unions, preserving
 /// isolated selected vertices and retaining edges only when both endpoints
 /// belong to the selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcedureGraphProjection {
-    pub vertex_label: Option<LabelId>,
-    pub relation: Option<RelationId>,
+    pub vertex_labels: SchemaSelection<LabelId>,
+    pub relations: SchemaSelection<RelationId>,
     pub weight: ProcedureGraphWeight,
     /// None preserves the registered procedure's required/default direction.
     pub direction: Option<ProcedureGraphDirection>,
@@ -95,18 +95,28 @@ pub enum ProcedureSelfLoops {
 
 impl ProcedureGraphProjection {
     pub(crate) fn append_transcript(&self, bytes: &mut Vec<u8>) {
-        for id in [
-            self.vertex_label.map(|id| id.0),
-            self.relation.map(|id| id.0),
-        ] {
-            match id {
+        fn selection<T: Copy>(
+            bytes: &mut Vec<u8>,
+            selection: &SchemaSelection<T>,
+            identity: impl Fn(T) -> u64,
+        ) {
+            match selection.members() {
                 None => bytes.push(0),
-                Some(id) => {
+                Some([id]) => {
                     bytes.push(1);
-                    bytes.extend_from_slice(&id.to_be_bytes());
+                    bytes.extend_from_slice(&identity(*id).to_be_bytes());
+                }
+                Some(ids) => {
+                    bytes.push(2);
+                    bytes.extend_from_slice(&(ids.len() as u64).to_be_bytes());
+                    for &id in ids {
+                        bytes.extend_from_slice(&identity(id).to_be_bytes());
+                    }
                 }
             }
         }
+        selection(bytes, &self.vertex_labels, |id| id.0);
+        selection(bytes, &self.relations, |id| id.0);
         match self.weight {
             ProcedureGraphWeight::Unit => bytes.push(0),
             ProcedureGraphWeight::Property { key, missing } => {
@@ -188,7 +198,7 @@ impl PreparedProcedureCall {
     pub fn argument_names(&self) -> &[String] {
         &self.names
     }
-    /// The optional query-local graph argument. Its labels, relation and
+    /// The optional query-local graph argument. Its labels, relations and
     /// weight property are frozen catalog identities, never runtime strings.
     #[must_use]
     pub fn graph_projection(&self) -> Option<&ProcedureGraphProjection> {
@@ -1321,6 +1331,31 @@ mod tests {
     }
 
     #[test]
+    fn all_and_singleton_graph_projections_preserve_the_existing_transcript() {
+        let mut projection = ProcedureGraphProjection {
+            vertex_labels: SchemaSelection::ALL,
+            relations: SchemaSelection::ALL,
+            weight: ProcedureGraphWeight::Unit,
+            direction: None,
+            parallel_edges: ProcedureParallelEdges::Reject,
+            self_loops: ProcedureSelfLoops::Keep,
+        };
+        let mut bytes = Vec::new();
+        projection.append_transcript(&mut bytes);
+        assert_eq!(bytes, [0, 0, 0, 0, 0, 0]);
+        projection.vertex_labels = SchemaSelection::one(LabelId(7));
+        projection.relations = SchemaSelection::one(RelationId(u64::MAX));
+        bytes.clear();
+        projection.append_transcript(&mut bytes);
+        let mut fixture = vec![1];
+        fixture.extend_from_slice(&7_u64.to_be_bytes());
+        fixture.push(1);
+        fixture.extend_from_slice(&u64::MAX.to_be_bytes());
+        fixture.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(bytes, fixture);
+    }
+
+    #[test]
     fn projected_call_and_computed_page_have_distinct_template_tags() {
         let mut call = ReadStageTemplate::Call {
             at: 0,
@@ -1342,8 +1377,8 @@ mod tests {
         } = &mut call
         {
             *graph_projection = Some(ProcedureGraphProjection {
-                vertex_label: None,
-                relation: None,
+                vertex_labels: SchemaSelection::ALL,
+                relations: SchemaSelection::ALL,
                 weight: ProcedureGraphWeight::Unit,
                 direction: None,
                 parallel_edges: ProcedureParallelEdges::Reject,

@@ -589,7 +589,7 @@ fn checked_output_refusal_or_expiry_after_actions_rolls_back_before_completion()
                     &query,
                     policy(4, 4, 0),
                     || now.load(Ordering::Relaxed) as u64,
-                    |rows, meter| {
+                    |rows, meter, _| {
                         calls.fetch_add(1, Ordering::Relaxed);
                         assert_eq!(rows.len(), 4);
                         if expiry {
@@ -655,7 +655,7 @@ fn zero_final_rows_keep_creations_and_empty_match_does_not_invent_effects() {
                 &query,
                 policy(0, 2, 1),
                 || NOW,
-                |rows, meter| {
+                |rows, meter, _| {
                     assert!(rows.is_empty());
                     calls.fetch_add(1, Ordering::Relaxed);
                     meter(0)

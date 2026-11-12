@@ -249,18 +249,35 @@ where
                 right_limits.page_bytes,
                 right_limits.max_sort_work,
             )?;
-            let (input, work) = host
-                .seeded_vertex_leaf(
-                    right_plan,
-                    seeds,
-                    snapshot,
-                    cx,
-                    input_policy(right_policy, max_input_rows),
-                    scratch,
-                    destination,
-                    right_limits,
-                )
-                .await?;
+            let (input, work) = match seeds {
+                cross::seeds::Roots::Identities(seeds) => {
+                    host.seeded_vertex_leaf(
+                        right_plan,
+                        seeds,
+                        snapshot,
+                        cx,
+                        input_policy(right_policy, max_input_rows),
+                        scratch,
+                        destination,
+                        right_limits,
+                    )
+                    .await?
+                }
+                cross::seeds::Roots::Property { key, values } => {
+                    host.seeded_property_leaf(
+                        right_plan,
+                        key,
+                        values,
+                        snapshot,
+                        cx,
+                        input_policy(right_policy, max_input_rows),
+                        scratch,
+                        destination,
+                        right_limits,
+                    )
+                    .await?
+                }
+            };
             host.checkpoint()?;
             host.stages(
                 right_plan,

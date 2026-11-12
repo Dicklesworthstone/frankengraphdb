@@ -767,7 +767,8 @@ fn list_graph_expression_in_scope<'a>(
         let end = if super::super::pattern_comprehension_follows(current.kind, &lexer)? {
             after_balanced(&mut ahead, b'[')?
         } else if !key
-            && matches!(current.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("COUNT"))
+            && (matches!(current.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("COUNT"))
+                || collect_subquery_follows(current.kind, &lexer)?)
             && matches!(ahead.clone().next()?.kind, TokenKind::Punct(b'{'))
         {
             ahead.next()?;
@@ -867,6 +868,7 @@ fn row_pattern_expressions_from<'a>(
     mut hoisted: impl FnMut(usize) -> bool,
     source: bool,
 ) -> Result<Vec<(Token<'a>, Lexer<'a>)>, GraphPatternTextError> {
+    refuse_lazy_collect(token, lexer)?;
     let mut expressions = Vec::new();
     let mut previous = None;
     let mut depth = 0_usize;
@@ -931,8 +933,9 @@ fn row_pattern_expressions_from<'a>(
             }
         }
         let mut ahead = lexer.clone();
-        let after = if matches!(token.kind, TokenKind::Word(word)
-            if !key && word.eq_ignore_ascii_case("COUNT"))
+        let after = if !key
+            && (matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("COUNT"))
+                || collect_subquery_follows(token.kind, lexer)?)
             && matches!(ahead.clone().next()?.kind, TokenKind::Punct(b'{'))
         {
             ahead.next()?;
@@ -971,6 +974,103 @@ fn row_pattern_expressions_from<'a>(
         previous = Some(token.kind);
         token = lexer.next()?;
     }
+}
+
+/// The current Apply owner gathers graph expressions before evaluating the
+/// containing scalar expression. Until a lazy correlated Apply is available,
+/// a COLLECT body inside CASE or COALESCE must refuse at preparation, including
+/// when it is wrapped in a list expression. A WITH-produced collection is an
+/// ordinary value and remains usable in either lazy scalar form.
+fn refuse_lazy_collect<'a>(
+    mut token: Token<'a>,
+    lexer: &Lexer<'a>,
+) -> Result<(), GraphPatternTextError> {
+    let mut lexer = lexer.clone();
+    let mut depth = 0_usize;
+    let mut groups = Vec::new();
+    let mut cases = Vec::new();
+    let mut coalesce = Vec::new();
+    let mut previous = None;
+    loop {
+        let key = matches!(previous, Some(TokenKind::Punct(b'.')))
+            || (matches!(previous, Some(TokenKind::Punct(b':'))) && groups.last() != Some(&b'{'))
+            || matches!(previous, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"));
+        if matches!(token.kind, TokenKind::End)
+            || (depth == 0 && matches!(token.kind, TokenKind::Punct(b')' | b']' | b'}' | b'|')))
+        {
+            return Ok(());
+        }
+        if let TokenKind::Word(word) = token.kind
+            && !key
+        {
+            let next = lexer.clone().next()?.kind;
+            // A map key such as {case: value} is not a scalar CASE.
+            if !matches!(next, TokenKind::Punct(b':')) {
+                if word.eq_ignore_ascii_case("CASE") {
+                    cases.push(depth);
+                } else if word.eq_ignore_ascii_case("END")
+                    && cases.last() == Some(&depth)
+                    && (matches!(
+                        next,
+                        TokenKind::End | TokenKind::Punct(b')' | b']' | b'}' | b',')
+                    ) || matches!(next, TokenKind::Word(word)
+                            if ["AS", "END", "WITH", "RETURN", "WHERE", "ORDER", "SKIP", "LIMIT"]
+                                .iter().any(|name| word.eq_ignore_ascii_case(name))))
+                {
+                    cases.pop();
+                } else if word.eq_ignore_ascii_case("COALESCE")
+                    && matches!(next, TokenKind::Punct(b'('))
+                {
+                    coalesce.push(depth + 1);
+                } else if collect_subquery_follows(token.kind, &lexer)?
+                    && (!cases.is_empty() || !coalesce.is_empty())
+                {
+                    return Err(error(
+                        token.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "COLLECT subqueries outside CASE/COALESCE; bind the list in WITH first",
+                        ),
+                    ));
+                }
+            }
+        }
+        match token.kind {
+            TokenKind::Punct(opening @ (b'(' | b'[' | b'{')) => {
+                groups.push(opening);
+                depth += 1;
+            }
+            TokenKind::Punct(b')' | b']' | b'}') => {
+                groups.pop();
+                depth = depth.saturating_sub(1);
+                coalesce.retain(|&scope| scope <= depth);
+            }
+            _ => {}
+        }
+        previous = Some(token.kind);
+        token = lexer.next()?;
+    }
+}
+
+/// A binding named collect can still own a map projection (`collect{.p}`).
+/// The subquery form starts with a relational clause, not a map field. Include
+/// write introducers so the read compiler can refuse them before resolution.
+fn collect_subquery_follows(
+    token: TokenKind<'_>,
+    lexer: &Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    if !matches!(token, TokenKind::Word(word) if word.eq_ignore_ascii_case("COLLECT")) {
+        return Ok(false);
+    }
+    let mut lexer = lexer.clone();
+    if !matches!(lexer.next()?.kind, TokenKind::Punct(b'{')) {
+        return Ok(false);
+    }
+    let body = lexer.next()?.kind;
+    Ok(matches!(body, TokenKind::Word(word)
+        if ["MATCH", "OPTIONAL", "WITH", "RETURN", "UNWIND", "CALL",
+            "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE"]
+            .iter().any(|clause| word.eq_ignore_ascii_case(clause)))
+        && !matches!(lexer.next()?.kind, TokenKind::Punct(b':')))
 }
 
 /// Consume one balanced token group, returning its first following token.
@@ -1074,6 +1174,9 @@ pub(super) fn relational_subquery_body(
     token: TokenKind<'_>,
     lexer: &Lexer<'_>,
 ) -> Result<bool, GraphPatternTextError> {
+    if matches!(token, TokenKind::Word(word) if word.eq_ignore_ascii_case("COLLECT")) {
+        return collect_subquery_follows(token, lexer);
+    }
     if !matches!(token, TokenKind::Word(word)
         if word.eq_ignore_ascii_case("EXISTS") || word.eq_ignore_ascii_case("COUNT"))
     {
@@ -1303,6 +1406,8 @@ impl<'a> Parser<'a> {
     /// ordinary scalar/value evaluator owns Boolean precedence, three-valued
     /// logic and lazy CASE; graph sources retain the existing eager governed
     /// Apply contract. A public projection never exports the private suffix.
+    /// An OPTIONAL child supplies its local export range and ends at this
+    /// WHERE, before the containing clause performs its null extension.
     #[allow(clippy::type_complexity)]
     fn multipart_existence_expression(
         &mut self,
@@ -1310,6 +1415,7 @@ impl<'a> Parser<'a> {
         incoming: &RowSchema<'a>,
         aggregate: bool,
         call_depth: usize,
+        optional_exports: Option<core::ops::Range<usize>>,
     ) -> Result<(Vec<UnresolvedContinuation<'a>>, RowSchema<'a>, bool), GraphSetTextError> {
         let at = self.current.at;
         let returning = self.is_word("RETURN");
@@ -1431,11 +1537,11 @@ impl<'a> Parser<'a> {
                 &mut pipeline,
                 ReadStageTemplate::Project {
                     at,
-                    projection: incoming
-                        .iter()
-                        .enumerate()
-                        .map(|(column, (name, _))| ReadProjectionTemplate {
-                            name: name.text.to_owned(),
+                    projection: optional_exports
+                        .clone()
+                        .unwrap_or(0..incoming.len())
+                        .map(|column| ReadProjectionTemplate {
+                            name: incoming[column].0.text.to_owned(),
                             value: ReadValueTemplate::Column(column),
                         })
                         .collect(),
@@ -1443,9 +1549,14 @@ impl<'a> Parser<'a> {
                 },
                 &mut depth,
             )?;
-            let (tail, next, terminal) = self.multipart_row_tail(incoming.clone(), aggregate)?;
-            pipeline.extend(tail);
-            (next, terminal)
+            if let Some(exports) = optional_exports {
+                (incoming[exports].to_vec(), true)
+            } else {
+                let (tail, next, terminal) =
+                    self.multipart_row_tail(incoming.clone(), aggregate)?;
+                pipeline.extend(tail);
+                (next, terminal)
+            }
         };
         let mut syntax = self.take_part_syntax()?;
         syntax.return_at = at;
@@ -1486,10 +1597,11 @@ impl<'a> Parser<'a> {
             self.current = token;
             self.lexer = lexer;
             let count = self.is_word("COUNT");
+            let collection = self.is_word("COLLECT");
             let quantifier = self.list_quantifier()?;
             let list =
                 row_list_graph_expression_follows(self.current.kind, &self.lexer, |_| false)?;
-            let collected = list || self.starts_pattern_comprehension()?;
+            let collected = collection || list || self.starts_pattern_comprehension()?;
             let (operation, mapped, leading) = if list {
                 let (operation, leading) = self.multipart_list_comprehension(
                     statement,
@@ -1509,6 +1621,14 @@ impl<'a> Parser<'a> {
                     None => *list,
                 };
                 (operation, Some(value), leading)
+            } else if collection {
+                let (operation, leading) =
+                    self.multipart_collection_operation(statement, &schema, visible, call_depth)?;
+                (
+                    operation,
+                    Some(ReadValueTemplate::Column(schema.len() + 1)),
+                    leading,
+                )
             } else if collected {
                 let (pattern, join, column, value) =
                     self.multipart_comprehension_pattern(statement, &schema, visible, token.at)?;
@@ -1607,7 +1727,7 @@ impl<'a> Parser<'a> {
                     leading_types: schema
                         .iter()
                         .map(|(_, kind)| *kind)
-                        .chain(list.then_some(GraphSetColumnType::List))
+                        .chain((list || collection).then_some(GraphSetColumnType::List))
                         .collect(),
                     correlations: Vec::new(),
                     row_fields: Vec::new(),
@@ -2062,15 +2182,99 @@ impl<'a> Parser<'a> {
                 result,
             });
         }
-        if call_depth >= 8 {
-            return Err(expected(at, "at most eight nested read subquery bodies"));
-        }
         if matches!(result, RowPatternResult::Count) {
             self.word("COUNT")?;
         } else {
             self.word("EXISTS")?;
         }
         self.punct(b'{', "{")?;
+        let (body, _) =
+            self.multipart_read_subquery(statement, incoming, captures, call_depth, at, true)?;
+        Ok(UnresolvedContinuationOperation::SubqueryBody {
+            body: Box::new(body),
+            imports: (0..captures).collect(),
+            result,
+        })
+    }
+
+    /// Scalar collection reuses the governed, order-preserving Collect Apply
+    /// already owned by graph-reading list comprehensions. Its private empty
+    /// list is always non-NULL: even an absent or NULL correlated argument must
+    /// execute the body and collect its actual rows (possibly none).
+    fn multipart_collection_operation(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        captures: usize,
+        call_depth: usize,
+    ) -> Result<(UnresolvedContinuationOperation<'a>, Vec<ReadStageTemplate>), GraphSetTextError>
+    {
+        let at = self.current.at;
+        self.word("COLLECT")?;
+        self.punct(b'{', "{")?;
+        let (body, returned) =
+            self.multipart_read_subquery(statement, incoming, captures, call_depth, at, false)?;
+        if returned.len() != 1 {
+            return Err(expected(
+                at,
+                "exactly one RETURN column in a COLLECT subquery",
+            ));
+        }
+        self.capacity(
+            incoming.len() + 1,
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        let list_name = BOUNDARY_READ_NAMES
+            .iter()
+            .copied()
+            .find(|name| incoming.iter().all(|(binding, _)| binding.text != *name));
+        let Some(list_name) = list_name else {
+            return Err(expected(at, "bounded private COLLECT subquery columns"));
+        };
+        // Collect Apply reads its body positionally. Do not insert an ordinary
+        // renaming projection: that could sort an explicitly ordered body.
+        let mut projection: Vec<_> = incoming
+            .iter()
+            .enumerate()
+            .map(|(column, (name, _))| ReadProjectionTemplate {
+                name: name.text.to_owned(),
+                value: ReadValueTemplate::Column(column),
+            })
+            .collect();
+        projection.push(ReadProjectionTemplate {
+            name: list_name.to_owned(),
+            value: ReadValueTemplate::List(Vec::new()),
+        });
+        Ok((
+            UnresolvedContinuationOperation::List {
+                body: Box::new(body),
+                imports: (0..captures).collect(),
+                list_column: incoming.len(),
+            },
+            vec![ReadStageTemplate::Project {
+                at,
+                projection,
+                quantifier: GraphSetQuantifier::All,
+            }],
+        ))
+    }
+
+    /// Compile an isolated read body while sharing parameter/catalog admission.
+    /// EXISTS/COUNT may end without RETURN; COLLECT requires an explicit result.
+    #[allow(clippy::too_many_arguments)]
+    fn multipart_read_subquery(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        captures: usize,
+        call_depth: usize,
+        at: usize,
+        implicit_return: bool,
+    ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
+        if call_depth >= 8 {
+            return Err(expected(at, "at most eight nested read subquery bodies"));
+        }
         // A body has a separate namespace, but shares the original parameter
         // table, catalog slots, lexer and statement-wide admission counters.
         // Hidden witness/property columns are not implicit imports.
@@ -2086,7 +2290,7 @@ impl<'a> Parser<'a> {
         let comparisons = self.read_comparisons.take();
         let element_reads = core::mem::replace(&mut self.call_element_reads, true);
         let call_body = core::mem::replace(&mut self.call_body, true);
-        let existence_body = core::mem::replace(&mut self.existence_body, true);
+        let existence_body = core::mem::replace(&mut self.existence_body, implicit_return);
         let optional_body = core::mem::take(&mut self.optional_body);
         let parsed = self.multipart_parts_from(
             statement,
@@ -2111,14 +2315,10 @@ impl<'a> Parser<'a> {
         self.call_body = call_body;
         self.existence_body = existence_body;
         self.optional_body = optional_body;
-        let (mut body, _) = parsed?;
+        let (mut body, returned) = parsed?;
         body.append_element_keys(&mut remainder.element_keys);
         self.punct(b'}', "} after a read-only subquery body")?;
-        Ok(UnresolvedContinuationOperation::SubqueryBody {
-            body: Box::new(body),
-            imports: (0..captures).collect(),
-            result,
-        })
+        Ok((body, returned))
     }
 
     /// Keep the native Collect scope's witness order and NULL placeholders
@@ -2662,6 +2862,10 @@ impl<'a> Parser<'a> {
         owned: bool,
     ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
         self.refuse_call_write(call_depth)?;
+        // The optional child owns exactly one MATCH and its WHERE. Graph
+        // expressions in that WHERE are completed here, inside the child,
+        // rather than consuming the containing query's following clauses.
+        let optional_imports = self.optional_body.then_some(incoming.len());
         let mut terminal = false;
         let first = if self.is_word("MATCH") && incoming.is_empty() && !owned {
             let (input, next, terminal, _) =
@@ -2723,7 +2927,10 @@ impl<'a> Parser<'a> {
             if self.row_existence_filter(incoming.len())?
                 || self.row_existence_projection(incoming.len())?
             {
-                let (next, done) = if self.is_word("WHERE")
+                let optional_exports =
+                    optional_imports.map(|imports| imports..self.visible_width(&incoming));
+                let (next, done) = if optional_exports.is_none()
+                    && self.is_word("WHERE")
                     && self.whole_row_existence_filter(incoming.len())?
                 {
                     let (part, next, done) =
@@ -2732,13 +2939,21 @@ impl<'a> Parser<'a> {
                     (next, done)
                 } else {
                     let (parts, next, done) = self.multipart_existence_expression(
-                        statement, &incoming, aggregate, call_depth,
+                        statement,
+                        &incoming,
+                        aggregate,
+                        call_depth,
+                        optional_exports,
                     )?;
                     result.continuations.extend(parts);
                     (next, done)
                 };
                 incoming = next;
                 terminal = done;
+                if optional_imports.is_some() && terminal {
+                    self.boundary_reads = None;
+                    self.projected_sources = None;
+                }
             } else if self.inline_call()? {
                 let (part, next, done) =
                     self.multipart_call_part(statement, &incoming, aggregate, call_depth)?;
@@ -2754,7 +2969,7 @@ impl<'a> Parser<'a> {
                 if !self.is_word("MATCH") {
                     return Err(expected(self.current.at, "MATCH after WITH or OPTIONAL"));
                 }
-                if kind == RowJoinKind::Left && self.clause_where_deferred()? {
+                if kind == RowJoinKind::Left && self.clause_where_requires_apply()? {
                     let (part, next, done) =
                         self.multipart_optional_apply(statement, &incoming, aggregate, call_depth)?;
                     result.continuations.push(part);
@@ -3221,9 +3436,12 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// Whether the clause starting at this MATCH has a top-level WHERE the
-    /// composition entry re-reads (deferred_wheres). Nothing is consumed.
-    fn clause_where_deferred(&self) -> Result<bool, GraphPatternTextError> {
+    /// Whether this OPTIONAL clause needs its own correlated Apply. A graph
+    /// expression must be placed inside that child before parsing its pattern:
+    /// a parsed nested scope would otherwise be refused at the MATCH offset,
+    /// before the composition entry can identify the WHERE for a retry.
+    /// Only lookahead and the original deferred-WHERE offset are retained.
+    fn clause_where_requires_apply(&mut self) -> Result<bool, GraphPatternTextError> {
         const CLAUSES: [&str; 10] = [
             "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "UNION", "ORDER", "SKIP",
             "LIMIT",
@@ -3241,7 +3459,16 @@ impl<'a> Parser<'a> {
                     if depth == 0 && !matches!(previous, TokenKind::Punct(b'.')) =>
                 {
                     if word.eq_ignore_ascii_case("WHERE") {
-                        return Ok(self.deferred_wheres.contains(&token.at));
+                        if self.deferred_wheres.contains(&token.at) {
+                            return Ok(true);
+                        }
+                        if row_pattern_filter_starts(&mut lexer.clone(), |_| false)?
+                            || !row_pattern_expressions(&mut lexer.clone(), |_| false)?.is_empty()
+                        {
+                            self.deferred_wheres.push(token.at);
+                            return Ok(true);
+                        }
+                        return Ok(false);
                     }
                     if CLAUSES
                         .iter()
@@ -3704,35 +3931,42 @@ impl<'a> Parser<'a> {
             None
         };
         let mut terminal = !head.with;
-        let (mut pipeline, mut next) = if optional_body {
-            // The optional Apply's body ends with its WHERE and exports the
-            // clause's own bindings; the clauses after it are the caller's.
-            let at = self.current.at;
-            let mut stages = Vec::new();
-            let mut depth = 2;
-            self.word("WHERE")?;
-            self.row_selection(&schema, &mut stages, &mut depth, at)?;
-            let exports: RowSchema<'a> = schema[incoming.len()..visible].to_vec();
-            stages.push(ReadStageTemplate::Project {
-                at,
-                projection: (incoming.len()..visible)
-                    .map(|column| ReadProjectionTemplate {
-                        name: schema[column].0.text.to_owned(),
-                        value: ReadValueTemplate::Column(column),
-                    })
-                    .collect(),
-                quantifier: GraphSetQuantifier::All,
-            });
-            self.boundary_reads = None;
-            self.projected_sources = None;
-            terminal = true;
-            (stages, exports)
-        } else if head.with {
-            let (pipeline, schema, _) = self.row_pipeline_prefix(schema)?;
-            (pipeline, schema)
-        } else {
-            (graph_page.into_iter().collect(), schema)
-        };
+        let (mut pipeline, mut next) =
+            if optional_body && self.row_existence_filter(schema.len())? {
+                // Keep the candidate row intact until the multipart owner has
+                // appended its correlated graph sources and Boolean filter.
+                // Projecting the child exports here would hide imported bindings;
+                // filtering after the Apply would erase null-extended outer rows.
+                (Vec::new(), schema)
+            } else if optional_body {
+                // The optional Apply's body ends with its WHERE and exports the
+                // clause's own bindings; the clauses after it are the caller's.
+                let at = self.current.at;
+                let mut stages = Vec::new();
+                let mut depth = 2;
+                self.word("WHERE")?;
+                self.row_selection(&schema, &mut stages, &mut depth, at)?;
+                let exports: RowSchema<'a> = schema[incoming.len()..visible].to_vec();
+                stages.push(ReadStageTemplate::Project {
+                    at,
+                    projection: (incoming.len()..visible)
+                        .map(|column| ReadProjectionTemplate {
+                            name: schema[column].0.text.to_owned(),
+                            value: ReadValueTemplate::Column(column),
+                        })
+                        .collect(),
+                    quantifier: GraphSetQuantifier::All,
+                });
+                self.boundary_reads = None;
+                self.projected_sources = None;
+                terminal = true;
+                (stages, exports)
+            } else if head.with {
+                let (pipeline, schema, _) = self.row_pipeline_prefix(schema)?;
+                (pipeline, schema)
+            } else {
+                (graph_page.into_iter().collect(), schema)
+            };
         // The body's RETURN may follow its own WITH stages, so ask again here.
         if !terminal
             && self.call_body
@@ -4224,7 +4458,33 @@ impl BoundReadInput {
                 list_column,
             } = &part.operation
             {
-                input = super::super::bind_stages(input, &source.leading, values)?;
+                // Saving the list (or a scalar subquery's non-NULL guard) is
+                // compiler-private. Preserve the selected outer occurrence
+                // sequence, including a completed WITH ORDER BY/SKIP/LIMIT.
+                let [
+                    ReadStageTemplate::Project {
+                        at,
+                        projection,
+                        quantifier: GraphSetQuantifier::All,
+                    },
+                ] = source.leading.as_slice()
+                else {
+                    unreachable!("a collected read saves exactly one private input list")
+                };
+                let projection = projection
+                    .iter()
+                    .map(|output| {
+                        super::super::bind_read_value(&output.value, values)
+                            .map(|value| GraphSetProjection::new(output.name.clone(), value))
+                    })
+                    .collect::<Result<_, _>>()?;
+                input =
+                    input
+                        .project_ordered_output(projection)
+                        .map_err(|kind| GraphSetTextError {
+                            offset: *at,
+                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                        })?;
                 input = input
                     .collect_apply(body.bind_values(values)?, imports.clone(), *list_column)
                     .map_err(|kind| GraphSetTextError {

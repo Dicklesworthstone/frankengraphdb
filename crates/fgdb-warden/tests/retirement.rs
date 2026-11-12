@@ -248,3 +248,52 @@ fn concurrent_retirement_has_one_winner_and_fences_live_permits() {
     assert_eq!(read.checkpoint_at(NOW), Err(Error::AuthorityRetired));
     assert_eq!(write.checkpoint_at(NOW), Err(Error::AuthorityRetired));
 }
+
+#[test]
+fn consuming_verified_write_permit_keeps_one_allowance_and_live_issuer() {
+    let issuer = authority(1);
+    let token = issuer.issue_at(&grant(), NOW).unwrap();
+    let verified = issuer.verify_at(&token, BRANCH, NOW).unwrap();
+    let decision = verified.begin_write_at(BRANCH, NOW).unwrap().canonical_decision_bytes();
+    let mut permit = verified.into_write_at(BRANCH, NOW).unwrap();
+    assert_eq!(permit.canonical_decision_bytes(), decision);
+    permit.charge_work_at(NOW, 4).unwrap();
+    permit.charge_rows_at(NOW, 3).unwrap();
+    // Moving the value between owners must retain all counters and validity.
+    let mut moved = Some(permit).take().unwrap();
+    assert_eq!(moved.usage(), Usage { nodes: 0, work: 4, rows: 3 });
+    assert!(issuer.retire());
+    assert_eq!(moved.checkpoint_at(NOW + 1), Err(Error::AuthorityRetired));
+    assert_eq!(moved.charge_work_at(NOW + 1, 0), Err(Error::ExecutionStopped));
+    assert_eq!(moved.usage(), Usage { nodes: 0, work: 4, rows: 3 });
+}
+
+#[test]
+fn consuming_write_permit_checks_admission_and_latches_budget_and_time() {
+    let issuer = authority(1);
+    let token = issuer.issue_at(&grant(), NOW).unwrap();
+    let verified = || issuer.verify_at(&token, BRANCH, NOW).unwrap();
+    assert!(verified().into_write_at("other", NOW).is_err());
+    assert!(verified().into_write_at(BRANCH, 1000).is_err());
+    let mut allowance = verified().into_write_at(BRANCH, NOW).unwrap();
+    allowance.charge_work_at(NOW, 6).unwrap();
+    assert!(allowance.charge_work_at(NOW, 5).is_err());
+    assert_eq!(allowance.charge_work_at(NOW, 1), Err(Error::ExecutionStopped));
+    assert_eq!(allowance.usage().work, 6);
+    let mut backwards = verified().into_write_at(BRANCH, NOW + 1).unwrap();
+    assert_eq!(backwards.checkpoint_at(NOW), Err(Error::ClockWentBackwards));
+    assert_eq!(backwards.checkpoint_at(NOW + 2), Err(Error::ExecutionStopped));
+    let mut read_only = grant();
+    read_only.rights = Rights::Read;
+    let read_token = issuer.issue_at(&read_only, NOW).unwrap();
+    assert!(matches!(
+        issuer.verify_at(&read_token, BRANCH, NOW).unwrap().into_write_at(BRANCH, NOW),
+        Err(Error::PermissionDenied)
+    ));
+    let admitted = verified();
+    issuer.retire();
+    assert!(matches!(
+        admitted.into_write_at(BRANCH, NOW),
+        Err(Error::AuthorityRetired)
+    ));
+}

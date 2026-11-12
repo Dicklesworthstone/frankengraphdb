@@ -7,7 +7,7 @@ use crate::{
     ProjectionLimits, ProjectionSpec, SelfLoopPolicy,
 };
 use fgdb_crypto::{Digest, Hasher};
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaSelection};
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,38 +74,44 @@ impl FnxWeightSpec {
     }
 }
 
-/// An induced projection: retain visible vertices matching the optional label,
-/// then visible edges matching the optional relation whose BOTH endpoints are
-/// retained. Isolates remain. None means all in the already admitted snapshot;
+/// An induced projection: retain visible vertices carrying ANY selected label,
+/// then visible edges of ANY selected relation whose BOTH endpoints are
+/// retained. Isolates remain. All means all in the already admitted snapshot;
 /// it does not authorize a wider snapshot or cross a tenant/branch boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FnxSelection {
-    pub vertex_label: Option<LabelId>,
-    pub relation: Option<RelationId>,
+    pub vertex_labels: SchemaSelection<LabelId>,
+    pub relations: SchemaSelection<RelationId>,
     pub weight: FnxWeightSpec,
 }
 impl FnxSelection {
     pub fn digest(self) -> Digest {
         let mut hash = Hasher::new();
         hash.update(b"fgdb:prism:induced-selection:v1");
-        match self.vertex_label {
-            None => {
-                hash.update(&[0]);
-            }
-            Some(label) => {
-                hash.update(&[1]);
-                hash.update(&label.0.to_le_bytes());
+        fn selection<T: Copy>(
+            hash: &mut Hasher,
+            selection: &SchemaSelection<T>,
+            identity: impl Fn(T) -> u64,
+        ) {
+            match selection.members() {
+                None => {
+                    hash.update(&[0]);
+                }
+                Some([id]) => {
+                    hash.update(&[1]);
+                    hash.update(&identity(*id).to_le_bytes());
+                }
+                Some(ids) => {
+                    hash.update(&[2]);
+                    hash.update(&(ids.len() as u64).to_le_bytes());
+                    for &id in ids {
+                        hash.update(&identity(id).to_le_bytes());
+                    }
+                }
             }
         }
-        match self.relation {
-            None => {
-                hash.update(&[0]);
-            }
-            Some(relation) => {
-                hash.update(&[1]);
-                hash.update(&relation.0.to_le_bytes());
-            }
-        }
+        selection(&mut hash, &self.vertex_labels, |id| id.0);
+        selection(&mut hash, &self.relations, |id| id.0);
         match self.weight {
             FnxWeightSpec::Unit => {
                 hash.update(&[0]);
@@ -169,8 +175,8 @@ impl FnxReadOptions {
         Self {
             as_of,
             selection: FnxSelection {
-                vertex_label: None,
-                relation: None,
+                vertex_labels: SchemaSelection::ALL,
+                relations: SchemaSelection::ALL,
                 weight: FnxWeightSpec::Unit,
             },
             projection: ProjectionSpec {
@@ -187,8 +193,8 @@ impl FnxReadOptions {
     /// [`Self::whole_graph`] read in the direction `call`'s signature law
     /// requires: an undirected-law procedure (connected components,
     /// triangles, clustering) reads every edge undirected. Betweenness,
-    /// closeness, harmonic and eigenvector centrality keep their undirected
-    /// whole-graph defaults while admitting explicit directed and reversed projections.
+    /// closeness, harmonic, eigenvector, load, degree centrality and core numbers keep
+    /// their undirected defaults while admitting explicit directed and reversed projections.
     /// Every other procedure reads directed edges.
     /// A reciprocal pair in an undirected input projects to a parallel edge,
     /// which is refused, not collapsed.
@@ -203,6 +209,9 @@ impl FnxReadOptions {
                         | FoundationAlgorithm::ClosenessCentrality
                         | FoundationAlgorithm::HarmonicCentrality
                         | FoundationAlgorithm::EigenvectorCentrality
+                        | FoundationAlgorithm::LoadCentrality
+                        | FoundationAlgorithm::CoreNumber
+                        | FoundationAlgorithm::DegreeCentrality
                 )
             )
         {

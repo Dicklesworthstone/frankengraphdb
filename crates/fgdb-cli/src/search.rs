@@ -8,6 +8,13 @@
 //!   typo-tolerant `fuzzy1|fuzzy2` / `fuzzy1-all|fuzzy2-all` within that edit
 //!   distance, bounded by `--max-expansions <n>` vocabulary terms, default
 //!   64; exceeding the bound refuses rather than truncating);
+//! - `--text-required`, `--text-optional` and `--text-excluded` instead supply
+//!   exact-token Boolean clauses over `--text-property`. All required terms,
+//!   at least `--text-minimum-optional` optional terms (default 0), and no
+//!   excluded terms must match. With no required terms, at least one optional
+//!   term must match. Empty/purely negative queries return no hits. Clauses
+//!   share query byte/term limits; Boolean retrieval is text-only and refuses
+//!   ordinary text modes, vector lanes and graph fusion;
 //! - `--vector <x,y,...>` with one `--vector-property <property>` per
 //!   coordinate, in order, runs a nearest-neighbour search over those numeric
 //!   properties (`--metric l2|cosine|dot`, default l2; exact unless
@@ -51,8 +58,8 @@ use fgdb::EmbeddedReadView;
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search, VectorEncoding};
 use fgdb_beacon::{
-    DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, GraphHybridQuery, HnswConfig,
-    IndexConfig, TextMatch, VectorSearch,
+    BooleanTextQuery, DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile,
+    GraphHybridQuery, HnswConfig, IndexConfig, TextMatch, VectorSearch,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -64,6 +71,10 @@ use std::io::Write;
 #[derive(Default)]
 pub(super) struct SearchFlags {
     text: Option<String>,
+    text_required: Option<String>,
+    text_optional: Option<String>,
+    text_excluded: Option<String>,
+    text_minimum_optional: Option<usize>,
     text_property: Option<String>,
     text_match: Option<TextMatch>,
     max_expansions: Option<usize>,
@@ -95,8 +106,12 @@ const DEFAULT_MAX_EXPANSIONS: usize = 64;
 const MAX_ELIGIBLE_IDS: usize = 100_000;
 
 impl SearchFlags {
-    pub(super) const FLAGS: [&str; 21] = [
+    pub(super) const FLAGS: [&str; 25] = [
         "--text",
+        "--text-required",
+        "--text-optional",
+        "--text-excluded",
+        "--text-minimum-optional",
         "--text-property",
         "--text-match",
         "--max-expansions",
@@ -135,6 +150,13 @@ impl SearchFlags {
         }
         match flag {
             "--text" => once(&mut self.text, value.to_owned(), flag),
+            "--text-required" => once(&mut self.text_required, value.to_owned(), flag),
+            "--text-optional" => once(&mut self.text_optional, value.to_owned(), flag),
+            "--text-excluded" => once(&mut self.text_excluded, value.to_owned(), flag),
+            "--text-minimum-optional" => {
+                let minimum = super::decimal_usize(flag, value)?;
+                once(&mut self.text_minimum_optional, minimum, flag)
+            }
             "--text-property" => once(&mut self.text_property, value.to_owned(), flag),
             "--text-match" => {
                 let fuzzy = |distance, require_all| TextMatch::Fuzzy {
@@ -308,6 +330,12 @@ enum Lanes {
     /// The complete graph request is validated before opening storage.
     GraphOnly(ExactHybridQuery<'static>),
     Text(String, TextMatch),
+    BooleanText {
+        required: String,
+        optional: String,
+        excluded: String,
+        minimum_optional: usize,
+    },
     Vector(Vec<f32>, VectorSearch),
     Hybrid {
         text: String,
@@ -353,9 +381,43 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     let flags = &options.search;
     let k = flags.k.unwrap_or(10);
     let encoding = flags.vector_encoding.unwrap_or_default();
-    let text = match (&flags.text, &flags.text_property) {
-        (Some(query), Some(name)) => Some((query.clone(), property(name, &options.properties)?)),
-        (None, None) => None,
+    let boolean = flags.text_required.is_some()
+        || flags.text_optional.is_some()
+        || flags.text_excluded.is_some();
+    if flags.text_minimum_optional.is_some() && !boolean {
+        return Err(Failure::usage(
+            "--text-minimum-optional needs a Boolean text clause",
+        ));
+    }
+    if boolean
+        && (flags.text.is_some()
+            || flags.text_match.is_some()
+            || flags.max_expansions.is_some()
+            || flags.vector.is_some()
+            || !flags.vector_properties.is_empty()
+            || flags.expand_from.is_some())
+    {
+        return Err(Failure::usage(
+            "Boolean text clauses cannot be combined with --text, --text-match, \
+             --max-expansions, vector lanes or graph fusion",
+        ));
+    }
+    let boolean_property = if boolean {
+        Some(property(
+            flags
+                .text_property
+                .as_deref()
+                .ok_or_else(|| Failure::usage("Boolean text clauses need --text-property"))?,
+            &options.properties,
+        )?)
+    } else {
+        None
+    };
+    let text = match (&flags.text, &flags.text_property, boolean) {
+        (Some(query), Some(name), false) => {
+            Some((query.clone(), property(name, &options.properties)?))
+        }
+        (None, None, false) | (None, Some(_), true) => None,
         _ => {
             return Err(Failure::usage(
                 "--text and --text-property are given together",
@@ -515,7 +577,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         as_of: flags.as_of,
         vertex_label,
         projection: Projection {
-            text: text.as_ref().map(|(_, key)| *key),
+            text: boolean_property.or_else(|| text.as_ref().map(|(_, key)| *key)),
             vector: vector
                 .as_ref()
                 .map(|(_, keys)| keys.clone())
@@ -525,27 +587,36 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         index,
         policy: ReadPolicy::default(),
     };
-    let lanes = match (text, vector) {
-        (Some((text, _)), Some((vector, _))) => Lanes::Hybrid {
-            text,
-            text_mode,
-            vector,
-            vector_mode,
-            candidates,
-        },
-        (Some((text, _)), None) => Lanes::Text(text, text_mode),
-        (None, Some((vector, _))) => Lanes::Vector(vector, vector_mode),
-        (None, None) => {
-            let graph = graph.as_ref().ok_or_else(|| {
+    let lanes = if boolean {
+        Lanes::BooleanText {
+            required: flags.text_required.clone().unwrap_or_default(),
+            optional: flags.text_optional.clone().unwrap_or_default(),
+            excluded: flags.text_excluded.clone().unwrap_or_default(),
+            minimum_optional: flags.text_minimum_optional.unwrap_or(0),
+        }
+    } else {
+        match (text, vector) {
+            (Some((text, _)), Some((vector, _))) => Lanes::Hybrid {
+                text,
+                text_mode,
+                vector,
+                vector_mode,
+                candidates,
+            },
+            (Some((text, _)), None) => Lanes::Text(text, text_mode),
+            (None, Some((vector, _))) => Lanes::Vector(vector, vector_mode),
+            (None, None) => {
+                let graph = graph.as_ref().ok_or_else(|| {
                 Failure::usage(
                     "search needs --text with --text-property, --vector with --vector-property, \
                      or --expand-from with an explicit --max-hops",
                 )
             })?;
-            let query = GraphHybridQuery::graph_only(k, graph.candidates, graph.weight, 60)
-                .map_err(Failure::usage)?;
-            read.validate_graph_only(query).map_err(Failure::usage)?;
-            Lanes::GraphOnly(query.retrieval)
+                let query = GraphHybridQuery::graph_only(k, graph.candidates, graph.weight, 60)
+                    .map_err(Failure::usage)?;
+                read.validate_graph_only(query).map_err(Failure::usage)?;
+                Lanes::GraphOnly(query.retrieval)
+            }
         }
     };
     Ok(Prepared {
@@ -570,6 +641,20 @@ impl Prepared {
                 query,
                 k: self.k,
                 mode: *mode,
+            },
+            Lanes::BooleanText {
+                required,
+                optional,
+                excluded,
+                minimum_optional,
+            } => Search::BooleanText {
+                query: BooleanTextQuery {
+                    required,
+                    optional,
+                    excluded,
+                    minimum_optional: *minimum_optional,
+                },
+                k: self.k,
             },
             Lanes::Vector(query, mode) => Search::Vector {
                 query,
@@ -602,6 +687,11 @@ impl Prepared {
             |vector: u16, text: u16| ExactRrfProfile::new(60, vector, text).map_err(Failure::usage);
         Ok(match &self.lanes {
             Lanes::GraphOnly(query) => *query,
+            Lanes::BooleanText { .. } => {
+                return Err(Failure::usage(
+                    "Boolean text clauses do not support graph fusion",
+                ));
+            }
             Lanes::Text(query, mode) => ExactHybridQuery {
                 vector: &[],
                 text: query,
@@ -839,6 +929,49 @@ mod tests {
         ];
         parts.extend_from_slice(properties);
         prepare(&options(&parts)).expect("vector request")
+    }
+
+    #[test]
+    fn boolean_flags_bind_one_text_lane_without_interpreting_clause_syntax() {
+        let request = prepare(&options(&[
+            "--text-property",
+            "bio",
+            "--text-required",
+            "graph storage",
+            "--text-optional",
+            "database memory",
+            "--text-excluded",
+            "deprecated",
+            "--text-minimum-optional",
+            "2",
+            "--as-of",
+            "7",
+            "--vertex-label",
+            "Document",
+            "--eligible",
+            "2,1,2",
+            "--k",
+            "3",
+        ]))
+        .unwrap();
+        let (query, k) = match request.search().unwrap() {
+            Search::BooleanText { query, k } => Some((query, k)),
+            _ => None,
+        }
+        .expect("Boolean flags must bind Boolean retrieval");
+        assert_eq!(query.required, "graph storage");
+        assert_eq!(query.optional, "database memory");
+        assert_eq!(query.excluded, "deprecated");
+        assert_eq!(query.minimum_optional, 2);
+        assert_eq!(k, 3);
+        assert_eq!(request.search().unwrap().lanes(), (false, true));
+        assert_eq!(request.read.projection.text, Some(PropertyKeyId(4)));
+        assert!(request.read.projection.vector.is_empty());
+        assert_eq!(request.read.as_of, Some(CommitSeq(7)));
+        assert_eq!(request.read.vertex_label, Some(LabelId(1)));
+        assert_eq!(request.eligible, Some(vec![VId(1), VId(2)]));
+        assert!(request.read.config_for(request.search().unwrap()).is_ok());
+        assert!(request.retrieval().is_err());
     }
 
     #[test]

@@ -868,7 +868,7 @@ impl<V: Vfs + Clone> Database<V> {
                             policy.insertion_policy(),
                             verified.predicates(),
                             execution,
-                            |stats, rows, work| {
+                            |stats, rows, work, _| {
                                 result = Some(chain_result(&chain, stats, rows, work)?);
                                 Ok(())
                             },

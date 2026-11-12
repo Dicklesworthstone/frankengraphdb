@@ -33,8 +33,8 @@ fn options() -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: Some(LabelId(1)),
-            relation: Some(RelationId(1)),
+            vertex_labels: Some(LabelId(1)).into(),
+            relations: Some(RelationId(1)).into(),
             weight: FnxWeightSpec::Property {
                 key: PropertyKeyId(1),
                 missing: MissingWeightPolicy::Reject,
@@ -510,7 +510,7 @@ fn root_substitution_future_cuts_and_retired_image_history_fail_before_empty_sel
             .await
             .unwrap();
         let mut empty = options();
-        empty.selection.vertex_label = Some(LabelId(999));
+        empty.selection.vertex_labels = Some(LabelId(999)).into();
         empty.source_limits.max_work_units = 0;
         assert!(matches!(
             old.execute_fnx_sealed(&query, &image, &dijkstra_call(), empty, memory()),
@@ -663,7 +663,7 @@ fn host_sealing_projection_and_kernel_admissions_do_not_fall_back_to_decoded() {
         }
         let mut opt = options();
         opt.projection_limits.max_input_edges = 1;
-        opt.selection.vertex_label = Some(LabelId(999));
+        opt.selection.vertex_labels = Some(LabelId(999)).into();
         assert!(matches!(
             db.execute_fnx_sealed(
                 &query,
@@ -752,7 +752,7 @@ fn host_sealing_projection_and_kernel_admissions_do_not_fall_back_to_decoded() {
             ]
         );
         opt = options();
-        opt.selection.relation = None;
+        opt.selection.relations = None.into();
         assert!(matches!(
             db.execute_fnx_sealed(
                 &query,
@@ -819,7 +819,7 @@ fn induced_endpoints_and_explicit_loop_and_weight_discard_precede_numeric_bindin
         .await
         .unwrap();
         let mut all = options();
-        all.selection.vertex_label = None;
+        all.selection.vertex_labels = None.into();
         assert!(matches!(
             db.execute_fnx_sealed(
                 &query,

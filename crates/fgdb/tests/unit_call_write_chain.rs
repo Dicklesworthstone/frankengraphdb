@@ -502,7 +502,7 @@ fn cancellation_and_late_authority_expiry_discard_every_call_frame() {
                         NOW
                     }
                 },
-                |rows, _| {
+                |rows, _, _| {
                     assert_eq!(rows.len(), 3);
                     expired.store(true, Ordering::Relaxed);
                     Ok(())

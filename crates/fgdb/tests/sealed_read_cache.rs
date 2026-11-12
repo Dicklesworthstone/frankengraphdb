@@ -44,8 +44,8 @@ fn keys() -> DatabaseKeys {
 
 fn options() -> FnxReadOptions {
     let mut options = FnxReadOptions::whole_graph(None);
-    options.selection.vertex_label = Some(L);
-    options.selection.relation = Some(R);
+    options.selection.vertex_labels = Some(L).into();
+    options.selection.relations = Some(R).into();
     options.projection.directedness = Directedness::Undirected;
     options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
     options.projection.self_loops = SelfLoopPolicy::Drop;
@@ -303,8 +303,8 @@ fn changed_projection_shapes_reuse_the_source_and_rebuild_every_selected_graph()
                         ParallelEdgePolicy::Minimum
                     };
                 }
-                2 => opt.selection.vertex_label = None,
-                3 => opt.selection.vertex_label = Some(LabelId(99)),
+                2 => opt.selection.vertex_labels = None.into(),
+                3 => opt.selection.vertex_labels = Some(LabelId(99)).into(),
                 4 => opt.projection.self_loops = SelfLoopPolicy::Keep,
                 5 => {
                     opt.source_limits.max_work_units -= 1;
@@ -994,8 +994,8 @@ fn buffered_slots_do_not_displace_live_entries_and_selection_keys_do_not_alias()
         for dimension in 0..7 {
             let mut variant = options();
             match dimension {
-                0 => variant.selection.vertex_label = None,
-                1 => variant.selection.relation = Some(RelationId(8)),
+                0 => variant.selection.vertex_labels = None.into(),
+                1 => variant.selection.relations = Some(RelationId(8)).into(),
                 2 => {
                     variant.selection.weight = FnxWeightSpec::Property {
                         key: P,
@@ -1234,11 +1234,11 @@ fn readonly_sealed_native_templates_preserve_pages_group_slots_and_typed_refusal
             Err(fgdb::SealedQueryError::Query(fgdb::QueryError::Set(
                 fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(
                     fgdb::GqlError::Procedure(fgdb::ProcedureError::SealedRelationMismatch {
-                        requested: Some(RelationId(8)),
+                        requested,
                         retained: R,
                     }),
                 )),
-            ))),
+            ))) if requested.single() == Some(RelationId(8)),
         ));
         let zero = fgdb::PreparedNativeRead::prepare(
             &sealed_sql_bfs("vertex, distance", "RETURN vertex, distance LIMIT 0"),
@@ -2406,7 +2406,7 @@ fn composed_sealed_queries_keep_exact_admission_and_source_failures_before_empty
             assert!(matches!(error,
                 fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(
                     fgdb::GqlError::Procedure(fgdb::ProcedureError::SealedRelationMismatch { requested, retained })
-                )) if requested == expected && retained == R
+                )) if requested.single() == expected && retained == R
             ));
         }
         for (index, text) in [

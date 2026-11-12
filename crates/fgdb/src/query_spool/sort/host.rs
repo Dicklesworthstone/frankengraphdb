@@ -35,6 +35,32 @@ pub(crate) trait ExternalOrderHost: Send {
         false
     }
 
+    /// Property postings must name this host's exact immutable cut. A host
+    /// lacking them keeps its original source before seed extraction begins.
+    fn supports_property_seeds(&self) -> bool {
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seeded_property_leaf<'q, A, B>(
+        &'q mut self,
+        _plan: &'q AsyncSpillSetPlan,
+        _key: PropertyKeyId,
+        _values: crate::gql_exec::source::PropertySeedValues,
+        _snapshot: CommitSeq,
+        _cx: &'q QueryCx,
+        _policy: GqlQueryPolicy,
+        _scratch: &'q mut SpillFile<A>,
+        _destination: &'q mut SpillFile<B>,
+        _limits: ExternalOrderLimits,
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+    {
+        Box::pin(async { Err(SpillError::InvalidRun.into()) })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn seeded_vertex_leaf<'q, A, B>(
         &'q mut self,

@@ -234,6 +234,15 @@ impl PreparedGraphAggregate {
         self.count_shape(true).map(|shape| shape.source)
     }
 
+    /// Keep potential exact-count definitions on the host's metadata path,
+    /// including edge endpoint labels whose universality it must prove from
+    /// one snapshot. This shape-only candidate supplies neither counts nor
+    /// that proof; execution still requires the checked metadata preparation.
+    pub(crate) fn count_metadata_candidate_source(&self) -> Option<GraphCountSource> {
+        self.count_shape_with_labels(true, true)
+            .map(|shape| shape.source)
+    }
+
     /// Bind a trusted source's exact, already admitted counts to this query.
     /// `examined` counts all live rows that the ordinary input iterator would
     /// yield; `matching` counts the named relation's occurrences, or the same

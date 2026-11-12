@@ -572,6 +572,9 @@ pub enum WriteTxnError {
     /// diagnostics can contain protected identities or CAS values and do not
     /// escape this boundary. Never used for an admitted commit's outcome.
     AuthorizedMutationRefused,
+    /// Final host graph-value hydration exhausted the cumulative native
+    /// evaluator policy before any write could be published.
+    OutputLimit(fgdb_gql::GlaLimitExceeded),
     /// An authorized write named a client-chosen identity for a creation or
     /// ensure intent. Authorized creations take engine-allocated identities
     /// only (fgdb-hxgm1, owner ruling 2026-10-07): a chosen identity would let
@@ -589,6 +592,10 @@ pub enum WriteTxnError {
     /// in this native write chain. Carrying its identity alone stays legal.
     DeletedElementRead,
     Finished,
+    /// The explicit authorized execution exhausted its cumulative statement count.
+    StatementLimit {
+        limit: usize,
+    },
     /// The supplied database is not the opened handle that began this txn.
     /// Refusal preserves the transaction for use with its actual owner.
     WrongDatabase,
@@ -659,6 +666,7 @@ impl core::fmt::Display for WriteTxnError {
                 write!(formatter, "write authorization refused: {source}")
             }
             Self::AuthorizedMutationRefused => formatter.write_str("authorized mutation refused"),
+            Self::OutputLimit(source) => source.fmt(formatter),
             Self::AuthorizedClientIdentity => formatter.write_str(
                 "authorized creation takes an engine-allocated identity, not a chosen one",
             ),
@@ -669,6 +677,9 @@ impl core::fmt::Display for WriteTxnError {
             Self::NoPreparedWrite => formatter.write_str("write transaction has no batch"),
             Self::DeletedElementRead => formatter.write_str("read of a deleted graph element"),
             Self::Finished => formatter.write_str("write transaction is already finished"),
+            Self::StatementLimit { limit } => {
+                write!(formatter, "authorized transaction statement limit {limit} reached")
+            }
             Self::WrongDatabase => {
                 formatter.write_str("write transaction belongs to a different database handle")
             }
@@ -734,6 +745,7 @@ impl core::error::Error for WriteTxnError {
         match self {
             Self::StatementTime(source) => Some(source),
             Self::Authorization(source) => Some(source),
+            Self::OutputLimit(source) => Some(source),
             Self::Interrupted(source) => Some(source.as_ref()),
             Self::BasisRebuild(source) => Some(source.as_ref()),
             Self::Read(source) => Some(source),
@@ -745,6 +757,7 @@ impl core::error::Error for WriteTxnError {
             | Self::NoPreparedWrite
             | Self::DeletedElementRead
             | Self::Finished
+            | Self::StatementLimit { .. }
             | Self::WrongDatabase
             | Self::UnknownSavepoint
             | Self::SavepointLimit { .. }
@@ -800,6 +813,9 @@ impl From<GqlError> for WriteTxnError {
 pub struct WriteTxn {
     handle_owner: std::sync::Arc<()>,
     basis: CommitSeq,
+    /// Exact discardable counts from this basis, never the handle's newer head.
+    /// Persistent counter trees share their immutable nodes across generations.
+    basis_counts: crate::gql_exec::source::exact_counts::ExactCounts,
     staged: Vec<WriteBatch>,
     /// Raw vertex identities in this many complete staged batches have already
     /// entered the monotonic read set. Truncating staged input also truncates
@@ -824,6 +840,8 @@ pub struct WriteTxn {
     read_set: std::cell::RefCell<std::collections::BTreeSet<ElementId>>,
     /// Explicit field getters retain point domains without narrowing full reads.
     point_reads: std::cell::RefCell<PointReads>,
+    /// Count inputs observe a complete population without enumerating its IDs.
+    count_reads: std::cell::RefCell<CountReads>,
     match_expansions: std::cell::RefCell<std::collections::BTreeSet<(VId, RelationId)>>,
     scanned_vertex_labels: std::cell::RefCell<std::collections::BTreeSet<LabelId>>,
     /// A scan depends on absent rows too, even if it returned nothing or its

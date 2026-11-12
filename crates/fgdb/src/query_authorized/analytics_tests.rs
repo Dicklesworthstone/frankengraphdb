@@ -86,8 +86,8 @@ fn options(direction: Directedness) -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: None,
-            relation: None,
+            vertex_labels: None.into(),
+            relations: None.into(),
             weight: FnxWeightSpec::Property {
                 key: W,
                 missing: MissingWeightPolicy::Zero,
@@ -584,10 +584,10 @@ fn a_tape_replays_every_live_call_of_its_build_in_order() {
             let base = options(direction);
             variants.push(base);
             let mut other = base;
-            other.selection.vertex_label = Some(LabelId(2));
+            other.selection.vertex_labels = Some(LabelId(2)).into();
             variants.push(other);
             other = base;
-            other.selection.relation = Some(RelationId(2));
+            other.selection.relations = Some(RelationId(2)).into();
             variants.push(other);
             other = base;
             other.projection.self_loops = SelfLoopPolicy::Drop;

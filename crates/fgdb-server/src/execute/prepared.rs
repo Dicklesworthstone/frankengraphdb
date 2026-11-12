@@ -700,7 +700,7 @@ async fn write_returning_prepared(
         &execution_token,
         bound,
         Some((&prepared.generation, fgdb_types::CommitSeq(0))),
-        |_, rows, _| Ok(rows),
+        |_, rows, _, _| Ok(rows),
     )
     .await
 }

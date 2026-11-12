@@ -96,9 +96,16 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
         | set::AnalyticSource::SelectedCoreNumbers { input }
         | set::AnalyticSource::SelectedTriangleCounts { input, .. } = source
         {
-            // The induced graph owns both labelled source leaves and their
-            // union, then the shared analytic engine and YIELD projection.
-            return circuit(cx, &input)?.append(2);
+            let topology = match input {
+                set::AnalyticTopology::Pattern(input) => circuit(cx, &input)?,
+                set::AnalyticTopology::Union { vertices, edges } => {
+                    // The vertex subtree is shared by both endpoint Semi
+                    // joins and the isolate projection, never compiled three
+                    // times. Count both subtrees and all four private owners.
+                    circuit(cx, &vertices)?.combine(circuit(cx, &edges)?, 4)?
+                }
+            };
+            return topology.append(2);
         }
         // One topology/analytics owner plus its exact YIELD projection.
         // The source binding has the two endpoint identity columns; outer
@@ -112,6 +119,53 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
         // The exact reducer and checked row sink share ONE registry node and
         // its meter. Count the complete child, not only its first graph leaf.
         return circuit(cx, definition.input())?.append(1);
+    }
+    if let Some(plan) = query.incremental_apply_count_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
+        // The group's complete active-input definition is descriptive here:
+        // the compiler shares the two already-compiled sources, then adds
+        // Semi, Group, Left join and the recipe's output projections.
+        let stages = u64::try_from(plan.output.len())
+            .ok()
+            .and_then(|count| count.checked_add(3))
+            .ok_or(StandingQueryError::Unsupported)?;
+        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
+    }
+    if let Some(plan) = query.incremental_apply_distinct_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
+        // Outer normalization and DISTINCT arguments share one source. The
+        // argument join, body projections, restoration join and public
+        // projections are the same nodes admitted by Staging::compile.
+        let stages = plan
+            .body
+            .len()
+            .checked_add(plan.output.len())
+            .and_then(|count| count.checked_add(4))
+            .and_then(|count| u64::try_from(count).ok())
+            .ok_or(StandingQueryError::Unsupported)?;
+        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
+    }
+    if let Some(plan) = query.incremental_apply_exists_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
+        // Shared children, complementary Semi/Anti joins, two witness
+        // projections, UNION ALL, and one public-schema restoration.
+        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, 6);
+    }
+    if let Some(plan) = query.incremental_apply_join_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
+        // Count exactly the same optional witness, join and projection stages
+        // as Staging::compile. Admission never substitutes the body's first
+        // graph leaf or omits a dependency because an outer input is empty.
+        let stages = u64::try_from(plan.output.len())
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .and_then(|count| count.checked_add(u64::from(plan.right_projection.is_some())))
+            .ok_or(StandingQueryError::Unsupported)?;
+        return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
     }
     if let Some(input) = query.incremental_scope() {
         return circuit(cx, input);

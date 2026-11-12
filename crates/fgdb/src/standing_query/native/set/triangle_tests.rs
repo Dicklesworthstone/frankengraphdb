@@ -673,25 +673,42 @@ fn every_triangle_registration_and_rebuild_boundary_preserves_the_accepted_circu
             );
         }
         let mut calls = 0;
-        rebuild_checked(&mut db, &cx, first, root, policy(), &mut || {
-            calls += 1;
-            Ok(())
-        })
+        let private_inputs = handle.native.as_deref().unwrap().private_inputs().unwrap();
+        rebuild_checked(
+            &mut db,
+            &cx,
+            first,
+            root,
+            private_inputs,
+            policy(),
+            &mut || {
+                calls += 1;
+                Ok(())
+            },
+        )
         .unwrap();
         for stop in 1..=calls {
             let identity = addresses(&db, first, root);
             let mut seen = 0;
             assert!(
-                rebuild_checked(&mut db, &cx, first, root, policy(), &mut || {
-                    seen += 1;
-                    if seen == stop {
-                        Err(StandingQueryError::Maintenance(
-                            StandingQueryFailure::Interrupted,
-                        ))
-                    } else {
-                        Ok(())
+                rebuild_checked(
+                    &mut db,
+                    &cx,
+                    first,
+                    root,
+                    private_inputs,
+                    policy(),
+                    &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(StandingQueryError::Maintenance(
+                                StandingQueryFailure::Interrupted,
+                            ))
+                        } else {
+                            Ok(())
+                        }
                     }
-                })
+                )
                 .is_err()
             );
             assert_eq!(seen, stop);

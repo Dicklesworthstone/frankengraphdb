@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 31;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 35;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -352,13 +352,16 @@ const SIGNATURES: &[FnxSignature] = &[
         complexity: "O(|V| + |E| + sum_edges min(deg(u), deg(v)))",
         execution_kernel: "fgdb-prism/clustering-degree-forward-csr-v1",
     },
-    foundation(
-        "fnx.degree_centrality",
-        FnxOutput::Score,
-        "explicit undirected simple projection; unweighted; self-loops refused; degree / (|V| - 1); a single vertex scores 1",
-        "O(|V| + |E|)",
-        "fgdb-prism/degree-centrality-csr-v1",
-    ),
+    FnxSignature {
+        graph_kind: FnxGraphKind::Any,
+        ..foundation(
+            "fnx.degree_centrality",
+            FnxOutput::Score,
+            "unqualified whole-graph input defaults to undirected; explicit directed, reversed or undirected simple projection; unweighted; self-loops refused; directed degree is in-degree + out-degree, so reciprocal arcs can score above 1; degree multiplied by 1 / (|V| - 1); a single vertex scores 1",
+            "O(|V| + |E|)",
+            "fgdb-prism/degree-centrality-csr-v1",
+        )
+    },
     FnxSignature {
         graph_kind: FnxGraphKind::Any,
         ..foundation(
@@ -402,13 +405,16 @@ const SIGNATURES: &[FnxSignature] = &[
             "fgdb-prism/eigenvector-csr-gather-v1",
         )
     },
-    foundation(
-        "fnx.core_number",
-        FnxOutput::Core,
-        "explicit undirected simple projection; unweighted; self-loops refused; k-core number of each vertex, an exact count",
-        "O(|V| + |E|)",
-        "fgdb-prism/core-number-bucket-csr-v1",
-    ),
+    FnxSignature {
+        graph_kind: FnxGraphKind::Any,
+        ..foundation(
+            "fnx.core_number",
+            FnxOutput::Core,
+            "unqualified whole-graph input defaults to undirected; explicit directed, reversed or undirected simple projection; unweighted; self-loops refused; k-core number of each vertex, an exact count; directed degree is in-degree plus out-degree, so reciprocal arcs count twice and reversing every arc preserves core numbers",
+            "O(|V| + |E|)",
+            "fgdb-prism/core-number-bucket-csr-v1",
+        )
+    },
     FnxSignature {
         name: "fnx.cdlp",
         graph_input_arity: 1,
@@ -440,13 +446,16 @@ const SIGNATURES: &[FnxSignature] = &[
         "fgdb-prism/in-degree-directory-v2",
     ),
     directed_degree("fnx.out_degree_centrality", "fgdb-prism/out-degree-csr-v1"),
-    foundation(
-        "fnx.load_centrality",
-        FnxOutput::Score,
-        "explicit undirected simple projection; unweighted; self-loops refused; Newman load splits accumulated flow equally among shortest-path predecessors; normalized by (|V|-1)(|V|-2); isolates retained",
-        "O(|V| + sum_components |C| * (|C| + |E_C|)); O(|V|) kernel workspace",
-        "fgdb-prism/newman-load-csr-v2",
-    ),
+    FnxSignature {
+        graph_kind: FnxGraphKind::Any,
+        ..foundation(
+            "fnx.load_centrality",
+            FnxOutput::Score,
+            "unqualified whole-graph input defaults to undirected; explicit directed, reversed or undirected simple projection; unweighted; self-loops refused; Newman load splits accumulated flow equally among shortest-path predecessors; normalized by (|V|-1)(|V|-2) in both directed and undirected projections; isolates retained",
+            "O(|V| + sum_components |C| * (|C| + |E_C|)); O(|V|) kernel workspace",
+            "fgdb-prism/newman-load-csr-v3",
+        )
+    },
     FnxSignature {
         name: "fnx.hits_centrality",
         graph_input_arity: 1,
@@ -570,6 +579,50 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_laws: "explicit projection; known source; finite signed weights; exact dyadic path sums and strict exact relaxation in canonical vertex/neighbor sweeps; reachable negative cycles refuse, unreachable cycles do not; final shortest distances round once to nearest ties-even binary64, nonfinite final distances refuse; no epsilon or FNX floating-order equivalence claim; only reachable vertices, in full-width VId order",
         complexity: "O(|V| * (|V| + |E|)) fixed 34-limb arithmetic and logical traversal plus separately bounded compressed history/lookup work; O(|V|) kernel workspace",
         execution_kernel: "fgdb-prism/bellman-ford-exact-dyadic-sweeps-v1",
+    },
+    FnxSignature {
+        name: "fnx.louvain_communities",
+        graph_input_arity: 1,
+        parameters: &[
+            FnxParameterSpec {
+                name: "resolution",
+                value_type: FnxParameterType::FiniteFloat,
+                positional: true,
+                default: Some(FnxArgument::Float(1.0)),
+            },
+            FnxParameterSpec {
+                name: "threshold",
+                value_type: FnxParameterType::FiniteFloat,
+                positional: true,
+                default: Some(FnxArgument::Float(1e-7)),
+            },
+            FnxParameterSpec {
+                name: "max_levels",
+                value_type: FnxParameterType::OptionalNonNegativeInteger,
+                positional: true,
+                default: Some(FnxArgument::Null),
+            },
+            FnxParameterSpec {
+                name: "weighted",
+                value_type: FnxParameterType::Boolean,
+                positional: true,
+                default: Some(FnxArgument::Boolean(true)),
+            },
+            FnxParameterSpec {
+                name: "max_iter",
+                value_type: FnxParameterType::PositiveInteger,
+                positional: false,
+                default: Some(FnxArgument::Integer(100)),
+            },
+        ],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Component],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Undirected,
+        numeric_profile: "fgdb-louvain-f64-canonical-edge-order-v1",
+        rng_policy: "none; canonical VId order at the first level, stable community order thereafter",
+        graph_laws: "explicit undirected simple projection; finite nonnegative weights; self-loops contribute twice to degree; full multilevel Louvain with positive-gain local moves, stable neighbor encounter ties and weighted coarsening; threshold bounds interlevel modularity improvement; optional max_levels returns that completed level; named max_iter bounds total optimization sweeps and exhaustion refuses; host iteration admission remains independent; communities named by their minimum full-width VId; isolates retained",
+        complexity: "O(s * (|V| + |E|) + l * |E| log(1+|E|)); O(|V| + |E|) admitted working graph; s bounded by max_iter under independent host admission",
+        execution_kernel: "fgdb-prism/louvain-multilevel-stable-edges-v1",
     },
 ];
 
@@ -945,6 +998,89 @@ impl Default for KatzOptions {
     }
 }
 
+/// Deterministic multilevel Louvain over an explicit undirected projection.
+/// A level ceiling returns that completed level. The algorithm's total sweep
+/// ceiling defaults to 100 and refuses unfinished optimization; the host admits
+/// that requested allowance independently. Neither refusal returns a prefix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LouvainOptions {
+    resolution: f64,
+    threshold: f64,
+    max_levels: Option<usize>,
+    max_iter: usize,
+    weighted: bool,
+}
+
+impl LouvainOptions {
+    pub fn new(
+        resolution: f64,
+        threshold: f64,
+        max_levels: Option<usize>,
+        weighted: bool,
+    ) -> Result<Self, FnxBindError> {
+        let invalid = |message| FnxBindError {
+            at: 0,
+            kind: FnxBindErrorKind::InvalidArgument(message),
+        };
+        if !resolution.is_finite() || resolution <= 0.0 {
+            return Err(invalid("resolution must be finite and positive"));
+        }
+        if !threshold.is_finite() || threshold < 0.0 {
+            return Err(invalid("threshold must be finite and nonnegative"));
+        }
+        if max_levels == Some(0) {
+            return Err(invalid("max_levels must be positive or NULL"));
+        }
+        Ok(Self {
+            resolution,
+            threshold: if threshold == 0.0 { 0.0 } else { threshold },
+            max_levels,
+            max_iter: 100,
+            weighted,
+        })
+    }
+    /// Set the positive total sweep allowance without changing the four
+    /// positional Louvain arguments. Query text exposes this as named-only
+    /// `max_iter`; exceeding it refuses an unfinished partition.
+    pub fn with_max_iter(mut self, max_iter: usize) -> Result<Self, FnxBindError> {
+        if max_iter == 0 {
+            return Err(FnxBindError {
+                at: 0,
+                kind: FnxBindErrorKind::InvalidArgument("max_iter must be positive"),
+            });
+        }
+        self.max_iter = max_iter;
+        Ok(self)
+    }
+    pub const fn resolution(self) -> f64 {
+        self.resolution
+    }
+    pub const fn threshold(self) -> f64 {
+        self.threshold
+    }
+    pub const fn max_levels(self) -> Option<usize> {
+        self.max_levels
+    }
+    pub const fn max_iter(self) -> usize {
+        self.max_iter
+    }
+    pub const fn weighted(self) -> bool {
+        self.weighted
+    }
+}
+
+impl Default for LouvainOptions {
+    fn default() -> Self {
+        Self {
+            resolution: 1.0,
+            threshold: 1e-7,
+            max_levels: None,
+            max_iter: 100,
+            weighted: true,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FnxAlgorithm {
     PageRank(PageRankOptions),
@@ -985,6 +1121,7 @@ pub enum FnxAlgorithm {
     KatzCentrality(KatzOptions),
     /// Deterministic semi-synchronous community detection, capped at 100 rounds.
     LabelPropagationCommunities,
+    LouvainCommunities(LouvainOptions),
     /// Weighted minimum spanning forest, with canonical Kruskal tie/order laws.
     MinimumSpanningTree,
     /// Signed finite weights, exact dyadic sums and reachable-cycle detection.
@@ -1019,6 +1156,7 @@ impl FnxAlgorithm {
             Self::LabelPropagationCommunities => 26,
             Self::MinimumSpanningTree => 27,
             Self::SingleSourceBellmanFordPathLength { .. } => 28,
+            Self::LouvainCommunities(_) => 29,
         }]
     }
 }
@@ -1133,6 +1271,10 @@ impl FnxCallSpec {
     /// projection. Each community is named by its smallest full-width VId.
     pub fn label_propagation_communities() -> Self {
         Self::new(FnxAlgorithm::LabelPropagationCommunities)
+    }
+    /// Multilevel modularity optimization, with canonical deterministic ties.
+    pub fn louvain_communities(options: LouvainOptions) -> Self {
+        Self::new(FnxAlgorithm::LouvainCommunities(options))
     }
     /// Checked incoming Katz centrality with scalar attenuation and baseline.
     /// Text calls accept `alpha`, `beta`, `max_iter` and `tol`, in that order
@@ -1610,6 +1752,27 @@ impl FnxCallSpec {
             "fnx.out_degree_centrality" => FnxAlgorithm::OutDegreeCentrality,
             "fnx.hits_centrality" => FnxAlgorithm::HitsCentrality,
             "fnx.label_propagation_communities" => FnxAlgorithm::LabelPropagationCommunities,
+            "fnx.louvain_communities" => {
+                let resolution = float_argument(arguments[0])
+                    .ok_or_else(|| invalid(0, "finite resolution required"))?;
+                let threshold = float_argument(arguments[1])
+                    .ok_or_else(|| invalid(1, "finite threshold required"))?;
+                let max_levels = match arguments[2] {
+                    FnxArgument::Null => None,
+                    FnxArgument::Integer(value) if value > 0 => Some(
+                        usize::try_from(value)
+                            .map_err(|_| invalid(2, "positive max_levels or NULL required"))?,
+                    ),
+                    _ => return Err(invalid(2, "positive max_levels or NULL required")),
+                };
+                let FnxArgument::Boolean(weighted) = arguments[3] else {
+                    return Err(invalid(3, "boolean weighted required"));
+                };
+                FnxAlgorithm::LouvainCommunities(
+                    LouvainOptions::new(resolution, threshold, max_levels, weighted)
+                        .map_err(whole)?,
+                )
+            }
             "fnx.articulation_points" => FnxAlgorithm::ArticulationPoints,
             "fnx.bridges" => FnxAlgorithm::Bridges,
             "fnx.minimum_spanning_tree" => FnxAlgorithm::MinimumSpanningTree,
@@ -1673,6 +1836,8 @@ impl FnxCallSpec {
     /// interprets a name as a positional slot.
     /// Named-only `source` puts teleportation and dangling redistribution at
     /// one full-width vertex without changing the four positional arguments.
+    /// Louvain's named-only `max_iter` sets a positive total optimization-sweep
+    /// allowance, defaulting to 100, without adding a fifth positional slot.
     pub fn from_named_arguments(
         namespace: &str,
         name: &str,
@@ -1712,6 +1877,23 @@ impl FnxCallSpec {
                 FnxArgument::Vertex(vertex) => Ok(vertex),
                 FnxArgument::Integer(value) if value >= 0 => Ok(VId(value as u128)),
                 _ => Err(invalid(index, "VId or nonnegative integer source required")),
+            })
+            .transpose()?;
+        let louvain_iterations = registration
+            .parameters
+            .iter()
+            .zip(&named)
+            .find_map(|(parameter, value)| {
+                (parameter.name == "max_iter" && !parameter.positional)
+                    .then_some(*value)
+                    .flatten()
+            })
+            .map(|(index, value)| {
+                match value {
+                    FnxArgument::Integer(count) if count > 0 => usize::try_from(count).ok(),
+                    _ => None,
+                }
+                .ok_or_else(|| invalid(index, "positive integer max_iter required"))
             })
             .transpose()?;
         let iterations =
@@ -1825,6 +2007,20 @@ impl FnxCallSpec {
                 }
                 failure
             })?;
+        let call = if let Some(max_iter) = louvain_iterations {
+            let FnxAlgorithm::LouvainCommunities(options) = call.algorithm() else {
+                return Err(error(
+                    FnxCallSite::Procedure,
+                    FnxBindErrorKind::UnknownProcedure,
+                ));
+            };
+            let options = options
+                .with_max_iter(max_iter)
+                .map_err(|failure| error(FnxCallSite::Call, failure.kind))?;
+            Self::compiled(FnxAlgorithm::LouvainCommunities(options), call.outputs)
+        } else {
+            call
+        };
         let call = match (exact, global) {
             (None, None) => Ok(call),
             (None, Some(tolerance)) => {
@@ -1890,6 +2086,7 @@ impl FnxCallSpec {
             FnxAlgorithm::LabelPropagationCommunities => 28,
             FnxAlgorithm::MinimumSpanningTree => 30,
             FnxAlgorithm::SingleSourceBellmanFordPathLength { .. } => 31,
+            FnxAlgorithm::LouvainCommunities(_) => 32,
             _ => 23,
         };
         hash.update(&binding_version.to_le_bytes());
@@ -1897,6 +2094,21 @@ impl FnxCallSpec {
         hash.update(&(name.len() as u128).to_le_bytes());
         hash.update(name.as_bytes());
         match algorithm {
+            FnxAlgorithm::LouvainCommunities(options) => {
+                hash.update(&options.resolution.to_bits().to_le_bytes());
+                hash.update(&options.threshold.to_bits().to_le_bytes());
+                match options.max_levels {
+                    Some(levels) => {
+                        hash.update(&[1]);
+                        hash.update(&(levels as u128).to_le_bytes());
+                    }
+                    None => {
+                        hash.update(&[0]);
+                    }
+                }
+                hash.update(&(options.max_iter as u128).to_le_bytes());
+                hash.update(&[u8::from(options.weighted)]);
+            }
             FnxAlgorithm::KatzCentrality(options) => {
                 hash.update(&options.alpha.to_bits().to_le_bytes());
                 hash.update(&options.beta.to_bits().to_le_bytes());

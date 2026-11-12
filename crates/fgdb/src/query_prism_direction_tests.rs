@@ -258,7 +258,7 @@ fn admitted_empty_rows_skip_history_and_preserve_complete_kernel_results() {
             )
         };
         let mut invalid = options();
-        invalid.selection.vertex_label = None;
+        invalid.selection.vertex_labels = None.into();
         assert!(matches!(
             build(invalid),
             Err(SealedReadError::Projection(SealedProjectionError::Weight {
@@ -363,6 +363,338 @@ fn assert_projection(
         opt.projection.directedness != Directedness::Directed
     );
     (graph, decoded)
+}
+
+#[test]
+fn directed_core_runs_over_real_sealed_sources_with_cooperative_and_refusal_parity() {
+    directed_total_degree_analytics("core_number");
+}
+
+#[test]
+fn directed_degree_runs_over_real_sealed_sources_with_directory_scan_and_history_parity() {
+    directed_total_degree_analytics("degree_centrality");
+}
+
+fn directed_total_degree_analytics(name: &str) {
+    use std::cell::Cell;
+    use std::num::NonZeroUsize;
+
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for vertex in [0, 1, 2, 3, u128::MAX] {
+            batch.create_vertex(VId(vertex), vec![LabelId(1)], vec![]);
+        }
+        batch.create_vertex(VId(99), vec![LabelId(2)], vec![]);
+        // Reciprocal triangle, one-way leaf, isolate and one raw duplicate.
+        // A loop excluded by endpoint selection is present from the first cut.
+        for (eid, (source, target)) in [
+            (0, 1),
+            (1, 0),
+            (0, 2),
+            (2, 0),
+            (1, 2),
+            (2, 1),
+            (3, 0),
+            (0, 1),
+            (99, 99),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            batch.add_edge(EId(eid as u128), VId(source), VId(target), vec![]);
+        }
+        let first = db.write(&commit, batch).await.unwrap();
+        let mut other_relation = WriteBatch::new(RelationId(2));
+        other_relation.add_edge(EId(90), VId(3), VId(3), vec![]);
+        let before_loop = db.write(&commit, other_relation).await.unwrap();
+        let mut add_loop = WriteBatch::new(RelationId(1));
+        add_loop.add_edge(EId(91), VId(0), VId(0), vec![]);
+        db.write(&commit, add_loop).await.unwrap();
+        let view = db.read_session().unwrap();
+        let image = db
+            .store
+            .seal_partition(
+                &query,
+                view.partition_root(),
+                first,
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
+        let call = FnxCallSpec::bind(
+            &format!(
+                "CALL fnx.{name}() YIELD vertex,{}",
+                if name == "core_number" {
+                    "core"
+                } else {
+                    "score"
+                }
+            ),
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        for direction in DIRECTIONS {
+            let mut opt = options();
+            opt.selection.weight = FnxWeightSpec::Unit;
+            opt.projection = ProjectionSpec {
+                directedness: direction,
+                parallel_edges: ParallelEdgePolicy::CollapseUnit,
+                self_loops: SelfLoopPolicy::Drop,
+            };
+            let (admitted, decoded) = assert_projection(&view, &query, &image, opt);
+            let core = if direction == Directedness::Undirected {
+                2
+            } else {
+                4
+            };
+            let expected: Vec<_> = [(0, core), (1, core), (2, core), (3, 1), (u128::MAX, 0)]
+                .into_iter()
+                .map(|(vertex, core)| {
+                    let value = if name == "core_number" {
+                        FnxValue::Integer(core)
+                    } else {
+                        let degree = match (direction, vertex) {
+                            (Directedness::Undirected, 0) => 3.0,
+                            (Directedness::Undirected, 1 | 2) => 2.0,
+                            (_, 0) => 5.0,
+                            (_, 1 | 2) => 4.0,
+                            (_, 3) => 1.0,
+                            _ => 0.0,
+                        };
+                        FnxValue::Score(degree * 0.25)
+                    };
+                    vec![FnxValue::Vertex(VId(vertex)), value]
+                })
+                .collect();
+            assert_eq!(
+                call.execute(&decoded, opt.execution_limits, || query.checkpoint())
+                    .unwrap()
+                    .rows,
+                expected,
+            );
+            // Keep must accept excluded endpoint/relation loops and a selected
+            // loop that only becomes visible after the requested historical cut.
+            let mut historical = opt;
+            historical.as_of = Some(before_loop);
+            historical.projection.self_loops = SelfLoopPolicy::Keep;
+            let historical = projected(&view, &query, &image, historical);
+            assert_eq!(
+                call.execute_sealed(&query, &historical, opt.execution_limits, memory())
+                    .unwrap()
+                    .rows,
+                expected
+            );
+            for cached in [true, false] {
+                if !cached && (name != "degree_centrality" || direction == Directedness::Undirected)
+                {
+                    continue;
+                }
+                let graph = if cached {
+                    admitted.clone()
+                } else {
+                    // Admit only mandatory source storage. Optional incoming
+                    // degree and vertex-prefix directories cannot consume space.
+                    let mut tight = opt;
+                    tight.projection_limits.max_workspace_bytes = admitted.node_count()
+                        * (std::mem::size_of::<VId>() + std::mem::size_of::<usize>())
+                        + admitted
+                            .incoming_index_stats()
+                            .map_or(0, |stats| stats.charged_workspace_bytes);
+                    projected(&view, &query, &image, tight)
+                };
+                let synchronous = call
+                    .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                    .unwrap();
+                assert_eq!(synchronous.rows, expected);
+                assert_eq!(
+                    synchronous.certificate.adapter,
+                    AdapterPath::CompressedCursor
+                );
+                if name == "degree_centrality" {
+                    assert_eq!(
+                        synchronous.certificate.kernel_workspace_bytes,
+                        graph.node_count()
+                            * (std::mem::size_of::<f64>()
+                                + if cached {
+                                    0
+                                } else {
+                                    std::mem::size_of::<usize>()
+                                })
+                    );
+                    assert_eq!(
+                        synchronous.certificate.witness.edges_scanned,
+                        if cached { 0 } else { 7 }
+                    );
+                    if cached {
+                        assert_eq!(
+                            synchronous.certificate.estimated_work,
+                            graph.node_count() + 2
+                        );
+                    }
+                    assert_eq!(
+                        synchronous.certificate.execution_kernel,
+                        match (direction, cached) {
+                            (Directedness::Undirected, _) =>
+                                "fgdb-prism/sealed-degree-directory-v1",
+                            (_, true) => "fgdb-prism/sealed-total-degree-directory-v1",
+                            (_, false) => "fgdb-prism/sealed-total-degree-v1",
+                        }
+                    );
+                }
+                let exact_memory = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: synchronous.certificate.kernel_workspace_bytes,
+                    ..memory()
+                };
+                let exact_work = FnxExecutionLimits {
+                    max_estimated_work: synchronous.certificate.estimated_work,
+                    ..opt.execution_limits
+                };
+                assert_eq!(
+                    call.execute_sealed(&query, &graph, exact_work, exact_memory)
+                        .unwrap(),
+                    synchronous,
+                );
+                assert!(matches!(
+                    call.execute_sealed(
+                        &query,
+                        &graph,
+                        FnxExecutionLimits {
+                            max_estimated_work: exact_work.max_estimated_work - 1,
+                            ..exact_work
+                        },
+                        exact_memory
+                    ),
+                    Err(FnxSealedExecutionError::Execution(
+                        FnxExecutionError::LimitExceeded {
+                            resource: "estimated work",
+                            ..
+                        }
+                    )),
+                ));
+                // The opposite-index builder may report its own typed source
+                // workspace refusal before the scalar kernel can allocate.
+                assert!(
+                    call.execute_sealed(
+                        &query,
+                        &graph,
+                        exact_work,
+                        FnxMemoryLimits {
+                            max_kernel_workspace_bytes: exact_memory.max_kernel_workspace_bytes - 1,
+                            ..exact_memory
+                        }
+                    )
+                    .is_err()
+                );
+                let yields = Cell::new(0);
+                let cooperative = call
+                    .execute_sealed_cooperative(
+                        &query,
+                        &graph,
+                        exact_work,
+                        exact_memory,
+                        NonZeroUsize::new(1).unwrap(),
+                        || {
+                            yields.set(yields.get() + 1);
+                            asupersync::runtime::yield_now::yield_now()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(yields.get() > graph.node_count());
+                assert_eq!(cooperative.rows, expected);
+                assert_eq!(
+                    cooperative.certificate.result_digest,
+                    synchronous.certificate.result_digest,
+                );
+                assert_eq!(
+                    cooperative.certificate.witness,
+                    synchronous.certificate.witness
+                );
+                assert_eq!(
+                    cooperative.certificate.kernel_workspace_bytes,
+                    exact_memory.max_kernel_workspace_bytes,
+                );
+
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                call.execute_sealed_cooperative(
+                    &query.with_checkpoint_probe(Arc::clone(&probe)),
+                    &graph,
+                    exact_work,
+                    exact_memory,
+                    NonZeroUsize::new(1).unwrap(),
+                    asupersync::runtime::yield_now::yield_now,
+                )
+                .await
+                .unwrap();
+                let checkpoints = probe.calls();
+                for stop in [1, checkpoints / 2, checkpoints] {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                    assert!(matches!(
+                        call.execute_sealed_cooperative(
+                            &query.with_checkpoint_probe(Arc::clone(&probe)),
+                            &graph,
+                            exact_work,
+                            exact_memory,
+                            NonZeroUsize::new(1).unwrap(),
+                            asupersync::runtime::yield_now::yield_now,
+                        )
+                        .await,
+                        Err(FnxSealedExecutionError::Cancelled(_)),
+                    ));
+                    assert_eq!(probe.calls(), stop);
+                }
+
+                let mut kept = opt;
+                kept.projection.self_loops = SelfLoopPolicy::Keep;
+                let graph = projected(&view, &query, &image, kept);
+                assert!(matches!(
+                    call.execute_sealed(&query, &graph, opt.execution_limits, memory()),
+                    Err(FnxSealedExecutionError::Execution(
+                        FnxExecutionError::SelfLoopRefused
+                    )),
+                ));
+                assert!(matches!(
+                    call.execute_sealed_cooperative(
+                        &query,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        NonZeroUsize::new(1).unwrap(),
+                        asupersync::runtime::yield_now::yield_now,
+                    )
+                    .await,
+                    Err(FnxSealedExecutionError::Execution(
+                        FnxExecutionError::SelfLoopRefused
+                    )),
+                ));
+                let mut reject = opt;
+                reject.projection.parallel_edges = ParallelEdgePolicy::Reject;
+                assert!(matches!(
+                    view.prism_sealed_projection_at(
+                        &query,
+                        &image,
+                        view.frontier(),
+                        reject.selection,
+                        reject.projection,
+                        reject.projection_limits,
+                        reject.source_limits,
+                    ),
+                    Err(SealedReadError::Projection(
+                        SealedProjectionError::Projection(ProjectionError::ParallelEdge { .. },)
+                    )),
+                ));
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
 }
 
 #[test]
@@ -914,7 +1246,7 @@ fn incoming_endpoint_masks_and_loop_discard_precede_weight_observation() {
             assert!(
                 !cursor_row(&graph, &query, graph.vertex_ordinal(VId(2)).unwrap(), None).is_empty()
             );
-            opt.selection.vertex_label = None;
+            opt.selection.vertex_labels = None.into();
             assert!(matches!(
                 db.prism_sealed_projection_at(
                     &query,

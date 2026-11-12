@@ -7,7 +7,10 @@
 
 #[path = "write_txn_parts/authorized.rs"]
 mod authorized;
-pub use authorized::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
+pub use authorized::{
+    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteOutput, AuthorizedWriteSession,
+    AuthorizedWriteTransaction,
+};
 #[path = "write_txn_parts/beacon.rs"]
 mod beacon;
 #[path = "write_txn_parts/native_query.rs"]
@@ -28,6 +31,7 @@ include!("write_txn_parts/field_rebase.rs");
 include!("write_txn_parts/vertex_reads.rs");
 include!("write_txn_parts/edge_reads.rs");
 include!("write_txn_parts/point_reads.rs");
+include!("write_txn_parts/count_reads.rs");
 include!("write_txn_parts/gql_types.rs");
 include!("write_txn_parts/gql_entry.rs");
 include!("write_txn_parts/gql_node.rs");

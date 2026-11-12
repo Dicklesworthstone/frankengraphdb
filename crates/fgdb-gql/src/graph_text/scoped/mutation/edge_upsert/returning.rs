@@ -70,9 +70,7 @@ impl<'a> ReturnLeaves<'a> for ParsedEdgeReturn<'a> {
             ReturnMapInput::Properties => {
                 return Err(error(
                     source.at,
-                    GraphPatternTextErrorKind::Expected(
-                        "an explicit MERGE relationship property, not a complete property map",
-                    ),
+                    GraphPatternTextErrorKind::Expected("a post-MERGE property-map expression"),
                 ));
             }
         };
@@ -97,6 +95,23 @@ impl<'a> ReturnLeaves<'a> for ParsedEdgeReturn<'a> {
     }
     fn types(&self) -> Vec<GraphSetColumnType> {
         self.bindings.iter().map(|(_, kind)| *kind).collect()
+    }
+
+    fn map_properties(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+    ) -> Result<crate::set_text::ReadValueTemplate, GraphPatternTextError> {
+        // The chosen relationship identity is already part of the native
+        // final-row input. Read its complete map through the same governed
+        // final-overlay reader as properties(r), including capability masking
+        // before reverse naming and the witness for currently absent keys.
+        let column = self.map_input(parser, source, ReturnMapInput::Identity)?;
+        Ok(crate::set_text::ReadValueTemplate::ElementMetadata {
+            kind: crate::GraphElementMetadata::Properties,
+            value: Box::new(crate::set_text::ReadValueTemplate::Column(column)),
+            catalog: parser.syntax.element_catalog.request(),
+        })
     }
 }
 impl<'a> ParsedEdgeReturn<'a> {

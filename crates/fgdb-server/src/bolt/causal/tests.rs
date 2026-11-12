@@ -48,6 +48,12 @@ fn extra(sequence: u64) -> Map {
     ]
 }
 
+fn read_extra(sequence: u64) -> Map {
+    let mut options = extra(sequence);
+    options.push(("mode".into(), Value::string("r")));
+    options
+}
+
 async fn write_vertex(cx: &Cx, client: &mut Connection<'_>) {
     client
         .run(cx, "CREATE (n)", &vec![], &extra(0))
@@ -233,7 +239,7 @@ fn future_bookmarks_refuse_before_any_query_or_transaction_result_escapes() {
             assert!(client.transaction.is_none());
         }
         assert_eq!(
-            client.begin(&root, &extra(1)).await.unwrap_err().code,
+            client.begin(&root, &read_extra(1)).await.unwrap_err().code,
             UNREACHED
         );
         assert!(client.transaction.is_none());
@@ -319,7 +325,7 @@ fn a_later_commit_cannot_satisfy_a_bookmark_for_an_already_pinned_transaction() 
         let mut writer = connection(&server, token.clone());
         write_vertex(&root, &mut writer).await;
         let mut reader = connection(&server, token);
-        reader.begin(&root, &extra(1)).await.unwrap();
+        reader.begin(&root, &read_extra(1)).await.unwrap();
         assert_eq!(reader.transaction.as_ref().unwrap().seq, CommitSeq(1));
         write_vertex(&root, &mut writer).await;
         reader
@@ -367,7 +373,7 @@ fn a_later_commit_cannot_satisfy_a_bookmark_for_an_already_pinned_transaction() 
         assert!(reader.transaction.is_none());
         assert!(reader.pending.is_none());
         reader.handle(&root, &mut wire, Request::Reset).await;
-        reader.begin(&root, &extra(2)).await.unwrap();
+        reader.begin(&root, &read_extra(2)).await.unwrap();
         reader
             .run(&root, "MATCH (n) RETURN 7 AS marker", &vec![], &vec![])
             .await
@@ -471,7 +477,7 @@ fn read_bookmarks_do_not_grant_write_rights_or_reattach_a_recovered_transaction(
             "Neo.ClientError.Statement.AccessMode",
         );
         assert!(reader.pending.is_none());
-        reader.begin(&root, &extra(0)).await.unwrap();
+        reader.begin(&root, &read_extra(0)).await.unwrap();
         fail_after_marker(&root, db, 0xca05).await;
         assert!(matches!(
             settled(db).await,
@@ -511,7 +517,7 @@ fn cancelled_causal_session_admission_leaves_no_transaction_or_result_owner() {
         held.write(&contexts.commit(), crate::recovery::tests::vertex(1))
             .await
             .unwrap();
-        let input = extra(0);
+        let input = read_extra(0);
         let mut admission = Box::pin(reader.begin(&root, &input));
         assert!(
             admission
@@ -523,7 +529,7 @@ fn cancelled_causal_session_admission_leaves_no_transaction_or_result_owner() {
         assert!(reader.transaction.is_none());
         assert!(reader.pending.is_none());
         drop(held);
-        reader.begin(&root, &extra(0)).await.unwrap();
+        reader.begin(&root, &read_extra(0)).await.unwrap();
         assert_eq!(reader.transaction.as_ref().unwrap().seq, CommitSeq(1));
         server.join_database_workers(&root).await;
     });

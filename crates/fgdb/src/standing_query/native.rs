@@ -28,14 +28,28 @@ pub(super) enum Layout {
     Circuit {
         columns: Vec<String>,
         first: usize,
+        private_inputs: Vec<bool>,
     },
     GroupCircuit {
         columns: Vec<String>,
         slots: Vec<GraphAggregateTextSlot>,
         first: usize,
+        private_inputs: Vec<bool>,
     },
 }
 impl Layout {
+    /// One role per compiled node, captured before circuit publication. These
+    /// roles survive policy changes and distinguish shared public sources from
+    /// private witnesses even when the initial result allowance is unbounded.
+    pub(super) fn private_inputs(&self) -> Option<&[bool]> {
+        match self {
+            Self::Circuit { private_inputs, .. } | Self::GroupCircuit { private_inputs, .. } => {
+                Some(private_inputs)
+            }
+            Self::Rows { .. } | Self::Aggregate { .. } => None,
+        }
+    }
+
     fn columns(&self) -> &[String] {
         match self {
             Self::Rows { columns }
@@ -67,21 +81,28 @@ impl PreparedNativeRead {
     /// Ordinary patterns, aggregates, WITH-aggregate pipelines and unadorned
     /// binary set/product circuits with projections, filters and UNWIND are admitted
     /// only where the existing standing engines support their bound operators.
-    /// Zero-argument connected/weakly-connected/strongly-connected component
-    /// CALLs reuse the component delta engines for one explicit relation or
-    /// all relation types, and all live vertices, with unit weights, collapsed
-    /// parallel edges and kept or dropped self-loops. YIELD aliases and downstream
-    /// row stages retain their native schema; unsupported projection recipes refuse.
-    /// Core-number CALLs use the existing exact affected-component maintainer
-    /// for one explicit relation or all relation types, with self-loops dropped.
-    /// Their checked integer rows and derivatives are retained only for native
-    /// registration; typed core-number views do not acquire a second row sink.
-    /// Triangle and clustering CALLs admit one relation or all relation types
-    /// under the undirected/unit/collapse profile. Triangle CALLs require dropped
-    /// self-loops; clustering may also keep them and excludes them from degree.
-    /// Both maintain exact per-vertex values, including live zero-count isolates.
-    /// Whole-graph definitions retain cross-type support and admit new relation
-    /// types on later commits, including after a rebuild.
+    /// Zero-argument connected/weakly-connected/strongly-connected component,
+    /// core-number, triangle and clustering CALLs retain all vertices or ANY of
+    /// up to sixteen distinct labels, and all relation types or a union of up to
+    /// sixteen distinct types. Both endpoints must belong to the selected
+    /// vertex set. Overlapping labels do not multiply vertex or edge support;
+    /// selected isolates and counted parallel support survive later deletions.
+    /// Component CALLs reuse the existing delta engines with unit weights,
+    /// collapsed parallel edges and kept or dropped self-loops. YIELD aliases
+    /// and downstream row stages retain their native schema; unsupported
+    /// projection recipes refuse.
+    /// Core-number CALLs use the exact affected-component maintainer with
+    /// self-loops dropped. Their checked integer rows and derivatives are
+    /// retained only for native registration; typed core-number views do not
+    /// acquire a second row sink.
+    /// Triangle and clustering CALLs use the undirected/unit/collapse profile.
+    /// Triangle CALLs require dropped self-loops; clustering may also keep them
+    /// and excludes them from degree. Both maintain exact per-vertex values,
+    /// including live zero-count isolates.
+    /// Unions share ordinary maintained vertex/set/semijoin owners before the
+    /// existing analytic engine. Whole-graph definitions retain cross-type
+    /// support and admit new relation types on later commits, including after
+    /// a rebuild; explicit unions remain restricted to their bound identities.
     /// The source retains linear vertex result/incidence state and consumes
     /// signed triangle changes; it does not retain the typed triple table or
     /// rescan it per tick. Bootstrap still materializes the initial triangle

@@ -1,6 +1,8 @@
 //! Real buffered graph joins through the existing external ordering/stage host.
 //! Literal fixture expectations do not execute another copy of the join driver.
 
+#[path = "buffered_optional_tests.rs"]
+mod optional;
 #[path = "buffered_relational_join_tests.rs"]
 mod relational_join;
 #[path = "buffered_walk_tests.rs"]

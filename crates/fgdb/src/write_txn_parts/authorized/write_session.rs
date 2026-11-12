@@ -1245,7 +1245,7 @@ where
                                 capability.predicates(),
                                 execution,
                                 &mut active_record,
-                                |stats, _, work| {
+                                |stats, _, work, _| {
                                     // Chains publish only their aggregate effects;
                                     // private carried identities are not RETURN.
                                     // Construct even a stats receipt before commit.

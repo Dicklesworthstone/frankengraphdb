@@ -734,6 +734,20 @@ impl PreparedGraphAggregate {
     pub fn answers_identified_edges_from_topology(&self) -> bool {
         self.input.plan().requires_identified_edges() && weighted::answers_identified_exactly(self)
     }
+    /// Whether the ordinary element-map executor reaches the existing bounded
+    /// root-group owner. A physical source substitution must preserve that
+    /// owner's finite-prefix retirement, including its argument DISTINCT state.
+    /// Keep eligibility with the owner rather than recreating its page/key proof.
+    pub(crate) fn uses_root_group_retirement(&self) -> bool {
+        let plan = self.input.plan();
+        self.computed_input.is_none()
+            && self.relational_input.is_none()
+            && (!plan.requires_identified_edges() || weighted::answers_identified_exactly(self))
+            && !plan.projects_labels()
+            && !plan.projects_types()
+            && !plan.projects_property_maps()
+            && result::RootGroups::new(self).is_some()
+    }
     #[must_use]
     pub fn key_columns(&self) -> &[String] {
         if self.output_projection.is_some() {

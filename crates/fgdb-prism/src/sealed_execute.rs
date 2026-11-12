@@ -1,5 +1,6 @@
-//! Native CALL kernels over fallible compressed rows. No flat adjacency is
-//! constructed, including for a hub row. The decoded implementation remains
+//! Native CALL kernels over fallible compressed rows. Kernels declare their
+//! workspace; multilevel Louvain retains an admitted coarsening graph. No
+//! decoded source projection is constructed. The decoded implementation remains
 //! an independent differential oracle, not a hidden fallback.
 
 use crate::execute::{
@@ -55,6 +56,8 @@ mod katz;
 mod label_propagation;
 #[path = "sealed_load.rs"]
 mod load;
+#[path = "sealed_louvain.rs"]
+mod louvain;
 #[cfg(test)]
 #[path = "shallow_bfs_tests.rs"]
 mod shallow_tests;
@@ -410,12 +413,12 @@ fn execution_pass_work(call: &FnxCallSpec, graph: &SealedGraphView) -> Result<us
         // retained rows are not a traversal or initialization allowance.
         return Ok(0);
     }
-    if matches!(
-        call.algorithm(),
-        FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
-            | FnxAlgorithm::OutDegreeCentrality
-    ) || (matches!(call.algorithm(), FnxAlgorithm::InDegreeCentrality)
-        && graph.incoming_degrees().is_some())
+    if matches!(call.algorithm(), FnxAlgorithm::OutDegreeCentrality)
+        || (matches!(
+            call.algorithm(),
+            FnxAlgorithm::InDegreeCentrality
+                | FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+        ) && graph.incoming_degrees().is_some())
     {
         // One admitted degree per vertex, initialization and completion.
         add(graph.node_count(), 2)
@@ -565,6 +568,19 @@ fn shallow_bfs_run(
 
 // Synchronous and cooperative drivers share the normalization, owned output
 // and witness. They differ only in how they checkpoint/yield between degrees.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectedDegree {
+    Incoming,
+    Outgoing,
+    Total,
+}
+
+impl DirectedDegree {
+    fn needs_incoming(self) -> bool {
+        self != Self::Outgoing
+    }
+}
+
 struct DegreeCentrality {
     values: Vec<f64>,
     nodes: usize,
@@ -613,6 +629,23 @@ impl DegreeCentrality {
         Ok(())
     }
 
+    fn push_total(&mut self, outgoing: Option<usize>, incoming: Option<usize>) -> Result<()> {
+        let outgoing = outgoing.ok_or(ExecutionError::InvalidUpstreamResult)?;
+        let incoming = incoming.ok_or(ExecutionError::InvalidUpstreamResult)?;
+        // Each simple, loop-free face has at most n - 1 neighbors. Mutual
+        // arcs contribute to both faces, so the normalized total can exceed 1.
+        if self.values.len() == self.nodes || outgoing >= self.nodes || incoming >= self.nodes {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        let degree = add(outgoing, incoming)?;
+        self.values.push(if self.nodes == 1 {
+            1.0
+        } else {
+            degree as f64 * self.reciprocal
+        });
+        Ok(())
+    }
+
     fn push_average_neighbor_degree(&mut self, total: usize, degree: usize) -> Result<()> {
         if self.values.len() == self.nodes || degree >= self.nodes || (degree == 0 && total != 0) {
             return Err(ExecutionError::InvalidUpstreamResult.into());
@@ -641,12 +674,17 @@ impl DegreeCentrality {
         )
     }
 
-    fn finish_directed(self, incoming: bool, edges: usize, scanned: bool) -> Result<KernelOutput> {
+    fn finish_directed(
+        self,
+        direction: DirectedDegree,
+        edges: usize,
+        scanned: bool,
+    ) -> Result<KernelOutput> {
         self.finish_with_witness(
-            if incoming {
-                "fgdb_in_degree_centrality"
-            } else {
-                "fgdb_out_degree_centrality"
+            match direction {
+                DirectedDegree::Incoming => "fgdb_in_degree_centrality",
+                DirectedDegree::Outgoing => "fgdb_out_degree_centrality",
+                DirectedDegree::Total => "degree_centrality",
             },
             edges,
             if scanned {
@@ -731,13 +769,16 @@ fn average_neighbor_degree(
 
 fn directed_degree_centrality(
     graph: &impl Rows,
-    incoming: bool,
+    direction: DirectedDegree,
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<KernelOutput> {
     checkpoint()?;
     let n = graph.node_count();
-    let directory = incoming.then(|| graph.incoming_degrees()).flatten();
-    let scan = incoming && directory.is_none();
+    let directory = direction
+        .needs_incoming()
+        .then(|| graph.incoming_degrees())
+        .flatten();
+    let scan = direction.needs_incoming() && directory.is_none();
     let mut counts = reserve(if scan { n } else { 0 })?;
     let mut edges = 0usize;
     if scan {
@@ -750,6 +791,9 @@ fn directed_degree_centrality(
             let mut row = graph.open(source)?;
             while let Some((target, _)) = row.next()? {
                 checkpoint()?;
+                if direction == DirectedDegree::Total && target == source {
+                    return Err(ExecutionError::SelfLoopRefused.into());
+                }
                 let count = counts
                     .get_mut(target)
                     .ok_or(ExecutionError::InvalidUpstreamResult)?;
@@ -761,14 +805,21 @@ fn directed_degree_centrality(
     let mut output = DegreeCentrality::new(n)?;
     for vertex in 0..n {
         checkpoint()?;
-        output.push_directed(if incoming {
-            directory.unwrap_or(&counts).get(vertex).copied()
+        if direction == DirectedDegree::Total {
+            output.push_total(
+                graph.degree(vertex),
+                directory.unwrap_or(&counts).get(vertex).copied(),
+            )?;
         } else {
-            graph.degree(vertex)
-        })?;
+            output.push_directed(if direction == DirectedDegree::Incoming {
+                directory.unwrap_or(&counts).get(vertex).copied()
+            } else {
+                graph.degree(vertex)
+            })?;
+        }
     }
     checkpoint()?;
-    output.finish_directed(incoming, edges, scan)
+    output.finish_directed(direction, edges, scan)
 }
 
 /// Admission and both drivers share one normalization/storage decision. Unit
@@ -1049,6 +1100,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::HitsCentrality
                 | FnxAlgorithm::LabelPropagationCommunities
+                | FnxAlgorithm::LouvainCommunities(_)
                 | FnxAlgorithm::KatzCentrality(_)
                 | FnxAlgorithm::ArticulationPoints
                 | FnxAlgorithm::Bridges
@@ -1197,6 +1249,9 @@ impl FnxCallSpec {
         if matches!(self.algorithm(), FnxAlgorithm::LabelPropagationCommunities) {
             return label_propagation::execute(self, cx, graph, limits, memory, &admission);
         }
+        if matches!(self.algorithm(), FnxAlgorithm::LouvainCommunities(_)) {
+            return louvain::execute(self, cx, graph, limits, memory, &admission);
+        }
         if matches!(self.algorithm(), FnxAlgorithm::KatzCentrality(_)) {
             return katz::execute(self, cx, graph, limits, memory, &admission);
         }
@@ -1297,10 +1352,26 @@ impl FnxCallSpec {
             }
             FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
                 admission.rows(n)?;
+                let directed = graph.spec().directedness != Directedness::Undirected;
+                let directory = graph.incoming_degrees().is_some();
                 (
-                    "fgdb-prism/sealed-degree-directory-v1",
+                    if !directed {
+                        "fgdb-prism/sealed-degree-directory-v1"
+                    } else if directory {
+                        "fgdb-prism/sealed-total-degree-directory-v1"
+                    } else {
+                        "fgdb-prism/sealed-total-degree-v1"
+                    },
                     pass,
-                    mul(n, size_of::<f64>())?,
+                    mul(
+                        n,
+                        size_of::<f64>()
+                            + if directed && !directory {
+                                size_of::<usize>()
+                            } else {
+                                0
+                            },
+                    )?,
                     None,
                 )
             }
@@ -1405,7 +1476,11 @@ impl FnxCallSpec {
                 FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::AverageNeighborDegree
             )
         ) {
-            require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+            if graph.spec().directedness == Directedness::Undirected {
+                require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+            } else if graph.has_self_loops() {
+                return Err(ExecutionError::SelfLoopRefused.into());
+            }
         }
         let rows = SealedRows { cx, graph };
         let mut control = || checkpoint(cx);
@@ -1416,12 +1491,20 @@ impl FnxCallSpec {
             FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
                 directed_degree_centrality(
                     &rows,
-                    matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality),
+                    if matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality) {
+                        DirectedDegree::Incoming
+                    } else {
+                        DirectedDegree::Outgoing
+                    },
                     &mut control,
                 )?
             }
             FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
-                degree_centrality(&rows, &mut control)?
+                if graph.spec().directedness == Directedness::Undirected {
+                    degree_centrality(&rows, &mut control)?
+                } else {
+                    directed_degree_centrality(&rows, DirectedDegree::Total, &mut control)?
+                }
             }
             FnxAlgorithm::PageRank(options) => pagerank(&rows, options, source, &mut control)?,
             FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => {
@@ -1865,9 +1948,12 @@ fn finish_encoded_bfs(
             call.algorithm(),
             FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
-                | FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
                 | FnxAlgorithm::OutDegreeCentrality
         )
+        && !(matches!(
+            call.algorithm(),
+            FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+        ) && graph.incoming_degrees().is_some())
     {
         witness
             .complexity_claim
@@ -2401,7 +2487,7 @@ mod tests {
     }
 
     #[test]
-    fn admitted_incoming_degrees_match_every_small_topology_without_opening_rows() {
+    fn admitted_incoming_and_total_degrees_match_small_topologies_without_opening_rows() {
         struct DirectoryRows<'a> {
             graph: &'a SnapshotGraphView,
             incoming: &'a [usize],
@@ -2438,66 +2524,163 @@ mod tests {
                 graph: &graph,
                 incoming: &counts,
             };
-            let mut checks = 0;
-            let cached = directed_degree_centrality(&rows, true, &mut || {
-                checks += 1;
-                Ok(())
-            })
-            .unwrap();
-            let scanned =
-                directed_degree_centrality(&DecodedRows(&graph), true, &mut || Ok(())).unwrap();
-            let expected: Vec<_> = counts
-                .iter()
-                .map(|&count| (count as f64 / 2.0).to_bits())
-                .collect();
-            assert_eq!(rank_score_bits(&cached), expected);
-            assert_eq!(rank_score_bits(&scanned), expected);
-            assert_eq!(cached.witness.edges_scanned, 0);
-            assert_eq!(scanned.witness.edges_scanned, mask.count_ones() as usize);
-            assert_eq!(checks, 5);
-            // Each remaining directory read still belongs to live control.
-            for stop in 1..=checks {
-                let mut seen = 0;
-                let result = directed_degree_centrality(&rows, true, &mut || {
-                    seen += 1;
-                    if seen == stop {
-                        Err(Error::Cancelled(
-                            std::io::Error::other("degree stop").into(),
-                        ))
-                    } else {
+            for direction in [DirectedDegree::Incoming, DirectedDegree::Total] {
+                if direction == DirectedDegree::Total && mask & 0b100010001 != 0 {
+                    continue;
+                }
+                let mut checks = 0;
+                let cached = directed_degree_centrality(&rows, direction, &mut || {
+                    checks += 1;
+                    Ok(())
+                })
+                .unwrap();
+                let mut scan_checks = 0;
+                let scanned =
+                    directed_degree_centrality(&DecodedRows(&graph), direction, &mut || {
+                        scan_checks += 1;
                         Ok(())
-                    }
-                });
-                assert!(matches!(result, Err(Error::Cancelled(_))));
-                assert_eq!(seen, stop);
+                    })
+                    .unwrap();
+                let expected: Vec<_> = counts
+                    .iter()
+                    .enumerate()
+                    .map(|(vertex, &count)| {
+                        let outgoing = if direction == DirectedDegree::Total {
+                            (0..3)
+                                .filter(|target| mask & (1 << (vertex * 3 + target)) != 0)
+                                .count()
+                        } else {
+                            0
+                        };
+                        ((count + outgoing) as f64 * 0.5).to_bits()
+                    })
+                    .collect();
+                assert_eq!(rank_score_bits(&cached), expected);
+                assert_eq!(rank_score_bits(&scanned), expected);
+                assert_eq!(cached.witness.edges_scanned, 0);
+                assert_eq!(scanned.witness.edges_scanned, mask.count_ones() as usize);
+                assert_eq!(checks, 5);
+                // Each remaining directory read still belongs to live control.
+                for stop in 1..=checks {
+                    let mut seen = 0;
+                    let result = directed_degree_centrality(&rows, direction, &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(Error::Cancelled(
+                                std::io::Error::other("degree stop").into(),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    });
+                    assert!(matches!(result, Err(Error::Cancelled(_))));
+                    assert_eq!(seen, stop);
+                }
+                for stop in 1..=scan_checks {
+                    let mut seen = 0;
+                    let result =
+                        directed_degree_centrality(&DecodedRows(&graph), direction, &mut || {
+                            seen += 1;
+                            if seen == stop {
+                                Err(Error::Cancelled(std::io::Error::other("scan stop").into()))
+                            } else {
+                                Ok(())
+                            }
+                        });
+                    assert!(matches!(result, Err(Error::Cancelled(_))));
+                    assert_eq!(seen, stop);
+                }
             }
         }
+        // A six-vertex graph distinguishes multiplication by the reciprocal
+        // from per-row division; both borrowed and scanned incoming degrees
+        // must retain the same bits, including isolated output vertices.
+        let vertices: Vec<_> = (0..6).map(VId).collect();
+        let edges: Vec<_> = [(0, 1), (2, 0), (0, 3)]
+            .into_iter()
+            .enumerate()
+            .map(|(eid, (source, target))| ProjectionEdge {
+                eid: EId(eid as u128),
+                source: VId(source),
+                target: VId(target),
+                weight: 1.0,
+            })
+            .collect();
+        let graph = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([0x62; 32]),
+                as_of: CommitSeq(2),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: Directedness::Directed,
+                parallel_edges: ParallelEdgePolicy::Reject,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: 6,
+                max_input_edges: 3,
+                max_adjacency_entries: 3,
+                max_workspace_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let rows = DirectoryRows {
+            graph: &graph,
+            incoming: &[1, 1, 0, 1, 0, 0],
+        };
+        let cached =
+            directed_degree_centrality(&rows, DirectedDegree::Total, &mut || Ok(())).unwrap();
+        let scanned =
+            directed_degree_centrality(&DecodedRows(&graph), DirectedDegree::Total, &mut || Ok(()))
+                .unwrap();
+        let expected: Vec<_> = [3.0_f64, 1.0, 1.0, 1.0, 0.0, 0.0]
+            .into_iter()
+            .map(|degree| (degree * (1.0 / 5.0)).to_bits())
+            .collect();
+        assert_ne!(expected[0], (3.0_f64 / 5.0).to_bits());
+        assert_eq!(rank_score_bits(&cached), expected);
+        assert_eq!(rank_score_bits(&scanned), expected);
     }
 
     #[test]
-    fn incoming_degree_without_admission_evidence_keeps_every_source_failure() {
-        let graph = projection(511);
-        let rows = FaultRows {
-            graph: &graph,
-            calls: std::cell::Cell::new(0),
-            fail_at: usize::MAX,
-        };
-        directed_degree_centrality(&rows, true, &mut || Ok(())).unwrap();
-        assert_eq!(rows.calls.get(), 3 + 9 + 3);
-        for fail_at in 1..=rows.calls.get() {
+    fn incoming_and_total_degree_without_directory_keep_every_source_failure() {
+        for (direction, mask) in [
+            (DirectedDegree::Incoming, 511u16),
+            (DirectedDegree::Total, 238u16),
+        ] {
+            let graph = projection(mask);
             let rows = FaultRows {
                 graph: &graph,
                 calls: std::cell::Cell::new(0),
-                fail_at,
+                fail_at: usize::MAX,
             };
-            assert!(matches!(
-                directed_degree_centrality(&rows, true, &mut || Ok(())),
-                Err(Error::Source(SealedProjectionError::UnknownOrdinal(
-                    usize::MAX
-                )))
-            ));
-            assert_eq!(rows.calls.get(), fail_at);
+            directed_degree_centrality(&rows, direction, &mut || Ok(())).unwrap();
+            assert_eq!(rows.calls.get(), 3 + mask.count_ones() as usize + 3);
+            for fail_at in 1..=rows.calls.get() {
+                let rows = FaultRows {
+                    graph: &graph,
+                    calls: std::cell::Cell::new(0),
+                    fail_at,
+                };
+                assert!(matches!(
+                    directed_degree_centrality(&rows, direction, &mut || Ok(())),
+                    Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                        usize::MAX
+                    )))
+                ));
+                assert_eq!(rows.calls.get(), fail_at);
+            }
         }
+        assert!(matches!(
+            directed_degree_centrality(
+                &DecodedRows(&projection(511)),
+                DirectedDegree::Total,
+                &mut || Ok(())
+            ),
+            Err(Error::Execution(ExecutionError::SelfLoopRefused))
+        ));
     }
 
     fn assert_rank_matches_decoded(

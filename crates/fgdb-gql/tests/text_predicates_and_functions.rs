@@ -1521,6 +1521,152 @@ fn a_composite_on_the_right_compares_like_the_mirrored_comparison() {
     }
 }
 
+/// A composite in the middle of a comparison chain is one operand, not a
+/// nested comparison and not a scalar-only expression (fgdb-fc7cx). Each
+/// adjacent pair retains the ordinary three-valued comparison semantics.
+#[test]
+fn composite_middle_operands_preserve_comparison_chains() {
+    let truth = CanonicalScalar::Bool;
+    for (statement, expected) in [
+        ("RETURN 1 + 1 < [1] < 3 AS v", CanonicalScalar::Null),
+        (
+            "WITH 0 AS x, 5 AS y RETURN x < [1] < y AS v",
+            CanonicalScalar::Null,
+        ),
+        ("UNWIND [[1]] AS x RETURN x = [1] = [1] AS v", truth(true)),
+        ("UNWIND [[1]] AS x RETURN x <= [1] < [2] AS v", truth(true)),
+        (
+            "UNWIND [[1]] AS x RETURN x = [2] = [NULL] AS v",
+            truth(false),
+        ),
+        (
+            "UNWIND [[NULL]] AS x RETURN x = [NULL] = [NULL] AS v",
+            CanonicalScalar::Null,
+        ),
+        (
+            "UNWIND [{k:1}] AS x RETURN x = {k:1} = {k:1} AS v",
+            truth(true),
+        ),
+        (
+            "UNWIND [{k:1}] AS x RETURN x <> {k:2} != {k:3} AS v",
+            truth(true),
+        ),
+        (
+            "UNWIND [[1]] AS x RETURN NOT x = [1] = [2] AS v",
+            truth(true),
+        ),
+        (
+            "UNWIND [[1]] AS x RETURN x = [1] = [1] AND true AS v",
+            truth(true),
+        ),
+        // Predicates, subscripts and entry reads still bind more tightly
+        // than comparison, while a following comparison does not.
+        ("RETURN true = [1] IN [[1]] = true AS v", truth(true)),
+        ("RETURN true = [1] NOT IN [[2]] = true AS v", truth(true)),
+        ("RETURN false = [1] NOT IN [[1]] = false AS v", truth(true)),
+        (
+            "RETURN true = [1] NOT IN [[NULL]] = true AS v",
+            CanonicalScalar::Null,
+        ),
+        (
+            "UNWIND [[1]] AS x RETURN x = [1] IS NULL = false AS v",
+            truth(false),
+        ),
+        ("UNWIND [[1]] AS x RETURN x = [1][0] = 1 AS v", truth(false)),
+        ("UNWIND [1] AS x RETURN x = {k:1}.k = 1 AS v", truth(true)),
+        (
+            "UNWIND [[1]] AS x RETURN [0] + x < [1] + [1] < [2] AS v",
+            truth(true),
+        ),
+    ] {
+        let result = execute(&prepare(statement), &text("x"), policy())
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        assert_eq!(result.value.len(), 1, "{statement}");
+        assert_eq!(
+            result.value[0].values()[0].as_scalar(),
+            Some(&expected),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn composite_chain_parameters_rebind_without_consuming_the_following_comparison() {
+    use fgdb_gql::GqlParameterType;
+    use fgdb_gql::algebra::GraphValue;
+
+    let template = PreparedGraphSetText::prepare_with_parameter_types(
+        "UNWIND [$xs] AS x WITH x, $xs AS middle, $map AS m \
+         RETURN x = $xs = [1] AS parameter_list, \
+         x = middle = [1] AS column_list, m = $map = {k:1} AS parameter_map",
+        &[
+            ("xs", GqlParameterType::List),
+            ("map", GqlParameterType::Map),
+        ],
+        symbols,
+    )
+    .unwrap();
+    let transcript = template.canonical_template_bytes();
+    let mut plans = Vec::new();
+    for value in [1, 2] {
+        let cell = GraphValue::Scalar(CanonicalScalar::Int(value));
+        let parameters = GqlParameters::new()
+            .with_list("xs", vec![cell.clone()])
+            .unwrap()
+            .with_map("map", vec![("k".into(), cell)])
+            .unwrap();
+        let query = template.bind_parameters(&parameters).unwrap();
+        plans.push(query.canonical_bytes());
+        let result = execute(&query, &text("unused"), policy()).unwrap();
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(
+            result.value[0].values(),
+            &[0; 3].map(|_| GraphValue::Scalar(CanonicalScalar::Bool(value == 1)))
+        );
+    }
+    assert_ne!(plans[0], plans[1]);
+    assert_eq!(template.canonical_template_bytes(), transcript);
+
+    // WHERE keeps only TRUE; NULL and FALSE do not become a row. The
+    // comparison tail also keeps its ordinary expression/work failures
+    // underneath an empty final page.
+    let query = prepare("UNWIND [[1],[2],NULL] AS x WITH x WHERE x = [1] = [1] RETURN x");
+    let result = execute(&query, &text("unused"), policy()).unwrap();
+    assert_eq!(
+        result.value,
+        [GraphValueRow::from_owned_values(vec![GraphValue::List(
+            vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice()
+        )])]
+    );
+    for statement in [
+        "UNWIND [[1]] AS x RETURN x = [1] = [1 / 0] AS v LIMIT 0",
+        "UNWIND [[1]] AS x RETURN x = [2] = [1 / 0] AS v LIMIT 0",
+    ] {
+        assert!(
+            matches!(
+                execute(&prepare(statement), &text("unused"), policy()),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    error: fgdb_gql::GraphIntegerError {
+                        kind: fgdb_gql::GraphIntegerErrorKind::DivisionByZero,
+                        ..
+                    },
+                    ..
+                }))
+            ),
+            "{statement}"
+        );
+    }
+    assert!(matches!(
+        execute(
+            &query,
+            &text("unused"),
+            GqlQueryPolicy::new(100, 100, 1, 1_000_000)
+        ),
+        Err(GqlQueryError::Evaluator(error))
+            if error.dimension == fgdb_gql::GlaLimitDimension::WorkUnits
+    ));
+}
+
 /// fgdb-txbg9: date(...) builds a date from one calendar's fields (over an
 /// optional `date` base), from ISO 8601 text, from a date or from NULL, and a
 /// date reads its fields as `d.year`. Expected days are the TCK's (Temporal1
@@ -3262,7 +3408,7 @@ fn opencypher_to_string_and_to_integer_convert_the_scalar_domain() {
 
 /// fgdb-20foe: openCypher `text =~ 'pattern'` is a whole-string match under
 /// fgdb regex profile 1. The pattern is a text literal compiled once, at
-/// preparation, so a malformed or out-of-profile pattern and a non-literal
+/// preparation, so a malformed or out-of-profile pattern and a row-dependent
 /// pattern refuse before execution. It filters in the graph pattern's WHERE,
 /// yields a three-valued Boolean in RETURN, fails typed on a non-text input,
 /// is part of the plan identity, and charges its bounded work.
@@ -3369,6 +3515,205 @@ fn opencypher_regex_match_is_a_bounded_whole_string_match() {
     assert!(
         counted_long >= counted_short + 1024 / 64,
         "{counted_long} vs {counted_short}"
+    );
+}
+
+#[test]
+fn regex_parameters_rebind_in_graph_and_row_predicates_with_literal_costs() {
+    let arguments = |value: CanonicalScalar| {
+        let mut parameters = GqlParameters::new();
+        parameters
+            .insert(
+                "pattern",
+                fgdb_gql::GqlParameterValue::Scalar(
+                    fgdb_gql::GqlScalarParameter::new(value).unwrap(),
+                ),
+            )
+            .unwrap();
+        parameters
+    };
+    for statement in [
+        "MATCH (n) WHERE n.text =~ $pattern RETURN n.text AS value",
+        "MATCH (n) WHERE NOT (n.text =~ $pattern) RETURN n.text AS value",
+        "MATCH (n) RETURN n.text =~ $pattern AS value",
+        "MATCH (n) WITH n.text AS t WHERE t =~ $pattern RETURN t AS value",
+        "MATCH (n) WITH n.text AS t RETURN t =~ $pattern AS value",
+        "MATCH (n) RETURN CASE WHEN n.text =~ $pattern THEN 'yes' ELSE 'no' END AS value",
+    ] {
+        let template = PreparedGraphSetText::prepare(statement, symbols).unwrap();
+        assert_eq!(template.parameter_schema().len(), 1, "{statement}");
+        assert_eq!(
+            template.parameter_schema()[0].parameter_type,
+            fgdb_gql::GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Text)
+        );
+        let transcript = template.canonical_template_bytes();
+        let mut bound_transcripts = Vec::new();
+        for (pattern, input) in [
+            ("A.*", text("Ada")),
+            ("A.*", text("bob")),
+            ("(?i)ada", text("ADA")),
+            ("\\d{3}", text("123")),
+            ("é🦀.*", text("é🦀tail")),
+            ("", text("")),
+            ("a.*", CanonicalScalar::Null),
+        ] {
+            let plan = template.bind_parameters(&arguments(text(pattern))).unwrap();
+            bound_transcripts.push(plan.canonical_bytes());
+            let literal = pattern.replace('\\', "\\\\").replace('\'', "\\'");
+            let literal = prepare(&statement.replace("$pattern", &format!("'{literal}'")));
+            let expected = execute(&literal, &input, policy()).unwrap();
+            let actual = execute(&plan, &input, policy()).unwrap();
+            assert_eq!(actual.value, expected.value, "{statement}: {pattern}");
+            assert_eq!(
+                actual.evaluator.work_units, expected.evaluator.work_units,
+                "parameter matching must reuse the literal VM's metering: {statement}"
+            );
+        }
+        assert_ne!(bound_transcripts[0], bound_transcripts[2], "{statement}");
+        assert_eq!(template.canonical_template_bytes(), transcript);
+
+        let null = template
+            .bind_parameters(&arguments(CanonicalScalar::Null))
+            .unwrap();
+        let actual = execute(&null, &text("Ada"), policy()).unwrap();
+        if statement.contains("WHERE") {
+            assert!(actual.value.is_empty(), "{statement}");
+        } else {
+            let expected = if statement.contains("CASE") {
+                text("no")
+            } else {
+                CanonicalScalar::Null
+            };
+            assert_eq!(actual.value.len(), 1);
+            assert_eq!(
+                actual.value[0].values()[0].as_scalar(),
+                Some(&expected),
+                "{statement}"
+            );
+        }
+    }
+}
+
+#[test]
+fn regex_parameters_validate_before_execution_and_keep_group_keys_distinct() {
+    use fgdb_gql::{GqlParameterType, GqlParameterValue, GqlScalarParameter};
+    use fgdb_types::CanonicalScalarKind;
+
+    let arguments = |name: &str, value: CanonicalScalar| {
+        let mut parameters = GqlParameters::new();
+        parameters
+            .insert(
+                name,
+                GqlParameterValue::Scalar(GqlScalarParameter::new(value).unwrap()),
+            )
+            .unwrap();
+        parameters
+    };
+    let statement = "MATCH (n) RETURN n.text =~ $pattern AS value LIMIT 0";
+    let template = PreparedGraphSetText::prepare(statement, symbols).unwrap();
+    for value in [
+        text("("),
+        text("\\bsecret"),
+        text("a{257}"),
+        text(&"a".repeat(fgdb_gql::regex::MAX_REGEX_PROGRAM + 1)),
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Bool(true),
+    ] {
+        assert!(
+            template
+                .bind_parameters(&arguments("pattern", value))
+                .is_err()
+        );
+    }
+    let calls = std::cell::Cell::new(0);
+    for kind in [
+        GqlParameterType::Int64,
+        GqlParameterType::List,
+        GqlParameterType::Scalar(CanonicalScalarKind::Bool),
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare_with_parameter_types(
+                statement,
+                &[("pattern", kind)],
+                |kind, name| {
+                    calls.set(calls.get() + 1);
+                    symbols(kind, name)
+                },
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(calls.get(), 0);
+    let nullable = PreparedGraphSetText::prepare_with_parameter_types(
+        "MATCH (n) RETURN n.text =~ $pattern AS value",
+        &[(
+            "pattern",
+            GqlParameterType::Scalar(CanonicalScalarKind::Null),
+        )],
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&arguments("pattern", CanonicalScalar::Null))
+    .unwrap();
+    assert_eq!(
+        execute(&nullable, &text("valid"), policy()).unwrap().value[0].values()[0].as_scalar(),
+        Some(&CanonicalScalar::Null)
+    );
+    // Binding NULL does not discard the operand's native type checks.
+    assert!(execute(&nullable, &CanonicalScalar::Int(1), policy()).is_err());
+    // Native CASE remains lazy: neither text validation nor matching runs in
+    // its untaken branch. The pattern itself still binds before any execution.
+    let lazy = PreparedGraphSetText::prepare(
+        "MATCH (n) RETURN CASE WHEN true THEN true ELSE n.text =~ $pattern END AS value",
+        symbols,
+    )
+    .unwrap();
+    for pattern in [text("a.*"), CanonicalScalar::Null] {
+        let query = lazy.bind_parameters(&arguments("pattern", pattern)).unwrap();
+        let result = execute(&query, &CanonicalScalar::Int(1), policy()).unwrap();
+        assert_eq!(
+            result.value[0].values()[0].as_scalar(),
+            Some(&CanonicalScalar::Bool(true))
+        );
+    }
+    assert!(
+        lazy.bind_parameters(&arguments("pattern", text("(")))
+            .is_err()
+    );
+
+    let grouped = fgdb_gql::PreparedGraphPipelineAggregateText::prepare(
+        "MATCH (n) WITH n.text AS t \
+         RETURN t =~ $first AS a, t =~ $second AS b, COUNT(*) AS c",
+        symbols,
+    )
+    .unwrap();
+    let mut parameters = arguments("first", text("a.*"));
+    parameters
+        .insert(
+            "second",
+            GqlParameterValue::Scalar(GqlScalarParameter::new(text("b.*")).unwrap()),
+        )
+        .unwrap();
+    let bound = grouped.bind_parameters(&parameters).unwrap();
+    let input = CanonicalPropertyValue::from(text("ab"));
+    let result = bound
+        .execute_governed(
+            1,
+            [VId(1)],
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(Some(&input)),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert_eq!(
+        result.value[0].keys()[0].as_scalar(),
+        Some(&CanonicalScalar::Bool(true))
+    );
+    assert_eq!(
+        result.value[0].keys()[1].as_scalar(),
+        Some(&CanonicalScalar::Bool(false))
     );
 }
 

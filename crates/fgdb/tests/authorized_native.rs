@@ -2436,7 +2436,7 @@ fn temporal_aggregate_relations_share_historical_scope_and_one_live_permit() {
         // Two private CALL input rows may form one delivered aggregate, but
         // the public standalone result still exceeds this same signed cap.
         let mut standalone = fgdb_prism::FnxReadOptions::whole_graph(Some(basis));
-        standalone.selection.relation = Some(RelationId(1));
+        standalone.selection.relations = Some(RelationId(1)).into();
         standalone.projection.directedness = fgdb_prism::Directedness::Directed;
         standalone.projection.parallel_edges = fgdb_prism::ParallelEdgePolicy::CollapseUnit;
         assert!(matches!(

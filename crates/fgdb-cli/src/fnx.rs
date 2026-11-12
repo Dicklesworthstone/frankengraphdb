@@ -350,8 +350,12 @@ impl ProjectionFlags {
         }
         Ok(FnxReadOptions {
             selection: FnxSelection {
-                vertex_label: lookup(&self.label, &bindings.labels, "label")?.map(LabelId),
-                relation: lookup(&self.relation, &bindings.relations, "relation")?.map(RelationId),
+                vertex_labels: lookup(&self.label, &bindings.labels, "label")?
+                    .map(LabelId)
+                    .into(),
+                relations: lookup(&self.relation, &bindings.relations, "relation")?
+                    .map(RelationId)
+                    .into(),
                 weight,
             },
             projection: ProjectionSpec {
@@ -437,7 +441,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     if sealed.is_some() {
         // All graph-law and scheduling checks precede either read-only open.
         // Unsupported algorithms never fall back to decoded adjacency.
-        if read.selection.relation.is_none() {
+        if read.selection.relations.single().is_none() {
             return Err(Failure::usage("--sealed requires --graph-relation"));
         }
         if !options.buffered.enabled() && options.budget != super::QueryBudget::default() {
@@ -1589,10 +1593,16 @@ mod tests {
     }
 
     #[test]
-    fn sealed_core_and_load_preflight_accept_only_undirected_projections() {
-        for call in [
-            "CALL fnx.core_number() YIELD core AS level, node AS id",
-            "CALL fnx.load_centrality() YIELD score AS rank, node AS id",
+    fn sealed_core_and_load_preflight_enforce_their_direction_laws() {
+        for (call, admits_directed) in [
+            (
+                "CALL fnx.core_number() YIELD core AS level, node AS id",
+                false,
+            ),
+            (
+                "CALL fnx.load_centrality() YIELD score AS rank, node AS id",
+                true,
+            ),
         ] {
             for direction in ["directed", "reversed", "undirected"] {
                 let args: Vec<String> = [
@@ -1616,12 +1626,12 @@ mod tests {
                 assert!(options.fnx_call);
                 match super::prepare(&options) {
                     Ok(prepared) => {
-                        assert_eq!(direction, "undirected");
+                        assert!(admits_directed || direction == "undirected");
                         assert!(prepared.is_sealed());
                         assert!(prepared.call.supports_sealed_execution());
                     }
                     Err(failure) => {
-                        assert_ne!(direction, "undirected");
+                        assert!(!admits_directed && direction != "undirected");
                         assert_eq!(failure.code, 3);
                         assert_eq!(failure.class, "query");
                     }

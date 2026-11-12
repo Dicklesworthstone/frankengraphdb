@@ -49,7 +49,8 @@ impl<'a> Incidences<'a> {
         cx.checkpoint()?;
         let relation = config
             .selection
-            .relation
+            .relations
+            .single()
             .ok_or(SealedProjectionError::RelationRequired)?;
         let direction = config.projection.directedness;
         if !relation_visible {

@@ -1023,7 +1023,7 @@ fn prepared_returning_binding_and_native_execution_share_one_signed_work_ceiling
                 &scoped,
                 bound,
                 None,
-                |_, rows, _| Ok(rows),
+                |_, rows, _, _| Ok(rows),
             )
             .await
             {

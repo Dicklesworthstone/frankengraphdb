@@ -162,11 +162,17 @@ fn drive_scalar_load<C>(
         match state.step()? {
             LoadStep::Scalar => {}
             LoadStep::Complete => break,
-            LoadStep::Row(vertex) => {
-                for &neighbor in graph
-                    .neighbors_indices(vertex)
-                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?
-                {
+            LoadStep::Row {
+                vertex,
+                predecessors,
+            } => {
+                let row = if predecessors {
+                    graph.in_neighbors_indices(vertex)
+                } else {
+                    graph.neighbors_indices(vertex)
+                }
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                for &neighbor in row {
                     meter.unit().map_err(FnxExecutionError::Cancelled)?;
                     state.visit(neighbor)?;
                 }
@@ -368,7 +374,7 @@ fn load_reached_work_bound_admits_isolates_and_keeps_connected_bounds() {
     let result = call.execute(&view, limits, || Ok::<_, ()>(())).unwrap();
     assert_eq!(
         result.certificate.execution_kernel,
-        "fgdb-prism/newman-load-csr-v2"
+        "fgdb-prism/newman-load-csr-v3"
     );
     assert_eq!(result.certificate.estimated_work, work);
     assert_eq!(result.rows.len(), n);
@@ -564,7 +570,7 @@ fn load_row_runs_leave_numeric_refusal_before_later_checkpoints() {
     let make_state = || {
         let mut state = Load::new::<Stop>(view.node_count(), usize::MAX).unwrap();
         while !matches!(state.phase, LoadPhase::Reduce(0)) {
-            if let LoadStep::Row(vertex) = state.step::<Stop>().unwrap() {
+            if let LoadStep::Row { vertex, .. } = state.step::<Stop>().unwrap() {
                 for &neighbor in view.neighbors_indices(vertex).unwrap() {
                     state.visit::<Stop>(neighbor).unwrap();
                 }

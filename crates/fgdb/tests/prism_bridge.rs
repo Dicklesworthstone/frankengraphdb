@@ -32,8 +32,8 @@ fn options() -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: Some(LabelId(1)),
-            relation: Some(RelationId(1)),
+            vertex_labels: Some(LabelId(1)).into(),
+            relations: Some(RelationId(1)).into(),
             weight: FnxWeightSpec::Property {
                 key: PropertyKeyId(1),
                 missing: MissingWeightPolicy::Reject,
@@ -260,7 +260,7 @@ fn excluded_properties_and_explicit_discard_laws_cannot_change_answers() {
         let selected = options();
         db.execute_fnx(&query, &call(), selected).unwrap();
         let mut all = selected;
-        all.selection.vertex_label = None;
+        all.selection.vertex_labels = None.into();
         assert!(matches!(
             db.execute_fnx(&query, &call(), all),
             Err(FnxReadError::Weight {
@@ -314,11 +314,11 @@ fn relation_filter_and_selection_recipe_are_bound_even_when_rows_coincide() {
         let base = options();
         let first = db.execute_fnx(&query, &call(), base).unwrap();
         let mut other = base;
-        other.selection.relation = None; // same edges now, different recipe
+        other.selection.relations = None.into(); // same edges now, different recipe
         let second = db.execute_fnx(&query, &call(), other).unwrap();
         assert_eq!(first.analytics, second.analytics);
         assert_ne!(first.digest, second.digest);
-        other.selection.relation = Some(RelationId(9));
+        other.selection.relations = Some(RelationId(9)).into();
         let isolated = db.execute_fnx(&query, &call(), other).unwrap();
         assert_eq!(isolated.analytics.certificate.edges, 0);
         assert_eq!(isolated.analytics.certificate.vertices, 3);
@@ -552,7 +552,7 @@ fn selected_relation_calls_bound_winner_scratch_without_skipping_raw_source_work
             let mut limited = options();
             limited.as_of = Some(cuts[0]);
             limited.source_limits.max_scratch_entries = 32;
-            limited.selection.relation = None;
+            limited.selection.relations = None.into();
             assert!(matches!(
                 db.execute_fnx(&query, &call(), limited),
                 Err(FnxReadError::SourceLimit {
@@ -560,7 +560,7 @@ fn selected_relation_calls_bound_winner_scratch_without_skipping_raw_source_work
                     ..
                 })
             ));
-            limited.selection.relation = Some(RelationId(1));
+            limited.selection.relations = Some(RelationId(1)).into();
             limited.source_limits.max_work_units = 128;
             assert!(matches!(
                 db.execute_fnx(&query, &call(), limited),
@@ -656,7 +656,7 @@ fn retained_adjacency_projections_equal_cold_reads_across_history_and_reductions
         for at in [first, latest] {
             for relation in [None, Some(RelationId(1)), Some(RelationId(2))] {
                 let selection = FnxSelection {
-                    relation,
+                    relations: relation.into(),
                     ..base.selection
                 };
                 for directedness in [

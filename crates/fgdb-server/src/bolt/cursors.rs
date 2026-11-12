@@ -149,7 +149,13 @@ impl<'s> Connection<'s> {
         pending: Pending<'s>,
     ) -> Result<Option<i64>, Failure> {
         checkpoint(cx)?;
-        if self.pending.is_some() || (self.transaction.is_some() && pending.write.is_some()) {
+        if self.pending.is_some()
+            || (self.transaction.is_some()
+                && matches!(
+                    &pending.write,
+                    Some(super::autocommit::PendingWrite::Deferred(_))
+                ))
+        {
             return Err(Failure::invalid("invalid Bolt result ownership transition"));
         }
         if let Some(transaction) = self.transaction.as_mut() {
@@ -233,6 +239,13 @@ fn slots<T>(total: &mut usize, capacity: usize) -> Result<(), Failure> {
 fn retained_bytes(cx: &Cx, pending: &Pending<'_>) -> Result<usize, Failure> {
     let mut total = size_of::<Pending<'_>>();
     add(&mut total, pending.database.capacity())?;
+    if let Some(super::autocommit::PendingWrite::Completed(summary)) = &pending.write {
+        slots::<(String, Value)>(&mut total, summary.capacity())?;
+        for (key, value) in summary {
+            add(&mut total, key.capacity())?;
+            value_bytes(cx, value, 0, &mut total)?;
+        }
+    }
     slots::<Vec<Value>>(&mut total, pending.rows.capacity())?;
     for row in &pending.rows {
         checkpoint(cx)?;

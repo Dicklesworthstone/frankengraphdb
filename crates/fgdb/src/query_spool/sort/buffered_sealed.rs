@@ -142,7 +142,7 @@ fn admit_procedure_shape(
     }
     let names = call.argument_names();
     if let Some(projection) = call.graph_projection() {
-        if !names.is_empty() || projection.relation != Some(relation) {
+        if !names.is_empty() || projection.relations.single() != Some(relation) {
             return false;
         }
         if let Some(direction) = projection.direction {

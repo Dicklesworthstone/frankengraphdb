@@ -89,8 +89,13 @@ impl PreparedNativeRead {
     /// every tied route, including parallel-edge alternatives, before the same
     /// external ordering and windows. It also accepts an omitted upper bound:
     /// complete eligible layers settle new endpoints until the finite source
-    /// is exhausted. Unbounded repeatable WALK, unsupported combinations,
-    /// procedures and unlowered optional instructions still refuse.
+    /// is exhausted. An edge-rooted fixed-hop pattern may end in one correlated
+    /// OPTIONAL MATCH: its copied bindings, predicates and fixed path captures
+    /// run in a resumable private frame, preserving all witnesses or one NULL
+    /// extension after successful exhaustion. The source holds only active
+    /// path records, and the same external owner handles order/DISTINCT/pages.
+    /// Unbounded repeatable WALK, unsupported combinations, procedures and
+    /// other unlowered optional instructions still refuse.
     /// Terminal exact aggregate results have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));
@@ -181,12 +186,14 @@ impl PreparedNativeRead {
                     EdgeScanError::Plan(error),
                 )))
             };
-            if query
-                .plan()
-                .operators()
-                .iter()
-                .any(|op| matches!(op, GlaOperator::Expand { .. } | GlaOperator::Probe { .. }))
-            {
+            if query.plan().operators().iter().any(|op| {
+                matches!(
+                    op,
+                    GlaOperator::Expand { .. }
+                        | GlaOperator::Probe { .. }
+                        | GlaOperator::Optional { .. }
+                )
+            }) {
                 let (plan, tail) =
                     AsyncEdgeJoinPlan::compile_sort_input(query.plan()).map_err(error)?;
                 Input::Join(plan, tail)

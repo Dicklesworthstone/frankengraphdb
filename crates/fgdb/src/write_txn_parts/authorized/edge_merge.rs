@@ -164,7 +164,7 @@ impl<V: Vfs + Clone> Database<V> {
             query,
             policy,
             clock,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         )
         .await
     }
@@ -192,6 +192,7 @@ impl<V: Vfs + Clone> Database<V> {
         admit: impl FnOnce(
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<QueryReceipt, QueryFault> {
         let merged = |error: Fault| error.map_source(GraphEdgeMergeQueryError::Merge);
@@ -234,7 +235,7 @@ impl<V: Vfs + Clone> Database<V> {
                     false,
                 )
                 .map_err(merged)?;
-                let result = query_cx.with_restriction(|| {
+                let mut result = query_cx.with_restriction(|| {
                     let transaction = &*workspace.transaction();
                     let controls = RefCell::new(&mut execution);
                     let mut checkpoint = || {
@@ -285,15 +286,18 @@ impl<V: Vfs + Clone> Database<V> {
                     .permit
                     .charge_rows_at((execution.clock)(), rows)
                     .map_err(refusal)?;
-                query_cx
-                    .with_restriction(|| {
-                        admit(&result.value, &mut |work| {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.work(work)
-                        })
-                    })
-                    .map_err(source)
-                    .map_err(merged)?;
+                super::output::admit_output(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    verified.predicates(),
+                    &mut execution,
+                    policy.query,
+                    &mut result,
+                    admit,
+                )
+                .map_err(source)
+                .map_err(merged)?;
                 execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()

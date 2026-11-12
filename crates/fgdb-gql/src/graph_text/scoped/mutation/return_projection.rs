@@ -183,7 +183,7 @@ fn pattern_comprehension_follows(
 }
 
 /// Whether the next token starts an operator that binds tighter than a
-/// comparison: arithmetic, a null predicate (`IS`), IN, a string predicate
+/// comparison: arithmetic, a null predicate (`IS`), [NOT] IN, a string predicate
 /// or `=~`. `a < b IS NOT NULL` is `a < (b IS NOT NULL)` (TCK Precedence1
 /// [23]), so `b` is then not the comparison's whole right operand.
 pub(super) fn tighter_than_comparison(
@@ -192,6 +192,10 @@ pub(super) fn tighter_than_comparison(
     Ok(match lexer.next()?.kind {
         TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^') => true,
         TokenKind::Punct(b'=') => matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT") => matches!(
+            lexer.next()?.kind,
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")
+        ),
         TokenKind::Word(word) => ["IS", "IN", "STARTS", "ENDS", "CONTAINS"]
             .iter()
             .any(|operator| word.eq_ignore_ascii_case(operator)),
@@ -305,6 +309,48 @@ fn list_operand_at(
             }),
         }),
         _ => Ok(false),
+    }
+}
+
+/// A visibly list-valued RHS without typed row names or parameters. Write
+/// dispatch uses the same lookahead as the value compiler, so a list nested
+/// inside a scalar call does not change that assignment's execution owner.
+pub(super) fn explicit_list_value_at<'a>(
+    token: Token<'a>,
+    lexer: &Lexer<'a>,
+) -> Result<bool, GraphPatternTextError> {
+    Ok(list_operand_at(token, lexer, Route::NONE)?
+        || list_chain_at(token, lexer, Route::NONE)?)
+}
+
+fn list_chain_at<'a>(
+    mut token: Token<'a>,
+    lexer: &Lexer<'a>,
+    route: Route<'_, 'a>,
+) -> Result<bool, GraphPatternTextError> {
+    let mut lexer = lexer.clone();
+    let mut list = false;
+    let mut joined = false;
+    loop {
+        while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
+            token = lexer.next()?;
+        }
+        list |= list_operand_at(token, &lexer, route)?;
+        loop {
+            token = skip_factor(token, &mut lexer)?;
+            if !matches!(token.kind, TokenKind::Punct(b'*' | b'/' | b'%' | b'^')) {
+                break;
+            }
+            token = lexer.next()?;
+            while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
+                token = lexer.next()?;
+            }
+        }
+        if !matches!(token.kind, TokenKind::Punct(b'+' | b'-')) {
+            return Ok(list && joined);
+        }
+        joined = true;
+        token = lexer.next()?;
     }
 }
 
@@ -1888,6 +1934,27 @@ impl<'a> Parser<'a> {
         self.read_value_inner(inputs, schema, resolve, depth, true)
     }
 
+    /// A bare argument in a collection-only position has a structural type.
+    /// Keep explicit declarations, including nullable scalar arguments, and
+    /// let the shared parameter table reject incompatible earlier uses.
+    /// Postfix reads and composed expressions do not constrain their base:
+    /// a list source such as $map.items or $value + [1] is not a bare list.
+    fn infer_collection_parameter(
+        &mut self,
+        kind: GqlParameterType,
+    ) -> Result<(), GraphPatternTextError> {
+        let TokenKind::Parameter(name) = self.current.kind else {
+            return Ok(());
+        };
+        let next = self.lexer.clone().next()?.kind;
+        if matches!(next, TokenKind::Punct(b')' | b']' | b'|'))
+            || matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("WHERE"))
+        {
+            self.parameter_types.entry(name.to_owned()).or_insert(kind);
+        }
+        Ok(())
+    }
+
     /// The composite value a scalar expression reads through a let slot
     /// (fgdb-o5o9t). It never hands its own head back to the scalar compiler.
     pub(super) fn read_composite_operand(
@@ -2234,31 +2301,7 @@ impl<'a> Parser<'a> {
         &self,
         route: Route<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
-        let mut lexer = self.lexer.clone();
-        let mut token = self.current;
-        let mut list = false;
-        let mut joined = false;
-        loop {
-            while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
-                token = lexer.next()?;
-            }
-            list |= list_operand_at(token, &lexer, route)?;
-            loop {
-                token = skip_factor(token, &mut lexer)?;
-                if !matches!(token.kind, TokenKind::Punct(b'*' | b'/' | b'%' | b'^')) {
-                    break;
-                }
-                token = lexer.next()?;
-                while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
-                    token = lexer.next()?;
-                }
-            }
-            if !matches!(token.kind, TokenKind::Punct(b'+' | b'-')) {
-                return Ok(list && joined);
-            }
-            joined = true;
-            token = lexer.next()?;
-        }
+        list_chain_at(self.current, &self.lexer, route)
     }
 
     /// The visible list-typed row column a bare name here reads, when no
@@ -2678,9 +2721,11 @@ impl<'a> Parser<'a> {
     /// Whether a whole composite stands here as a comparison's right
     /// operand: a list or map literal, a list- or map-typed parameter or a
     /// bare list-typed row column, which no subscript, slice, entry read or
-    /// call, no operator binding tighter than a comparison and no further
-    /// comparison of a chain follows (fgdb-bqri3). A list comprehension is a
-    /// let operand of its own (starts_let_operand).
+    /// call or operator binding tighter than a comparison follows
+    /// (fgdb-bqri3). A following comparison ends this operand: the ordinary
+    /// comparison tail reads it again as the next pair's left operand
+    /// (fgdb-fc7cx). A list comprehension is a let operand of its own
+    /// (starts_let_operand).
     pub(super) fn composite_right_operand(
         &self,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
@@ -2699,7 +2744,7 @@ impl<'a> Parser<'a> {
         }
         Ok(!matches!(
             lexer.clone().next()?.kind,
-            TokenKind::Punct(b'[' | b'.' | b'(' | b'=' | b'!' | b'<' | b'>')
+            TokenKind::Punct(b'[' | b'.' | b'(')
         ) && !tighter_than_comparison(&mut lexer)?)
     }
 
@@ -3599,6 +3644,7 @@ impl<'a> Parser<'a> {
         } else {
             self.advance()?;
             self.punct(b'(', "(")?;
+            self.infer_collection_parameter(GqlParameterType::Map)?;
             let source = match self.current.kind {
                 TokenKind::Word(word)
                     if !self.elements.contains(&word)
@@ -4266,6 +4312,7 @@ impl<'a> Parser<'a> {
         };
         Ok(match function {
             ListFunction::Head | ListFunction::Last | ListFunction::Tail => {
+                self.infer_collection_parameter(GqlParameterType::List)?;
                 let list = Box::new(next(self, inputs, resolve)?);
                 match function {
                     ListFunction::Head => ReadValueTemplate::Index {
@@ -4301,6 +4348,7 @@ impl<'a> Parser<'a> {
                 self.punct(b',', ",")?;
                 let element = self.name()?;
                 self.word("IN")?;
+                self.infer_collection_parameter(GqlParameterType::List)?;
                 let list = Box::new(next(self, inputs.as_deref_mut(), resolve)?);
                 self.punct(b'|', "|")?;
                 self.elements.push(accumulator.text);
@@ -4336,6 +4384,7 @@ impl<'a> Parser<'a> {
     > {
         let element = self.name()?;
         self.word("IN")?;
+        self.infer_collection_parameter(GqlParameterType::List)?;
         let list = self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
         self.elements.push(element.text);
         let parts = self.element_parts(inputs, schema, resolve, depth, projection);

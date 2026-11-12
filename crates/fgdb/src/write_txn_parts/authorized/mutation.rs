@@ -135,7 +135,7 @@ impl<V: Vfs + Clone> Database<V> {
             query,
             policy,
             clock,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         )
         .await
     }
@@ -166,6 +166,7 @@ impl<V: Vfs + Clone> Database<V> {
         admit: impl FnOnce(
             &[fgdb_gql::algebra::GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<
         (
@@ -298,14 +299,17 @@ impl<V: Vfs + Clone> Database<V> {
                 tail.complete(stats, &mut result).map_err(|error| {
                     GqlQueryError::Source(GraphMutationQueryError::Mutation(error))
                 })?;
-                query_cx
-                    .with_restriction(|| {
-                        admit(&result.value, &mut |work| {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.work(work)
-                        })
-                    })
-                    .map_err(query_source)?;
+                super::output::admit_output(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    verified.predicates(),
+                    &mut execution,
+                    policy.query,
+                    &mut result,
+                    admit,
+                )
+                .map_err(query_source)?;
                 execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()

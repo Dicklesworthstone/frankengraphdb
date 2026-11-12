@@ -42,6 +42,7 @@ enum ParsedOp {
         index: usize,
         at: usize,
     },
+    RegexTemplate(MutationIntegerTemplateOp),
     Unary(GraphIntegerUnary),
     Binary(GraphIntegerBinary),
     Coalesce,
@@ -174,6 +175,49 @@ fn list_members(
     Ok(())
 }
 
+/// A regex template has the same unary, text-to-Boolean shape regardless of
+/// the eventual parameter. This program is a type witness, never executed.
+pub(super) fn regex_parameter_shape() -> GraphIntegerOp {
+    GraphIntegerOp::Matches(Box::new(
+        crate::regex::CompiledRegex::compile("").expect("the empty regex is in profile 1"),
+    ))
+}
+
+fn bind_regex_parameter(
+    ops: &mut Vec<GraphIntegerOp>,
+    values: &[GqlParameterValue],
+    index: usize,
+    at: usize,
+) -> Result<(), GraphMutationTextError> {
+    let refused = || failure(at, GraphMutationTextErrorKind::IntegerOperand);
+    let Some(GqlParameterValue::Scalar(value)) = values.get(index) else {
+        return Err(refused());
+    };
+    match value.value() {
+        CanonicalScalar::Text(pattern) => {
+            let regex = crate::regex::CompiledRegex::compile(pattern.as_str()).map_err(|_| {
+                failure(
+                    at,
+                    GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                        "a regular expression in fgdb regex profile 1",
+                    )),
+                )
+            })?;
+            ops.push(GraphIntegerOp::Matches(Box::new(regex)));
+        }
+        CanonicalScalar::Null => {
+            // Preserve the regex operand's text validation and evaluation,
+            // including errors and cancellation in that operand. Comparing
+            // its text length to NULL yields UNKNOWN without a matcher.
+            ops.push(GraphIntegerOp::CharLength);
+            ops.push(GraphIntegerOp::Literal(None));
+            ops.push(GraphIntegerOp::Compare(IntegerComparison::Equal));
+        }
+        _ => return Err(refused()),
+    }
+    Ok(())
+}
+
 /// Whether the list literal `lexer` is just past the `[` of has an element
 /// that is itself a list or map literal, at its own level. Only lexical
 /// lookahead: nothing is read.
@@ -210,8 +254,13 @@ pub(in crate::graph_text) fn bind_integer(
             list_members(&mut ops, values, *index, *at)?;
             continue;
         }
+        if let MutationIntegerTemplateOp::RegexParameter { index, at } = op {
+            bind_regex_parameter(&mut ops, values, *index, *at)?;
+            continue;
+        }
         ops.push(match op {
-            MutationIntegerTemplateOp::ListMembers { .. } => unreachable!("expanded above"),
+            MutationIntegerTemplateOp::ListMembers { .. }
+            | MutationIntegerTemplateOp::RegexParameter { .. } => unreachable!("expanded above"),
             MutationIntegerTemplateOp::Bound(op) => op.clone(),
             MutationIntegerTemplateOp::Parameter { index, at } => {
                 let value = values
@@ -1347,6 +1396,7 @@ impl<'a> Parser<'a> {
                 ParsedOp::ListMembers { index, at } => {
                     MutationIntegerTemplateOp::ListMembers { index, at }
                 }
+                ParsedOp::RegexTemplate(op) => op,
                 ParsedOp::Unary(op) => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Unary(op)),
                 ParsedOp::Binary(op) => {
                     MutationIntegerTemplateOp::Bound(GraphIntegerOp::Binary(op))
@@ -1409,6 +1459,7 @@ impl<'a> Parser<'a> {
                 MutationIntegerTemplateOp::ListMembers { .. } => {
                     Ok(GraphIntegerOp::InList { members: 0 })
                 }
+                MutationIntegerTemplateOp::RegexParameter { .. } => Ok(regex_parameter_shape()),
                 MutationIntegerTemplateOp::Parameter { index, at } => {
                     let kind = self.syntax.parameters[*index].parameter_type;
                     let witness = match kind {
@@ -1816,43 +1867,60 @@ impl<'a> Parser<'a> {
                 )?;
                 continue;
             }
-            // openCypher `text =~ 'pattern'`: the pattern is a text literal,
-            // compiled once here into fgdb regex profile 1 (fgdb-20foe).
+            // The row-predicate parser uses the same bounded operand owner.
             if self.is_punct(b'=')
                 && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'~'))
             {
-                self.advance()?;
-                self.advance()?;
-                let pattern_at = self.current.at;
-                let expected = |item| {
-                    failure(
-                        pattern_at,
-                        GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
-                            item,
-                        )),
-                    )
-                };
-                let TokenKind::Quoted(raw) = self.current.kind else {
-                    return Err(expected("a regular-expression text literal after =~"));
-                };
-                let CanonicalScalar::Text(pattern) =
-                    crate::graph_text::literal::text_scalar(raw, pattern_at)?
-                else {
-                    return Err(expected("a regular-expression text literal after =~"));
-                };
-                let regex = crate::regex::CompiledRegex::compile(pattern.as_str())
-                    .map_err(|_| expected("a regular expression in fgdb regex profile 1"))?;
-                self.advance()?;
-                emit(
-                    program,
-                    ParsedOp::Bound(GraphIntegerOp::Matches(Box::new(regex))),
-                    at,
-                )?;
+                let matcher = self.read_regex_pattern()?;
+                emit(program, ParsedOp::RegexTemplate(matcher), at)?;
                 continue;
             }
             break;
         }
         Ok(())
+    }
+
+    /// Read the pattern of one =~ operation. Literals compile at preparation;
+    /// typed text/NULL parameters retain a hole until binding. Row predicates
+    /// and scalar expressions share this owner, including errors and limits.
+    pub(in crate::graph_text) fn read_regex_pattern(
+        &mut self,
+    ) -> Result<MutationIntegerTemplateOp, GraphPatternTextError> {
+        self.punct(b'=', "=~")?;
+        self.punct(b'~', "=~")?;
+        let at = self.current.at;
+        let expected = |item| error(at, GraphPatternTextErrorKind::Expected(item));
+        if let TokenKind::Parameter(name) = self.current.kind {
+            let kind = self
+                .parameter_types
+                .get(name)
+                .copied()
+                .unwrap_or(GqlParameterType::Scalar(CanonicalScalarKind::Text));
+            if !matches!(
+                kind,
+                GqlParameterType::Scalar(CanonicalScalarKind::Text | CanonicalScalarKind::Null)
+            ) {
+                return Err(expected("a text or NULL regular-expression parameter"));
+            }
+            let Number::Parameter(index) = self.number(kind)? else {
+                unreachable!("the current native token is a parameter")
+            };
+            return Ok(MutationIntegerTemplateOp::RegexParameter { index, at });
+        }
+        let TokenKind::Quoted(raw) = self.current.kind else {
+            return Err(expected(
+                "a regular-expression text literal or parameter after =~",
+            ));
+        };
+        let CanonicalScalar::Text(pattern) = crate::graph_text::literal::text_scalar(raw, at)? else {
+            return Err(expected("a regular-expression text literal after =~"));
+        };
+        let regex = crate::regex::CompiledRegex::compile(pattern.as_str())
+            .map_err(|_| expected("a regular expression in fgdb regex profile 1"))?;
+        self.advance()?;
+        Ok(MutationIntegerTemplateOp::Bound(GraphIntegerOp::Matches(
+            Box::new(regex),
+        )))
     }
 
     fn scalar_concat(

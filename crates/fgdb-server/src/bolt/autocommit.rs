@@ -11,6 +11,8 @@ use fgdb_gql::{BoundNativeGraphWrite, GraphSymbol, PreparedGraphWriteChainText};
 use fgdb_protocol::body::{Body, Execute, ExecuteMode, Outcome};
 use fgdb_warden::{PlannerPredicates, Rights};
 
+mod graph_return;
+
 #[cfg(test)]
 mod tests;
 
@@ -73,45 +75,29 @@ fn output_slots<T>(total: &mut usize, count: usize) -> Result<(), Refusal> {
     )
 }
 
-/// Reserve conversion work before visiting or copying a nested cell. Graph
-/// identities need a transaction-scoped hydration owner; a later read session
-/// must never turn a committed write into a conversion failure.
-fn admit_return_value(
+/// Reserve a non-graph cell's conversion work before copying its payload.
+/// Collections and graph values have their own governed encoder below.
+fn admit_scalar_value(
     value: &WireValue,
     depth: usize,
     total: &mut usize,
     work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
 ) -> Result<(), Refusal> {
-    output_work(work, 1)?;
     if depth > fgdb_bolt::packstream::MAX_DEPTH {
         return Err(output_budget());
     }
     let bytes = match value {
-        WireValue::Vertex(_)
+        WireValue::List(_)
+        | WireValue::Map(_)
+        | WireValue::Vertex(_)
         | WireValue::Edge(_)
         | WireValue::Vertices(_)
         | WireValue::Edges(_)
         | WireValue::Path { .. } => {
             return Err(Refusal::new(
-                ErrorCode::Statement,
-                "Bolt write RETURN supports values; return element properties instead of graph elements",
+                ErrorCode::Execution,
+                "composite output reached scalar conversion",
             ));
-        }
-        WireValue::List(values) => {
-            output_slots::<Value>(total, values.len())?;
-            for value in values {
-                admit_return_value(value, depth + 1, total, work)?;
-            }
-            0
-        }
-        WireValue::Map(entries) => {
-            output_slots::<(String, Value)>(total, entries.len())?;
-            for (key, value) in entries {
-                output_work(work, key.len().div_ceil(64) as u64 + 1)?;
-                output_bytes(total, key.capacity())?;
-                admit_return_value(value, depth + 1, total, work)?;
-            }
-            0
         }
         WireValue::Text(text) | WireValue::Decimal(text) => {
             output_bytes(total, text.capacity())?;
@@ -163,29 +149,6 @@ fn admit_return_value(
     output_work(work, bytes.div_ceil(64) as u64)
 }
 
-/// Container lengths were admitted before this conversion. Allocate those
-/// exact lengths explicitly; a fallible collect must not grow an unreserved
-/// destination or retain the larger wire cell allocation.
-fn convert_return_value(cell: WireValue, entities: &Entities) -> Result<Value, Failure> {
-    match cell {
-        WireValue::List(values) => {
-            let mut output = Vec::with_capacity(values.len());
-            for value in values {
-                output.push(convert_return_value(value, entities)?);
-            }
-            Ok(Value::List(output))
-        }
-        WireValue::Map(entries) => {
-            let mut output = Vec::with_capacity(entries.len());
-            for (key, value) in entries {
-                output.push((key, convert_return_value(value, entities)?));
-            }
-            Ok(Value::Map(output))
-        }
-        scalar => value(scalar, entities),
-    }
-}
-
 /// Inline value slots belong to their enclosing container. Count all owned
 /// payload capacities, including the structures temporal conversion produces.
 fn retained_value(
@@ -222,10 +185,12 @@ fn retained_value(
 
 /// Convert the complete result while the native rollback workspace and signed
 /// permit are live. Even PULL 1 or DISCARD must admit every later row first.
-fn collect_returning(
+pub(super) fn collect_returning(
     rows: Vec<Vec<WireValue>>,
     max_frame_len: usize,
     work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    metadata: &mut dyn fgdb::AuthorizedWriteOutput,
+    catalog: &fgdb_gql::ReverseSymbolCatalog,
 ) -> Result<VecDeque<Vec<Value>>, Refusal> {
     output_work(work, 1)?;
     let mut reserved = 0;
@@ -233,21 +198,16 @@ fn collect_returning(
     let mut output = VecDeque::with_capacity(rows.len());
     let mut retained = 0;
     output_slots::<Vec<Value>>(&mut retained, output.capacity())?;
-    let entities = Entities::default();
     for row in rows {
         output_work(work, 1)?;
         let mut reserved = retained;
         output_slots::<Value>(&mut reserved, row.len())?;
-        for cell in &row {
-            // The record structure and its field list occupy depths 0 and 1.
-            admit_return_value(cell, 2, &mut reserved, work)?;
-        }
+        let mut encoder = graph_return::ReturnEncoder::new(work, metadata, catalog);
         let mut cells = Vec::with_capacity(row.len());
         for cell in row {
-            cells.push(
-                convert_return_value(cell, &entities)
-                    .map_err(|error| Refusal::new(ErrorCode::Statement, error.message))?,
-            );
+            // The record and field list occupy depths 0 and 1. Metadata is
+            // read from the final unpublished overlay before any rows escape.
+            cells.push(encoder.cell(cell, 2, &mut reserved)?);
         }
         let before = retained;
         output_slots::<Value>(&mut retained, cells.capacity())?;
@@ -504,7 +464,15 @@ impl<'s> Connection<'s> {
                         &token,
                         definition,
                         Some((&pending.generation, deferred.minimum_seq)),
-                        move |_, rows, work| collect_returning(rows, max_frame_len, work),
+                        move |_, rows, work, metadata| {
+                            collect_returning(
+                                rows,
+                                max_frame_len,
+                                work,
+                                metadata,
+                                pending.db.symbols.borrowed_reverse_catalog(),
+                            )
+                        },
                     ));
                 execution.await.map_err(Failure::from_refusal)?
             }

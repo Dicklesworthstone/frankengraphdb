@@ -406,7 +406,7 @@ mod independent_creations {
                     &chain(NESTED),
                     bounded(4_000, 0),
                     || NOW,
-                    |rows, work| {
+                    |rows, work, _| {
                         assert!(rows.is_empty());
                         admitted = true;
                         // All 4000 creations and their ordered preparation
@@ -1677,7 +1677,7 @@ fn authorized_foreach_cancellation_and_late_expiration_discard_all_iterations() 
                         NOW
                     }
                 },
-                |rows, _| {
+                |rows, _, _| {
                     assert_eq!(rows.len(), 1);
                     // Output admission is reached only after all five CREATE
                     // and SET iterations. Expiry still precedes publication.
@@ -2720,7 +2720,7 @@ fn authorized_nested_foreach_cancellation_and_expiry_abort_every_frame() {
                         NOW
                     }
                 },
-                |rows, _| {
+                |rows, _, _| {
                     assert_eq!(rows.len(), 1);
                     // Every parent and child has finished. Reauthorization
                     // must still precede the one publication boundary.

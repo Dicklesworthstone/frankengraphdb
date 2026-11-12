@@ -312,23 +312,36 @@ impl<'a> Parser<'a> {
         if self.is_word("IN") || self.is_word("BETWEEN") || self.is_word("NOT") {
             return self.selection_membership(schema, selection, left, at);
         }
-        let text_op = if self.take_word("STARTS")? {
+        // =~ owns its literal/parameter RHS. The other text predicates read
+        // a second scalar expression. Route before ordinary '=' comparison.
+        let regex = self.is_punct(b'=')
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'~'));
+        let text_op = if regex {
+            Some(self.read_regex_pattern()?)
+        } else if self.take_word("STARTS")? {
             self.word("WITH")?;
-            Some(GraphIntegerOp::StartsWith)
+            Some(MutationIntegerTemplateOp::Bound(GraphIntegerOp::StartsWith))
         } else if self.take_word("ENDS")? {
             self.word("WITH")?;
-            Some(GraphIntegerOp::EndsWith)
+            Some(MutationIntegerTemplateOp::Bound(GraphIntegerOp::EndsWith))
         } else if self.take_word("CONTAINS")? {
-            Some(GraphIntegerOp::Contains)
+            Some(MutationIntegerTemplateOp::Bound(GraphIntegerOp::Contains))
         } else {
             None
         };
         if let Some(op) = text_op {
-            let right = self.selection_value(schema)?;
-            self.selection_text_parameters(&left, &right, at)?;
+            let right = if regex {
+                None
+            } else {
+                let right = self.selection_value(schema)?;
+                self.selection_text_parameters(&left, &right, at)?;
+                Some(right)
+            };
             let mut program = scalar_program(left, at)?;
-            program.extend(scalar_program(right, at)?);
-            program.push(MutationIntegerTemplateOp::Bound(op));
+            if let Some(right) = right {
+                program.extend(scalar_program(right, at)?);
+            }
+            program.push(op);
             let value = ReadValueTemplate::Integer { program, at };
             let test = ReadFilterOp::Compare {
                 left: self.selection_cell(schema, selection, value, at)?,

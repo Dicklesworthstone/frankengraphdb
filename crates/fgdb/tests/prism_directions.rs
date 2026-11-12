@@ -24,8 +24,8 @@ fn options(direction: Directedness) -> FnxReadOptions {
     FnxReadOptions {
         as_of: None,
         selection: FnxSelection {
-            vertex_label: Some(LabelId(1)),
-            relation: Some(RelationId(1)),
+            vertex_labels: Some(LabelId(1)).into(),
+            relations: Some(RelationId(1)).into(),
             weight: FnxWeightSpec::Property {
                 key: PropertyKeyId(1),
                 missing: MissingWeightPolicy::Reject,
@@ -596,7 +596,7 @@ fn sealed_directed_clustering_matches_decoded_history_reductions_and_exact_limit
         // It is distinct from an empty vertex selection, which has no rows.
         for direction in [Directedness::Directed, Directedness::Reversed] {
             let mut opt = options(direction);
-            opt.selection.relation = Some(RelationId(999));
+            opt.selection.relations = Some(RelationId(999)).into();
             let graph = project(&db, &query, opt).await;
             assert_eq!(graph.scan_incidence_bound(), 0);
             assert_eq!(graph.node_count(), 6);
@@ -617,8 +617,8 @@ fn sealed_directed_clustering_matches_decoded_history_reductions_and_exact_limit
             );
             exact_sealed_limits(&procedure, &query, &graph, opt, &isolated, &db).await;
 
-            opt.selection.relation = Some(RelationId(1));
-            opt.selection.vertex_label = Some(LabelId(999));
+            opt.selection.relations = Some(RelationId(1)).into();
+            opt.selection.vertex_labels = Some(LabelId(999)).into();
             opt.execution_limits.max_estimated_work = 0;
             opt.execution_limits.max_result_rows = 0;
             let graph = project(&db, &query, opt).await;
@@ -912,7 +912,7 @@ fn sealed_betweenness_matches_decoded_history_reductions_and_exact_limits() {
         // scalar admission and output metadata may have a fixed nonzero cost.
         let mut opt = options(Directedness::Undirected);
         opt.projection.self_loops = SelfLoopPolicy::Drop;
-        opt.selection.vertex_label = Some(LabelId(999));
+        opt.selection.vertex_labels = Some(LabelId(999)).into();
         opt.execution_limits.max_result_rows = 0;
         let graph = project(&db, &query, opt).await;
         assert_eq!(graph.node_count(), 0);

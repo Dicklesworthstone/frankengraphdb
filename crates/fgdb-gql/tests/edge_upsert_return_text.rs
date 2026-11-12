@@ -3,8 +3,8 @@ use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryPolicy, GraphEdgeReturnBinding,
-    GraphSymbol, GraphSymbolKind, PreparedGraphEdgeUpsertQuery, PreparedGraphEdgeUpsertQueryText,
-    PreparedGraphEdgeUpsertText,
+    GraphSymbol, GraphSymbolKind, GraphSymbolResolver, PreparedGraphEdgeUpsertQuery,
+    PreparedGraphEdgeUpsertQueryText, PreparedGraphEdgeUpsertText, ReverseSymbolCatalog,
 };
 use fgdb_types::{CanonicalScalar, EId};
 
@@ -15,6 +15,23 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
         _ => None,
+    }
+}
+
+struct Catalog<'a> {
+    property_name: &'a str,
+    probes: &'a std::cell::Cell<usize>,
+}
+impl GraphSymbolResolver for Catalog<'_> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self.probes.set(self.probes.get() + 1);
+        symbols(kind, name)
+    }
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        self.probes.set(self.probes.get() + 1);
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_property(PropertyKeyId(1), self.property_name);
+        Some(catalog)
     }
 }
 fn prepare(suffix: &str) -> PreparedGraphEdgeUpsertQuery {
@@ -144,7 +161,7 @@ fn unsupported_scopes_and_broken_suffixes_cannot_be_ignored_or_resolved_early() 
         "RETURN a",
         "RETURN b.p",
         "RETURN *",
-        "RETURN r{.*}",
+        "RETURN a{.*}",
         "RETURN r.p AS value; CREATE (n)",
         "SET r.p = 1 RETURN r.p +",
         "RETURN r.p RETURN r",
@@ -182,6 +199,56 @@ fn unsupported_scopes_and_broken_suffixes_cannot_be_ignored_or_resolved_early() 
         )
         .is_err()
     );
+}
+
+#[test]
+fn relationship_map_projection_binds_the_final_identity_and_pins_the_reverse_catalog() {
+    let probes = std::cell::Cell::new(0);
+    for suffix in [
+        "RETURN properties(r) AS full,keys(r) AS names,r{.*,p:r.p+1} AS projected",
+        "RETURN r{.*} AS key,count(*) AS hits,collect(r{.*}) AS maps",
+        "WITH r{.*} AS document RETURN document,keys(document) AS names",
+        "WITH r AS edge RETURN edge{.*} AS document",
+    ] {
+        let text = format!("{PREFIX} SET r.p=$value {suffix}");
+        let template = PreparedGraphEdgeUpsertQueryText::prepare(
+            &text,
+            RelationId(2),
+            Catalog {
+                property_name: "p",
+                probes: &probes,
+            },
+        )
+        .unwrap_or_else(|error| panic!("{suffix}: {error:?}"));
+        let resolved = probes.get();
+        let arguments = GqlParameters::new().with_int64("value", 7).unwrap();
+        let first = template.bind_parameters(&arguments).unwrap();
+        assert!(first.bindings().contains(&GraphEdgeReturnBinding::Edge));
+        assert_eq!(
+            first.canonical_bytes(),
+            template
+                .bind_parameters(&arguments)
+                .unwrap()
+                .canonical_bytes()
+        );
+        assert_eq!(
+            probes.get(),
+            resolved,
+            "rebinding does not consult a catalog"
+        );
+        let renamed = PreparedGraphEdgeUpsertQueryText::prepare(
+            &text,
+            RelationId(2),
+            Catalog {
+                property_name: "renamed",
+                probes: &probes,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&arguments)
+        .unwrap();
+        assert_ne!(first.canonical_bytes(), renamed.canonical_bytes());
+    }
 }
 
 #[test]

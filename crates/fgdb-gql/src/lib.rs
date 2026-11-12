@@ -239,6 +239,7 @@ pub use set_ops::{
     GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
     GraphSetProjectionError, GraphSetQuantifier, GraphSetRowPull, GraphSetSource, GraphSetValue,
     GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS,
+    MaintainedApplyJoin, MaintainedCountJoin, MaintainedDistinctApply, MaintainedExistenceJoin,
     PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall, ProcedureGraphDirection,
     ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
     ProcedureSelfLoops, WithElementMetadata, WithElementReads, WithProcedureRows, WithProcedures,

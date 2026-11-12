@@ -1,6 +1,7 @@
 impl WriteTxn {
     pub(crate) fn begin(
         basis: CommitSeq,
+        basis_counts: crate::gql_exec::source::exact_counts::ExactCounts,
         txn: &TxnCx,
         obligation_id: ObligationId,
         handle_owner: std::sync::Arc<()>,
@@ -9,6 +10,7 @@ impl WriteTxn {
         Ok(Self {
             handle_owner,
             basis,
+            basis_counts,
             staged: Vec::new(),
             observed_staged_vertex_batches: std::cell::Cell::new(0),
             prepared: None,
@@ -18,6 +20,7 @@ impl WriteTxn {
             program_multi_relation: false,
             read_set: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             point_reads: std::cell::RefCell::new(PointReads::default()),
+            count_reads: std::cell::RefCell::new(CountReads::default()),
             match_expansions: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             scanned_vertex_labels: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             scanned_vertices: std::cell::Cell::new(false),

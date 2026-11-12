@@ -151,26 +151,43 @@ fn complete_native_rebuild_replaces_no_old_node_until_every_stage_is_accepted() 
         let size = db.standing_queries.len();
         let before = db.standing_native_query(&cx, &handle, policy()).unwrap();
         let mut calls = 0;
-        rebuild_checked(&mut db, &cx, first, root, policy(), &mut || {
-            calls += 1;
-            Ok(())
-        })
+        let private_inputs = handle.native.as_deref().unwrap().private_inputs().unwrap();
+        rebuild_checked(
+            &mut db,
+            &cx,
+            first,
+            root,
+            private_inputs,
+            policy(),
+            &mut || {
+                calls += 1;
+                Ok(())
+            },
+        )
         .unwrap();
         assert!(calls > 0);
         for stop in 1..=calls {
             let identity = addresses(&db, first, root);
             let mut visited = 0;
             assert!(
-                rebuild_checked(&mut db, &cx, first, root, policy(), &mut || {
-                    visited += 1;
-                    if visited == stop {
-                        Err(StandingQueryError::Maintenance(
-                            StandingQueryFailure::Interrupted,
-                        ))
-                    } else {
-                        Ok(())
+                rebuild_checked(
+                    &mut db,
+                    &cx,
+                    first,
+                    root,
+                    private_inputs,
+                    policy(),
+                    &mut || {
+                        visited += 1;
+                        if visited == stop {
+                            Err(StandingQueryError::Maintenance(
+                                StandingQueryFailure::Interrupted,
+                            ))
+                        } else {
+                            Ok(())
+                        }
                     }
-                })
+                )
                 .is_err()
             );
             assert_eq!(visited, stop);

@@ -9,7 +9,7 @@ use fgdb::{
     BufferLimits, BufferedReadError, BufferedReadLimits, BufferedReadView, Database, DatabaseKeys,
     MemVfs, MemoryPool, WriteBatch,
 };
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaSelection};
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions,
     FnxReadResult, FnxSealedExecutionError, FnxSealedReadError, FnxValue, ParallelEdgePolicy,
@@ -63,8 +63,8 @@ fn limits() -> BufferedReadLimits {
 
 fn options() -> FnxReadOptions {
     let mut options = FnxReadOptions::whole_graph(None);
-    options.selection.vertex_label = Some(L);
-    options.selection.relation = Some(R);
+    options.selection.vertex_labels = Some(L).into();
+    options.selection.relations = Some(R).into();
     options.projection.directedness = Directedness::Undirected;
     options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
     options.projection.self_loops = SelfLoopPolicy::Drop;
@@ -156,6 +156,71 @@ async fn seed(contexts: &PurposeContexts, vfs: &MemVfs) -> Database<MemVfs> {
     );
     assert_eq!(db.write(&commit, unrelated).await.unwrap(), CommitSeq(2));
     db
+}
+
+#[test]
+fn sealed_label_unions_preserve_any_membership_without_widening_relation_storage() {
+    let ((), report) = run_async_under_lab(0x6273_0110, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = seed(&contexts, &vfs).await;
+        let mut labels = WriteBatch::new(R);
+        labels.set_vertex_label(VId(BASE + 3), L, false);
+        labels.set_vertex_label(VId(BASE + 3), LabelId(11), true);
+        db.write(&contexts.commit(), labels).await.unwrap();
+        let mut view = cold(&contexts, &vfs, pool()).await;
+        let procedure = call();
+        let mut opt = options();
+        opt.selection.vertex_labels = SchemaSelection::any_of(&[LabelId(11), L, L]).unwrap();
+        let actual = view
+            .execute_fnx_sealed(&cx, &procedure, opt, memory(), sealing(), RAW)
+            .await
+            .unwrap();
+        let triangle = expected(&[BASE + 1, BASE + 2, BASE + 3, u128::MAX], true);
+        assert_eq!(actual.analytics.rows, triangle);
+        assert_eq!(
+            actual,
+            db.execute_fnx_sealed(&cx, &procedure, opt, memory(), sealing())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            db.call_fnx(&cx, TRIANGLES, &FnxParameters::new(), opt)
+                .unwrap()
+                .analytics
+                .rows,
+            triangle
+        );
+        let narrower = view
+            .execute_fnx_sealed(&cx, &procedure, options(), memory(), sealing(), RAW)
+            .await
+            .unwrap();
+        assert_eq!(
+            narrower.analytics.rows,
+            expected(&[BASE + 1, BASE + 2, u128::MAX], false)
+        );
+        // One physical sealed image represents one relation. A union must
+        // refuse before reads instead of silently selecting All or one member.
+        opt.selection.relations = SchemaSelection::any_of(&[R, RelationId(8)]).unwrap();
+        let before = view.buffer_stats();
+        assert!(matches!(
+            view.execute_fnx_sealed(&cx, &procedure, opt, memory(), sealing(), RAW)
+                .await,
+            Err(FnxSealedReadError::Projection(
+                SealedProjectionError::RelationRequired
+            ))
+        ));
+        assert_eq!(view.buffer_stats(), before);
+        assert!(matches!(
+            db.execute_fnx_sealed(&cx, &procedure, opt, memory(), sealing())
+                .await,
+            Err(FnxSealedReadError::Projection(
+                SealedProjectionError::RelationRequired
+            ))
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -282,7 +347,7 @@ fn sealed_preflight_and_future_cuts_refuse_before_faults_and_empty_relations_kee
             Err(FnxSealedReadError::Execution(_))
         ));
         bad = options();
-        bad.selection.relation = None;
+        bad.selection.relations = None.into();
         assert!(matches!(
             view.execute_fnx_sealed(&cx, &procedure, bad, memory(), sealing(), RAW,)
                 .await,
@@ -301,7 +366,7 @@ fn sealed_preflight_and_future_cuts_refuse_before_faults_and_empty_relations_kee
         ));
         assert_eq!(view.buffer_stats(), before);
         let mut empty = options();
-        empty.selection.relation = Some(RelationId(99));
+        empty.selection.relations = Some(RelationId(99)).into();
         let result = view
             .execute_fnx_sealed(&cx, &procedure, empty, memory(), sealing(), 0)
             .await
@@ -472,6 +537,7 @@ fn cooperative_buffered_calls_preserve_historical_answers_across_quanta() {
             "CALL fnx.load_centrality() YIELD vertex,score",
             "CALL fnx.average_neighbor_degree() YIELD vertex,score",
             "CALL fnx.label_propagation_communities() YIELD vertex,component",
+            "CALL fnx.louvain_communities() YIELD vertex,component",
             "CALL fnx.pagerank(iterations => 4, weighted => false) YIELD vertex,score",
             "CALL fnx.in_degree_centrality() YIELD vertex,score",
             "CALL fnx.out_degree_centrality() YIELD vertex,score",
@@ -779,7 +845,7 @@ fn cooperative_buffered_preflight_and_limits_remain_active_after_a_warm_build() 
             );
         }
         let mut empty = options();
-        empty.selection.relation = Some(RelationId(99));
+        empty.selection.relations = Some(RelationId(99)).into();
         assert_eq!(
             view.execute_fnx_sealed_cooperative(&cx, &procedure, empty, memory(), sealing(), 0, q,)
                 .await
@@ -809,6 +875,10 @@ fn cooperative_buffered_cancellation_and_every_warm_suspend_release_the_reader()
         ),
         (
             "CALL fnx.label_propagation_communities() YIELD vertex,component",
+            Directedness::Undirected,
+        ),
+        (
+            "CALL fnx.louvain_communities() YIELD vertex,component",
             Directedness::Undirected,
         ),
         (

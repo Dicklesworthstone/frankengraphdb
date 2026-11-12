@@ -949,3 +949,91 @@ fn every_selection_and_proposal_checkpoint_can_interrupt_without_returning_a_bat
         Err(GqlQueryError::Interrupted("late source failure"))
     ));
 }
+
+/// The same bound regex program selects writes and scalar RHS values. The
+/// parameter never becomes source text and no pattern is compiled per row.
+#[test]
+fn regex_parameters_select_mutations_and_rebind_without_retaining_prior_patterns() {
+    let statement = "MATCH (n) WHERE n.text =~ $pattern SET n.p=99";
+    let template = PreparedGraphMutationText::prepare(statement, R, symbols).unwrap();
+    let properties = BTreeMap::from([
+        (
+            (VId(1), TEXT),
+            CanonicalPropertyValue::from(CanonicalScalar::ucs_basic_text("Ada").unwrap()),
+        ),
+        (
+            (VId(2), TEXT),
+            CanonicalPropertyValue::from(CanonicalScalar::ucs_basic_text("Bob").unwrap()),
+        ),
+    ]);
+    for (pattern, selected) in [
+        (CanonicalScalar::ucs_basic_text("A.*").unwrap(), Some(VId(1))),
+        (CanonicalScalar::ucs_basic_text("B.*").unwrap(), Some(VId(2))),
+        (CanonicalScalar::Null, None),
+    ] {
+        let mut parameters = GqlParameters::new();
+        parameters
+            .insert(
+                "pattern",
+                fgdb_gql::GqlParameterValue::Scalar(
+                    fgdb_gql::GqlScalarParameter::new(pattern).unwrap(),
+                ),
+            )
+            .unwrap();
+        let plan = template.bind_parameters(&parameters).unwrap();
+        let result = run(&plan, &[VId(1), VId(2)], &[], &properties, policy()).unwrap();
+        let expected: Vec<_> = selected
+            .into_iter()
+            .map(|vertex| GraphMutationIntent::Property {
+                vertex,
+                key: P,
+                value: stored(CanonicalScalar::Int(99)),
+            })
+            .collect();
+        assert_eq!(result.intents(), expected.as_slice());
+    }
+
+    let mut parameters = GqlParameters::new();
+    parameters
+        .insert(
+            "pattern",
+            fgdb_gql::GqlParameterValue::Scalar(
+                fgdb_gql::GqlScalarParameter::new(
+                    CanonicalScalar::ucs_basic_text("A.*").unwrap(),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    let assignment = PreparedGraphMutationText::prepare(
+        "MATCH (n) SET n.p=n.text =~ $pattern",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&parameters)
+    .unwrap();
+    let result = run(
+        &assignment,
+        &[VId(1), VId(2)],
+        &[],
+        &properties,
+        policy(),
+    )
+    .unwrap();
+    assert_eq!(
+        result.intents(),
+        &[
+            GraphMutationIntent::Property {
+                vertex: VId(1),
+                key: P,
+                value: stored(CanonicalScalar::Bool(true)),
+            },
+            GraphMutationIntent::Property {
+                vertex: VId(2),
+                key: P,
+                value: stored(CanonicalScalar::Bool(false)),
+            },
+        ]
+    );
+}

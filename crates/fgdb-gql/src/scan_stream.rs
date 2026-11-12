@@ -17,9 +17,10 @@ use fgdb_types::CommitSeq;
 /// only the complete bound definition and precedes source access. Once a
 /// cursor has opened, its errors are final; execution is never retried.
 /// Metadata counts retain their host's exact-count path. Collections retain
-/// their existing source-order contract. An edge input must be one unbound
-/// fixed-edge scan: keyed endpoint and multi-hop plans can use substantially
-/// cheaper bound-closure or factorized evaluation in the ordinary host.
+/// their existing source-order contract. Edge inputs admit an unbound fixed
+/// scan or a connected fixed-edge tree with a SUM/AVG reduction. Keyed roots,
+/// closing joins, support/count reductions and finite root-group retirement
+/// retain the host's indexed, factorized or bounded-group evaluation.
 #[derive(Clone, Debug)]
 pub enum AggregateScanPlan {
     Vertex(crate::stream::aggregate::VertexAggregatePlan),
@@ -37,8 +38,9 @@ impl AggregateScanPlan {
         use crate::GraphSetValue;
         use crate::algebra::GlaOperator;
 
-        if aggregate.count_metadata_source().is_some()
+        if aggregate.count_metadata_candidate_source().is_some()
             || aggregate.count_summary_source().is_some()
+            || aggregate.uses_root_group_retirement()
             || aggregate
                 .aggregates()
                 .iter()
@@ -73,29 +75,81 @@ impl AggregateScanPlan {
                     .ok()
                     .map(Self::Vertex)
             }
-            GlaOperator::ScanEdges { .. }
-                if operators.iter().all(|operator| match operator {
-                    GlaOperator::ScanEdges { .. }
-                    // Named root-edge properties use a capture even though
-                    // the input remains this single edge scan. The physical
-                    // compiler below validates its complete capture contract.
-                    | GlaOperator::CapturePath { .. }
-                    | GlaOperator::ProjectValues { .. }
-                    | GlaOperator::OrderByValues
-                    | GlaOperator::Limit {
-                        offset: 0,
-                        count: None,
-                    } => true,
-                    GlaOperator::Select { predicates, .. } => predicates.is_empty(),
-                    _ => false,
-                }) =>
-            {
+            GlaOperator::ScanEdges { .. } if Self::admits_edge_input(aggregate) => {
                 crate::edge_stream::aggregate::EdgeAggregatePlan::compile(aggregate)
                     .ok()
                     .map(Self::Edge)
             }
             _ => None,
         }
+    }
+
+    fn admits_edge_input(aggregate: &crate::PreparedGraphAggregate) -> bool {
+        use crate::GraphAggregateFunction::{
+            AverageInt, AverageIntDistinct, SumInt, SumIntDistinct,
+        };
+        use crate::algebra::{GlaOperator, VertexPredicate};
+
+        let operators = aggregate.input_pattern().plan().operators();
+        let joined = operators
+            .iter()
+            .any(|operator| matches!(operator, GlaOperator::Expand { .. }));
+        if joined
+            && (aggregate.input_projection().is_some()
+                || aggregate.input_relation().is_some()
+                || !aggregate.aggregates().iter().any(|spec| {
+                    matches!(
+                        spec.function(),
+                        SumInt | SumIntDistinct | AverageInt | AverageIntDistinct
+                    )
+                }))
+        {
+            // Count and support reductions have weighted/factorized host
+            // paths. A SUM/AVG input must enumerate occurrences today, so it
+            // can instead reduce the existing indexed join cursor directly.
+            return false;
+        }
+        let mut width = 2_usize;
+        operators
+            .iter()
+            .enumerate()
+            .all(|(at, operator)| match operator {
+                GlaOperator::ScanEdges { .. } => at == 0,
+                GlaOperator::Expand { source, .. } if (source.ordinal() as usize) < width => {
+                    width += 1;
+                    true
+                }
+                GlaOperator::DifferentEdges { .. } => joined,
+                // The host can intersect a closing join or seek its already
+                // bound target. Trees may branch from any earlier endpoint,
+                // but positive identities on appended vertices keep that path.
+                GlaOperator::VertexIdentity { left, right, equal } => {
+                    !joined || !*equal || (left.ordinal() < 2 && right.ordinal() < 2)
+                }
+                GlaOperator::Select { predicates, .. } => {
+                    // Only the initial root prefix can choose the host's indexed
+                    // endpoint closure. Predicates after Expand cannot drive it.
+                    width > 2
+                        || predicates.iter().all(|predicate| {
+                            matches!(
+                                predicate,
+                                VertexPredicate::HasLabel(_) | VertexPredicate::PropertyNull { .. }
+                            )
+                        })
+                }
+                // The physical compiler still validates complete captures, slots,
+                // edge uniqueness and the unpaginated aggregate input contract.
+                GlaOperator::CapturePath { .. }
+                | GlaOperator::CompareProperties { .. }
+                | GlaOperator::SelectBoolean { .. }
+                | GlaOperator::ProjectValues { .. }
+                | GlaOperator::OrderByValues
+                | GlaOperator::Limit {
+                    offset: 0,
+                    count: None,
+                } => true,
+                _ => false,
+            })
     }
 }
 

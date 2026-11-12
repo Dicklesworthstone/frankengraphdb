@@ -17,6 +17,9 @@ pub struct Symbols {
     // Sessions retain this immutable catalog. Operator changes fork its state
     // only when an older resolver still owns a reference.
     catalog: Arc<SymbolCatalog>,
+    // Hydration borrows the same immutable name generation without rebuilding
+    // a catalog on each result row or charging for unrelated hidden names.
+    reverse: Arc<ReverseSymbolCatalog>,
 }
 
 /// A second binding of one name, or one id bound under two names, in a kind.
@@ -68,11 +71,17 @@ impl Symbols {
         };
         Arc::make_mut(&mut self.catalog)
             .bind(name, symbol)
-            .map(|_| ())
             .map_err(|_| SymbolConflict {
                 kind,
                 name: name.to_owned(),
-            })
+            })?;
+        let reverse = Arc::make_mut(&mut self.reverse);
+        match symbol {
+            CatalogSymbol::Label(id) => reverse.insert_label(id, name),
+            CatalogSymbol::Relation(id) => reverse.insert_relation(id, name),
+            CatalogSymbol::Property(id) => reverse.insert_property(id, name),
+        }
+        Ok(())
     }
 
     /// Resolve a name in exactly the requested kind; never across kinds.
@@ -105,6 +114,9 @@ impl Symbols {
                 _ => None,
             })
     }
+    pub(crate) fn borrowed_reverse_catalog(&self) -> &ReverseSymbolCatalog {
+        &self.reverse
+    }
 }
 
 impl GraphSymbolResolver for Symbols {
@@ -113,7 +125,7 @@ impl GraphSymbolResolver for Symbols {
     }
 
     fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
-        CatalogSymbolResolver::new(&self.catalog).reverse_catalog()
+        Some((*self.reverse).clone())
     }
 
     fn reverse_label(&self, id: LabelId) -> Option<String> {

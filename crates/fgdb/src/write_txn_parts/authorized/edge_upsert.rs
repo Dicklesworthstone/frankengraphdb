@@ -183,7 +183,7 @@ impl<V: Vfs + Clone> Database<V> {
             query,
             policy,
             clock,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         )
         .await
     }
@@ -211,6 +211,7 @@ impl<V: Vfs + Clone> Database<V> {
         admit: impl FnOnce(
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<QueryReceipt, QueryFault> {
         let refusal = |error| query_source(WriteTxnError::Authorization(error));
@@ -253,7 +254,7 @@ impl<V: Vfs + Clone> Database<V> {
                     false,
                 )
                 .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
-                let result = query_cx.with_restriction(|| {
+                let mut result = query_cx.with_restriction(|| {
                     let controls = RefCell::new(&mut execution);
                     let transaction = &*workspace.transaction();
                     edge_upsert_returning::<WriteTxnError, WriteTxnError, _>(
@@ -309,14 +310,17 @@ impl<V: Vfs + Clone> Database<V> {
                     .permit
                     .charge_rows_at((execution.clock)(), rows)
                     .map_err(refusal)?;
-                query_cx
-                    .with_restriction(|| {
-                        admit(&result.value, &mut |work| {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.work(work)
-                        })
-                    })
-                    .map_err(query_source)?;
+                crate::write_txn::authorized::output::admit_output(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    verified.predicates(),
+                    &mut execution,
+                    policy.merge.query,
+                    &mut result,
+                    admit,
+                )
+                .map_err(query_source)?;
                 execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()

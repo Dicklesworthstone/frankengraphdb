@@ -18,8 +18,8 @@ fn is_null(value: Option<&CanonicalPropertyValue>) -> bool {
 }
 
 use crate::{
-    BeaconError, ExactHybridHit, ExactHybridQuery, IndexConfig, IndexDocument, IndexSnapshot,
-    Neighbor, TextHit, TextMatch, VectorSearch, WorkControl,
+    BeaconError, BooleanTextQuery, ExactHybridHit, ExactHybridQuery, IndexConfig, IndexDocument,
+    IndexSnapshot, Neighbor, TextHit, TextMatch, VectorSearch, WorkControl,
 };
 
 mod numeric;
@@ -169,6 +169,13 @@ pub enum Search<'a> {
         k: usize,
         mode: TextMatch,
     },
+    /// Exact-token clauses over one text projection. All clauses share the
+    /// configured query limits and the admitted corpus's BM25 statistics.
+    /// This is text retrieval; Boolean clauses do not imply hybrid fusion.
+    BooleanText {
+        query: BooleanTextQuery<'a>,
+        k: usize,
+    },
     Vector {
         query: &'a [f32],
         k: usize,
@@ -183,7 +190,7 @@ impl Search<'_> {
     #[must_use]
     pub fn k(self) -> usize {
         match self {
-            Self::Text { k, .. } | Self::Vector { k, .. } => k,
+            Self::Text { k, .. } | Self::BooleanText { k, .. } | Self::Vector { k, .. } => k,
             Self::Hybrid(query) => query.k,
         }
     }
@@ -191,7 +198,7 @@ impl Search<'_> {
     #[must_use]
     pub fn lanes(self) -> (bool, bool) {
         match self {
-            Self::Text { .. } => (false, true),
+            Self::Text { .. } | Self::BooleanText { .. } => (false, true),
             Self::Vector { .. } => (true, false),
             Self::Hybrid(query) => (
                 query.profile.vector_weight() != 0,
@@ -221,7 +228,7 @@ impl Search<'_> {
         };
         match self {
             Self::Vector { query, mode, .. } => vector(query, mode, work),
-            Self::Text { .. } => Ok(()),
+            Self::Text { .. } | Self::BooleanText { .. } => Ok(()),
             Self::Hybrid(query) => {
                 let (v, t) = self.lanes();
                 let count = u64::from(query.vector_candidates) * u64::from(v)
@@ -265,6 +272,9 @@ impl Search<'_> {
         match self {
             Self::Text { query, k, mode } => snapshot
                 .text_search(query, k, mode, eligible, work)
+                .map(Rows::Text),
+            Self::BooleanText { query, k } => snapshot
+                .text_search_boolean(query, k, eligible, work)
                 .map(Rows::Text),
             Self::Vector { query, k, mode } => snapshot
                 .knn(query, k, mode, eligible, work)
@@ -529,12 +539,19 @@ mod filtered_search_tests {
         .snapshot()
     }
 
-    fn queries() -> [Search<'static>; 3] {
+    fn queries() -> [Search<'static>; 4] {
         [
             Search::Text {
                 query: "red",
                 k: 1,
                 mode: TextMatch::Any,
+            },
+            Search::BooleanText {
+                query: BooleanTextQuery {
+                    required: "red",
+                    ..BooleanTextQuery::default()
+                },
+                k: 1,
             },
             Search::Vector {
                 query: &[0.0],

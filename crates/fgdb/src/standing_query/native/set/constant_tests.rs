@@ -548,23 +548,40 @@ fn every_circuit_registration_and_rebuild_checkpoint_preserves_existing_state() 
         assert_eq!(db.standing_queries.len(), len);
         let (first, last) = range(&h);
         let mut rebuild_calls = 0;
-        rebuild_checked(&mut db, &cx, first, last, policy(), &mut || {
-            rebuild_calls += 1;
-            Ok(())
-        })
+        let private_inputs = h.native.as_deref().unwrap().private_inputs().unwrap();
+        rebuild_checked(
+            &mut db,
+            &cx,
+            first,
+            last,
+            private_inputs,
+            policy(),
+            &mut || {
+                rebuild_calls += 1;
+                Ok(())
+            },
+        )
         .unwrap();
         for stop in 1..=rebuild_calls {
             let mut seen = 0;
-            let result = rebuild_checked(&mut db, &cx, first, last, policy(), &mut || {
-                seen += 1;
-                if seen == stop {
-                    Err(StandingQueryError::Maintenance(
-                        StandingQueryFailure::Interrupted,
-                    ))
-                } else {
-                    Ok(())
-                }
-            });
+            let result = rebuild_checked(
+                &mut db,
+                &cx,
+                first,
+                last,
+                private_inputs,
+                policy(),
+                &mut || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(StandingQueryError::Maintenance(
+                            StandingQueryFailure::Interrupted,
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
             assert!(result.is_err());
             assert_eq!(seen, stop);
             assert_eq!(db.standing_queries.len(), len);
@@ -573,11 +590,19 @@ fn every_circuit_registration_and_rebuild_checkpoint_preserves_existing_state() 
         let mut seen = 0;
         assert!(
             catch_unwind(AssertUnwindSafe(|| {
-                let _ = rebuild_checked(&mut db, &cx, first, last, policy(), &mut || {
-                    seen += 1;
-                    assert!(seen != rebuild_calls, "injected rebuild unwind");
-                    Ok(())
-                });
+                let _ = rebuild_checked(
+                    &mut db,
+                    &cx,
+                    first,
+                    last,
+                    private_inputs,
+                    policy(),
+                    &mut || {
+                        seen += 1;
+                        assert!(seen != rebuild_calls, "injected rebuild unwind");
+                        Ok(())
+                    },
+                );
             }))
             .is_err()
         );
