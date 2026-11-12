@@ -12,6 +12,38 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Buffered durable runs and generation-bound analytics — qualification pending
+
+Source added 2026-11-12 for `fgdb-teypc`, `fgdb-w3-tier-r-0tj` and
+`fgdb-w3-buffer-g2v`. Buffered compressed analytics now reuse authenticated
+relation runs selected by their pinned root. Native V7 and carried V8 images
+retain their original provenance, floor and coverage; stale images combine
+with only selected Tier-D blocks whose sequence spans extend past the verified
+horizon. Missing membership and below-floor cuts retain ordinary sealing.
+Damaged attachments and source, memory or cancellation refusals do not reseal.
+
+The complete selected raw-history population is still admitted before run
+reads, including the GQL source callback and cache receipt. Root parsing and
+decoded suffix inputs retain source-pool reservations. The stale path currently
+holds the complete selected suffix during overlay construction, so it can
+refuse a pool where family-at-a-time sealing would fit. Initial buffered open
+still authenticates Tier-D history, and run decoding and final images retain
+their separate sealing bounds; descriptor-only open and streamed run frames
+remain unfinished.
+
+Compressed projection digests and analytics certificates now identify the
+authenticated selected generation, including a native V7 wrapper, while the
+immutable run header continues to identify its original adjacency source.
+Regression sources cover live/cold certificate bindings, direct and stale
+buffered runs, history, compaction/reopen, empty relations, corruption refusal,
+raw-history admission, cancellation and reservation refunds. Pinned targeted
+formatting, diff hygiene and independent source/API reviews pass. The locked
+targeted test build and a separate metadata-only check both stopped when the
+pinned `asupersync` compiler was killed by signal 9, before first-party
+compilation or any test assertion. Compilation and runtime qualification are
+UNRUN; full workspace checks, Clippy and UBS remain unrun. No complete
+exact-tree proof or closure of the broader storage beads is claimed.
+
 ### Sealed-run continuity during checkpoint recovery — qualification pending
 
 Source added 2026-11-12 for `fgdb-rc1111-persistent-tier-r-7hsan` and

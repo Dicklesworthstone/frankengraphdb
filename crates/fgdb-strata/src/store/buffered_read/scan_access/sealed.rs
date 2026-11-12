@@ -1,7 +1,9 @@
-//! Transfer one already-admitted source family with its existing input charges.
-//! No root reopen, vertex payload scan, or uncharged source clone is needed.
+//! Reuse admitted run membership or transfer charged relation histories.
+//! Only the pinned root envelope is reopened for run membership; no complete
+//! history reopen, vertex payload scan, or uncharged source clone is needed.
 
 use super::*;
+use crate::tiered::sealed::{AdjRunSegment, SealedLimits};
 use core::convert::Infallible;
 
 /// Field order keeps the input allocations alive under their reservations.
@@ -31,6 +33,51 @@ fn source_error(error: BufferedScanError<Infallible>) -> BufferedReadError {
 }
 
 impl<V: Vfs> BufferedPartition<V> {
+    /// Reuse only run membership authenticated by this pinned root. Root
+    /// parsing keeps a source-pool reservation; the compressed run itself has
+    /// the caller's separate image/population limits, like a freshly sealed
+    /// image. The caller must admit the complete raw relation before this I/O.
+    pub(crate) async fn published_sealed_relation(
+        &mut self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+        relation: RelationId,
+        limits: SealedLimits,
+    ) -> Result<Option<(AdjRunSegment, CommitSeq)>, BufferedReadError> {
+        self.begin(cx, as_of)?;
+        // A keyed, immutable legacy-root hint avoids adding root-read scratch
+        // or I/O to the ordinary sealer. A missing hint earns the proof again.
+        let known_legacy = self
+            .store
+            .root_run_presence
+            .lock()
+            .ok()
+            .is_some_and(|hint| *hint == Some((self.root_id, false)));
+        if known_legacy {
+            return Ok(None);
+        }
+        let root_bytes = self
+            .limits
+            .max_root_bytes
+            .min(crate::root::MAX_ENCODED_ROOT_BYTES);
+        let bytes = root_bytes
+            .checked_mul(16)
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        let _root_workspace = self.reserve_scan_bytes(cx, bytes)?;
+        if let Some(run) = self
+            .store
+            .get_published_adj_run(cx, self.root_id, relation, as_of, limits, root_bytes)
+            .await?
+        {
+            let verified_through = run.partition().anchor().verified_through();
+            return Ok(Some((run, verified_through)));
+        }
+        self.store
+            .get_published_adj_run_post_seal(cx, self.root_id, relation, as_of, limits, root_bytes)
+            .await
+            .map_err(BufferedReadError::from)
+    }
+
     /// Admit the complete raw population before faulting any payload. Sorting
     /// authenticated descriptors changes only the order of independent source
     /// families, never the publication precedence inside a family's history.
@@ -121,6 +168,51 @@ impl<V: Vfs> BufferedPartition<V> {
             advance(&mut sources.work, 1, maximum)?;
             end += 1;
         }
+        self.load_sealed_relation_source(cx, sources, start, end)
+            .await
+            .map(Some)
+    }
+
+    /// Retain only the admitted relation's post-horizon statements. Root
+    /// block spans include retirements as well as births, so an old birth
+    /// retired after sealing remains in this overlay. The raw source count
+    /// was already admitted before this physical pruning.
+    ///
+    /// Unlike family-at-a-time legacy sealing, this retains the complete
+    /// suffix until overlay construction finishes. Its owner vectors and
+    /// every decoded block keep the ordinary source-pool reservations; an
+    /// oversized suffix refuses rather than escaping the pool or resealing.
+    pub(crate) async fn post_seal_relation_source(
+        &mut self,
+        cx: &QueryCx,
+        sources: &mut SealedSources,
+        verified_through: CommitSeq,
+    ) -> Result<SealedSource, BufferedReadError> {
+        let maximum = self.limits.max_work;
+        let mut retained = 0;
+        for position in sources.next..sources.blocks.len() {
+            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+            advance(&mut sources.work, 1, maximum)?;
+            let route = sources.blocks[position];
+            if self.root.blocks[route.1].last_seq > verified_through {
+                sources.blocks[retained] = route;
+                retained += 1;
+            }
+        }
+        sources.blocks.truncate(retained);
+        sources.next = 0;
+        self.load_sealed_relation_source(cx, sources, 0, retained)
+            .await
+    }
+
+    async fn load_sealed_relation_source(
+        &mut self,
+        cx: &QueryCx,
+        sources: &mut SealedSources,
+        start: usize,
+        end: usize,
+    ) -> Result<SealedSource, BufferedReadError> {
+        let maximum = self.limits.max_work;
         let count = end - start;
         // Reserve the three owner vectors before any allocation or payload
         // fault. Decoded images keep their own per-block reservations.
@@ -202,6 +294,6 @@ impl<V: Vfs> BufferedPartition<V> {
         }
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         sources.next = end;
-        Ok(Some(source))
+        Ok(source)
     }
 }

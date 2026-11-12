@@ -3,6 +3,7 @@
 //! shared wrong answer. Full-width identities and an isolate are deliberate.
 #![recursion_limit = "256"]
 
+use asupersync::fs::Vfs;
 use asupersync::lab::run_async_under_lab;
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{
@@ -13,12 +14,13 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaSelection};
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions,
     FnxReadResult, FnxSealedExecutionError, FnxSealedReadError, FnxValue, ParallelEdgePolicy,
-    SealedProjectionError, SelfLoopPolicy,
+    SealedGraphView, SealedProjectionError, SelfLoopPolicy,
 };
+use fgdb_strata::store::{BlockStore, RootReadLimits};
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits};
 use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
 };
 use std::sync::Arc;
 use std::{
@@ -156,6 +158,454 @@ async fn seed(contexts: &PurposeContexts, vfs: &MemVfs) -> Database<MemVfs> {
     );
     assert_eq!(db.write(&commit, unrelated).await.unwrap(), CommitSeq(2));
     db
+}
+
+async fn durable_projection(
+    view: &mut BufferedReadView<MemVfs>,
+    cx: &QueryCx,
+    options: FnxReadOptions,
+) -> SealedGraphView {
+    view.prism_sealed_projection_at(
+        cx,
+        options.as_of.unwrap_or(view.frontier()),
+        options.selection,
+        options.projection,
+        options.projection_limits,
+        options.source_limits,
+        sealing(),
+        RAW,
+    )
+    .await
+    .unwrap()
+}
+
+#[test]
+fn durable_buffered_runs_keep_native_and_carried_provenance_across_history_and_reopen() {
+    let ((), report) = run_async_under_lab(0x6273_0120, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = seed(&contexts, &vfs).await;
+        let source_root = db.partition_root().unwrap();
+        for relation in [R, RelationId(99)] {
+            db.seal_relation(
+                &commit,
+                &cx,
+                relation,
+                CommitSeq(2),
+                sealing(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        }
+        let native_root = db.partition_root().unwrap();
+        let pinned_pool = pool();
+        let mut pinned = cold(&contexts, &vfs, pinned_pool.clone()).await;
+        let native = durable_projection(&mut pinned, &cx, options()).await;
+        let image = native.unmasked_source().unwrap();
+        assert!(image.has_durable_incoming());
+        assert_eq!(image.anchor().scope().source_root, source_root);
+        assert_eq!(image.anchor().scope().floor, CommitSeq(2));
+        assert_eq!(image.anchor().scope().publication, CommitSeq(2));
+        assert_eq!(image.anchor().verified_through(), CommitSeq(2));
+        assert_eq!(image.anchor().admitted_envelope_root(), Some(native_root));
+        let triangle = expected(&[BASE + 1, BASE + 2, BASE + 3, u128::MAX], true);
+        assert_eq!(
+            call()
+                .execute_sealed(&cx, &native, options().execution_limits, memory())
+                .unwrap()
+                .rows,
+            triangle
+        );
+
+        // An unrelated commit carries both runs and advances their coverage,
+        // while their physical source, floor and publication remain original.
+        let mut c3 = WriteBatch::new(RelationId(8));
+        c3.set_vertex_property(VId(BASE + 1), P, Some(CanonicalScalar::Int(55)));
+        assert_eq!(db.write(&commit, c3).await.unwrap(), CommitSeq(3));
+        let carried_root = db.partition_root().unwrap();
+        let mut carried = cold(&contexts, &vfs, pool()).await;
+        let graph = durable_projection(&mut carried, &cx, options()).await;
+        let image = graph.unmasked_source().unwrap();
+        assert!(image.has_durable_incoming());
+        assert_eq!(image.anchor().scope().source_root, source_root);
+        assert_eq!(image.anchor().scope().publication, CommitSeq(2));
+        assert_eq!(image.anchor().verified_through(), CommitSeq(3));
+        assert_eq!(image.anchor().admitted_envelope_root(), Some(carried_root));
+        assert_eq!(
+            call()
+                .execute_sealed(&cx, &graph, options().execution_limits, memory())
+                .unwrap()
+                .rows,
+            triangle
+        );
+
+        // R now requires the persisted base plus a delta. Deletion, property
+        // replacement and an added edge must survive physical consolidation.
+        let mut c4 = WriteBatch::new(R);
+        c4.delete_edge(EId(BASE + 3));
+        c4.set_edge_property(EId(BASE + 1), P, Some(CanonicalScalar::Int(7)));
+        c4.add_edge(EId(BASE + 5), VId(BASE + 2), VId(u128::MAX), vec![]);
+        assert_eq!(db.write(&commit, c4).await.unwrap(), CommitSeq(4));
+        let before_compact = db.partition_root().unwrap();
+        db.compact(&commit).await.unwrap();
+        assert_ne!(db.partition_root().unwrap(), before_compact);
+        let mut current = cold(&contexts, &vfs, pool()).await;
+        for cut in [
+            CommitSeq::ORIGIN,
+            CommitSeq(1),
+            CommitSeq(2),
+            CommitSeq(3),
+            CommitSeq(4),
+        ] {
+            let mut opt = options();
+            opt.as_of = Some(cut);
+            let actual = current
+                .execute_fnx_sealed(&cx, &call(), opt, memory(), sealing(), RAW)
+                .await
+                .unwrap();
+            let literal = if cut == CommitSeq::ORIGIN {
+                Vec::new()
+            } else {
+                expected(
+                    &[BASE + 1, BASE + 2, BASE + 3, u128::MAX],
+                    cut < CommitSeq(4),
+                )
+            };
+            assert_eq!(actual.analytics.rows, literal, "cut {cut:?}");
+            let resident = db
+                .call_fnx(&cx, TRIANGLES, &FnxParameters::new(), opt)
+                .unwrap();
+            assert_eq!(actual.analytics.rows, resident.analytics.rows);
+            assert_eq!(
+                actual.analytics.certificate.snapshot,
+                resident.analytics.certificate.snapshot
+            );
+        }
+        let overlay = durable_projection(&mut current, &cx, options()).await;
+        assert!(overlay.unmasked_source().unwrap().has_durable_incoming());
+        let mut empty = options();
+        empty.selection.relations = Some(RelationId(99)).into();
+        let empty_graph = durable_projection(&mut current, &cx, empty).await;
+        let empty_source = empty_graph.unmasked_source().unwrap();
+        assert_eq!(empty_source.anchor().scope().source_root, source_root);
+        assert_eq!(empty_source.anchor().scope().publication, CommitSeq(2));
+        assert_eq!(empty_source.anchor().verified_through(), CommitSeq(4));
+        assert_eq!(
+            call()
+                .execute_sealed(&cx, &empty_graph, empty.execution_limits, memory())
+                .unwrap()
+                .rows,
+            expected(&[BASE + 1, BASE + 2, BASE + 3, u128::MAX], false)
+        );
+        drop(db);
+        assert_eq!(
+            pinned
+                .execute_fnx_sealed(&cx, &call(), options(), memory(), sealing(), RAW)
+                .await
+                .unwrap()
+                .analytics
+                .rows,
+            triangle
+        );
+        drop(pinned);
+        assert_eq!(pinned_pool.used(), 0);
+        let db = Database::open_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let mut reopened = cold(&contexts, &vfs, pool()).await;
+        let actual = reopened
+            .execute_fnx_sealed(&cx, &call(), options(), memory(), sealing(), RAW)
+            .await
+            .unwrap();
+        assert_eq!(
+            actual.analytics.rows,
+            expected(&[BASE + 1, BASE + 2, BASE + 3, u128::MAX], false)
+        );
+        let resident = db
+            .call_fnx(&cx, TRIANGLES, &FnxParameters::new(), options())
+            .unwrap();
+        assert_eq!(actual.analytics.rows, resident.analytics.rows);
+        assert_eq!(
+            actual.analytics.certificate.snapshot,
+            resident.analytics.certificate.snapshot
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn admitted_buffered_runs_do_not_reseal_old_blocks_or_hide_attached_run_damage() {
+    let ((), report) = run_async_under_lab(0x6273_0121, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        for stale in [false, true] {
+            let vfs = MemVfs::new().unwrap();
+            let mut db = seed(&contexts, &vfs).await;
+            // The retained run contains four incidences, but its selected
+            // Tier-D history also contains the replaced property's statements.
+            let mut update = WriteBatch::new(R);
+            update.set_edge_property(EId(BASE + 1), P, Some(CanonicalScalar::Int(5)));
+            assert_eq!(db.write(&commit, update).await.unwrap(), CommitSeq(3));
+            let run = db
+                .seal_relation(
+                    &commit,
+                    &cx,
+                    R,
+                    CommitSeq(3),
+                    sealing(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap();
+            if stale {
+                let mut suffix = WriteBatch::new(R);
+                suffix.delete_edge(EId(BASE + 3));
+                suffix.add_edge(EId(BASE + 5), VId(BASE + 2), VId(u128::MAX), vec![]);
+                assert_eq!(db.write(&commit, suffix).await.unwrap(), CommitSeq(4));
+            }
+            let store = BlockStore::open_existing_for_read_with_vfs(
+                &commit,
+                vfs.clone(),
+                vfs.database_dir(),
+                [0xe1; 32],
+                DatabaseSecurityNamespaceId([0xe2; 32]),
+            )
+            .await
+            .unwrap();
+            let root = store
+                .get_root(&commit, db.partition_root().unwrap())
+                .await
+                .unwrap();
+            let mut old_block = None;
+            for reference in root.blocks {
+                if reference.last_seq > CommitSeq(3) {
+                    continue;
+                }
+                let bytes = store
+                    .get_bytes(&commit, fgdb_strata::DeltaBlockVersion(reference.block_id))
+                    .await
+                    .unwrap();
+                if fgdb_strata::decode_block(&bytes)
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry.relation == R)
+                {
+                    old_block = Some(store.path(reference.block_id));
+                    break;
+                }
+            }
+            let old_block = old_block.expect("the sealed prefix has a Tier-D source block");
+            let original_block = vfs.read(&old_block).await.unwrap();
+            let run_path = store.path(run.0);
+            let original_run = vfs.read(&run_path).await.unwrap();
+            let source_pool = pool();
+            // Full source authentication must complete before this fault.
+            let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+            view.set_sealed_read_cache_pool(&cx, MemoryPool::new(0, 0).unwrap())
+                .unwrap();
+            vfs.write(&old_block, b"damaged redundant pre-seal Tier-D block")
+                .await
+                .unwrap();
+            let actual = view
+                .execute_fnx_sealed(&cx, &call(), options(), memory(), sealing(), RAW)
+                .await
+                .unwrap();
+            let literal = expected(&[BASE + 1, BASE + 2, BASE + 3, u128::MAX], !stale);
+            assert_eq!(actual.analytics.rows, literal);
+            // A fresh reader still validates every source family. Run reuse
+            // does not authorize skipping initial complete-source admission.
+            assert!(
+                Database::open_buffered_read_view_with_vfs(
+                    &commit,
+                    vfs.clone(),
+                    vfs.database_dir(),
+                    keys(),
+                    pool(),
+                    limits(),
+                )
+                .await
+                .is_err()
+            );
+            vfs.write(&old_block, &original_block).await.unwrap();
+
+            vfs.write(&run_path, b"damaged selected durable adjacency run")
+                .await
+                .unwrap();
+            // Admission charges raw history before touching run bytes; the
+            // smaller compacted image cannot excuse those source records.
+            let error = view
+                .execute_fnx_sealed(&cx, &call(), options(), memory(), sealing(), 4)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    FnxSealedReadError::Seal(SealedError::Limit { limit: 4, .. })
+                ),
+                "{error:?}"
+            );
+            let error = view
+                .execute_fnx_sealed(&cx, &call(), options(), memory(), sealing(), RAW)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, FnxSealedReadError::Seal(_)), "{error:?}");
+            // Healthy Tier-D bytes cannot replace an attached damaged run.
+            // Restoring the original object keeps this same reader usable.
+            vfs.write(&run_path, &original_run).await.unwrap();
+            assert_eq!(
+                view.execute_fnx_sealed(&cx, &call(), options(), memory(), sealing(), RAW)
+                    .await
+                    .unwrap()
+                    .analytics
+                    .rows,
+                literal
+            );
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn durable_buffered_run_admission_preserves_limits_cancellation_and_reservation_refunds() {
+    let ((), report) = run_async_under_lab(0x6273_0122, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        for stale in [false, true] {
+            let vfs = MemVfs::new().unwrap();
+            let mut db = seed(&contexts, &vfs).await;
+            db.seal_relation(
+                &commit,
+                &cx,
+                R,
+                CommitSeq(1),
+                sealing(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+            if stale {
+                // Three independent source families force simultaneous suffix
+                // reservations in the bounded, in-memory overlay constructor.
+                let mut suffix = WriteBatch::new(R);
+                suffix.set_edge_property(EId(BASE + 1), P, Some(CanonicalScalar::Int(5)));
+                suffix.delete_edge(EId(BASE + 3));
+                suffix.add_edge(EId(BASE + 5), VId(BASE + 2), VId(u128::MAX), vec![]);
+                assert_eq!(db.write(&commit, suffix).await.unwrap(), CommitSeq(3));
+            }
+            let source_pool = pool();
+            let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+            view.set_sealed_read_cache_pool(&cx, MemoryPool::new(0, 0).unwrap())
+                .unwrap();
+            let procedure = call();
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let observed = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let expected = view
+                .execute_fnx_sealed(&observed, &procedure, options(), memory(), sealing(), RAW)
+                .await
+                .unwrap();
+            let checkpoints = probe.calls();
+            assert!(checkpoints > 1);
+
+            if stale {
+                let pressure = source_pool
+                    .reserve(&cx, source_pool.available() - 3 * 1024 * 1024)
+                    .unwrap();
+                let held = source_pool.used();
+                let error = view
+                    .execute_fnx_sealed(&cx, &procedure, options(), memory(), sealing(), RAW)
+                    .await
+                    .unwrap_err();
+                let FnxSealedReadError::Seal(SealedError::BufferedSource(error)) = error else {
+                    panic!("suffix memory admission must preserve its source error: {error:?}");
+                };
+                assert!(matches!(
+                    *error,
+                    BufferedReadError::Buffer(fgdb_strata::tiered::buffer::BufferError::Memory(
+                        fgdb::MemoryError::ResourceExhausted { .. }
+                    ))
+                ));
+                assert!(
+                    source_pool.used() <= held,
+                    "failed suffix leaked its reservations"
+                );
+                drop(pressure);
+                assert_eq!(
+                    view.execute_fnx_sealed(&cx, &procedure, options(), memory(), sealing(), RAW)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+            }
+            for dimension in 0..6 {
+                let mut opt = options();
+                let mut image = sealing();
+                let mut kernel = memory();
+                let mut raw = RAW;
+                match dimension {
+                    0 => raw = 0,
+                    1 => image.max_image_bytes = 0,
+                    2 => image.max_incidences = 0,
+                    3 => opt.source_limits.max_work_units = 0,
+                    4 => kernel.max_result_bytes = 0,
+                    5 => opt.execution_limits.max_result_rows = 0,
+                    _ => unreachable!(),
+                }
+                assert!(
+                    view.execute_fnx_sealed(&cx, &procedure, opt, kernel, image, raw)
+                        .await
+                        .is_err(),
+                    "persisted source dimension {dimension}, stale={stale}"
+                );
+                assert_eq!(
+                    view.execute_fnx_sealed(&cx, &procedure, options(), memory(), sealing(), RAW)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+            }
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+
+            for stop in 1..=checkpoints {
+                let source_pool = pool();
+                let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+                view.set_sealed_read_cache_pool(&cx, MemoryPool::new(0, 0).unwrap())
+                    .unwrap();
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let interrupted = cx.with_checkpoint_probe(Arc::clone(&probe));
+                assert!(
+                    view.execute_fnx_sealed(
+                        &interrupted,
+                        &procedure,
+                        options(),
+                        memory(),
+                        sealing(),
+                        RAW,
+                    )
+                    .await
+                    .is_err(),
+                    "persisted source checkpoint {stop}, stale={stale}"
+                );
+                assert_eq!(probe.calls(), stop);
+                assert_eq!(
+                    view.execute_fnx_sealed(&cx, &procedure, options(), memory(), sealing(), RAW)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+                drop(view);
+                assert_eq!(source_pool.used(), 0, "checkpoint {stop}, stale={stale}");
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

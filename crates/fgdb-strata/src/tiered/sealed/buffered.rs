@@ -26,12 +26,35 @@ fn buffered_error(error: BufferedReadError) -> SealedError {
     }
 }
 
+fn buffered_run_error(error: BufferedReadError) -> SealedError {
+    let BufferedReadError::Store(error) = error else {
+        return buffered_error(error);
+    };
+    // Keep a run decoder's cancellation and image-budget refusal in their
+    // original domain; neither is corruption or permission to reseal.
+    let error = match *error {
+        StoreError::MalformedAdjRun(error) => match *error {
+            AdjRunError::Sealed(error) => return error,
+            error => StoreError::MalformedAdjRun(Box::new(error)),
+        },
+        error => error,
+    };
+    SealedError::Store(Box::new(error))
+}
+
 impl<V: Vfs> BufferedPartition<V> {
-    /// Seal one relation from this already-admitted immutable generation.
+    /// Open a compressed relation from this already-admitted generation.
     /// Initial buffered admission proved the complete root and its histories;
     /// subsequent faults still authenticate every selected topology/property
-    /// extent. No root reopen, second vertex scan, or writer lease is needed.
-    /// One source family's raw history remains charged until the ordinary
+    /// extent. An attached durable run is authenticated by this exact pinned
+    /// root and reused with its original provenance and retained floor. A run
+    /// whose verified horizon precedes `floor` is composed with only post-seal
+    /// Tier-D blocks. Missing membership or a cut below the retained floor
+    /// uses the ordinary sealer; a damaged attachment refuses.
+    ///
+    /// No full root-history reopen, second vertex scan, or writer lease is
+    /// needed. For ordinary sealing without a reusable run, one source
+    /// family's raw history remains charged until the ordinary
     /// compactor consumes it, then drops before the next family is loaded.
     /// Publication precedence stays unchanged inside each family. Other
     /// relations are not faulted again, even when the selection is empty.
@@ -55,8 +78,10 @@ impl<V: Vfs> BufferedPartition<V> {
     /// failure refunds all transient source reservations and leaves the reader
     /// usable. A single large source history may still exceed source admission.
     ///
-    /// The result is the same derived image and opaque root/relation receipt as
-    /// BlockStore::seal_relation, not persisted Tier R or a new durable authority.
+    /// A stale run's complete selected suffix remains source-pool charged
+    /// until the delta overlay is built; its peak can exceed one family and
+    /// refuse the same finite pool. Run decoding and completed images retain
+    /// the separate sealing limits. Reuse earns no new durable authority.
     pub async fn seal_relation(
         &mut self,
         cx: &QueryCx,
@@ -77,7 +102,7 @@ impl<V: Vfs> BufferedPartition<V> {
         .await
     }
 
-    /// Seal the same authenticated source with an additional owner-level
+    /// Open the same compressed source with an additional owner-level
     /// admission for its complete selected RAW incidence population. The count
     /// comes from the existing descriptor admission, before compaction can
     /// discard superseded or pre-floor histories. No selected payload is faulted
@@ -117,6 +142,39 @@ impl<V: Vfs> BufferedPartition<V> {
                 .map_err(buffered_error)
                 .map_err(map_error)?;
             admit(sources.incidences)?;
+            if let Some((run, verified_through)) = self
+                .published_sealed_relation(cx, floor, relation, limits)
+                .await
+                .map_err(buffered_run_error)
+                .map_err(map_error)?
+            {
+                if floor <= verified_through {
+                    cx.checkpoint()
+                        .map_err(SealedError::Interrupted)
+                        .map_err(map_error)?;
+                    return Ok(run.into_partition());
+                }
+                let source = self
+                    .post_seal_relation_source(cx, &mut sources, verified_through)
+                    .await
+                    .map_err(buffered_error)
+                    .map_err(map_error)?;
+                let overlay = SealedDeltaOverlay::from_post_seal_blocks(
+                    cx,
+                    run,
+                    scope.source_root,
+                    scope.publication,
+                    verified_through,
+                    floor,
+                    &source.blocks,
+                    &source.properties,
+                    limits,
+                )
+                .map_err(map_error)?;
+                drop(source);
+                drop(sources);
+                return overlay.materialize_partition(cx, limits).map_err(map_error);
+            }
             let mut builder = image::ImageBuilder::new(limits).map_err(map_error)?;
             let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
             while let Some(source) = self

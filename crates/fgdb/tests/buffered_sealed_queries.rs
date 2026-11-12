@@ -1465,6 +1465,166 @@ fn dropping_a_suspended_second_procedure_refunds_both_children_and_live_rows() {
 }
 
 #[test]
+fn durable_sealed_queries_charge_raw_history_before_run_reads_and_cache_reuse() {
+    use asupersync::fs::Vfs;
+    use fgdb_strata::store::{BlockStore, RootReadLimits};
+    use fgdb_strata::tiered::sealed::SealedError;
+
+    let ((), report) = run_async_under_lab(0x6273_5120, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, mut writer) = fixture(&commit).await;
+        let params = parameters();
+        let prepared = prepare(
+            &format!("{BFS} YIELD node,distance RETURN node,distance LIMIT 0"),
+            &params,
+        );
+        let visible = prepare(
+            &format!("{BFS} YIELD node,distance RETURN node,distance ORDER BY node"),
+            &params,
+        );
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let before_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut before_view = view(&commit, &vfs, &before_pool).await;
+        let before = execute(
+            &prepared,
+            &mut before_view,
+            &cx,
+            policy(),
+            &spill_pool,
+            1,
+            WORK,
+        )
+        .await
+        .unwrap();
+        assert!(before.rows.is_empty());
+        drop(before_view);
+        assert_eq!(before_pool.used(), 0);
+        for (seq, value) in [(3, 101), (4, 102)] {
+            let mut restatement = WriteBatch::new(R);
+            restatement.set_edge_property(EId(BASE + 1), P, Some(CanonicalScalar::Int(value)));
+            assert_eq!(
+                writer.write(&commit, restatement).await.unwrap(),
+                CommitSeq(seq)
+            );
+        }
+        let run = writer
+            .seal_relation(
+                &commit,
+                &cx,
+                R,
+                CommitSeq(4),
+                sealing(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let store = BlockStore::open_existing_for_read_with_vfs(
+            &commit,
+            vfs.clone(),
+            vfs.database_dir(),
+            [0x9a; 32],
+            DatabaseSecurityNamespaceId([0x9b; 32]),
+        )
+        .await
+        .unwrap();
+        let run_path = store.path(run.0);
+        let original_run = vfs.read(&run_path).await.unwrap();
+
+        // The same query callback covers a native V7 run, covered V8 run,
+        // and stale V8 run whose suffix changes the reachable vertex set.
+        for phase in 0..3 {
+            if phase == 1 {
+                let mut unrelated = WriteBatch::new(S);
+                unrelated.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(111)));
+                assert_eq!(
+                    writer.write(&commit, unrelated).await.unwrap(),
+                    CommitSeq(5)
+                );
+            } else if phase == 2 {
+                let mut suffix = WriteBatch::new(R);
+                suffix.add_edge(EId(BASE + 9), VId(THIRD), VId(FOURTH), vec![]);
+                assert_eq!(writer.write(&commit, suffix).await.unwrap(), CommitSeq(6));
+            }
+            let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+            let mut current = view(&commit, &vfs, &source_pool).await;
+            let first = execute(&prepared, &mut current, &cx, policy(), &spill_pool, 1, WORK)
+                .await
+                .unwrap();
+            assert_eq!(first.snapshot, writer.frontier().unwrap());
+            assert!(first.rows.is_empty());
+            assert!(
+                first.records > before.records,
+                "superseded raw rows disappeared"
+            );
+            let faults = current.buffer_stats();
+            assert_eq!(
+                execute(&prepared, &mut current, &cx, policy(), &spill_pool, 1, WORK)
+                    .await
+                    .unwrap(),
+                first
+            );
+            assert_eq!(current.buffer_stats(), faults);
+
+            let cap = first.records - 1;
+            let tighter = GqlQueryPolicy::new(cap, 0, WORK, WORK);
+            let error = execute(&prepared, &mut current, &cx, tighter, &spill_pool, 1, WORK)
+                .await
+                .unwrap_err();
+            assert!(is_snapshot_or_source_work_limit(&error, cap), "{error:?}");
+
+            let mut literal = bfs_rows();
+            if phase == 2 {
+                literal.push(vec![vertex(FOURTH), integer(3)]);
+            }
+            assert_eq!(
+                execute(&visible, &mut current, &cx, policy(), &spill_pool, 1, WORK)
+                    .await
+                    .unwrap()
+                    .rows,
+                literal
+            );
+
+            // A fresh query owner has no cached image or raw-count receipt.
+            // Even LIMIT 0 must admit its source before reading the run.
+            let probe_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+            let mut probe = view(&commit, &vfs, &probe_pool).await;
+            vfs.write(&run_path, b"damaged registered source for a composed query")
+                .await
+                .unwrap();
+            let error = execute(&prepared, &mut probe, &cx, tighter, &spill_pool, 1, WORK)
+                .await
+                .unwrap_err();
+            assert!(is_snapshot_or_source_work_limit(&error, cap), "{error:?}");
+            let error = execute(&prepared, &mut probe, &cx, policy(), &spill_pool, 1, WORK)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&error, NativeSpoolError::Procedure(error)
+                    if matches!(error.as_ref(), GqlQueryError::Source(
+                        GqlError::Procedure(ProcedureError::BufferedSealedRead(error))
+                    ) if matches!(error.as_ref(), FnxSealedReadError::Seal(SealedError::Store(_))))),
+                "{error:?}"
+            );
+            vfs.write(&run_path, &original_run).await.unwrap();
+            assert_eq!(
+                execute(&prepared, &mut probe, &cx, policy(), &spill_pool, 1, WORK)
+                    .await
+                    .unwrap(),
+                first
+            );
+            assert_eq!(spill_pool.used(), 0);
+            drop(probe);
+            drop(current);
+            assert_eq!(probe_pool.used(), 0);
+            assert_eq!(source_pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn superseded_history_is_charged_before_compaction_even_under_limit_zero_and_reuse() {
     let ((), report) = run_async_under_lab(0x6273_5105, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

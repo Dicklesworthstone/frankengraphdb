@@ -33,7 +33,7 @@ use fgdb_strata::tiered::buffer::BufferError;
 use fgdb_strata::tiered::edge_scan::{
     BufferedEdgeCandidate, BufferedEdgeProperty, BufferedEdgeScanEvent, BufferedEdgeTopology,
 };
-use fgdb_strata::tiered::sealed::{SealedError, SealedLimits};
+use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::num::NonZeroUsize;
 
@@ -320,9 +320,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
 
     /// Build a reusable sealed projection from this view's opaque Strata
     /// admission. The shared historical vertex cursor includes isolates and
-    /// applies the label selection at exactly as_of. Strata then faults only
-    /// the selected relation and runs its existing compactor/image encoder;
-    /// initial buffered open already proved the complete source root.
+    /// applies the label selection at exactly as_of. Strata reuses the selected
+    /// root's authenticated durable run when it covers that cut, merging its
+    /// post-seal suffix when needed. A missing run or a cut below its retained
+    /// floor uses the ordinary relation compactor. Initial buffered open already
+    /// proved the complete source root; damaged attachments still refuse.
     ///
     /// The caller cannot substitute a root claim or decoded source rows. Both
     /// vertex selection and the sealed anchor belong to this pinned generation,
@@ -476,16 +478,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                     .await
                     .map_err(FnxSealedReadError::Seal)?
             };
-            let scope = partition.anchor().scope();
-            let root = self.partition.root();
-            if scope.source_root != self.partition_root()
-                || scope.publication != self.frontier()
-                || scope.graph != root.graph
-                || scope.branch != root.branch
-                || scope.partition != root.partition
-            {
-                return Err(FnxSealedReadError::SourceMismatch);
-            }
+            self.check_sealed_source(&partition, as_of)?;
             let graph = build
                 .build(
                     cx,
@@ -630,16 +623,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 )
                 .await?
         };
-        let scope = partition.anchor().scope();
-        let root = self.partition.root();
-        if scope.source_root != self.partition_root()
-            || scope.publication != self.frontier()
-            || scope.graph != root.graph
-            || scope.branch != root.branch
-            || scope.partition != root.partition
-        {
-            return Err(query_sealed_failure(FnxSealedReadError::SourceMismatch));
-        }
+        self.check_sealed_source(&partition, as_of)
+            .map_err(query_sealed_failure)?;
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
         let graph = SealedGraphView::build_cooperative_with_events(
             cx,
@@ -678,6 +663,40 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             )
             .map_err(GqlQueryError::Interrupted)?;
         Ok((graph, usage.admission))
+    }
+
+    /// A carried image keeps its original source and publication. Only the
+    /// store-minted envelope receipt can bind it to this newer generation;
+    /// equal graph coordinates alone never authorize an unrelated image.
+    fn check_sealed_source(
+        &self,
+        partition: &SealedPartition,
+        as_of: CommitSeq,
+    ) -> Result<(), FnxSealedReadError<BufferedReadError, Cancel>> {
+        let anchor = partition.anchor();
+        let scope = anchor.scope();
+        let root = self.partition.root();
+        let admitted = scope.source_root == self.partition_root()
+            || anchor.admitted_envelope_root() == Some(self.partition_root());
+        if !admitted
+            || anchor.admitted_publication() != self.frontier()
+            || scope.graph != root.graph
+            || scope.branch != root.branch
+            || scope.partition != root.partition
+        {
+            return Err(FnxSealedReadError::SourceMismatch);
+        }
+        let ceiling = anchor.verified_through();
+        if as_of < scope.floor || as_of > ceiling {
+            return Err(FnxSealedReadError::Projection(SealedProjectionError::Read(
+                SealedError::SnapshotOutsideAnchor {
+                    requested: as_of,
+                    floor: scope.floor,
+                    publication: ceiling,
+                },
+            )));
+        }
+        Ok(())
     }
 
     /// One vertex-selection implementation for decoded and sealed adapters.
