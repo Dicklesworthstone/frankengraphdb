@@ -7425,7 +7425,11 @@ mod collect_subqueries {
                 )),
                 [int(1), int(1), null()]
                     .into_iter()
-                    .map(|x| row([x, int(count), GraphValue::Scalar(CanonicalScalar::Bool(true))]))
+                    .map(|x| row([
+                        x,
+                        int(count),
+                        GraphValue::Scalar(CanonicalScalar::Bool(true))
+                    ]))
                     .collect::<Vec<_>>()
             );
         }
@@ -7436,7 +7440,10 @@ mod collect_subqueries {
                  EXISTS { UNWIND [] AS x RETURN x AS value \
                  UNION ALL UNWIND [] AS y RETURN y AS value } AS present"
             ),
-            vec![row([int(0), GraphValue::Scalar(CanonicalScalar::Bool(false))])]
+            vec![row([
+                int(0),
+                GraphValue::Scalar(CanonicalScalar::Bool(false))
+            ])]
         );
     }
 
@@ -7465,12 +7472,8 @@ mod collect_subqueries {
         for kind in ["COUNT", "EXISTS"] {
             for statement in [
                 format!("RETURN {kind} {{ RETURN 1 AS x UNION ALL WITH 2 AS x }} AS value"),
-                format!(
-                    "MATCH (n) RETURN {kind} {{ RETURN n UNION ALL MATCH (n) }} AS value"
-                ),
-                format!(
-                    "MATCH (n) RETURN {kind} {{ RETURN n UNION MATCH (n) }} AS value"
-                ),
+                format!("MATCH (n) RETURN {kind} {{ RETURN n UNION ALL MATCH (n) }} AS value"),
+                format!("MATCH (n) RETURN {kind} {{ RETURN n UNION MATCH (n) }} AS value"),
             ] {
                 let mut reads = 0;
                 let result = PreparedGraphSetText::prepare(&statement, |kind, name| {
@@ -7494,7 +7497,11 @@ mod collect_subqueries {
         .unwrap();
         let definition = template.canonical_template_bytes();
         for (minimum, extra, values) in [
-            (2, 7, vec![vec![2, 2, 2, 7], vec![2, 7], vec![3, 7], vec![7]]),
+            (
+                2,
+                7,
+                vec![vec![2, 2, 2, 7], vec![2, 7], vec![3, 7], vec![7]],
+            ),
             (3, 9, vec![vec![9], vec![9], vec![3, 9], vec![9]]),
         ] {
             let query = template

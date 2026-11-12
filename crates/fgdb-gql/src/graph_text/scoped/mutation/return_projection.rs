@@ -1454,6 +1454,7 @@ impl<'a> Parser<'a> {
                     )
                     .into());
                 }
+                self.record_parameter_alias(alias, &operand, &[]);
                 outputs.push((alias, operand));
                 if !self.take(b',')? {
                     break;
@@ -1974,6 +1975,77 @@ impl<'a> Parser<'a> {
         self.read_value_inner(inputs, schema, resolve, depth, true)
     }
 
+    /// Preserve only identity projections. A computed expression, list member,
+    /// graph field or aggregate does not impose its result type on a parameter
+    /// inside it. Binding offsets keep same-spelled aliases in distinct scopes
+    /// independent, and WITH * preserves the original binding unchanged.
+    pub(super) fn record_parameter_alias(
+        &mut self,
+        alias: Name<'a>,
+        value: &ReadValueTemplate,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+    ) {
+        let parameter = match value {
+            ReadValueTemplate::Parameter { index, .. } => self
+                .syntax
+                .parameters
+                .get(*index)
+                .map(|spec| spec.name.clone()),
+            ReadValueTemplate::Column(column) => schema
+                .get(*column)
+                .and_then(|(name, _)| self.parameter_aliases.get(&name.at))
+                .cloned(),
+            _ => None,
+        };
+        if let Some(parameter) = parameter {
+            self.parameter_aliases.insert(alias.at, parameter);
+        }
+    }
+
+    /// A collection-only use of an actual row binding constrains its bare
+    /// parameter origin. Explicit declarations and already inferred contracts
+    /// remain authoritative; ordinary type admission reports incompatible uses.
+    fn infer_parameter_alias(
+        &mut self,
+        kind: GqlParameterType,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<(), GraphPatternTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(());
+        };
+        if self.elements.contains(&word) {
+            return Ok(());
+        }
+        let schema = if schema.is_empty() {
+            self.resolved_row.as_deref().unwrap_or(schema)
+        } else {
+            schema
+        };
+        let Some(parameter) = schema
+            .iter()
+            .find(|(name, _)| name.text == word)
+            .and_then(|(name, _)| self.parameter_aliases.get(&name.at))
+        else {
+            return Ok(());
+        };
+        if self.parameter_types.contains_key(parameter) {
+            return Ok(());
+        }
+        if let Some(inference) = &self.parameter_inference {
+            inference
+                .borrow_mut()
+                .entry(parameter.clone())
+                .or_insert(kind);
+            // The owner observes the new monotone constraint and reparses;
+            // this provisional type error never escapes as a final verdict.
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::ConflictingParameterTypes,
+            ));
+        }
+        Ok(())
+    }
+
     /// A bare argument in a collection-only position has a structural type.
     /// Keep explicit declarations, including nullable scalar arguments, and
     /// let the shared parameter table reject incompatible earlier uses.
@@ -1982,15 +2054,18 @@ impl<'a> Parser<'a> {
     fn infer_collection_parameter(
         &mut self,
         kind: GqlParameterType,
+        schema: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<(), GraphPatternTextError> {
-        let TokenKind::Parameter(name) = self.current.kind else {
-            return Ok(());
-        };
         let next = self.lexer.clone().next()?.kind;
         if matches!(next, TokenKind::Punct(b')' | b']' | b'|'))
-            || matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("WHERE"))
+            || matches!(next, TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("WHERE") || word.eq_ignore_ascii_case("AS"))
         {
-            self.parameter_types.entry(name.to_owned()).or_insert(kind);
+            if let TokenKind::Parameter(name) = self.current.kind {
+                self.parameter_types.entry(name.to_owned()).or_insert(kind);
+            } else {
+                self.infer_parameter_alias(kind, schema)?;
+            }
         }
         Ok(())
     }
@@ -3093,6 +3168,14 @@ impl<'a> Parser<'a> {
                 kind: GraphSetTextErrorKind::IntegerNesting { limit: 64 },
             });
         }
+        // A field read on a bare parameter alias has the same map contract
+        // as `$parameter.key`. Declared scalar/temporal domains retain their
+        // own field semantics; local and graph bindings are not aliases.
+        if matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+            && self.temporal_call()?.is_none()
+        {
+            self.infer_parameter_alias(GqlParameterType::Map, schema)?;
+        }
         // A composite that is an operator's left operand is one operand of
         // the scalar expression, not the whole value: `size(l) > 0`, `[0] +
         // n.tags`. A resolved scope compiles it over its own leaves, so
@@ -3357,6 +3440,7 @@ impl<'a> Parser<'a> {
         {
             self.advance()?;
             self.punct(b'(', "(")?;
+            self.infer_collection_parameter(GqlParameterType::List, schema)?;
             let inner =
                 self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
             self.punct(b')', ")")?;
@@ -3742,7 +3826,7 @@ impl<'a> Parser<'a> {
         } else {
             self.advance()?;
             self.punct(b'(', "(")?;
-            self.infer_collection_parameter(GqlParameterType::Map)?;
+            self.infer_collection_parameter(GqlParameterType::Map, schema)?;
             let source = match self.current.kind {
                 TokenKind::Word(word)
                     if !self.elements.contains(&word)
@@ -4410,7 +4494,7 @@ impl<'a> Parser<'a> {
         };
         Ok(match function {
             ListFunction::Head | ListFunction::Last | ListFunction::Tail => {
-                self.infer_collection_parameter(GqlParameterType::List)?;
+                self.infer_collection_parameter(GqlParameterType::List, schema)?;
                 let list = Box::new(next(self, inputs, resolve)?);
                 match function {
                     ListFunction::Head => ReadValueTemplate::Index {
@@ -4446,7 +4530,7 @@ impl<'a> Parser<'a> {
                 self.punct(b',', ",")?;
                 let element = self.name()?;
                 self.word("IN")?;
-                self.infer_collection_parameter(GqlParameterType::List)?;
+                self.infer_collection_parameter(GqlParameterType::List, schema)?;
                 let list = Box::new(next(self, inputs.as_deref_mut(), resolve)?);
                 self.punct(b'|', "|")?;
                 self.elements.push(accumulator.text);
@@ -4482,7 +4566,7 @@ impl<'a> Parser<'a> {
     > {
         let element = self.name()?;
         self.word("IN")?;
-        self.infer_collection_parameter(GqlParameterType::List)?;
+        self.infer_collection_parameter(GqlParameterType::List, schema)?;
         let list = self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
         self.elements.push(element.text);
         let parts = self.element_parts(inputs, schema, resolve, depth, projection);

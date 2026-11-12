@@ -280,7 +280,11 @@ fn collection_union_uses_one_snapshot_overlay_and_capability_for_every_branch() 
             vec![20, 35, 40]
         );
         assert_eq!(
-            values(pinned.query(&cx, statement, &args, symbols, policy()).unwrap()),
+            values(
+                pinned
+                    .query(&cx, statement, &args, symbols, policy())
+                    .unwrap()
+            ),
             before
         );
         assert_eq!(txcx.outstanding_obligations(), 0);

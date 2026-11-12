@@ -1148,6 +1148,7 @@ mod inferred_collection_parameters {
             ("head($items)", int(1)),
             ("last($items)", int(3)),
             ("tail($items)", list(&[2, 3])),
+            ("size($items)", int(3)),
             ("reduce(total = 0, x IN $items | total + x)", int(6)),
         ];
         for prefix in ["", "MATCH (n) ", "WITH 1 AS seed "] {
@@ -1177,6 +1178,271 @@ mod inferred_collection_parameters {
                 );
             }
         }
+    }
+
+    fn inferred_as(text: &str, declarations: &[(&str, GqlParameterType)]) -> PreparedGraphSetText {
+        let inferred = PreparedGraphSetText::prepare(text, |_, _| None)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let declared =
+            PreparedGraphSetText::prepare_with_parameter_types(text, declarations, |_, _| None)
+                .unwrap();
+        assert_eq!(
+            inferred.canonical_template_bytes(),
+            declared.canonical_template_bytes(),
+            "{text}"
+        );
+        for &(name, kind) in declarations {
+            assert!(
+                inferred
+                    .parameter_schema()
+                    .iter()
+                    .any(|spec| { spec.name.as_str() == name && spec.parameter_type == kind }),
+                "{text}: {name}"
+            );
+        }
+        inferred
+    }
+
+    #[test]
+    fn list_constraints_follow_identity_aliases_and_graph_boundaries() {
+        let arguments = GqlParameters::new()
+            .with_list("items", vec![int(1), int(2), int(3)])
+            .unwrap();
+        let yes = GraphValue::Scalar(CanonicalScalar::Bool(true));
+        for prefix in [
+            "WITH $items AS xs ",
+            "MATCH (n) WITH $items AS xs ",
+            "WITH $items AS original WITH original AS xs ",
+            "WITH $items AS xs WITH * ",
+            "WITH $items AS original MATCH (n) WITH original AS xs ",
+            "WITH $items AS xs MATCH (n) WITH * ",
+            "WITH $items AS original WITH original AS xs, count(*) AS occurrences ",
+        ] {
+            for (expression, expected) in [
+                ("[x IN xs | x + 1]", list(&[2, 3, 4])),
+                ("[x IN xs WHERE x > 1 | x * 2]", list(&[4, 6])),
+                ("any(x IN xs WHERE x = 2)", yes.clone()),
+                ("all(x IN xs WHERE x > 0)", yes.clone()),
+                ("none(x IN xs WHERE x < 0)", yes.clone()),
+                ("single(x IN xs WHERE x = 2)", yes.clone()),
+                ("head(xs)", int(1)),
+                ("last(xs)", int(3)),
+                ("tail(xs)", list(&[2, 3])),
+                ("size(xs)", int(3)),
+                ("reduce(total = 0, x IN xs | total + x)", int(6)),
+            ] {
+                let text = format!("{prefix}RETURN {expression} AS value");
+                let inferred = inferred_as(&text, &[("items", GqlParameterType::List)]);
+                assert_eq!(
+                    run(&inferred, &arguments),
+                    vec![GraphValueRow::from_owned_values(vec![expected])],
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aliased_lists_rebind_without_changing_order_multiplicity_or_nulls() {
+        for text in [
+            "WITH $items AS original WITH original AS xs \
+             RETURN [x IN xs | x] AS copy, head(xs) AS first, tail(xs) AS rest",
+            "WITH $items AS xs MATCH (n) \
+             RETURN [x IN xs | x] AS copy, head(xs) AS first, tail(xs) AS rest",
+        ] {
+            let template = inferred_as(text, &[("items", GqlParameterType::List)]);
+            let definition = template.canonical_template_bytes();
+            let null = GraphValue::Scalar(CanonicalScalar::Null);
+            for values in [vec![], vec![2, 2, 7], vec![9]] {
+                let arguments = GqlParameters::new()
+                    .with_list("items", values.iter().copied().map(int).collect())
+                    .unwrap();
+                let first = values.first().copied().map_or_else(|| null.clone(), int);
+                assert_eq!(
+                    run(&template, &arguments),
+                    vec![GraphValueRow::from_owned_values(vec![
+                        list(&values),
+                        first,
+                        list(&values[values.len().min(1)..]),
+                    ])],
+                    "{text}"
+                );
+                assert_eq!(template.canonical_template_bytes(), definition);
+            }
+            assert_eq!(
+                run(&template, &GqlParameters::new().with_null("items").unwrap()),
+                vec![GraphValueRow::from_owned_values(vec![null; 3])]
+            );
+        }
+        let unwind = inferred_as(
+            "WITH $items AS original WITH original AS xs UNWIND xs AS item RETURN item",
+            &[("items", GqlParameterType::List)],
+        );
+        for values in [vec![], vec![2, 2, 7]] {
+            let arguments = GqlParameters::new()
+                .with_list("items", values.iter().copied().map(int).collect())
+                .unwrap();
+            assert_eq!(
+                run(&unwind, &arguments),
+                values
+                    .into_iter()
+                    .map(|value| GraphValueRow::from_owned_values(vec![int(value)]))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(run(&unwind, &GqlParameters::new().with_null("items").unwrap()).is_empty());
+    }
+
+    #[test]
+    fn map_aliases_and_multiple_parameters_infer_one_reusable_contract() {
+        for prefix in [
+            "WITH $props AS p ",
+            "WITH $props AS original WITH original AS p ",
+            "MATCH (n) WITH $props AS p ",
+            "WITH $props AS original MATCH (n) WITH original AS p ",
+        ] {
+            for expression in ["keys(p)", "properties(p)", "p.a"] {
+                let text = format!("{prefix}RETURN {expression} AS value");
+                let inferred = inferred_as(&text, &[("props", GqlParameterType::Map)]);
+                for value in [1, 9] {
+                    let entries = vec![("a".into(), int(value))];
+                    let arguments = GqlParameters::new()
+                        .with_map("props", entries.clone())
+                        .unwrap();
+                    let expected = match expression {
+                        "keys(p)" => GraphValue::List(
+                            vec![GraphValue::Scalar(
+                                CanonicalScalar::ucs_basic_text("a").unwrap(),
+                            )]
+                            .into(),
+                        ),
+                        "properties(p)" => GraphValue::map(entries).unwrap(),
+                        _ => int(value),
+                    };
+                    assert_eq!(
+                        run(&inferred, &arguments),
+                        vec![GraphValueRow::from_owned_values(vec![expected])],
+                        "{text}"
+                    );
+                }
+                assert_eq!(
+                    run(&inferred, &GqlParameters::new().with_null("props").unwrap()),
+                    vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                        CanonicalScalar::Null,
+                    )])],
+                    "{text}"
+                );
+            }
+        }
+        let inferred = inferred_as(
+            "WITH $items AS xs, $props AS p \
+             RETURN [x IN xs | x] AS copy, keys(p) AS names",
+            &[
+                ("items", GqlParameterType::List),
+                ("props", GqlParameterType::Map),
+            ],
+        );
+        assert_eq!(inferred.parameter_schema()[0].name.as_str(), "items");
+        assert_eq!(inferred.parameter_schema()[1].name.as_str(), "props");
+        assert_eq!(
+            run(
+                &inferred,
+                &GqlParameters::new()
+                    .with_list("items", vec![int(2), int(2)])
+                    .unwrap()
+                    .with_map("props", vec![])
+                    .unwrap()
+            ),
+            vec![GraphValueRow::from_owned_values(vec![
+                list(&[2, 2]),
+                list(&[]),
+            ])]
+        );
+    }
+
+    #[test]
+    fn alias_inference_respects_shadowing_explicit_types_and_scalar_constraints() {
+        for text in [
+            "WITH $items AS xs WITH [9] AS xs RETURN head(xs) AS value",
+            "WITH $items AS xs RETURN head([xs IN [[9]] | head(xs)]) AS value",
+        ] {
+            let template = inferred_as(text, &[("items", GqlParameterType::Int64)]);
+            assert_eq!(
+                run(
+                    &template,
+                    &GqlParameters::new().with_int64("items", 1).unwrap()
+                ),
+                vec![GraphValueRow::from_owned_values(vec![int(9)])]
+            );
+        }
+        let declared = PreparedGraphSetText::prepare_with_parameter_types(
+            "WITH $items AS xs RETURN size(xs) AS value",
+            &[(
+                "items",
+                GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Text),
+            )],
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            run(
+                &declared,
+                &GqlParameters::new().with_text("items", "naïve").unwrap()
+            ),
+            vec![GraphValueRow::from_owned_values(vec![int(5)])]
+        );
+        let null = PreparedGraphSetText::prepare_with_parameter_types(
+            "WITH $items AS xs RETURN head(xs) AS value",
+            &[(
+                "items",
+                GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Null),
+            )],
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            run(&null, &GqlParameters::new().with_null("items").unwrap()),
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                CanonicalScalar::Null,
+            )])]
+        );
+        assert!(
+            PreparedGraphSetText::prepare_with_parameter_types(
+                "WITH $items AS xs RETURN head(xs) AS value",
+                &[("items", GqlParameterType::Int64)],
+                |_, _| None,
+            )
+            .is_err()
+        );
+        for text in [
+            "MATCH (n:Person) WITH $items AS xs RETURN xs * 2 AS scalar, head(xs) AS first",
+            "MATCH (n:Person) WITH $items AS xs RETURN head(xs) AS first, keys(xs) AS names",
+        ] {
+            assert!(
+                PreparedGraphSetText::prepare(text, |_, _| {
+                    panic!("incompatible parameter uses must refuse before catalog resolution")
+                })
+                .is_err(),
+                "{text}"
+            );
+        }
+        let union = inferred_as(
+            "WITH $items AS xs RETURN size(xs) AS value \
+             UNION ALL WITH 9 AS xs RETURN xs AS value",
+            &[("items", GqlParameterType::List)],
+        );
+        assert_eq!(
+            run(
+                &union,
+                &GqlParameters::new()
+                    .with_list("items", vec![int(2), int(2)])
+                    .unwrap()
+            ),
+            vec![
+                GraphValueRow::from_owned_values(vec![int(2)]),
+                GraphValueRow::from_owned_values(vec![int(9)]),
+            ]
+        );
     }
 
     #[test]

@@ -468,12 +468,13 @@ impl PreparedGraphText {
                     continuations: Vec::new(),
                 });
             }
-            let mut parser = Parser::new_with_parameter_types(statement, declarations)?
-                .with_zones(zones.cloned());
-            parser.deferred_wheres = deferred.to_vec();
-            parser.implicit_withs = implicit.to_vec();
-            parser.read_elements = true;
-            parser.multipart_read(statement)
+            Parser::infer_parameter_aliases(statement, declarations, |mut parser| {
+                parser.zones = zones.cloned();
+                parser.deferred_wheres = deferred.to_vec();
+                parser.implicit_withs = implicit.to_vec();
+                parser.read_elements = true;
+                parser.multipart_read(statement)
+            })
         };
         let error = match read(&[], &[]) {
             Err(error) => error,
@@ -2752,9 +2753,13 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         let boundary = self.boundary_reads.clone();
         let parameter_types = self.parameter_types.clone();
+        let parameter_aliases = self.parameter_aliases.clone();
+        let parameter_inference = self.parameter_inference.clone();
         let parse = |deferred: &[usize], implicit: &[usize]| -> Result<_, GraphSetTextError> {
             let mut parser =
                 Self::new_with_parameter_types(statement, declarations)?.with_zones(zones.clone());
+            parser.parameter_aliases.clone_from(&parameter_aliases);
+            parser.parameter_inference.clone_from(&parameter_inference);
             if incoming.is_some() {
                 parser.parameter_types.clone_from(&parameter_types);
                 parser = parser.resume_after(boundary.clone(), &[], at)?;
@@ -3297,9 +3302,9 @@ impl<'a> Parser<'a> {
             self.read_row_bindings.clear();
             self.boundary_reads = None;
             self.projected_sources = None;
-            // Reaching UNION already required a RETURN in the first arm.
-            // Every later arm must return too, even in COUNT/EXISTS bodies
-            // whose final single-query RETURN would otherwise be optional.
+            // Reaching UNION requires an explicit RETURN in the first arm.
+            // Every subsequent arm must return too, even in COUNT/EXISTS,
+            // where a final implicit pattern could otherwise appear compatible.
             let implicit_return = core::mem::take(&mut self.existence_body);
             let parsed = self.multipart_parts_from(statement, false, branch_schema, call_depth);
             self.existence_body = implicit_return;
@@ -3916,6 +3921,7 @@ impl<'a> Parser<'a> {
         // Every graph head, including the first MATCH, can introduce maps.
         // Preserve that provenance before boundary reads lower its values.
         for (name, value) in &head.outputs {
+            self.record_parameter_alias(*name, value, incoming);
             if value.is_map_value(
                 |column| {
                     incoming

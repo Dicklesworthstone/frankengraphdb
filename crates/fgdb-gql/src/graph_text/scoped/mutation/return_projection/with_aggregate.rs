@@ -782,6 +782,9 @@ impl<'a> Parser<'a> {
                     crate::GraphAggregateBuildError::DuplicateName,
                 ));
             }
+            if let Output::Key(key) = output {
+                self.record_parameter_alias(name, &inputs[keys[key]].value, schema);
+            }
             returned.push((name, output, kind));
             if !self.take(b',')? {
                 break;

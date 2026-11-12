@@ -481,6 +481,12 @@ The shared native operators retain imported-value typing, subquery scope privacy
 
 Pinned formatting and patch applicability checks are available for this source addition. Rust compilation and these regression executions remain **UNRUN**: the pinned foundation compilation previously exhausted the environment's memory allowance, and the canonical filesystem is full. These sources do not close either broader bead or claim a completed exact-tree proof.
 
+### Collection parameter types through WITH aliases
+
+Source added 2026-11-12 for `fgdb-l5k31`: prepared set queries infer List and Map parameter contracts from structural uses of identity `WITH` aliases, including renamed aliases, `WITH *`, later graph clauses and aggregate grouping keys. For example, `WITH $items AS xs RETURN [x IN xs | x + 1] AS values` now derives the same canonical template as an explicit List declaration. List comprehensions, predicates, list functions and `UNWIND` constrain their bare sources; `keys`, `properties` and map field reads constrain Map sources. Explicit declarations, including Text for `size`, retain precedence. Computed values and aggregate results do not transfer parameter identity, and shadowed bindings remain separate.
+
+The ordinary unresolved parser records binding origins and rebuilds the complete template when a new collection constraint appears, before catalog resolution. Each restart adds a distinct parameter constraint, bounded by the existing parameter and source limits; compilation work is not cumulatively metered across those restarts. Four regression functions in `crates/fgdb-gql/tests/list_values.rs` exercise canonical equivalence, alias chains, independent parameters, rebinding, duplicate and NULL values, shadowing, explicit types and incompatible contracts before catalog access. Standalone final-aggregate facades and multi-origin aliases exported by inner UNION retain their existing explicit-type requirements. Pinned formatting and independent source review pass. Runtime tests remain **UNRUN**: the recovered serial build was killed while compiling the pinned asupersync dependency, before first-party diagnostics. The broader bead and exact-tree qualification remain open.
+
 ### Pinned embedded read views
 
 `Database::read_session()` returns an immutable `EmbeddedReadView` owning one decoded generation. A view:

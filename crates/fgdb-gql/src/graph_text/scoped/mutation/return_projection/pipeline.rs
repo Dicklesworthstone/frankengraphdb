@@ -2546,6 +2546,7 @@ impl<'a> Parser<'a> {
                 ) {
                     self.map_aliases.push(alias.at);
                 }
+                self.record_parameter_alias(alias, &value, schema);
                 projection.push(ReadProjectionTemplate {
                     name: alias.text.to_owned(),
                     value,
@@ -2596,6 +2597,7 @@ impl<'a> Parser<'a> {
                 .entry(name.to_owned())
                 .or_insert(GqlParameterType::List);
         }
+        self.infer_collection_parameter(GqlParameterType::List, schema)?;
         let value = self.read_row_value(schema, 0)?;
         self.word("AS")?;
         let alias = self.name()?;

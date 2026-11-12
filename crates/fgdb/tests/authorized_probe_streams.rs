@@ -919,9 +919,8 @@ fn projected_collection_limits_and_late_errors_never_publish_partial_lists() {
     let args = GqlParameters::new();
     // Keep the exact execution allowance (including 32 work units) independent
     // of text admission: this fixture imports a trusted, precompiled template.
-    let selector = std::sync::Arc::new(
-        fgdb_gql::PreparedGraphBranchText::prepare(COLLECTION_TEXT).unwrap(),
-    );
+    let selector =
+        std::sync::Arc::new(fgdb_gql::PreparedGraphBranchText::prepare(COLLECTION_TEXT).unwrap());
     let native = std::sync::Arc::new(
         fgdb::PreparedNativeRead::prepare(selector.statement(), &args, symbols).unwrap(),
     );

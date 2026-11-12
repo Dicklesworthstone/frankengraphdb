@@ -1067,6 +1067,15 @@ struct Parser<'a> {
     /// must never make a newly parsed `()` correlate with an ancestor node.
     outer_anonymous: Vec<&'a str>,
     parameter_types: BTreeMap<String, GqlParameterType>,
+    /// A WITH alias retains the origin of a bare parameter, keyed by its
+    /// actual binding occurrence rather than its spelling. Collection-only
+    /// uses can constrain that origin without confusing shadowed bindings.
+    parameter_aliases: BTreeMap<usize, String>,
+    /// Preparation-only, monotone constraints discovered after a parameter's
+    /// first projection. The owner rebuilds the complete unresolved template
+    /// when a constraint is added; no partly retyped plan can escape.
+    parameter_inference:
+        Option<std::rc::Rc<std::cell::RefCell<BTreeMap<String, GqlParameterType>>>>,
     /// Implicit UInt64 declarations used only by bare pagination operands.
     /// Only a pagination expression may refine that default to Int64; other
     /// scalar/unsigned uses keep their strict declaration contract.
@@ -1344,6 +1353,8 @@ impl<'a> Parser<'a> {
             scope_count: 0,
             outer_anonymous: Vec::new(),
             parameter_types: BTreeMap::new(),
+            parameter_aliases: BTreeMap::new(),
+            parameter_inference: None,
             flexible_page_parameters: BTreeSet::new(),
             page_expression_parameters: BTreeSet::new(),
             in_page_expression: false,

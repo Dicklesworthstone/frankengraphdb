@@ -82,11 +82,12 @@ impl PreparedGraphText {
         zones: Option<&crate::GqlTimeZones>,
         deferred: &[usize],
     ) -> Result<UnresolvedGraphText<'a>, crate::GraphSetTextError> {
-        let mut parser =
-            Parser::new_with_parameter_types(statement, declarations)?.with_zones(zones.cloned());
-        parser.deferred_wheres = deferred.to_vec();
-        parser.read_elements = true;
-        parser.parse_return_for_composition(statement)
+        Parser::infer_parameter_aliases(statement, declarations, |mut parser| {
+            parser.zones = zones.cloned();
+            parser.deferred_wheres = deferred.to_vec();
+            parser.read_elements = true;
+            parser.parse_return_for_composition(statement)
+        })
     }
 }
 
@@ -443,6 +444,36 @@ fn resolve_call_catalog(
 }
 
 impl<'a> Parser<'a> {
+    /// Discover constraints with the ordinary unresolved parser. A newly
+    /// constrained WITH alias stops the provisional parse and restarts from
+    /// the original source so preceding projections, NULL domains and row
+    /// schemas all agree with the final parameter contract. Every restart
+    /// adds a distinct parameter; the lexer bounds their total. Catalog
+    /// resolution and parameter binding happen only after this returns.
+    pub(super) fn infer_parameter_aliases<T>(
+        statement: &'a str,
+        declarations: &[(&str, GqlParameterType)],
+        mut parse: impl FnMut(Self) -> Result<T, crate::GraphSetTextError>,
+    ) -> Result<T, crate::GraphSetTextError> {
+        let constraints: BTreeMap<String, GqlParameterType> = BTreeMap::new();
+        let inference = std::rc::Rc::new(std::cell::RefCell::new(constraints));
+        loop {
+            let mut parser = Self::new_with_parameter_types(statement, declarations)?;
+            let before = {
+                let inferred = inference.borrow();
+                for (name, kind) in inferred.iter() {
+                    parser.parameter_types.entry(name.clone()).or_insert(*kind);
+                }
+                inferred.len()
+            };
+            parser.parameter_inference = Some(std::rc::Rc::clone(&inference));
+            let result = parse(parser);
+            if inference.borrow().len() == before {
+                return result;
+            }
+        }
+    }
+
     pub(super) fn new_with_parameter_types(
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
