@@ -132,6 +132,27 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         self.partition.pool()
     }
 
+    /// Enable durable relation runs for native typed-edge MATCH streams, their
+    /// aggregate inputs and same-relation nested joins/probes. This is an
+    /// explicit source profile: construction
+    /// reserves the configured decoder capacity and an EId locator in this
+    /// view's MemoryPool before loading a selected run. The reservation remains
+    /// owned by the cursor; returned records retain independent charges.
+    ///
+    /// Floor-zero runs must cover the complete pinned frontier, even for a
+    /// historical query, so invisible historical candidates keep their normal
+    /// identity admission. Other source shapes keep ordinary buffered scans.
+    /// Source selection is lazy; LIMIT 0, unpolled pulls and early close do not
+    /// load a run. Selected-run failures never retry through Tier D. Encoded
+    /// extents and post-seal native merging remain outside this first profile.
+    pub fn set_native_run_limits(
+        &mut self,
+        cx: &QueryCx,
+        limits: Option<fgdb_strata::tiered::sealed::SealedLimits>,
+    ) -> Result<(), BufferedReadError> {
+        self.partition.set_native_run_limits(cx, limits)
+    }
+
     /// Retention for completed decoded analytics projections. It uses the
     /// resident projection cache's default allowance and at most eight entries,
     /// independently of source extents and compressed projection retention.

@@ -116,6 +116,7 @@ impl<V: Vfs> Driver<'_, V> {
         self.root.work.step(cx, observe)?;
         let charge = self.root.partition.reserve_scan_bytes(cx, bytes)?;
         let mut state = State {
+            run: None,
             heads: Vec::new(),
             orders: Vec::new(),
             order_bytes: 0,

@@ -478,6 +478,7 @@ pub struct BufferedPartition<V: Vfs> {
     block_directory: block_directory::BlockDirectory,
     buffer: ExtentBuffer,
     limits: BufferedReadLimits,
+    native_run_limits: Option<crate::tiered::sealed::SealedLimits>,
     _metadata: MemoryCharge,
 }
 
@@ -853,6 +854,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
             block_directory,
             buffer,
             limits,
+            native_run_limits: None,
             _metadata: metadata,
         })
     }
@@ -870,6 +872,32 @@ impl<V: Vfs> BufferedPartition<V> {
     }
     pub const fn stats(&self) -> BufferStats {
         self.buffer.stats()
+    }
+
+    /// Opt into native typed-edge scans from a complete durable relation run.
+    /// The first demanded candidate admits the configured decode capacity and
+    /// a compact identity locator through this reader's source pool. No image
+    /// is loaded by this setter or by constructing an unpolled cursor.
+    ///
+    /// Only floor-zero runs covering this entire pinned generation may replace
+    /// its historical candidate domain. Stale, pruned, untyped and selected-root
+    /// scans keep their ordinary source. Encoded extents retain that source too;
+    /// this profile does not yet account the erasure decoder's workspace.
+    /// A selected run's corruption, cancellation or quota failure is terminal.
+    pub fn set_native_run_limits(
+        &mut self,
+        cx: &QueryCx,
+        limits: Option<crate::tiered::sealed::SealedLimits>,
+    ) -> Result<(), BufferedReadError> {
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        if let Some(limits) = limits {
+            scan_access::native_runs::decode_capacity(limits)?;
+        }
+        // A verification reader may already require direct physical reads.
+        // Disabling this query profile must not weaken that reader policy.
+        self.store.direct_pack_reads |= limits.is_some();
+        self.native_run_limits = limits;
+        Ok(())
     }
 
     /// Open a lazy canonical vertex cursor at one fixed historical cut. Heap

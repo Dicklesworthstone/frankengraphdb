@@ -7,6 +7,7 @@ use crate::tiered::edge_scan::{
     EdgeScanWork,
 };
 
+pub(super) mod native_runs;
 mod retained;
 mod sealed;
 

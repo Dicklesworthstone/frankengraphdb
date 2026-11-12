@@ -31,10 +31,10 @@ impl BufferedEdgeDirection {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Incidence {
-    endpoint: VId,
-    relation: Option<RelationId>,
-    direction: BufferedEdgeDirection,
-    after: Option<EId>,
+    pub(super) endpoint: VId,
+    pub(super) relation: Option<RelationId>,
+    pub(super) direction: BufferedEdgeDirection,
+    pub(super) after: Option<EId>,
 }
 impl Incidence {
     pub(super) fn matches(self, entry: &AdjacencyEntry) -> bool {
@@ -70,7 +70,10 @@ struct Continuation {
 /// seeks and payload reads share one cumulative source allowance. This is not
 /// a durable index or an optimal I/O bound: broad incoming ranges can select
 /// many blocks, and each successor can refault its routed bounded blocks.
-/// No full edge directory, neighborhood payload bag or result table is kept.
+/// The ordinary routed source keeps no full edge directory or neighborhood
+/// payload bag. When a typed root selects the opt-in complete-run profile,
+/// same-relation nested requests reuse its charged endpoint/EId locators;
+/// independent root positions and stored edge orientation remain unchanged.
 ///
 /// Root exhaustion does not disable nested reads: the final root edge may still
 /// have children. Close/error/drop of a POLLED pending call drops the complete
@@ -354,6 +357,21 @@ impl<V: Vfs> Driver<'_, V> {
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
         self.root.work.step(cx, observe)?;
+        if self.root.has_published_relation(request.relation) {
+            // A changed source drops its preceding Tier-D child workspace
+            // before reserving a row from the already admitted run.
+            *continuation = None;
+        }
+        if let Some(candidate) = self.root.published_incident(cx, request, observe)? {
+            return match candidate {
+                Some(candidate) => self
+                    .root
+                    .resolve_endpoints(cx, candidate, request.relation, observe)
+                    .await
+                    .map(Some),
+                None => Ok(None),
+            };
+        }
         if continuation
             .as_ref()
             .is_none_or(|saved| saved.next != request)
@@ -401,6 +419,16 @@ impl<V: Vfs> Driver<'_, V> {
         request: Incidence,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
+        if let Some(candidate) = self.root.published_incident(cx, request, observe)? {
+            return match candidate {
+                Some(candidate) => self
+                    .root
+                    .resolve_endpoints(cx, candidate, request.relation, observe)
+                    .await
+                    .map(Some),
+                None => Ok(None),
+            };
+        }
         let mut state = self
             .prepare_incident(cx, request, false, EdgePropertyAccess::Read, observe)
             .await?;
@@ -439,6 +467,7 @@ impl<V: Vfs> Driver<'_, V> {
         // Only routed blocks receive heads; grow their capacity under a charge
         // before heap insertion. Root heads and their position stay unchanged.
         let mut state = State {
+            run: None,
             heads: Vec::new(),
             orders: Vec::new(),
             order_bytes: 0,

@@ -925,6 +925,9 @@ pub struct BlockStore<V: Vfs = UnixVfs> {
     ecs_coding: Option<StrataEcsConfig>,
     /// Where packed objects are, shared by every clone of this store.
     packs: Arc<pack::PackIndex>,
+    /// Per-reader policy: bounded source profiles read one packed object,
+    /// without loading or borrowing a whole-pack payload cache.
+    direct_pack_reads: bool,
     /// Bounded metadata hint for one authenticated immutable root. It avoids a
     /// second read for legacy opens; actual run selection always reauthenticates.
     root_run_presence: Arc<std::sync::Mutex<Option<(PartitionRootVersion, bool)>>>,
@@ -1250,6 +1253,7 @@ impl<V: Vfs> BlockStore<V> {
             scalar_resolver: None,
             ecs_coding,
             packs,
+            direct_pack_reads: false,
             root_run_presence: Arc::default(),
         })
     }
@@ -1312,6 +1316,7 @@ impl<V: Vfs> BlockStore<V> {
             scalar_resolver: None,
             ecs_coding,
             packs,
+            direct_pack_reads: false,
             root_run_presence: Arc::default(),
         })
     }
@@ -1350,6 +1355,7 @@ impl<V: Vfs> BlockStore<V> {
             scalar_resolver: self.scalar_resolver.clone(),
             ecs_coding: self.ecs_coding.clone(),
             packs: Arc::new(packs),
+            direct_pack_reads: true,
             root_run_presence: Arc::default(),
         })
     }
@@ -2019,7 +2025,7 @@ impl<V: Vfs> BlockStore<V> {
                 pack::Located::Several(copies) => copies,
             };
             for location in copies {
-                let candidate = match self.packs.read(cx, &self.vfs, location, limit).await {
+                let candidate = match self.read_pack_location(cx, location, limit).await {
                     Ok(bytes) => proof(bytes).await,
                     Err(error) => Err(error),
                 };
@@ -2058,10 +2064,22 @@ impl<V: Vfs> BlockStore<V> {
             pack::Located::One(location) => location,
             pack::Located::Several(copies) => copies[0],
         };
-        self.packs
-            .read(cx, &self.vfs, location, limit)
-            .await
-            .map(Some)
+        self.read_pack_location(cx, location, limit).await.map(Some)
+    }
+
+    async fn read_pack_location(
+        &self,
+        cx: &impl StorageReadCx,
+        location: pack::Location,
+        limit: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        if self.direct_pack_reads {
+            self.packs
+                .read_uncached(cx, &self.vfs, location, limit)
+                .await
+        } else {
+            self.packs.read(cx, &self.vfs, location, limit).await
+        }
     }
 
     /// Fill `out` with the block object `id`, whose admitted length is `out.len()`.

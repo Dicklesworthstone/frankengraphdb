@@ -5,7 +5,9 @@
 //! One head and a compact position memo per block, one active decoded block
 //! and one winning edge suffice. Refaults authenticate the same immutable
 //! bytes but need not sort a block's positions again.
-//! No full edge directory, result table or per-candidate partition rescan exists.
+//! The ordinary history merge keeps no full edge directory or result table.
+//! The opt-in complete-run profile instead owns a charged EId/version locator
+//! over one immutable compressed relation, including incoming/outgoing seeks.
 
 use crate::AdjacencyEntry;
 use crate::edge_props::BlockProps;
@@ -22,6 +24,7 @@ use std::cmp::Reverse;
 
 mod incidence;
 pub use incidence::{BufferedEdgeDirection, BufferedEdgeIncidenceScan, BufferedEdgeJoinScan};
+mod published;
 
 /// Controls precede work and candidate history resolution. Identity is emitted
 /// exactly once per EId, including an identity invisible at the selected cut.
@@ -168,6 +171,7 @@ struct ActiveBlock {
     _order_charge: MemoryCharge,
 }
 struct State {
+    run: Option<published::RunCursor>,
     heads: Vec<Reverse<Head>>,
     // Only original positions, never identities or properties. Allocate a
     // memo only when an unfinished block is displaced. One- and two-row
@@ -186,6 +190,12 @@ struct State {
 }
 
 impl State {
+    fn has_more(&self) -> bool {
+        self.run
+            .as_ref()
+            .map_or(!self.heads.is_empty(), |run| !run.finished)
+    }
+
     /// Both directory capacities and every memo capacity share the existing
     /// head reservation. No retained allocation may hide behind vector length.
     fn retained_bytes(&self) -> Option<usize> {
@@ -309,6 +319,12 @@ fn restore_positions<C>(
 /// directory in logarithmic work, then visits only matching block descriptors;
 /// every comparison and visit is metered. The history, property and endpoint
 /// resolution laws are unchanged.
+///
+/// `BufferedPartition::set_native_run_limits` may select a complete durable
+/// run for a typed root. That profile reserves its decoder capacity and a
+/// compact EId/version directory on first demand; the cursor owns those
+/// charges until exhaustion, error or close. Other source shapes retain the
+/// ordinary bounded-block merge described above.
 pub struct BufferedEdgeScan<'source, V: Vfs> {
     partition: &'source mut BufferedPartition<V>,
     as_of: CommitSeq,
@@ -345,6 +361,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             blocks,
             relation,
             state: Some(State {
+                run: None,
                 heads: Vec::new(),
                 orders: Vec::new(),
                 order_bytes: 0,
@@ -461,6 +478,20 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
+        if !state.initialized {
+            self.prepare_published_run(state, cx, observe).await?;
+        }
+        if let Some(run) = state.run.as_mut() {
+            return published::next(
+                self.partition,
+                &mut self.work,
+                run,
+                cx,
+                self.as_of,
+                properties,
+                observe,
+            );
+        }
         if !state.initialized {
             let mut selected = self
                 .relation
@@ -695,7 +726,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             return Ok(None);
         };
         let result = self.advance(&mut state, cx, properties, observe).await;
-        if matches!(result, Ok(Some(_))) && !state.heads.is_empty() {
+        if matches!(result, Ok(Some(_))) && state.has_more() {
             self.state = Some(state);
         }
         result
@@ -723,7 +754,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         let candidate = self
             .resolve_endpoints(cx, candidate, relation, observe)
             .await?;
-        if !state.heads.is_empty() {
+        if state.has_more() {
             self.state = Some(state);
         }
         Ok(Some(candidate))

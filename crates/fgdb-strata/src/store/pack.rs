@@ -729,6 +729,22 @@ impl PackIndex {
 
     /// The bytes at `location`, refusing an object over `limit` before any
     /// read. The caller verifies the object's identity, as for a loose read.
+    /// This per-read arm neither populates nor borrows whole-pack payloads.
+    pub(super) async fn read_uncached<V: Vfs>(
+        &self,
+        cx: &impl StorageReadCx,
+        vfs: &V,
+        location: Location,
+        limit: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        super::ensure_size_within_limit(location.len(), limit)?;
+        let pack =
+            Arc::clone(&self.table.read().expect("pack table").packs[location.pack as usize]);
+        self.read_direct(cx, vfs, &pack, location).await
+    }
+
+    /// The ordinary cached object reader. Callers still prove object identity;
+    /// admission of a pack location never substitutes for that proof.
     pub(super) async fn read<V: Vfs>(
         &self,
         cx: &impl StorageReadCx,
@@ -1034,8 +1050,8 @@ fn open_host_range_view(
     len: usize,
 ) -> Result<fgdb_unsafe_vfs::FileView, StoreError> {
     let preferred = preferred_host_map_path();
-    if let Some(view) =
-        fgdb_unsafe_vfs::open_view(file, offset, len, preferred).map_err(vfs_error_to_store_error)?
+    if let Some(view) = fgdb_unsafe_vfs::open_view(file, offset, len, preferred)
+        .map_err(vfs_error_to_store_error)?
     {
         return Ok(view);
     }
@@ -1598,5 +1614,84 @@ mod cancellation_tests {
                 .expect("short file inspected cleanly")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn uncached_member_reads_bypass_resident_payloads_and_observe_physical_damage() {
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let (index, vfs, locations, bytes) = fixture();
+        let pack = Arc::clone(&index.packs()[0]);
+
+        assert_eq!(
+            runtime
+                .block_on(index.read_uncached(&cx, &vfs, locations[0], 100))
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(index.whole_reads(), 0);
+        assert_eq!(*index.resident.lock().unwrap(), 0);
+        assert!(matches!(*pack.slot.lock().unwrap(), Slot::Empty));
+
+        // Establish a healthy whole-pack cache independently of the uncached
+        // reader. It remains resident throughout the selected-object reads.
+        assert_eq!(
+            runtime
+                .block_on(index.read(&cx, &vfs, locations[1], 100))
+                .unwrap(),
+            b"defg"
+        );
+        assert_eq!(index.whole_reads(), 1);
+        assert_eq!(*index.resident.lock().unwrap(), bytes.len());
+        assert!(matches!(*pack.slot.lock().unwrap(), Slot::Loaded(_)));
+
+        // A healthy member must still reach the VFS even when its entire pack
+        // is already cached. Parking open distinguishes this from a cache hit.
+        vfs.phase.store(1, SeqCst);
+        let mut pending_read = Box::pin(index.read_uncached(&cx, &vfs, locations[0], 100));
+        runtime.block_on(poll_fn(|cx| {
+            assert!(pending_read.as_mut().poll(cx).is_pending());
+            assert!(vfs.entered.load(SeqCst));
+            Poll::Ready(())
+        }));
+        drop(pending_read);
+        assert_eq!(
+            runtime
+                .block_on(index.read_uncached(&cx, &vfs, locations[0], 100))
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(index.whole_reads(), 1);
+        assert_eq!(*index.resident.lock().unwrap(), bytes.len());
+        assert!(matches!(*pack.slot.lock().unwrap(), Slot::Loaded(_)));
+
+        // Damage only the last member after the cache was populated. The
+        // ordinary cache still has its original bytes, but an uncached source
+        // must observe the physical short read instead of borrowing them.
+        std::fs::write(&pack.path, &bytes[..bytes.len() - 1]).unwrap();
+        assert_eq!(
+            runtime
+                .block_on(index.read(&cx, &vfs, locations[1], 100))
+                .unwrap(),
+            b"defg"
+        );
+        assert!(matches!(
+            runtime.block_on(index.read_uncached(&cx, &vfs, locations[1], 100)),
+            Err(StoreError::Io(ref error)) if error.kind() == io::ErrorKind::UnexpectedEof
+        ));
+        assert_eq!(index.whole_reads(), 1);
+        assert_eq!(*index.resident.lock().unwrap(), bytes.len());
+        assert!(matches!(*pack.slot.lock().unwrap(), Slot::Loaded(_)));
+
+        std::fs::write(&pack.path, &bytes).unwrap();
+        assert_eq!(
+            runtime
+                .block_on(index.read_uncached(&cx, &vfs, locations[1], 100))
+                .unwrap(),
+            b"defg"
+        );
+        assert_eq!(index.whole_reads(), 1);
+        assert_eq!(*index.resident.lock().unwrap(), bytes.len());
     }
 }
