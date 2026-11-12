@@ -2012,3 +2012,289 @@ fn standard_deviations_aggregate_like_percentiles() {
         ]
     );
 }
+
+mod collection_parameter_inference {
+    use super::*;
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::CanonicalScalarKind;
+
+    fn integer(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+
+    fn inferred_as(
+        text: &str,
+        declarations: &[(&str, GqlParameterType)],
+    ) -> PreparedGraphPipelineAggregateText {
+        let inferred = PreparedGraphPipelineAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let declared = PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
+            text,
+            declarations,
+            symbols,
+        )
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(
+            inferred.canonical_template_bytes(),
+            declared.canonical_template_bytes(),
+            "{text}"
+        );
+        for &(name, kind) in declarations {
+            assert!(
+                inferred
+                    .parameter_schema()
+                    .iter()
+                    .any(|spec| spec.name.as_str() == name && spec.parameter_type == kind),
+                "{text}: {name}"
+            );
+        }
+        inferred
+    }
+
+    fn execute(
+        template: &PreparedGraphPipelineAggregateText,
+        arguments: &GqlParameters,
+    ) -> Vec<GraphAggregateRow> {
+        template
+            .bind_relation_parameters(arguments)
+            .unwrap()
+            .execute_governed(
+                wide(),
+                |source, policy| {
+                    source.plan().execute_governed_with_properties(
+                        1,
+                        [VId(1)],
+                        [],
+                        |_, _| Ok::<_, ()>(true),
+                        |_, _| Ok(None::<&CanonicalPropertyValue>),
+                        policy,
+                        || Ok::<_, ()>(()),
+                    )
+                },
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+    }
+
+    #[test]
+    fn terminal_arguments_infer_through_row_and_graph_boundaries() {
+        let arguments = GqlParameters::new()
+            .with_list("items", vec![integer(2), integer(2), integer(7)])
+            .unwrap();
+        for prefix in [
+            "WITH $items AS xs",
+            "WITH $items AS original WITH original AS xs",
+            "WITH $items AS xs WITH *",
+            "MATCH (n) WITH $items AS xs",
+            "WITH $items AS original MATCH (n) WITH original AS xs",
+            "MATCH (n) WITH $items AS original MATCH (m) WITH original AS xs",
+        ] {
+            for (expression, expected) in [
+                ("sum(head(xs))", 2),
+                ("sum(size(xs))", 3),
+                ("sum(reduce(total = 0, x IN xs | total + x))", 11),
+            ] {
+                let text = format!("{prefix} RETURN {expression} AS value");
+                let template = inferred_as(&text, &[("items", GqlParameterType::List)]);
+                let rows = execute(&template, &arguments);
+                assert_eq!(rows.len(), 1, "{text}");
+                assert_eq!(rows[0].values()[0].as_integer(), Some(expected), "{text}");
+            }
+            let text = format!("{prefix} RETURN count([x IN xs WHERE x > 2 | x]) AS count");
+            let template = inferred_as(&text, &[("items", GqlParameterType::List)]);
+            let rows = execute(&template, &arguments);
+            assert_eq!(rows.len(), 1, "{text}");
+            assert_eq!(rows[0].values()[0].as_count(), Some(1), "{text}");
+        }
+
+        let arguments = GqlParameters::new()
+            .with_map("props", vec![("a".into(), integer(2))])
+            .unwrap();
+        for prefix in [
+            "WITH $props AS p",
+            "WITH $props AS original WITH original AS p",
+            "MATCH (n) WITH $props AS original MATCH (m) WITH original AS p",
+        ] {
+            let text = format!("{prefix} RETURN sum(p.a) AS total");
+            let template = inferred_as(&text, &[("props", GqlParameterType::Map)]);
+            let rows = execute(&template, &arguments);
+            assert_eq!(rows.len(), 1, "{text}");
+            assert_eq!(rows[0].values()[0].as_integer(), Some(2), "{text}");
+        }
+    }
+
+    #[test]
+    fn grouping_and_result_clauses_constrain_the_complete_template() {
+        let arguments = GqlParameters::new()
+            .with_list("items", vec![integer(2), integer(2), integer(7)])
+            .unwrap();
+        for text in [
+            "WITH $items AS xs RETURN count(*) AS c GROUP BY size(xs)",
+            "WITH $items AS xs RETURN count(*) AS c GROUP BY xs HAVING size(xs) = 3",
+            "WITH $items AS xs RETURN xs AS data, count(*) AS c HAVING size(data) = 3",
+            "WITH $items AS xs RETURN xs AS data, count(*) AS c ORDER BY size(data)",
+            "WITH $items AS xs RETURN count(*) AS c HAVING sum(size(xs)) > 0",
+            "WITH $items AS xs RETURN count(*) AS c ORDER BY sum(head(xs))",
+            "WITH $items AS xs RETURN count(*) AS c ORDER BY sum(head($items))",
+        ] {
+            let template = inferred_as(text, &[("items", GqlParameterType::List)]);
+            let rows = execute(&template, &arguments);
+            assert_eq!(rows.len(), 1, "{text}");
+            assert_eq!(
+                rows[0].values().last().unwrap().as_count(),
+                Some(1),
+                "{text}"
+            );
+        }
+        // The collection consumer is outside the aggregate call and therefore
+        // belongs to the computed RETURN resolver, not its input reader.
+        let text = "WITH $items AS xs RETURN size(xs) + count(*) AS value GROUP BY xs";
+        let template = inferred_as(text, &[("items", GqlParameterType::List)]);
+        let declared = PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
+            text,
+            &[("items", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap();
+        let rows = execute(&template, &arguments);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows, execute(&declared, &arguments));
+
+        let arguments = GqlParameters::new()
+            .with_map("props", vec![("a".into(), integer(2))])
+            .unwrap();
+        for text in [
+            "WITH $props AS p RETURN p AS data, count(*) AS c HAVING size(keys(data)) = 1",
+            "WITH $props AS p RETURN p AS data, count(*) AS c ORDER BY size(keys(data))",
+            "WITH $props AS p RETURN count(*) AS c ORDER BY sum(p.a)",
+            "WITH $props AS p RETURN count(*) AS c ORDER BY count(keys($props))",
+        ] {
+            let template = inferred_as(text, &[("props", GqlParameterType::Map)]);
+            let rows = execute(&template, &arguments);
+            assert_eq!(rows.len(), 1, "{text}");
+            assert_eq!(
+                rows[0].values().last().unwrap().as_count(),
+                Some(1),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn inferred_template_rebinds_bags_empty_lists_and_nulls() {
+        let text = "UNWIND [0,0,1] AS occurrence WITH $items AS xs \
+                    RETURN sum(head(xs)) AS first, count(xs) AS present, \
+                    count(DISTINCT xs) AS different";
+        let template = inferred_as(text, &[("items", GqlParameterType::List)]);
+        let definition = template.canonical_template_bytes();
+        for (values, expected) in [
+            (vec![2, 2, 7], Some(6)),
+            (vec![], None),
+            (vec![9], Some(27)),
+        ] {
+            let arguments = GqlParameters::new()
+                .with_list("items", values.into_iter().map(integer).collect())
+                .unwrap();
+            let rows = execute(&template, &arguments);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].values()[0].as_integer(), expected);
+            assert_eq!(rows[0].values()[1].as_count(), Some(3));
+            assert_eq!(rows[0].values()[2].as_count(), Some(1));
+            assert_eq!(template.canonical_template_bytes(), definition);
+        }
+        let rows = execute(&template, &GqlParameters::new().with_null("items").unwrap());
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].values()[0].is_null());
+        assert_eq!(rows[0].values()[1].as_count(), Some(0));
+        assert_eq!(rows[0].values()[2].as_count(), Some(0));
+        for arguments in [
+            GqlParameters::new().with_int64("items", 2).unwrap(),
+            GqlParameters::new().with_text("items", "two").unwrap(),
+        ] {
+            assert!(template.bind_relation_parameters(&arguments).is_err());
+        }
+        assert_eq!(template.canonical_template_bytes(), definition);
+    }
+
+    #[test]
+    fn explicit_domains_and_shadowed_bindings_remain_authoritative() {
+        let text = "WITH $items AS xs RETURN sum(size(xs)) AS total";
+        let template = PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
+            text,
+            &[("items", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
+            symbols,
+        )
+        .unwrap();
+        let rows = execute(
+            &template,
+            &GqlParameters::new().with_text("items", "naïve").unwrap(),
+        );
+        assert_eq!(rows[0].values()[0].as_integer(), Some(5));
+
+        let template = PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
+            "WITH $items AS xs RETURN count(head(xs)) AS heads, count(keys(xs)) AS maps",
+            &[("items", GqlParameterType::Scalar(CanonicalScalarKind::Null))],
+            symbols,
+        )
+        .unwrap();
+        let rows = execute(&template, &GqlParameters::new().with_null("items").unwrap());
+        assert_eq!(rows[0].values()[0].as_count(), Some(0));
+        assert_eq!(rows[0].values()[1].as_count(), Some(0));
+
+        let template = PreparedGraphPipelineAggregateText::prepare(
+            "WITH $items AS xs WITH [7] AS xs RETURN sum(head(xs)) AS total",
+            symbols,
+        )
+        .unwrap();
+        assert_eq!(
+            template.parameter_schema()[0].parameter_type,
+            GqlParameterType::Int64
+        );
+        let rows = execute(
+            &template,
+            &GqlParameters::new().with_int64("items", 1).unwrap(),
+        );
+        assert_eq!(rows[0].values()[0].as_integer(), Some(7));
+    }
+
+    #[test]
+    fn conflicting_and_late_invalid_uses_are_rejected_before_catalog_resolution() {
+        for text in [
+            "MATCH (n {p: 1}) WITH $items AS xs \
+             RETURN sum(head(xs)) AS first, count(keys(xs)) AS maps",
+            "MATCH (n {p: 1}) WITH $items AS xs \
+             RETURN count(keys(xs)) AS maps, sum(head(xs)) AS first",
+            "MATCH (n {p: 1}) WITH $items AS xs \
+             RETURN xs AS data, count(*) AS c HAVING size(data) > 0 ORDER BY keys(data)",
+            "MATCH (n {p: 1}) WITH $items AS xs \
+             RETURN count(keys($items)) AS maps, sum(head(xs)) AS first",
+        ] {
+            let error = PreparedGraphPipelineAggregateText::prepare(text, |_, _| {
+                panic!("an unresolved inference conflict must not consult the catalog")
+            })
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &error.kind,
+                    GraphPipelineAggregateTextErrorKind::Input(GraphSetTextErrorKind::Pattern(
+                        GraphPatternTextErrorKind::ConflictingParameterTypes
+                    ))
+                ),
+                "{text}: {error:?}"
+            );
+        }
+        for text in [
+            "MATCH (n {p: 1}) WITH $items AS xs RETURN sum(head(xs)) AS total LIMIT $items",
+            "MATCH (n {p: 1}) WITH $items AS xs RETURN sum(head(xs)) AS total ORDER BY missing",
+        ] {
+            assert!(
+                PreparedGraphPipelineAggregateText::prepare(text, |_, _| {
+                    panic!("a refused terminal clause must not consult the catalog")
+                })
+                .is_err(),
+                "{text}"
+            );
+        }
+    }
+}

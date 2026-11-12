@@ -65,6 +65,23 @@ impl Inputs {
         index >= self.width
     }
 
+    /// A terminal grouping key can rename the same bare parameter again.
+    /// Keep its binding origin for HAVING/ORDER BY, without treating a
+    /// computed key or any aggregate result as an identity projection.
+    pub(super) fn record_alias<'a>(
+        &self,
+        parser: &mut Parser<'a>,
+        alias: Name<'a>,
+        index: usize,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+    ) {
+        if index < self.width {
+            parser.record_parameter_alias(alias, &ReadValueTemplate::Column(index), schema);
+        } else {
+            parser.record_parameter_alias(alias, &self.computed[index - self.width].1, schema);
+        }
+    }
+
     /// Leave plain-column definitions entirely untouched, including canonical
     /// bytes and event traces. Computed definitions retain only the columns
     /// actually consumed by grouping/summaries, without suppressing any earlier

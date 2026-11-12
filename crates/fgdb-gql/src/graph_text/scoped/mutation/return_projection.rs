@@ -1979,7 +1979,7 @@ impl<'a> Parser<'a> {
     /// graph field or aggregate does not impose its result type on a parameter
     /// inside it. Binding offsets keep same-spelled aliases in distinct scopes
     /// independent, and WITH * preserves the original binding unchanged.
-    pub(super) fn record_parameter_alias(
+    pub(in crate::graph_text) fn record_parameter_alias(
         &mut self,
         alias: Name<'a>,
         value: &ReadValueTemplate,
@@ -2089,6 +2089,14 @@ impl<'a> Parser<'a> {
         {
             if let TokenKind::Parameter(name) = self.current.kind {
                 self.check_inferred_collection_parameter(name, kind, self.current.at)?;
+                if !self.parameter_types.contains_key(name)
+                    && let Some(inference) = &self.parameter_inference
+                {
+                    inference
+                        .borrow_mut()
+                        .entry(name.to_owned())
+                        .or_insert(kind);
+                }
                 self.parameter_types.entry(name.to_owned()).or_insert(kind);
             } else {
                 self.infer_parameter_alias(kind, schema)?;

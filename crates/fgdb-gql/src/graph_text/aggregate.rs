@@ -146,6 +146,26 @@ impl core::fmt::Debug for PreparedGraphAggregateText {
             .finish()
     }
 }
+
+/// The complete unresolved grouping contract. Generated aliases and catalog
+/// binding are deliberately later: an inferred parameter discovered in a
+/// result clause must rebuild the earlier input expressions first.
+struct ParsedAggregate<'a> {
+    parser: Parser<'a>,
+    computed: ComputedInputs<'a>,
+    returned: Vec<ReturnItem<'a>>,
+    groups: Vec<Expression<'a>>,
+    hidden: Vec<HiddenSummary<'a>>,
+    output_columns: Vec<usize>,
+    distinct: bool,
+    has_output_projection: bool,
+    having: Vec<Having>,
+    having_expression: Option<having::HavingTemplate>,
+    ordering: Vec<GraphAggregateOrder>,
+    projected_ordering: Vec<GraphValueOrder>,
+    computed_ordering: Vec<ReadValueTemplate>,
+}
+
 impl PreparedGraphAggregateText {
     /// Validate the complete bounded grammar and grouping before calling the
     /// host resolver. Numeric operands register with the original parser's
@@ -182,326 +202,366 @@ impl PreparedGraphAggregateText {
         let mut hidden_aliases: Vec<String> = Vec::new();
         let mut key_aliases: Vec<(String, usize)> = Vec::new();
         let mut source_aliases: Vec<String> = Vec::new();
-        let mut computed = ComputedInputs::default();
-        let mut output_leaves = Vec::new();
-        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
-            .with_zones(resolve.time_zones());
-        parser.parse_head()?;
-        let distinct = parser.take_word("DISTINCT")?;
-        if !distinct {
-            parser.take_all_quantifier()?;
-        }
-        let mut returned = Vec::new();
-        loop {
-            parser.capacity(
-                returned.len(),
-                MAX_PATTERN_VERTICES,
-                crate::algebra::PatternLimitDimension::Columns,
-            )?;
-            let item = parser.aggregate_item(&mut computed, &mut output_leaves)?;
-            if returned
-                .iter()
-                .any(|previous: &ReturnItem<'_>| previous.alias.text == item.alias.text)
-            {
-                return Err(error(
-                    item.alias.at,
-                    GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection),
-                ));
-            }
-            returned.push(item);
-            if !parser.take(b',')? {
-                break;
-            }
-        }
-        let mut groups = Vec::new();
-        let explicit_groups = parser.take_word("GROUP")?;
-        if explicit_groups {
-            parser.word("BY")?;
-            let empty_grouping = matches!(parser.current.kind, TokenKind::Punct(b'('))
-                && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b')'));
-            if empty_grouping {
-                parser.advance()?;
-                parser.advance()?;
-            }
-            loop {
-                if empty_grouping {
-                    break;
+        let zones = resolve.time_zones();
+        let ParsedAggregate {
+            mut parser,
+            mut computed,
+            returned,
+            groups,
+            hidden,
+            output_columns,
+            distinct,
+            has_output_projection,
+            having,
+            having_expression,
+            ordering,
+            projected_ordering,
+            computed_ordering,
+        } = Parser::infer_parameter_aliases(
+            statement,
+            declarations,
+            |mut parser| -> Result<_, GraphPatternTextError> {
+                let mut computed = ComputedInputs::default();
+                let mut output_leaves = Vec::new();
+                parser.zones = zones.clone();
+                parser.parse_head()?;
+                let distinct = parser.take_word("DISTINCT")?;
+                if !distinct {
+                    parser.take_all_quantifier()?;
                 }
-                parser.capacity(
-                    groups.len(),
-                    MAX_PATTERN_VERTICES,
-                    crate::algebra::PatternLimitDimension::Columns,
-                )?;
-                let expression = if let TokenKind::Word(word) = parser.current.kind
-                    && !matches!(
-                        parser.lexer.clone().next()?.kind,
-                        TokenKind::Punct(b'.' | b'(')
-                    )
-                    && let Some(item) = returned.iter().find(|item| {
-                        item.alias.text == word && item.function.is_none() && item.output.is_none()
-                    }) {
-                    let expression = item.expression.expect("nonaggregate RETURN expression");
-                    parser.advance()?;
-                    expression
-                } else {
-                    parser.aggregate_expression(&mut computed)?
-                };
-                if groups
-                    .iter()
-                    .any(|previous: &Expression<'_>| previous.same(expression))
-                {
-                    return Err(error(
-                        expression.variable.at,
-                        GraphPatternTextErrorKind::Expected("unique GROUP BY expression"),
-                    ));
-                }
-                groups.push(expression);
-                if !parser.take(b',')? {
-                    break;
-                }
-            }
-        } else {
-            // Reuse parsed expressions, not source text or individual property
-            // leaves. Inference must not register parameter occurrences twice.
-            // RETURN admission bounds this set. Repeated expressions under
-            // different aliases retain distinct output slots but share one key.
-            for item in &returned {
-                if item.function.is_none() && item.output.is_none() {
-                    let expression = item.expression.expect("nonaggregate RETURN expression");
-                    if !groups.iter().any(|group| group.same(expression)) {
-                        groups.push(expression);
+                let mut returned = Vec::new();
+                loop {
+                    parser.capacity(
+                        returned.len(),
+                        MAX_PATTERN_VERTICES,
+                        crate::algebra::PatternLimitDimension::Columns,
+                    )?;
+                    let item = parser.aggregate_item(&mut computed, &mut output_leaves)?;
+                    if returned
+                        .iter()
+                        .any(|previous: &ReturnItem<'_>| previous.alias.text == item.alias.text)
+                    {
+                        return Err(error(
+                            item.alias.at,
+                            GraphPatternTextErrorKind::Build(
+                                PatternBuildError::DuplicateProjection,
+                            ),
+                        ));
+                    }
+                    if item.function.is_none() {
+                        let value = item.output.as_ref().or_else(|| {
+                            item.expression
+                                .and_then(|expression| expression.computed)
+                                .map(|index| &computed.operands[index])
+                        });
+                        if let Some(value) = value {
+                            parser.record_parameter_alias(item.alias, value, &[]);
+                        }
+                    }
+                    returned.push(item);
+                    if !parser.take(b',')? {
+                        break;
                     }
                 }
-            }
-        }
-        if explicit_groups {
-            // Explicit keys decide the groups. Independent values that were
-            // not themselves named as keys belong to the post-group output.
-            // Reuse the parsed program so parameter occurrences and catalog
-            // reads are not registered twice. Implicit grouping deliberately
-            // retains these expressions as keys, even on an empty input.
-            for item in &mut returned {
-                if item.function.is_none()
-                    && let Some(expression) = item.expression
-                    && !groups.iter().any(|group| group.same(expression))
-                    && let Some(index) = expression.computed
-                    && computed.operands[index].row_independent()
-                {
-                    item.expression = None;
-                    item.output = Some(computed.operands[index].clone());
-                }
-            }
-        }
-        for item in &returned {
-            if item.function.is_none()
-                && item.output.is_none()
-                && !groups
-                    .iter()
-                    .any(|group| group.same(item.expression.expect("key expression")))
-            {
-                return Err(error(
-                    item.alias.at,
-                    GraphPatternTextErrorKind::Expected(
-                        "nonaggregate RETURN expression in GROUP BY",
-                    ),
-                ));
-            }
-        }
-        // Hidden grouping keys consume real evaluation columns. Bound their
-        // combined width with returned summaries before any catalog access.
-        for (at, _) in returned
-            .iter()
-            .filter(|item| item.function.is_some())
-            .enumerate()
-        {
-            parser.capacity(
-                groups.len() + at,
-                MAX_PATTERN_VERTICES,
-                crate::algebra::PatternLimitDimension::Columns,
-            )?;
-        }
-        let mut hidden = Vec::new();
-        let mut has_output_projection = returned.iter().any(|item| item.output.is_some());
-        let visible = returned
-            .iter()
-            .filter(|item| item.function.is_some())
-            .count();
-        let mut output_columns = Vec::new();
-        for leaf in &output_leaves {
-            let column = match leaf {
-                OutputLeaf::Aggregate(leaf) => {
-                    let index = if let Some(index) = returned
-                        .iter()
-                        .filter(|item| item.function.is_some())
-                        .position(|item| {
-                            item.function == Some(leaf.function)
-                                && same_expression(item.expression, leaf.expression)
-                        }) {
-                        index
-                    } else if let Some(index) =
-                        hidden.iter().position(|item: &HiddenSummary<'_>| {
-                            item.function == leaf.function
-                                && same_expression(item.expression, leaf.expression)
-                        })
-                    {
-                        visible + index
-                    } else {
+                let mut groups = Vec::new();
+                let explicit_groups = parser.take_word("GROUP")?;
+                if explicit_groups {
+                    parser.word("BY")?;
+                    let empty_grouping = matches!(parser.current.kind, TokenKind::Punct(b'('))
+                        && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b')'));
+                    if empty_grouping {
+                        parser.advance()?;
+                        parser.advance()?;
+                    }
+                    loop {
+                        if empty_grouping {
+                            break;
+                        }
                         parser.capacity(
-                            groups.len() + visible + hidden.len(),
+                            groups.len(),
                             MAX_PATTERN_VERTICES,
                             crate::algebra::PatternLimitDimension::Columns,
                         )?;
-                        let index = visible + hidden.len();
-                        hidden.push(HiddenSummary {
-                            expression: leaf.expression,
-                            function: leaf.function,
-                            at: leaf.at,
-                        });
-                        index
-                    };
-                    groups.len() + index
+                        let expression = if let TokenKind::Word(word) = parser.current.kind
+                            && !matches!(
+                                parser.lexer.clone().next()?.kind,
+                                TokenKind::Punct(b'.' | b'(')
+                            )
+                            && let Some(item) = returned.iter().find(|item| {
+                                item.alias.text == word
+                                    && item.function.is_none()
+                                    && item.output.is_none()
+                            }) {
+                            let expression =
+                                item.expression.expect("nonaggregate RETURN expression");
+                            parser.advance()?;
+                            expression
+                        } else {
+                            parser.aggregate_expression(&mut computed)?
+                        };
+                        if groups
+                            .iter()
+                            .any(|previous: &Expression<'_>| previous.same(expression))
+                        {
+                            return Err(error(
+                                expression.variable.at,
+                                GraphPatternTextErrorKind::Expected("unique GROUP BY expression"),
+                            ));
+                        }
+                        groups.push(expression);
+                        if !parser.take(b',')? {
+                            break;
+                        }
+                    }
+                } else {
+                    // Reuse parsed expressions, not source text or individual property
+                    // leaves. Inference must not register parameter occurrences twice.
+                    // RETURN admission bounds this set. Repeated expressions under
+                    // different aliases retain distinct output slots but share one key.
+                    for item in &returned {
+                        if item.function.is_none() && item.output.is_none() {
+                            let expression =
+                                item.expression.expect("nonaggregate RETURN expression");
+                            if !groups.iter().any(|group| group.same(expression)) {
+                                groups.push(expression);
+                            }
+                        }
+                    }
                 }
-                OutputLeaf::Group(expression) => groups
-                    .iter()
-                    .position(|group| group.same(*expression))
-                    .ok_or_else(|| {
-                        error(
-                            expression.variable.at,
+                if explicit_groups {
+                    // Explicit keys decide the groups. Independent values that were
+                    // not themselves named as keys belong to the post-group output.
+                    // Reuse the parsed program so parameter occurrences and catalog
+                    // reads are not registered twice. Implicit grouping deliberately
+                    // retains these expressions as keys, even on an empty input.
+                    for item in &mut returned {
+                        if item.function.is_none()
+                            && let Some(expression) = item.expression
+                            && !groups.iter().any(|group| group.same(expression))
+                            && let Some(index) = expression.computed
+                            && computed.operands[index].row_independent()
+                        {
+                            item.expression = None;
+                            item.output = Some(computed.operands[index].clone());
+                        }
+                    }
+                }
+                for item in &returned {
+                    if item.function.is_none()
+                        && item.output.is_none()
+                        && !groups
+                            .iter()
+                            .any(|group| group.same(item.expression.expect("key expression")))
+                    {
+                        return Err(error(
+                            item.alias.at,
                             GraphPatternTextErrorKind::Expected(
                                 "nonaggregate RETURN expression in GROUP BY",
                             ),
-                        )
-                    })?,
-            };
-            output_columns.push(column);
-        }
-        let (having, having_expression) = having::parse(
-            &mut parser,
-            &returned,
-            &groups,
-            &output_columns,
-            &mut hidden,
-            &mut computed,
-        )?;
-        // ORDER BY sorts the rows RETURN produces and never changes them. An
-        // aggregate there needs a statement already grouped by GROUP BY, a
-        // RETURN aggregate or HAVING; otherwise it would silently turn one
-        // row per match into one row per key (openCypher InvalidAggregation).
-        let grouped = explicit_groups
-            || visible > 0
-            || !hidden.is_empty()
-            || !having.is_empty()
-            || having_expression.is_some();
-        let mut result_order: Vec<(ResultOrderColumn, bool, GraphNullPlacement, usize)> =
-            Vec::new();
-        let mut order_expressions = Vec::new();
-        if parser.take_word("ORDER")? {
-            parser.word("BY")?;
-            loop {
-                parser.capacity(
-                    result_order.len(),
-                    MAX_PATTERN_VERTICES,
-                    crate::algebra::PatternLimitDimension::Columns,
-                )?;
-                let at = parser.current.at;
-                let column = parser.aggregate_order_expression(
+                        ));
+                    }
+                }
+                // Hidden grouping keys consume real evaluation columns. Bound their
+                // combined width with returned summaries before any catalog access.
+                for (at, _) in returned
+                    .iter()
+                    .filter(|item| item.function.is_some())
+                    .enumerate()
+                {
+                    parser.capacity(
+                        groups.len() + at,
+                        MAX_PATTERN_VERTICES,
+                        crate::algebra::PatternLimitDimension::Columns,
+                    )?;
+                }
+                let mut hidden = Vec::new();
+                let mut has_output_projection = returned.iter().any(|item| item.output.is_some());
+                let visible = returned
+                    .iter()
+                    .filter(|item| item.function.is_some())
+                    .count();
+                let mut output_columns = Vec::new();
+                for leaf in &output_leaves {
+                    let column = match leaf {
+                        OutputLeaf::Aggregate(leaf) => {
+                            let index = if let Some(index) = returned
+                                .iter()
+                                .filter(|item| item.function.is_some())
+                                .position(|item| {
+                                    item.function == Some(leaf.function)
+                                        && same_expression(item.expression, leaf.expression)
+                                }) {
+                                index
+                            } else if let Some(index) =
+                                hidden.iter().position(|item: &HiddenSummary<'_>| {
+                                    item.function == leaf.function
+                                        && same_expression(item.expression, leaf.expression)
+                                })
+                            {
+                                visible + index
+                            } else {
+                                parser.capacity(
+                                    groups.len() + visible + hidden.len(),
+                                    MAX_PATTERN_VERTICES,
+                                    crate::algebra::PatternLimitDimension::Columns,
+                                )?;
+                                let index = visible + hidden.len();
+                                hidden.push(HiddenSummary {
+                                    expression: leaf.expression,
+                                    function: leaf.function,
+                                    at: leaf.at,
+                                });
+                                index
+                            };
+                            groups.len() + index
+                        }
+                        OutputLeaf::Group(expression) => groups
+                            .iter()
+                            .position(|group| group.same(*expression))
+                            .ok_or_else(|| {
+                                error(
+                                    expression.variable.at,
+                                    GraphPatternTextErrorKind::Expected(
+                                        "nonaggregate RETURN expression in GROUP BY",
+                                    ),
+                                )
+                            })?,
+                    };
+                    output_columns.push(column);
+                }
+                let (having, having_expression) = having::parse(
+                    &mut parser,
                     &returned,
                     &groups,
+                    &output_columns,
                     &mut hidden,
                     &mut computed,
-                    &mut order_expressions,
                 )?;
-                if result_order
-                    .iter()
-                    .any(|(previous, _, _, _)| *previous == column)
-                {
-                    return Err(error(
-                        at,
-                        GraphPatternTextErrorKind::Expected("unique ORDER BY column"),
-                    ));
-                }
-                let descending = parser.take_word("DESC")? || parser.take_word("DESCENDING")?;
-                if !descending && !parser.take_word("ASC")? {
-                    parser.take_word("ASCENDING")?;
-                }
-                let nulls = if parser.take_word("NULLS")? {
-                    if parser.take_word("FIRST")? {
-                        GraphNullPlacement::First
-                    } else {
-                        parser.word("LAST")?;
-                        GraphNullPlacement::Last
+                // ORDER BY sorts the rows RETURN produces and never changes them. An
+                // aggregate there needs a statement already grouped by GROUP BY, a
+                // RETURN aggregate or HAVING; otherwise it would silently turn one
+                // row per match into one row per key (openCypher InvalidAggregation).
+                let grouped = explicit_groups
+                    || visible > 0
+                    || !hidden.is_empty()
+                    || !having.is_empty()
+                    || having_expression.is_some();
+                let mut result_order: Vec<(ResultOrderColumn, bool, GraphNullPlacement, usize)> =
+                    Vec::new();
+                let mut order_expressions = Vec::new();
+                if parser.take_word("ORDER")? {
+                    parser.word("BY")?;
+                    loop {
+                        parser.capacity(
+                            result_order.len(),
+                            MAX_PATTERN_VERTICES,
+                            crate::algebra::PatternLimitDimension::Columns,
+                        )?;
+                        let at = parser.current.at;
+                        let column = parser.aggregate_order_expression(
+                            &returned,
+                            &groups,
+                            &mut hidden,
+                            &mut computed,
+                            &mut order_expressions,
+                        )?;
+                        if result_order
+                            .iter()
+                            .any(|(previous, _, _, _)| *previous == column)
+                        {
+                            return Err(error(
+                                at,
+                                GraphPatternTextErrorKind::Expected("unique ORDER BY column"),
+                            ));
+                        }
+                        let descending =
+                            parser.take_word("DESC")? || parser.take_word("DESCENDING")?;
+                        if !descending && !parser.take_word("ASC")? {
+                            parser.take_word("ASCENDING")?;
+                        }
+                        let nulls = if parser.take_word("NULLS")? {
+                            if parser.take_word("FIRST")? {
+                                GraphNullPlacement::First
+                            } else {
+                                parser.word("LAST")?;
+                                GraphNullPlacement::Last
+                            }
+                        } else {
+                            GraphNullPlacement::Last
+                        };
+                        result_order.push((column, descending, nulls, at));
+                        if !parser.take(b',')? {
+                            break;
+                        }
                     }
-                } else {
-                    GraphNullPlacement::Last
-                };
-                result_order.push((column, descending, nulls, at));
-                if !parser.take(b',')? {
-                    break;
                 }
-            }
-        }
-        let mut ordering = Vec::new();
-        let mut projected_ordering = Vec::new();
-        let mut computed_ordering = Vec::new();
-        let projected_column = |column: ResultOrderColumn| match column {
-            ResultOrderColumn::Projected(column) => Some(column),
-            ResultOrderColumn::Evaluation(GraphAggregateColumn::GroupKey(key)) => {
-                returned.iter().position(|item| {
-                    item.function.is_none()
-                        && item.output.is_none()
-                        && item.expression.is_some_and(|expr| expr.same(groups[key]))
-                })
-            }
-            ResultOrderColumn::Evaluation(GraphAggregateColumn::Aggregate(summary)) => returned
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| item.function.is_some())
-                .nth(summary)
-                .map(|(column, _)| column),
-            ResultOrderColumn::Computed(_) => None,
-        };
-        let projected = result_order
-            .iter()
-            .any(|(column, _, _, _)| matches!(column, ResultOrderColumn::Projected(_)));
-        let private_rank = !order_expressions.is_empty()
-            || (projected
-                && result_order
+                let mut ordering = Vec::new();
+                let mut projected_ordering = Vec::new();
+                let mut computed_ordering = Vec::new();
+                let projected_column = |column: ResultOrderColumn| match column {
+                    ResultOrderColumn::Projected(column) => Some(column),
+                    ResultOrderColumn::Evaluation(GraphAggregateColumn::GroupKey(key)) => {
+                        returned.iter().position(|item| {
+                            item.function.is_none()
+                                && item.output.is_none()
+                                && item.expression.is_some_and(|expr| expr.same(groups[key]))
+                        })
+                    }
+                    ResultOrderColumn::Evaluation(GraphAggregateColumn::Aggregate(summary)) => {
+                        returned
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, item)| item.function.is_some())
+                            .nth(summary)
+                            .map(|(column, _)| column)
+                    }
+                    ResultOrderColumn::Computed(_) => None,
+                };
+                let projected = result_order
                     .iter()
-                    .any(|(column, _, _, _)| projected_column(*column).is_none()));
-        if private_rank {
-            has_output_projection = true;
-            let width = groups.len() + visible + hidden.len();
-            let input_column = |column| match column {
-                ResultOrderColumn::Evaluation(GraphAggregateColumn::GroupKey(at)) => at,
-                ResultOrderColumn::Evaluation(GraphAggregateColumn::Aggregate(at)) => {
-                    groups.len() + at
-                }
-                ResultOrderColumn::Projected(at) => width + at,
-                ResultOrderColumn::Computed(_) => unreachable!("expression leaves are columns"),
-            };
-            for (column, descending, nulls, _) in result_order {
-                let value = if let ResultOrderColumn::Computed(index) = column {
-                    let (value, leaves) = &order_expressions[index];
-                    let mut value = value.clone();
-                    let columns = leaves.iter().copied().map(input_column).collect::<Vec<_>>();
-                    remap_output_columns(&mut value, &columns);
-                    value
-                } else {
-                    ReadValueTemplate::Column(input_column(column))
-                };
-                projected_ordering.push(GraphValueOrder {
-                    column: computed_ordering.len(),
-                    descending,
-                    nulls_first: nulls == GraphNullPlacement::First,
-                });
-                computed_ordering.push(value);
-            }
-        } else if projected {
-            // A computed alias selects the existing post-group projection
-            // owner. Other keys must be in that same returned tuple; hidden
-            // evaluation keys cannot masquerade as projected positions.
-            for (column, descending, nulls, at) in result_order {
-                let column = match column {
+                    .any(|(column, _, _, _)| matches!(column, ResultOrderColumn::Projected(_)));
+                let private_rank = !order_expressions.is_empty()
+                    || (projected
+                        && result_order
+                            .iter()
+                            .any(|(column, _, _, _)| projected_column(*column).is_none()));
+                if private_rank {
+                    has_output_projection = true;
+                    let width = groups.len() + visible + hidden.len();
+                    let input_column = |column| match column {
+                        ResultOrderColumn::Evaluation(GraphAggregateColumn::GroupKey(at)) => at,
+                        ResultOrderColumn::Evaluation(GraphAggregateColumn::Aggregate(at)) => {
+                            groups.len() + at
+                        }
+                        ResultOrderColumn::Projected(at) => width + at,
+                        ResultOrderColumn::Computed(_) => {
+                            unreachable!("expression leaves are columns")
+                        }
+                    };
+                    for (column, descending, nulls, _) in result_order {
+                        let value = if let ResultOrderColumn::Computed(index) = column {
+                            let (value, leaves) = &order_expressions[index];
+                            let mut value = value.clone();
+                            let columns =
+                                leaves.iter().copied().map(input_column).collect::<Vec<_>>();
+                            remap_output_columns(&mut value, &columns);
+                            value
+                        } else {
+                            ReadValueTemplate::Column(input_column(column))
+                        };
+                        projected_ordering.push(GraphValueOrder {
+                            column: computed_ordering.len(),
+                            descending,
+                            nulls_first: nulls == GraphNullPlacement::First,
+                        });
+                        computed_ordering.push(value);
+                    }
+                } else if projected {
+                    // A computed alias selects the existing post-group projection
+                    // owner. Other keys must be in that same returned tuple; hidden
+                    // evaluation keys cannot masquerade as projected positions.
+                    for (column, descending, nulls, at) in result_order {
+                        let column = match column {
                     ResultOrderColumn::Projected(column) => Some(column),
                     ResultOrderColumn::Evaluation(GraphAggregateColumn::GroupKey(key)) => {
                         returned.iter().position(|item| {
@@ -528,45 +588,62 @@ impl PreparedGraphAggregateText {
                         ),
                     )
                 })?;
-                if projected_ordering
-                    .iter()
-                    .any(|key: &GraphValueOrder| key.column == column)
-                {
+                        if projected_ordering
+                            .iter()
+                            .any(|key: &GraphValueOrder| key.column == column)
+                        {
+                            return Err(error(
+                                at,
+                                GraphPatternTextErrorKind::Expected("unique ORDER BY column"),
+                            ));
+                        }
+                        projected_ordering.push(GraphValueOrder {
+                            column,
+                            descending,
+                            nulls_first: nulls == GraphNullPlacement::First,
+                        });
+                    }
+                } else {
+                    // Unchanged column-only queries keep their evaluation owner and
+                    // exact previous template and bound-plan transcripts.
+                    for (column, descending, nulls, _) in result_order {
+                        let ResultOrderColumn::Evaluation(column) = column else {
+                            unreachable!("projected ordering was selected above");
+                        };
+                        ordering.push(GraphAggregateOrder {
+                            column,
+                            descending,
+                            nulls,
+                        });
+                    }
+                }
+                if !grouped && let Some(first) = hidden.first() {
                     return Err(error(
-                        at,
-                        GraphPatternTextErrorKind::Expected("unique ORDER BY column"),
+                        first.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "GROUP BY, HAVING or a RETURN aggregate before an ORDER BY aggregate",
+                        ),
                     ));
                 }
-                projected_ordering.push(GraphValueOrder {
-                    column,
-                    descending,
-                    nulls_first: nulls == GraphNullPlacement::First,
-                });
-            }
-        } else {
-            // Unchanged column-only queries keep their evaluation owner and
-            // exact previous template and bound-plan transcripts.
-            for (column, descending, nulls, _) in result_order {
-                let ResultOrderColumn::Evaluation(column) = column else {
-                    unreachable!("projected ordering was selected above");
-                };
-                ordering.push(GraphAggregateOrder {
-                    column,
-                    descending,
-                    nulls,
-                });
-            }
-        }
-        if !grouped && let Some(first) = hidden.first() {
-            return Err(error(
-                first.at,
-                GraphPatternTextErrorKind::Expected(
-                    "GROUP BY, HAVING or a RETURN aggregate before an ORDER BY aggregate",
-                ),
-            ));
-        }
-        parser.parse_pagination()?;
-        parser.end()?;
+                parser.parse_pagination()?;
+                parser.end()?;
+                Ok(ParsedAggregate {
+                    parser,
+                    computed,
+                    returned,
+                    groups,
+                    hidden,
+                    output_columns,
+                    distinct,
+                    has_output_projection,
+                    having,
+                    having_expression,
+                    ordering,
+                    projected_ordering,
+                    computed_ordering,
+                })
+            },
+        )?;
         let output_aggregates = returned
             .iter()
             .filter(|item| item.function.is_some())

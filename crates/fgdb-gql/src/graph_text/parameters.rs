@@ -450,11 +450,14 @@ impl<'a> Parser<'a> {
     /// schemas all agree with the final parameter contract. Every restart
     /// adds a distinct parameter; the lexer bounds their total. Catalog
     /// resolution and parameter binding happen only after this returns.
-    pub(super) fn infer_parameter_aliases<T>(
+    pub(super) fn infer_parameter_aliases<T, E>(
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
-        mut parse: impl FnMut(Self) -> Result<T, crate::GraphSetTextError>,
-    ) -> Result<T, crate::GraphSetTextError> {
+        mut parse: impl FnMut(Self) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<GraphPatternTextError>,
+    {
         let constraints: BTreeMap<String, GqlParameterType> = BTreeMap::new();
         let inference = std::rc::Rc::new(std::cell::RefCell::new(constraints));
         loop {

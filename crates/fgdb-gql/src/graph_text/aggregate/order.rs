@@ -149,12 +149,22 @@ impl<'a> Parser<'a> {
             leaves.push(leaf);
             Ok(Some(index))
         };
+        // These result expressions already own their column resolver. Expose
+        // only its public binding names to collection-parameter inference,
+        // retaining the previous dynamic domain until that resolver supplies
+        // the actual group/summary column. Computed results carry no origin.
+        let scope = returned
+            .iter()
+            .map(|item| (item.alias, crate::GraphSetColumnType::Any))
+            .collect();
+        let row = self.resolved_row.replace(scope);
         let value = if whole {
             self.read_resolved_item(&mut resolve, 0)
         } else {
             self.read_resolved_value(&mut resolve, 0)
-        }
-        .map_err(|source| {
+        };
+        self.resolved_row = row;
+        let value = value.map_err(|source| {
             let kind = match source.kind {
                 crate::GraphSetTextErrorKind::Pattern(kind) => kind,
                 _ => GraphPatternTextErrorKind::Expected(if whole {

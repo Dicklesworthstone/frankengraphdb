@@ -212,11 +212,12 @@ interruptions and late failures under LIMIT 0. A native integration regression
 covers capability filtering in every branch, pinned snapshots and staged
 transaction overlays. These are added regression sources, not passing runtime
 evidence. Targeted pinned formatting and `git diff --check` passed, and
-independent source/API review found no remaining blocker. Compilation,
-runtime tests, Clippy, UBS and exact-tree qualification remain **UNRUN**:
-the earlier execution host disconnected before product compilation, and
-the restored host has not returned a terminal build verdict. The broader
-language beads remain open.
+independent source/API review found no remaining blocker. Scoped UBS completed
+with reviewed diagnostics and no actionable changed-production finding.
+Compilation, runtime tests, Clippy and exact-tree qualification remain
+**UNRUN**: the earlier execution host disconnected before product compilation,
+and the restored host could not admit a compiler under memory pressure.
+The broader language beads remain open.
 
 ### Parameterized regular expressions — qualification pending
 
@@ -586,11 +587,50 @@ The shared native operators retain imported-value typing, subquery scope privacy
 
 Pinned formatting and patch applicability checks are available for this source addition. Rust compilation and these regression executions remain **UNRUN**: the pinned foundation compilation previously exhausted the environment's memory allowance, and the canonical filesystem is full. These sources do not close either broader bead or claim a completed exact-tree proof.
 
-### Collection parameter types through WITH aliases
+### Collection parameter types through WITH and aggregate clauses
 
-Source added 2026-11-12 for `fgdb-l5k31`: prepared set queries infer List and Map parameter contracts from structural uses of identity `WITH` aliases, including renamed aliases, `WITH *`, later graph clauses and aggregate grouping keys. For example, `WITH $items AS xs RETURN [x IN xs | x + 1] AS values` now derives the same canonical template as an explicit List declaration. List comprehensions, predicates, list functions and `UNWIND` constrain their bare sources; `keys`, `properties` and map field reads constrain Map sources. Explicit declarations, including Text for `size`, retain precedence. Computed values and aggregate results do not transfer parameter identity, and shadowed bindings remain separate.
+Source added 2026-11-12 for `fgdb-l5k31`. Prepared set queries and both
+aggregate preparation facades infer List and Map contracts from structural
+uses of bare parameters and identity aliases. Renames, `WITH *`, later graph
+clauses, terminal aggregate arguments, grouping, computed RETURN, HAVING and
+ORDER BY participate in the same complete unresolved inference phase. For
+example, `WITH $items AS xs RETURN sum(head(xs)) AS total` and
+`MATCH (n) RETURN $items AS xs, count(*) AS c ORDER BY size(xs)` derive the
+same canonical templates as their explicit List declarations.
 
-The ordinary unresolved parser records binding origins and rebuilds the complete template when a new collection constraint appears, before catalog resolution. Each restart adds a distinct parameter constraint, bounded by the existing parameter and source limits; compilation work is not cumulatively metered across those restarts. Discovered List/Map requirements must agree at every alias or bare-parameter use, including dynamic value operators whose ordinary column admission cannot prove that conflict. Five regression functions in `crates/fgdb-gql/tests/list_values.rs` exercise canonical equivalence, alias chains, independent parameters, rebinding, duplicate and NULL values, shadowing, explicit types and incompatible contracts before catalog access. Legacy nonnullable Int64 and nullable canonical scalar declarations retain their distinct binding contracts. Standalone final-aggregate facades and multi-origin aliases exported by inner UNION retain their existing explicit-type requirements. Pinned formatting and independent source review pass. Runtime tests remain **UNRUN**: both the recovered serial test build and a metadata-only check were killed while compiling the pinned asupersync dependency, before first-party diagnostics. The broader bead and exact-tree qualification remain open.
+The ordinary parser records binding origins and rebuilds the complete
+unresolved template when a new collection constraint appears. Only after
+constraints stabilize may aggregate finishers resolve graph symbols or
+materialize their private generated aliases. Late direct uses such as
+`head($items)` participate in the same retry mechanism. Each restart adds a
+distinct parameter constraint, bounded by existing parameter and source
+limits; compilation work is not cumulatively metered across those restarts.
+
+Explicit declarations, including Text for `size` and canonical Null, retain
+precedence. Result aliases shadow input names, and only valid grouping inputs
+remain visible after grouping. Computed values and aggregate results do not
+transfer parameter identity. List/Map requirements must agree at every alias
+or bare use; incompatible contracts and invalid terminal clauses refuse
+before catalog access. Multi-origin aliases exported by inner UNION retain
+their existing explicit-type requirements.
+
+Five set-query regressions and nine added aggregate regressions cover canonical
+equivalence, aliases and graph boundaries, direct and terminal consumers,
+rebinding bags/empty lists/NULL, explicit domains, shadowing, empty grouping
+and zero catalog callbacks on conflicts. They are in
+`crates/fgdb-gql/tests/list_values.rs`,
+`crates/fgdb-gql/tests/pipeline_aggregate_text.rs` and
+`crates/fgdb-gql/tests/computed_aggregate_text.rs`.
+
+Pinned formatting and whitespace checks passed for the final feature sources.
+Independent production and regression reviews found no remaining concrete
+API, lifetime, scope or oracle blocker. Scoped UBS completed; its sole critical
+diagnostic compared public authorization-error variants in a test and was
+reviewed as a false positive, and changed production findings had no actionable
+defect. Cargo compilation, runtime tests, Clippy and exact-tree qualification
+remain **UNRUN**. The controlled build launcher refused before spawning Cargo
+when available host memory fell to approximately 1.70 GiB. The broader bead
+remains open.
 
 ### Pinned embedded read views
 

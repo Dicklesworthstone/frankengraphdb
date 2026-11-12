@@ -128,11 +128,22 @@ fn expression<'a>(
     };
     // The HAVING owner reads comparisons and Boolean precedence itself.
     // ORDER BY instead owns a complete value, which may itself be Boolean.
+    // Match that resolver's scope for structural parameter constraints:
+    // public aliases shadow input names; only actual grouping inputs remain
+    // visible. Summary results never inherit their arguments' identities.
+    let mut scope = output.to_vec();
+    for (index, column) in schema[..input_visible].iter().enumerate() {
+        if keys.contains(&index) && !scope.iter().any(|(name, _)| name.text == column.0.text) {
+            scope.push(*column);
+        }
+    }
+    let row = parser.resolved_row.replace(scope);
     let expression = if whole {
         parser.read_resolved_item(&mut resolve, 0)
     } else {
         parser.read_resolved_value(&mut resolve, 0)
     };
+    parser.resolved_row = row;
     if let Some(failure) = failure {
         return Err(failure);
     }

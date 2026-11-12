@@ -1692,3 +1692,239 @@ fn composite_aggregate_results_are_arithmetic_and_concatenation_operands() {
         );
     }
 }
+
+mod collection_parameter_inference {
+    use super::*;
+    use fgdb_gql::algebra::GraphValue;
+
+    fn integer(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+
+    fn inferred_as(
+        text: &str,
+        declarations: &[(&str, GqlParameterType)],
+    ) -> PreparedGraphAggregateText {
+        let inferred = PreparedGraphAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        let declared =
+            PreparedGraphAggregateText::prepare_with_parameter_types(text, declarations, symbols)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(
+            inferred.canonical_template_bytes(),
+            declared.canonical_template_bytes(),
+            "{text}"
+        );
+        for &(name, kind) in declarations {
+            assert!(
+                inferred
+                    .parameter_schema()
+                    .iter()
+                    .any(|spec| spec.name.as_str() == name && spec.parameter_type == kind),
+                "{text}: {name}"
+            );
+        }
+        inferred
+    }
+
+    fn execute(
+        template: &PreparedGraphAggregateText,
+        arguments: &GqlParameters,
+        vertices: &[VId],
+    ) -> Vec<GraphAggregateRow> {
+        run(
+            &template.bind_parameters(arguments).unwrap(),
+            vertices,
+            &[],
+            &Props::new(),
+        )
+        .unwrap()
+        .value
+    }
+
+    #[test]
+    fn result_clause_consumers_infer_collection_return_aliases() {
+        let arguments = GqlParameters::new()
+            .with_list("items", vec![integer(2), integer(2), integer(7)])
+            .unwrap();
+        for text in [
+            "MATCH (n) RETURN $items AS xs, count(*) AS c HAVING size(xs) = 3",
+            "MATCH (n) RETURN $items AS xs, count(*) AS c ORDER BY size(xs)",
+            "MATCH (n) RETURN $items AS xs, count(*) AS c HAVING size($items) = 3",
+            "MATCH (n) RETURN $items AS xs, count(*) AS c ORDER BY head($items)",
+        ] {
+            let template = inferred_as(text, &[("items", GqlParameterType::List)]);
+            let rows = execute(&template, &arguments, &[VId(1), VId(2)]);
+            assert_eq!(rows.len(), 1, "{text}");
+            assert_eq!(
+                rows[0].values().last().unwrap().as_count(),
+                Some(2),
+                "{text}"
+            );
+        }
+        let arguments = GqlParameters::new()
+            .with_map("props", vec![("a".into(), integer(2))])
+            .unwrap();
+        for text in [
+            "MATCH (n) RETURN $props AS p, count(*) AS c HAVING size(keys(p)) = 1",
+            "MATCH (n) RETURN $props AS p, count(*) AS c ORDER BY size(keys(p))",
+            "MATCH (n) RETURN $props AS p, count(*) AS c HAVING size(keys($props)) = 1",
+        ] {
+            let template = inferred_as(text, &[("props", GqlParameterType::Map)]);
+            let rows = execute(&template, &arguments, &[VId(1), VId(2)]);
+            assert_eq!(rows.len(), 1, "{text}");
+            assert_eq!(
+                rows[0].values().last().unwrap().as_count(),
+                Some(2),
+                "{text}"
+            );
+        }
+
+        let calls = Cell::new(0);
+        let template = PreparedGraphAggregateText::prepare(
+            "MATCH (n {p: 1}) RETURN $items AS xs, count(*) AS c HAVING size(xs) > 0",
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(template.parameter_schema()[0].occurrences, 1);
+        assert_eq!(
+            template.parameter_schema()[0].parameter_type,
+            GqlParameterType::List
+        );
+    }
+
+    #[test]
+    fn empty_grouping_keeps_inferred_collection_outputs_and_rebinding() {
+        let implicit = inferred_as(
+            "MATCH (n) RETURN $items AS xs, count(*) AS c ORDER BY size(xs)",
+            &[("items", GqlParameterType::List)],
+        );
+        let global = inferred_as(
+            "MATCH (n) RETURN $items AS xs, count(*) AS c GROUP BY () ORDER BY size(xs)",
+            &[("items", GqlParameterType::List)],
+        );
+        let definition = global.canonical_template_bytes();
+        for values in [vec![], vec![2, 2, 7], vec![9]] {
+            let expected = GraphValue::List(values.iter().copied().map(integer).collect());
+            let arguments = GqlParameters::new()
+                .with_list("items", values.into_iter().map(integer).collect())
+                .unwrap();
+            assert!(execute(&implicit, &arguments, &[]).is_empty());
+            let rows = execute(&implicit, &arguments, &[VId(1), VId(2)]);
+            assert_eq!(rows.len(), 1);
+            match implicit.output_slots()[0] {
+                GraphAggregateTextSlot::GroupKey(index) => {
+                    assert_eq!(rows[0].keys()[index], expected);
+                }
+                GraphAggregateTextSlot::Aggregate(index) => {
+                    assert_eq!(rows[0].values()[index].as_value(), Some(&expected));
+                }
+            }
+            assert_eq!(rows[0].values().last().unwrap().as_count(), Some(2));
+
+            let rows = execute(&global, &arguments, &[]);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].values()[0].as_value(), Some(&expected));
+            assert_eq!(rows[0].values()[1].as_count(), Some(0));
+            assert_eq!(global.canonical_template_bytes(), definition);
+        }
+        let null = GqlParameters::new().with_null("items").unwrap();
+        let rows = execute(&global, &null, &[]);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].values()[0].is_null());
+        assert_eq!(rows[0].values()[1].as_count(), Some(0));
+        assert_eq!(global.canonical_template_bytes(), definition);
+    }
+
+    #[test]
+    fn result_alias_constraints_respect_explicit_domains_and_binding_identity() {
+        let text = "MATCH (n) RETURN $items AS xs, count(*) AS c HAVING size(xs) = 5";
+        let template = PreparedGraphAggregateText::prepare_with_parameter_types(
+            text,
+            &[("items", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
+            symbols,
+        )
+        .unwrap();
+        let rows = execute(
+            &template,
+            &GqlParameters::new().with_text("items", "naïve").unwrap(),
+            &[VId(1), VId(2)],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values().last().unwrap().as_count(), Some(2));
+
+        let template = PreparedGraphAggregateText::prepare_with_parameter_types(
+            "MATCH (n) RETURN $items AS xs, count(*) AS c \
+             HAVING head(xs) IS NULL ORDER BY keys(xs)",
+            &[("items", GqlParameterType::Scalar(CanonicalScalarKind::Null))],
+            symbols,
+        )
+        .unwrap();
+        let rows = execute(
+            &template,
+            &GqlParameters::new().with_null("items").unwrap(),
+            &[VId(1), VId(2)],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values().last().unwrap().as_count(), Some(2));
+
+        let template = PreparedGraphAggregateText::prepare(
+            "MATCH (n) RETURN $items AS other, [9] AS xs, count(*) AS c ORDER BY head(xs)",
+            symbols,
+        )
+        .unwrap();
+        assert_eq!(
+            template.parameter_schema()[0].parameter_type,
+            GqlParameterType::Int64
+        );
+        let rows = execute(
+            &template,
+            &GqlParameters::new().with_int64("items", 1).unwrap(),
+            &[VId(1), VId(2)],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values().last().unwrap().as_count(), Some(2));
+    }
+
+    #[test]
+    fn contradictory_result_uses_fail_before_catalog_resolution() {
+        for text in [
+            "MATCH (n {p: 1}) RETURN $items AS xs, count(*) AS c \
+             HAVING head(xs) = 1 ORDER BY keys(xs)",
+            "MATCH (n {p: 1}) RETURN $items AS xs, count(*) AS c \
+             HAVING size(keys(xs)) > 0 ORDER BY head(xs)",
+            "MATCH (n {p: 1}) RETURN $items AS xs, count(*) AS c \
+             HAVING size(keys($items)) > 0 ORDER BY head(xs)",
+        ] {
+            let error = PreparedGraphAggregateText::prepare(text, |_, _| {
+                panic!("unresolved result constraints must precede catalog resolution")
+            })
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &error.kind,
+                    GraphPatternTextErrorKind::ConflictingParameterTypes
+                ),
+                "{text}: {error:?}"
+            );
+        }
+        for text in [
+            "MATCH (n {p: 1}) RETURN $items AS xs, count(*) AS c \
+             HAVING size(xs) > 0 LIMIT $items",
+            "MATCH (n {p: 1}) RETURN $items AS xs, count(*) AS c \
+             HAVING size(xs) > 0 ORDER BY missing",
+        ] {
+            assert!(
+                PreparedGraphAggregateText::prepare(text, |_, _| {
+                    panic!("invalid terminal clauses must precede catalog resolution")
+                })
+                .is_err(),
+                "{text}"
+            );
+        }
+    }
+}
