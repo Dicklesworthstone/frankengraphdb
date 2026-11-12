@@ -1406,26 +1406,50 @@ mod inferred_collection_parameters {
                 CanonicalScalar::Null,
             )])]
         );
+        // Dynamic row admission does not change an explicit argument's
+        // contract: legacy Int64 remains nonnullable and never becomes List.
+        let scalar = PreparedGraphSetText::prepare_with_parameter_types(
+            "WITH $items AS xs RETURN head(xs) AS value",
+            &[("items", GqlParameterType::Int64)],
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            scalar.parameter_schema()[0].parameter_type,
+            GqlParameterType::Int64
+        );
         assert!(
-            PreparedGraphSetText::prepare_with_parameter_types(
-                "WITH $items AS xs RETURN head(xs) AS value",
-                &[("items", GqlParameterType::Int64)],
-                |_, _| None,
+            scalar
+                .bind_parameters(&GqlParameters::new().with_list("items", vec![]).unwrap())
+                .is_err()
+        );
+        assert!(
+            scalar
+                .bind_parameters(&GqlParameters::new().with_null("items").unwrap())
+                .is_err()
+        );
+        let nullable = PreparedGraphSetText::prepare_with_parameter_types(
+            "WITH $items AS xs RETURN head(xs) AS value",
+            &[(
+                "items",
+                GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Int),
+            )],
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            run(&nullable, &GqlParameters::new().with_null("items").unwrap()),
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                CanonicalScalar::Null,
+            )])]
+        );
+        assert!(
+            PreparedGraphSetText::prepare(
+                "MATCH (n:Person) WITH $items AS xs RETURN xs * 2 AS scalar, head(xs) AS first",
+                |_, _| panic!("incompatible scalar uses must refuse before catalog resolution"),
             )
             .is_err()
         );
-        for text in [
-            "MATCH (n:Person) WITH $items AS xs RETURN xs * 2 AS scalar, head(xs) AS first",
-            "MATCH (n:Person) WITH $items AS xs RETURN head(xs) AS first, keys(xs) AS names",
-        ] {
-            assert!(
-                PreparedGraphSetText::prepare(text, |_, _| {
-                    panic!("incompatible parameter uses must refuse before catalog resolution")
-                })
-                .is_err(),
-                "{text}"
-            );
-        }
         let union = inferred_as(
             "WITH $items AS xs RETURN size(xs) AS value \
              UNION ALL WITH 9 AS xs RETURN xs AS value",
@@ -1442,6 +1466,52 @@ mod inferred_collection_parameters {
                 GraphValueRow::from_owned_values(vec![int(2)]),
                 GraphValueRow::from_owned_values(vec![int(9)]),
             ]
+        );
+    }
+
+    #[test]
+    fn conflicting_alias_and_direct_collection_requirements_refuse_before_catalog() {
+        for text in [
+            "MATCH (n:Person) WITH $items AS xs RETURN head(xs) AS first, keys(xs) AS names",
+            "MATCH (n:Person) WITH $items AS xs RETURN keys(xs) AS names, head(xs) AS first",
+            "MATCH (n:Person) WITH $items AS xs RETURN head(xs) AS first, xs.a AS field",
+            "MATCH (n:Person) WITH $items AS xs RETURN xs.a AS field, head(xs) AS first",
+            "MATCH (n:Person) WITH $items AS xs RETURN head(xs) AS first, keys($items) AS names",
+            "MATCH (n:Person) WITH $items AS xs RETURN keys(xs) AS names, head($items) AS first",
+            "MATCH (n:Person) WITH $items AS xs RETURN head($items) AS first, keys(xs) AS names",
+            "MATCH (n:Person) WITH $items AS xs RETURN keys($items) AS names, head(xs) AS first",
+        ] {
+            let result = PreparedGraphSetText::prepare(text, |_, _| {
+                panic!("incompatible collection uses must refuse before catalog resolution")
+            });
+            assert!(
+                matches!(
+                    result,
+                    Err(fgdb_gql::GraphSetTextError {
+                        kind: fgdb_gql::GraphSetTextErrorKind::Pattern(
+                            fgdb_gql::GraphPatternTextErrorKind::ConflictingParameterTypes,
+                        ),
+                        ..
+                    })
+                ),
+                "{text}"
+            );
+        }
+        // The caller can declare NULL explicitly; neither collection use
+        // changes that contract or invents a conflicting inferred domain.
+        let null = PreparedGraphSetText::prepare_with_parameter_types(
+            "WITH $items AS xs RETURN head(xs) AS first, keys(xs) AS names",
+            &[(
+                "items",
+                GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Null),
+            )],
+            |_, _| None,
+        )
+        .unwrap();
+        let absent = GraphValue::Scalar(CanonicalScalar::Null);
+        assert_eq!(
+            run(&null, &GqlParameters::new().with_null("items").unwrap()),
+            vec![GraphValueRow::from_owned_values(vec![absent; 2])]
         );
     }
 

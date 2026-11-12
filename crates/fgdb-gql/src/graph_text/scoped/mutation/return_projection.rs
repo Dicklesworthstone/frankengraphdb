@@ -2003,8 +2003,9 @@ impl<'a> Parser<'a> {
     }
 
     /// A collection-only use of an actual row binding constrains its bare
-    /// parameter origin. Explicit declarations and already inferred contracts
-    /// remain authoritative; ordinary type admission reports incompatible uses.
+    /// parameter origin. Explicit declarations keep their existing binding and
+    /// NULL semantics. Inferred contracts must agree at every use: dynamic value
+    /// operators cannot reject every incompatible domain during preparation.
     fn infer_parameter_alias(
         &mut self,
         kind: GqlParameterType,
@@ -2028,6 +2029,7 @@ impl<'a> Parser<'a> {
         else {
             return Ok(());
         };
+        self.check_inferred_collection_parameter(parameter, kind, self.current.at)?;
         if self.parameter_types.contains_key(parameter) {
             return Ok(());
         }
@@ -2040,6 +2042,30 @@ impl<'a> Parser<'a> {
             // this provisional type error never escapes as a final verdict.
             return Err(error(
                 self.current.at,
+                GraphPatternTextErrorKind::ConflictingParameterTypes,
+            ));
+        }
+        Ok(())
+    }
+
+    /// A discovered structural contract must agree at every later use, even
+    /// when a value operator accepts a dynamic column during type admission.
+    /// Explicit declarations are not discovery constraints: their nullable
+    /// scalar domains retain the ordinary value grammar and evaluator.
+    fn check_inferred_collection_parameter(
+        &self,
+        name: &str,
+        required: GqlParameterType,
+        at: usize,
+    ) -> Result<(), GraphPatternTextError> {
+        if self.parameter_inference.as_ref().is_some_and(|inference| {
+            inference
+                .borrow()
+                .get(name)
+                .is_some_and(|previous| *previous != required)
+        }) {
+            return Err(error(
+                at,
                 GraphPatternTextErrorKind::ConflictingParameterTypes,
             ));
         }
@@ -2062,6 +2088,7 @@ impl<'a> Parser<'a> {
                 if word.eq_ignore_ascii_case("WHERE") || word.eq_ignore_ascii_case("AS"))
         {
             if let TokenKind::Parameter(name) = self.current.kind {
+                self.check_inferred_collection_parameter(name, kind, self.current.at)?;
                 self.parameter_types.entry(name.to_owned()).or_insert(kind);
             } else {
                 self.infer_parameter_alias(kind, schema)?;
