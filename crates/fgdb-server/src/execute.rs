@@ -39,6 +39,20 @@ use fgdb_protocol::body::{ErrorCode, Execute, ExecuteBatch, Outcome, WireValue};
 use fgdb_types::{EmbeddedTxnCompletion, PurposeContexts};
 use fgdb_warden::CapabilityToken;
 
+pub(crate) fn budget_flag(message: &str) -> Option<&'static str> {
+    if message.contains("GQL SnapshotRecords budget exceeded:") {
+        Some("--max-snapshot-records")
+    } else if message.contains("GQL ResultRows budget exceeded:") {
+        Some("--max-result-rows")
+    } else if message.contains("GLA WorkUnits limit exceeded:") {
+        Some("--max-work-units")
+    } else if message.contains("GLA ScratchEntries limit exceeded:") {
+        Some("--max-scratch-entries")
+    } else {
+        None
+    }
+}
+
 /// A refusal of one statement, reported on its child stream.
 pub(crate) struct Refusal {
     pub(crate) code: ErrorCode,
@@ -47,10 +61,16 @@ pub(crate) struct Refusal {
 
 impl Refusal {
     pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
+        let mut message = message.into();
+        if code == ErrorCode::Budget
+            && !message.contains(" (raise with ")
+            && let Some(flag) = budget_flag(&message)
+        {
+            message.push_str(" (raise with ");
+            message.push_str(flag);
+            message.push(')');
         }
+        Self { code, message }
     }
 }
 
@@ -1325,7 +1345,13 @@ pub(crate) fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refus
         if matches!(
             current.downcast_ref::<fgdb_gql::GraphWriteScriptBatchError>(),
             Some(fgdb_gql::GraphWriteScriptBatchError::TooManyStatements { .. })
-        ) {
+        ) || current
+            .downcast_ref::<fgdb_gql::GqlBudgetExceeded>()
+            .is_some()
+            || current
+                .downcast_ref::<fgdb_gql::GlaLimitExceeded>()
+                .is_some()
+        {
             code = ErrorCode::Budget;
             break;
         }
@@ -1433,3 +1459,84 @@ mod returning_admission_tests;
 
 #[cfg(test)]
 pub(crate) mod statement_time_tests;
+
+#[cfg(test)]
+mod budget_hint_tests {
+    use super::*;
+    use fgdb_gql::{GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlBudgetExceeded};
+
+    #[test]
+    fn budget_refusals_append_matching_fgdbd_serve_flag_without_touching_warden_caveats() {
+        let cases = [
+            (
+                GqlBudgetExceeded {
+                    dimension: GqlBudgetDimension::SnapshotRecords,
+                    limit: 100,
+                    observed: 101,
+                }
+                .to_string(),
+                "--max-snapshot-records",
+            ),
+            (
+                GqlBudgetExceeded {
+                    dimension: GqlBudgetDimension::ResultRows,
+                    limit: 50,
+                    observed: 51,
+                }
+                .to_string(),
+                "--max-result-rows",
+            ),
+            (
+                GlaLimitExceeded {
+                    dimension: GlaLimitDimension::WorkUnits,
+                    limit: 1_000,
+                    observed: 1_001,
+                }
+                .to_string(),
+                "--max-work-units",
+            ),
+            (
+                GlaLimitExceeded {
+                    dimension: GlaLimitDimension::ScratchEntries,
+                    limit: 500,
+                    observed: 501,
+                }
+                .to_string(),
+                "--max-scratch-entries",
+            ),
+        ];
+        for (raw, flag) in cases {
+            let refusal = Refusal::new(ErrorCode::Budget, raw.clone());
+            assert_eq!(refusal.code, ErrorCode::Budget);
+            assert!(
+                refusal.message.ends_with(&format!(" (raise with {flag})")),
+                "expected {flag} hint in {:?}",
+                refusal.message
+            );
+            let idempotent = Refusal::new(ErrorCode::Budget, refusal.message.clone());
+            assert_eq!(idempotent.message, refusal.message);
+        }
+
+        let write_snap = write_refusal(&GqlBudgetExceeded {
+            dimension: GqlBudgetDimension::SnapshotRecords,
+            limit: 10,
+            observed: 11,
+        });
+        assert_eq!(write_snap.code, ErrorCode::Budget);
+        assert!(write_snap.message.contains("--max-snapshot-records"));
+
+        let write_work = write_refusal(&GlaLimitExceeded {
+            dimension: GlaLimitDimension::WorkUnits,
+            limit: 10,
+            observed: 11,
+        });
+        assert_eq!(write_work.code, ErrorCode::Budget);
+        assert!(write_work.message.contains("--max-work-units"));
+
+        let warden = Refusal::new(
+            ErrorCode::Budget,
+            fgdb_warden::Error::LimitExceeded(fgdb_warden::LimitDimension::Work).to_string(),
+        );
+        assert!(!warden.message.contains("--max-"));
+    }
+}

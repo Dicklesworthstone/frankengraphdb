@@ -307,6 +307,12 @@ impl<'a> VerifiedCapability<'a> {
         &self.program
     }
 
+    /// Compile this verified capability's read projection into [`fgdb_policy::ReadPolicy`]
+    /// when exact lowering exists without approximation.
+    pub fn to_read_policy(&self) -> Result<Option<fgdb_policy::ReadPolicy>, fgdb_policy::PolicyError> {
+        self.program.to_read_policy()
+    }
+
     /// Authorize whole-database physical maintenance, independently of query
     /// rights and their per-query ceilings. A subgraph or field restriction
     /// cannot authorize work over hidden objects. The host must recheck after
@@ -366,7 +372,11 @@ impl<'a> VerifiedCapability<'a> {
         if !self.program.rights.can_write() {
             return Err(Error::PermissionDenied);
         }
-        Ok(ExecutionPermit::owning(self.program, self._authority, now_ms))
+        Ok(ExecutionPermit::owning(
+            self.program,
+            self._authority,
+            now_ms,
+        ))
     }
 }
 

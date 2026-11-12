@@ -19,6 +19,12 @@ use fgdb_types::CanonicalScalar;
 pub enum GraphSetOperand {
     Column(usize),
     Literal(GqlScalarParameter),
+    /// openCypher `id(x)` (`text == false`) or `elementId(x)` (`text == true`)
+    /// over a vertex, edge, or dynamic element column.
+    IdentityColumn {
+        column: usize,
+        text: bool,
+    },
 }
 impl core::fmt::Debug for GraphSetOperand {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -119,12 +125,12 @@ impl GraphSetPredicateOp {
                 } => {
                     let left = resolve(left, left_cells, right_cells, columns, control)?;
                     let right = resolve(right, left_cells, right_cells, columns, control)?;
-                    for value in [left, right] {
-                        if let Cell::Scalar(value) = value {
+                    for value in [&left, &right] {
+                        if let Some(value) = value.as_scalar() {
                             crate::algebra_exec::charge_payload(value, control)?;
                         }
                     }
-                    compare(left, right, *comparison, control)?
+                    compare(&left, &right, *comparison, control)?
                 }
                 GraphSetPredicateOp::IsNull { operand, is_null } => Some(
                     resolve(operand, left_cells, right_cells, columns, control)?.is_null()
@@ -234,6 +240,21 @@ impl RowPredicate {
                     })
                 }
                 GraphSetOperand::Literal(_) => Ok(GraphSetColumnType::Scalar),
+                GraphSetOperand::IdentityColumn { column, .. } => {
+                    let kind = types.get(*column).copied().ok_or(Error::UnknownInput {
+                        instruction,
+                        column: *column,
+                    })?;
+                    if !matches!(
+                        kind,
+                        GraphSetColumnType::Vertex
+                            | GraphSetColumnType::Edge
+                            | GraphSetColumnType::Any
+                    ) {
+                        return Err(Error::InvalidValueComparison { instruction });
+                    }
+                    Ok(GraphSetColumnType::Scalar)
+                }
             };
             match op {
                 GraphSetPredicateOp::Not if depth >= 1 => continue,
@@ -359,17 +380,31 @@ impl RowPredicate {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Cell<'a> {
     Scalar(&'a CanonicalScalar),
+    OwnedScalar(CanonicalScalar),
+    /// Unsigned `VId`/`EId` above `i64::MAX` read by `id(x)`.
+    OverflowIdentity(u128),
     Vertex(fgdb_types::VId),
     Edge(fgdb_types::EId),
     /// A path, list, map or list of graph elements in a dynamic column.
     Composite(&'a GraphValue),
 }
 impl Cell<'_> {
-    fn is_null(self) -> bool {
-        matches!(self, Self::Scalar(CanonicalScalar::Null))
+    fn is_null(&self) -> bool {
+        matches!(
+            self,
+            Self::Scalar(CanonicalScalar::Null) | Self::OwnedScalar(CanonicalScalar::Null)
+        )
+    }
+
+    fn as_scalar(&self) -> Option<&CanonicalScalar> {
+        match self {
+            Self::Scalar(value) => Some(value),
+            Self::OwnedScalar(value) => Some(value),
+            _ => None,
+        }
     }
 }
 fn resolve<'a, E>(
@@ -400,16 +435,105 @@ fn resolve<'a, E>(
             }
         }
         GraphSetOperand::Literal(value) => Cell::Scalar(value.value()),
+        GraphSetOperand::IdentityColumn { column, text } => {
+            let column = columns.map_or(*column, |columns| columns[*column]);
+            let value = if column < left.len() {
+                &left[column]
+            } else {
+                &right[column - left.len()]
+            };
+            match value {
+                GraphValue::Scalar(CanonicalScalar::Null) => Cell::Scalar(&CanonicalScalar::Null),
+                GraphValue::Vertex(fgdb_types::VId(id)) | GraphValue::Edge(fgdb_types::EId(id)) => {
+                    if *text {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        Cell::OwnedScalar(
+                            CanonicalScalar::ucs_basic_text(&id.to_string())
+                                .expect("ASCII decimal identity"),
+                        )
+                    } else if let Ok(signed) = i64::try_from(*id) {
+                        Cell::OwnedScalar(CanonicalScalar::Int(signed))
+                    } else {
+                        Cell::OverflowIdentity(*id)
+                    }
+                }
+                _ => Cell::Composite(value),
+            }
+        }
+    })
+}
+fn compare_overflow_identity(
+    identity: u128,
+    scalar: &CanonicalScalar,
+    identity_on_left: bool,
+    comparison: IntegerComparison,
+) -> Option<bool> {
+    use core::cmp::Ordering;
+    let order = match scalar {
+        CanonicalScalar::Int(_) => Ordering::Greater,
+        CanonicalScalar::Float(number) => {
+            let raw = number.get();
+            if raw.is_nan() {
+                return match comparison {
+                    IntegerComparison::Equal => Some(false),
+                    IntegerComparison::NotEqual => Some(true),
+                    _ => None,
+                };
+            }
+            if raw < 0.0 {
+                Ordering::Greater
+            } else if raw.is_infinite() {
+                Ordering::Less
+            } else if let Ok(signed) = i128::try_from(identity) {
+                number
+                    .compare_rational(signed, core::num::NonZeroU64::MIN)
+                    .reverse()
+            } else {
+                // `identity >= 2^127`; compare against `2^127` boundary first.
+                const TWO_POW_127: f64 = 170_141_183_460_469_231_731_687_303_715_884_105_728.0;
+                if raw < TWO_POW_127 {
+                    Ordering::Greater
+                } else if raw >= TWO_POW_127 * 2.0 {
+                    Ordering::Less
+                } else {
+                    // For finite binary64 in [2^127, 2^128), ULP >= 2^74, so `raw as u128` is exact.
+                    identity.cmp(&(raw as u128))
+                }
+            }
+        }
+        _ => return comparison.across_domains(),
+    };
+    let order = if identity_on_left {
+        order
+    } else {
+        order.reverse()
+    };
+    Some(match comparison {
+        IntegerComparison::Equal => order == Ordering::Equal,
+        IntegerComparison::NotEqual => order != Ordering::Equal,
+        IntegerComparison::Greater => order == Ordering::Greater,
+        IntegerComparison::Less => order == Ordering::Less,
+        IntegerComparison::GreaterOrEqual => order != Ordering::Less,
+        IntegerComparison::LessOrEqual => order != Ordering::Greater,
     })
 }
 fn compare<E>(
-    left: Cell<'_>,
-    right: Cell<'_>,
+    left: &Cell<'_>,
+    right: &Cell<'_>,
     comparison: IntegerComparison,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<bool>, E> {
     if left.is_null() || right.is_null() {
         return Ok(None);
+    }
+    if let (Some(left), Some(right)) = (left.as_scalar(), right.as_scalar()) {
+        return Ok(comparison.evaluate_scalar_pair(Some(left), Some(right)));
+    }
+    if let (Cell::OverflowIdentity(left), Some(right)) = (left, right.as_scalar()) {
+        return Ok(compare_overflow_identity(*left, right, true, comparison));
+    }
+    if let (Some(left), Cell::OverflowIdentity(right)) = (left.as_scalar(), right) {
+        return Ok(compare_overflow_identity(*right, left, false, comparison));
     }
     Ok(match (left, right) {
         (Cell::Vertex(left), Cell::Vertex(right)) => Some(match comparison {
@@ -422,9 +546,14 @@ fn compare<E>(
             IntegerComparison::NotEqual => left != right,
             _ => return Ok(None),
         }),
-        (Cell::Scalar(left), Cell::Scalar(right)) => {
-            comparison.evaluate_scalar_pair(Some(left), Some(right))
-        }
+        (Cell::OverflowIdentity(left), Cell::OverflowIdentity(right)) => Some(match comparison {
+            IntegerComparison::Equal => left == right,
+            IntegerComparison::NotEqual => left != right,
+            IntegerComparison::Greater => left > right,
+            IntegerComparison::Less => left < right,
+            IntegerComparison::GreaterOrEqual => left >= right,
+            IntegerComparison::LessOrEqual => left <= right,
+        }),
         (Cell::Composite(left), Cell::Composite(right)) => match comparison {
             IntegerComparison::Equal => super::projection::membership::equal(left, right, control)?,
             IntegerComparison::NotEqual => {
@@ -446,6 +575,11 @@ fn append_operand(operand: &GraphSetOperand, bytes: &mut Vec<u8>) {
             bytes.push(1);
             bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
             bytes.extend_from_slice(value.canonical_bytes());
+        }
+        GraphSetOperand::IdentityColumn { column, text } => {
+            bytes.push(2);
+            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+            bytes.push(u8::from(*text));
         }
     }
 }

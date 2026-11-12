@@ -1321,7 +1321,14 @@ impl<'a> Parser<'a> {
         &self,
         outputs: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
-        self.write_property_reads(outputs, false)
+        self.write_property_reads(outputs, false, false)
+    }
+
+    pub(super) fn write_tail_reads_with_maps(
+        &self,
+        outputs: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
+        self.write_property_reads(outputs, false, true)
     }
 
     /// The next write needs property values used by expressions or RETURN,
@@ -1331,13 +1338,14 @@ impl<'a> Parser<'a> {
         &self,
         outputs: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
-        self.write_property_reads(outputs, true)
+        self.write_property_reads(outputs, true, false)
     }
 
     fn write_property_reads(
         &self,
         outputs: &[(Name<'a>, GraphSetColumnType)],
         skip_set_targets: bool,
+        include_maps: bool,
     ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
         let mut reads: Vec<(Name<'a>, Name<'a>)> = Vec::new();
         let mut lexer = self.lexer.clone();
@@ -1484,6 +1492,35 @@ impl<'a> Parser<'a> {
                 }
                 _ => {}
             }
+            if include_maps
+                && !target
+                && !after_dot
+                && !after_alias
+                && let TokenKind::Word(word) = token.kind
+                && let Some(source) =
+                    return_projection::pipeline::property_map_source(word, token.at, &lexer)?
+                && !locals.shadows(source.text)
+                && let Some(alias) =
+                    return_projection::pipeline::carried_alias(carried.as_deref(), source.text)
+                && outputs.iter().any(|(name, kind)| {
+                    name.text == alias
+                        && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                })
+                && !reads
+                    .iter()
+                    .any(|(read, known)| read.text == alias && known.text == "*")
+            {
+                reads.push((
+                    Name {
+                        text: alias,
+                        at: source.at,
+                    },
+                    Name {
+                        text: "*",
+                        at: source.at,
+                    },
+                ));
+            }
             back = [back[1], back[2], Some(token)];
             token = lexer.next()?;
         }
@@ -1576,6 +1613,43 @@ pub(super) fn push_tail_read<'a>(
             at: key.at,
         },
         GraphSetColumnType::Stored,
+    ));
+    reads.push((alias.text, key, schema.len() - 1));
+    Ok(())
+}
+
+/// One hoisted write-tail complete property-map read (`alias{.*}`, `properties(alias)`,
+/// `keys(alias)`), evaluated against the final staged graph overlay under the
+/// statement's governed element reader and reverse catalog.
+pub(super) fn push_tail_map_read<'a>(
+    projection: &mut Vec<ReadProjectionTemplate>,
+    schema: &mut Vec<(Name<'a>, GraphSetColumnType)>,
+    reads: &mut Vec<(&'a str, Name<'a>, usize)>,
+    (alias, key): (Name<'a>, Name<'a>),
+    value: ReadValueTemplate,
+) -> Result<(), GraphPatternTextError> {
+    let name = return_projection::pipeline::BOUNDARY_READ_NAMES
+        .iter()
+        .copied()
+        .find(|name| schema.iter().all(|(output, _)| output.text != *name))
+        .ok_or_else(|| {
+            error(
+                key.at,
+                GraphPatternTextErrorKind::Expected(
+                    "at most 16 carried-element property reads after a WITH",
+                ),
+            )
+        })?;
+    projection.push(ReadProjectionTemplate {
+        name: name.to_owned(),
+        value,
+    });
+    schema.push((
+        Name {
+            text: name,
+            at: key.at,
+        },
+        GraphSetColumnType::Any,
     ));
     reads.push((alias.text, key, schema.len() - 1));
     Ok(())

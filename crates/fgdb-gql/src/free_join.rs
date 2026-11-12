@@ -16,17 +16,24 @@
 //! ordered-search logarithms, after the separately accounted trie preparation.
 //! A grouped FreeJoin plan does not inherit that bound merely from its name.
 
+mod decision;
 mod execute;
 mod factor;
 mod graph;
 mod plan;
 mod trie;
 
+pub use decision::{
+    AgmExponent, BinaryObservation, CalibratedFreeJoin, ConformalJoinCalibration,
+    JOIN_DECISION_POLICY_EPOCH, JoinDecisionCard, JoinStrategy, RelationSketchSummary,
+};
 pub use execute::{FreeJoin, FreeJoinCursor, JoinBinding, MultiplicityOverflow};
 pub use factor::{
     FactorNodeKind, FactorizedBatch, FactorizedColumns, FactorizedCursor, FactorizedReadError,
     FreeJoinBatchCursor,
 };
-pub use graph::{GraphTrie, GraphTrieCursor, GraphTrieError};
+pub use graph::{
+    GraphTrie, GraphTrieCursor, GraphTrieError, SliceAdjacencyTrie, SliceAdjacencyTrieCursor,
+};
 pub use plan::{FreeJoinPlan, JoinPlanError, JoinVariable, MAX_JOIN_RELATIONS, MAX_JOIN_VARIABLES};
 pub use trie::{ColumnarCursor, ColumnarTrie, TrieBuildError, TrieCursor, TrieRelation};

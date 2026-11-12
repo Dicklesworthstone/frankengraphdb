@@ -497,11 +497,51 @@ fn durable_runs_reopen_native_authorized_and_prism_history_without_changing_orig
             pinned.push((view, expected));
         }
 
-        // A new semantic commit drops incompatible run attachments; pinned
-        // readers retain their authenticated old generation and answers.
+        // A vertex-only commit leaves R's edges untouched and carries R's run
+        // forward in V8; an edge commit on R bounds verified_through so the
+        // latest cut falls back to Tier D while historical cuts retain Tier R.
         let mut advance = WriteBatch::new(R);
         advance.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(300)));
         assert_eq!(db.write(&cx, advance).await.unwrap(), CommitSeq(4));
+        let carried = store
+            .get_published_adj_run(
+                &query,
+                db.partition_root().unwrap(),
+                R,
+                CommitSeq(4),
+                SealedLimits::default(),
+                RootReadLimits::default().max_root_bytes,
+            )
+            .await
+            .unwrap()
+            .expect("vertex-only commit preserves R's persistent run");
+        assert_eq!(carried.header().scope, run.header().scope);
+        assert_eq!(
+            carried.partition().anchor().verified_through(),
+            CommitSeq(4)
+        );
+        let newest = cold(&vfs, &cx, &query, CommitSeq(4)).await;
+        assert_eq!(
+            sealed_answers(&newest, &query),
+            answers(&db.read_session().unwrap(), &query)
+        );
+        let mut edge_advance = WriteBatch::new(R);
+        edge_advance.add_edge(EId(99), VId(3), VId(1), vec![(P, CanonicalScalar::Int(40))]);
+        assert_eq!(db.write(&cx, edge_advance).await.unwrap(), CommitSeq(5));
+        assert!(
+            store
+                .get_published_adj_run(
+                    &query,
+                    db.partition_root().unwrap(),
+                    R,
+                    CommitSeq(5),
+                    SealedLimits::default(),
+                    RootReadLimits::default().max_root_bytes,
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             store
                 .get_published_adj_run(
@@ -514,11 +554,11 @@ fn durable_runs_reopen_native_authorized_and_prism_history_without_changing_orig
                 )
                 .await
                 .unwrap()
-                .is_none()
+                .is_some()
         );
-        let newest = cold(&vfs, &cx, &query, CommitSeq(4)).await;
+        let newest_after_edge = cold(&vfs, &cx, &query, CommitSeq(5)).await;
         assert_eq!(
-            sealed_answers(&newest, &query),
+            sealed_answers(&newest_after_edge, &query),
             answers(&db.read_session().unwrap(), &query)
         );
         drop(db);
@@ -1309,6 +1349,483 @@ fn scrub_rechecks_admitted_runs_and_fences_held_and_reopened_writers() {
                 assert_eq!(vfs.read(&run_path).await.unwrap(), damaged);
             }
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn post_seal_commits_persist_runs_across_reopen_other_relations_and_scrub() {
+    let ((), report) = run_async_under_lab(0xd870_0008, |runtime| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+        let cx = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let (mut db, _) = fixture(&cx, &vfs).await;
+        let base_3 = db.partition_root().unwrap();
+        let r_run_id = db
+            .seal_relation(
+                &cx,
+                &query,
+                R,
+                CommitSeq(1),
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+
+        // Commit 4 mutates OTHER and vertex properties; R's run must persist in V8.
+        let mut c4 = WriteBatch::new(OTHER);
+        c4.add_edge(
+            EId(50),
+            VId(1),
+            VId(4),
+            vec![(P, CanonicalScalar::Int(500))],
+        );
+        c4.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(101)));
+        assert_eq!(db.write(&cx, c4).await.unwrap(), CommitSeq(4));
+
+        // Reopen writable database from V8 checkpoint and write Commit 5 (vertex creation).
+        drop(db);
+        let mut db = Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let mut c5 = WriteBatch::new(OTHER);
+        c5.create_vertex(VId(5), vec![L], vec![(P, CanonicalScalar::Int(5))]);
+        assert_eq!(db.write(&cx, c5).await.unwrap(), CommitSeq(5));
+
+        let store = BlockStore::open_existing_for_read_with_vfs(
+            &cx,
+            vfs.clone(),
+            vfs.database_dir(),
+            KEY,
+            NS,
+        )
+        .await
+        .unwrap();
+        let root_5 = db.partition_root().unwrap();
+        let root_5_bytes = store.get_root_bytes(&cx, root_5).await.unwrap();
+        assert_eq!(
+            u16::from_be_bytes([root_5_bytes[4], root_5_bytes[5]]),
+            fgdb_strata::root::runs::ROOT_FORMAT_V8
+        );
+        let r_at_5 = store
+            .get_published_adj_run(
+                &query,
+                root_5,
+                R,
+                CommitSeq(5),
+                SealedLimits::default(),
+                RootReadLimits::default().max_root_bytes,
+            )
+            .await
+            .unwrap()
+            .expect("R run persists across post-seal commits and reopen");
+        assert_eq!(r_at_5.header().scope.source_root, base_3);
+        assert_eq!(r_at_5.header().scope.publication, CommitSeq(3));
+        assert_eq!(r_at_5.partition().anchor().verified_through(), CommitSeq(5));
+        assert_eq!(
+            r_at_5.partition().anchor().admitted_envelope_root(),
+            Some(root_5)
+        );
+
+        // Live and cold Prism projections at Commit 5 must consume the persistent run directly.
+        let opts_5 = options(CommitSeq(5));
+        let live_proj = db
+            .prism_sealed_projection_with_source_limits(
+                &query,
+                Some(CommitSeq(5)),
+                opts_5.selection,
+                opts_5.projection,
+                opts_5.projection_limits,
+                opts_5.source_limits,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            live_proj
+                .unmasked_source()
+                .unwrap()
+                .anchor()
+                .scope()
+                .source_root,
+            base_3
+        );
+        let cold_proj = Database::open_prism_sealed_projection_with_vfs(
+            &cx,
+            &query,
+            vfs.clone(),
+            vfs.database_dir(),
+            keys(),
+            opts_5,
+            SealedLimits::default(),
+            RootReadLimits::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            cold_proj
+                .unmasked_source()
+                .unwrap()
+                .anchor()
+                .scope()
+                .source_root,
+            base_3
+        );
+
+        // Seal OTHER at Commit 5 while R remains carried from Commit 3.
+        let other_run_id = db
+            .seal_relation(
+                &cx,
+                &query,
+                OTHER,
+                CommitSeq(1),
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(other_run_id, r_run_id);
+
+        // Commit 6 mutates R: R stays verified_through Commit 5 while OTHER advances to Commit 6.
+        let mut c6 = WriteBatch::new(R);
+        c6.add_edge(
+            EId(60),
+            VId(4),
+            VId(5),
+            vec![(P, CanonicalScalar::Int(600))],
+        );
+        assert_eq!(db.write(&cx, c6).await.unwrap(), CommitSeq(6));
+        let root_6 = db.partition_root().unwrap();
+        assert!(
+            store
+                .get_published_adj_run(
+                    &query,
+                    root_6,
+                    R,
+                    CommitSeq(6),
+                    SealedLimits::default(),
+                    RootReadLimits::default().max_root_bytes,
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_published_adj_run(
+                    &query,
+                    root_6,
+                    R,
+                    CommitSeq(5),
+                    SealedLimits::default(),
+                    RootReadLimits::default().max_root_bytes,
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let other_at_6 = store
+            .get_published_adj_run(
+                &query,
+                root_6,
+                OTHER,
+                CommitSeq(6),
+                SealedLimits::default(),
+                RootReadLimits::default().max_root_bytes,
+            )
+            .await
+            .unwrap()
+            .expect("OTHER run persists across R's mutation at Commit 6");
+        assert_eq!(
+            other_at_6.partition().anchor().verified_through(),
+            CommitSeq(6)
+        );
+
+        // Commit 7 mutates OTHER: R's verified_through must NOT jump over Commit 6!
+        let mut c7 = WriteBatch::new(OTHER);
+        c7.set_vertex_property(VId(5), P, Some(CanonicalScalar::Int(55)));
+        assert_eq!(db.write(&cx, c7).await.unwrap(), CommitSeq(7));
+        let root_7 = db.partition_root().unwrap();
+        assert!(
+            store
+                .get_published_adj_run(
+                    &query,
+                    root_7,
+                    R,
+                    CommitSeq(7),
+                    SealedLimits::default(),
+                    RootReadLimits::default().max_root_bytes,
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_published_adj_run(
+                    &query,
+                    root_7,
+                    R,
+                    CommitSeq(5),
+                    SealedLimits::default(),
+                    RootReadLimits::default().max_root_bytes,
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .get_published_adj_run(
+                    &query,
+                    root_7,
+                    OTHER,
+                    CommitSeq(7),
+                    SealedLimits::default(),
+                    RootReadLimits::default().max_root_bytes,
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let summary = db.scrub(&cx).await.unwrap();
+        assert!(summary.lost.is_empty());
+        assert!(summary.block_lost.is_empty());
+        assert!(summary.metadata_lost.is_empty());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn published_fgrn_v2_dual_face_and_post_seal_delta_overlay_serve_both_directions_across_reopen() {
+    let ((), report) = run_async_under_lab(0xd870_0099, |runtime| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+        let cx = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let (mut db, _) = fixture(&cx, &vfs).await;
+
+        let run_id = db
+            .seal_relation(
+                &cx,
+                &query,
+                R,
+                CommitSeq(1),
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+
+        let store = BlockStore::open_existing_for_read_with_vfs(
+            &cx,
+            vfs.clone(),
+            vfs.database_dir(),
+            KEY,
+            NS,
+        )
+        .await
+        .unwrap();
+        let raw_run_bytes = store.get_adj_run_bytes(&cx, run_id).await.unwrap();
+        assert_eq!(
+            u16::from_le_bytes([raw_run_bytes[4], raw_run_bytes[5]]),
+            fgdb::ADJ_RUN_FORMAT_V2,
+            "published durable runs must use FGRN-v2 dual-face format",
+        );
+        let loaded_run = store
+            .get_published_adj_run(
+                &query,
+                db.partition_root().unwrap(),
+                R,
+                CommitSeq(3),
+                SealedLimits::default(),
+                RootReadLimits::default().max_root_bytes,
+            )
+            .await
+            .unwrap()
+            .expect("sealed run covers CommitSeq(3)");
+        assert!(loaded_run.partition().has_durable_incoming());
+        let inc_idx = loaded_run
+            .partition()
+            .incoming_index(
+                &query,
+                fgdb_strata::tiered::sealed::IncomingIndexLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            inc_idx.stats().charged_workspace_bytes,
+            inc_idx.stats().charged_resident_bytes,
+        );
+
+        // Apply post-seal mutations on R across two commits (add_edge, delete_edge, set_edge_property).
+        let mut c4 = WriteBatch::new(R);
+        c4.add_edge(
+            EId(401),
+            VId(4),
+            VId(1),
+            vec![(P, CanonicalScalar::Int(41))],
+        );
+        c4.delete_edge(EId(4));
+        c4.set_edge_property(EDGE, P, Some(CanonicalScalar::Int(700)));
+        assert_eq!(db.write(&cx, c4).await.unwrap(), CommitSeq(4));
+
+        let mut c5 = WriteBatch::new(R);
+        c5.add_edge(
+            EId(501),
+            VId(2),
+            VId(4),
+            vec![(P, CanonicalScalar::Int(51))],
+        );
+        assert_eq!(db.write(&cx, c5).await.unwrap(), CommitSeq(5));
+
+        // Reopen cold from disk so zero process-local state survives.
+        drop(db);
+        let db = Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+
+        // Direct StrataNeighborCursor overlay verification at both CommitSeq(4) and CommitSeq(5).
+        for cut in [CommitSeq(4), CommitSeq(5)] {
+            let overlay = db
+                .open_sealed_delta_overlay(
+                    &query,
+                    R,
+                    Some(cut),
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap()
+                .expect("carried FGRN-v2 run + post-seal Tier-D delta overlay must open");
+            assert_eq!(overlay.verified_through(), CommitSeq(3));
+            assert_eq!(overlay.as_of(), cut);
+            assert!(overlay.base_run().partition().has_durable_incoming());
+
+            let fresh = store
+                .seal_relation(
+                    &query,
+                    db.partition_root().unwrap(),
+                    cut,
+                    R,
+                    SealedLimits::default(),
+                )
+                .await
+                .unwrap();
+            let fresh_inc = fresh
+                .incoming_index(
+                    &query,
+                    fgdb_strata::tiered::sealed::IncomingIndexLimits::default(),
+                )
+                .unwrap();
+
+            for v in [VId(1), VId(2), VId(3), VId(4), VId(99)] {
+                let mut ov_out = overlay.outgoing_cursor(&query, v).unwrap();
+                let mut fr_out = fresh.row(&query, v, R, cut).unwrap();
+                loop {
+                    match (ov_out.next(&query).unwrap(), fr_out.next(&query).unwrap()) {
+                        (Some(a), Some(b)) => {
+                            assert_eq!(a.entry, b.entry);
+                            assert_eq!(a.properties, b.properties);
+                        }
+                        (None, None) => break,
+                        other => panic!("outgoing overlay mismatch at {cut:?} v={v:?}: {other:?}"),
+                    }
+                }
+
+                let mut ov_in = overlay.incoming_cursor(&query, v).unwrap();
+                let mut fr_in = fresh_inc.row(&query, v, R, cut).unwrap();
+                loop {
+                    match (ov_in.next(&query).unwrap(), fr_in.next(&query).unwrap()) {
+                        (Some(a), Some(b)) => {
+                            assert_eq!(a.entry, b.entry);
+                            assert_eq!(a.properties, b.properties);
+                        }
+                        (None, None) => break,
+                        other => panic!("incoming overlay mismatch at {cut:?} v={v:?}: {other:?}"),
+                    }
+                }
+            }
+
+            let materialized = overlay
+                .materialize_partition(&query, SealedLimits::default())
+                .unwrap();
+            assert_eq!(materialized.anchor(), fresh.anchor());
+            assert!(materialized.has_durable_incoming());
+        }
+
+        // Verify Directed, Reversed, and Undirected --sealed CALL fnx.* match EmbeddedReadView bit-for-bit!
+        let live_view = db.read_session().unwrap();
+        for dir in [
+            fgdb_prism::Directedness::Directed,
+            fgdb_prism::Directedness::Reversed,
+            fgdb_prism::Directedness::Undirected,
+        ] {
+            let mut opts = options(CommitSeq(5));
+            opts.projection.directedness = dir;
+            let call = FnxCallSpec::bind(
+                "CALL fnx.single_source_shortest_path_length(1) YIELD node, distance",
+                &FnxParameters::new(),
+            )
+            .unwrap();
+            let expected = live_view.execute_fnx(&query, &call, opts).unwrap();
+            let actual = db
+                .execute_fnx_sealed(&query, &call, opts, memory(), SealedLimits::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                actual.analytics.certificate.adapter,
+                fgdb_prism::AdapterPath::CompressedCursor,
+                "post-seal delta overlay must stay on CompressedCursor for direction={dir:?}",
+            );
+            assert_eq!(
+                actual.analytics.columns, expected.analytics.columns,
+                "direction={dir:?} columns"
+            );
+            assert_eq!(
+                actual.analytics.rows, expected.analytics.rows,
+                "direction={dir:?} rows"
+            );
+            assert_eq!(
+                actual.analytics.certificate.result_digest,
+                expected.analytics.certificate.result_digest,
+                "direction={dir:?} result_digest",
+            );
+            assert_eq!(
+                actual.selection, expected.selection,
+                "direction={dir:?} selection"
+            );
+
+            let cold_proj = Database::open_prism_sealed_projection_with_vfs(
+                &cx,
+                &query,
+                vfs.clone(),
+                vfs.database_dir(),
+                keys(),
+                opts,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+            let cold_exec = call
+                .execute_sealed(&query, &cold_proj, opts.execution_limits, memory())
+                .unwrap();
+            assert_eq!(
+                fgdb_prism::FnxReadResult::bind_selection(cold_exec, opts.selection),
+                actual,
+                "cold open_prism_sealed_projection mismatch for {dir:?}",
+            );
+        }
+
+        let cold_sealed_view = cold(&vfs, &cx, &query, CommitSeq(5)).await;
+        assert_eq!(
+            sealed_answers(&cold_sealed_view, &query),
+            answers(&live_view, &query),
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

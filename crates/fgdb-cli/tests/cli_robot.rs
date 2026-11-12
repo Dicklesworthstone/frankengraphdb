@@ -1071,6 +1071,43 @@ fn robot_schema_is_frozen_and_help_is_a_complete_robot_invocation() {
     assert!(help.stderr.contains("--key-file"));
     assert!(help.stderr.contains("64 hex"));
     assert!(help.stderr.contains("adopt --db <dir>"));
+    let (decoded_help, sealed_help) = help
+        .stderr
+        .split_once("Standalone query --sealed runs ")
+        .expect("help documents standalone --sealed analytics");
+    let sealed_schema = schema.get("analytics").get("sealed").string();
+    for signature in fgdb_prism::FnxSignatureRegistry::signatures() {
+        let short = signature.name.strip_prefix("fnx.").unwrap();
+        assert!(
+            decoded_help.contains(short),
+            "fgdb help CALL fnx.* section must advertise {short}"
+        );
+        assert!(
+            sealed_help.contains(short),
+            "fgdb help --sealed section must advertise {short}"
+        );
+        assert!(
+            sealed_schema.contains(short),
+            "robot schema analytics.sealed must advertise {short}"
+        );
+    }
+    assert!(
+        help.stderr
+            .contains("Degree, core, eigenvector, load, closeness, harmonic and betweenness admit")
+            && !help
+                .stderr
+                .contains("Degree, core, eigenvector and load also require an undirected")
+            && !help
+                .stderr
+                .contains("Degree, average_neighbor_degree, core, eigenvector and load require"),
+        "fgdb help must match FnxGraphKind::Any on degree/core/eigenvector/load"
+    );
+    assert!(
+        sealed_schema.contains(
+            "degree, core, eigenvector, load, closeness, harmonic and betweenness admit directed, reversed and undirected simple projections"
+        ),
+        "robot schema analytics.sealed must match FnxGraphKind::Any on degree/core/eigenvector/load"
+    );
     assert_eq!(help.terminal().get("kind").string(), "help");
 }
 
@@ -3628,8 +3665,10 @@ fn sealed_prism_cli_preflights_before_writable_open() {
                 "KNOWS",
                 "CALL fnx.degree_centrality() YIELD vertex,score",
             ],
-            3,
-            "query",
+            // Directed total-degree centrality is implemented (85d6f1746);
+            // the exact original argv now reaches the read-only opener.
+            4,
+            "open",
         ),
         (
             &[
@@ -6367,4 +6406,72 @@ fn inline_prism_projection_matches_explicit_flags_and_replays_after_reopen() {
         &["CALL fnx.pagerank({relations:['Unbound']}) YIELD vertex RETURN vertex"],
     )
     .failure(3, "query");
+}
+
+#[test]
+fn tck_match8_with_star_and_per_row_duplicate_key_merge_execute_end_to_end() {
+    // 1. openCypher TCK Match8 [2]: single (:Person) self-loop MERGE followed by
+    // WITH * OPTIONAL MATCH (a)--(c) RETURN count(*) AS n -> 1.
+    let db = TestDb::new("tck-match8-with-star");
+    db.create();
+    db.write(&["CREATE (:Person {name:'Solo'})"]);
+    let match8 = db.command(
+        "write",
+        &["MATCH (a:Person), (b:Person) \
+             MERGE (a)-[:KNOWS]->(b) \
+             WITH * \
+             OPTIONAL MATCH (a)--(c) \
+             RETURN count(*) AS n"],
+    );
+    assert_rows(&match8, r#"[[{"type":"int","value":"1"}]]"#);
+
+    // 2. Per-row visibility across duplicate keys inside a single MATCH ... MERGE:
+    // Paris appears twice (ON CREATE -> 1, ON MATCH -> 2), Rome once (ON CREATE -> 1).
+    let cities = TestDb::new("per-row-merge-visibility");
+    cities.create();
+    cities
+        .command(
+            "write",
+            &[
+                "--label",
+                "City=2",
+                "--property",
+                "bornIn=6",
+                "--property",
+                "visits=7",
+                "CREATE (:Person {name:'Ada', bornIn:'Paris'}); \
+                 CREATE (:Person {name:'Bea', bornIn:'Paris'}); \
+                 CREATE (:Person {name:'Cyd', bornIn:'Rome'})",
+            ],
+        )
+        .sequence("written");
+    cities.write(&[
+        "--label",
+        "City=2",
+        "--property",
+        "bornIn=6",
+        "--property",
+        "visits=7",
+        "MATCH (p:Person) \
+         MERGE (c:City {name: p.bornIn}) \
+         ON CREATE SET c.visits = 1 \
+         ON MATCH SET c.visits = c.visits + 1",
+    ]);
+    let observed = cities.command(
+        "query",
+        &[
+            "--label",
+            "City=2",
+            "--property",
+            "bornIn=6",
+            "--property",
+            "visits=7",
+            "MATCH (c:City) RETURN c.name AS city, c.visits AS visits ORDER BY city",
+        ],
+    );
+
+    assert_rows(
+        &observed,
+        r#"[[{"type":"text","value":"Paris"},{"type":"int","value":"2"}],[{"type":"text","value":"Rome"},{"type":"int","value":"1"}]]"#,
+    );
 }

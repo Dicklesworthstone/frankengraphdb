@@ -3375,6 +3375,30 @@ fn an_optional_match_where_over_imported_values_filters_before_null_extension() 
         )),
         expected(&|a, b| p(b) > p(a))
     );
+    // Explicit 3-vertex arithmetic and function-call operands referencing an
+    // imported binding (fgdb-nbrog): unmatched outer rows NULL-extend rather
+    // than dropping after the left join.
+    let int_or_null = |a: i64, b: Option<i64>| {
+        GraphValueRow::from_owned_values(vec![
+            GraphValue::Scalar(CanonicalScalar::Int(a)),
+            b.map_or(GraphValue::Scalar(CanonicalScalar::Null), |v| {
+                GraphValue::Scalar(CanonicalScalar::Int(v))
+            }),
+        ])
+    };
+    let expected_nbrog = vec![
+        int_or_null(1, Some(3)),
+        int_or_null(2, None),
+        int_or_null(3, None),
+    ];
+    for predicate in ["b.p = a.p + 2", "b.p = abs(a.p) + 2"] {
+        let query = format!(
+            "MATCH (a) WHERE id(a) IN [1, 2, 4] WITH a ORDER BY a.p \
+             OPTIONAL MATCH (b) WHERE id(b) IN [1, 2, 4] AND {predicate} \
+             RETURN a.p, b.p ORDER BY a.p"
+        );
+        assert_eq!(execute(&query), expected_nbrog, "{predicate}");
+    }
 }
 
 #[test]

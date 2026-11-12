@@ -217,20 +217,58 @@ impl<V: Vfs + Clone> Database<V> {
                         let (adjacency, patches) = source.await?;
                         (run.into_partition(), adjacency, patches, Some(source_root))
                     } else {
-                        // Keep the sealer's deep Send proof behind the same
-                        // explicit future boundary as the Prism opener.
-                        let sealing: crate::SendFuture<'_, _> =
-                            Box::pin(published.store.seal_relation_with_read_source(
+                        let post_seal_run: crate::SendFuture<'_, _> =
+                            Box::pin(published.store.get_published_adj_run_post_seal(
                                 query_cx,
                                 published.root_id,
-                                as_of,
                                 relation,
+                                as_of,
                                 sealing,
-                                source_limits,
+                                source_limits.max_root_bytes,
                             ));
-                        let (partition, adjacency, patches) =
-                            sealing.await.map_err(SealedReadError::Seal)?;
-                        (partition, adjacency, patches, None)
+                        if let Some((base, verified_through)) = post_seal_run.await? {
+                            let source: crate::SendFuture<'_, _> =
+                                Box::pin(published.store.reopen_with_vertices_bounded(
+                                    query_cx,
+                                    published.root_id,
+                                    as_of,
+                                    source_limits,
+                                ));
+                            let (adjacency, patches) = source.await?;
+                            let post_seal = fgdb_strata::store::PostSealBlocks::from_reopened_all(
+                                published.root_id,
+                                &adjacency,
+                                relation,
+                                verified_through,
+                            );
+                            let partition = fgdb_strata::tiered::sealed::SealedDeltaOverlay::build(
+                                query_cx,
+                                base,
+                                published.root_id,
+                                verified_through,
+                                as_of,
+                                &post_seal,
+                                sealing,
+                            )
+                            .and_then(|ov| ov.materialize_partition(query_cx, sealing))
+                            .map_err(SealedReadError::Seal)?;
+                            (partition, adjacency, patches, None)
+                        } else {
+                            // Keep the sealer's deep Send proof behind the same
+                            // explicit future boundary as the Prism opener.
+                            let sealing: crate::SendFuture<'_, _> =
+                                Box::pin(published.store.seal_relation_with_read_source(
+                                    query_cx,
+                                    published.root_id,
+                                    as_of,
+                                    relation,
+                                    sealing,
+                                    source_limits,
+                                ));
+                            let (partition, adjacency, patches) =
+                                sealing.await.map_err(SealedReadError::Seal)?;
+                            (partition, adjacency, patches, None)
+                        }
                     };
                 query_cx
                     .checkpoint()
@@ -616,7 +654,7 @@ impl SealedReadView {
         let mut options = procedure_options(&bound, self.as_of, policy);
         if options.selection.relations.single() != Some(self.relation) {
             return Err(refuse(ProcedureError::SealedRelationMismatch {
-                requested: options.selection.relations,
+                requested: Box::new(options.selection.relations),
                 retained: self.relation,
             }));
         }
@@ -717,7 +755,11 @@ impl SealedReadView {
             },
             |row, control| {
                 control(SourceEvent::SnapshotRecord)?;
-                if !options.selection.vertex_labels.intersects_sorted(&row.labels) {
+                if !options
+                    .selection
+                    .vertex_labels
+                    .intersects_sorted(&row.labels)
+                {
                     return Ok(());
                 }
                 control(SourceEvent::ScratchEntry)?;

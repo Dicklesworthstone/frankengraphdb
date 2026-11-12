@@ -210,6 +210,19 @@ impl<Row> core::fmt::Debug for PreparedGraphPattern<Row> {
     }
 }
 impl<Row> PreparedGraphPattern<Row> {
+    pub(crate) fn from_parts(
+        logical: GlaPlan<Row>,
+        variable_count: usize,
+        edge_count: usize,
+        columns: Vec<String>,
+    ) -> Self {
+        Self {
+            logical,
+            variable_count,
+            edge_count,
+            columns,
+        }
+    }
     #[must_use]
     pub fn plan(&self) -> &GlaPlan<Row> {
         &self.logical

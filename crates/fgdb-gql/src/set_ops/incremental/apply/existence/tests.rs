@@ -524,9 +524,9 @@ fn admitted_apply(query: &PreparedGraphSet) -> bool {
 #[test]
 fn native_exists_and_not_exists_reach_presence_admission_without_general_page_admission() {
     for text in [
-        "MATCH (a:L) WITH a WHERE EXISTS { MATCH (a)-[:R]->(b) } RETURN a",
-        "MATCH (a:L) WITH a WHERE NOT EXISTS { MATCH (a)-[:R]->(b) } RETURN a",
-        "MATCH (a:L) WITH a RETURN EXISTS { MATCH (a)-[:R]->(b) } AS present",
+        "MATCH (a:L) WITH a AS root WHERE EXISTS { MATCH (root)-[:R]->(b) } RETURN root",
+        "MATCH (a:L) WITH a AS root WHERE NOT EXISTS { MATCH (root)-[:R]->(b) } RETURN root",
+        "MATCH (a:L) WITH a AS root RETURN EXISTS { MATCH (root)-[:R]->(b) } AS present",
     ] {
         let query = PreparedGraphSetText::prepare(text, |kind, name| match (kind, name) {
             (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),

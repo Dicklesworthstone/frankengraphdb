@@ -574,21 +574,33 @@ fn admit_values<'a>(
 fn join_spec(
     left: &[GraphSetColumnType],
     inputs: &[Projection<'_>],
-    keys: &[(usize, usize)],
+    keys: &[crate::set_text::BoundCorrelation],
     comparisons: &[(usize, usize, IntegerComparison)],
     at: usize,
 ) -> Result<RowJoinSpec, GraphSetTextError> {
     let right: Vec<_> = inputs.iter().map(projection_type).collect();
     let typed_keys = !keys.is_empty()
-        && keys.iter().all(|&(l, r)| {
-            left[l] == right[r]
-                && matches!(
-                    left[l],
-                    GraphSetColumnType::Vertex | GraphSetColumnType::Edge
-                )
+        && keys.iter().all(|key| match *key {
+            crate::set_text::BoundCorrelation::Column { left: l, right: r } => {
+                left[l] == right[r]
+                    && matches!(
+                        left[l],
+                        GraphSetColumnType::Vertex | GraphSetColumnType::Edge
+                    )
+            }
+            crate::set_text::BoundCorrelation::Identity { .. } => false,
         });
     let spec = if typed_keys {
-        RowJoinSpec::new(left, &right, keys)
+        let pairs: Vec<_> = keys
+            .iter()
+            .map(|key| match *key {
+                crate::set_text::BoundCorrelation::Column { left: l, right: r } => (l, r),
+                crate::set_text::BoundCorrelation::Identity { .. } => {
+                    unreachable!("typed_keys excluded Identity")
+                }
+            })
+            .collect();
+        RowJoinSpec::new(left, &right, &pairs)
     } else {
         RowJoinSpec::cross(left, &right).and_then(|spec| {
             if keys.is_empty() {
@@ -598,11 +610,28 @@ fn join_spec(
             // exact Int/Float peers can occur at any list/map depth. Canonical
             // typed keys would discard them before the predicate could run.
             let mut code = Vec::new();
-            for &(l, r) in keys {
+            for &key in keys {
+                let (lhs, rhs) = match key {
+                    crate::set_text::BoundCorrelation::Column { left: l, right: r } => (
+                        GraphSetOperand::Column(l),
+                        GraphSetOperand::Column(left.len() + r),
+                    ),
+                    crate::set_text::BoundCorrelation::Identity {
+                        left: l,
+                        right: r,
+                        text,
+                    } => (
+                        GraphSetOperand::Column(l),
+                        GraphSetOperand::IdentityColumn {
+                            column: left.len() + r,
+                            text,
+                        },
+                    ),
+                };
                 code.push(GraphSetPredicateOp::Compare {
-                    left: GraphSetOperand::Column(l),
+                    left: lhs,
                     comparison: IntegerComparison::Equal,
-                    right: GraphSetOperand::Column(left.len() + r),
+                    right: rhs,
                 });
                 if code.len() > 1 {
                     code.push(GraphSetPredicateOp::And);
@@ -2402,7 +2431,7 @@ impl<'a> Parser<'a> {
                 )?;
                 self.syntax.variables.push(variable);
                 let right = self.mutation_projection(&mut inputs, variable, None)?;
-                keys.push((left, right));
+                keys.push(crate::set_text::BoundCorrelation::Column { left, right });
             } else if self.syntax.scopes[scope]
                 .find_name(&|binding| binding.text == name.text)
                 .is_some()
@@ -2582,7 +2611,7 @@ impl<'a> Parser<'a> {
                     return Err(expected(name.at, "a vertex-valued imported binding"));
                 }
                 let right = self.mutation_projection(&mut inputs, variable, None)?;
-                keys.push((left, right));
+                keys.push(crate::set_text::BoundCorrelation::Column { left, right });
             }
             if self.syntax.names_path(name.text) {
                 return Err(expected(
@@ -2601,7 +2630,7 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 let right = self.mutation_projection(&mut inputs, variable, None)?;
-                keys.push((left, right));
+                keys.push(crate::set_text::BoundCorrelation::Column { left, right });
             }
         }
         if keys.is_empty() {
@@ -3732,7 +3761,7 @@ impl<'a> Parser<'a> {
                 }
                 let right =
                     self.mutation_projection(&mut inputs, self.syntax.variables[right], None)?;
-                keys.push((left, right));
+                keys.push(crate::set_text::BoundCorrelation::Column { left, right });
             }
             if self.syntax.names_path(name.text) {
                 return Err(expected(name.at, "new path bindings after WITH"));
@@ -3755,7 +3784,7 @@ impl<'a> Parser<'a> {
                     return Err(expected(name.at, "an edge-valued imported binding"));
                 }
                 let right = self.mutation_projection(&mut inputs, variable, None)?;
-                keys.push((left, right));
+                keys.push(crate::set_text::BoundCorrelation::Column { left, right });
             }
         }
         // The current property-map correlation record has no scope tag. Do
@@ -3767,10 +3796,19 @@ impl<'a> Parser<'a> {
         if !row_comparisons.is_empty() && !self.syntax.scopes.is_empty() {
             return Err(expected(at, "root-only imported MATCH comparisons"));
         }
-        for (variable, key, left) in core::mem::take(&mut self.read_correlations) {
-            let right = self.mutation_projection(&mut inputs, variable, key)?;
-            if !keys.contains(&(left, right)) {
-                keys.push((left, right));
+        for (variable, target, left) in core::mem::take(&mut self.read_correlations) {
+            let (property, identity_text) = match target {
+                CorrelationTarget::Element => (None, None),
+                CorrelationTarget::Property(key) => (Some(key), None),
+                CorrelationTarget::Identity { text } => (None, Some(text)),
+            };
+            let right = self.mutation_projection(&mut inputs, variable, property)?;
+            let correlation = match identity_text {
+                None => crate::set_text::BoundCorrelation::Column { left, right },
+                Some(text) => crate::set_text::BoundCorrelation::Identity { left, right, text },
+            };
+            if !keys.contains(&correlation) {
+                keys.push(correlation);
             }
         }
         let mut comparisons = Vec::new();

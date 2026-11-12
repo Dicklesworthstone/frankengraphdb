@@ -1562,3 +1562,162 @@ fn maintained_indexed_graph_keeps_source_quotas_work_and_live_refusal() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn scalar_identity_correlations_seed_resident_matches_and_preserve_capability_refusal() {
+    let ((), report) = run_async_under_lab(0xbeac_372a, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = fixture(&c.commit(), 0, true).await;
+        let mut filler = WriteBatch::new(R);
+        for id in 200..400_u128 {
+            filler.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(X, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        db.write(&c.commit(), filler).await.unwrap();
+
+        let ids_param = GqlParameters::new()
+            .with_list(
+                "ids",
+                vec![
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(3)),
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(1)),
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(3)),
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(-1)),
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Null),
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(999)),
+                    fgdb_gql::algebra::GraphValue::Scalar(
+                        CanonicalScalar::Float(fgdb_types::CanonicalF64::new(2.0)),
+                    ),
+                    fgdb_gql::algebra::GraphValue::Scalar(
+                        CanonicalScalar::Float(fgdb_types::CanonicalF64::new(2.5)),
+                    ),
+                ],
+            )
+            .unwrap();
+        let eids_param = GqlParameters::new()
+            .with_list(
+                "eids",
+                vec![
+                    fgdb_gql::algebra::GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text("3").unwrap(),
+                    ),
+                    fgdb_gql::algebra::GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text("1").unwrap(),
+                    ),
+                    fgdb_gql::algebra::GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text("3").unwrap(),
+                    ),
+                    fgdb_gql::algebra::GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text("03").unwrap(),
+                    ),
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Null),
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(2)),
+                    fgdb_gql::algebra::GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text("2").unwrap(),
+                    ),
+                ],
+            )
+            .unwrap();
+
+        // Tight max_vertices budget: only 4 distinct valid seeds (1, 2, 3, 999) may
+        // be probed from the 205-vertex snapshot; an unseeded full scan fails max_vertices.
+        let seeded_policy = GqlQueryPolicy::new(8, 100, 100_000, 100_000);
+        let expected_vals = vec![3_i64, 1, 3, 2];
+
+        let row_ints = |result: QueryResult| -> Vec<i64> {
+            let QueryResult::Rows { rows, .. } = result else {
+                panic!("expected read rows: {result:?}");
+            };
+            rows.iter()
+                .map(|row| match &row[0] {
+                    QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(v))) => *v,
+                    other => panic!("unexpected cell {other:?}"),
+                })
+                .collect()
+        };
+
+        for query_text in [
+            "UNWIND $ids AS id MATCH (n) WHERE id(n) = id RETURN n.x AS x",
+            "UNWIND $ids AS id MATCH (n) WHERE id = id(n) RETURN n.x AS x",
+            "UNWIND $ids AS id WITH id MATCH (n) WHERE id(n) = id RETURN n.x AS x",
+            "UNWIND $ids AS id WITH id MATCH (n) WHERE id = id(n) RETURN n.x AS x",
+        ] {
+            let result = db
+                .query(&c.query(), query_text, &ids_param, symbols, seeded_policy)
+                .unwrap();
+            assert_eq!(row_ints(result), expected_vals, "{query_text}");
+        }
+
+        for query_text in [
+            "UNWIND $eids AS eid MATCH (n) WHERE elementId(n) = eid RETURN n.x AS x",
+            "UNWIND $eids AS eid MATCH (n) WHERE eid = elementId(n) RETURN n.x AS x",
+            "UNWIND $eids AS eid WITH eid MATCH (n) WHERE elementId(n) = eid RETURN n.x AS x",
+        ] {
+            let result = db
+                .query(&c.query(), query_text, &eids_param, symbols, seeded_policy)
+                .unwrap();
+            assert_eq!(row_ints(result), expected_vals, "{query_text}");
+        }
+
+        // Unseeded compound OR falls back to row filter cleanly under a generous vertex budget,
+        // and fails the tight 8-vertex budget as negative control proving seeding happened above.
+        let unseeded_or =
+            "UNWIND $ids AS id MATCH (n) WHERE id(n) = id OR n.x = 999999 RETURN n.x AS x";
+        assert!(
+            db.query(&c.query(), unseeded_or, &ids_param, symbols, seeded_policy)
+                .is_err()
+        );
+        let full_res = db
+            .query(&c.query(), unseeded_or, &ids_param, symbols, policy())
+            .unwrap();
+        assert_eq!(row_ints(full_res), expected_vals);
+
+        // Capability-masked read session refuses both id(n) = id and elementId(n) = eid (FG-INV-20).
+        let authority = Authority::new(
+            AuthKey::from_seed(3729),
+            NS,
+            "id-corr-mask",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 1000,
+                max_work: 10_000_000,
+                max_rows: 100,
+            },
+        );
+        grant.labels = Scope::only([LabelId(1)]);
+        grant.relations = Scope::only([R]);
+        grant.properties = Scope::only([TEXT, X]);
+        let token = authority.issue_at(&grant, 100).unwrap();
+        let mut session = db
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap();
+        for forbidden in [
+            ("UNWIND $ids AS id MATCH (n) WHERE id(n) = id RETURN n.x AS x", &ids_param),
+            ("UNWIND $eids AS eid MATCH (n) WHERE elementId(n) = eid RETURN n.x AS x", &eids_param),
+        ] {
+            assert!(
+                session.prepare(&c.query(), forbidden.0, forbidden.1).is_err(),
+                "capability-scoped session must refuse identity correlation: {}",
+                forbidden.0
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

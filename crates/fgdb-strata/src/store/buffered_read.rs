@@ -522,6 +522,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
         let records = self
             .read_object_proven(
                 cx,
+                super::StoredObjectKind::Manifest,
                 id.0,
                 (limits.max_root_bytes as u64).min(super::MANIFEST_HEADER_AND_RECORDS_CEILING),
                 |bytes| async move {
@@ -964,6 +965,7 @@ impl<V: Vfs> BufferedPartition<V> {
     async fn pin(
         &mut self,
         cx: &QueryCx,
+        kind: super::StoredObjectKind,
         key: ExtentKey,
         admission: Admission,
     ) -> Result<BufferHandle, BufferedReadError> {
@@ -971,7 +973,13 @@ impl<V: Vfs> BufferedPartition<V> {
             PreparedExtent::Resident(handle) => Ok(handle),
             PreparedExtent::Load(mut pending) => {
                 self.store
-                    .read_object_exact(cx, key.object(), key.checksum(), pending.as_mut())
+                    .read_object_exact_kind(
+                        cx,
+                        kind,
+                        key.object(),
+                        key.checksum(),
+                        pending.as_mut(),
+                    )
                     .await?;
                 Ok(self.buffer.complete(cx, pending)?)
             }
@@ -1196,7 +1204,14 @@ impl<V: Vfs> BufferedPartition<V> {
             control(VertexPointEvent::Decode(descriptor.rows))?;
             drop(last.take());
             let _workspace = self.reserve_scan_workspace(cx)?;
-            let bytes = self.pin(cx, descriptor.extent, admission).await?;
+            let bytes = self
+                .pin(
+                    cx,
+                    super::StoredObjectKind::VertexPatch,
+                    descriptor.extent,
+                    admission,
+                )
+                .await?;
             let rows = match (access, unique) {
                 // Initial admission plus the current extent checksum already
                 // authenticate this projection. Retain its one topology parse
@@ -1314,7 +1329,15 @@ impl<V: Vfs> BufferedPartition<V> {
         let bytes = match retained {
             Some(bytes) if bytes.key() == descriptor.extent => bytes,
             Some(_) => return Err(BufferedReadError::from(BufferError::InvalidLoad).into()),
-            None => self.pin(cx, descriptor.extent, admission).await?,
+            None => {
+                self.pin(
+                    cx,
+                    super::StoredObjectKind::VertexPatch,
+                    descriptor.extent,
+                    admission,
+                )
+                .await?
+            }
         };
         let rows =
             self.decode_vertex_point_patch(winner.patch, bytes.as_ref(), Some((winner.row, key)))?;
@@ -1722,7 +1745,12 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
             .map_err(BufferedReadError::Buffer)?;
         let bytes = self
             .partition
-            .pin(cx, descriptor.extent, Admission::ScanBypass)
+            .pin(
+                cx,
+                super::StoredObjectKind::VertexPatch,
+                descriptor.extent,
+                Admission::ScanBypass,
+            )
             .await?;
         let rows = self
             .partition

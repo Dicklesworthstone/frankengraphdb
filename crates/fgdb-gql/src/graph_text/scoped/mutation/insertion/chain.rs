@@ -97,6 +97,7 @@ impl PreparedGraphWriteChainText {
                 }
             }
         };
+        lexer.text = first_statement;
         let multipart_mutation =
             PreparedGraphInsertText::multipart_source_kind(first_statement, &[])?
                 == Some(ReadWriteKind::Mutation);
@@ -695,9 +696,8 @@ impl PreparedGraphWriteChainText {
                 TokenKind::Word(word)
                     if depth == 0
                         && [
-                            "ON", "SET", "RETURN", "WITH", "UNWIND", "MERGE", "CREATE",
-                            "INSERT", "MATCH", "OPTIONAL", "DELETE", "DETACH", "REMOVE",
-                            "FOREACH", "CALL",
+                            "ON", "SET", "RETURN", "WITH", "UNWIND", "MERGE", "CREATE", "INSERT",
+                            "MATCH", "OPTIONAL", "DELETE", "DETACH", "REMOVE", "FOREACH", "CALL",
                         ]
                         .iter()
                         .any(|end| word.eq_ignore_ascii_case(end))
@@ -711,8 +711,7 @@ impl PreparedGraphWriteChainText {
                 }
                 TokenKind::Word(word) if !matches!(previous, Some(TokenKind::Punct(b'.'))) => {
                     let next = script::next_script_token(&mut lexer.clone())?.kind;
-                    if word.eq_ignore_ascii_case("REDUCE")
-                        && matches!(next, TokenKind::Punct(b'('))
+                    if word.eq_ignore_ascii_case("REDUCE") && matches!(next, TokenKind::Punct(b'('))
                     {
                         reductions.push(depth + 1);
                     }
@@ -1381,7 +1380,7 @@ impl PreparedGraphWriteChainText {
                 relation,
                 declarations,
                 crate::graph_text::LentResolver(&mut resolve),
-                true,
+                !allow_single,
                 true,
             )?;
             steps.push(ChainTextStep::Insert(Box::new((first, returning))));

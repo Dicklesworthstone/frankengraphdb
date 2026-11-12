@@ -441,7 +441,16 @@ fn property_seed_proof_requires_a_necessary_root_equality_and_keeps_failure_barr
             .with_order_by(&[GraphValueOrder::ascending(0)])
             .unwrap(),
         pattern("MATCH (b) WHERE 1/(b.p-2)>0 RETURN b.p AS value,b"),
-        pattern("MATCH (b) RETURN b.p+1 AS value,b"),
+        crate::PreparedGraphSetText::prepare(
+            "MATCH (b) RETURN b.p+1 AS value,b",
+            |kind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap(),
         pattern("MATCH (b)-[:R]->(c) RETURN b.p AS value,b"),
     ] {
         assert_eq!(selected(right, &[equal(1, 2)]).property_seed_column(), None);

@@ -702,6 +702,10 @@ fn admitted_apply(query: &PreparedGraphSet) -> bool {
         .incremental_apply_count_with_control(&mut allow)
         .unwrap()
         .is_some()
+        || query
+            .incremental_collected_count_with_control(&mut allow)
+            .unwrap()
+            .is_some()
     {
         return true;
     }
@@ -718,6 +722,7 @@ fn admitted_apply(query: &PreparedGraphSet) -> bool {
 fn native_count_and_returning_call_reach_the_count_recipe() {
     for text in [
         "MATCH (a:L) WITH a RETURN a,COUNT { MATCH (a)-[:R]->(b) } AS c",
+        "MATCH (a:L) WITH DISTINCT a RETURN a,COUNT { MATCH (a)-[:R]->(b) } AS c",
         "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b) RETURN count(*) AS c } RETURN a,c",
         "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b) RETURN count(b) AS c } RETURN a,c",
         "MATCH (a:L) WITH a CALL (a) { MATCH (a)-[:R]->(b) RETURN count(DISTINCT b) AS c } RETURN a,c",
@@ -778,4 +783,104 @@ fn check_recipe_identity_and_cancellation(query: PreparedGraphSet) {
         assert_eq!(seen, stop);
         assert_eq!(query.canonical_bytes(), original);
     }
+}
+
+#[test]
+fn single_part_collected_count_reaches_native_recipe_and_maintains_zero_filled_counts() {
+    for text in [
+        "MATCH (a:L) RETURN a.p AS name, COUNT { MATCH (a)-[:R]->(:L) } AS c",
+        "MATCH (a:L) RETURN a, COUNT { MATCH (a)-[:R]->(b) } + 1 AS c",
+        "MATCH (a:L) RETURN DISTINCT a.p AS name, COUNT { MATCH (a)-[:R]->(b:L) } AS c",
+        "MATCH (a:L) RETURN a.p AS name, COUNT { MATCH (a)-[:R]->(:L) } AS out_c, COUNT { MATCH (:L)-[:R]->(a) } AS in_c",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let original = query.canonical_bytes();
+        let plan = query
+            .incremental_collected_count_with_control(&mut allow)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected collected count recipe for: {text}"));
+        assert_eq!(query.canonical_bytes(), original);
+        assert_eq!(plan.restrict.kind(), RowJoinKind::Semi);
+        assert_eq!(plan.join.kind(), RowJoinKind::Left);
+        let output = plan.output.last().unwrap();
+        assert_eq!(output.column_types(), query.column_types());
+        assert_eq!(
+            output.columns().collect::<Vec<_>>(),
+            query
+                .columns()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    // Raw list projection (not wrapped in COUNT/size) must return Ok(None).
+    let raw_collect = PreparedGraphSetText::prepare(
+        "MATCH (a:L) RETURN a.p AS name, [(a)-[:R]->(b:L) | b] AS xs",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert!(
+        raw_collect
+            .incremental_collected_count_with_control(&mut allow)
+            .unwrap()
+            .is_none()
+    );
+
+    // Verify incremental Z-set ticks over the decorrelated circuit, including 0-fill.
+    let single = PreparedGraphSetText::prepare(
+        "MATCH (a:L) RETURN a.p AS name, COUNT { MATCH (a)-[:R]->(:L) } AS c",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let plan = single
+        .incremental_collected_count_with_control(&mut allow)
+        .unwrap()
+        .unwrap();
+    let schema = plan.group.input().column_types().to_vec();
+    let mut circuit = Circuit {
+        restrict: IncrementalRowJoin::new(plan.restrict),
+        group: IncrementalGroupAggregate::new(plan.group, &schema).unwrap(),
+        join: IncrementalRowJoin::new(plan.join),
+        output: plan
+            .output
+            .into_iter()
+            .map(IncrementalRowProjection::new)
+            .collect(),
+    };
+
+    // Outer left has (name, hidden_vertex_a): vertex 1 ("alice"=10) and vertex 2 ("bob"=20).
+    let d_left = bag([
+        (row(vec![scalar(Some(10)), vertex(1)]), 1),
+        (row(vec![scalar(Some(20)), vertex(2)]), 1),
+    ]);
+    // Inner right has correlated source vertex 1 with weight 2 (two outgoing :R edges),
+    // and an uncorrelated vertex 99 that must be filtered out by Semi restriction.
+    let d_right = bag([(row(vec![vertex(1)]), 2), (row(vec![vertex(99)]), 5)]);
+    circuit.tick(&d_left, &d_right).unwrap();
+    assert_eq!(
+        plain(circuit.rows()),
+        BTreeMap::from([
+            (row(vec![scalar(Some(10)), scalar(Some(2))]), 1),
+            (row(vec![scalar(Some(20)), scalar(Some(0))]), 1),
+        ])
+    );
+
+    // Retract one outgoing edge from vertex 1 and add one outgoing edge to vertex 2.
+    let d_right_2 = bag([(row(vec![vertex(1)]), -1), (row(vec![vertex(2)]), 1)]);
+    circuit.tick(&bag([]), &d_right_2).unwrap();
+    assert_eq!(
+        plain(circuit.rows()),
+        BTreeMap::from([
+            (row(vec![scalar(Some(10)), scalar(Some(1))]), 1),
+            (row(vec![scalar(Some(20)), scalar(Some(1))]), 1),
+        ])
+    );
 }

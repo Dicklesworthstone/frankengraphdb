@@ -142,6 +142,10 @@ mod gql_exec;
 mod memvfs;
 mod origin_birth;
 pub use origin_birth::OriginBirthError;
+mod derived_watermarks;
+pub use derived_watermarks::{
+    DerivedCheckpointError, DerivedCheckpointOutcome, DerivedRebuildReason,
+};
 mod seal_maintenance;
 pub use seal_maintenance::SealPublicationError;
 mod prepared_write;
@@ -191,9 +195,9 @@ pub use query::{
     SealedReadView, StatementClock, StatementTimeError,
 };
 pub use write_txn::{
-    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteOutput, AuthorizedWriteSession,
-    AuthorizedWriteTransaction,
-    IdentityPermutation, WriteTxn, WriteTxnError,
+    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteOutput,
+    AuthorizedWriteSession, AuthorizedWriteTransaction, IdentityPermutation, WriteTxn,
+    WriteTxnError,
 };
 
 /// The in-memory [`Vfs`](asupersync::fs::Vfs) behind the embedded spine's
@@ -235,11 +239,18 @@ use fgdb_strata::edge_props::BlockProps;
 use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
 use fgdb_strata::root::{PartitionRoot, RootError, merge_all_edges_with_props};
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
+pub use fgdb_strata::store::{
+    ExtentError, ExtentFrameSize, ExtentObjectKind, KeyEnvelopeError, StrataEcsConfig,
+    is_key_envelope_v1,
+};
 use fgdb_strata::vertex::{VertexPatchRows, merge_all_vertices};
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
 use fgdb_strata::{AdjacencyEntry, PartitionRootVersion};
 
 pub use fgdb_strata::edge_props::EdgePropertyRow;
+pub use fgdb_strata::tiered::sealed::{
+    FORMAT_V2 as ADJ_RUN_FORMAT_V2, SealedDeltaOverlay, StrataNeighborCursor,
+};
 pub use fgdb_strata::vertex::VertexRow;
 use fgdb_types::context::{CommitCx, TxnCx};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
@@ -315,6 +326,7 @@ pub struct DatabaseKeys {
     /// The data-encryption key for capsules.
     dek: SharedSecret<32>,
     scalar_resolver: Option<Arc<dyn fgdb_types::CanonicalScalarResolver + Send + Sync>>,
+    strata_ecs: Option<StrataEcsConfig>,
 }
 
 impl core::fmt::Debug for DatabaseKeys {
@@ -331,6 +343,7 @@ impl DatabaseKeys {
             namespace,
             dek: SharedSecret::new(dek),
             scalar_resolver: None,
+            strata_ecs: None,
         }
     }
 
@@ -343,6 +356,62 @@ impl DatabaseKeys {
     ) -> Self {
         self.scalar_resolver = Some(resolver);
         self
+    }
+
+    /// Enable Encrypt-then-Code (`FGEC` v1) on Strata storage extents with
+    /// explicit configuration.
+    #[must_use]
+    pub fn with_strata_ecs(mut self, config: StrataEcsConfig) -> Self {
+        self.strata_ecs = Some(config);
+        self
+    }
+
+    /// Enable Encrypt-then-Code (`FGEC` v1) on Strata storage extents, deriving
+    /// a domain-separated Strata DEK from this handle's capsule DEK on the
+    /// canonical trunk coordinate (`epoch = 1`).
+    #[must_use]
+    pub fn with_default_strata_ecs(mut self) -> Self {
+        let strata_dek = SharedSecret::new(fgdb_crypto::derive_key(
+            "fgdb:strata-ecs:dek:v1",
+            self.dek.expose(),
+        ));
+        self.strata_ecs = Some(StrataEcsConfig::new(strata_dek).with_coordinates(GRAPH, BRANCH, 1));
+        self
+    }
+
+    /// Borrow the configured Strata Encrypt-then-Code parameters, if enabled.
+    #[must_use]
+    pub fn strata_ecs(&self) -> Option<&StrataEcsConfig> {
+        self.strata_ecs.as_ref()
+    }
+
+    /// Seal `(k_oid, namespace, dek)` into a passphrase-wrapped `FGKE-V1`
+    /// Argon2id + XChaCha20-Poly1305 key envelope.
+    pub fn seal_passphrase_envelope(
+        &self,
+        passphrase: &[u8],
+        salt: [u8; 16],
+        nonce: [u8; 24],
+    ) -> Result<String, KeyEnvelopeError> {
+        fgdb_strata::store::seal_key_envelope_v1(
+            passphrase,
+            salt,
+            nonce,
+            self.k_oid.expose(),
+            self.namespace,
+            self.dek.expose(),
+        )
+    }
+
+    /// Unwrap an `FGKE-V1` passphrase-wrapped key envelope and enable Strata
+    /// Encrypt-then-Code (`FGEC` v1) by default.
+    pub fn open_passphrase_envelope(
+        passphrase: &[u8],
+        envelope_text: &str,
+    ) -> Result<Self, KeyEnvelopeError> {
+        let (k_oid, namespace, dek) =
+            fgdb_strata::store::open_key_envelope_v1(passphrase, envelope_text)?;
+        Ok(Self::new(k_oid, namespace, dek).with_default_strata_ecs())
     }
 
     fn decode_template(
@@ -2637,6 +2706,9 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// This is not a durable identity or an authorization/session protocol.
     handle_owner: Arc<()>,
     standing_queries: Vec<standing_query::StandingQuery>,
+    /// Transient index of a `StandingQuery::CapabilityScope` while registering
+    /// or rebuilding its private downstream circuit (`FG-INV-20`).
+    active_registration_scope: Option<usize>,
     /// Rebuildable resident search generations fed only after successful
     /// durable publication. Registrations belong to this opened lifetime.
     maintained_beacon: query::BeaconRegistry,
@@ -2695,10 +2767,9 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// or seeds them from the admission of the root the slot selected
     /// (fgdb-ibbuq).
     receipts: PublishReceipts,
-    /// Authenticated current-root run membership retained for integrity sweep.
-    /// This inventory cannot mint a run anchor or grant physical reclamation.
-    attached_runs:
-        std::collections::BTreeMap<RelationId, fgdb_strata::tiered::sealed::AdjRunSegmentVersion>,
+    /// Authenticated current-root run membership retained across commits and
+    /// integrity sweeps. This inventory cannot mint a run anchor or grant GC.
+    attached_runs: std::collections::BTreeMap<RelationId, fgdb_strata::root::runs::AdjRunRef>,
     /// The durable I/O authority retained so same-handle recovery reopens
     /// through the SAME injected filesystem rather than silently escaping to
     /// `UnixVfs`. Chronicle and Strata's `BlockStore` both open through this
@@ -3410,6 +3481,12 @@ impl<V: Vfs + Clone> Database<V> {
                             if let Some(refusal) = unsupported_manifest(&error, stale, path) {
                                 return Err(refusal);
                             }
+                            if matches!(
+                                error,
+                                StoreError::Extent(ExtentError::AuthenticationFailed)
+                            ) {
+                                return Err(OpenError::Store(error));
+                            }
                             false
                         }
                         _ => false,
@@ -3453,29 +3530,36 @@ impl<V: Vfs + Clone> Database<V> {
         let identity_allocation =
             crate::write_txn::IdentityAllocation::from_chain(coordinator.chain(), &keys);
         let published_frontier = snapshot.frontier;
-        let attached_runs: std::collections::BTreeMap<_, _> = store
+        let raw_attached_runs = store
             .published_adj_run_refs(cx, snapshot.root, fgdb_strata::root::MAX_ROOT_READ_BYTES)
             .await
-            .map_err(RebuildError::Store)?
-            .into_iter()
-            .map(|reference| {
-                (
+            .map_err(RebuildError::Store)?;
+        let mut attached_runs = std::collections::BTreeMap::new();
+        if !raw_attached_runs.is_empty() {
+            // Preserve the selected V7/V8 root's authenticated Tier-D lineage
+            // across ordinary writable opens, and normalize each attachment's
+            // provenance so subsequent commits carry unaffected runs forward.
+            let base_source_root = store
+                .get_root_run_source(cx, snapshot.root, fgdb_strata::root::MAX_ROOT_READ_BYTES)
+                .await
+                .map_err(RebuildError::Store)?;
+            if raw_attached_runs
+                .iter()
+                .all(fgdb_strata::root::runs::AdjRunRef::is_v7_native)
+            {
+                snapshot.sealed_source_root = Some(base_source_root);
+            }
+            for reference in raw_attached_runs {
+                let carried = fgdb_strata::root::runs::AdjRunRef::carried(
                     reference.relation,
-                    fgdb_strata::tiered::sealed::AdjRunSegmentVersion(reference.run),
-                )
-            })
-            .collect();
-        if !attached_runs.is_empty() {
-            // Preserve the selected V7 root's authenticated Tier-D lineage
-            // across ordinary writable opens, just as seal_relation does.
-            // Live compressed readers must accept its attached runs without
-            // substituting a newly rebuilt image of the envelope root.
-            snapshot.sealed_source_root = Some(
-                store
-                    .get_root_run_source(cx, snapshot.root, fgdb_strata::root::MAX_ROOT_READ_BYTES)
-                    .await
-                    .map_err(RebuildError::Store)?,
-            );
+                    reference.run,
+                    reference.resolved_source_root(base_source_root.0),
+                    reference.floor,
+                    reference.resolved_publication(published_frontier),
+                    reference.resolved_verified_through(published_frontier),
+                );
+                attached_runs.insert(carried.relation, carried);
+            }
         }
         Ok(Self {
             coordinator,
@@ -3500,6 +3584,7 @@ impl<V: Vfs + Clone> Database<V> {
             preparation_anchor: None,
             handle_owner: Arc::new(()),
             standing_queries: Vec::new(),
+            active_registration_scope: None,
             maintained_beacon: query::BeaconRegistry::default(),
             statement_clock: None,
         })
@@ -5006,7 +5091,7 @@ impl<V: Vfs + Clone> Database<V> {
                 recovery,
                 source: Box::new(RebuildError::from(error)),
             })?;
-        let verified_root = match appended {
+        let mut verified_root = match appended {
             Some(verified) => verified,
             None => {
                 // A missing or mismatched memo grants no prefix shortcut.
@@ -5040,6 +5125,35 @@ impl<V: Vfs + Clone> Database<V> {
                     })?
             }
         };
+        let mut next_attached_runs = self.attached_runs.clone();
+        if !next_attached_runs.is_empty() {
+            let mut mutated_relations = std::collections::BTreeSet::new();
+            for sealed in &blocks[block_prefix..] {
+                let (entries, _) = fgdb_strata::decode_block_with_properties(&sealed.bytes)
+                    .map_err(|error| WriteError::CommittedNeedsRecovery {
+                        recovery,
+                        source: Box::new(RebuildError::Store(StoreError::Malformed(error))),
+                    })?;
+                for entry in &entries {
+                    mutated_relations.insert(entry.relation);
+                }
+            }
+            let previous_frontier = self.snapshot.frontier;
+            for (&relation, reference) in &mut next_attached_runs {
+                if !mutated_relations.contains(&relation)
+                    && reference.resolved_verified_through(previous_frontier) == previous_frontier
+                {
+                    reference.verified_through = Some(frontier);
+                }
+            }
+            let carried: Vec<_> = next_attached_runs.values().copied().collect();
+            self.store
+                .attach_runs_to_verified_root(&mut verified_root, &carried)
+                .map_err(|error| WriteError::CommittedNeedsRecovery {
+                    recovery,
+                    source: Box::new(RebuildError::from(error)),
+                })?;
+        }
         let root_id = verified_root.id();
         // The manifest names the published root (fgdb-63w2) and binds it to
         // the chain commitment at this very commit (fgdb-90hw): the durable
@@ -5245,7 +5359,7 @@ impl<V: Vfs + Clone> Database<V> {
         self.published_root.blocks.extend(new_refs);
         self.published_root.vertex_patches.extend(new_patch_refs);
         self.published_root.published_at = frontier;
-        self.attached_runs.clear();
+        self.attached_runs = next_attached_runs;
         self.state = DatabaseState::Healthy {
             published_frontier: self.snapshot.frontier,
         };
@@ -6568,9 +6682,15 @@ async fn open_block_store<V: Vfs + Clone>(
     path: &Path,
     keys: &DatabaseKeys,
 ) -> Result<BlockStore<V>, OpenError> {
-    let store =
-        BlockStore::open_with_vfs(cx, vfs.clone(), path, keys.k_oid.clone(), keys.namespace)
-            .await?;
+    let store = BlockStore::open_with_vfs_and_ecs(
+        cx,
+        vfs.clone(),
+        path,
+        keys.k_oid.clone(),
+        keys.namespace,
+        keys.strata_ecs.clone(),
+    )
+    .await?;
     Ok(match &keys.scalar_resolver {
         Some(resolver) => store.with_scalar_resolver(resolver.clone()),
         None => store,
@@ -6587,12 +6707,13 @@ async fn open_block_store_for_read<V: Vfs + Clone>(
     path: &Path,
     keys: &DatabaseKeys,
 ) -> Result<Option<BlockStore<V>>, OpenError> {
-    let store = match BlockStore::open_existing_for_read_with_vfs(
+    let store = match BlockStore::open_existing_for_read_with_vfs_and_ecs(
         cx,
         vfs.clone(),
         path,
         keys.k_oid.clone(),
         keys.namespace,
+        keys.strata_ecs.clone(),
     )
     .await
     {
@@ -6732,6 +6853,9 @@ async fn read_slot_with_source_limits<V: Vfs>(
         Ok(resolved) if resolved.len() == 1 => Ok(Some((claimed, resolved))),
         Err(error) if let Some(refusal) = unsupported_manifest(&error, claimed, path) => {
             Err(refusal)
+        }
+        Err(error) if matches!(error, StoreError::Extent(ExtentError::AuthenticationFailed)) => {
+            Err(OpenError::Store(error))
         }
         Err(error) if limits.is_some() => Err(OpenError::Store(error)),
         _ => Err(OpenError::SlotDisagreesWithStream {

@@ -62,10 +62,7 @@ fn prepare(
         let height = (usize::BITS - retained.leading_zeros()) as usize;
         let index = mul(retained, add(32, mul(height, 4)?)?)?;
         let setup = add(mul(incoming, 2)?, add(index, mul(n, 8)?)?)?;
-        add(
-            mul(sources, add(forward, incoming)?)?,
-            add(forward, setup)?,
-        )?
+        add(mul(sources, add(forward, incoming)?)?, add(forward, setup)?)?
     } else {
         // Preserve the existing undirected work admission exactly.
         mul(add(mul(sources, 2)?, 1)?, forward)?
@@ -109,9 +106,7 @@ pub(super) fn execute(
         .as_ref()
         .map_or(0, |face| face.charged_workspace_bytes());
     let outgoing = graph.row_view();
-    let incoming = reverse
-        .as_ref()
-        .map_or(outgoing, SealedRowSource::row_view);
+    let incoming = reverse.as_ref().map_or(outgoing, SealedRowSource::row_view);
     loop {
         checkpoint(cx)?;
         match state.step::<Infallible>()? {
@@ -178,9 +173,7 @@ where
         .as_ref()
         .map_or(0, |face| face.charged_workspace_bytes());
     let outgoing = graph.row_view();
-    let incoming = reverse
-        .as_ref()
-        .map_or(outgoing, SealedRowSource::row_view);
+    let incoming = reverse.as_ref().map_or(outgoing, SealedRowSource::row_view);
     loop {
         control.tick().await?;
         match state.step::<Infallible>()? {

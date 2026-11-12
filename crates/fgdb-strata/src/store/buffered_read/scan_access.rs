@@ -157,7 +157,14 @@ impl<V: Vfs> BufferedPartition<V> {
         admission: Admission,
     ) -> Result<BufferedBlockKeys, BufferedReadError> {
         let descriptor = self.blocks[at];
-        let bytes = self.pin(cx, descriptor.block, admission).await?;
+        let bytes = self
+            .pin(
+                cx,
+                crate::store::StoredObjectKind::Block,
+                descriptor.block,
+                admission,
+            )
+            .await?;
         let (entries, patch) = crate::decode_block_with_properties(bytes.as_ref())
             .map_err(StoreError::Malformed)
             .map_err(BufferedReadError::from)?;
@@ -182,7 +189,14 @@ impl<V: Vfs> BufferedPartition<V> {
         admission: Admission,
     ) -> Result<Vec<EdgePropertyRow>, BufferedReadError> {
         let key = self.blocks[at].properties.ok_or(BufferError::InvalidLoad)?;
-        let bytes = self.pin(cx, key, admission).await?;
+        let bytes = self
+            .pin(
+                cx,
+                crate::store::StoredObjectKind::EdgePropertyPatch,
+                key,
+                admission,
+            )
+            .await?;
         crate::edge_props::read_property_patch_inner(
             self.store.k_oid.expose(),
             self.store.namespace,
@@ -202,7 +216,14 @@ impl<V: Vfs> BufferedPartition<V> {
         admission: Admission,
     ) -> Result<Vec<EdgePropertyRow>, BufferedReadError> {
         let key = self.blocks[at].properties.ok_or(BufferError::InvalidLoad)?;
-        let bytes = self.pin(cx, key, admission).await?;
+        let bytes = self
+            .pin(
+                cx,
+                crate::store::StoredObjectKind::EdgePropertyPatch,
+                key,
+                admission,
+            )
+            .await?;
         crate::edge_props::read_admitted_property_column(
             self.store.k_oid.expose(),
             self.store.namespace,
@@ -226,7 +247,14 @@ impl<V: Vfs> BufferedPartition<V> {
             .checked_sub(1)
             .ok_or(BufferError::InvalidLoad)?;
         let key = self.blocks[at].properties.ok_or(BufferError::InvalidLoad)?;
-        let bytes = self.pin(cx, key, admission).await?;
+        let bytes = self
+            .pin(
+                cx,
+                crate::store::StoredObjectKind::EdgePropertyPatch,
+                key,
+                admission,
+            )
+            .await?;
         crate::edge_props::read_admitted_property_row(
             self.store.k_oid.expose(),
             self.store.namespace,
@@ -252,7 +280,14 @@ impl<V: Vfs> BufferedPartition<V> {
             .checked_sub(1)
             .ok_or(BufferError::InvalidLoad)?;
         let key = self.blocks[at].properties.ok_or(BufferError::InvalidLoad)?;
-        let bytes = self.pin(cx, key, admission).await?;
+        let bytes = self
+            .pin(
+                cx,
+                crate::store::StoredObjectKind::EdgePropertyPatch,
+                key,
+                admission,
+            )
+            .await?;
         crate::edge_props::read_admitted_property_value(
             self.store.k_oid.expose(),
             self.store.namespace,

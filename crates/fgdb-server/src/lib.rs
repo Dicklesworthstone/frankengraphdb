@@ -79,6 +79,7 @@
 // future-incompatibility lint (rust-lang/rust#159228) rejects under -D warnings.
 #![recursion_limit = "256"]
 
+pub mod aegis;
 mod beacon;
 mod bolt;
 mod commits;
@@ -94,8 +95,15 @@ mod shutdown;
 mod symbols;
 mod tls;
 
+pub use aegis::{AegisReplicaCoordinator, SingleMemberPublisher};
 pub use beacon::{BeaconIndexConfig, BeaconIndexStatus};
-pub use keys::{KeyFileError, parse_key_lines, read_database_keys, read_issuer_key};
+pub use fgdb_resource::{
+    Admitted as AdmittedResources, ResourceAxis, ResourceCeiling, ResourceError, ResourceVector,
+};
+pub use keys::{
+    KeyFileError, parse_key_lines, read_database_keys, read_database_keys_with_options,
+    read_issuer_key, read_passphrase_file,
+};
 pub use maintenance::{MaintenanceEvent, MaintenanceSchedule, MaintenanceScheduleError};
 pub use ordered::OrderedReadConfig;
 pub use recovery::DatabaseStatus;
@@ -177,6 +185,31 @@ impl ServerLimits {
             return Err(ServerError::InvalidLimits);
         }
         Ok(())
+    }
+
+    /// Inclusive [`ResourceCeiling`] derived from these connection and frame limits.
+    #[must_use]
+    pub fn frame_resource_ceiling(&self) -> ResourceCeiling {
+        ResourceCeiling::new(ResourceVector {
+            cpu_micros: u64::MAX,
+            memory_bytes: self.max_window_bytes,
+            io_bytes: u64::MAX,
+            io_ops: self.max_connections as u64,
+            network_bytes: u64::from(self.max_frame_len),
+        })
+    }
+
+    /// Check one frame's network payload and connection window footprint against
+    /// [`Self::frame_resource_ceiling`].
+    pub fn admit_frame_resources(
+        &self,
+        payload_bytes: u64,
+        window_bytes: u64,
+    ) -> Result<AdmittedResources, ResourceError> {
+        let mut requested = ResourceVector::ZERO;
+        requested.network_bytes = payload_bytes;
+        requested.memory_bytes = window_bytes;
+        self.frame_resource_ceiling().admit(requested)
     }
 }
 

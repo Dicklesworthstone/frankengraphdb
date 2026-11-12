@@ -905,6 +905,10 @@ impl<'a> Parser<'a> {
             }
             _ => return Ok(false),
         };
+        let mut after = after;
+        if matches!(after.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT")) {
+            after = lexer.next()?;
+        }
         if !matches!(after.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")) {
             return Ok(false);
         }
@@ -1041,13 +1045,25 @@ impl<'a> Parser<'a> {
             // A literal, or a list-typed row column read as its value.
             self.comparison_operand(columns, nesting, at)?
         };
-        if self.take_word("IN")? {
+        let membership = self.is_word("IN")
+            || (self.is_word("NOT")
+                && matches!(
+                    self.lexer.clone().next()?.kind,
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")
+                ));
+        if membership {
+            let negate = self.take_word("NOT")?;
+            self.word("IN")?;
             let list = self.membership_list(columns, nesting, at)?;
             let value = ReadValueTemplate::In {
                 value: Box::new(left),
                 list: Box::new(list),
             };
-            return self.let_slot(program, value, at);
+            self.let_slot(program, value, at)?;
+            if negate {
+                emit(program, ParsedOp::Bound(GraphIntegerOp::Not), at)?;
+            }
+            return Ok(());
         }
         // A chain compares each neighbouring pair: `a < b <= c` is `a < b AND
         // b <= c` (TCK Comparison3), one composite comparison per link.
@@ -1079,12 +1095,32 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
         let mut right = self.comparison_operand(columns, nesting, at)?;
-        while self.take_word("IN")? {
+        while self.is_word("IN")
+            || (self.is_word("NOT")
+                && matches!(
+                    self.lexer.clone().next()?.kind,
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")
+                ))
+        {
+            let negate = self.take_word("NOT")?;
+            self.word("IN")?;
             let list = self.membership_list(columns, nesting, at)?;
             right = ReadValueTemplate::In {
                 value: Box::new(right),
                 list: Box::new(list),
             };
+            if negate {
+                right = ReadValueTemplate::Let {
+                    values: vec![right],
+                    body: Box::new(ReadValueTemplate::Integer {
+                        program: vec![
+                            MutationIntegerTemplateOp::Bound(GraphIntegerOp::Local(0)),
+                            MutationIntegerTemplateOp::Bound(GraphIntegerOp::Not),
+                        ],
+                        at,
+                    }),
+                };
+            }
         }
         Ok(right)
     }
@@ -1353,8 +1389,12 @@ impl<'a> Parser<'a> {
                 self.predicate_start = usize::MAX;
             }
             ExpressionBoundary::Operand => {
-                self.comparison_start = self.current.at;
-                self.predicate_start = self.current.at;
+                self.comparison_start = if self.comparison_right_at == at {
+                    usize::MAX
+                } else {
+                    at
+                };
+                self.predicate_start = at;
             }
             ExpressionBoundary::Whole | ExpressionBoundary::Predicate => {}
         }
@@ -2317,15 +2357,18 @@ impl<'a> Parser<'a> {
         &self,
         columns: &ExpressionColumns<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
+        let row = self.routing_row(columns);
         let collected =
             matches!(columns, ExpressionColumns::Resolved(_)) && self.collected_aggregate_call()?;
         let metadata = self
             .value_metadata_call(
                 matches!(columns, ExpressionColumns::Graph(_)),
-                self.routing_row(columns).unwrap_or(&[]),
+                row.unwrap_or(&[]),
             )?
             .is_some();
-        Ok(self.let_operand_here()? || collected || metadata)
+        let composite_null =
+            self.predicate_start == self.current.at && self.starts_composite_null(row)?;
+        Ok(self.let_operand_here()? || collected || metadata || composite_null)
     }
 
     /// The operand every other form leaves: a property, column or row

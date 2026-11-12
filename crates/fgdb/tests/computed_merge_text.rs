@@ -1595,10 +1595,12 @@ fn match_and_trailing_map_replacement_clear_the_keys_the_clause_does_not_assign(
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 fn integer_list(values: &[i64]) -> GraphValue {
     GraphValue::List(
-        values.iter().map(|value| GraphValue::Scalar(Scalar::Int(*value))).collect(),
+        values
+            .iter()
+            .map(|value| GraphValue::Scalar(Scalar::Int(*value)))
+            .collect(),
     )
 }
 
@@ -1626,7 +1628,13 @@ fn native_target_lists_keep_branch_and_clause_cuts_and_survive_reopen() {
             let frozen = arguments.canonical_bytes();
             let fgdb::QueryResult::Rows { rows, .. } = db
                 .query_write_engine(
-                    &txn, &query, &commit, statement, &arguments, symbols, R,
+                    &txn,
+                    &query,
+                    &commit,
+                    statement,
+                    &arguments,
+                    symbols,
+                    R,
                     program_policy(4),
                 )
                 .await
@@ -1646,12 +1654,17 @@ fn native_target_lists_keep_branch_and_clause_cuts_and_survive_reopen() {
         }
         let fgdb::QueryResult::Rows { rows, .. } = db
             .query_write_engine(
-                &txn, &query, &commit,
+                &txn,
+                &query,
+                &commit,
                 "MERGE (n:Person {id:1}) ON MATCH \
                  SET n.copy=tail(n.count),n.ready=split(n.name,','), \
                      n.count=[n IN n.count WHERE n>1 | n+1] \
                  RETURN n.count,n.copy,n.ready",
-                &GqlParameters::new(), symbols, R, program_policy(3),
+                &GqlParameters::new(),
+                symbols,
+                R,
+                program_policy(3),
             )
             .await
             .unwrap()
@@ -1662,20 +1675,29 @@ fn native_target_lists_keep_branch_and_clause_cuts_and_survive_reopen() {
             fgdb::QueryValue::Value(integer_list(&[100, 4, 100])),
             fgdb::QueryValue::Value(integer_list(&[99, 3, 99])),
             fgdb::QueryValue::Value(GraphValue::List(
-                ["red", "blue"].into_iter().map(|value| {
-                    GraphValue::Scalar(Scalar::ucs_basic_text(value).unwrap())
-                }).collect(),
+                ["red", "blue"]
+                    .into_iter()
+                    .map(|value| GraphValue::Scalar(Scalar::ucs_basic_text(value).unwrap()))
+                    .collect(),
             )),
         ];
-        assert_eq!(rows, [expected.clone()]);
+        assert_eq!(rows.as_slice(), core::slice::from_ref(&expected));
         assert_eq!(db.frontier().unwrap().0, before.0 + 3);
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
-        let fgdb::QueryResult::Rows { rows, .. } = db.query(
-            &query, "MATCH (n:Person {id:1}) RETURN n.count,n.copy,n.ready",
-            &GqlParameters::new(), symbols, query_policy(),
-        ).unwrap() else {
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        let fgdb::QueryResult::Rows { rows, .. } = db
+            .query(
+                &query,
+                "MATCH (n:Person {id:1}) RETURN n.count,n.copy,n.ready",
+                &GqlParameters::new(),
+                symbols,
+                query_policy(),
+            )
+            .unwrap()
+        else {
             panic!("stored lists must remain readable after reopen");
         };
         assert_eq!(rows, [expected]);
@@ -1703,29 +1725,46 @@ fn unwind_target_lists_accumulate_and_late_refusals_publish_no_prefix() {
             );
             let arguments = rows(&[(1, 2), (2, 5), (1, 3)]);
             let frozen = arguments.canonical_bytes();
-            let result = db.query_write_engine(
-                &txn, &query, &commit, &text, &arguments, symbols, R,
-                program_policy(if mode == 3 { 4 } else { 5 }),
-            ).await;
+            let result = db
+                .query_write_engine(
+                    &txn,
+                    &query,
+                    &commit,
+                    &text,
+                    &arguments,
+                    symbols,
+                    R,
+                    program_policy(if mode == 3 { 4 } else { 5 }),
+                )
+                .await;
             if mode == 0 {
                 result.unwrap();
                 assert_eq!(db.frontier().unwrap().0, before.0 + 1);
-                let fgdb::QueryResult::Rows { rows, .. } = db.query(
-                    &query, "MATCH (n:Person) RETURN n.id,n.count ORDER BY n.id",
-                    &GqlParameters::new(), symbols, query_policy(),
-                ).unwrap() else {
+                let fgdb::QueryResult::Rows { rows, .. } = db
+                    .query(
+                        &query,
+                        "MATCH (n:Person) RETURN n.id,n.count ORDER BY n.id",
+                        &GqlParameters::new(),
+                        symbols,
+                        query_policy(),
+                    )
+                    .unwrap()
+                else {
                     panic!("completed UNWIND writes remain queryable");
                 };
-                assert_eq!(rows, [
-                    vec![
-                        fgdb::QueryValue::Value(GraphValue::Scalar(Scalar::Int(1))),
-                        fgdb::QueryValue::Value(integer_list(&[2, 3])),
-                    ],
-                    vec![
-                        fgdb::QueryValue::Value(GraphValue::Scalar(Scalar::Int(2))),
-                        fgdb::QueryValue::Value(integer_list(&[5])),
-                    ],
-                ]);
+                assert_eq!(
+                    rows,
+                    [
+                        vec![
+                            fgdb::QueryValue::Value(GraphValue::Scalar(Scalar::Int(1))),
+                            fgdb::QueryValue::Value(integer_list(&[2, 3])),
+                        ],
+                        vec![
+                            fgdb::QueryValue::Value(GraphValue::Scalar(Scalar::Int(2))),
+                            fgdb::QueryValue::Value(integer_list(&[5])),
+                        ],
+                    ]
+                );
             } else {
                 assert!(result.is_err(), "mode {mode}");
                 assert_eq!(db.frontier().unwrap(), before, "mode {mode}");

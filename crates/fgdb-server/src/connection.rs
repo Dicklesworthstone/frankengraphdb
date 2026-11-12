@@ -80,14 +80,28 @@ impl PreparedStatements {
         let definition = definition.into();
         definition.generation().check().map_err(Refusal::from)?;
         let next = self.source_bytes.checked_add(definition.source_bytes());
-        if self.entries.len() >= MAX_PREPARED_STATEMENTS
-            || next.is_none_or(|bytes| bytes > MAX_PREPARED_SOURCE_BYTES)
-        {
+        let next_templates = (self.entries.len() as u64).saturating_add(1);
+        let ceiling = fgdb_resource::ResourceCeiling::new(fgdb_resource::ResourceVector {
+            cpu_micros: u64::MAX,
+            memory_bytes: MAX_PREPARED_SOURCE_BYTES as u64,
+            io_bytes: u64::MAX,
+            io_ops: MAX_PREPARED_STATEMENTS as u64,
+            network_bytes: u64::MAX,
+        });
+        let admitted = next.and_then(|bytes| {
+            u64::try_from(bytes).ok().and_then(|memory_bytes| {
+                let mut requested = fgdb_resource::ResourceVector::ZERO;
+                requested.memory_bytes = memory_bytes;
+                requested.io_ops = next_templates;
+                ceiling.admit(requested).ok().map(|_| bytes)
+            })
+        });
+        let Some(next_bytes) = admitted else {
             return Err(Refusal::new(
                 ErrorCode::Budget,
                 "this connection's prepared statement allowance is exhausted; release a template",
             ));
-        }
+        };
         let handle = loop {
             let mut bytes = [0; 16];
             cx.random_bytes(&mut bytes);
@@ -97,7 +111,7 @@ impl PreparedStatements {
             }
         };
         let generation = definition.generation().clone();
-        self.source_bytes = next.expect("checked source byte allowance");
+        self.source_bytes = next_bytes;
         self.entries.insert(handle, Arc::new(definition));
         Ok((handle, generation))
     }

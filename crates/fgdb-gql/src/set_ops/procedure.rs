@@ -1376,14 +1376,14 @@ mod tests {
             graph_projection, ..
         } = &mut call
         {
-            *graph_projection = Some(ProcedureGraphProjection {
+            *graph_projection = Some(Box::new(ProcedureGraphProjection {
                 vertex_labels: SchemaSelection::ALL,
                 relations: SchemaSelection::ALL,
                 weight: ProcedureGraphWeight::Unit,
                 direction: None,
                 parallel_edges: ProcedureParallelEdges::Reject,
                 self_loops: ProcedureSelfLoops::Keep,
-            });
+            }));
         }
         let mut projected = Vec::new();
         call.append_template_transcript(&mut projected);

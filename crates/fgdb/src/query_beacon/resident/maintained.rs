@@ -370,6 +370,77 @@ impl<V: Vfs + Clone> Database<V> {
         })
     }
 
+    pub(crate) fn export_beacon_checkpoint_payload(
+        &self,
+        cx: &QueryCx,
+        handle: &MaintainedBeaconIndex,
+    ) -> Result<(CommitSeq, Vec<u8>), MaintainedBeaconError> {
+        cx.with_restriction(|| {
+            checkpoint(cx)?;
+            let current = self.frontier().map_err(Error::Source)?;
+            let entry = self.maintained_beacon.entry(&self.handle_owner, handle)?;
+            if let Some(failure) = &entry.failure {
+                return Err(MaintainedBeaconError::Unavailable {
+                    source: entry.resident.source_sequence,
+                    current,
+                    failure: failure.clone(),
+                });
+            }
+            if entry.resident.source_sequence != current {
+                return Err(MaintainedBeaconError::Stale {
+                    source: entry.resident.source_sequence,
+                    current,
+                });
+            }
+            entry
+                .resident
+                .encode_derived_payload(cx, entry.maintenance)
+                .map_err(Into::into)
+        })
+    }
+
+    pub(crate) fn install_restored_beacon_index(
+        &mut self,
+        cx: &QueryCx,
+        resident: ResidentIndex,
+        maintenance: ReadPolicy,
+        last_refresh: RefreshReport,
+    ) -> Result<MaintainedBeaconIndex, MaintainedBeaconError> {
+        cx.with_restriction(|| {
+            checkpoint(cx)?;
+            let slot = self.maintained_beacon.vacant_slot()?;
+            if slot == self.maintained_beacon.entries.len() {
+                self.maintained_beacon.entries.try_reserve(1).map_err(|_| {
+                    Error::Index(BeaconError::ResourceLimit {
+                        resource: "Beacon registration allocation",
+                        limit: MAX_MAINTAINED_BEACON_INDEXES,
+                    })
+                })?;
+            }
+            let registration = Arc::new(());
+            let handle = MaintainedBeaconIndex {
+                owner: Arc::clone(&self.handle_owner),
+                registration: Arc::clone(&registration),
+                slot,
+            };
+            let entry = Entry {
+                registration,
+                resident,
+                maintenance,
+                last_refresh,
+                failure: None,
+            };
+            checkpoint(cx)?;
+            if slot == self.maintained_beacon.entries.len() {
+                self.maintained_beacon.entries.push(Some(entry));
+            } else {
+                self.maintained_beacon.entries[slot] = Some(entry);
+            }
+            self.maintained_beacon.refresh_query_indexes();
+            Ok(handle)
+        })
+    }
+
     /// Return maintenance state even when this registration is fenced. The
     /// database itself must still be readable; this never blesses an ambiguous
     /// durable outcome or reads the retained corpus for diagnostics.

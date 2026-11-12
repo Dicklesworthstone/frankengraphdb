@@ -20,5 +20,5 @@ pub use crate::set_ops::spill::{
     SpillSetAggregateRowError, SpillSetApplyKind, SpillSetApplyPlan, SpillSetArgumentsPlan,
     SpillSetBinaryPlan, SpillSetBuildError, SpillSetCollection, SpillSetCrossPlan,
     SpillSetJoinPlan, SpillSetMergeStep, SpillSetProcedurePlan, SpillSetRowError, SpillSetRows,
-    SpillSetStage, SpillSetValuesPlan,
+    SpillSetStage, SpillSetValuesPlan, scalar_to_vid,
 };

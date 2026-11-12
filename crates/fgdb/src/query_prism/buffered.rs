@@ -243,7 +243,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             if options.selection.relations.single() != Some(relation) {
                 return Err(GqlQueryError::Source(GqlError::Procedure(
                     ProcedureError::SealedRelationMismatch {
-                        requested: options.selection.relations,
+                        requested: Box::new(options.selection.relations),
                         retained: relation,
                     },
                 )));
@@ -410,9 +410,12 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     ) -> Result<SealedGraphView, FnxSealedReadError<BufferedReadError, Cancel>> {
         cx.with_restriction_async(async {
             cx.checkpoint().map_err(FnxReadError::Cancelled)?;
-            let relation = selection.relations.single().ok_or(FnxSealedReadError::Projection(
-                SealedProjectionError::RelationRequired,
-            ))?;
+            let relation = selection
+                .relations
+                .single()
+                .ok_or(FnxSealedReadError::Projection(
+                    SealedProjectionError::RelationRequired,
+                ))?;
             if as_of > self.frontier() {
                 return Err(read_failure(BufferedReadError::BeyondPublication {
                     requested: as_of,

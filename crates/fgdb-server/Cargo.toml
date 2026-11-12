@@ -20,7 +20,10 @@ fgdb-bolt = { path = "../fgdb-bolt" }
 fgdb-crypto = { path = "../fgdb-crypto" }
 fgdb-delta-types = { path = "../fgdb-delta-types" }
 fgdb-gql = { path = "../fgdb-gql" }
+fgdb-order = { path = "../fgdb-order" }
 fgdb-protocol = { path = "../fgdb-protocol", features = ["transport"] }
+fgdb-repl = { path = "../fgdb-repl" }
+fgdb-resource = { path = "../fgdb-resource" }
 fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }
 fgdb-warden = { path = "../fgdb-warden" }

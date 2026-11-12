@@ -666,6 +666,201 @@ impl<V: Vfs + Clone> Database<V> {
     }
 }
 
+const DERIVED_BEACON_MAGIC: [u8; 4] = *b"FGDB";
+const DERIVED_BEACON_VERSION_V1: u16 = 1;
+
+fn encode_vector_encoding(enc: fgdb_beacon::read::VectorEncoding) -> u8 {
+    match enc {
+        fgdb_beacon::read::VectorEncoding::Coordinates => 1,
+        fgdb_beacon::read::VectorEncoding::PackedF32Le => 2,
+        fgdb_beacon::read::VectorEncoding::CoordinatesRoundedF32 => 3,
+    }
+}
+
+fn decode_vector_encoding(code: u8) -> Option<fgdb_beacon::read::VectorEncoding> {
+    match code {
+        1 => Some(fgdb_beacon::read::VectorEncoding::Coordinates),
+        2 => Some(fgdb_beacon::read::VectorEncoding::PackedF32Le),
+        3 => Some(fgdb_beacon::read::VectorEncoding::CoordinatesRoundedF32),
+        _ => None,
+    }
+}
+
+impl ResidentIndex {
+    pub(crate) fn encode_derived_payload(
+        &self,
+        cx: &QueryCx,
+        policy: ReadPolicy,
+    ) -> Result<(CommitSeq, Vec<u8>), Error> {
+        cx.with_restriction(|| {
+            cx.checkpoint().map_err(Error::Interrupted)?;
+            let work = RefCell::new(Meter::new(policy.max_work_units, |_| cx.checkpoint()));
+            let result = (|| {
+                work.borrow_mut().charge(1)?;
+                let mut out = Vec::new();
+                out.extend_from_slice(&DERIVED_BEACON_MAGIC);
+                out.extend_from_slice(&DERIVED_BEACON_VERSION_V1.to_le_bytes());
+                match self.definition.vertex_label {
+                    Some(label) => {
+                        out.push(1);
+                        out.extend_from_slice(&label.0.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
+                match self.definition.projection.text {
+                    Some(prop) => {
+                        out.push(1);
+                        out.extend_from_slice(&prop.0.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
+                out.push(encode_vector_encoding(self.definition.projection.encoding));
+                out.extend_from_slice(
+                    &(self.definition.projection.vector.len() as u64).to_le_bytes(),
+                );
+                for &prop in &self.definition.projection.vector {
+                    work.borrow_mut().charge(1)?;
+                    out.extend_from_slice(&prop.0.to_le_bytes());
+                }
+                let index_bytes = self.index.encode_checkpoint(&mut SharedWork(&work))?;
+                out.extend_from_slice(&(index_bytes.len() as u64).to_le_bytes());
+                out.extend_from_slice(&index_bytes);
+                Ok((self.source_sequence, out))
+            })();
+            complete(work.into_inner(), result)
+        })
+    }
+
+    /// Decode a persisted Beacon payload for `owner` at `source_sequence`.
+    /// Returns `Ok(None)` when checkpoint bytes or projection/config bindings
+    /// are malformed or incompatible (triggering `FG-INV-18` discard + rebuild),
+    /// while propagating caller cancellation / work-budget refusals as `Err`.
+    pub(crate) fn decode_derived_payload(
+        owner: Arc<()>,
+        options: &Options,
+        source_sequence: CommitSeq,
+        bytes: &[u8],
+        cx: &QueryCx,
+    ) -> Result<Option<Self>, Error> {
+        cx.with_restriction(|| {
+            cx.checkpoint().map_err(Error::Interrupted)?;
+            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
+                cx.checkpoint()
+            }));
+            let result = (|| {
+                let def = definition(options, &mut SharedWork(&work))?;
+                let mut pos = 0usize;
+                let mut take = |len: usize| -> Option<&[u8]> {
+                    let end = pos.checked_add(len)?;
+                    if end > bytes.len() {
+                        return None;
+                    }
+                    let slice = &bytes[pos..end];
+                    pos = end;
+                    Some(slice)
+                };
+                if take(4) != Some(&DERIVED_BEACON_MAGIC) {
+                    return Ok(None);
+                }
+                let Some(ver) = take(2).map(|b| u16::from_le_bytes([b[0], b[1]])) else {
+                    return Ok(None);
+                };
+                if ver != DERIVED_BEACON_VERSION_V1 {
+                    return Ok(None);
+                }
+                let stored_label = match take(1).map(|b| b[0]) {
+                    Some(0) => None,
+                    Some(1) => {
+                        let Some(raw) = take(8) else { return Ok(None) };
+                        let mut arr = [0u8; 8];
+                        arr.copy_from_slice(raw);
+                        Some(LabelId(u64::from_le_bytes(arr)))
+                    }
+                    _ => return Ok(None),
+                };
+                let stored_text = match take(1).map(|b| b[0]) {
+                    Some(0) => None,
+                    Some(1) => {
+                        let Some(raw) = take(8) else { return Ok(None) };
+                        let mut arr = [0u8; 8];
+                        arr.copy_from_slice(raw);
+                        Some(PropertyKeyId(u64::from_le_bytes(arr)))
+                    }
+                    _ => return Ok(None),
+                };
+                let Some(enc_code) = take(1).map(|b| b[0]) else {
+                    return Ok(None);
+                };
+                let Some(stored_encoding) = decode_vector_encoding(enc_code) else {
+                    return Ok(None);
+                };
+                let Some(vec_len_raw) = take(8) else {
+                    return Ok(None);
+                };
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(vec_len_raw);
+                let Ok(vec_len) = usize::try_from(u64::from_le_bytes(arr)) else {
+                    return Ok(None);
+                };
+                if stored_label != def.vertex_label
+                    || stored_text != def.projection.text
+                    || stored_encoding != def.projection.encoding
+                    || vec_len != def.projection.vector.len()
+                {
+                    return Ok(None);
+                }
+                for &expected_prop in &def.projection.vector {
+                    work.borrow_mut().charge(1)?;
+                    let Some(raw) = take(8) else { return Ok(None) };
+                    let mut p_arr = [0u8; 8];
+                    p_arr.copy_from_slice(raw);
+                    if PropertyKeyId(u64::from_le_bytes(p_arr)) != expected_prop {
+                        return Ok(None);
+                    }
+                }
+                let Some(idx_len_raw) = take(8) else {
+                    return Ok(None);
+                };
+                let mut idx_arr = [0u8; 8];
+                idx_arr.copy_from_slice(idx_len_raw);
+                let Ok(idx_len) = usize::try_from(u64::from_le_bytes(idx_arr)) else {
+                    return Ok(None);
+                };
+                let Some(idx_bytes) = take(idx_len) else {
+                    return Ok(None);
+                };
+                if pos != bytes.len() {
+                    return Ok(None);
+                }
+                let index = match BeaconIndex::decode_checkpoint(
+                    idx_bytes,
+                    &def.index,
+                    &mut SharedWork(&work),
+                ) {
+                    Ok(index) => index,
+                    Err(
+                        fgdb_beacon::BeaconCheckpointError::Malformed(_)
+                        | fgdb_beacon::BeaconCheckpointError::ConfigMismatch,
+                    ) => return Ok(None),
+                    Err(fgdb_beacon::BeaconCheckpointError::Beacon(
+                        error @ (BeaconError::WorkBudgetExceeded | BeaconError::Cancelled),
+                    )) => return Err(Error::Index(error)),
+                    Err(fgdb_beacon::BeaconCheckpointError::Beacon(_)) => return Ok(None),
+                };
+                work.borrow_mut().charge(1)?;
+                Ok(Some(ResidentIndex {
+                    owner,
+                    definition: Arc::new(def),
+                    source_sequence,
+                    index,
+                    graph_source: None,
+                }))
+            })();
+            complete(work.into_inner(), result)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

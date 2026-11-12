@@ -1046,6 +1046,13 @@ impl<'a> Syntax<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CorrelationTarget<'a> {
+    Element,
+    Property(Name<'a>),
+    Identity { text: bool },
+}
+
 struct Parser<'a> {
     lexer: Lexer<'a>,
     current: Token<'a>,
@@ -1067,7 +1074,7 @@ struct Parser<'a> {
     page_expression_parameters: BTreeSet<String>,
     in_page_expression: bool,
     read_row_bindings: Vec<Name<'a>>,
-    read_correlations: Vec<(Name<'a>, Option<Name<'a>>, usize)>,
+    read_correlations: Vec<(Name<'a>, CorrelationTarget<'a>, usize)>,
     /// Computed imported join keys, evaluated once per leading row before
     /// its graph product. Their private columns never enter public schemas.
     read_row_fields: Vec<crate::set_text::ReadValueTemplate>,
@@ -1143,6 +1150,10 @@ struct Parser<'a> {
     /// list sum's Product operand (usize::MAX), is part of a tighter operand,
     /// so `[0] + x < [1]` compares the sum.
     comparison_start: usize,
+    /// Where a row-filter comparison's right operand starts (`selection.rs`),
+    /// so a composite at that exact offset may begin a tighter `[NOT] IN`
+    /// membership without consuming a following comparison link.
+    comparison_right_at: usize,
     /// Where the innermost predicate-level operand starts (scalar_predicate):
     /// a comparison's right operand may begin a composite membership, which
     /// binds tighter than the comparison (`true = [1] IN l`).
@@ -1357,6 +1368,7 @@ impl<'a> Parser<'a> {
             lets: None,
             let_base: 0,
             comparison_start: usize::MAX,
+            comparison_right_at: usize::MAX,
             predicate_start: usize::MAX,
             boolean_operand_at: usize::MAX,
             membership_list: false,
@@ -1950,7 +1962,8 @@ impl<'a> Parser<'a> {
                 self.imported_row_field()?
             };
             if let Some(row) = row {
-                self.read_correlations.push((variable, Some(key), row));
+                self.read_correlations
+                    .push((variable, CorrelationTarget::Property(key), row));
             } else if let Some(predicate) = self.collection_property_operand(variable, key)? {
                 self.syntax.filters.push(predicate);
             } else if !edge && self.computed_value_follows()? {

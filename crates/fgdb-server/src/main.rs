@@ -241,6 +241,8 @@ struct DatabaseOptions {
     name: String,
     path: PathBuf,
     key_file: Option<PathBuf>,
+    kek_passphrase_file: Option<PathBuf>,
+    strata_ecs: bool,
     issuer_key_file: Option<PathBuf>,
     query_scratch_dir: Option<PathBuf>,
     policy_epoch: u64,
@@ -529,6 +531,8 @@ impl ServeOptions {
                         name: name.to_owned(),
                         path: PathBuf::from(path),
                         key_file: None,
+                        kek_passphrase_file: None,
+                        strata_ecs: false,
                         issuer_key_file: None,
                         query_scratch_dir: None,
                         policy_epoch: 1,
@@ -550,6 +554,13 @@ impl ServeOptions {
                     match flag {
                         "--key-file" if db.key_file.is_none() => {
                             db.key_file = Some(PathBuf::from(value(args, &mut at, flag)?));
+                        }
+                        "--kek-passphrase-file" if db.kek_passphrase_file.is_none() => {
+                            db.kek_passphrase_file =
+                                Some(PathBuf::from(value(args, &mut at, flag)?));
+                        }
+                        "--strata-ecs" if !db.strata_ecs => {
+                            db.strata_ecs = true;
                         }
                         "--issuer-key-file" if db.issuer_key_file.is_none() => {
                             db.issuer_key_file = Some(PathBuf::from(value(args, &mut at, flag)?));
@@ -730,9 +741,14 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
                     })?;
             }
         }
-        let keys = fgdb_server::read_database_keys(cx, db.key_file.as_deref().expect("checked"))
-            .await
-            .map_err(Failure::open)?;
+        let keys = fgdb_server::read_database_keys_with_options(
+            cx,
+            db.key_file.as_deref().expect("checked"),
+            db.kek_passphrase_file.as_deref(),
+            db.strata_ecs,
+        )
+        .await
+        .map_err(Failure::open)?;
         let issuer_key =
             fgdb_server::read_issuer_key(cx, db.issuer_key_file.as_deref().expect("checked"))
                 .await
@@ -916,16 +932,31 @@ fn report_maintenance(name: &str, event: MaintenanceEvent) {
             eprintln!("fgdbd: database {name:?}: scrub failed: {error}");
         }
         MaintenanceEvent::Scrub(Ok(summary)) => {
-            eprintln!(
-                "fgdbd: database {name:?}: scrub completed: capsules={}, repaired={}, lost={}, blocks={}, block_lost={}, metadata={}, metadata_lost={}",
-                summary.objects,
-                summary.repaired.len(),
-                summary.lost.len(),
-                summary.block_objects,
-                summary.block_lost.len(),
-                summary.metadata_objects,
-                summary.metadata_lost.len(),
-            );
+            if summary.block_repaired.is_empty() && summary.metadata_repaired.is_empty() {
+                eprintln!(
+                    "fgdbd: database {name:?}: scrub completed: capsules={}, repaired={}, lost={}, blocks={}, block_lost={}, metadata={}, metadata_lost={}",
+                    summary.objects,
+                    summary.repaired.len(),
+                    summary.lost.len(),
+                    summary.block_objects,
+                    summary.block_lost.len(),
+                    summary.metadata_objects,
+                    summary.metadata_lost.len(),
+                );
+            } else {
+                eprintln!(
+                    "fgdbd: database {name:?}: scrub completed: capsules={}, repaired={}, lost={}, blocks={}, block_repaired={}, block_lost={}, metadata={}, metadata_repaired={}, metadata_lost={}",
+                    summary.objects,
+                    summary.repaired.len(),
+                    summary.lost.len(),
+                    summary.block_objects,
+                    summary.block_repaired.len(),
+                    summary.block_lost.len(),
+                    summary.metadata_objects,
+                    summary.metadata_repaired.len(),
+                    summary.metadata_lost.len(),
+                );
+            }
             if !summary.lost.is_empty()
                 || !summary.block_lost.is_empty()
                 || !summary.metadata_lost.is_empty()
@@ -940,6 +971,7 @@ fn report_maintenance(name: &str, event: MaintenanceEvent) {
 
 struct TokenOptions {
     key_file: PathBuf,
+    kek_passphrase_file: Option<PathBuf>,
     issuer_key_file: PathBuf,
     policy_epoch: u64,
     rights: Rights,
@@ -953,9 +985,11 @@ struct TokenOptions {
 impl TokenOptions {
     fn parse(args: &[String]) -> Result<Self, Failure> {
         let mut key_file = None;
+        let mut kek_passphrase_file = None;
         let mut issuer_key_file = None;
         let mut options = Self {
             key_file: PathBuf::new(),
+            kek_passphrase_file: None,
             issuer_key_file: PathBuf::new(),
             policy_epoch: 1,
             rights: Rights::Read,
@@ -975,6 +1009,9 @@ impl TokenOptions {
             match flag {
                 "--key-file" if key_file.is_none() => {
                     key_file = Some(PathBuf::from(value(args, &mut at, flag)?))
+                }
+                "--kek-passphrase-file" if kek_passphrase_file.is_none() => {
+                    kek_passphrase_file = Some(PathBuf::from(value(args, &mut at, flag)?))
                 }
                 "--issuer-key-file" if issuer_key_file.is_none() => {
                     issuer_key_file = Some(PathBuf::from(value(args, &mut at, flag)?));
@@ -1024,6 +1061,7 @@ impl TokenOptions {
             at += 1;
         }
         options.key_file = key_file.ok_or_else(|| Failure::usage("token needs --key-file"))?;
+        options.kek_passphrase_file = kek_passphrase_file;
         options.issuer_key_file =
             issuer_key_file.ok_or_else(|| Failure::usage("token needs --issuer-key-file"))?;
         if options.expires_in_seconds == 0 {
@@ -1049,9 +1087,14 @@ impl TokenOptions {
 }
 
 async fn token(cx: &Cx, options: TokenOptions) -> Result<(), Failure> {
-    let keys = fgdb_server::read_database_keys(cx, &options.key_file)
-        .await
-        .map_err(Failure::open)?;
+    let keys = fgdb_server::read_database_keys_with_options(
+        cx,
+        &options.key_file,
+        options.kek_passphrase_file.as_deref(),
+        false,
+    )
+    .await
+    .map_err(Failure::open)?;
     let issuer_key = fgdb_server::read_issuer_key(cx, &options.issuer_key_file)
         .await
         .map_err(Failure::open)?;
@@ -1235,24 +1278,58 @@ fn attenuate(options: AttenuateOptions) -> Result<(), Failure> {
 }
 
 async fn keygen(cx: &Cx, args: &[String]) -> Result<(), Failure> {
-    let (lines, path) = match args {
-        [flag, path] if flag == "--database" => (3, path),
-        [flag, path] if flag == "--issuer" => (1, path),
+    let (lines, path, passphrase_path) = match args {
+        [flag, path] if flag == "--database" => (3, path, None),
+        [flag, path, pass_flag, pass_path]
+            if flag == "--database" && pass_flag == "--passphrase-file" =>
+        {
+            (3, path, Some(std::path::Path::new(pass_path)))
+        }
+        [pass_flag, pass_path, flag, path]
+            if flag == "--database" && pass_flag == "--passphrase-file" =>
+        {
+            (3, path, Some(std::path::Path::new(pass_path)))
+        }
+        [flag, path] if flag == "--issuer" => (1, path, None),
         _ => {
             return Err(Failure::usage(
-                "keygen needs --database <path> or --issuer <path>",
+                "keygen needs --database <path> [--passphrase-file <path>] or --issuer <path>",
             ));
         }
     };
-    let mut text = String::new();
-    for _ in 0..lines {
-        let mut key = [0u8; 32];
-        cx.random_bytes(&mut key);
-        for byte in key {
-            text.push_str(&format!("{byte:02x}"));
+    let text = if let Some(passphrase_path) = passphrase_path {
+        let passphrase = fgdb_server::read_passphrase_file(cx, passphrase_path)
+            .await
+            .map_err(Failure::open)?;
+        let mut k_oid = [0u8; 32];
+        let mut namespace = [0u8; 32];
+        let mut dek = [0u8; 32];
+        let mut salt = [0u8; 16];
+        let mut nonce = [0u8; 24];
+        cx.random_bytes(&mut k_oid);
+        cx.random_bytes(&mut namespace);
+        cx.random_bytes(&mut dek);
+        cx.random_bytes(&mut salt);
+        cx.random_bytes(&mut nonce);
+        let keys = fgdb::DatabaseKeys::new(
+            k_oid,
+            fgdb_types::DatabaseSecurityNamespaceId(namespace),
+            dek,
+        );
+        keys.seal_passphrase_envelope(passphrase.as_bytes(), salt, nonce)
+            .map_err(Failure::open)?
+    } else {
+        let mut text = String::new();
+        for _ in 0..lines {
+            let mut key = [0u8; 32];
+            cx.random_bytes(&mut key);
+            for byte in key {
+                text.push_str(&format!("{byte:02x}"));
+            }
+            text.push('\n');
         }
-        text.push('\n');
-    }
+        text
+    };
     let options = asupersync::fs::OpenOptions::new()
         .write(true)
         .create_new(true);

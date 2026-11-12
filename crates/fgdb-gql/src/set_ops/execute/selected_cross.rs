@@ -15,6 +15,76 @@ mod range;
 pub(super) mod seeded;
 
 type Key = (usize, usize);
+type IdKey = (usize, usize, bool);
+
+/// Convert one leading scalar cell into the exact `u128` element identity that
+/// `id(x)` (`text == false`) or `elementId(x)` (`text == true`) can equal.
+pub(crate) fn scalar_to_identity(value: &GraphValue, text: bool) -> Option<u128> {
+    use fgdb_types::CanonicalScalar;
+    if text {
+        let GraphValue::Scalar(CanonicalScalar::Text(raw)) = value else {
+            return None;
+        };
+        let raw = raw.as_str();
+        if raw.is_empty()
+            || !raw.bytes().all(|byte| byte.is_ascii_digit())
+            || (raw != "0" && raw.starts_with('0'))
+        {
+            return None;
+        }
+        return raw.parse::<u128>().ok();
+    }
+    match value {
+        GraphValue::Scalar(CanonicalScalar::Int(n)) if *n >= 0 => Some(*n as u128),
+        GraphValue::Scalar(CanonicalScalar::Float(number)) => {
+            let raw = number.get();
+            if !raw.is_finite() || raw < 0.0 || raw >= 9_223_372_036_854_775_808.0 {
+                return None;
+            }
+            let candidate = raw as i64;
+            (candidate >= 0
+                && number.compare_rational(i128::from(candidate), core::num::NonZeroU64::MIN)
+                    == Ordering::Equal)
+                .then_some(candidate as u128)
+        }
+        _ => None,
+    }
+}
+
+pub fn scalar_to_vid(value: &GraphValue, text: bool) -> Option<fgdb_types::VId> {
+    scalar_to_identity(value, text).map(fgdb_types::VId)
+}
+
+fn id_equality(
+    op: &GraphSetPredicateOp,
+    width: usize,
+    columns: Option<&[usize]>,
+) -> Option<IdKey> {
+    let (scalar, element, text) = match op {
+        GraphSetPredicateOp::Compare {
+            left: GraphSetOperand::Column(scalar),
+            comparison: IntegerComparison::Equal,
+            right:
+                GraphSetOperand::IdentityColumn {
+                    column: element,
+                    text,
+                },
+        }
+        | GraphSetPredicateOp::Compare {
+            left:
+                GraphSetOperand::IdentityColumn {
+                    column: element,
+                    text,
+                },
+            comparison: IntegerComparison::Equal,
+            right: GraphSetOperand::Column(scalar),
+        } => (*scalar, *element, *text),
+        _ => return None,
+    };
+    let scalar = columns.map_or(scalar, |columns| columns[scalar]);
+    let element = columns.map_or(element, |columns| columns[element]);
+    (scalar < width && element >= width).then_some((scalar, element - width, text))
+}
 
 fn equality(op: &GraphSetPredicateOp, width: usize, columns: Option<&[usize]>) -> Option<Key> {
     let GraphSetPredicateOp::Compare {
@@ -146,6 +216,91 @@ pub(super) fn required_keys<E>(
         }
     }
     Ok(keys)
+}
+
+pub(crate) fn required_id_keys<E>(
+    width: usize,
+    code: &[GraphSetPredicateOp],
+    columns: Option<&[usize]>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Vec<IdKey>, E> {
+    let mut keys = Vec::new();
+    for op in code {
+        control(GlaExecutionEvent::Work)?;
+        let Some(key) = id_equality(op, width, columns) else {
+            continue;
+        };
+        let mut duplicate = false;
+        for prior in &keys {
+            control(GlaExecutionEvent::Work)?;
+            duplicate |= *prior == key;
+        }
+        if duplicate {
+            continue;
+        }
+        if requires_atom(
+            code,
+            |op| id_equality(op, width, columns) == Some(key),
+            control,
+        )? {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+fn right_element_identity(value: &GraphValue, text: bool) -> Option<u128> {
+    let id = match value {
+        GraphValue::Vertex(fgdb_types::VId(id)) | GraphValue::Edge(fgdb_types::EId(id)) => *id,
+        _ => return None,
+    };
+    (text || i64::try_from(id).is_ok()).then_some(id)
+}
+
+fn id_eligible<E>(
+    row: &GraphValueRow,
+    keys: &[IdKey],
+    right: bool,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<bool, E> {
+    for &(a, b, text) in keys {
+        control(GlaExecutionEvent::Work)?;
+        let present = if right {
+            right_element_identity(&row.values()[b], text).is_some()
+        } else {
+            scalar_to_identity(&row.values()[a], text).is_some()
+        };
+        if !present {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn compare_id_keys<E>(
+    left: &GraphValueRow,
+    left_is_right: bool,
+    right: &GraphValueRow,
+    keys: &[IdKey],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Ordering, E> {
+    for &(a, b, text) in keys {
+        control(GlaExecutionEvent::Work)?;
+        let lhs = if left_is_right {
+            right_element_identity(&left.values()[b], text)
+        } else {
+            scalar_to_identity(&left.values()[a], text)
+        }
+        .expect("id_eligible checked left key");
+        let rhs =
+            right_element_identity(&right.values()[b], text).expect("id_eligible checked right key");
+        let order = lhs.cmp(&rhs);
+        if order != Ordering::Equal {
+            return Ok(order);
+        }
+    }
+    Ok(Ordering::Equal)
 }
 
 pub(super) fn eligible<E>(
@@ -365,12 +520,58 @@ fn boundary<E>(
     Ok(lo)
 }
 
+fn id_boundary<E>(
+    row: &GraphValueRow,
+    right: &[GraphValueRow],
+    index: &[usize],
+    keys: &[IdKey],
+    upper: bool,
+    hint: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<usize, E> {
+    let mut after = |at: usize| -> Result<bool, E> {
+        control(GlaExecutionEvent::Work)?;
+        let order = compare_id_keys(row, false, &right[index[at]], keys, control)?;
+        Ok(order == Ordering::Greater || (upper && order == Ordering::Equal))
+    };
+    let hint = hint.min(index.len());
+    let (mut lo, mut hi) = (0, index.len());
+    if hint < index.len() && after(hint)? {
+        lo = hint + 1;
+        if lo == index.len() || !after(lo)? {
+            return Ok(lo);
+        }
+        lo += 1;
+    } else if hint > 0 {
+        hi = hint - 1;
+        if after(hi)? {
+            return Ok(hint);
+        }
+    } else if hint < index.len() {
+        return Ok(0);
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if after(mid)? {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo)
+}
+
 /// Equality access structure shared by row emission and cardinality.
 struct Index {
     keys: Vec<Key>,
+    id_keys: Vec<IdKey>,
     ordinals: Vec<usize>,
 }
 impl Index {
+    fn has_keys(&self) -> bool {
+        !self.keys.is_empty() || !self.id_keys.is_empty()
+    }
+
     fn build<E>(
         width: usize,
         right: &[GraphValueRow],
@@ -379,6 +580,7 @@ impl Index {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         let keys = required_keys(width, code, columns, control)?;
+        let mut id_keys = Vec::new();
         let mut ordinals = Vec::new();
         if !keys.is_empty() {
             for (at, row) in right.iter().enumerate() {
@@ -393,8 +595,28 @@ impl Index {
                 control(GlaExecutionEvent::Work)?;
                 Ok(order.then_with(|| a.cmp(b)))
             })?;
+        } else {
+            id_keys = required_id_keys(width, code, columns, control)?;
+            if !id_keys.is_empty() {
+                for (at, row) in right.iter().enumerate() {
+                    control(GlaExecutionEvent::Work)?;
+                    if id_eligible(row, &id_keys, true, control)? {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        ordinals.push(at);
+                    }
+                }
+                merge::sort(&mut ordinals, control, &mut |a, b, control| {
+                    let order = compare_id_keys(&right[*a], true, &right[*b], &id_keys, control)?;
+                    control(GlaExecutionEvent::Work)?;
+                    Ok(order.then_with(|| a.cmp(b)))
+                })?;
+            }
         }
-        Ok(Self { keys, ordinals })
+        Ok(Self {
+            keys,
+            id_keys,
+            ordinals,
+        })
     }
 
     /// The indexed rows whose keys equal `row`'s. `hint` carries the previous
@@ -407,28 +629,56 @@ impl Index {
         hint: &mut usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<core::ops::Range<usize>, E> {
-        if self.keys.is_empty() {
-            Ok(0..right.len())
-        } else if eligible(row, &self.keys, false, control)? {
-            let lower = boundary(
-                row,
-                right,
-                &self.ordinals,
-                &self.keys,
-                false,
-                *hint,
-                control,
-            )?;
-            let upper = boundary(row, right, &self.ordinals, &self.keys, true, lower, control)?;
-            *hint = lower;
-            Ok(lower..upper)
+        if !self.keys.is_empty() {
+            if eligible(row, &self.keys, false, control)? {
+                let lower = boundary(
+                    row,
+                    right,
+                    &self.ordinals,
+                    &self.keys,
+                    false,
+                    *hint,
+                    control,
+                )?;
+                let upper =
+                    boundary(row, right, &self.ordinals, &self.keys, true, lower, control)?;
+                *hint = lower;
+                Ok(lower..upper)
+            } else {
+                Ok(0..0)
+            }
+        } else if !self.id_keys.is_empty() {
+            if id_eligible(row, &self.id_keys, false, control)? {
+                let lower = id_boundary(
+                    row,
+                    right,
+                    &self.ordinals,
+                    &self.id_keys,
+                    false,
+                    *hint,
+                    control,
+                )?;
+                let upper = id_boundary(
+                    row,
+                    right,
+                    &self.ordinals,
+                    &self.id_keys,
+                    true,
+                    lower,
+                    control,
+                )?;
+                *hint = lower;
+                Ok(lower..upper)
+            } else {
+                Ok(0..0)
+            }
         } else {
-            Ok(0..0)
+            Ok(0..right.len())
         }
     }
 
     fn row<'a>(&self, right: &'a [GraphValueRow], at: usize) -> &'a GraphValueRow {
-        &right[if self.keys.is_empty() {
+        &right[if !self.has_keys() {
             at
         } else {
             self.ordinals[at]
@@ -492,7 +742,7 @@ pub(super) fn visit_with_context<E, Context>(
     })?;
     // Fixed priority: equality first, then one proved necessary inequality.
     // No observed-cardinality choice and no retry after a refused index build.
-    let range_index = if index.keys.is_empty() {
+    let range_index = if !index.has_keys() {
         range::Index::build(first.len(), right, code, columns, &mut |value| {
             event(context, value)
         })?

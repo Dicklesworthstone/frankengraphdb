@@ -101,7 +101,7 @@ pub(crate) struct UnresolvedGraphText<'a> {
     pub(super) singleton: bool,
     pub(super) leading: Vec<ReadStageTemplate>,
     pub(super) leading_types: Vec<crate::GraphSetColumnType>,
-    pub(super) correlations: Vec<(usize, usize)>,
+    pub(super) correlations: Vec<crate::set_text::BoundCorrelation>,
     pub(super) row_fields: Vec<ReadValueTemplate>,
 }
 impl UnresolvedGraphText<'_> {
@@ -562,7 +562,7 @@ fn resolve_call_symbols(
         let projection = resolve_fnx_projection(value, at, resolve)?;
         arguments.remove(0);
         offsets.remove(0);
-        *graph_projection = Some(projection);
+        *graph_projection = Some(Box::new(projection));
     }
     for ((argument, value), &at) in names.iter().zip(arguments.iter_mut()).zip(offsets.iter()) {
         let Some(kind) = symbol_argument(namespace, name, argument) else {
@@ -737,15 +737,11 @@ fn resolve_fnx_projection(
     };
     let labels = labels
         .iter()
-        .map(|name| {
-            symbol(GraphSymbolKind::Label, projection_text(name, at)?).map(LabelId)
-        })
+        .map(|name| symbol(GraphSymbolKind::Label, projection_text(name, at)?).map(LabelId))
         .collect::<Result<Vec<_>, _>>()?;
     let relations = relations
         .iter()
-        .map(|name| {
-            symbol(GraphSymbolKind::Relation, projection_text(name, at)?).map(RelationId)
-        })
+        .map(|name| symbol(GraphSymbolKind::Relation, projection_text(name, at)?).map(RelationId))
         .collect::<Result<Vec<_>, _>>()?;
     projection.vertex_labels = fgdb_delta_types::SchemaSelection::any_of(&labels)
         .map_err(|_| expected("at most 16 distinct labels in the induced projection"))?;

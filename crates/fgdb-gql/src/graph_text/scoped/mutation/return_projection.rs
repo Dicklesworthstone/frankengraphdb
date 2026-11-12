@@ -203,6 +203,22 @@ pub(super) fn tighter_than_comparison(
     })
 }
 
+pub(super) fn membership_keyword(
+    token: TokenKind<'_>,
+    lexer: &Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    Ok(match token {
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("IN") => true,
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT") => {
+            matches!(
+                lexer.clone().next()?.kind,
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")
+            )
+        }
+        _ => false,
+    })
+}
+
 /// The first token after a value's postfix reads (`[...]` subscripts and
 /// `.key` entries), with `lexer` just past the value itself.
 fn after_postfix<'t>(lexer: &mut Lexer<'t>) -> Result<Token<'t>, GraphPatternTextError> {
@@ -319,8 +335,7 @@ pub(super) fn explicit_list_value_at<'a>(
     token: Token<'a>,
     lexer: &Lexer<'a>,
 ) -> Result<bool, GraphPatternTextError> {
-    Ok(list_operand_at(token, lexer, Route::NONE)?
-        || list_chain_at(token, lexer, Route::NONE)?)
+    Ok(list_operand_at(token, lexer, Route::NONE)? || list_chain_at(token, lexer, Route::NONE)?)
 }
 
 fn list_chain_at<'a>(
@@ -931,7 +946,10 @@ impl<'a> Parser<'a> {
             // shadows the first and silently crosses every row.
             match (self.read_row_bindings.iter()).position(|row| row.text == variable.text) {
                 Some(row) => {
-                    bound_correlations.push((row, index));
+                    bound_correlations.push(crate::set_text::BoundCorrelation::Column {
+                        left: row,
+                        right: index,
+                    });
                     identity.push((row, index));
                 }
                 None => {
@@ -940,9 +958,31 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        for (variable, key, row) in correlations {
-            let index = self.mutation_projection(&mut inputs, variable, key)?;
-            bound_correlations.push((row, index));
+        for (variable, target, row) in correlations {
+            match target {
+                CorrelationTarget::Element => {
+                    let index = self.mutation_projection(&mut inputs, variable, None)?;
+                    bound_correlations.push(crate::set_text::BoundCorrelation::Column {
+                        left: row,
+                        right: index,
+                    });
+                }
+                CorrelationTarget::Property(key) => {
+                    let index = self.mutation_projection(&mut inputs, variable, Some(key))?;
+                    bound_correlations.push(crate::set_text::BoundCorrelation::Column {
+                        left: row,
+                        right: index,
+                    });
+                }
+                CorrelationTarget::Identity { text } => {
+                    let index = self.mutation_projection(&mut inputs, variable, None)?;
+                    bound_correlations.push(crate::set_text::BoundCorrelation::Identity {
+                        left: row,
+                        right: index,
+                        text,
+                    });
+                }
+            }
         }
         // A CALL output matched as a vertex must be one (fgdb-luq0b):
         // record it, so the host refuses a scalar instead of letting the
@@ -2224,6 +2264,10 @@ impl<'a> Parser<'a> {
         }
         Ok(match after_postfix(&mut lexer)?.kind {
             TokenKind::Punct(byte) => b"=<>!+-*/%^".contains(&byte),
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT") => matches!(
+                lexer.next()?.kind,
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")
+            ),
             TokenKind::Word(word) => ["AND", "OR", "XOR", "IS", "IN", "STARTS", "ENDS", "CONTAINS"]
                 .iter()
                 .any(|operator| word.eq_ignore_ascii_case(operator)),
@@ -2237,6 +2281,9 @@ impl<'a> Parser<'a> {
     /// or `>=`, as in `[1, 0] >= [1]`. The scalar compiler reads such a
     /// comparison whole in the value language; it never compares composites.
     pub(super) fn starts_composite_comparison(&self) -> Result<bool, GraphPatternTextError> {
+        if self.comparison_right_at == self.current.at {
+            return self.starts_composite_membership(None);
+        }
         // Element metadata produces ordinary lists/maps. Compare the
         // complete value rather than coercing labels()/keys()/properties()
         // into a scalar let reference.
@@ -2254,8 +2301,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b'=') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
                 TokenKind::Punct(b'<' | b'>') => true,
                 TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
-                TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
-                _ => false,
+                kind => membership_keyword(kind, &lexer)?,
             });
         }
         // A list- or map-typed parameter compared whole (`$rows = [1]`), as
@@ -2273,8 +2319,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b'=') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
                 TokenKind::Punct(b'<' | b'>') => true,
                 TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
-                TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
-                _ => false,
+                kind => membership_keyword(kind, &lexer)?,
             });
         }
         let list = self.is_punct(b'[');
@@ -2288,8 +2333,7 @@ impl<'a> Parser<'a> {
             TokenKind::Punct(b'<') => list || matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
             TokenKind::Punct(b'>') => list,
             TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
-            TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
-            _ => false,
+            kind => membership_keyword(kind, &lexer)?,
         })
     }
 
@@ -2638,8 +2682,7 @@ impl<'a> Parser<'a> {
             TokenKind::Punct(b'=') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
             TokenKind::Punct(b'<' | b'>') => true,
             TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
-            TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
-            _ => false,
+            kind => membership_keyword(kind, &lexer)?,
         })
     }
 
@@ -2715,7 +2758,7 @@ impl<'a> Parser<'a> {
             TokenKind::Word(_) if self.row_list_column(row)?.is_some() => lexer.next()?,
             _ => return Ok(false),
         };
-        Ok(matches!(after.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")))
+        membership_keyword(after.kind, &lexer)
     }
 
     /// Whether a whole composite stands here as a comparison's right
@@ -2748,13 +2791,68 @@ impl<'a> Parser<'a> {
         ) && !tighter_than_comparison(&mut lexer)?)
     }
 
-    /// starts_let_operand, or a list literal read through a subscript or
-    /// slice (`[5, [6, 7], 10][1]`), whose element may be a list or a scalar
-    /// (fgdb-c4i0d). A literal compared with `=` or IN was already taken by
-    /// starts_composite_comparison.
+    /// Whether a list or map literal, a list- or map-typed parameter or a
+    /// bare list-typed row column starts a null predicate here (`[1] IS NULL`,
+    /// `{k:1} IS NOT NULL`). `IS [NOT] NULL` binds tighter than a comparison,
+    /// so a comparison's right operand may begin with one (`x = [1] IS NULL =
+    /// false`, fgdb-fc7cx).
+    pub(super) fn starts_composite_null(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let after = match self.current.kind {
+            TokenKind::Parameter(name)
+                if matches!(
+                    self.parameter_types.get(name),
+                    Some(crate::GqlParameterType::List | crate::GqlParameterType::Map)
+                ) =>
+            {
+                after_postfix(&mut lexer)?
+            }
+            TokenKind::Punct(b'{') => {
+                skip_group(&mut lexer)?;
+                after_postfix(&mut lexer)?
+            }
+            TokenKind::Punct(b'[') if !self.starts_let_operand()? => {
+                skip_group(&mut lexer)?;
+                after_postfix(&mut lexer)?
+            }
+            TokenKind::Word(_) if self.row_list_column(row)?.is_some() => {
+                after_postfix(&mut lexer)?
+            }
+            _ => return Ok(false),
+        };
+        let TokenKind::Word(word) = after.kind else {
+            return Ok(false);
+        };
+        if !word.eq_ignore_ascii_case("IS") {
+            return Ok(false);
+        }
+        let next = lexer.next()?;
+        Ok(match next.kind {
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("NULL") => true,
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT") => matches!(
+                lexer.next()?.kind,
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("NULL")
+            ),
+            _ => false,
+        })
+    }
+
+    /// starts_let_operand, a list literal read through a subscript or slice
+    /// (`[5, [6, 7], 10][1]`), or a map literal read through an entry or
+    /// subscript (`{k:1}.k`, `{k:1}['k']`), whose element may be a composite
+    /// or a scalar (fgdb-c4i0d, fgdb-fc7cx). A literal compared with `=` or IN
+    /// was already taken by starts_composite_comparison.
     pub(super) fn let_operand_here(&self) -> Result<bool, GraphPatternTextError> {
         if self.starts_let_operand()? || self.named_subscript_follows()? {
             return Ok(true);
+        }
+        if self.is_punct(b'{') {
+            let mut lexer = self.lexer.clone();
+            skip_group(&mut lexer)?;
+            return Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'.' | b'[')));
         }
         if !self.is_punct(b'[') {
             return Ok(false);
@@ -4857,11 +4955,24 @@ impl BoundSetTextInput {
                             kind: GraphSetTextErrorKind::SetBuild(kind),
                         })?;
                     let mut code = Vec::new();
-                    for &(left, right) in &self.correlations {
+                    for &correlation in &self.correlations {
+                        let (left, right) = match correlation {
+                            crate::set_text::BoundCorrelation::Column { left, right } => (
+                                crate::GraphSetOperand::Column(left),
+                                crate::GraphSetOperand::Column(width + right),
+                            ),
+                            crate::set_text::BoundCorrelation::Identity { left, right, text } => (
+                                crate::GraphSetOperand::Column(left),
+                                crate::GraphSetOperand::IdentityColumn {
+                                    column: width + right,
+                                    text,
+                                },
+                            ),
+                        };
                         code.push(crate::GraphSetPredicateOp::Compare {
-                            left: crate::GraphSetOperand::Column(left),
+                            left,
                             comparison: IntegerComparison::Equal,
-                            right: crate::GraphSetOperand::Column(width + right),
+                            right,
                         });
                         if code.len() > 1 {
                             code.push(crate::GraphSetPredicateOp::And);
@@ -4958,7 +5069,7 @@ pub(super) fn bind_stages(
                         names.clone(),
                         outputs.clone(),
                         vertices.clone(),
-                        *graph_projection,
+                        graph_projection.as_deref().copied(),
                         catalog_symbols.clone(),
                     )
                     .map_err(|kind| GraphSetTextError {

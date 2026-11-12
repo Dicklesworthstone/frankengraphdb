@@ -8,9 +8,10 @@
 
 use super::image::{Row, RowScan, RowScanStep, Storage, reserved};
 use super::{
-    Image, SealedAnchor, SealedBuildEvent, SealedEdge, SealedError, SealedPartition,
+    Image, SealedAnchor, SealedBuildEvent, SealedEdge, SealedError, SealedLimits, SealedPartition,
     SealedScanBudget, SealedScanStep, check_limit,
 };
+use fgdb_codec::ef_payload::{self, EfPayloadLimits};
 use fgdb_codec::elias_fano::{EliasFano, EliasFanoSequentialCursor, EntryLimit};
 use fgdb_delta_types::RelationId;
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -78,7 +79,7 @@ struct IncomingRow {
     incidences: usize,
 }
 
-struct Index {
+pub(super) struct Index {
     rows: Vec<IncomingRow>,
     chunks: Vec<EliasFano>,
     stats: IncomingIndexStats,
@@ -292,6 +293,9 @@ impl SealedIncomingIndex {
     }
     pub fn shares_index_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.index, &other.index)
+    }
+    pub(super) fn index_arc(&self) -> Arc<Index> {
+        Arc::clone(&self.index)
     }
 
     fn find(&self, destination: VId, relation: RelationId) -> Option<&IncomingRow> {
@@ -1092,6 +1096,24 @@ mod construction {
         limits: IncomingIndexLimits,
         control: &mut C,
     ) -> Result<SealedIncomingIndex, C::Error> {
+        if let Some(durable) = source.durable_incoming() {
+            control.check().await?;
+            check_limit(
+                "incoming incidences",
+                durable.stats.incidences,
+                limits.max_incidences,
+            )?;
+            check_limit("incoming rows", durable.stats.rows, limits.max_rows)?;
+            check_limit(
+                "incoming workspace bytes",
+                durable.stats.charged_resident_bytes,
+                limits.max_workspace_bytes,
+            )?;
+            return Ok(SealedIncomingIndex {
+                source: source.clone(),
+                index: Arc::clone(durable),
+            });
+        }
         build_selected::<true, _>(source, limits, control).await
     }
 
@@ -1430,6 +1452,289 @@ mod construction {
         }
         Ok(())
     }
+}
+
+pub(super) fn encode_durable_index(
+    index: &Index,
+    relation: RelationId,
+    image: &Image,
+    max_bytes: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+) -> Result<Vec<u8>, SealedError> {
+    checkpoint()?;
+    let mut out = Vec::new();
+    let push = |out: &mut Vec<u8>, slice: &[u8]| -> Result<(), SealedError> {
+        let next_len = out
+            .len()
+            .checked_add(slice.len())
+            .ok_or(SealedError::SizeOverflow)?;
+        check_limit("durable run bytes", next_len, max_bytes)?;
+        out.try_reserve(slice.len())
+            .map_err(|_| SealedError::AllocationFailed)?;
+        out.extend_from_slice(slice);
+        Ok(())
+    };
+    push(
+        &mut out,
+        &u32::try_from(index.rows.len())
+            .map_err(|_| SealedError::SizeOverflow)?
+            .to_le_bytes(),
+    )?;
+    push(
+        &mut out,
+        &u32::try_from(index.chunks.len())
+            .map_err(|_| SealedError::SizeOverflow)?
+            .to_le_bytes(),
+    )?;
+    for row in &index.rows {
+        checkpoint()?;
+        if row.relation != relation {
+            return Err(SealedError::NonCanonical);
+        }
+        let rank = image.destination_rank(row.destination);
+        if image.dictionary.get(rank) != Some(row.destination) {
+            return Err(SealedError::NonCanonical);
+        }
+        push(
+            &mut out,
+            &u32::try_from(rank)
+                .map_err(|_| SealedError::SizeOverflow)?
+                .to_le_bytes(),
+        )?;
+        push(
+            &mut out,
+            &u32::try_from(row.incidences)
+                .map_err(|_| SealedError::SizeOverflow)?
+                .to_le_bytes(),
+        )?;
+    }
+    for chunk in &index.chunks {
+        checkpoint()?;
+        let ef_limits = EfPayloadLimits {
+            max_entries: chunk.len(),
+            max_bytes,
+        };
+        let maximum = chunk.max_value().unwrap_or(0);
+        let length = ef_payload::encoded_len(chunk.len(), maximum, ef_limits)
+            .map_err(SealedError::Payload)?;
+        push(&mut out, &maximum.to_le_bytes())?;
+        push(
+            &mut out,
+            &u32::try_from(length)
+                .map_err(|_| SealedError::SizeOverflow)?
+                .to_le_bytes(),
+        )?;
+        ef_payload::encode_to(chunk, ef_limits, |part| push(&mut out, part))?;
+    }
+    checkpoint()?;
+    Ok(out)
+}
+
+fn verify_locator_endpoint(
+    image: &Image,
+    position: u64,
+    destination: VId,
+    relation: RelationId,
+) -> Result<(), SealedError> {
+    let row_index = image
+        .offsets
+        .rank_le(position)
+        .checked_sub(1)
+        .ok_or(SealedError::NonCanonical)?;
+    let start = image
+        .offsets
+        .select(row_index)
+        .ok_or(SealedError::NonCanonical)?;
+    let offset = usize::try_from(
+        position
+            .checked_sub(start)
+            .ok_or(SealedError::NonCanonical)?,
+    )
+    .map_err(|_| SealedError::SizeOverflow)?;
+    let (entry, _) = image
+        .rows
+        .get(row_index)
+        .ok_or(SealedError::NonCanonical)?
+        .incidence(image, offset)
+        .ok_or(SealedError::NonCanonical)?;
+    if entry.dst != destination || entry.relation != relation {
+        return Err(SealedError::NonCanonical);
+    }
+    Ok(())
+}
+
+pub(super) fn decode_durable_index(
+    bytes: &[u8],
+    relation: RelationId,
+    image: &Image,
+    limits: SealedLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+) -> Result<Arc<Index>, SealedError> {
+    checkpoint()?;
+    let mut at = 0usize;
+    let mut take = |n: usize| -> Result<&[u8], SealedError> {
+        let end = at.checked_add(n).ok_or(SealedError::SizeOverflow)?;
+        let slice = bytes.get(at..end).ok_or(SealedError::Truncated)?;
+        at = end;
+        Ok(slice)
+    };
+    let row_count =
+        u32::from_le_bytes(take(4)?.try_into().map_err(|_| SealedError::Truncated)?) as usize;
+    let chunk_count =
+        u32::from_le_bytes(take(4)?.try_into().map_err(|_| SealedError::Truncated)?) as usize;
+    check_limit("descriptors", row_count, limits.max_rows)?;
+    check_limit("incidences", image.incidences, limits.max_incidences)?;
+    if row_count > image.dictionary.len() || row_count > image.incidences {
+        return Err(SealedError::NonCanonical);
+    }
+    if image.incidences == 0 {
+        if row_count != 0 || chunk_count != 0 {
+            return Err(SealedError::NonCanonical);
+        }
+        if at != bytes.len() {
+            return Err(SealedError::TrailingBytes);
+        }
+        let retained_bytes = size_of::<Index>();
+        return Ok(Arc::new(Index {
+            rows: Vec::new(),
+            chunks: Vec::new(),
+            stats: IncomingIndexStats {
+                rows: 0,
+                incidences: 0,
+                chunks: 0,
+                charged_resident_bytes: 0,
+                charged_workspace_bytes: 0,
+            },
+            retained_bytes,
+        }));
+    }
+
+    let mut rows = reserved(row_count)?;
+    let mut prev_rank: Option<usize> = None;
+    let mut total_incidences = 0usize;
+    let mut expected_chunks = 0usize;
+    for _ in 0..row_count {
+        checkpoint()?;
+        let rank =
+            u32::from_le_bytes(take(4)?.try_into().map_err(|_| SealedError::Truncated)?) as usize;
+        let incidences =
+            u32::from_le_bytes(take(4)?.try_into().map_err(|_| SealedError::Truncated)?) as usize;
+        if incidences == 0 || prev_rank.is_some_and(|prev| prev >= rank) {
+            return Err(SealedError::NonCanonical);
+        }
+        let destination = image
+            .dictionary
+            .get(rank)
+            .ok_or(SealedError::NonCanonical)?;
+        prev_rank = Some(rank);
+        total_incidences = add(total_incidences, incidences)?;
+        let row_chunks = incidences.div_ceil(CHUNK_ENTRIES);
+        let first_chunk = expected_chunks;
+        expected_chunks = add(expected_chunks, row_chunks)?;
+        rows.push(IncomingRow {
+            destination,
+            relation,
+            first_chunk,
+            end_chunk: expected_chunks,
+            incidences,
+        });
+    }
+    if total_incidences != image.incidences || expected_chunks != chunk_count {
+        return Err(SealedError::NonCanonical);
+    }
+
+    let mut chunks = reserved(chunk_count)?;
+    let mut payload_bytes = 0usize;
+    let max_locator = (image.incidences - 1) as u64;
+    for row in &rows {
+        let mut remaining = row.incidences;
+        let mut prev_locator: Option<u64> = None;
+        for _ in row.first_chunk..row.end_chunk {
+            checkpoint()?;
+            let expected_len = remaining.min(CHUNK_ENTRIES);
+            remaining -= expected_len;
+            let maximum =
+                u64::from_le_bytes(take(8)?.try_into().map_err(|_| SealedError::Truncated)?);
+            if maximum > max_locator {
+                return Err(SealedError::NonCanonical);
+            }
+            let payload_len =
+                u32::from_le_bytes(take(4)?.try_into().map_err(|_| SealedError::Truncated)?)
+                    as usize;
+            let raw_payload = take(payload_len)?;
+            let chunk = ef_payload::decode(
+                raw_payload,
+                expected_len,
+                maximum,
+                EfPayloadLimits {
+                    max_entries: expected_len,
+                    max_bytes: limits.max_image_bytes,
+                },
+            )
+            .map_err(SealedError::Payload)?;
+            let mut first_in_chunk = None;
+            let mut last_in_chunk = None;
+            for pos in chunk.sequential_cursor() {
+                if prev_locator.is_some_and(|prev| prev >= pos) || pos > max_locator {
+                    return Err(SealedError::NonCanonical);
+                }
+                if first_in_chunk.is_none() {
+                    first_in_chunk = Some(pos);
+                }
+                last_in_chunk = Some(pos);
+                prev_locator = Some(pos);
+            }
+            let first_pos = first_in_chunk.ok_or(SealedError::NonCanonical)?;
+            let last_pos = last_in_chunk.ok_or(SealedError::NonCanonical)?;
+            if last_pos != maximum {
+                return Err(SealedError::NonCanonical);
+            }
+            verify_locator_endpoint(image, first_pos, row.destination, relation)?;
+            if last_pos != first_pos {
+                verify_locator_endpoint(image, last_pos, row.destination, relation)?;
+            }
+            payload_bytes = add(payload_bytes, ef_bytes(expected_len, maximum)?)?;
+            chunks.push(chunk);
+        }
+    }
+    if at != bytes.len() {
+        return Err(SealedError::TrailingBytes);
+    }
+
+    let resident = add(
+        payload_bytes,
+        add(
+            mul(row_count, size_of::<IncomingRow>())?,
+            mul(chunk_count, size_of::<EliasFano>())?,
+        )?,
+    )?;
+    let mut retained_bytes = add(
+        size_of::<Index>(),
+        add(
+            mul(rows.capacity(), size_of::<IncomingRow>())?,
+            mul(chunks.capacity(), size_of::<EliasFano>())?,
+        )?,
+    )?;
+    for chunk in &chunks {
+        checkpoint()?;
+        retained_bytes = add(
+            retained_bytes,
+            chunk.owned_heap_bytes().ok_or(SealedError::SizeOverflow)?,
+        )?;
+    }
+    checkpoint()?;
+    Ok(Arc::new(Index {
+        rows,
+        chunks,
+        stats: IncomingIndexStats {
+            rows: row_count,
+            incidences: image.incidences,
+            chunks: chunk_count,
+            charged_resident_bytes: resident,
+            charged_workspace_bytes: resident,
+        },
+        retained_bytes,
+    }))
 }
 
 #[cfg(test)]

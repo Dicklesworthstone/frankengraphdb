@@ -206,7 +206,7 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<ReadStageTemplate>, GraphEdgeUpsertTextError> {
         let visible = schema.len();
         let mut reads = Vec::new();
-        for (alias, key) in self.write_tail_reads(&schema)? {
+        for (alias, key) in self.write_tail_reads_with_maps(&schema)? {
             let Some(at) = schema[..visible]
                 .iter()
                 .position(|(name, _)| name.text == alias.text)
@@ -223,6 +223,21 @@ impl<'a> Parser<'a> {
                 returning.bindings[binding],
                 (EdgeBinding::Edge, GraphSetColumnType::Edge)
             ) {
+                continue;
+            }
+            if key.text == "*" {
+                let value = crate::set_text::ReadValueTemplate::ElementMetadata {
+                    kind: crate::GraphElementMetadata::Properties,
+                    value: Box::new(returning.projection[at].value.clone()),
+                    catalog: self.syntax.element_catalog.request(),
+                };
+                mutation_query::push_tail_map_read(
+                    &mut returning.projection,
+                    &mut schema,
+                    &mut reads,
+                    (alias, key),
+                    value,
+                )?;
                 continue;
             }
             let variable = returning.variable;

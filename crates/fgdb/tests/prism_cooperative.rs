@@ -2741,10 +2741,9 @@ fn directed_load_sealed_and_cooperative_paths_preserve_history_and_exact_workspa
         let cx = contexts.query();
         let mut db = small_database(&contexts.commit(), 7, false).await;
         let mut batch = WriteBatch::new(RelationId(1));
-        for (at, (source, target)) in
-            [(0, 1), (0, 2), (1, 3), (2, 3), (2, 4), (3, 5), (4, 5)]
-                .into_iter()
-                .enumerate()
+        for (at, (source, target)) in [(0, 1), (0, 2), (1, 3), (2, 3), (2, 4), (3, 5), (4, 5)]
+            .into_iter()
+            .enumerate()
         {
             batch.add_edge(
                 EId(at as u128 + 1),
@@ -2774,8 +2773,7 @@ fn directed_load_sealed_and_cooperative_paths_preserve_history_and_exact_workspa
         change.delete_edge(EId(6));
         db.write(&contexts.commit(), change).await.unwrap();
         let current = db.frontier().unwrap();
-        let call =
-            FnxCallSpec::bind("CALL fnx.load_centrality()", &FnxParameters::new()).unwrap();
+        let call = FnxCallSpec::bind("CALL fnx.load_centrality()", &FnxParameters::new()).unwrap();
         for direction in [Directedness::Directed, Directedness::Reversed] {
             let mut previous = None;
             for at in [original, current] {
@@ -2853,7 +2851,8 @@ fn directed_load_sealed_and_cooperative_paths_preserve_history_and_exact_workspa
                     ..exact
                 };
                 for refused in [
-                    call.execute_sealed(&cx, &graph, exact_work, below).unwrap_err(),
+                    call.execute_sealed(&cx, &graph, exact_work, below)
+                        .unwrap_err(),
                     call.execute_sealed_cooperative(
                         &cx,
                         &graph,
@@ -2867,11 +2866,10 @@ fn directed_load_sealed_and_cooperative_paths_preserve_history_and_exact_workspa
                 ] {
                     assert!(matches!(
                         refused,
-                        FnxSealedExecutionError::Execution(
-                            FnxExecutionError::LimitExceeded { .. }
-                        ) | FnxSealedExecutionError::Source(SealedProjectionError::Read(
-                            fgdb_strata::tiered::sealed::SealedError::Limit { .. }
-                        ))
+                        FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded { .. })
+                            | FnxSealedExecutionError::Source(SealedProjectionError::Read(
+                                fgdb_strata::tiered::sealed::SealedError::Limit { .. }
+                            ))
                     ));
                 }
                 let yields = Cell::new(0);
@@ -2924,8 +2922,7 @@ fn directed_load_cancels_at_every_sealed_cooperative_checkpoint_without_partial_
     runtime.block_on(async {
         let cx = contexts.query();
         let db = small_database(&contexts.commit(), 3, false).await;
-        let call =
-            FnxCallSpec::bind("CALL fnx.load_centrality()", &FnxParameters::new()).unwrap();
+        let call = FnxCallSpec::bind("CALL fnx.load_centrality()", &FnxParameters::new()).unwrap();
         for direction in [Directedness::Directed, Directedness::Reversed] {
             let opt = options(direction);
             let graph = projection(&db, &cx, opt).await;

@@ -35,6 +35,7 @@
 mod planner;
 mod token;
 
+pub use fgdb_policy::{PolicyError, ReadCaveat, ReadLimits, ReadPolicy};
 pub use planner::{
     EdgeWriteImage, ExecutionPermit, PlannerPredicates, ReadAccess, Usage, VertexWriteFields,
     VertexWriteImage, WriteAccess, WriteEndpoint,
@@ -255,4 +256,126 @@ pub(crate) fn validate_name(value: &str) -> Result<(), Error> {
         return Err(Error::Malformed);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod read_policy_tests {
+    use super::*;
+    use asupersync::security::key::AuthKey;
+    use fgdb_delta_types::SchemaEpoch;
+    use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, VId};
+
+    fn test_authority() -> Authority {
+        Authority::new(
+            AuthKey::from_seed(7),
+            DatabaseSecurityNamespaceId([0xAB; 32]),
+            "main",
+            SchemaEpoch(1),
+            1,
+        )
+        .expect("authority")
+    }
+
+    #[test]
+    fn verified_read_capability_compiles_to_exact_fgdb_policy_and_preserves_denials() {
+        let authority = test_authority();
+        let grant = Grant {
+            branch: "main".to_string(),
+            labels: Scope::only([LabelId(10)]),
+            relations: Scope::only([RelationId(3), RelationId(5)]),
+            properties: Scope::only([PropertyKeyId(1), PropertyKeyId(2), PropertyKeyId(9)]),
+            rights: Rights::Read,
+            limits: QueryLimits {
+                max_nodes: 500,
+                max_work: 4_000,
+                max_rows: 200,
+            },
+            expires_at_ms: 90_000,
+        };
+        let token = authority
+            .issue_at(&grant, 10_000)
+            .expect("mint read token")
+            .attenuate(Restriction::DenyProperties(BTreeSet::from([PropertyKeyId(
+                2,
+            )])))
+            .expect("attenuate denied property");
+        let verified = authority
+            .verify_at(&token, "main", 20_000)
+            .expect("verify attenuated token");
+
+        let policy = verified
+            .to_read_policy()
+            .expect("compile read policy")
+            .expect("exact representation");
+        assert!(policy.allows_time_interval(10_000, 89_999));
+        assert!(!policy.allows_time_interval(10_000, 90_000));
+        assert_eq!(policy.limits().rows, 200);
+        assert_eq!(policy.limits().work, 4_000);
+        assert!(policy.allows_vertex(VId(1), &[LabelId(10), LabelId(99)], &[]));
+        assert!(!policy.allows_vertex(VId(1), &[LabelId(99)], &[]));
+        assert!(policy.allows_edge(RelationId(3), &[]));
+        assert!(!policy.allows_edge(RelationId(4), &[]));
+        let projected = policy.project_properties(&[
+            (PropertyKeyId(1), CanonicalScalar::Int(11)),
+            (PropertyKeyId(2), CanonicalScalar::Int(22)),
+            (PropertyKeyId(9), CanonicalScalar::Int(99)),
+        ]);
+        assert_eq!(
+            projected,
+            vec![
+                (PropertyKeyId(1), CanonicalScalar::Int(11)),
+                (PropertyKeyId(9), CanonicalScalar::Int(99)),
+            ]
+        );
+    }
+
+    #[test]
+    fn write_only_or_disjunctive_capabilities_return_none_without_approximation() {
+        let authority = test_authority();
+        let write_only = authority
+            .issue_at(
+                &Grant {
+                    branch: "main".to_string(),
+                    labels: Scope::All,
+                    relations: Scope::All,
+                    properties: Scope::All,
+                    rights: Rights::Write,
+                    limits: QueryLimits {
+                        max_nodes: 10,
+                        max_work: 10,
+                        max_rows: 10,
+                    },
+                    expires_at_ms: 50_000,
+                },
+                1_000,
+            )
+            .expect("mint write-only");
+        let verified_write = authority
+            .verify_at(&write_only, "main", 2_000)
+            .expect("verify write-only");
+        assert_eq!(verified_write.to_read_policy(), Ok(None));
+
+        let disjunctive = authority
+            .issue_at(
+                &Grant {
+                    branch: "main".to_string(),
+                    labels: Scope::only([LabelId(1), LabelId(2)]),
+                    relations: Scope::All,
+                    properties: Scope::All,
+                    rights: Rights::Read,
+                    limits: QueryLimits {
+                        max_nodes: 10,
+                        max_work: 10,
+                        max_rows: 10,
+                    },
+                    expires_at_ms: 50_000,
+                },
+                1_000,
+            )
+            .expect("mint disjunctive");
+        let verified_disjunctive = authority
+            .verify_at(&disjunctive, "main", 2_000)
+            .expect("verify disjunctive");
+        assert_eq!(verified_disjunctive.to_read_policy(), Ok(None));
+    }
 }

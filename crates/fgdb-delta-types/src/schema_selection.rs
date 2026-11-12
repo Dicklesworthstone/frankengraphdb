@@ -136,10 +136,7 @@ mod tests {
             Ok(SchemaSelection::one(7))
         );
         assert_eq!(a.single(), None);
-        assert_eq!(
-            SchemaSelection::one(u64::MAX).single(),
-            Some(u64::MAX)
-        );
+        assert_eq!(SchemaSelection::one(u64::MAX).single(), Some(u64::MAX));
     }
 
     #[test]

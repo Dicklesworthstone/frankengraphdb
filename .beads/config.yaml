@@ -7,5 +7,11 @@
 # tracked export.  `scripts/br_sync.sh` owns the explicit, landing-lease-aware
 # export at session completion so a gate never reads a corpus that moves under
 # it (fgdb-09iz / fgdb-wv3v).
+#
+# `source_repo_path` ruling (fgdb-rc1017-bridge-wvze5.21): `source_repo_path`
+# is deliberately omitted (SQLite `NULL` across all writers and hosts) so
+# tracked `.beads/issues.jsonl` lines stay host-path-independent across macOS
+# (`/Users/...`) and Linux (`/data/projects/...`) checkouts and never trigger
+# spurious scalar drift during additive reconciliation or fresh import.
 sync:
   auto_flush: false

@@ -1958,3 +1958,67 @@ fn remote_parameter_files_refuse_before_credentials_in_every_single_statement_mo
         refused(&run(&flags), 2, "usage");
     }
 }
+
+#[test]
+fn embedded_write_and_transaction_if_current_guard_durable_frontier() {
+    let fixture = Fixture::new("if-current");
+    assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);
+
+    assert_eq!(
+        succeeded(
+            &fixture.robot("write", &["--if-current", "0", "CREATE (:Person {id: 10})"]),
+            "written"
+        ),
+        1
+    );
+
+    let stale_write = fixture.robot("write", &["--if-current", "0", "CREATE (:Person {id: 99})"]);
+    refused(&stale_write, 3, "query");
+    assert!(
+        terminal(&stale_write).contains("\"code\":\"conflict\""),
+        "{}",
+        terminal(&stale_write)
+    );
+
+    assert_eq!(
+        succeeded(
+            &fixture.robot(
+                "transaction",
+                &[
+                    "--if-current",
+                    "1",
+                    "--write",
+                    "CREATE (:Person {id: 20})",
+                    "--query",
+                    "MATCH (n:Person) RETURN n.id ORDER BY n.id"
+                ]
+            ),
+            "committed"
+        ),
+        2
+    );
+
+    let stale_txn = fixture.robot(
+        "transaction",
+        &[
+            "--if-current",
+            "1",
+            "--write",
+            "CREATE (:Person {id: 88})",
+        ],
+    );
+    refused(&stale_txn, 3, "query");
+    assert!(
+        terminal(&stale_txn).contains("\"code\":\"conflict\""),
+        "{}",
+        terminal(&stale_txn)
+    );
+
+    let read = fixture.robot("query", &["MATCH (n:Person) RETURN n.id ORDER BY n.id"]);
+    assert_eq!(succeeded(&read, "rows"), 2);
+    let stdout = String::from_utf8(read.stdout).unwrap();
+    assert!(stdout.contains("\"value\":\"10\""), "{stdout}");
+    assert!(stdout.contains("\"value\":\"20\""), "{stdout}");
+    assert!(!stdout.contains("\"value\":\"99\""), "{stdout}");
+    assert!(!stdout.contains("\"value\":\"88\""), "{stdout}");
+}

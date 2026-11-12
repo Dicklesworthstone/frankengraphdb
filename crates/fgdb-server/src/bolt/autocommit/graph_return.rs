@@ -162,7 +162,8 @@ impl<'a> ReturnEncoder<'a> {
         let kind = self.metadata_cell(element, GraphElementMetadata::Type, depth + 1, bytes)?;
         let properties =
             self.metadata_cell(element, GraphElementMetadata::Properties, depth + 1, bytes)?;
-        let GraphValue::Vertex(source) = self.read(element, GraphElementMetadata::StartNode)? else {
+        let GraphValue::Vertex(source) = self.read(element, GraphElementMetadata::StartNode)?
+        else {
             return Err(unavailable());
         };
         let GraphValue::Vertex(target) = self.read(element, GraphElementMetadata::EndNode)? else {

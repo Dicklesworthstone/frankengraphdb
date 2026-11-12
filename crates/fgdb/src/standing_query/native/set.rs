@@ -55,12 +55,14 @@ fn component_source(
     strong: bool,
 ) -> Result<AnalyticSource, StandingQueryError> {
     if labels.is_all() && (relations.is_all() || relations.single().is_some()) {
-        return Ok(AnalyticSource::Components(match (strong, relations.single()) {
-            (false, Some(relation)) => components::ComponentRelation::Weak(relation),
-            (true, Some(relation)) => components::ComponentRelation::Strong(relation),
-            (false, None) => components::ComponentRelation::WeakAll,
-            (true, None) => components::ComponentRelation::StrongAll,
-        }));
+        return Ok(AnalyticSource::Components(
+            match (strong, relations.single()) {
+                (false, Some(relation)) => components::ComponentRelation::Weak(relation),
+                (true, Some(relation)) => components::ComponentRelation::Strong(relation),
+                (false, None) => components::ComponentRelation::WeakAll,
+                (true, None) => components::ComponentRelation::StrongAll,
+            },
+        ));
     }
     Ok(AnalyticSource::SelectedComponents {
         input: analytic_topology(relations, labels)?,
@@ -84,7 +86,9 @@ fn analytic_topology(
     let vertices = match labels.members() {
         None => topology_vertices(None)?,
         Some(labels) => {
-            let (first, rest) = labels.split_first().ok_or(StandingQueryError::Unsupported)?;
+            let (first, rest) = labels
+                .split_first()
+                .ok_or(StandingQueryError::Unsupported)?;
             let mut vertices = topology_vertices(Some(*first))?;
             for &label in rest {
                 // ANY label is one vertex lifetime, even if several selected
@@ -306,20 +310,12 @@ pub(super) fn analytic_procedure(
             )
         }
         FnxAlgorithm::Triangles if options.projection.self_loops == SelfLoopPolicy::Drop => (
-            triangle_source(
-                relations,
-                labels,
-                triangle_counts::Output::Triangles,
-            )?,
+            triangle_source(relations, labels, triangle_counts::Output::Triangles)?,
             GraphSetColumnType::Scalar,
             FnxOutput::Triangles,
         ),
         FnxAlgorithm::ClusteringCoefficient => (
-            triangle_source(
-                relations,
-                labels,
-                triangle_counts::Output::Clustering,
-            )?,
+            triangle_source(relations, labels, triangle_counts::Output::Clustering)?,
             GraphSetColumnType::Scalar,
             FnxOutput::Score,
         ),
@@ -518,6 +514,71 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         checkpoint()?;
         Ok(index)
     }
+    #[allow(clippy::too_many_arguments)]
+    fn compile_count_recipe(
+        &mut self,
+        cx: &QueryCx,
+        left_query: &PreparedGraphSet,
+        right_query: &PreparedGraphSet,
+        restrict: &RowJoinSpec,
+        group: PreparedGraphSetAggregate,
+        group_columns: &[String],
+        group_types: &[GraphSetColumnType],
+        join: &RowJoinSpec,
+        output: Vec<RowProjectionSpec>,
+        policy: GqlQueryPolicy,
+        checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
+    ) -> Result<usize, StandingQueryError> {
+        let left = self.compile(cx, left_query, policy, checkpoint)?;
+        // Count witnesses are private aggregate input. Retain every
+        // source/work/scratch ceiling without spending a final-row
+        // allowance on each matching relationship occurrence.
+        let input_policy = group::input_policy(policy);
+        let right = self.compile_group_input(cx, right_query, input_policy, checkpoint)?;
+        let state = self.database.prepare_standing_join_spec(
+            cx,
+            [right, left],
+            restrict,
+            input_policy,
+            self.database.standing_queries.len(),
+        )?;
+        let active = self.append_private(StandingQuery::Join(Box::new(state)));
+        checkpoint()?;
+        // Group only keys needed by a current outer row. Unrequested
+        // groups must not introduce a conditional Int64 count overflow.
+        let state = self.database.prepare_standing_group_rows(
+            cx,
+            active,
+            group,
+            input_policy,
+            self.database.standing_queries.len(),
+            group_columns,
+            group_types,
+        )?;
+        let grouped = self.append_private(StandingQuery::Group(Box::new(state)));
+        checkpoint()?;
+        let state = self.database.prepare_standing_join_spec(
+            cx,
+            [left, grouped],
+            join,
+            policy,
+            self.database.standing_queries.len(),
+        )?;
+        let mut input = self.append(StandingQuery::Join(Box::new(state)));
+        checkpoint()?;
+        for spec in output {
+            let state = self.database.prepare_standing_projection(
+                cx,
+                input,
+                spec,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            input = self.append(StandingQuery::Projection(Box::new(state)));
+            checkpoint()?;
+        }
+        Ok(input)
+    }
     fn compile(
         &mut self,
         cx: &QueryCx,
@@ -666,55 +727,35 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         } else if let Some(plan) =
             query.incremental_apply_count_with_control(&mut |_| checkpoint())?
         {
-            let left = self.compile(cx, plan.left, policy, checkpoint)?;
-            // Count witnesses are private aggregate input. Retain every
-            // source/work/scratch ceiling without spending a final-row
-            // allowance on each matching relationship occurrence.
-            let input_policy = group::input_policy(policy);
-            let right = self.compile_group_input(cx, plan.right, input_policy, checkpoint)?;
-            let state = self.database.prepare_standing_join_spec(
+            self.compile_count_recipe(
                 cx,
-                [right, left],
+                plan.left,
+                plan.right,
                 &plan.restrict,
-                input_policy,
-                self.database.standing_queries.len(),
-            )?;
-            let active = self.append_private(StandingQuery::Join(Box::new(state)));
-            checkpoint()?;
-            // Group only keys needed by a current outer row. Unrequested
-            // groups must not introduce a conditional Int64 count overflow.
-            let state = self.database.prepare_standing_group_rows(
-                cx,
-                active,
                 plan.group,
-                input_policy,
-                self.database.standing_queries.len(),
                 &plan.group_columns,
                 &plan.group_types,
-            )?;
-            let grouped = self.append_private(StandingQuery::Group(Box::new(state)));
-            checkpoint()?;
-            let state = self.database.prepare_standing_join_spec(
-                cx,
-                [left, grouped],
                 &plan.join,
+                plan.output,
                 policy,
-                self.database.standing_queries.len(),
-            )?;
-            let mut input = self.append(StandingQuery::Join(Box::new(state)));
-            checkpoint()?;
-            for spec in plan.output {
-                let state = self.database.prepare_standing_projection(
-                    cx,
-                    input,
-                    spec,
-                    policy,
-                    self.database.standing_queries.len(),
-                )?;
-                input = self.append(StandingQuery::Projection(Box::new(state)));
-                checkpoint()?;
-            }
-            input
+                checkpoint,
+            )?
+        } else if let Some(plan) =
+            query.incremental_collected_count_with_control(&mut |_| checkpoint())?
+        {
+            self.compile_count_recipe(
+                cx,
+                &plan.left,
+                &plan.right,
+                &plan.restrict,
+                plan.group,
+                &plan.group_columns,
+                &plan.group_types,
+                &plan.join,
+                plan.output,
+                policy,
+                checkpoint,
+            )?
         } else if let Some(plan) =
             query.incremental_apply_distinct_with_control(&mut |_| checkpoint())?
         {
@@ -1185,7 +1226,7 @@ fn rebuild_checked<V: Vfs + Clone>(
     // argument DISTINCT and the public restoration join; its public allowance
     // must remain effective. The immutable layout survives every failed rebuild.
     let mut staged = Staging::new(database);
-    let at = staged.database.snapshot.frontier;
+    let at = staged.database.registration_frontier();
     for old in first..=root {
         checkpoint()?;
         let policy = if private_inputs[old - first] {

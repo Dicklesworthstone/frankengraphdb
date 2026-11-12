@@ -26,6 +26,7 @@ struct Registration<'a, V: Vfs + Clone> {
 }
 impl<V: Vfs + Clone> Drop for Registration<'_, V> {
     fn drop(&mut self) {
+        self.database.active_registration_scope = None;
         if !self.accepted {
             self.database.standing_queries.truncate(self.first);
         }
@@ -33,6 +34,89 @@ impl<V: Vfs + Clone> Drop for Registration<'_, V> {
 }
 
 impl PreparedNativeRead {
+    /// Atomically register a PRIVATE capability-projected replaying subscription
+    /// (`FG-INV-20`). When `scope` covers the full graph, this delegates directly
+    /// to [`Self::subscribe_scoped`] with zero extra nodes; when `scope` restricts
+    /// labels, relations, or properties, a private `CapabilityScope` (`Pi_C`)
+    /// homomorphically projects both the initial snapshot and every committed
+    /// `LogicalDeltaBatch` before any downstream circuit stage observes them.
+    pub fn subscribe_authorized<V: Vfs + Clone, T, E>(
+        &self,
+        database: &mut Database<V>,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        scope: &fgdb_warden::PlannerPredicates,
+        setup: NativeSubscriptionSetup,
+        admit: impl FnOnce(&[String], &Arc<SubscriptionBatch>) -> Result<T, E>,
+    ) -> Result<(NativeSubscription, T), E>
+    where
+        E: From<SubscriptionError>,
+    {
+        if scope.is_unrestricted_graph() {
+            return self.subscribe_scoped(database, cx, params, setup, admit);
+        }
+        if self.has_procedure_call() {
+            return Err(SubscriptionError::from(StandingQueryError::Unsupported).into());
+        }
+        cx.checkpoint()
+            .map_err(StandingQueryError::Interrupted)
+            .map_err(SubscriptionError::from)?;
+        database
+            .ensure_readable()
+            .map_err(StandingQueryError::Read)
+            .map_err(SubscriptionError::from)?;
+        let mut checkpoint = || {
+            cx.checkpoint()
+                .map_err(|_| crate::StandingQueryFailure::Interrupted)
+        };
+        let cap_state = crate::standing_query::capability::State::build(
+            database,
+            scope.clone(),
+            setup.maintenance,
+            &mut checkpoint,
+        )
+        .map_err(SubscriptionError::from)?;
+        let first = database.standing_queries.len();
+        database
+            .standing_queries
+            .push(StandingQuery::CapabilityScope(Box::new(cap_state)));
+        database.active_registration_scope = Some(first);
+        let mut registration = Registration {
+            database,
+            first,
+            accepted: false,
+        };
+        let (mut consumer, output) =
+            self.subscribe_replaying(&mut *registration.database, cx, params, setup, admit)?;
+        registration.database.active_registration_scope = None;
+        let end = registration.database.standing_queries.len();
+        if consumer.handle.index <= first
+            || consumer.handle.index.checked_add(2) != Some(end)
+            || consumer
+                .replay
+                .as_ref()
+                .is_none_or(|replay| replay.index.checked_add(1) != Some(end))
+        {
+            return Err(SubscriptionError::from(StandingQueryError::Unsupported).into());
+        }
+        let Some(StandingQuery::CapabilityScope(scope_state)) =
+            registration.database.standing_queries.get_mut(first)
+        else {
+            return Err(SubscriptionError::from(StandingQueryError::Unsupported).into());
+        };
+        scope_state.members_end = end;
+        cx.checkpoint()
+            .map_err(StandingQueryError::Interrupted)
+            .map_err(SubscriptionError::from)?;
+        consumer.ownership = Some(Ownership {
+            range: first..end,
+            shared: AtomicBool::new(false),
+            released: false,
+        });
+        registration.accepted = true;
+        Ok((consumer, output))
+    }
+
     /// Atomically register a PRIVATE replaying subscription and admit its first
     /// baseline through the ordinary subscription executor. Policies, native
     /// result semantics, replay retention and ACK rules are unchanged.

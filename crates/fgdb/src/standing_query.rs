@@ -5,6 +5,7 @@
 //! Registrations are not durable subscriptions and do not survive reopening.
 
 mod aggregate;
+mod capability;
 mod closure;
 mod components;
 mod constant;
@@ -282,6 +283,9 @@ pub(crate) enum StandingQuery {
     /// An explicitly released PRIVATE registration slot. No handle escaped
     /// its owner. Keep later indices stable; release trims a vacant suffix.
     Released,
+    /// Pre-expansion capability quotient (`Pi_C`) governing a contiguous slice
+    /// of private downstream circuit nodes (`FG-INV-20`).
+    CapabilityScope(Box<capability::State>),
     Aggregate(Box<aggregate::StandingQuery>),
     /// The same complete-group producer with a prepared downstream result stage.
     ProjectedAggregate {
@@ -336,6 +340,7 @@ impl StandingQuery {
     fn maintained(&self) -> Option<(CommitSeq, &StandingQueryStats)> {
         Some(match self {
             Self::Released => return None,
+            Self::CapabilityScope(scope) => (scope.visible_frontier, &scope.stats),
             Self::Aggregate(query)
             | Self::ProjectedAggregate { source: query, .. }
             | Self::Rows { source: query, .. } => (query.frontier, &query.stats),
@@ -364,6 +369,7 @@ impl StandingQuery {
                 CommitSeq::ORIGIN,
                 Some(StandingQueryFailure::DependencyUnavailable),
             ),
+            Self::CapabilityScope(scope) => (scope.policy, scope.visible_frontier, scope.failure),
             Self::Aggregate(query)
             | Self::ProjectedAggregate { source: query, .. }
             | Self::Rows { source: query, .. } => (query.policy, query.frontier, query.failure),
@@ -393,6 +399,11 @@ impl StandingQuery {
     ) {
         let (frontier, failure, observed) = match self {
             Self::Released => return,
+            Self::CapabilityScope(scope) => (
+                &mut scope.physical_frontier,
+                &mut scope.failure,
+                &mut scope.stats,
+            ),
             Self::Aggregate(query)
             | Self::ProjectedAggregate { source: query, .. }
             | Self::Rows { source: query, .. } => {
@@ -635,6 +646,45 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(self.store_standing_query(StandingQuery::Reachability(Box::new(query))))
     }
 
+    pub(crate) fn export_standing_reachability_checkpoint(
+        &self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+    ) -> Result<(RelationId, CommitSeq, Vec<u8>), StandingQueryError> {
+        let StandingQuery::Reachability(query) = self.admitted_standing_query(cx, handle)? else {
+            return Err(StandingQueryError::Unsupported);
+        };
+        query.encode_checkpoint_bytes(cx)
+    }
+
+    pub(crate) fn catch_up_or_none_standing_reachability(
+        &self,
+        query_cx: &QueryCx,
+        bytes: &[u8],
+        watermark_seq: CommitSeq,
+        relation: RelationId,
+        policy: GqlQueryPolicy,
+    ) -> Result<Option<(recursive::State, u64)>, StandingQueryError> {
+        let delta_index = self.delta_index().map_err(StandingQueryError::Read)?;
+        let target_head = self.frontier().map_err(StandingQueryError::Read)?;
+        recursive::State::decode_and_catch_up(
+            query_cx,
+            bytes,
+            watermark_seq,
+            relation,
+            policy,
+            delta_index,
+            target_head,
+        )
+    }
+
+    pub(crate) fn install_restored_standing_reachability(
+        &mut self,
+        state: recursive::State,
+    ) -> StandingQueryHandle {
+        self.store_standing_query(StandingQuery::Reachability(Box::new(state)))
+    }
+
     fn store_standing_query(&mut self, query: StandingQuery) -> StandingQueryHandle {
         let index = self.standing_queries.len();
         self.standing_queries.push(query);
@@ -642,6 +692,44 @@ impl<V: Vfs + Clone> Database<V> {
             owner: Arc::clone(&self.handle_owner),
             index,
             native: None,
+        }
+    }
+
+    pub(in crate::standing_query) fn containing_capability_scope(
+        &self,
+        index: usize,
+    ) -> Option<(usize, &capability::State)> {
+        self.standing_queries[..index.min(self.standing_queries.len())]
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(scope_idx, node)| match node {
+                StandingQuery::CapabilityScope(scope) if index < scope.members_end => {
+                    Some((scope_idx, scope.as_ref()))
+                }
+                _ => None,
+            })
+    }
+
+    pub(in crate::standing_query) fn registration_frontier(&self) -> CommitSeq {
+        if let Some(scope_idx) = self.active_registration_scope
+            && let Some(StandingQuery::CapabilityScope(scope)) =
+                self.standing_queries.get(scope_idx)
+        {
+            scope.visible_frontier
+        } else {
+            self.snapshot.frontier
+        }
+    }
+
+    pub(in crate::standing_query) fn expected_node_frontier(&self, index: usize) -> CommitSeq {
+        if let Some((_, scope)) = self.containing_capability_scope(index) {
+            scope.visible_frontier
+        } else if let Some(StandingQuery::CapabilityScope(scope)) = self.standing_queries.get(index)
+        {
+            scope.visible_frontier
+        } else {
+            self.snapshot.frontier
         }
     }
 
@@ -665,13 +753,69 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(StandingQueryError::ForeignHandle);
         }
         self.ensure_readable().map_err(StandingQueryError::Read)?;
+        struct ScopeRebuildGuard<'a, V: Vfs + Clone> {
+            database: &'a mut Database<V>,
+            backup: Option<(usize, StandingQuery)>,
+            committed: bool,
+        }
+        impl<V: Vfs + Clone> Drop for ScopeRebuildGuard<'_, V> {
+            fn drop(&mut self) {
+                self.database.active_registration_scope = None;
+                if !self.committed
+                    && let Some((scope_idx, previous)) = self.backup.take()
+                {
+                    self.database.standing_queries[scope_idx] = previous;
+                }
+            }
+        }
+        let rebuild_scope =
+            if let Some((scope_idx, scope)) = self.containing_capability_scope(handle.index) {
+                // Rebuild the capability quotient only when rebuilding the root
+                // circuit or a direct single-node view, not on Replay alone (which
+                // establishes a fresh replay history over the current healthy source).
+                let is_replay = matches!(
+                    self.standing_queries.get(handle.index),
+                    Some(StandingQuery::Replay(_))
+                );
+                if is_replay {
+                    None
+                } else {
+                    let mut checkpoint = || {
+                        cx.checkpoint()
+                            .map_err(|_| StandingQueryFailure::Interrupted)
+                    };
+                    let old_visible_frontier = scope.visible_frontier;
+                    let members_end = scope.members_end;
+                    let predicates = scope.scope.clone();
+                    let mut rebuilt =
+                        capability::State::build(self, predicates, policy, &mut checkpoint)?;
+                    rebuilt.visible_frontier = rebuilt.visible_frontier.max(old_visible_frontier);
+                    rebuilt.members_end = members_end;
+                    Some((scope_idx, StandingQuery::CapabilityScope(Box::new(rebuilt))))
+                }
+            } else {
+                None
+            };
+        let mut scope_guard = ScopeRebuildGuard {
+            backup: None,
+            committed: false,
+            database: self,
+        };
+        if let Some((scope_idx, replacement_scope)) = rebuild_scope {
+            let previous = std::mem::replace(
+                &mut scope_guard.database.standing_queries[scope_idx],
+                replacement_scope,
+            );
+            scope_guard.backup = Some((scope_idx, previous));
+            scope_guard.database.active_registration_scope = Some(scope_idx);
+        }
         if let Some(
             layout @ (native::Layout::Circuit { first, .. }
             | native::Layout::GroupCircuit { first, .. }),
         ) = handle.native.as_deref()
         {
-            return native::set::rebuild(
-                self,
+            let frontier = native::set::rebuild(
+                scope_guard.database,
                 cx,
                 *first,
                 handle.index,
@@ -679,37 +823,57 @@ impl<V: Vfs + Clone> Database<V> {
                     .private_inputs()
                     .ok_or(StandingQueryError::Unsupported)?,
                 policy,
-            );
+            )?;
+            scope_guard.committed = true;
+            return Ok(frontier);
         }
-        let current = self
+        let current = scope_guard
+            .database
             .standing_queries
             .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
         let replacement = match current {
-            StandingQuery::Released => return Err(StandingQueryError::UnknownHandle),
-            StandingQuery::Replay(query) => StandingQuery::Replay(Box::new(
-                self.prepare_standing_replay(cx, &query.source, query.limits, policy)?,
-            )),
-            StandingQuery::Constant(query) => StandingQuery::Constant(Box::new(
-                self.prepare_standing_constant(cx, query.definition.clone(), policy)?,
-            )),
-            StandingQuery::Aggregate(query) => {
-                self.prepare_registered_aggregate(cx, query.definition.clone(), policy)?
+            StandingQuery::Released | StandingQuery::CapabilityScope(_) => {
+                return Err(StandingQueryError::UnknownHandle);
             }
-            StandingQuery::ProjectedAggregate { output, .. } => {
-                self.prepare_registered_aggregate(cx, output.definition().clone(), policy)?
+            StandingQuery::Replay(query) => {
+                StandingQuery::Replay(Box::new(scope_guard.database.prepare_standing_replay(
+                    cx,
+                    &query.source,
+                    query.limits,
+                    policy,
+                )?))
             }
-            StandingQuery::Rows { output, .. } => self.prepare_registered_rows_with_delivery(
+            StandingQuery::Constant(query) => {
+                StandingQuery::Constant(Box::new(scope_guard.database.prepare_standing_constant(
+                    cx,
+                    query.definition.clone(),
+                    policy,
+                )?))
+            }
+            StandingQuery::Aggregate(query) => scope_guard.database.prepare_registered_aggregate(
                 cx,
-                output.definition().clone(),
+                query.definition.clone(),
                 policy,
-                output.is_private_bag(),
             )?,
+            StandingQuery::ProjectedAggregate { output, .. } => scope_guard
+                .database
+                .prepare_registered_aggregate(cx, output.definition().clone(), policy)?,
+            StandingQuery::Rows { output, .. } => {
+                scope_guard.database.prepare_registered_rows_with_delivery(
+                    cx,
+                    output.definition().clone(),
+                    policy,
+                    output.is_private_bag(),
+                )?
+            }
             StandingQuery::Reachability(query) => StandingQuery::Reachability(Box::new(
-                self.prepare_standing_reachability(cx, query.relation(), policy)?,
+                scope_guard
+                    .database
+                    .prepare_standing_reachability(cx, query.relation(), policy)?,
             )),
             StandingQuery::Closure(query) => {
-                StandingQuery::Closure(Box::new(self.prepare_standing_closure(
+                StandingQuery::Closure(Box::new(scope_guard.database.prepare_standing_closure(
                     cx,
                     query.input,
                     query.endpoints,
@@ -718,18 +882,25 @@ impl<V: Vfs + Clone> Database<V> {
                 )?))
             }
             StandingQuery::Triangles(query) => StandingQuery::Triangles(Box::new(
-                self.prepare_standing_triangles(cx, query.relation(), query.quantifier(), policy)?,
+                scope_guard.database.prepare_standing_triangles(
+                    cx,
+                    query.relation(),
+                    query.quantifier(),
+                    policy,
+                )?,
             )),
             StandingQuery::TriangleCounts(query) => {
                 let state = if let Some(definition) = query.selected {
-                    self.prepare_standing_selected_triangle_counts(
-                        cx,
-                        definition,
-                        query.output(),
-                        policy,
-                    )?
+                    scope_guard
+                        .database
+                        .prepare_standing_selected_triangle_counts(
+                            cx,
+                            definition,
+                            query.output(),
+                            policy,
+                        )?
                 } else {
-                    self.prepare_standing_triangle_counts(
+                    scope_guard.database.prepare_standing_triangle_counts(
                         cx,
                         query.relation,
                         query.output(),
@@ -739,18 +910,22 @@ impl<V: Vfs + Clone> Database<V> {
                 StandingQuery::TriangleCounts(Box::new(state))
             }
             StandingQuery::Components(query) => StandingQuery::Components(Box::new(
-                self.prepare_standing_components(cx, query.relation, policy)?,
+                scope_guard
+                    .database
+                    .prepare_standing_components(cx, query.relation, policy)?,
             )),
             StandingQuery::CoreNumbers(query) => {
                 let state = if let Some(definition) = query.selected {
-                    self.prepare_standing_selected_core_numbers(
-                        cx,
-                        definition,
-                        policy,
-                        query.has_value_rows(),
-                    )?
+                    scope_guard
+                        .database
+                        .prepare_standing_selected_core_numbers(
+                            cx,
+                            definition,
+                            policy,
+                            query.has_value_rows(),
+                        )?
                 } else {
-                    self.prepare_standing_core_numbers(
+                    scope_guard.database.prepare_standing_core_numbers(
                         cx,
                         query.relation,
                         policy,
@@ -759,15 +934,17 @@ impl<V: Vfs + Clone> Database<V> {
                 };
                 StandingQuery::CoreNumbers(Box::new(state))
             }
-            StandingQuery::Set(query) => StandingQuery::Set(Box::new(self.prepare_standing_set(
-                cx,
-                query.inputs,
-                query.operation(),
-                policy,
-                handle.index,
-            )?)),
+            StandingQuery::Set(query) => {
+                StandingQuery::Set(Box::new(scope_guard.database.prepare_standing_set(
+                    cx,
+                    query.inputs,
+                    query.operation(),
+                    policy,
+                    handle.index,
+                )?))
+            }
             StandingQuery::Join(query) => {
-                StandingQuery::Join(Box::new(self.prepare_standing_join_spec(
+                StandingQuery::Join(Box::new(scope_guard.database.prepare_standing_join_spec(
                     cx,
                     query.inputs,
                     query.spec(),
@@ -775,17 +952,17 @@ impl<V: Vfs + Clone> Database<V> {
                     handle.index,
                 )?))
             }
-            StandingQuery::Projection(query) => {
-                StandingQuery::Projection(Box::new(self.prepare_standing_projection(
+            StandingQuery::Projection(query) => StandingQuery::Projection(Box::new(
+                scope_guard.database.prepare_standing_projection(
                     cx,
                     query.input,
                     query.spec().clone(),
                     policy,
                     handle.index,
-                )?))
-            }
+                )?,
+            )),
             StandingQuery::Filter(query) => {
-                StandingQuery::Filter(Box::new(self.prepare_standing_filter(
+                StandingQuery::Filter(Box::new(scope_guard.database.prepare_standing_filter(
                     cx,
                     query.input,
                     query.spec().clone(),
@@ -793,18 +970,18 @@ impl<V: Vfs + Clone> Database<V> {
                     handle.index,
                 )?))
             }
-            StandingQuery::Reduction(query) => {
-                StandingQuery::Reduction(Box::new(self.prepare_standing_reduction(
+            StandingQuery::Reduction(query) => StandingQuery::Reduction(Box::new(
+                scope_guard.database.prepare_standing_reduction(
                     cx,
                     query.input,
                     query.spec().key_columns(),
                     query.spec().value_column(),
                     policy,
                     handle.index,
-                )?))
-            }
+                )?,
+            )),
             StandingQuery::Window(query) => {
-                StandingQuery::Window(Box::new(self.prepare_standing_window(
+                StandingQuery::Window(Box::new(scope_guard.database.prepare_standing_window(
                     cx,
                     query.input,
                     query.spec().clone(),
@@ -813,7 +990,7 @@ impl<V: Vfs + Clone> Database<V> {
                 )?))
             }
             StandingQuery::Group(query) => {
-                StandingQuery::Group(Box::new(self.prepare_standing_group(
+                StandingQuery::Group(Box::new(scope_guard.database.prepare_standing_group(
                     cx,
                     query.input,
                     query.definition().clone(),
@@ -824,7 +1001,8 @@ impl<V: Vfs + Clone> Database<V> {
         };
         let frontier = replacement.status().1;
         // No source mutation, await or fallible work between preparation and swap.
-        self.standing_queries[handle.index] = replacement;
+        scope_guard.database.standing_queries[handle.index] = replacement;
+        scope_guard.committed = true;
         Ok(frontier)
     }
 
@@ -842,14 +1020,32 @@ impl<V: Vfs + Clone> Database<V> {
             .standing_queries
             .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
-        if matches!(query, StandingQuery::Released) {
+        if matches!(
+            query,
+            StandingQuery::Released | StandingQuery::CapabilityScope(_)
+        ) {
             return Err(StandingQueryError::UnknownHandle);
         }
+        if let Some((_, scope)) = self.containing_capability_scope(handle.index) {
+            if let Some(reason) = scope.failure {
+                return Err(StandingQueryError::Unavailable {
+                    frontier: scope.visible_frontier,
+                    reason,
+                });
+            }
+            if scope.physical_frontier != self.snapshot.frontier {
+                return Err(StandingQueryError::Unavailable {
+                    frontier: scope.visible_frontier,
+                    reason: StandingQueryFailure::InvalidDelta,
+                });
+            }
+        }
+        let expected_frontier = self.expected_node_frontier(handle.index);
         let (_, frontier, failure) = query.status();
         if let Some(reason) = failure {
             return Err(StandingQueryError::Unavailable { frontier, reason });
         }
-        if frontier != self.snapshot.frontier {
+        if frontier != expected_frontier {
             return Err(StandingQueryError::Unavailable {
                 frontier,
                 reason: StandingQueryFailure::InvalidDelta,
@@ -884,13 +1080,14 @@ impl<V: Vfs + Clone> Database<V> {
             .standing_queries
             .get(first..=handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
-        for node in nodes {
+        for (offset, node) in nodes.iter().enumerate() {
             cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
             let (_, frontier, failure) = node.status();
             if let Some(reason) = failure {
                 return Err(StandingQueryError::Unavailable { frontier, reason });
             }
-            if frontier != self.snapshot.frontier || node.maintained().is_none() {
+            let expected_frontier = self.expected_node_frontier(first + offset);
+            if frontier != expected_frontier || node.maintained().is_none() {
                 return Err(StandingQueryError::Unavailable {
                     frontier,
                     reason: StandingQueryFailure::InvalidDelta,
@@ -938,6 +1135,7 @@ impl<V: Vfs + Clone> Database<V> {
             | StandingQuery::Filter(_)
             | StandingQuery::Reduction(_)
             | StandingQuery::Replay(_)
+            | StandingQuery::CapabilityScope(_)
             | StandingQuery::Released
             | StandingQuery::Window(_) => return Err(StandingQueryError::Unsupported),
         };
@@ -1002,18 +1200,67 @@ impl<V: Vfs + Clone> Database<V> {
 /// One publication lifecycle. A failed derived view never rejects a durable
 /// database commit or prevents independently admitted sibling views advancing.
 pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &LogicalDeltaBatch) {
-    for index in 0..queries.len() {
+    let total_len = queries.len();
+    let mut active_scope: Option<(usize, usize)> = None;
+    let mut index = 0;
+    while index < total_len {
+        if let Some((scope_idx, members_end)) = active_scope
+            && index >= members_end
+        {
+            if let Some(StandingQuery::CapabilityScope(scope)) = queries.get_mut(scope_idx) {
+                scope.current_delta = None;
+            }
+            active_scope = None;
+        }
         // Every dependency precedes its consumer. Borrow already published
         // operands and one exclusive consumer; no cursor can skip a tick.
         let (prior, remaining) = queries.split_at_mut(index);
         let query = &mut remaining[0];
         if matches!(query, StandingQuery::Released) {
+            index += 1;
+            continue;
+        }
+        if let StandingQuery::CapabilityScope(scope) = query {
+            let members_end = scope.members_end.min(total_len);
+            if scope.failure.is_some() {
+                index = members_end.max(index + 1);
+                continue;
+            }
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let result = scope.maintain(batch, &mut checkpoint);
+            let stats = scope.stats;
+            let has_delta = result.is_ok() && scope.current_delta.is_some();
+            query.record(batch.commit_seq(), result, stats);
+            if has_delta {
+                active_scope = Some((index, members_end));
+                index += 1;
+            } else {
+                index = members_end.max(index + 1);
+            }
             continue;
         }
         let (policy, _, failure) = query.status();
         if failure.is_some() {
+            index += 1;
             continue;
         }
+        let effective_batch = if let Some((scope_idx, _)) = active_scope {
+            match prior.get(scope_idx) {
+                Some(StandingQuery::CapabilityScope(scope)) => match &scope.current_delta {
+                    Some(projected) => projected,
+                    None => {
+                        index += 1;
+                        continue;
+                    }
+                },
+                _ => batch,
+            }
+        } else {
+            batch
+        };
         let mut checkpoint = || {
             cx.checkpoint()
                 .map_err(|_| StandingQueryFailure::Interrupted)
@@ -1024,46 +1271,55 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             checkpoint: &mut checkpoint,
         };
         let result = match query {
-            StandingQuery::Released => continue,
-            StandingQuery::Aggregate(query) => query.maintain(batch, &mut meter),
+            StandingQuery::Released | StandingQuery::CapabilityScope(_) => {
+                index += 1;
+                continue;
+            }
+            StandingQuery::Aggregate(query) => query.maintain(effective_batch, &mut meter),
             StandingQuery::ProjectedAggregate { source, output } => {
-                source.maintain_with_output(batch, &mut meter, Some(output.as_mut()))
+                source.maintain_with_output(effective_batch, &mut meter, Some(output.as_mut()))
             }
             StandingQuery::Rows { source, output } => {
-                source.maintain_with_output(batch, &mut meter, Some(output.as_mut()))
+                source.maintain_with_output(effective_batch, &mut meter, Some(output.as_mut()))
             }
-            StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
-            StandingQuery::Closure(query) => query.maintain(batch, prior, &mut meter),
-            StandingQuery::Triangles(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::Reachability(query) => query.maintain(cx, effective_batch, &mut meter),
+            StandingQuery::Closure(query) => query.maintain(effective_batch, prior, &mut meter),
+            StandingQuery::Triangles(query) => query.maintain(cx, effective_batch, &mut meter),
             StandingQuery::TriangleCounts(query) => {
-                query.maintain_with_sources(cx, batch, prior, &mut meter)
+                query.maintain_with_sources(cx, effective_batch, prior, &mut meter)
             }
             StandingQuery::Components(query) => {
-                query.maintain_with_sources(cx, batch, prior, &mut meter)
+                query.maintain_with_sources(cx, effective_batch, prior, &mut meter)
             }
             StandingQuery::CoreNumbers(query) => {
-                query.maintain_with_sources(cx, batch, prior, &mut meter)
+                query.maintain_with_sources(cx, effective_batch, prior, &mut meter)
             }
-            StandingQuery::Set(query) => query.maintain(batch, prior, &mut meter),
-            StandingQuery::Join(query) => query.maintain(batch, prior, &mut meter),
-            StandingQuery::Projection(query) => query.maintain(batch, prior, &mut meter),
-            StandingQuery::Filter(query) => query.maintain(batch, prior, &mut meter),
-            StandingQuery::Reduction(query) => query.maintain(batch, prior, &mut meter),
-            StandingQuery::Window(query) => query.maintain(batch, prior, &mut meter),
-            StandingQuery::Group(query) => query.maintain(batch, prior, &mut meter),
-            StandingQuery::Constant(query) => query.maintain(batch, &mut meter),
-            StandingQuery::Replay(query) => query.maintain(batch, prior, &mut meter),
+            StandingQuery::Set(query) => query.maintain(effective_batch, prior, &mut meter),
+            StandingQuery::Join(query) => query.maintain(effective_batch, prior, &mut meter),
+            StandingQuery::Projection(query) => query.maintain(effective_batch, prior, &mut meter),
+            StandingQuery::Filter(query) => query.maintain(effective_batch, prior, &mut meter),
+            StandingQuery::Reduction(query) => query.maintain(effective_batch, prior, &mut meter),
+            StandingQuery::Window(query) => query.maintain(effective_batch, prior, &mut meter),
+            StandingQuery::Group(query) => query.maintain(effective_batch, prior, &mut meter),
+            StandingQuery::Constant(query) => query.maintain(effective_batch, &mut meter),
+            StandingQuery::Replay(query) => query.maintain(effective_batch, prior, &mut meter),
         };
         // A relational node reads no graph: its affected identities are the
         // ones its graph sources re-derived in this tick.
         if result.is_ok()
             && let Some(inputs) = query.relational_inputs()
         {
-            let (vertices, edges) = source_affected(prior, inputs, batch.commit_seq());
+            let (vertices, edges) = source_affected(prior, inputs, effective_batch.commit_seq());
             meter.stats.affected_vertices = vertices;
             meter.stats.affected_edges = edges;
         }
-        query.record(batch.commit_seq(), result, meter.stats);
+        query.record(effective_batch.commit_seq(), result, meter.stats);
+        index += 1;
+    }
+    if let Some((scope_idx, _)) = active_scope
+        && let Some(StandingQuery::CapabilityScope(scope)) = queries.get_mut(scope_idx)
+    {
+        scope.current_delta = None;
     }
 }
 

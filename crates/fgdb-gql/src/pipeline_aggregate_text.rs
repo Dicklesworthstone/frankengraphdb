@@ -144,6 +144,13 @@ pub struct PreparedGraphPipelineAggregateText {
     /// Present when a RETURN item combines aggregate results (fgdb-4avot).
     pub(crate) output: Option<Box<PipelineOutput>>,
 }
+impl PreparedGraphPipelineAggregateText {
+    /// Whether any input stage or nested subquery invokes `CALL proc(...)`.
+    #[must_use]
+    pub fn has_procedure_call(&self) -> bool {
+        self.input.has_procedure_call()
+    }
+}
 
 /// A RETURN with an item that combines aggregate results (`sum(v) * 10 /
 /// count(v)`, fgdb-4avot).

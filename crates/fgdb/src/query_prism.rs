@@ -20,7 +20,7 @@ use fgdb_prism::{
     SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView, SortedVertexLookup,
 };
 use fgdb_strata::store::{RootReadError, RootReadLimits, StoreError};
-use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
+use fgdb_strata::tiered::sealed::{SealedDeltaOverlay, SealedError, SealedLimits, SealedPartition};
 use fgdb_types::{CanonicalF64, CanonicalScalar, CommitCx, CommitSeq, QueryCx, VId};
 use std::mem::size_of;
 use std::num::NonZeroUsize;
@@ -297,13 +297,14 @@ impl<V: Vfs + Clone> Database<V> {
                     .checkpoint()
                     .map_err(Error::Cancelled)
                     .map_err(SealedReadError::from)?;
-                let relation = options
-                    .selection
-                    .relations
-                    .single()
-                    .ok_or(SealedReadError::Projection(
-                        SealedProjectionError::RelationRequired,
-                    ))?;
+                let relation =
+                    options
+                        .selection
+                        .relations
+                        .single()
+                        .ok_or(SealedReadError::Projection(
+                            SealedProjectionError::RelationRequired,
+                        ))?;
                 let path = path.as_ref();
                 crate::require_database_dir(cx, &vfs, path).await?;
                 let published =
@@ -334,22 +335,59 @@ impl<V: Vfs + Clone> Database<V> {
                         sealing,
                         root_limits.max_root_bytes,
                     ));
-                let (partition, patches, authenticated_source_root) =
-                    if let Some(run) = attached.await? {
-                        // The run's original source root is authenticated by
-                        // its membership in this selected publication. Ordinary
-                        // source admission supplies vertex history separately;
-                        // none of that adjacency is compacted or re-encoded.
-                        let source_root = run.partition().anchor().scope().source_root;
-                        let source: crate::SendFuture<'_, _> =
-                            Box::pin(published.store.reopen_vertices_bounded(
-                                query_cx,
-                                published.root_id,
-                                as_of,
-                                root_limits,
-                            ));
-                        let patches = source.await?;
-                        (run.into_partition(), patches, source_root)
+                let (partition, patches, authenticated_source_root) = if let Some(run) =
+                    attached.await?
+                {
+                    // The run's original source root is authenticated by
+                    // its membership in this selected publication. Ordinary
+                    // source admission supplies vertex history separately;
+                    // none of that adjacency is compacted or re-encoded.
+                    let source_root = run.partition().anchor().scope().source_root;
+                    let source: crate::SendFuture<'_, _> =
+                        Box::pin(published.store.reopen_vertices_bounded(
+                            query_cx,
+                            published.root_id,
+                            as_of,
+                            root_limits,
+                        ));
+                    let patches = source.await?;
+                    (run.into_partition(), patches, source_root)
+                } else {
+                    let post_seal_run: crate::SendFuture<'_, _> =
+                        Box::pin(published.store.get_published_adj_run_post_seal(
+                            query_cx,
+                            published.root_id,
+                            relation,
+                            as_of,
+                            sealing,
+                            root_limits.max_root_bytes,
+                        ));
+                    if let Some((base, verified_through)) = post_seal_run.await? {
+                        let source: crate::SendFuture<'_, _> = Box::pin(
+                            published
+                                .store
+                                .reopen_post_seal_blocks_with_vertices_bounded(
+                                    query_cx,
+                                    published.root_id,
+                                    as_of,
+                                    root_limits,
+                                    relation,
+                                    verified_through,
+                                ),
+                        );
+                        let (post_seal, patches) = source.await?;
+                        let partition = SealedDeltaOverlay::build(
+                            query_cx,
+                            base,
+                            published.root_id,
+                            verified_through,
+                            as_of,
+                            &post_seal,
+                            sealing,
+                        )
+                        .and_then(|ov| ov.materialize_partition(query_cx, sealing))
+                        .map_err(SealedReadError::Seal)?;
+                        (partition, patches, published.root_id)
                     } else {
                         // Type-erased like the commit chokepoints (fgdb-a5y6m):
                         // the sealer's deep Send proof stops at this boundary.
@@ -364,10 +402,11 @@ impl<V: Vfs + Clone> Database<V> {
                             ));
                         let (partition, patches) = sealing.await.map_err(SealedReadError::Seal)?;
                         (partition, patches, published.root_id)
-                    };
+                    }
+                };
                 let scope = partition.anchor().scope();
                 if scope.source_root != authenticated_source_root
-                    || scope.publication != published.published_at
+                    || partition.anchor().admitted_publication() != published.published_at
                     || scope.graph != crate::GRAPH
                     || scope.branch != crate::BRANCH
                     || scope.partition != crate::PARTITION
@@ -431,7 +470,7 @@ pub enum ProcedureError {
     /// A query must explicitly select this prepared source's relation; the
     /// source never substitutes its relation for a different or whole graph.
     SealedRelationMismatch {
-        requested: fgdb_delta_types::SchemaSelection<fgdb_delta_types::RelationId>,
+        requested: Box<fgdb_delta_types::SchemaSelection<fgdb_delta_types::RelationId>>,
         retained: fgdb_delta_types::RelationId,
     },
     /// A count beyond the GQL Int64 domain.
@@ -1161,9 +1200,12 @@ impl<V: Vfs + Clone> Database<V> {
             let view = self.read_session().map_err(Error::Read)?;
             let as_of = as_of.unwrap_or(view.frontier());
             view.check_sealed_request(cx, as_of, selection)?;
-            let relation = selection.relations.single().ok_or(SealedReadError::Projection(
-                SealedProjectionError::RelationRequired,
-            ))?;
+            let relation = selection
+                .relations
+                .single()
+                .ok_or(SealedReadError::Projection(
+                    SealedProjectionError::RelationRequired,
+                ))?;
             let request = SealedProjectionRequest {
                 projection: ProjectionRequest {
                     binding: SnapshotBinding {
@@ -1270,18 +1312,107 @@ impl<V: Vfs + Clone> Database<V> {
             validation.await.map_err(sealed_source_error)?;
             Ok(run.into_partition())
         } else {
-            self.store
-                .seal_relation_with_source_limits(
+            let post_seal_run: crate::SendFuture<'_, _> =
+                Box::pin(self.store.get_published_adj_run_post_seal(
+                    cx,
+                    view.partition_root(),
+                    relation,
+                    as_of,
+                    sealing,
+                    source_limits.max_root_bytes,
+                ));
+            if let Some((base, verified_through)) =
+                post_seal_run.await.map_err(sealed_store_error)?
+            {
+                let post_seal_fut: crate::SendFuture<'_, _> =
+                    Box::pin(self.store.reopen_post_seal_blocks_bounded(
+                        cx,
+                        view.partition_root(),
+                        as_of,
+                        source_limits,
+                        relation,
+                        verified_through,
+                    ));
+                let post_seal = post_seal_fut.await.map_err(sealed_source_error)?;
+                SealedDeltaOverlay::build(
+                    cx,
+                    base,
+                    view.partition_root(),
+                    verified_through,
+                    as_of,
+                    &post_seal,
+                    sealing,
+                )
+                .and_then(|ov| ov.materialize_partition(cx, sealing))
+                .map_err(SealedReadError::Seal)
+            } else {
+                self.store
+                    .seal_relation_with_source_limits(
+                        cx,
+                        view.partition_root(),
+                        as_of,
+                        relation,
+                        sealing,
+                        source_limits,
+                    )
+                    .await
+                    .map_err(SealedReadError::Seal)
+            }
+        }
+    }
+
+    /// Open a post-seal `(Tier-R + Tier-D)` [`SealedDeltaOverlay`] for `relation`
+    /// at `as_of` when a carried [`fgdb_strata::tiered::sealed::AdjRunSegment`]
+    /// precedes post-seal mutations (`verified_through < as_of <= frontier`).
+    pub async fn open_sealed_delta_overlay(
+        &self,
+        cx: &QueryCx,
+        relation: fgdb_delta_types::RelationId,
+        as_of: Option<CommitSeq>,
+        sealing: SealedLimits,
+        source_limits: RootReadLimits,
+    ) -> Result<Option<SealedDeltaOverlay>, SealedReadError> {
+        cx.with_restriction_async(async {
+            let view = self.read_session().map_err(Error::Read)?;
+            let as_of = as_of.unwrap_or(view.frontier());
+            view.snapshot.check_frontier(as_of).map_err(Error::Read)?;
+            cx.checkpoint().map_err(Error::Cancelled)?;
+            let post_seal_run: crate::SendFuture<'_, _> =
+                Box::pin(self.store.get_published_adj_run_post_seal(
+                    cx,
+                    view.partition_root(),
+                    relation,
+                    as_of,
+                    sealing,
+                    source_limits.max_root_bytes,
+                ));
+            let Some((base, verified_through)) = post_seal_run.await.map_err(sealed_store_error)?
+            else {
+                return Ok(None);
+            };
+            let post_seal_fut: crate::SendFuture<'_, _> =
+                Box::pin(self.store.reopen_post_seal_blocks_bounded(
                     cx,
                     view.partition_root(),
                     as_of,
-                    relation,
-                    sealing,
                     source_limits,
-                )
-                .await
-                .map_err(SealedReadError::Seal)
-        }
+                    relation,
+                    verified_through,
+                ));
+            let post_seal = post_seal_fut.await.map_err(sealed_source_error)?;
+            let overlay = SealedDeltaOverlay::build(
+                cx,
+                base,
+                view.partition_root(),
+                verified_through,
+                as_of,
+                &post_seal,
+                sealing,
+            )
+            .map_err(SealedReadError::Seal)?;
+            Ok(Some(overlay))
+        })
+        .await
     }
 
     /// Bind a registered CALL before acquiring a generation; then pin exactly
@@ -1483,22 +1614,26 @@ impl EmbeddedReadView {
         partition: &SealedPartition,
         as_of: CommitSeq,
     ) -> Result<(), SealedReadError> {
-        let scope = partition.anchor().scope();
-        if (scope.source_root != self.partition_root()
-            && Some(scope.source_root) != self.snapshot.sealed_source_root)
-            || scope.publication != self.frontier()
+        let anchor = partition.anchor();
+        let scope = anchor.scope();
+        let root_admitted = scope.source_root == self.partition_root()
+            || Some(scope.source_root) == self.snapshot.sealed_source_root
+            || anchor.admitted_envelope_root() == Some(self.partition_root());
+        if !root_admitted
+            || anchor.admitted_publication() != self.frontier()
             || scope.graph != crate::GRAPH
             || scope.branch != crate::BRANCH
             || scope.partition != crate::PARTITION
         {
             return Err(SealedReadError::SourceMismatch);
         }
-        if as_of < scope.floor || as_of > scope.publication {
+        let ceiling = anchor.verified_through();
+        if as_of < scope.floor || as_of > ceiling {
             return Err(SealedReadError::Projection(SealedProjectionError::Read(
                 SealedError::SnapshotOutsideAnchor {
                     requested: as_of,
                     floor: scope.floor,
-                    publication: scope.publication,
+                    publication: ceiling,
                 },
             )));
         }

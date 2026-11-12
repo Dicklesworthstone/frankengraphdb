@@ -47,6 +47,17 @@ pub(super) fn selected_cross_probe_keys<E>(
     selected_cross::required_keys(left_width, code, columns, control)
 }
 
+pub(super) fn selected_cross_id_probe_keys<E>(
+    left_width: usize,
+    code: &[GraphSetPredicateOp],
+    columns: Option<&[usize]>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Vec<(usize, usize, bool)>, E> {
+    selected_cross::required_id_keys(left_width, code, columns, control)
+}
+
+pub use selected_cross::scalar_to_vid;
+
 /// Use the resident equality-witness law without redefining composite NULL
 /// semantics. The caller has validated the row schema and every key position.
 pub(super) fn selected_cross_probe_eligible<E>(

@@ -87,6 +87,9 @@ fn bind_having(
             CanonicalScalar::Int(value) => GraphHavingOperand::Integer(i128::from(*value)),
             _ => GraphHavingOperand::Scalar(value.predicate(IntegerComparison::Equal)),
         },
+        GraphSetOperand::IdentityColumn { .. } => {
+            unreachable!("row filter IR never builds IdentityColumn in HAVING")
+        }
     };
     let code = pipeline::bind_filter(code, values)?
         .into_iter()

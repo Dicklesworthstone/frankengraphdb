@@ -80,6 +80,30 @@ where
         )?;
         identities.dedup();
         GraphSeeds::Identities(&identities)
+    } else if let Some(root_col) = root
+        && let Some(&(key, _, text)) =
+            required_id_keys(width, code, slots.as_deref(), &mut |event| {
+                meter.event(event)
+            })?
+            .iter()
+            .find(|&&(_, column, _)| column == root_col)
+    {
+        // `id(n) = id` or `elementId(n) = eid` (fgdb-2acff): map each leading
+        // scalar cell that can equal a root identity to its exact VId.
+        for row in left {
+            meter.event(GlaExecutionEvent::Work)?;
+            if let Some(vertex) = scalar_to_vid(&row.values()[key], text) {
+                meter.event(GlaExecutionEvent::ScratchEntry)?;
+                identities.push(vertex);
+            }
+        }
+        merge::sort(
+            &mut identities,
+            &mut |event| meter.event(event),
+            &mut |a, b, _| Ok(a.cmp(b)),
+        )?;
+        identities.dedup();
+        GraphSeeds::Identities(&identities)
     } else if let Some((key, property)) = keys
         .iter()
         .find_map(|&(key, column)| Some((key, pattern.seeded_root_property(column)?)))

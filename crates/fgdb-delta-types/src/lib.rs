@@ -646,6 +646,27 @@ impl LogicalDeltaBatch {
     pub fn commit_seq(&self) -> fgdb_types::CommitSeq {
         self.commit_seq
     }
+
+    /// Project a committed batch under a capability homomorphism to a scoped
+    /// visible frontier (`FG-INV-20`), preserving marker identity provenance
+    /// while stamping the scoped sequence across batch, frontier, and marker.
+    #[must_use]
+    pub fn project_committed(
+        &self,
+        coordinate_entries: Vec<CoordinateEntry>,
+        projected_seq: fgdb_types::CommitSeq,
+    ) -> Self {
+        let mut commit_marker_identity = self.commit_marker_identity;
+        commit_marker_identity.commit_seq = projected_seq;
+        Self {
+            format: self.format,
+            coordinate_entries,
+            source_template_digest: self.source_template_digest,
+            commit_marker_identity,
+            frontier: projected_seq,
+            commit_seq: projected_seq,
+        }
+    }
 }
 
 #[cfg(test)]

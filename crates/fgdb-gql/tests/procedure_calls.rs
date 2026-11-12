@@ -670,7 +670,10 @@ fn graph_projection_unions_canonicalize_names_and_keep_full_width_identities() {
             canonical.canonical_template_bytes()
         );
         assert_eq!(
-            reordered.bind_parameters(&params).unwrap().canonical_bytes(),
+            reordered
+                .bind_parameters(&params)
+                .unwrap()
+                .canonical_bytes(),
             canonical_bound.canonical_bytes()
         );
     }

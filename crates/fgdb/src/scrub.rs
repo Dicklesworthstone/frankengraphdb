@@ -68,9 +68,11 @@ pub struct ScrubSummary {
     pub lost: Vec<LostCapsule>,
     pub block_objects: usize,
     pub block_clean: Vec<ObjectId>,
+    pub block_repaired: Vec<ObjectId>,
     pub block_lost: Vec<LostCapsule>,
     pub metadata_objects: usize,
     pub metadata_clean: Vec<ObjectId>,
+    pub metadata_repaired: Vec<ObjectId>,
     pub metadata_lost: Vec<LostCapsule>,
 }
 
@@ -92,16 +94,32 @@ enum MetadataKind {
 
 fn record_verification(
     object_id: ObjectId,
-    result: Result<Vec<u8>, StoreError>,
+    result: Result<(Vec<u8>, bool), StoreError>,
     clean: &mut Vec<ObjectId>,
+    repaired: &mut Vec<ObjectId>,
     lost: &mut Vec<LostCapsule>,
 ) -> Result<(), CommitError> {
     match result {
-        Ok(_) => clean.push(object_id),
+        Ok((_, false)) => clean.push(object_id),
+        Ok((_, true)) => repaired.push(object_id),
         Err(StoreError::IdentityMismatch { .. }) => lost.push(LostCapsule {
             object_id,
             reason: LostReason::IdentityMismatch,
         }),
+        Err(StoreError::Extent(fgdb_strata::store::ExtentError::AuthenticationFailed)) => {
+            lost.push(LostCapsule {
+                object_id,
+                reason: LostReason::AuthenticationFailed,
+            });
+        }
+        Err(StoreError::Extent(fgdb_strata::store::ExtentError::InsufficientSymbols {
+            ..
+        })) => {
+            lost.push(LostCapsule {
+                object_id,
+                reason: LostReason::InsufficientSymbols,
+            });
+        }
         Err(StoreError::Io(error)) if error.kind() != std::io::ErrorKind::NotFound => {
             return Err(CommitError::Io(error));
         }
@@ -360,6 +378,15 @@ impl<V: Vfs + Clone> Database<V> {
             lost: capsules.lost,
             ..ScrubSummary::default()
         };
+        // Heal any degraded FGEC pack files before opening the uncached
+        // verification reader so its pack re-index sees repaired pack bytes,
+        // while tracking which member OIDs required physical repair.
+        let repaired_pack_members = self.store.scrub_packs(cx).await.map_err(|error| {
+            CommitError::Io(match error {
+                StoreError::Io(error) => error,
+                error => std::io::Error::other(error),
+            })
+        })?;
         // An ordinary store can retain both a previously admitted pack table
         // and its complete bytes. Neither is evidence of today's physical
         // storage. Keep the authenticated inventory above, but resolve every
@@ -389,27 +416,38 @@ impl<V: Vfs + Clone> Database<V> {
             objects.insert(reference.patch_id, DataKind::VertexPatch);
         }
         for run in self.attached_runs.values() {
-            objects.insert(run.0, DataKind::AdjRun);
+            objects.insert(run.run, DataKind::AdjRun);
         }
         summary.block_objects = objects.len();
         for (object_id, kind) in objects {
             checkpoint(cx)?;
             let result = match kind {
-                DataKind::Block => store.get_bytes(cx, DeltaBlockVersion(object_id)).await,
+                DataKind::Block => {
+                    store
+                        .scrub_block_bytes(cx, DeltaBlockVersion(object_id), &repaired_pack_members)
+                        .await
+                }
                 DataKind::AdjRun => {
                     store
-                        .get_adj_run_bytes(
+                        .scrub_adj_run_bytes(
                             cx,
                             fgdb_strata::tiered::sealed::AdjRunSegmentVersion(object_id),
+                            &repaired_pack_members,
                         )
                         .await
                 }
                 DataKind::EdgeProperties => {
-                    store.get_edge_property_patch_bytes(cx, object_id).await
+                    store
+                        .scrub_edge_property_patch_bytes(cx, object_id, &repaired_pack_members)
+                        .await
                 }
                 DataKind::VertexPatch => {
                     store
-                        .get_patch_bytes(cx, VertexPatchVersion(object_id))
+                        .scrub_patch_bytes(
+                            cx,
+                            VertexPatchVersion(object_id),
+                            &repaired_pack_members,
+                        )
                         .await
                 }
             };
@@ -417,6 +455,7 @@ impl<V: Vfs + Clone> Database<V> {
                 object_id,
                 result,
                 &mut summary.block_clean,
+                &mut summary.block_repaired,
                 &mut summary.block_lost,
             )?;
         }
@@ -425,18 +464,31 @@ impl<V: Vfs + Clone> Database<V> {
             checkpoint(cx)?;
             let result = match kind {
                 MetadataKind::Manifest => {
-                    store.get_manifest_bytes(cx, self.snapshot.manifest).await
+                    store
+                        .scrub_manifest_bytes(cx, self.snapshot.manifest, &repaired_pack_members)
+                        .await
                 }
-                MetadataKind::Root => store.get_root_bytes(cx, self.snapshot.root).await,
-                MetadataKind::Segment => store.get_root_segment_bytes(cx, object_id).await,
+                MetadataKind::Root => {
+                    store
+                        .scrub_root_bytes(cx, self.snapshot.root, &repaired_pack_members)
+                        .await
+                }
+                MetadataKind::Segment => {
+                    store
+                        .scrub_root_segment_bytes(cx, object_id, &repaired_pack_members)
+                        .await
+                }
                 MetadataKind::IndexSegment => {
-                    store.get_root_index_segment_bytes(cx, object_id).await
+                    store
+                        .scrub_root_index_segment_bytes(cx, object_id, &repaired_pack_members)
+                        .await
                 }
             };
             record_verification(
                 object_id,
                 result,
                 &mut summary.metadata_clean,
+                &mut summary.metadata_repaired,
                 &mut summary.metadata_lost,
             )?;
         }

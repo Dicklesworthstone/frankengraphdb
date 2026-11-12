@@ -551,6 +551,15 @@ async fn run_with_limits<V: Vfs + Clone>(
     let (steps, mut statements) = prepare(options, resolver, &cx)?;
     let mut txn = db.begin(&contexts.txn()).map_err(execution_failure)?;
     let basis = txn.basis().0;
+    if let Some(expected_seq) = options.if_current
+        && basis != expected_seq
+    {
+        txn.abort();
+        return Err(Failure::coded(
+            crate::refusal::Code::Conflict,
+            "the expected frontier is no longer current; no write was executed",
+        ));
+    }
     let mut output = BufferedOutput {
         bytes: Vec::new(),
         limit: limits.output_bytes,

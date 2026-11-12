@@ -93,10 +93,16 @@ use std::sync::Arc;
 mod bounded_read;
 pub(crate) use bounded_read::ReopenedSealingAdjacency;
 use bounded_read::RootReadEvent;
-pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
+pub use bounded_read::{PostSealBlocks, ReopenedAdjacency, RootReadError, RootReadLimits};
+pub mod ecs_extent;
+pub use ecs_extent::{
+    DecodedExtent, ExtentError, ExtentFrameSize, ExtentObjectKind, KeyEnvelopeError,
+    StrataEcsConfig, is_encoded_extent, is_key_envelope_v1, open_key_envelope_v1,
+    seal_key_envelope_v1,
+};
 mod pack;
 mod runs;
-pub use pack::{PACK_DIR, PACK_MIN_OBJECTS};
+pub use pack::{PACK_DIR, PACK_MIN_OBJECTS, inspect_host_pack_table, read_host_pack_slice};
 
 /// The fewest new root segments (with index segments) a root publication
 /// packs together; fewer stay loose, as a small transaction's objects do.
@@ -262,7 +268,7 @@ struct ObjectPublicationPermit {
 /// the choice explicit on both write and read prevents that present equivalence
 /// from becoming a hidden compatibility dependency if either transcript changes.
 #[derive(Clone, Copy, Debug)]
-enum StoredObjectKind {
+pub(crate) enum StoredObjectKind {
     Block,
     AdjRun,
     Root,
@@ -276,6 +282,19 @@ enum StoredObjectKind {
 }
 
 impl StoredObjectKind {
+    fn extent_kind(self) -> ExtentObjectKind {
+        match self {
+            Self::Block => ExtentObjectKind::Block,
+            Self::AdjRun => ExtentObjectKind::AdjRun,
+            Self::Root => ExtentObjectKind::Root,
+            Self::Segment => ExtentObjectKind::Segment,
+            Self::IndexSegment => ExtentObjectKind::IndexSegment,
+            Self::VertexPatch => ExtentObjectKind::VertexPatch,
+            Self::EdgePropertyPatch => ExtentObjectKind::EdgePropertyPatch,
+            Self::Manifest => ExtentObjectKind::Manifest,
+        }
+    }
+
     fn identity(
         self,
         k_oid: &[u8; 32],
@@ -566,6 +585,8 @@ struct StagedObject<F> {
     staging: Option<PathBuf>,
     path: PathBuf,
     bytes: Vec<u8>,
+    disk_bytes: Vec<u8>,
+    disk_limit: u64,
     limit: u64,
     kind: StoredObjectKind,
     id: ObjectId,
@@ -705,6 +726,8 @@ pub enum StoreError {
         at: usize,
         error: Box<StoreError>,
     },
+    /// Authenticated `FGEC` extent coding / decryption / RaptorQ recovery failed.
+    Extent(ExtentError),
 }
 
 impl core::fmt::Display for StoreError {
@@ -758,6 +781,7 @@ impl core::fmt::Display for StoreError {
             Self::ManifestRootLoad { at, root, error } => {
                 write!(f, "loading manifest record {at}'s root {root:?}: {error}")
             }
+            Self::Extent(error) => write!(f, "strata extent coding: {error}"),
         }
     }
 }
@@ -766,6 +790,7 @@ impl core::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
+            Self::Extent(error) => Some(error),
             Self::MalformedAdjRun(error) => Some(error.as_ref()),
             Self::Malformed(error) => Some(error),
             Self::MalformedRoot(error) => Some(error),
@@ -897,6 +922,7 @@ pub struct BlockStore<V: Vfs = UnixVfs> {
     k_oid: SharedSecret<32>,
     namespace: DatabaseSecurityNamespaceId,
     scalar_resolver: Option<Arc<dyn CanonicalScalarResolver + Send + Sync>>,
+    ecs_coding: Option<StrataEcsConfig>,
     /// Where packed objects are, shared by every clone of this store.
     packs: Arc<pack::PackIndex>,
     /// Bounded metadata hint for one authenticated immutable root. It avoids a
@@ -994,6 +1020,52 @@ impl<V: Vfs> BlockStore<V> {
         self
     }
 
+    /// Enable page-framed AEAD + stripe-RaptorQ (`FGEC`) coding for all durable
+    /// Strata objects (`FGSB`, `FGSP`, `FGVP`, `FGRN`, `FGPK`, manifests, roots,
+    /// and segments), re-indexing existing packs under the configured DEK and
+    /// coordinates.
+    pub async fn with_ecs_coding(
+        mut self,
+        cx: &impl StorageReadCx,
+        config: StrataEcsConfig,
+    ) -> Result<Self, StoreError> {
+        let packs = pack::PackIndex::load_with_ecs(
+            cx,
+            &self.vfs,
+            self.dir.join(PACK_DIR),
+            Some((config.clone(), self.namespace)),
+        )
+        .await?;
+        self.packs = Arc::new(packs);
+        self.ecs_coding = Some(config);
+        Ok(self)
+    }
+
+    /// Active page-framed AEAD + stripe-RaptorQ configuration, if enabled.
+    pub fn ecs_coding(&self) -> Option<&StrataEcsConfig> {
+        self.ecs_coding.as_ref()
+    }
+
+    fn disk_limit_for(&self, logical_limit: u64) -> u64 {
+        match &self.ecs_coding {
+            Some(cfg) => ecs_extent::max_encoded_bytes_for_limit(logical_limit, cfg),
+            None => logical_limit,
+        }
+    }
+
+    fn encode_disk_bytes(
+        &self,
+        kind: ExtentObjectKind,
+        id: ObjectId,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, StoreError> {
+        match &self.ecs_coding {
+            Some(cfg) => ecs_extent::encode_extent(cfg, self.namespace, kind, id, plaintext)
+                .map_err(StoreError::Extent),
+            None => Ok(plaintext.to_vec()),
+        }
+    }
+
     /// Borrow the optional artifact capability retained by this store.
     pub fn scalar_resolver(&self) -> Option<&(dyn CanonicalScalarResolver + Send + Sync)> {
         self.scalar_resolver.as_deref()
@@ -1023,7 +1095,30 @@ impl<V: Vfs> BlockStore<V> {
         k_oid: impl Into<SharedSecret<32>>,
         namespace: DatabaseSecurityNamespaceId,
     ) -> Result<Self, StoreError> {
-        Self::open_with_vfs_at_crash(cx, vfs, database_dir, k_oid, namespace, None).await
+        Self::open_with_vfs_at_crash_and_ecs(cx, vfs, database_dir, k_oid, namespace, None, None)
+            .await
+    }
+
+    /// Open the block store through an explicit [`Vfs`] with optional `FGEC`
+    /// extent coding active during initial pack-index admission.
+    pub async fn open_with_vfs_and_ecs(
+        cx: &CommitCx,
+        vfs: V,
+        database_dir: impl AsRef<Path>,
+        k_oid: impl Into<SharedSecret<32>>,
+        namespace: DatabaseSecurityNamespaceId,
+        ecs_coding: Option<StrataEcsConfig>,
+    ) -> Result<Self, StoreError> {
+        Self::open_with_vfs_at_crash_and_ecs(
+            cx,
+            vfs,
+            database_dir,
+            k_oid,
+            namespace,
+            None,
+            ecs_coding,
+        )
+        .await
     }
 
     /// Open the block store, optionally stopping between durability of the
@@ -1038,6 +1133,27 @@ impl<V: Vfs> BlockStore<V> {
         k_oid: impl Into<SharedSecret<32>>,
         namespace: DatabaseSecurityNamespaceId,
         crash_at: Option<BlockStoreCrashPoint>,
+    ) -> Result<Self, StoreError> {
+        Self::open_with_vfs_at_crash_and_ecs(
+            cx,
+            vfs,
+            database_dir,
+            k_oid,
+            namespace,
+            crash_at,
+            None,
+        )
+        .await
+    }
+
+    async fn open_with_vfs_at_crash_and_ecs(
+        cx: &CommitCx,
+        vfs: V,
+        database_dir: impl AsRef<Path>,
+        k_oid: impl Into<SharedSecret<32>>,
+        namespace: DatabaseSecurityNamespaceId,
+        crash_at: Option<BlockStoreCrashPoint>,
+        ecs_coding: Option<StrataEcsConfig>,
     ) -> Result<Self, StoreError> {
         let k_oid = k_oid.into();
         let database_dir = database_dir.as_ref().to_path_buf();
@@ -1116,7 +1232,15 @@ impl<V: Vfs> BlockStore<V> {
         )
         .await?;
 
-        let packs = Arc::new(pack::PackIndex::load(cx, &vfs, dir.join(PACK_DIR)).await?);
+        let packs = Arc::new(
+            pack::PackIndex::load_with_ecs(
+                cx,
+                &vfs,
+                dir.join(PACK_DIR),
+                ecs_coding.as_ref().map(|cfg| (cfg.clone(), namespace)),
+            )
+            .await?,
+        );
         Ok(Self {
             vfs,
             dir,
@@ -1124,6 +1248,7 @@ impl<V: Vfs> BlockStore<V> {
             k_oid,
             namespace,
             scalar_resolver: None,
+            ecs_coding,
             packs,
             root_run_presence: Arc::default(),
         })
@@ -1142,6 +1267,20 @@ impl<V: Vfs> BlockStore<V> {
         k_oid: impl Into<SharedSecret<32>>,
         namespace: DatabaseSecurityNamespaceId,
     ) -> Result<Self, StoreError> {
+        Self::open_existing_for_read_with_vfs_and_ecs(cx, vfs, database_dir, k_oid, namespace, None)
+            .await
+    }
+
+    /// Read-only store open with optional `FGEC` extent coding active during
+    /// initial pack-index admission.
+    pub async fn open_existing_for_read_with_vfs_and_ecs(
+        cx: &CommitCx,
+        vfs: V,
+        database_dir: impl AsRef<Path>,
+        k_oid: impl Into<SharedSecret<32>>,
+        namespace: DatabaseSecurityNamespaceId,
+        ecs_coding: Option<StrataEcsConfig>,
+    ) -> Result<Self, StoreError> {
         let dir = database_dir.as_ref().join(BLOCK_DIR);
         if !cx
             .with_restriction_async(vfs.symlink_metadata(&dir))
@@ -1155,7 +1294,15 @@ impl<V: Vfs> BlockStore<V> {
             )
             .into());
         }
-        let packs = Arc::new(pack::PackIndex::load(cx, &vfs, dir.join(PACK_DIR)).await?);
+        let packs = Arc::new(
+            pack::PackIndex::load_with_ecs(
+                cx,
+                &vfs,
+                dir.join(PACK_DIR),
+                ecs_coding.as_ref().map(|cfg| (cfg.clone(), namespace)),
+            )
+            .await?,
+        );
         Ok(Self {
             vfs,
             publication_lock_path: dir.join(PUBLICATION_LOCK_FILE),
@@ -1163,6 +1310,7 @@ impl<V: Vfs> BlockStore<V> {
             k_oid: k_oid.into(),
             namespace,
             scalar_resolver: None,
+            ecs_coding,
             packs,
             root_run_presence: Arc::default(),
         })
@@ -1184,8 +1332,15 @@ impl<V: Vfs> BlockStore<V> {
     where
         V: Clone,
     {
-        let packs =
-            pack::PackIndex::load_for_verification(cx, &self.vfs, self.dir.join(PACK_DIR)).await?;
+        let packs = pack::PackIndex::load_for_verification_with_ecs(
+            cx,
+            &self.vfs,
+            self.dir.join(PACK_DIR),
+            self.ecs_coding
+                .as_ref()
+                .map(|cfg| (cfg.clone(), self.namespace)),
+        )
+        .await?;
         Ok(Self {
             vfs: self.vfs.clone(),
             dir: self.dir.clone(),
@@ -1193,6 +1348,7 @@ impl<V: Vfs> BlockStore<V> {
             k_oid: self.k_oid.clone(),
             namespace: self.namespace,
             scalar_resolver: self.scalar_resolver.clone(),
+            ecs_coding: self.ecs_coding.clone(),
             packs: Arc::new(packs),
             root_run_presence: Arc::default(),
         })
@@ -1313,9 +1469,11 @@ impl<V: Vfs> BlockStore<V> {
         ensure_size_within_limit(u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit)?;
         let id = kind.identity(self.k_oid.expose(), self.namespace, bytes);
         let path = self.path(id);
+        let disk_bytes = self.encode_disk_bytes(kind.extent_kind(), id, bytes)?;
+        let disk_limit = self.disk_limit_for(limit);
 
         if let Some(mut file) = self
-            .existing_canonical(kind, cx, id, &path, bytes, limit)
+            .existing_canonical(kind, cx, id, &path, bytes, limit, &disk_bytes, disk_limit)
             .await?
         {
             sync_file_and_directory(cx, &self.vfs, &mut file, &self.dir, || {
@@ -1334,7 +1492,7 @@ impl<V: Vfs> BlockStore<V> {
 
         let staging_path = self.dir.join(PUBLICATION_STAGING_FILE);
         let mut staging = self.open_staging_inode(cx, &staging_path).await?;
-        staging.write_all(bytes).await?;
+        staging.write_all(&disk_bytes).await?;
         cx.with_restriction_async(staging.sync_all()).await?;
         after_staging_sync();
         if crash_at == Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication) {
@@ -1388,9 +1546,21 @@ impl<V: Vfs> BlockStore<V> {
             kind.identity(self.k_oid.expose(), self.namespace, bytes)
         );
         let path = self.path(id);
+        let disk_bytes = self.encode_disk_bytes(kind.extent_kind(), id, bytes)?;
+        let disk_limit = self.disk_limit_for(limit);
 
         if let Some(file) = self
-            .existing_batch_object(kind, cx, id, &path, bytes, limit, repair_data)
+            .existing_batch_object_disk(
+                kind,
+                cx,
+                id,
+                &path,
+                bytes,
+                limit,
+                &disk_bytes,
+                disk_limit,
+                repair_data,
+            )
             .await?
         {
             return Ok(StagedObject {
@@ -1398,6 +1568,8 @@ impl<V: Vfs> BlockStore<V> {
                 staging: None,
                 path,
                 bytes: bytes.to_vec(),
+                disk_bytes,
+                disk_limit,
                 limit,
                 kind,
                 id,
@@ -1406,12 +1578,14 @@ impl<V: Vfs> BlockStore<V> {
 
         let staging_path = self.dir.join(format!("{PUBLICATION_STAGING_FILE}.{slot}"));
         let mut staging = self.open_staging_inode(cx, &staging_path).await?;
-        staging.write_all(bytes).await?;
+        staging.write_all(&disk_bytes).await?;
         Ok(StagedObject {
             file: staging,
             staging: Some(staging_path),
             path,
             bytes: bytes.to_vec(),
+            disk_bytes,
+            disk_limit,
             limit,
             kind,
             id,
@@ -1422,7 +1596,7 @@ impl<V: Vfs> BlockStore<V> {
     /// bytes have already passed the batch's ordinary identity and payload
     /// admission. Equal-identity unequal bytes remain collision evidence;
     /// filesystem errors and nonregular paths never become repair permission.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     async fn existing_batch_object(
         &self,
         kind: StoredObjectKind,
@@ -1433,8 +1607,37 @@ impl<V: Vfs> BlockStore<V> {
         limit: u64,
         repair_data: bool,
     ) -> Result<Option<V::File>, StoreError> {
+        let disk_bytes = self.encode_disk_bytes(kind.extent_kind(), id, bytes)?;
+        let disk_limit = self.disk_limit_for(limit);
+        self.existing_batch_object_disk(
+            kind,
+            cx,
+            id,
+            path,
+            bytes,
+            limit,
+            &disk_bytes,
+            disk_limit,
+            repair_data,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn existing_batch_object_disk(
+        &self,
+        kind: StoredObjectKind,
+        cx: &CommitCx,
+        id: ObjectId,
+        path: &Path,
+        bytes: &[u8],
+        limit: u64,
+        disk_bytes: &[u8],
+        disk_limit: u64,
+        repair_data: bool,
+    ) -> Result<Option<V::File>, StoreError> {
         let existing = self
-            .existing_canonical(kind, cx, id, path, bytes, limit)
+            .existing_canonical(kind, cx, id, path, bytes, limit, disk_bytes, disk_limit)
             .await;
         match existing {
             Err(StoreError::DamagedExisting { .. } | StoreError::ObjectTooLarge { .. })
@@ -1453,6 +1656,7 @@ impl<V: Vfs> BlockStore<V> {
     /// held, so a conforming writer can see either no winner or one complete
     /// winner. Equal bytes are never rewritten, but the caller re-syncs them
     /// because visibility alone is not a durability receipt.
+    #[allow(clippy::too_many_arguments)]
     async fn existing_canonical(
         &self,
         kind: StoredObjectKind,
@@ -1461,6 +1665,8 @@ impl<V: Vfs> BlockStore<V> {
         path: &Path,
         bytes: &[u8],
         limit: u64,
+        disk_bytes: &[u8],
+        disk_limit: u64,
     ) -> Result<Option<V::File>, StoreError> {
         match cx
             .with_restriction_async(self.vfs.symlink_metadata(path))
@@ -1484,7 +1690,44 @@ impl<V: Vfs> BlockStore<V> {
                 let reread = cx
                     .with_restriction_async(self.vfs.open(path, &existing_opts))
                     .await?;
-                let existing = read_bounded(cx, reread, limit).await?;
+                let raw = read_bounded(cx, reread, disk_limit).await?;
+                if let Some(cfg) = &self.ecs_coding {
+                    if raw == disk_bytes {
+                        return Ok(Some(file));
+                    }
+                    let Ok(decoded) = ecs_extent::decode_extent(
+                        cfg,
+                        self.namespace,
+                        kind.extent_kind(),
+                        id,
+                        limit,
+                        &raw,
+                        true,
+                    ) else {
+                        return Err(StoreError::DamagedExisting {
+                            expected: id,
+                            actual: ObjectId([0u8; 32]),
+                        });
+                    };
+                    let actual =
+                        kind.identity(self.k_oid.expose(), self.namespace, &decoded.plaintext);
+                    if actual != id {
+                        return Err(StoreError::DamagedExisting {
+                            expected: id,
+                            actual,
+                        });
+                    }
+                    if decoded.plaintext != bytes {
+                        return Err(StoreError::Collision { object_id: id });
+                    }
+                    // Plaintext matched via RaptorQ recovery (`needs_rewrite`), so
+                    // the physical disk realization is degraded rather than equal.
+                    return Err(StoreError::DamagedExisting {
+                        expected: id,
+                        actual: ObjectId([0u8; 32]),
+                    });
+                }
+                let existing = raw;
                 let actual = kind.identity(self.k_oid.expose(), self.namespace, &existing);
                 if actual != id {
                     return Err(StoreError::DamagedExisting {
@@ -1662,25 +1905,49 @@ impl<V: Vfs> BlockStore<V> {
     async fn read_object_bytes(
         &self,
         cx: &impl StorageReadCx,
+        kind: StoredObjectKind,
         id: ObjectId,
         limit: u64,
     ) -> Result<Vec<u8>, StoreError> {
         if let Some(bytes) = self.read_packed(cx, id, limit).await? {
             return Ok(bytes);
         }
-        self.read_loose(cx, id, limit).await
+        self.read_loose(cx, kind, id, limit).await
     }
 
     async fn read_loose(
         &self,
         cx: &impl StorageReadCx,
+        kind: StoredObjectKind,
         id: ObjectId,
         limit: u64,
     ) -> Result<Vec<u8>, StoreError> {
         let file = cx
             .with_restriction_async(self.vfs.open_read(&self.path(id)))
             .await?;
-        read_bounded(cx, file, limit).await
+        let raw = read_bounded(cx, file, self.disk_limit_for(limit)).await?;
+        if let Some(cfg) = &self.ecs_coding {
+            return ecs_extent::decode_extent(
+                cfg,
+                self.namespace,
+                kind.extent_kind(),
+                id,
+                limit,
+                &raw,
+                false,
+            )
+            .map(|decoded| decoded.plaintext)
+            .map_err(|err| match err {
+                ExtentError::PlaintextTooLarge { limit, observed } => {
+                    StoreError::ObjectTooLarge { limit, observed }
+                }
+                other => StoreError::Extent(other),
+            });
+        }
+        if ecs_extent::is_encoded_extent(&raw) {
+            return Err(StoreError::Extent(ExtentError::AuthenticationFailed));
+        }
+        Ok(raw)
     }
 
     /// Prove a candidate using the caller's exact family/decoder, then try
@@ -1695,6 +1962,7 @@ impl<V: Vfs> BlockStore<V> {
     async fn read_object_proven<T, Proof, Proven>(
         &self,
         cx: &impl StorageReadCx,
+        kind: StoredObjectKind,
         id: ObjectId,
         limit: u64,
         proof: Proof,
@@ -1703,7 +1971,7 @@ impl<V: Vfs> BlockStore<V> {
         Proof: FnMut(Vec<u8>) -> Proven,
         Proven: Future<Output = Result<T, StoreError>>,
     {
-        self.read_object_selected(cx, id, limit, proof, |_| true)
+        self.read_object_selected(cx, kind, id, limit, proof, |_| true)
             .await
     }
 
@@ -1713,6 +1981,7 @@ impl<V: Vfs> BlockStore<V> {
     async fn read_object_selected<T, Proof, Proven>(
         &self,
         cx: &impl StorageReadCx,
+        kind: StoredObjectKind,
         id: ObjectId,
         limit: u64,
         mut proof: Proof,
@@ -1722,7 +1991,7 @@ impl<V: Vfs> BlockStore<V> {
         Proof: FnMut(Vec<u8>) -> Proven,
         Proven: Future<Output = Result<T, StoreError>>,
     {
-        let first = match self.read_object_bytes(cx, id, limit).await {
+        let first = match self.read_object_bytes(cx, kind, id, limit).await {
             Ok(bytes) => proof(bytes).await,
             Err(error) => Err(error),
         };
@@ -1761,7 +2030,7 @@ impl<V: Vfs> BlockStore<V> {
                 }
             }
             if !refreshed {
-                let loose = match self.read_loose(cx, id, limit).await {
+                let loose = match self.read_loose(cx, kind, id, limit).await {
                     Ok(bytes) => proof(bytes).await,
                     Err(error) => Err(error),
                 };
@@ -1795,11 +2064,25 @@ impl<V: Vfs> BlockStore<V> {
             .map(Some)
     }
 
-    /// Fill `out` with the object `id`, whose admitted length is `out.len()`.
-    /// A stored object of any other length is refused.
+    /// Fill `out` with the block object `id`, whose admitted length is `out.len()`.
+    #[allow(dead_code)]
     pub(crate) async fn read_object_exact(
         &self,
         cx: &impl StorageReadCx,
+        id: ObjectId,
+        checksum: [u8; 32],
+        out: &mut [u8],
+    ) -> Result<(), StoreError> {
+        self.read_object_exact_kind(cx, StoredObjectKind::Block, id, checksum, out)
+            .await
+    }
+
+    /// Fill `out` with the object `id` of family `kind`, whose admitted length is
+    /// `out.len()`. A stored object of any other length is refused.
+    pub(crate) async fn read_object_exact_kind(
+        &self,
+        cx: &impl StorageReadCx,
+        kind: StoredObjectKind,
         id: ObjectId,
         checksum: [u8; 32],
         out: &mut [u8],
@@ -1813,6 +2096,7 @@ impl<V: Vfs> BlockStore<V> {
         let bytes = self
             .read_object_selected(
                 cx,
+                kind,
                 id,
                 out.len() as u64,
                 |bytes| async { Ok(bytes) },
@@ -1831,6 +2115,356 @@ impl<V: Vfs> BlockStore<V> {
         }
         out.copy_from_slice(&bytes);
         Ok(())
+    }
+
+    /// `O(1)` page-framed random read on an `FGEC`-coded sealed `AdjRun` (`FGRN`):
+    /// seeks directly to `frame_ordinal` and authenticates/decrypts only that
+    /// single `16 KiB` or `64 KiB` page (recovering via that stripe's RaptorQ
+    /// repair symbols if damaged). Returns `(plaintext_frame, healed_from_stripe)`.
+    pub async fn read_adj_run_frame(
+        &self,
+        cx: &impl StorageReadCx,
+        run: crate::tiered::sealed::AdjRunSegmentVersion,
+        frame_ordinal: u32,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        if let Some(cfg) = &self.ecs_coding {
+            let path = self.path(run.0);
+            match cx.with_restriction_async(self.vfs.open_read(&path)).await {
+                Ok(file) => {
+                    return ecs_extent::read_extent_frame_from_file(
+                        cx,
+                        file,
+                        cfg,
+                        self.namespace,
+                        ExtentObjectKind::AdjRun,
+                        run.0,
+                        frame_ordinal,
+                    )
+                    .await
+                    .map_err(|err| match err {
+                        Ok(ext_err) => StoreError::Extent(ext_err),
+                        Err(io_err) => StoreError::Io(io_err),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(StoreError::Io(error)),
+            }
+        }
+        let frame_bytes = self
+            .ecs_coding
+            .as_ref()
+            .map_or(ExtentFrameSize::KiB16.bytes(), |cfg| cfg.frame_size.bytes());
+        let all = self.get_adj_run_bytes(cx, run).await?;
+        let total_frames = if all.is_empty() {
+            1u32
+        } else {
+            u32::try_from(all.len().div_ceil(frame_bytes)).unwrap_or(u32::MAX)
+        };
+        if frame_ordinal >= total_frames {
+            return Err(StoreError::Extent(ExtentError::FrameOutOfBounds {
+                requested: frame_ordinal,
+                frame_count: total_frames,
+            }));
+        }
+        let start = (frame_ordinal as usize) * frame_bytes;
+        let end = (start + frame_bytes).min(all.len());
+        Ok((
+            if all.is_empty() {
+                Vec::new()
+            } else {
+                all[start..end].to_vec()
+            },
+            false,
+        ))
+    }
+
+    /// Sweep every `FGEC`-coded pack in `strata-blocks/packs/`, verifying full
+    /// header + stripe RaptorQ redundancy and atomically rewriting any pack that
+    /// healed bit-rot or tail truncation (`<= R` symbols per stripe). Returns the
+    /// set of member `ObjectId`s contained in packs repaired during this sweep.
+    pub async fn scrub_packs(
+        &self,
+        cx: &CommitCx,
+    ) -> Result<std::collections::BTreeSet<ObjectId>, StoreError> {
+        let mut repaired_members = std::collections::BTreeSet::new();
+        let Some(cfg) = &self.ecs_coding else {
+            return Ok(repaired_members);
+        };
+        let pack_dir = self.dir.join(PACK_DIR);
+        let mut entries = match cx
+            .with_restriction_async(self.vfs.read_dir(&pack_dir))
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(repaired_members);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut candidates = Vec::new();
+        while let Some(entry) = cx.with_restriction_async(entries.next_entry()).await? {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "pack")
+                && let Some(pack_id) = pack::pack_id_from_path(&path)
+            {
+                candidates.push((path, pack_id));
+            }
+        }
+        candidates.sort_by_key(|a| a.1);
+        let disk_limit = self.disk_limit_for(pack::MAX_PACK_BYTES);
+        for (pack_path, pack_id) in candidates {
+            publication_checkpoint(cx)?;
+            let file = match cx
+                .with_restriction_async(self.vfs.open_read(&pack_path))
+                .await
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let Ok(raw) = read_bounded(cx, file, disk_limit).await else {
+                continue;
+            };
+            let Ok(decoded) = ecs_extent::decode_extent(
+                cfg,
+                self.namespace,
+                ExtentObjectKind::Pack,
+                pack_id,
+                pack::MAX_PACK_BYTES,
+                &raw,
+                true,
+            ) else {
+                continue;
+            };
+            if !decoded.needs_rewrite {
+                continue;
+            }
+            if fgdb_crypto::blake3::hash(&decoded.plaintext).0 != pack_id.0 {
+                continue;
+            }
+            let Some(members) = pack::member_ids(&decoded.plaintext) else {
+                continue;
+            };
+            let _permit = self.acquire_publication_permit(cx)?;
+            let clean_disk = ecs_extent::encode_extent(
+                cfg,
+                self.namespace,
+                ExtentObjectKind::Pack,
+                pack_id,
+                &decoded.plaintext,
+            )
+            .map_err(StoreError::Extent)?;
+            let staging_path = pack_dir.join(pack::PACK_STAGING_FILE);
+            let mut staging = self.open_staging_inode(cx, &staging_path).await?;
+            staging.write_all(&clean_disk).await?;
+            cx.with_restriction_async(staging.sync_all()).await?;
+            self.verify_durable_bytes(cx, &staging_path, &clean_disk, disk_limit)
+                .await?;
+            drop(staging);
+            self.vfs.rename(&staging_path, &pack_path).await?;
+            sync_directory(cx, &self.vfs, &pack_dir).await?;
+            repaired_members.extend(members);
+        }
+        Ok(repaired_members)
+    }
+
+    async fn scrub_object_bytes_inner(
+        &self,
+        cx: &CommitCx,
+        id: ObjectId,
+        kind: StoredObjectKind,
+        limit: u64,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        if let Some(cfg) = &self.ecs_coding {
+            let path = self.path(id);
+            match cx
+                .with_restriction_async(self.vfs.symlink_metadata(&path))
+                .await
+            {
+                Ok(meta) if meta.file_type().is_file() => {
+                    let disk_limit = self.disk_limit_for(limit);
+                    if let Ok(file) = cx.with_restriction_async(self.vfs.open_read(&path)).await
+                        && let Ok(raw) = read_bounded(cx, file, disk_limit).await
+                        && let Ok(decoded) = ecs_extent::decode_extent(
+                            cfg,
+                            self.namespace,
+                            kind.extent_kind(),
+                            id,
+                            limit,
+                            &raw,
+                            true,
+                        )
+                    {
+                        let actual =
+                            kind.identity(self.k_oid.expose(), self.namespace, &decoded.plaintext);
+                        if actual == id {
+                            if decoded.needs_rewrite {
+                                let _permit = self.acquire_publication_permit(cx)?;
+                                let clean_disk = ecs_extent::encode_extent(
+                                    cfg,
+                                    self.namespace,
+                                    kind.extent_kind(),
+                                    id,
+                                    &decoded.plaintext,
+                                )
+                                .map_err(StoreError::Extent)?;
+                                let staging_path = self.dir.join(PUBLICATION_STAGING_FILE);
+                                let mut staging =
+                                    self.open_staging_inode(cx, &staging_path).await?;
+                                staging.write_all(&clean_disk).await?;
+                                cx.with_restriction_async(staging.sync_all()).await?;
+                                self.verify_durable_bytes(
+                                    cx,
+                                    &staging_path,
+                                    &clean_disk,
+                                    disk_limit,
+                                )
+                                .await?;
+                                drop(staging);
+                                self.vfs.rename(&staging_path, &path).await?;
+                                sync_directory(cx, &self.vfs, &self.dir).await?;
+                                return Ok((decoded.plaintext, true));
+                            }
+                            return Ok((decoded.plaintext, false));
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let bytes = self.read_metadata_bytes(cx, id, kind, limit).await?;
+        Ok((bytes, repaired_pack_members.contains(&id)))
+    }
+
+    pub async fn scrub_block_bytes(
+        &self,
+        cx: &CommitCx,
+        id: DeltaBlockVersion,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        self.scrub_object_bytes_inner(
+            cx,
+            id.0,
+            StoredObjectKind::Block,
+            MAX_STORED_OBJECT_BYTES,
+            repaired_pack_members,
+        )
+        .await
+    }
+
+    pub async fn scrub_adj_run_bytes(
+        &self,
+        cx: &CommitCx,
+        id: crate::tiered::sealed::AdjRunSegmentVersion,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        self.scrub_object_bytes_inner(
+            cx,
+            id.0,
+            StoredObjectKind::AdjRun,
+            crate::tiered::sealed::MAX_ADJ_RUN_BYTES as u64,
+            repaired_pack_members,
+        )
+        .await
+    }
+
+    pub async fn scrub_edge_property_patch_bytes(
+        &self,
+        cx: &CommitCx,
+        id: ObjectId,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        self.scrub_object_bytes_inner(
+            cx,
+            id,
+            StoredObjectKind::EdgePropertyPatch,
+            MAX_STORED_OBJECT_BYTES,
+            repaired_pack_members,
+        )
+        .await
+    }
+
+    pub async fn scrub_patch_bytes(
+        &self,
+        cx: &CommitCx,
+        id: VertexPatchVersion,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        self.scrub_object_bytes_inner(
+            cx,
+            id.0,
+            StoredObjectKind::VertexPatch,
+            MAX_STORED_OBJECT_BYTES,
+            repaired_pack_members,
+        )
+        .await
+    }
+
+    pub async fn scrub_manifest_bytes(
+        &self,
+        cx: &CommitCx,
+        id: crate::manifest::ManifestVersion,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        self.scrub_object_bytes_inner(
+            cx,
+            id.0,
+            StoredObjectKind::Manifest,
+            MANIFEST_HEADER_AND_RECORDS_CEILING,
+            repaired_pack_members,
+        )
+        .await
+    }
+
+    pub async fn scrub_root_bytes(
+        &self,
+        cx: &CommitCx,
+        id: PartitionRootVersion,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        self.scrub_object_bytes_inner(
+            cx,
+            id.0,
+            StoredObjectKind::Root,
+            crate::root::MAX_ENCODED_ROOT_BYTES as u64,
+            repaired_pack_members,
+        )
+        .await
+    }
+
+    pub async fn scrub_root_segment_bytes(
+        &self,
+        cx: &CommitCx,
+        id: ObjectId,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        self.scrub_object_bytes_inner(
+            cx,
+            id,
+            StoredObjectKind::Segment,
+            crate::root_segment::MAX_SEGMENT_BYTES as u64,
+            repaired_pack_members,
+        )
+        .await
+    }
+
+    pub async fn scrub_root_index_segment_bytes(
+        &self,
+        cx: &CommitCx,
+        id: ObjectId,
+        repaired_pack_members: &std::collections::BTreeSet<ObjectId>,
+    ) -> Result<(Vec<u8>, bool), StoreError> {
+        self.scrub_object_bytes_inner(
+            cx,
+            id,
+            StoredObjectKind::IndexSegment,
+            crate::root_segment::INDEX_BYTES as u64,
+            repaired_pack_members,
+        )
+        .await
     }
 
     /// Load the raw bytes of a block, verifying identity but not decoding.
@@ -1856,7 +2490,7 @@ impl<V: Vfs> BlockStore<V> {
         kind: StoredObjectKind,
         limit: u64,
     ) -> Result<Vec<u8>, StoreError> {
-        self.read_object_proven(cx, id, limit, |bytes| async move {
+        self.read_object_proven(cx, kind, id, limit, |bytes| async move {
             let actual = kind.identity(self.k_oid.expose(), self.namespace, &bytes);
             if actual != id {
                 return Err(StoreError::IdentityMismatch {
@@ -1957,20 +2591,26 @@ impl<V: Vfs> BlockStore<V> {
     ) -> Result<BlockRead, StoreError> {
         let namespace = self.namespace;
         let (bytes, decoded) = self
-            .read_object_proven(cx, id, MAX_STORED_OBJECT_BYTES, |bytes| {
-                let k_oid = self.k_oid.clone();
-                prove_off_task(bytes.len(), move || {
-                    let actual = block_id(k_oid.expose(), namespace, &bytes);
-                    if actual != id {
-                        return Err(StoreError::IdentityMismatch {
-                            expected: id,
-                            actual,
-                        });
-                    }
-                    let decoded = crate::decode_block_with_properties(&bytes);
-                    Ok((bytes, decoded))
-                })
-            })
+            .read_object_proven(
+                cx,
+                StoredObjectKind::Block,
+                id,
+                MAX_STORED_OBJECT_BYTES,
+                |bytes| {
+                    let k_oid = self.k_oid.clone();
+                    prove_off_task(bytes.len(), move || {
+                        let actual = block_id(k_oid.expose(), namespace, &bytes);
+                        if actual != id {
+                            return Err(StoreError::IdentityMismatch {
+                                expected: id,
+                                actual,
+                            });
+                        }
+                        let decoded = crate::decode_block_with_properties(&bytes);
+                        Ok((bytes, decoded))
+                    })
+                },
+            )
             .await?;
         let (entries, patch_id, locators) = match decoded {
             Ok((entries, Some((patch_id, locators)))) if prefetch_patch => {
@@ -1979,7 +2619,12 @@ impl<V: Vfs> BlockStore<V> {
             decoded => return Ok(((bytes, decoded), None)),
         };
         let patch_bytes = match self
-            .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+            .read_object_bytes(
+                cx,
+                StoredObjectKind::EdgePropertyPatch,
+                patch_id,
+                MAX_STORED_OBJECT_BYTES,
+            )
             .await
         {
             Ok(patch_bytes) => patch_bytes,
@@ -2063,6 +2708,7 @@ impl<V: Vfs> BlockStore<V> {
     ) -> Result<HostedPatchRead, StoreError> {
         self.read_object_selected(
             cx,
+            StoredObjectKind::EdgePropertyPatch,
             patch_id,
             MAX_STORED_OBJECT_BYTES,
             |bytes| async move {
@@ -2097,7 +2743,12 @@ impl<V: Vfs> BlockStore<V> {
         let mut issued = 0;
         while fetched.len() < ids.len() {
             while issued < ids.len() && reads.len() < OPEN_READS_IN_FLIGHT {
-                reads.push(self.read_object_bytes(cx, ids[issued], MAX_STORED_OBJECT_BYTES));
+                reads.push(self.read_object_bytes(
+                    cx,
+                    StoredObjectKind::Block,
+                    ids[issued],
+                    MAX_STORED_OBJECT_BYTES,
+                ));
                 issued += 1;
             }
             fetched.push(reads.next().await.expect("a read is in flight"));
@@ -2148,7 +2799,12 @@ impl<V: Vfs> BlockStore<V> {
         let mut issued = 0;
         while patches.len() < hosting.len() {
             while issued < hosting.len() && reads.len() < OPEN_READS_IN_FLIGHT {
-                reads.push(self.read_object_bytes(cx, hosting[issued].3, MAX_STORED_OBJECT_BYTES));
+                reads.push(self.read_object_bytes(
+                    cx,
+                    StoredObjectKind::EdgePropertyPatch,
+                    hosting[issued].3,
+                    MAX_STORED_OBJECT_BYTES,
+                ));
                 issued += 1;
             }
             patches.push(reads.next().await.expect("a read is in flight"));
@@ -2274,10 +2930,16 @@ impl<V: Vfs> BlockStore<V> {
     {
         let limit = MANIFEST_HEADER_AND_RECORDS_CEILING;
         let records = self
-            .read_object_proven(cx, id.0, limit, |bytes| async move {
-                crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
-                    .map_err(StoreError::MalformedManifest)
-            })
+            .read_object_proven(
+                cx,
+                StoredObjectKind::Manifest,
+                id.0,
+                limit,
+                |bytes| async move {
+                    crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
+                        .map_err(StoreError::MalformedManifest)
+                },
+            )
             .await?;
         let mut resolved = Vec::with_capacity(records.len());
         for (at, record) in records.into_iter().enumerate() {
@@ -3318,6 +3980,7 @@ impl<V: Vfs> BlockStore<V> {
         Ok(VerifiedRoot {
             id,
             bytes: encoded.bytes,
+            embedded_base_root: None,
             segments: encoded.new_segments,
             index_segments: encoded.new_index_segments,
             memo,
@@ -3371,6 +4034,7 @@ impl<V: Vfs> BlockStore<V> {
         let VerifiedRoot {
             id,
             bytes,
+            embedded_base_root,
             segments,
             index_segments,
             memo,
@@ -3395,6 +4059,11 @@ impl<V: Vfs> BlockStore<V> {
         if segments.len() + index_segments.len() >= ROOT_SEGMENT_PACK_MIN {
             batch.flush_as_pack(cx).await?;
         }
+        if let Some((base_id, base_bytes)) = &embedded_base_root {
+            batch
+                .put_object(cx, StoredObjectKind::Root, *base_id, base_bytes)
+                .await?;
+        }
         batch
             .put_object(cx, StoredObjectKind::Root, id.0, &bytes)
             .await?;
@@ -3403,11 +4072,41 @@ impl<V: Vfs> BlockStore<V> {
             .await?;
         batch.finish(cx).await?;
         receipts.root_memo = Some(memo);
-        self.note_root_run_presence(id, false);
+        if let Some((base_id, _)) = embedded_base_root {
+            self.note_root_run_presence(PartitionRootVersion(base_id), false);
+        }
+        self.note_root_run_presence(
+            id,
+            bytes.len() >= 6
+                && crate::root::runs::is_run_root_format(u16::from_be_bytes([bytes[4], bytes[5]])),
+        );
         Ok((
             crate::manifest::ManifestVersion(manifest_id),
             manifest.len(),
         ))
+    }
+
+    /// Wrap an admitted base root in a V7/V8 run-membership envelope before
+    /// publishing it with [`Self::publish_root_and_manifest`]. Returns the
+    /// embedded base [`PartitionRootVersion`] that owns the Tier-D membership.
+    pub fn attach_runs_to_verified_root(
+        &self,
+        root: &mut VerifiedRoot,
+        runs: &[crate::root::runs::AdjRunRef],
+    ) -> Result<PartitionRootVersion, StoreError> {
+        let base_root = root.id;
+        let wrapped =
+            crate::root::runs::encode_root_runs_with_source(&root.bytes, base_root.0, runs)
+                .map_err(StoreError::MalformedRoot)?;
+        let id = StoredObjectKind::Root.identity(self.k_oid.expose(), self.namespace, &wrapped);
+        let id = PartitionRootVersion(id);
+        let base_bytes = core::mem::replace(&mut root.bytes, wrapped);
+        root.embedded_base_root = Some((base_root.0, base_bytes));
+        root.id = id;
+        if let Some(binding) = &mut root.memo.binding {
+            binding.root = id;
+        }
+        Ok(base_root)
     }
 
     /// Load the partition root named by `id`, using the root format's exact byte
@@ -4005,6 +4704,8 @@ pub struct PublishReceipts {
 pub struct VerifiedRoot {
     id: PartitionRootVersion,
     bytes: Vec<u8>,
+    /// Retained standalone base root when `bytes` wraps it in a V7/V8 run envelope.
+    embedded_base_root: Option<(ObjectId, Vec<u8>)>,
     /// Full segments this root names that were never published before; they
     /// are written, before the root, in the same publication.
     segments: Vec<(ObjectId, Vec<u8>)>,
@@ -4066,6 +4767,21 @@ struct RootBinding {
 impl PublishReceipts {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Advance the memoised root identity when an envelope wraps the exact
+    /// base or predecessor root without altering block or vertex-patch lists.
+    pub fn rebind_root_binding(
+        &mut self,
+        expected: PartitionRootVersion,
+        replacement: PartitionRootVersion,
+    ) {
+        if let Some(memo) = &mut self.root_memo
+            && let Some(binding) = &mut memo.binding
+            && binding.root == expected
+        {
+            binding.root = replacement;
+        }
     }
 
     /// Enumerate root segments and index segments, each with its level, only
@@ -4438,12 +5154,38 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
             let reread = cx
                 .with_restriction_async(store.vfs.open_read(&candidate.path))
                 .await?;
-            let bytes = match read_bounded(cx, reread, pack::MAX_PACK_BYTES).await {
+            let disk_limit = store.disk_limit_for(pack::MAX_PACK_BYTES);
+            let disk_bytes = match read_bounded(cx, reread, disk_limit).await {
                 Ok(bytes) => bytes,
                 Err(StoreError::ObjectTooLarge { .. }) => continue,
                 Err(error) => return Err(error),
             };
-            let Some(members) = candidate.members(&bytes) else {
+            let logical_bytes = if let Some(cfg) = &store.ecs_coding {
+                let Some(pack_id) = pack::pack_id_from_path(&candidate.path) else {
+                    continue;
+                };
+                let Ok(decoded) = ecs_extent::decode_extent(
+                    cfg,
+                    store.namespace,
+                    ExtentObjectKind::Pack,
+                    pack_id,
+                    pack::MAX_PACK_BYTES,
+                    &disk_bytes,
+                    true,
+                ) else {
+                    continue;
+                };
+                if decoded.needs_rewrite {
+                    continue;
+                }
+                decoded.plaintext
+            } else {
+                if ecs_extent::is_encoded_extent(&disk_bytes) {
+                    return Err(StoreError::Extent(ExtentError::AuthenticationFailed));
+                }
+                disk_bytes.clone()
+            };
+            let Some(members) = candidate.members(&logical_bytes) else {
                 continue;
             };
             let mut matched = Vec::new();
@@ -4477,7 +5219,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
             publication_checkpoint(cx)?;
             cx.with_restriction_async(file.sync_all()).await?;
             store
-                .verify_durable_bytes(cx, &candidate.path, &bytes, pack::MAX_PACK_BYTES)
+                .verify_durable_bytes(cx, &candidate.path, &disk_bytes, disk_limit)
                 .await?;
             // The pack may have come from an interrupted publication. Its
             // inode proof alone is insufficient: finish must also sync both
@@ -4528,8 +5270,12 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
             .iter()
             .map(|(_, id, bytes)| (*id, bytes.as_slice()))
             .collect();
-        let bytes = pack::encode(&entries);
-        let path = dir.join(pack::name(&bytes));
+        let raw_pack_bytes = pack::encode(&entries);
+        let pack_id = ObjectId(fgdb_crypto::blake3::hash(&raw_pack_bytes).0);
+        let path = dir.join(pack::name(&raw_pack_bytes));
+        let disk_bytes =
+            store.encode_disk_bytes(ExtentObjectKind::Pack, pack_id, &raw_pack_bytes)?;
+        let disk_limit = store.disk_limit_for(pack::MAX_PACK_BYTES);
         match cx
             .with_restriction_async(store.vfs.symlink_metadata(&path))
             .await
@@ -4549,22 +5295,20 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                 let reread = cx
                     .with_restriction_async(store.vfs.open(&path, &existing_opts))
                     .await?;
-                if read_bounded(cx, reread, pack::MAX_PACK_BYTES).await? != bytes {
-                    return Err(StoreError::Collision {
-                        object_id: ObjectId(fgdb_crypto::blake3::hash(&bytes).0),
-                    });
+                if read_bounded(cx, reread, disk_limit).await? != disk_bytes {
+                    return Err(StoreError::Collision { object_id: pack_id });
                 }
                 cx.with_restriction_async(existing.sync_all()).await?;
                 // A prior pathname and same-cache equality are not receipts.
                 // Re-establish the same durable-byte proof as a new pack.
                 store
-                    .verify_durable_bytes(cx, &path, &bytes, pack::MAX_PACK_BYTES)
+                    .verify_durable_bytes(cx, &path, &disk_bytes, disk_limit)
                     .await?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let staging_path = dir.join(pack::PACK_STAGING_FILE);
                 let mut staging = store.open_staging_inode(cx, &staging_path).await?;
-                staging.write_all(&bytes).await?;
+                staging.write_all(&disk_bytes).await?;
                 if self.crash_at == Some(BlockStoreCrashPoint::AfterBatchStagingWrite) {
                     return Err(std::io::Error::other(
                         "crash: batch staging bytes before inode sync",
@@ -4573,7 +5317,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                 }
                 cx.with_restriction_async(staging.sync_all()).await?;
                 store
-                    .verify_durable_bytes(cx, &staging_path, &bytes, pack::MAX_PACK_BYTES)
+                    .verify_durable_bytes(cx, &staging_path, &disk_bytes, disk_limit)
                     .await?;
                 if self.crash_at
                     == Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication)
@@ -4598,7 +5342,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
             }
             Err(error) => return Err(error.into()),
         }
-        store.packs.published(path, &bytes);
+        store.packs.published(path, &raw_pack_bytes);
         self.packed = true;
         Ok(())
     }
@@ -4621,7 +5365,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         for object in &mut staged {
             let durable = object.staging.as_deref().unwrap_or(&object.path);
             self.store
-                .verify_durable_bytes(cx, durable, &object.bytes, object.limit)
+                .verify_durable_bytes(cx, durable, &object.disk_bytes, object.disk_limit)
                 .await?;
         }
         if creates
@@ -4645,20 +5389,27 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                     // genuine collision evidence, must not be overwritten.
                     if let Some(existing) = self
                         .store
-                        .existing_batch_object(
+                        .existing_batch_object_disk(
                             object.kind,
                             cx,
                             object.id,
                             &object.path,
                             &object.bytes,
                             object.limit,
+                            &object.disk_bytes,
+                            object.disk_limit,
                             true,
                         )
                         .await?
                     {
                         cx.with_restriction_async(existing.sync_all()).await?;
                         self.store
-                            .verify_durable_bytes(cx, &object.path, &object.bytes, object.limit)
+                            .verify_durable_bytes(
+                                cx,
+                                &object.path,
+                                &object.disk_bytes,
+                                object.disk_limit,
+                            )
                             .await?;
                         continue;
                     }

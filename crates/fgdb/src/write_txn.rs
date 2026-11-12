@@ -8,8 +8,8 @@
 #[path = "write_txn_parts/authorized.rs"]
 mod authorized;
 pub use authorized::{
-    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteOutput, AuthorizedWriteSession,
-    AuthorizedWriteTransaction,
+    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteOutput,
+    AuthorizedWriteSession, AuthorizedWriteTransaction,
 };
 #[path = "write_txn_parts/beacon.rs"]
 mod beacon;

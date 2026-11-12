@@ -13,7 +13,7 @@ mod count;
 mod distinct;
 mod existence;
 
-pub use count::MaintainedCountJoin;
+pub use count::{MaintainedCollectedCount, MaintainedCountJoin};
 pub use distinct::MaintainedDistinctApply;
 pub use existence::MaintainedExistenceJoin;
 
@@ -297,7 +297,9 @@ fn rebound<E>(
         charge(1, control)?;
         let mut op = op.clone();
         let remap = |operand: &mut GraphSetOperand| {
-            if let GraphSetOperand::Column(column) = operand {
+            if let GraphSetOperand::Column(column)
+            | GraphSetOperand::IdentityColumn { column, .. } = operand
+            {
                 *column = slots[*column];
             }
         };

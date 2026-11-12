@@ -88,3 +88,13 @@ overflow-checks = true
 # are Linux/Darwin; Windows is the plan's explicit post-1.0 platform roadmap.
 split-debuginfo = "unpacked"
 
+# fgdb-gql's unoptimized lib-test also exceeds Apple ld's 16 MB __eh_frame
+# compact-unwind limit on Darwin 27 / Xcode 21; match fgdb's test profile so
+# `cargo test -p fgdb-gql --lib` links cleanly with all assertions and checks on.
+[profile.test.package.fgdb-gql]
+opt-level = 1
+debug-assertions = true
+overflow-checks = true
+split-debuginfo = "unpacked"
+
+

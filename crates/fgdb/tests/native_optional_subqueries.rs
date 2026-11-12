@@ -14,9 +14,9 @@ use fgdb_gql::{
     GlaLimitDimension, GqlBudgetDimension, GqlParameters, GqlQueryError, GqlQueryPolicy,
     GraphSymbol, GraphSymbolKind,
 };
+use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts,
-    SimulationCheckpointProbe, VId,
+    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
 use std::sync::Arc;

@@ -6,11 +6,11 @@ use super::{BlockStore, PublishReceipts, StoreError, StoredObjectKind};
 use crate::PartitionRootVersion;
 use crate::root::{
     RootFrame,
-    runs::{AdjRunRef, decode_root_runs, encode_root_runs},
+    runs::{AdjRunRef, decode_root_runs, encode_root_runs_with_source},
 };
 use crate::tiered::sealed::{
-    AdjRunError, AdjRunSegment, AdjRunSegmentVersion, MAX_ADJ_RUN_BYTES, SealedLimits, SealedScope,
-    adj_run_id, read_adj_run,
+    AdjRunError, AdjRunSegment, AdjRunSegmentVersion, MAX_ADJ_RUN_BYTES, SealedDeltaOverlay,
+    SealedError, SealedLimits, SealedScope, adj_run_id, read_adj_run,
 };
 use asupersync::fs::Vfs;
 use fgdb_crypto::Digest;
@@ -188,47 +188,208 @@ impl<V: Vfs> BlockStore<V> {
         let Some(reference) = attached.runs.iter().find(|run| run.relation == relation) else {
             return Ok(None);
         };
-        if as_of < reference.floor {
-            return Ok(None);
-        }
-        let (graph, branch, partition, publication) = coordinate(attached.base_frame)?;
-        if as_of > publication {
+        let (graph, branch, partition, base_publication) = coordinate(attached.base_frame)?;
+        if as_of > base_publication {
             return Err(malformed(AdjRunError::ScopeMismatch));
         }
+        let base_source_root = PartitionRootVersion(crate::root::root_id(
+            self.k_oid.expose(),
+            self.namespace,
+            attached.base_frame,
+        ));
+        let source_root = PartitionRootVersion(reference.resolved_source_root(base_source_root.0));
+        let run_publication = reference.resolved_publication(base_publication);
+        let verified_through = reference.resolved_verified_through(base_publication);
+        if as_of < reference.floor || as_of > verified_through {
+            return Ok(None);
+        }
         let scope = SealedScope {
-            source_root: PartitionRootVersion(crate::root::root_id(
-                self.k_oid.expose(),
-                self.namespace,
-                attached.base_frame,
-            )),
+            source_root,
             graph,
             branch,
             partition,
             floor: reference.floor,
-            publication,
+            publication: run_publication,
         };
         let id = reference.run;
-        self.read_object_proven(
-            cx,
-            id,
-            limits.max_image_bytes.min(MAX_ADJ_RUN_BYTES) as u64,
-            |bytes| async move {
-                read_adj_run(
-                    cx,
-                    id,
-                    scope,
-                    relation,
-                    self.k_oid.expose(),
-                    self.namespace,
-                    &bytes,
-                    limits,
-                    self.decode_resolver(),
-                )
-                .map_err(malformed)
-            },
-        )
-        .await
-        .map(Some)
+        let mut run = self
+            .read_object_proven(
+                cx,
+                StoredObjectKind::AdjRun,
+                id,
+                limits.max_image_bytes.min(MAX_ADJ_RUN_BYTES) as u64,
+                |bytes| async move {
+                    read_adj_run(
+                        cx,
+                        id,
+                        scope,
+                        relation,
+                        self.k_oid.expose(),
+                        self.namespace,
+                        &bytes,
+                        limits,
+                        self.decode_resolver(),
+                    )
+                    .map_err(malformed)
+                },
+            )
+            .await?;
+        if source_root != base_source_root
+            || run_publication != base_publication
+            || verified_through != run_publication
+        {
+            run.bind_envelope(root, base_publication, verified_through);
+        }
+        Ok(Some(run))
+    }
+
+    /// Authenticate a carried durable run for `relation` when `as_of` exceeds
+    /// `verified_through` (`reference.floor <= verified_through < as_of <= base_publication`).
+    /// Returns `Ok(None)` when no run is attached, `as_of < reference.floor`, or
+    /// `as_of <= verified_through` (handled directly by [`Self::get_published_adj_run`]).
+    /// Attached but corrupt run bytes always fail closed with [`StoreError`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn get_published_adj_run_post_seal(
+        &self,
+        cx: &QueryCx,
+        root: PartitionRootVersion,
+        relation: RelationId,
+        as_of: CommitSeq,
+        limits: SealedLimits,
+        max_root_bytes: usize,
+    ) -> Result<Option<(AdjRunSegment, CommitSeq)>, StoreError> {
+        cx.checkpoint()
+            .map_err(|error| malformed(SealedError::Interrupted(error).into()))?;
+        let known_legacy = self
+            .root_run_presence
+            .lock()
+            .ok()
+            .is_some_and(|hint| *hint == Some((root, false)));
+        if known_legacy {
+            return Ok(None);
+        }
+        let bytes = self
+            .read_metadata_bytes(
+                cx,
+                root.0,
+                StoredObjectKind::Root,
+                max_root_bytes.min(crate::root::MAX_ENCODED_ROOT_BYTES) as u64,
+            )
+            .await?;
+        let Some(attached) = decode_root_runs(&bytes).map_err(StoreError::MalformedRoot)? else {
+            crate::root::decode_root_frame(&bytes).map_err(StoreError::MalformedRoot)?;
+            self.note_root_run_presence(root, false);
+            return Ok(None);
+        };
+        self.note_root_run_presence(root, true);
+        let Some(reference) = attached.runs.iter().find(|run| run.relation == relation) else {
+            return Ok(None);
+        };
+        let (graph, branch, partition, base_publication) = coordinate(attached.base_frame)?;
+        if as_of > base_publication {
+            return Err(malformed(AdjRunError::ScopeMismatch));
+        }
+        let base_source_root = PartitionRootVersion(crate::root::root_id(
+            self.k_oid.expose(),
+            self.namespace,
+            attached.base_frame,
+        ));
+        let source_root = PartitionRootVersion(reference.resolved_source_root(base_source_root.0));
+        let run_publication = reference.resolved_publication(base_publication);
+        let verified_through = reference.resolved_verified_through(base_publication);
+        if as_of < reference.floor || as_of <= verified_through {
+            return Ok(None);
+        }
+        let scope = SealedScope {
+            source_root,
+            graph,
+            branch,
+            partition,
+            floor: reference.floor,
+            publication: run_publication,
+        };
+        let id = reference.run;
+        let mut run = self
+            .read_object_proven(
+                cx,
+                StoredObjectKind::AdjRun,
+                id,
+                limits.max_image_bytes.min(MAX_ADJ_RUN_BYTES) as u64,
+                |bytes| async move {
+                    read_adj_run(
+                        cx,
+                        id,
+                        scope,
+                        relation,
+                        self.k_oid.expose(),
+                        self.namespace,
+                        &bytes,
+                        limits,
+                        self.decode_resolver(),
+                    )
+                    .map_err(malformed)
+                },
+            )
+            .await?;
+        run.bind_envelope(root, base_publication, verified_through);
+        Ok(Some((run, verified_through)))
+    }
+
+    /// Open a post-seal [`SealedDeltaOverlay`] combining a carried [`AdjRunSegment`]
+    /// (`verified_through < as_of`) with ONLY the post-seal Tier-D delta blocks
+    /// (`last_seq > verified_through`) on `relation`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_published_adj_run_with_delta_overlay(
+        &self,
+        cx: &QueryCx,
+        root: PartitionRootVersion,
+        relation: RelationId,
+        as_of: CommitSeq,
+        limits: SealedLimits,
+        source_limits: super::RootReadLimits,
+    ) -> Result<Option<SealedDeltaOverlay>, SealedError> {
+        let Some((base, verified_through)) = self
+            .get_published_adj_run_post_seal(
+                cx,
+                root,
+                relation,
+                as_of,
+                limits,
+                source_limits.max_root_bytes,
+            )
+            .await
+            .map_err(|err| SealedError::Store(Box::new(err)))?
+        else {
+            return Ok(None);
+        };
+        let post_seal = self
+            .reopen_post_seal_blocks_bounded(
+                cx,
+                root,
+                as_of,
+                source_limits,
+                relation,
+                verified_through,
+            )
+            .await
+            .map_err(|err| match err {
+                super::RootReadError::Store(error) => SealedError::Store(error),
+                super::RootReadError::Interrupted(error) => SealedError::Interrupted(error),
+                super::RootReadError::Limit {
+                    resource,
+                    requested,
+                    limit,
+                } => SealedError::Limit {
+                    resource,
+                    requested,
+                    limit,
+                },
+                super::RootReadError::BeyondPublication { .. } => SealedError::InvalidFloor,
+                super::RootReadError::SizeOverflow => SealedError::SizeOverflow,
+                super::RootReadError::AllocationFailed => SealedError::AllocationFailed,
+            })?;
+        SealedDeltaOverlay::build(cx, base, root, verified_through, as_of, &post_seal, limits)
+            .map(Some)
     }
 
     /// Publish a run and a replacement root/manifest at the same semantic
@@ -277,14 +438,10 @@ impl<V: Vfs> BlockStore<V> {
         {
             return Err(malformed(AdjRunError::ScopeMismatch));
         }
-        let run_bytes = run.encode(query_cx, limits).map_err(malformed)?;
+        let run_bytes = run.encode_dual_face(query_cx, limits).map_err(malformed)?;
         let run_id = adj_run_id(self.k_oid.expose(), self.namespace, &run_bytes);
         let mut refs = attached.map_or_else(Vec::new, |root| root.runs);
-        let reference = AdjRunRef {
-            relation: header.relation,
-            run: run_id,
-            floor: header.scope.floor,
-        };
+        let reference = AdjRunRef::v7(header.relation, run_id, header.scope.floor);
         match refs.binary_search_by_key(&header.relation, |reference| reference.relation) {
             Ok(at) => refs[at] = reference,
             Err(at) => {
@@ -296,7 +453,8 @@ impl<V: Vfs> BlockStore<V> {
                 refs.insert(at, reference);
             }
         }
-        let root_bytes = encode_root_runs(base, &refs).map_err(StoreError::MalformedRoot)?;
+        let root_bytes = encode_root_runs_with_source(base, source_root.0, &refs)
+            .map_err(StoreError::MalformedRoot)?;
         let root = PartitionRootVersion(crate::root::root_id(
             self.k_oid.expose(),
             self.namespace,

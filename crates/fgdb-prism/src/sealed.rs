@@ -384,12 +384,13 @@ impl SealedGraphView {
             .ok_or(SealedProjectionError::RelationRequired)?;
         partition.anchor().check_relation(relation)?;
         let scope = partition.anchor().scope();
-        if config.as_of < scope.floor || config.as_of > scope.publication {
+        let ceiling = partition.anchor().verified_through();
+        if config.as_of < scope.floor || config.as_of > ceiling {
             return Err(SealedProjectionError::Read(
                 SealedError::SnapshotOutsideAnchor {
                     requested: config.as_of,
                     floor: scope.floor,
-                    publication: scope.publication,
+                    publication: ceiling,
                 },
             ));
         }

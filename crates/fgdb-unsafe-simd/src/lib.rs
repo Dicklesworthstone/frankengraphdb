@@ -49,11 +49,19 @@
 //! change a result or a logical order, so [`control_group::prefetch_controls`]
 //! returns nothing and is a no-op wherever the hint does not exist.
 
+#![feature(portable_simd)]
 #![deny(unsafe_code)]
 
 pub mod control_group;
+pub mod sorted_set;
 
 pub use control_group::{
     COMPILED_PATHS, CONTROL_GROUP_WIDTH, DELETED_CONTROL, DispatchPath, EMPTY_CONTROL, GroupMasks,
     active_path, classify, classify_scalar, classify_via, prefetch_controls,
+};
+pub use sorted_set::{
+    SORTED_SET_COMPILED_PATHS, SortedSetDispatch, active_sorted_set_path, intersect_sorted_u64,
+    intersect_sorted_u64_scalar, intersect_sorted_u64_via, intersect_sorted_u128,
+    intersect_sorted_u128_scalar, intersect_sorted_u128_via, seek_ge_u64, seek_ge_u64_scalar,
+    seek_ge_u64_via, seek_ge_u128, seek_ge_u128_scalar, seek_ge_u128_via,
 };

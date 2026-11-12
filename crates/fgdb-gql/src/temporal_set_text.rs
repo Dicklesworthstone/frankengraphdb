@@ -368,6 +368,11 @@ impl core::fmt::Debug for PreparedTemporalGraphSetText {
     }
 }
 impl PreparedTemporalGraphSetText {
+    /// Whether any query arm, continuation, or subquery invokes `CALL proc(...)`.
+    #[must_use]
+    pub fn has_procedure_call(&self) -> bool {
+        self.inner.has_procedure_call()
+    }
     pub fn prepare(
         statement: &str,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,

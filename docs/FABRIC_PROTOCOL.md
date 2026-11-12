@@ -862,10 +862,14 @@ application output is admitted.
   SNAPSHOT_RESULT_END at the last delivered frontier (or, if it lands while a
   batch waits for credit, a stream-scoped `cancelled` ERROR); DRAIN and
   shutdown end it the same way. The capability is rechecked before every
-  batch, so expiry or issuer retirement ends a subscription. Because
-  maintained queries are not masked by capability scope yet, a subscription
-  requires a read capability whose scope hides nothing (refused
-  `permission_denied` otherwise), and because a registration lives as long as
+  batch, so expiry or issuer retirement ends a subscription. Native GQL
+  subscriptions project both the initial snapshot and each committed delta
+  batch through the capability's pre-expansion label/relation/property quotient
+  (`PreparedNativeRead::subscribe_authorized`), so hidden mutations emit zero
+  deltas and zero frontier advances; analytic `CALL fnx.*` subscriptions still
+  require a read capability whose scope hides nothing (refused
+  `permission_denied` otherwise), and changing a subscription's graph scope on
+  poll refuses `permission_denied`. Because a registration lives as long as
   the open database, each served database admits a bounded number of
   registrations per opened database generation (default 64; refused `budget`
   beyond). Failed setup, replay activation, first-baseline admission or final

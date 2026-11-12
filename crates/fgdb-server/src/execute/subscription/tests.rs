@@ -510,12 +510,13 @@ fn replay_retention_gap_uses_one_bounded_replacement_baseline() {
                 guard.write(&contexts.commit(), vertex(id)).await.unwrap();
             }
             drop(guard);
-            let admitted = db
+            let scope = db
                 .authority
                 .verify_at(&token, TRUNK, unix_millis())
                 .unwrap()
                 .predicates()
-                .limits();
+                .clone();
+            let admitted = scope.limits();
             db.subscriptions.fetch_add(1, Ordering::AcqRel);
             let consumer = generation.own_subscription(consumer);
             let mut subscription = Subscription {
@@ -523,6 +524,7 @@ fn replay_retention_gap_uses_one_bounded_replacement_baseline() {
                 columns: vec!["n".into()],
                 generation,
                 admitted,
+                scope,
                 initial: None,
                 registration_work: 0,
                 registration_nodes: 0,
@@ -1029,7 +1031,8 @@ fn clustering_subscription_refuses_hidden_topology_before_registration_or_delive
 }
 
 #[test]
-fn selected_union_analytics_subscriptions_replay_exact_changes_without_exposing_excluded_vertices() {
+fn selected_union_analytics_subscriptions_replay_exact_changes_without_exposing_excluded_vertices()
+{
     use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
     use fgdb_types::{CanonicalScalar, EId, VId};
     use fgdb_warden::Scope;
@@ -1130,7 +1133,11 @@ fn selected_union_analytics_subscriptions_replay_exact_changes_without_exposing_
         assert_eq!(db.subscriptions.load(Ordering::Acquire), 3);
 
         for tick in 0..7 {
-            let relation = if tick == 3 { RelationId(2) } else { RelationId(1) };
+            let relation = if tick == 3 {
+                RelationId(2)
+            } else {
+                RelationId(1)
+            };
             let mut change = fgdb::WriteBatch::new(relation);
             match tick {
                 0 => {
@@ -1212,9 +1219,7 @@ fn selected_union_analytics_subscriptions_replay_exact_changes_without_exposing_
                     ]
                     .into_iter()
                     .collect(),
-                    4 | 5 => [(1, 0), (2, 0), (wide, 0)]
-                        .into_iter()
-                        .collect(),
+                    4 | 5 => [(1, 0), (2, 0), (wide, 0)].into_iter().collect(),
                     _ => BTreeMap::new(),
                 };
                 let expected: BTreeMap<(u128, i64), i128> = values
@@ -1254,6 +1259,309 @@ fn selected_union_analytics_subscriptions_replay_exact_changes_without_exposing_
         for (_, subscription, _, _) in &mut subscriptions {
             assert!(success(poll(&root, db, &token, subscription).await).is_none());
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn capability_quotient_noninterference_10000_hidden_mutations_and_revocation() {
+    use fgdb::WriteBatch;
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_gql::GraphSymbolKind;
+    use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+    use fgdb_warden::Scope;
+
+    let ((), report) = run_async_under_lab(0x79a0_20ca, |root| async move {
+        let (mut server1, root_tok1, _) = served(&root, "cap-sub-d1").await;
+        let (mut server2, root_tok2, _) = served(&root, "cap-sub-d2").await;
+        for server in [&mut server1, &mut server2] {
+            let db = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+            for (kind, name, id) in [
+                (GraphSymbolKind::Label, "Person", 1),
+                (GraphSymbolKind::Label, "Secret", 2),
+                (GraphSymbolKind::Relation, "KNOWS", 1),
+                (GraphSymbolKind::Relation, "SECRET_EDGE", 2),
+                (GraphSymbolKind::Property, "name", 1),
+                (GraphSymbolKind::Property, "ssn", 2),
+            ] {
+                db.symbols.bind(kind, name, id).unwrap();
+            }
+        }
+        let db1 = &server1.databases["test"];
+        let db2 = &server2.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit_cx = contexts.commit();
+
+        // Pre-populate D2 with hidden vertices/edges before visible seed so physical
+        // CommitSeqs and physical snapshot record counts diverge before registration.
+        {
+            let mut pre = WriteBatch::new(RelationId(2));
+            for i in 0..50_u128 {
+                let vid = VId(10_000 + i);
+                pre.create_vertex(
+                    vid,
+                    vec![LabelId(2)],
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(i as i64))],
+                );
+                if i > 0 {
+                    pre.add_edge(
+                        EId(20_000 + i),
+                        VId(10_000 + i - 1),
+                        vid,
+                        vec![(PropertyKeyId(2), CanonicalScalar::Int(999))],
+                    );
+                }
+            }
+            db2.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit_cx, pre)
+                .await
+                .unwrap();
+        }
+
+        // Seed identical visible projection Pi_C(D1) == Pi_C(D2), while D2 also
+        // attaches hidden label Secret and hidden property ssn to visible vertices.
+        {
+            let mut seed1 = WriteBatch::new(RelationId(1));
+            seed1.create_vertex(
+                VId(1),
+                vec![LabelId(1)],
+                vec![(
+                    PropertyKeyId(1),
+                    CanonicalScalar::ucs_basic_text("Ada").unwrap(),
+                )],
+            );
+            seed1.create_vertex(
+                VId(2),
+                vec![LabelId(1)],
+                vec![(
+                    PropertyKeyId(1),
+                    CanonicalScalar::ucs_basic_text("Grace").unwrap(),
+                )],
+            );
+            db1.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit_cx, seed1)
+                .await
+                .unwrap();
+
+            let mut seed2 = WriteBatch::new(RelationId(1));
+            seed2.create_vertex(
+                VId(1),
+                vec![LabelId(1), LabelId(2)],
+                vec![
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::ucs_basic_text("Ada").unwrap(),
+                    ),
+                    (
+                        PropertyKeyId(2),
+                        CanonicalScalar::ucs_basic_text("000-01-0001").unwrap(),
+                    ),
+                ],
+            );
+            seed2.create_vertex(
+                VId(2),
+                vec![LabelId(1)],
+                vec![
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::ucs_basic_text("Grace").unwrap(),
+                    ),
+                    (
+                        PropertyKeyId(2),
+                        CanonicalScalar::ucs_basic_text("000-02-0002").unwrap(),
+                    ),
+                ],
+            );
+            db2.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit_cx, seed2)
+                .await
+                .unwrap();
+
+            let mut seed2_secret_edge = WriteBatch::new(RelationId(2));
+            seed2_secret_edge.add_edge(EId(9001), VId(1), VId(2), vec![]);
+            db2.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit_cx, seed2_secret_edge)
+                .await
+                .unwrap();
+        }
+
+        let attenuate = |tok: &CapabilityToken| {
+            tok.attenuate(Restriction::Rights(fgdb_warden::Rights::Read))
+                .unwrap()
+                .attenuate(Restriction::Labels(Scope::only([LabelId(1)])))
+                .unwrap()
+                .attenuate(Restriction::Relations(Scope::only([RelationId(1)])))
+                .unwrap()
+                .attenuate(Restriction::Properties(Scope::only([PropertyKeyId(1)])))
+                .unwrap()
+                // Tight node budget (~113 work units per circuit stage): plenty for
+                // 2 visible vertices, far below 200 hidden ops/commit (10,000 total)!
+                .attenuate(Restriction::MaxNodes(4_096))
+                .unwrap()
+                .attenuate(Restriction::MaxWork(200_000))
+                .unwrap()
+        };
+        let scoped1 = attenuate(&root_tok1);
+        let scoped2 = attenuate(&root_tok2);
+
+        let stmt = request(
+            "SUBSCRIBE TO MATCH (p:Person) \
+             RETURN p.name AS name, COUNT { MATCH (p)-[:KNOWS]->(:Person) } AS friends, p.ssn AS ssn",
+        );
+        let mut sub1 = success(subscribe(&root, db1, &scoped1, &stmt).await);
+        let mut sub2 = success(subscribe(&root, db2, &scoped2, &stmt).await);
+
+        let base1 = success(poll(&root, db1, &scoped1, &mut sub1).await).unwrap();
+        let base2 = success(poll(&root, db2, &scoped2, &mut sub2).await).unwrap();
+        assert!(base1.batch.is_snapshot() && base2.batch.is_snapshot());
+        assert_eq!(base1.batch.frontier(), CommitSeq(1));
+        assert_eq!(base2.batch.frontier(), CommitSeq(1));
+        assert_eq!(base1.entries, base2.entries);
+        assert_eq!(
+            base2.entries,
+            vec![
+                (
+                    1,
+                    vec![
+                        WireValue::Text("Ada".into()),
+                        WireValue::Int(0),
+                        WireValue::Null
+                    ]
+                ),
+                (
+                    1,
+                    vec![
+                        WireValue::Text("Grace".into()),
+                        WireValue::Int(0),
+                        WireValue::Null
+                    ]
+                ),
+            ]
+        );
+        sub1.consumer.acknowledge(base1.batch.receipt()).unwrap();
+        sub2.consumer.acknowledge(base2.batch.receipt()).unwrap();
+
+        // Apply 10,000 hidden mutations on D2 across 50 commits (200 hidden ops each):
+        // hidden SECRET_EDGE creations, hidden Secret vertices, and hidden ssn updates
+        // on visible Person(1). Every poll must return None with zero frontier leaks!
+        let mut hidden_ops = 0_usize;
+        for commit_idx in 0..50_u128 {
+            let mut hidden = WriteBatch::new(RelationId(2));
+            for slot in 0..99_u128 {
+                let hvid = VId(30_000 + commit_idx * 100 + slot);
+                let heid = EId(60_000 + commit_idx * 100 + slot);
+                hidden.create_vertex(
+                    hvid,
+                    vec![LabelId(2)],
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(slot as i64))],
+                );
+                hidden.add_edge(heid, VId(1), hvid, vec![]);
+                hidden_ops += 2;
+            }
+            hidden.set_vertex_property(
+                VId(1),
+                PropertyKeyId(2),
+                Some(CanonicalScalar::Int(commit_idx as i64)),
+            );
+            hidden.add_edge(EId(90_000 + commit_idx), VId(1), VId(2), vec![]);
+            hidden_ops += 2;
+            db2.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit_cx, hidden)
+                .await
+                .unwrap();
+            assert!(
+                success(poll(&root, db2, &scoped2, &mut sub2).await).is_none(),
+                "hidden commit {commit_idx} leaked a visible delta or exhausted budget"
+            );
+        }
+        assert_eq!(hidden_ops, 10_000);
+
+        // Visible transition 1: Ada -[:KNOWS]-> Grace (with extra hidden noise in the SAME commit on D2).
+        {
+            let mut vis1 = WriteBatch::new(RelationId(1));
+            vis1.add_edge(EId(501), VId(1), VId(2), vec![]);
+            db1.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit_cx, vis1)
+                .await
+                .unwrap();
+
+            let mut vis2 = WriteBatch::new(RelationId(1));
+            vis2.add_edge(EId(501), VId(1), VId(2), vec![]);
+            vis2.set_vertex_property(VId(2), PropertyKeyId(2), Some(CanonicalScalar::Int(777)));
+            db2.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit_cx, vis2)
+                .await
+                .unwrap();
+        }
+        let d1 = success(poll(&root, db1, &scoped1, &mut sub1).await).unwrap();
+        let d2 = success(poll(&root, db2, &scoped2, &mut sub2).await).unwrap();
+        assert_eq!(
+            (d1.batch.from(), d1.batch.frontier()),
+            (Some(CommitSeq(1)), CommitSeq(2))
+        );
+        assert_eq!(
+            (d2.batch.from(), d2.batch.frontier()),
+            (Some(CommitSeq(1)), CommitSeq(2))
+        );
+        assert_eq!(d1.entries, d2.entries);
+        assert_eq!(
+            d2.entries,
+            vec![
+                (
+                    -1,
+                    vec![
+                        WireValue::Text("Ada".into()),
+                        WireValue::Int(0),
+                        WireValue::Null
+                    ]
+                ),
+                (
+                    1,
+                    vec![
+                        WireValue::Text("Ada".into()),
+                        WireValue::Int(1),
+                        WireValue::Null
+                    ]
+                ),
+            ]
+        );
+        sub1.consumer.acknowledge(d1.batch.receipt()).unwrap();
+        sub2.consumer.acknowledge(d2.batch.receipt()).unwrap();
+
+        // Mid-stream capability expiry immediately refuses polling.
+        let expired = scoped2.attenuate(Restriction::ExpiresBefore(1)).unwrap();
+        refused(
+            poll(&root, db2, &expired, &mut sub2).await,
+            ErrorCode::PermissionDenied,
+        );
+
+        // Mid-stream issuer retirement / revocation epoch bump immediately refuses polling.
+        assert!(db2.authority.retire());
+        refused(
+            poll(&root, db2, &scoped2, &mut sub2).await,
+            ErrorCode::PermissionDenied,
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -279,7 +279,9 @@ fn retained_returning_definitions_are_not_authority_or_an_identity_bypass() {
             &token,
             definition,
             None,
-            |_, _, _, _| -> Result<(), Refusal> { panic!("retired authority must not produce rows") },
+            |_, _, _, _| -> Result<(), Refusal> {
+                panic!("retired authority must not produce rows")
+            },
         )
         .await;
         assert!(result.is_err());

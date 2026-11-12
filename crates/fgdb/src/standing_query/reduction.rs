@@ -152,7 +152,7 @@ impl<V: Vfs + Clone> Database<V> {
             .standing_queries
             .get(..before)
             .ok_or(StandingQueryError::UnknownHandle)?;
-        let at = self.snapshot.frontier;
+        let at = self.registration_frontier();
         cx.with_restriction(|| {
             let source =
                 sets::input_at(sources, input, at).map_err(StandingQueryError::Maintenance)?;

@@ -86,9 +86,9 @@ impl<E> From<IndexError> for EdgeInputError<E> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Anchor {
-    marker: MarkerRef,
-    template: [u8; 32],
+pub(crate) struct Anchor {
+    pub(crate) marker: MarkerRef,
+    pub(crate) template: [u8; 32],
 }
 impl Anchor {
     fn of(batch: &LogicalDeltaBatch) -> Self {
@@ -104,11 +104,11 @@ impl Anchor {
 /// This type does not retain vertex properties or expose graph-query execution.
 #[derive(PartialEq, Eq)]
 pub struct CommittedEdgeInput {
-    graph: GraphId,
-    branch: BranchId,
-    anchor: Option<Anchor>,
-    edges: BTreeMap<EId, EdgeTuple>,
-    epochs: BTreeMap<RelationId, SchemaEpoch>,
+    pub(crate) graph: GraphId,
+    pub(crate) branch: BranchId,
+    pub(crate) anchor: Option<Anchor>,
+    pub(crate) edges: BTreeMap<EId, EdgeTuple>,
+    pub(crate) epochs: BTreeMap<RelationId, SchemaEpoch>,
 }
 
 impl core::fmt::Debug for CommittedEdgeInput {

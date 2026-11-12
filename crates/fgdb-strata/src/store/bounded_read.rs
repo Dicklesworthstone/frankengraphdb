@@ -206,6 +206,52 @@ pub type ReopenedAdjacency = (
     Vec<Option<BlockProps>>,
 );
 
+/// Root-authenticated post-seal Tier-D delta blocks (`last_seq > after_seq`)
+/// for a single relation, minted only after full root and history admission.
+#[derive(Debug)]
+pub struct PostSealBlocks {
+    pub(crate) source_root: crate::PartitionRootVersion,
+    pub(crate) publication: CommitSeq,
+    pub(crate) relation: fgdb_delta_types::RelationId,
+    pub(crate) after_seq: CommitSeq,
+    pub(crate) blocks: Vec<Vec<crate::AdjacencyEntry>>,
+    pub(crate) props: Vec<Option<BlockProps>>,
+}
+
+impl PostSealBlocks {
+    /// Extract post-seal blocks for `relation` (`last_seq > after_seq`) from a
+    /// complete authenticated `ReopenedAdjacency` tuple (used by composed read
+    /// owners that already needed all relations' blocks for `EmbeddedReadView`).
+    pub fn from_reopened_all(
+        source_root: crate::PartitionRootVersion,
+        adjacency: &ReopenedAdjacency,
+        relation: fgdb_delta_types::RelationId,
+        after_seq: CommitSeq,
+    ) -> Self {
+        let (root, all_blocks, all_props) = adjacency;
+        let mut blocks = Vec::new();
+        let mut props = Vec::new();
+        for (block, block_props) in all_blocks.iter().zip(all_props) {
+            if block
+                .first()
+                .is_some_and(|entry| entry.relation == relation)
+                && crate::root::span_of(block).is_some_and(|(_, last_seq)| last_seq > after_seq)
+            {
+                blocks.push(block.clone());
+                props.push(block_props.clone());
+            }
+        }
+        Self {
+            source_root,
+            publication: root.published_at,
+            relation,
+            after_seq,
+            blocks,
+            props,
+        }
+    }
+}
+
 /// Retention follows complete admission; even `None` verifies every edge
 /// object, hosted property column, predecessor and historical identity.
 #[derive(Clone, Copy)]
@@ -213,6 +259,10 @@ enum AdjacencyRetention {
     None,
     All,
     Relation(fgdb_delta_types::RelationId),
+    RelationAfter {
+        relation: fgdb_delta_types::RelationId,
+        after_seq: CommitSeq,
+    },
 }
 
 /// A completed bounded root walk's private sealing input. Only the walk below
@@ -263,6 +313,7 @@ impl<V: Vfs> BlockStore<V> {
         let records = self
             .read_object_proven(
                 cx,
+                super::StoredObjectKind::Manifest,
                 id.0,
                 (limits.max_root_bytes as u64).min(super::MANIFEST_HEADER_AND_RECORDS_CEILING),
                 |bytes| async move {
@@ -349,6 +400,7 @@ impl<V: Vfs> BlockStore<V> {
         let bytes = self
             .read_object_proven(
                 cx,
+                super::StoredObjectKind::Root,
                 id.0,
                 maximum.min(crate::root::MAX_ENCODED_ROOT_BYTES as u64),
                 |bytes| async move {
@@ -371,7 +423,7 @@ impl<V: Vfs> BlockStore<V> {
         let decoded = crate::root::decode_root_frame(&bytes).map_err(StoreError::MalformedRoot)?;
         self.note_root_run_presence(
             id,
-            u16::from_be_bytes([bytes[4], bytes[5]]) == crate::root::runs::ROOT_FORMAT_V7,
+            crate::root::runs::is_run_root_format(u16::from_be_bytes([bytes[4], bytes[5]])),
         );
         let (decoded, tails) = match decoded {
             crate::root::RootFrame::V6(frame) => (
@@ -448,6 +500,7 @@ impl<V: Vfs> BlockStore<V> {
                         let (size, index) = self
                             .read_object_proven(
                                 cx,
+                                super::StoredObjectKind::IndexSegment,
                                 reference.segment_id,
                                 limit,
                                 |bytes| async move {
@@ -499,21 +552,27 @@ impl<V: Vfs> BlockStore<V> {
             for (at, reference) in named.iter().enumerate() {
                 let limit = remaining.min(crate::root_segment::MAX_SEGMENT_BYTES as u64);
                 let (segment, references) = self
-                    .read_object_proven(cx, reference.segment_id, limit, |bytes| async move {
-                        let references = crate::root_segment::read_segment(
-                            self.k_oid.expose(),
-                            self.namespace,
-                            &bytes,
-                            reference,
-                            at,
-                            coordinate,
-                            class,
-                        )
-                        .map_err(|error| {
-                            StoreError::MalformedRoot(crate::root::RootError::Segment(error))
-                        })?;
-                        Ok((bytes, references))
-                    })
+                    .read_object_proven(
+                        cx,
+                        super::StoredObjectKind::Segment,
+                        reference.segment_id,
+                        limit,
+                        |bytes| async move {
+                            let references = crate::root_segment::read_segment(
+                                self.k_oid.expose(),
+                                self.namespace,
+                                &bytes,
+                                reference,
+                                at,
+                                coordinate,
+                                class,
+                            )
+                            .map_err(|error| {
+                                StoreError::MalformedRoot(crate::root::RootError::Segment(error))
+                            })?;
+                            Ok((bytes, references))
+                        },
+                    )
                     .await?;
                 remaining = remaining.saturating_sub(segment.len() as u64);
                 list.push(references);
@@ -704,6 +763,81 @@ impl<V: Vfs> BlockStore<V> {
         .map(|_| ())
     }
 
+    /// Authenticate the complete source under `limits` while retaining ONLY
+    /// post-seal Tier-D delta blocks (`last_seq > after_seq`) on `relation`.
+    pub async fn reopen_post_seal_blocks_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+        relation: fgdb_delta_types::RelationId,
+        after_seq: CommitSeq,
+    ) -> Result<PostSealBlocks, RootReadError> {
+        let (source, _) = self
+            .reopen_selected_adjacency_bounded(
+                cx,
+                id,
+                requested_cut,
+                limits,
+                AdjacencyRetention::RelationAfter {
+                    relation,
+                    after_seq,
+                },
+                false,
+                false,
+            )
+            .await?;
+        let (root, blocks, props) = source.adjacency;
+        Ok(PostSealBlocks {
+            source_root: id,
+            publication: root.published_at,
+            relation,
+            after_seq,
+            blocks,
+            props,
+        })
+    }
+
+    /// Authenticate the complete source under `limits`, retaining vertex patches
+    /// plus ONLY post-seal Tier-D delta blocks (`last_seq > after_seq`) on `relation`.
+    pub async fn reopen_post_seal_blocks_with_vertices_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+        relation: fgdb_delta_types::RelationId,
+        after_seq: CommitSeq,
+    ) -> Result<(PostSealBlocks, Vec<crate::vertex::VertexPatchRows>), RootReadError> {
+        let (source, patches) = self
+            .reopen_selected_adjacency_bounded(
+                cx,
+                id,
+                requested_cut,
+                limits,
+                AdjacencyRetention::RelationAfter {
+                    relation,
+                    after_seq,
+                },
+                true,
+                false,
+            )
+            .await?;
+        let (root, blocks, props) = source.adjacency;
+        Ok((
+            PostSealBlocks {
+                source_root: id,
+                publication: root.published_at,
+                relation,
+                after_seq,
+                blocks,
+                props,
+            },
+            patches,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn reopen_selected_adjacency_bounded(
         &self,
@@ -757,6 +891,17 @@ impl<V: Vfs> BlockStore<V> {
                             .0
                             .first()
                             .is_some_and(|entry| entry.relation == relation),
+                        AdjacencyRetention::RelationAfter {
+                            relation,
+                            after_seq,
+                        } => {
+                            read.resolved
+                                .0
+                                .first()
+                                .is_some_and(|entry| entry.relation == relation)
+                                && crate::root::span_of(&read.resolved.0)
+                                    .is_some_and(|(_, last_seq)| last_seq > after_seq)
+                        }
                     };
                     keep.then(|| super::decoded_block(read))
                 },
@@ -771,7 +916,10 @@ impl<V: Vfs> BlockStore<V> {
         // new checkpoint before the vertex proof. Other cases drop the same
         // temporary state and retain the ordinary compactor.
         let unhosted_collapsed = prepare_unhosted_sealing
-            && !matches!(retention, AdjacencyRetention::None)
+            && !matches!(
+                retention,
+                AdjacencyRetention::None | AdjacencyRetention::RelationAfter { .. }
+            )
             && resolved.iter().all(|(_, properties)| properties.is_none());
         if unhosted_collapsed {
             let history = std::mem::take(&mut walk.history);
@@ -779,7 +927,9 @@ impl<V: Vfs> BlockStore<V> {
             history.into_selected_unhosted_buffers(
                 match retention {
                     AdjacencyRetention::Relation(relation) => Some(relation),
-                    AdjacencyRetention::All | AdjacencyRetention::None => None,
+                    AdjacencyRetention::All
+                    | AdjacencyRetention::None
+                    | AdjacencyRetention::RelationAfter { .. } => None,
                 },
                 resolved.iter_mut().map(|(entries, _)| entries),
             );

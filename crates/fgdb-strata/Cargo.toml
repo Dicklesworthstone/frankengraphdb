@@ -32,6 +32,9 @@ path = "../fgdb-delta-types"
 [dependencies.fgdb-codec]
 path = "../fgdb-codec"
 
+[dependencies.fgdb-unsafe-vfs]
+path = "../fgdb-unsafe-vfs"
+
 [lints]
 workspace = true
 

@@ -367,7 +367,10 @@ impl<'a> Parser<'a> {
             let mut first = true;
             loop {
                 let comparison = self.comparison()?;
-                let right = self.selection_value(schema)?;
+                let previous = core::mem::replace(&mut self.comparison_right_at, self.current.at);
+                let right = self.selection_value(schema);
+                self.comparison_right_at = previous;
+                let right = right?;
                 let next = self.at_comparison().then(|| right.clone());
                 if self.composite_compared(schema, &left, comparison, &right) {
                     self.selection_composite_comparison(

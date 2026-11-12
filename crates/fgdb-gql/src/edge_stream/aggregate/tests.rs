@@ -163,7 +163,7 @@ fn prepare(text: &str) -> PreparedGraphAggregate {
     PreparedGraphAggregateText::prepare(text, |kind, name: &str| match kind {
         GraphSymbolKind::Relation => Some(GraphSymbol::Relation(if name == "S" { S } else { R })),
         GraphSymbolKind::Property => Some(GraphSymbol::Property(P)),
-        GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_types::LabelId(1))),
+        GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1))),
     })
     .unwrap()
     .bind_parameters(&GqlParameters::new())
@@ -411,7 +411,11 @@ fn ordinary_tree_numeric_dispatch_matches_full_assignment_bags_in_both_match_mod
                         })
                         .collect::<Vec<_>>()
                         .join(",");
-                    let mode = if repeatable { "REPEATABLE ELEMENTS " } else { "" };
+                    let mode = if repeatable {
+                        "REPEATABLE ELEMENTS "
+                    } else {
+                        ""
+                    };
                     let end = char::from(b'a' + (width - 1) as u8);
                     let columns = if captured {
                         format!(
@@ -733,7 +737,10 @@ fn ordinary_numeric_dispatch_preserves_reachable_finite_root_group_retirement() 
     ] {
         let q = prepare(text);
         let definition = q.canonical_bytes();
-        assert!(!q.input_pattern().plan().requires_identified_edges(), "{text}");
+        assert!(
+            !q.input_pattern().plan().requires_identified_edges(),
+            "{text}"
+        );
         assert!(q.uses_root_group_retirement(), "{text}");
         assert!(AggregateScanPlan::compile_numeric(&q).is_none(), "{text}");
         assert_eq!(q.canonical_bytes(), definition, "{text}");

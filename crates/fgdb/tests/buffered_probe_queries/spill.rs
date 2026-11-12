@@ -299,6 +299,200 @@ fn external_identity_roots_preserve_duplicates_nulls_and_history_with_bounded_fa
 }
 
 #[test]
+fn external_scalar_identity_roots_narrow_id_and_element_id_correlations_across_cuts() {
+    let ((), report) = run_async_under_lab(0xe6_79, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = seed(&contexts, &vfs).await;
+        let mut extra = WriteBatch::new(R);
+        extra.create_vertex(VId(13), vec![], vec![(P, CanonicalScalar::Int(13))]);
+        for id in 100..164 {
+            extra.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
+        }
+        assert_eq!(
+            db.write(&contexts.commit(), extra).await.unwrap(),
+            CommitSeq(2)
+        );
+        let mut change = WriteBatch::new(R);
+        change.delete_vertex(VId(13));
+        change.set_vertex_property(IDS[2], P, Some(CanonicalScalar::Int(33)));
+        assert_eq!(
+            db.write(&contexts.commit(), change).await.unwrap(),
+            CommitSeq(3)
+        );
+
+        let id_params = GqlParameters::new()
+            .with_list(
+                "ids",
+                vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(0)),
+                    GraphValue::Scalar(CanonicalScalar::Int(13)),
+                    GraphValue::Scalar(CanonicalScalar::Int(0)),
+                    GraphValue::Scalar(CanonicalScalar::Int(-5)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                    GraphValue::Scalar(CanonicalScalar::Int(7)),
+                ],
+            )
+            .unwrap();
+        let eid_params = GqlParameters::new()
+            .with_list(
+                "eids",
+                vec![
+                    GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text(&IDS[2].0.to_string()).unwrap(),
+                    ),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("0").unwrap()),
+                    GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text(&IDS[2].0.to_string()).unwrap(),
+                    ),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("13").unwrap()),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("00").unwrap()),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                    GraphValue::Scalar(CanonicalScalar::Int(0)),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("7").unwrap()),
+                ],
+            )
+            .unwrap();
+
+        let source_pool = memory();
+        let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+
+        let id_logical = PreparedGraphSetText::prepare(
+            "UNWIND $ids AS id MATCH (n) WHERE id(n)=id RETURN n",
+            resolve,
+        )
+        .unwrap()
+        .bind_parameters(&id_params)
+        .unwrap();
+        let id_physical = AsyncSpillSetPlan::compile(&id_logical).unwrap();
+        assert!(matches!(
+            id_physical.source(),
+            AsyncSpillSetSourcePlan::Cross(plan) if plan.identity_seed_column() == Some((0, false))
+        ));
+
+        let join_logical = PreparedGraphSetText::prepare(
+            "UNWIND $eids AS eid WITH eid MATCH (n) WHERE eid=elementId(n) RETURN n",
+            resolve,
+        )
+        .unwrap()
+        .bind_parameters(&eid_params)
+        .unwrap();
+        let join_physical = AsyncSpillSetPlan::compile(&join_logical).unwrap();
+        assert!(matches!(
+            join_physical.source(),
+            AsyncSpillSetSourcePlan::RowJoin(plan) if plan.identity_seed_column() == Some((0, true))
+        ));
+
+        for cut in [2, 3] {
+            let expected_ids = if cut == 2 {
+                vec![(IDS[0], 1_i64), (VId(13), 13), (IDS[0], 1)]
+            } else {
+                vec![(IDS[0], 1_i64), (IDS[0], 1)]
+            };
+            let expected_id_rows: Vec<_> = expected_ids
+                .iter()
+                .map(|&(id, val)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(id),
+                        GraphValue::Scalar(CanonicalScalar::Int(val)),
+                    ])
+                    .canonical_bytes()
+                    .unwrap()
+                })
+                .collect();
+
+            for shape in [
+                format!(
+                    "UNWIND $ids AS id MATCH (n) WHERE id(n)=id FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n,n.p AS value"
+                ),
+                format!(
+                    "UNWIND $ids AS id WITH id MATCH (n) WHERE id=id(n) FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n,n.p AS value"
+                ),
+            ] {
+                let (rows, snapshot, stats) = ordered_parameters(
+                    &mut view,
+                    &cx,
+                    &shape,
+                    &id_params,
+                    GqlQueryPolicy::new(4, 100, SORT_WORK, SORT_WORK),
+                    8,
+                )
+                .await
+                .unwrap();
+                assert_eq!(rows, expected_id_rows, "{shape}");
+                assert_eq!(snapshot, CommitSeq(cut));
+                assert_eq!(
+                    stats.snapshot_records, 3,
+                    "only distinct non-negative integer seeds (0, 7, 13): {shape}"
+                );
+            }
+
+            let expected_eids = if cut == 2 {
+                vec![(IDS[2], 3_i64), (IDS[0], 1), (IDS[2], 3), (VId(13), 13)]
+            } else {
+                vec![(IDS[2], 33_i64), (IDS[0], 1), (IDS[2], 33)]
+            };
+            let expected_eid_rows: Vec<_> = expected_eids
+                .iter()
+                .map(|&(id, val)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(id),
+                        GraphValue::Scalar(CanonicalScalar::Int(val)),
+                    ])
+                    .canonical_bytes()
+                    .unwrap()
+                })
+                .collect();
+
+            for shape in [
+                format!(
+                    "UNWIND $eids AS eid MATCH (n) WHERE elementId(n)=eid FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n,n.p AS value"
+                ),
+                format!(
+                    "UNWIND $eids AS eid WITH eid MATCH (n) WHERE eid=elementId(n) FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n,n.p AS value"
+                ),
+            ] {
+                let (rows, snapshot, stats) = ordered_parameters(
+                    &mut view,
+                    &cx,
+                    &shape,
+                    &eid_params,
+                    GqlQueryPolicy::new(4, 100, SORT_WORK, SORT_WORK),
+                    8,
+                )
+                .await
+                .unwrap();
+                assert_eq!(rows, expected_eid_rows, "{shape}");
+                assert_eq!(snapshot, CommitSeq(cut));
+                assert_eq!(
+                    stats.snapshot_records, 4,
+                    "only distinct canonical decimal elementId seeds (0, 7, 13, u128::MAX): {shape}"
+                );
+                for run_rows in [1, 2] {
+                    let (rows, _, stats) = ordered_parameters(
+                        &mut view,
+                        &cx,
+                        &shape,
+                        &eid_params,
+                        policy(),
+                        run_rows,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(rows, expected_eid_rows);
+                    assert_eq!(stats.snapshot_records, 68);
+                }
+            }
+        }
+
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn external_apply_identity_roots_do_not_rescan_the_graph_or_hide_late_errors() {
     let ((), report) = run_async_under_lab(0xe6_72, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
