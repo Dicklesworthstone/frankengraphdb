@@ -737,6 +737,9 @@ pub(super) type SeededSource<'a, E, C> = Box<
 pub(super) enum ErasedSource<'a, E, C> {
     Once(Option<OnceSource<'a, E, C>>),
     Reusable(ReusableSource<'a, E, C>),
+    /// Retain the host's complete relational capabilities, including governed
+    /// procedures and optional seeded/factor readers, without manufacturing any.
+    Graph(Box<dyn crate::GraphSetSource<E, C> + 'a>),
     /// A reusable source plus its seeded reader: a MATCH joined to an input
     /// relation's rows admits only the roots those rows can join (fgdb-2npty).
     Seeded {

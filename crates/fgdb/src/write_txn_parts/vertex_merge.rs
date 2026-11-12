@@ -790,12 +790,7 @@ impl WriteTxn {
             let selected = {
                 let mut source = fgdb_gql::with_element_metadata(
                     fgdb_gql::WithElementReads {
-                        source: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
-                            fgdb_gql::algebra::GraphValueRow,
-                        >,
-                                 allowance| {
-                            self.execute_graph_pattern_governed(database, cx, pattern, allowance)
-                        },
+                        source: write_graph_source(self, database, cx),
                         elements: |element, key| {
                             self.element_property_with_checkpoint(
                                 database, cx, &failure, element, key,

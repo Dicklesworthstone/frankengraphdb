@@ -127,6 +127,268 @@ where
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+mod procedure_mutations {
+    use super::*;
+    use fgdb_gql::{
+        GraphMutationPolicy, GraphSymbolResolver, PreparedGraphMutationQueryText,
+        PreparedGraphMutationText, ReverseSymbolCatalog,
+    };
+    use fgdb_types::EId;
+    use fgdb_warden::LimitDimension;
+
+    const INPUT: &str = "CALL fnx.single_source_shortest_path_length(1) \
+        YIELD vertex AS n,distance ";
+    const SET: &str = "SET n.p=n.p+distance,n.q=distance";
+
+    struct Catalog;
+    impl GraphSymbolResolver for Catalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            symbols(kind, name)
+        }
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = ReverseSymbolCatalog::new();
+            catalog.insert_label(L, "Visible");
+            catalog.insert_relation(R, "R");
+            catalog.insert_property(P, "p");
+            catalog.insert_property(Q, "q");
+            catalog.insert_property(SECRET, "secret");
+            Some(catalog)
+        }
+    }
+
+    async fn database(contexts: &PurposeContexts, hidden: bool) -> Database<MemVfs> {
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=4_i64 {
+            let mut fields = vec![
+                (P, CanonicalScalar::Int(10 * id)),
+                (Q, CanonicalScalar::Int(0)),
+            ];
+            if hidden {
+                fields.push((SECRET, CanonicalScalar::Int(99)));
+            }
+            seed.create_vertex(VId(id as u128), vec![L], fields);
+        }
+        seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+        seed.add_edge(EId(2), VId(2), VId(3), vec![]);
+        if hidden {
+            seed.create_vertex(VId(90), vec![HIDDEN], vec![(P, CanonicalScalar::Int(900))]);
+            seed.add_edge(EId(90), VId(2), VId(90), vec![]);
+            seed.add_edge(EId(91), VId(90), VId(4), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        db
+    }
+
+    fn mutation_policy() -> GraphMutationPolicy {
+        GraphMutationPolicy::new(policy().mutations.query, 100)
+    }
+
+    fn authorization(error: &(dyn core::error::Error + 'static)) -> Option<Error> {
+        let mut cause = Some(error);
+        while let Some(error) = cause {
+            if let Some(WriteTxnError::Authorization(error)) = error.downcast_ref::<WriteTxnError>()
+            {
+                return Some(*error);
+            }
+            cause = error.source();
+        }
+        None
+    }
+
+    #[test]
+    fn fnx_selected_set_updates_only_visible_reached_vertices_with_or_without_return() {
+        lab(0xa611_0401, |contexts| async move {
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            let mut expected_stats = None;
+            for hidden in [false, true] {
+                for returning in [false, true] {
+                    let mut db = database(&contexts, hidden).await;
+                    let before = (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap(),
+                    );
+                    let mut scope = grant();
+                    scope.limits.max_rows = if returning { 3 } else { 0 };
+                    let token = issuer.issue_at(&scope, NOW).unwrap();
+                    let text = format!("{INPUT}{SET}");
+                    let (stats, completion) = if returning {
+                        let prepared = PreparedGraphMutationQueryText::prepare(
+                            &format!("{text} RETURN n,n.p,n.q ORDER BY n"),
+                            R,
+                            Catalog,
+                        )
+                        .unwrap()
+                        .bind_parameters(&GqlParameters::new())
+                        .unwrap();
+                        let (stats, rows, completion) = db
+                            .execute_graph_mutation_query_authorized(
+                                &txn,
+                                &query,
+                                &commit,
+                                &issuer,
+                                &token,
+                                "main",
+                                &prepared,
+                                mutation_policy(),
+                                || NOW,
+                            )
+                            .await
+                            .unwrap();
+                        let expected: Vec<_> = [(1, 10, 0), (2, 21, 1), (3, 32, 2)]
+                            .into_iter()
+                            .map(|(id, p, q)| {
+                                vec![
+                                    GraphValue::Vertex(VId(id)),
+                                    GraphValue::Scalar(CanonicalScalar::Int(p)),
+                                    GraphValue::Scalar(CanonicalScalar::Int(q)),
+                                ]
+                            })
+                            .collect();
+                        assert_eq!(
+                            rows.value
+                                .iter()
+                                .map(|row| row.values().to_vec())
+                                .collect::<Vec<_>>(),
+                            expected
+                        );
+                        (stats, completion)
+                    } else {
+                        let prepared = PreparedGraphMutationText::prepare(&text, R, Catalog)
+                            .unwrap()
+                            .bind_parameters(&GqlParameters::new())
+                            .unwrap();
+                        db.execute_graph_mutation_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &issuer,
+                            &token,
+                            "main",
+                            &prepared,
+                            mutation_policy(),
+                            || NOW,
+                        )
+                        .await
+                        .unwrap()
+                    };
+                    assert_eq!(stats.target_vertices, 3);
+                    assert_eq!(stats.target_edges, 0);
+                    assert_eq!(stats.effects, 6);
+                    if returning {
+                        if let Some(expected) = expected_stats {
+                            assert_eq!(
+                                stats, expected,
+                                "hidden state cannot affect procedure selection accounting"
+                            );
+                        } else {
+                            expected_stats = Some(stats);
+                        }
+                    }
+                    for original in &before.1 {
+                        let mut expected = original.clone();
+                        if (1..=3).contains(&original.vid.0) {
+                            let distance = original.vid.0 as i64 - 1;
+                            expected.props[0].1 =
+                                CanonicalScalar::Int(10 * original.vid.0 as i64 + distance).into();
+                            expected.props[1].1 = CanonicalScalar::Int(distance).into();
+                        }
+                        assert_eq!(db.vertex(original.vid).unwrap(), Some(expected));
+                    }
+                    assert_eq!(db.edges().unwrap(), before.2);
+                    let frontier = db.frontier().unwrap();
+                    assert_eq!(frontier.0, before.0.0 + 1);
+                    assert_eq!(
+                        completion,
+                        EmbeddedTxnCompletion::WriteCommitted {
+                            commit_seq: frontier
+                        }
+                    );
+                    assert_eq!(txn.outstanding_obligations(), 0);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn procedure_selected_mutations_keep_computed_field_admission_and_atomic_refusals() {
+        lab(0xa611_0402, |contexts| async move {
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            for hidden in [false, true] {
+                for failure in 0..4 {
+                    let mut db = database(&contexts, hidden).await;
+                    let before = (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap(),
+                    );
+                    let mut scope = grant();
+                    let mut allowance = mutation_policy();
+                    let text = match failure {
+                        0 => format!(
+                            "{INPUT}WITH n,distance,CASE WHEN distance=2 \
+                            THEN {{secret:99}} ELSE {{q:distance}} END AS patch \
+                            SET n += patch RETURN n.p LIMIT 0"
+                        ),
+                        1 => format!("{INPUT}SET n.q=10/(2-distance) RETURN n.q LIMIT 0"),
+                        _ => format!("{INPUT}{SET} RETURN n.p ORDER BY n.p"),
+                    };
+                    if failure == 2 {
+                        scope.limits.max_rows = 2;
+                    }
+                    if failure == 3 {
+                        allowance.max_effects = 5;
+                    }
+                    let token = issuer.issue_at(&scope, NOW).unwrap();
+                    let prepared = PreparedGraphMutationQueryText::prepare(&text, R, Catalog)
+                        .unwrap()
+                        .bind_parameters(&GqlParameters::new())
+                        .unwrap();
+                    let error = db
+                        .execute_graph_mutation_query_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &issuer,
+                            &token,
+                            "main",
+                            &prepared,
+                            allowance,
+                            || NOW,
+                        )
+                        .await
+                        .unwrap_err();
+                    match failure {
+                        0 => {
+                            assert_eq!(authorization(&error), Some(Error::ScopeDenied), "{error:?}")
+                        }
+                        1 => assert!(format!("{error:?}").contains("DivisionByZero"), "{error:?}"),
+                        2 => assert_eq!(
+                            authorization(&error),
+                            Some(Error::LimitExceeded(LimitDimension::Rows)),
+                            "{error:?}"
+                        ),
+                        _ => assert!(format!("{error:?}").contains("EffectLimit"), "{error:?}"),
+                    }
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before
+                    );
+                    assert_eq!(txn.outstanding_obligations(), 0);
+                }
+            }
+        });
+    }
+}
+
 #[test]
 fn repeated_vertex_keys_share_one_authorized_commit_and_survive_reopen() {
     lab(0xa611_0001, |contexts| async move {

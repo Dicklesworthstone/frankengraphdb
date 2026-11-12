@@ -1,6 +1,28 @@
 // Query-selected writes share the existing canonical staged overlay and the
 // ordinary WriteTxn::write rollback/preparation boundary. No alternate writer.
 
+/// The ordinary pattern and procedure leaves of a native write's input.
+/// Seeded or factor capabilities belong to each caller's existing adapter.
+fn write_graph_source<'a, V: Vfs + Clone>(
+    transaction: &'a WriteTxn,
+    database: &'a Database<V>,
+    cx: &'a fgdb_types::QueryCx,
+) -> impl fgdb_gql::GraphSetSource<WriteTxnError, Box<asupersync::error::Error>> + 'a {
+    fgdb_gql::WithProcedures {
+        patterns: move |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+            fgdb_gql::algebra::GraphValueRow,
+        >,
+                        policy: fgdb_gql::GqlQueryPolicy| {
+            transaction.execute_graph_pattern_governed(database, cx, pattern, policy)
+        },
+        procedures: move |call: &fgdb_gql::PreparedProcedureCall,
+                          arguments: &[fgdb_gql::algebra::GraphValue],
+                          policy: fgdb_gql::GqlQueryPolicy| {
+            transaction.execute_procedure_governed(database, cx, call, arguments, policy)
+        },
+    }
+}
+
 /// A chain's proof of successful native retirement, with a small append-only
 /// journal so nested rollback restores its entry prefix without cloning it.
 /// Only the native deletion owners insert identities after successful staging.
@@ -657,14 +679,21 @@ impl WriteTxn {
         // A MATCH joined to the input relation's rows (after a WITH stage)
         // admits only the roots they can join, through the overlay-aware
         // seeded reader the set queries use (fgdb-2npty).
-        let result = mutation.execute_governed_over_reading_with_seeded_source(
+        let result = mutation.execute_governed_over_reading_with_graph_source_and_field_admission(
             owned,
             policy,
-            |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
-            |pattern, seeds, budget| {
-                self.execute_seeded_graph_pattern_governed(database, cx, pattern, seeds, budget)
+            fgdb_gql::WithSeededPatterns {
+                source: write_graph_source(self, database, cx),
+                seeded: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                    fgdb_gql::algebra::GraphValueRow,
+                >,
+                         seeds: fgdb_gql::GraphSeeds<'_>,
+                         budget: fgdb_gql::GqlQueryPolicy| {
+                    self.execute_seeded_graph_pattern_governed(database, cx, pattern, seeds, budget)
+                },
             },
             self.element_reader_with_checkpoint(database, cx, &failure),
+            |_| Ok(()),
             || match failure.borrow_mut().take() {
                 Some(error) => Err(error),
                 None => cx.checkpoint(),
@@ -688,14 +717,21 @@ impl WriteTxn {
         TxnGqlError<fgdb_gql::GraphMutationQueryError<WriteTxnError>>,
     > {
         let failure = std::cell::RefCell::new(None);
-        let result = query.execute_governed_over_reading_with_seeded_source(
+        let result = query.execute_governed_over_reading_with_graph_source_and_field_admission(
             owned,
             policy,
-            |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
-            |pattern, seeds, budget| {
-                self.execute_seeded_graph_pattern_governed(database, cx, pattern, seeds, budget)
+            fgdb_gql::WithSeededPatterns {
+                source: write_graph_source(self, database, cx),
+                seeded: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                    fgdb_gql::algebra::GraphValueRow,
+                >,
+                         seeds: fgdb_gql::GraphSeeds<'_>,
+                         budget: fgdb_gql::GqlQueryPolicy| {
+                    self.execute_seeded_graph_pattern_governed(database, cx, pattern, seeds, budget)
+                },
             },
             self.element_reader_with_checkpoint(database, cx, &failure),
+            |_| Ok(()),
             || match failure.borrow_mut().take() {
                 Some(error) => Err(error),
                 None => cx.checkpoint(),

@@ -511,6 +511,30 @@ impl PreparedGraphMutationQuery {
         )
     }
 
+    /// Returning mutation over a complete relational host, with the same
+    /// dynamic-field admission and frozen selection as its no-result form.
+    /// Optional procedure, seeded and factor capabilities survive unchanged;
+    /// assignments and RETURN still share one collector and cumulative meter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_over_reading_with_graph_source_and_field_admission<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl crate::GraphSetSource<E, C>,
+        mut elements: impl crate::GraphElementReader<E>,
+        mut admit: impl FnMut(PropertyKeyId) -> Result<(), GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        self.execute_with(
+            owned,
+            policy,
+            collect::ErasedSource::Graph(Box::new(source)),
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            Some(&mut admit),
+            checkpoint,
+        )
+    }
+
     fn execute_with<E, C>(
         &self,
         owned: Option<Vec<GraphValueRow>>,

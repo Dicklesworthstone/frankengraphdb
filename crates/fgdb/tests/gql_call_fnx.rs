@@ -12,9 +12,9 @@ use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSetExecutionError, GraphSymbol,
-    GraphSymbolKind, PreparedGraphInsertQueryText, PreparedGraphInsertText,
-    PreparedGraphWriteChainText,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationPolicy, GraphSetExecutionError,
+    GraphSymbol, GraphSymbolKind, PreparedGraphInsertQueryText, PreparedGraphInsertText,
+    PreparedGraphMutationQueryText, PreparedGraphMutationText, PreparedGraphWriteChainText,
 };
 use fgdb_prism::*;
 use fgdb_types::{
@@ -1774,6 +1774,229 @@ fn procedure_failure_inside_a_write_call_restores_the_unpublished_prefix() {
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
+    });
+}
+
+#[test]
+fn procedure_selected_sets_keep_seeded_matches_and_simultaneous_values() {
+    run_transaction(async |commit, cx, txcx| {
+        let text = "CALL fnx.single_source_shortest_path_length(1) \
+                    YIELD vertex AS reached, distance WITH reached,distance \
+                    MATCH (reached)-[:R]->(next) SET next.p=reached.p+distance";
+        let params = GqlParameters::new();
+        let allowance = GraphMutationPolicy::new(policy(), 100);
+        // The triangle and tail read the entry values, including the staged
+        // 5->6 edge; no later occurrence sees this SET's earlier assignments.
+        let expected = [(1, 32), (2, 10), (3, 21), (4, 32), (5, 43), (6, 54)];
+        for returning in [false, true] {
+            let mut db = open(commit).await;
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.add_edge(EId(6), VId(5), VId(6), vec![]);
+            prefix.set_vertex_property(VId(6), P, Some(CanonicalScalar::Int(600)));
+            txn.write(&mut db, prefix).unwrap();
+            let stats = if returning {
+                let query = PreparedGraphMutationQueryText::prepare(
+                    &format!("{text} RETURN next.p AS value ORDER BY value"),
+                    R,
+                    symbols,
+                )
+                .unwrap()
+                .bind_parameters(&params)
+                .unwrap();
+                let (stats, output) = txn
+                    .execute_graph_mutation_query_governed(&mut db, cx, &query, allowance)
+                    .unwrap();
+                assert_eq!(
+                    output
+                        .value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    [10, 21, 32, 32, 43, 54]
+                        .map(|value| vec![GraphValue::Scalar(CanonicalScalar::Int(value))]),
+                );
+                stats
+            } else {
+                let mutation = PreparedGraphMutationText::prepare(text, R, symbols)
+                    .unwrap()
+                    .bind_parameters(&params)
+                    .unwrap();
+                txn.execute_graph_mutation_governed(&mut db, cx, &mutation, allowance)
+                    .unwrap()
+            };
+            assert_eq!(stats.effects, 6);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert_eq!(
+                db.vertex(VId(6)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(60).into())]
+            );
+            for (id, value) in expected {
+                assert_eq!(
+                    txn.vertex(&db, VId(id)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(value).into())]
+                );
+            }
+            txn.finish(&mut db, commit).await.unwrap();
+            for (id, value) in expected {
+                assert_eq!(
+                    db.vertex(VId(id)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(value).into())]
+                );
+            }
+            assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn procedure_selected_vertex_and_relationship_merges_use_the_staged_source() {
+    run_transaction(async |commit, cx, txcx| {
+        for relationship in [false, true] {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for (id, value) in [(1, 10), (2, 20), (3, 30)] {
+                seed.create_vertex(
+                    VId(id),
+                    vec![PERSON],
+                    vec![(P, CanonicalScalar::Int(value))],
+                );
+            }
+            seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+            db.write(commit, seed).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.add_edge(EId(2), VId(1), VId(3), vec![]);
+            txn.write(&mut db, prefix).unwrap();
+            let text = if relationship {
+                "CREATE (:Person {p:99}) WITH 1 AS start \
+                 CALL fnx.single_source_shortest_path_length(start) \
+                 YIELD vertex AS reached,distance WITH reached,distance WHERE distance>0 \
+                 MATCH (root:Person {p:10}) \
+                 MERGE (reached)-[back:R {p:distance}]->(root) \
+                 RETURN back.p AS value ORDER BY value"
+            } else {
+                "CREATE (:Person {p:99}) WITH 1 AS start \
+                 CALL fnx.single_source_shortest_path_length(start) YIELD vertex,distance \
+                 MERGE (copy:Person {p:distance}) RETURN copy.p AS value ORDER BY value"
+            };
+            let chain = PreparedGraphWriteChainText::prepare(text, R, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let mut allocated = 0_u128;
+            let (stats, output, _) = txn
+                .execute_graph_write_chain_governed(
+                    &mut db,
+                    cx,
+                    &chain,
+                    GraphInsertPolicy::new(policy(), 100, 100),
+                    |request| {
+                        allocated += 1;
+                        Ok::<_, Infallible>(match request {
+                            GraphInsertRequest::Vertex { .. } => {
+                                ElementId::Vertex(VId(100 + allocated))
+                            }
+                            GraphInsertRequest::Edge { .. } => {
+                                ElementId::Edge(EId(100 + allocated))
+                            }
+                        })
+                    },
+                )
+                .unwrap();
+            assert_eq!(allocated, 3);
+            assert_eq!(stats.created_vertices, if relationship { 1 } else { 3 });
+            assert_eq!(stats.created_edges, if relationship { 2 } else { 0 });
+            let expected: &[i64] = if relationship { &[1, 1] } else { &[0, 1, 1] };
+            assert_eq!(
+                output
+                    .value
+                    .iter()
+                    .map(|row| row.values().to_vec())
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|&value| vec![GraphValue::Scalar(CanonicalScalar::Int(value))])
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert_eq!(db.edges().unwrap().len(), 1);
+            txn.finish(&mut db, commit).await.unwrap();
+            assert_eq!(
+                db.vertices().unwrap().len(),
+                if relationship { 4 } else { 6 }
+            );
+            let edges = db.edges().unwrap();
+            assert_eq!(edges.len(), if relationship { 4 } else { 2 });
+            if relationship {
+                for source in [VId(2), VId(3)] {
+                    assert!(edges.iter().any(|edge| {
+                        edge.entry.src == source
+                            && edge.entry.dst == VId(1)
+                            && edge.props == vec![(P, CanonicalScalar::Int(1).into())]
+                    }));
+                }
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn late_procedure_selected_set_failure_restores_the_existing_transaction() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit).await;
+        let basis = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.set_vertex_property(VId(6), P, Some(CanonicalScalar::Int(600)));
+        txn.write(&mut db, prefix).unwrap();
+        let before = txn.staged_effect_digest().unwrap();
+        let expected = txn.vertices(&db).unwrap();
+        let chain = PreparedGraphWriteChainText::prepare(
+            "CREATE (:Person {p:77}) WITH 1 AS start \
+             CALL fnx.single_source_shortest_path_length(start) YIELD vertex AS n,distance \
+             SET n.p=1/(2-distance) RETURN n.p LIMIT 0",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let mut allocated = 0;
+        let error = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                cx,
+                &chain,
+                GraphInsertPolicy::new(policy(), 100, 100),
+                |request| {
+                    allocated += 1;
+                    assert!(matches!(request, GraphInsertRequest::Vertex { .. }));
+                    Ok::<_, Infallible>(ElementId::Vertex(VId(100)))
+                },
+            )
+            .expect_err("a later arithmetic failure must discard the CREATE and every SET");
+        let mut cause: &(dyn std::error::Error + 'static) = &error;
+        loop {
+            if let Some(integer) = cause.downcast_ref::<fgdb_gql::GraphIntegerError>() {
+                assert!(integer.kind.is_arithmetic_exception());
+                break;
+            }
+            cause = cause.source().unwrap_or_else(|| {
+                panic!("expected the SET expression's arithmetic refusal: {error:?}")
+            });
+        }
+        assert_eq!(allocated, 1);
+        assert_eq!(txn.staged_effect_digest().unwrap(), before);
+        assert_eq!(txn.vertices(&db).unwrap(), expected);
+        assert_eq!(db.frontier().unwrap(), basis);
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(db.vertices().unwrap(), expected);
+        assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
 

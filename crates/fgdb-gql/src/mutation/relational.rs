@@ -147,6 +147,38 @@ impl PreparedGraphMutation {
                 crate::GraphSetExecutionError::OwnedRowsUnavailable,
             ))
         };
+        // A complete source keeps every optional capability and the original
+        // host error channel. Selection still finishes under the same native
+        // relation meter before the ordinary simultaneous reducer receives it.
+        let source = match source {
+            super::collect::ErasedSource::Graph(mut source) => {
+                let Some(input) = &self.input_relation else {
+                    let (Some(selection), None) = (&self.selection, owned) else {
+                        return Err(owned_unavailable());
+                    };
+                    return source
+                        .pattern(selection, policy)
+                        .map_err(|error| error.map_source(GraphMutationError::Source));
+                };
+                let mut source = crate::set_ops::BorrowedSource {
+                    source: source.as_mut(),
+                    elements,
+                };
+                return match owned {
+                    None => input.execute_with_source(policy, &mut source, checkpoint),
+                    Some(rows) => input.execute_with_source(
+                        policy,
+                        &mut crate::set_ops::WithOwnedRows {
+                            source: &mut source,
+                            rows: Some(rows),
+                        },
+                        checkpoint,
+                    ),
+                }
+                .map_err(|error| error.map_source(GraphMutationError::InputRelation));
+            }
+            source => source,
+        };
         // Split a seeded reader off before the pattern closure borrows the
         // source; the relation below offers it to a joined MATCH leaf.
         let (mut source, mut seeded) = match source {
@@ -169,6 +201,7 @@ impl PreparedGraphMutation {
                 | super::collect::ErasedSource::Seeded {
                     patterns: source, ..
                 } => source(pattern, remaining),
+                super::collect::ErasedSource::Graph(source) => source.pattern(pattern, remaining),
             };
             selected.map_err(|error| error.map_source(SourceError::Host))
         };

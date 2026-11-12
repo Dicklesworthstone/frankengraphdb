@@ -35,6 +35,94 @@ fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphMutationError::Source(error))
 }
 
+/// The mutation's relational input and native procedure leaves share the same
+/// staged graph and signed permit. Restricted scopes keep seed construction
+/// disabled, exactly as the previous optional seeded callback did. Element
+/// reads retain the separate mutation reader and its interruption carrier.
+struct MutationGraphSource<'s, 'run, 'cx, 'permit, V: Vfs, Clock> {
+    transaction: &'s WriteTxn,
+    database: &'s Database<V>,
+    cx: &'s QueryCx,
+    scope: &'s PlannerPredicates,
+    execution: &'s RefCell<&'run mut Execution<'cx, 'permit, Clock>>,
+}
+
+impl<V: Vfs + Clone, Clock: FnMut() -> u64> fgdb_gql::GraphSetSource<WriteTxnError, WriteTxnError>
+    for MutationGraphSource<'_, '_, '_, '_, V, Clock>
+{
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<GraphValueRow>,
+        GqlQueryError<WriteTxnError, WriteTxnError>,
+    > {
+        selection::select_overlay(
+            self.transaction,
+            self.database,
+            self.cx,
+            pattern,
+            self.scope,
+            policy,
+            self.execution,
+        )
+    }
+
+    fn supports_seeded_patterns(&self) -> bool {
+        self.scope.sees_all_incidence() && self.scope.sees_all_fields()
+    }
+
+    fn seeded_pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        seeds: fgdb_gql::GraphSeeds<'_>,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Option<
+        Result<
+            fgdb_gql::GqlQueryExecution<GraphValueRow>,
+            GqlQueryError<WriteTxnError, WriteTxnError>,
+        >,
+    > {
+        if !self.supports_seeded_patterns() {
+            return None;
+        }
+        selection::select_seeded_overlay(
+            self.transaction,
+            self.database,
+            self.cx,
+            pattern,
+            seeds,
+            self.scope,
+            policy,
+            self.execution,
+        )
+    }
+
+    fn procedure(
+        &mut self,
+        call: &fgdb_gql::PreparedProcedureCall,
+        arguments: &[fgdb_gql::algebra::GraphValue],
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Option<
+        Result<
+            fgdb_gql::GqlQueryExecution<GraphValueRow>,
+            GqlQueryError<WriteTxnError, WriteTxnError>,
+        >,
+    > {
+        selection::procedure(
+            self.transaction,
+            self.database,
+            self.cx,
+            call,
+            arguments,
+            self.scope,
+            policy,
+            self.execution,
+        )
+    }
+}
+
 /// Admit one actual field of a computed map before it becomes a proposal.
 /// The catalog is a name dictionary, never a request to write all its fields.
 /// Preserve native cancellation in the query's interruption channel.
@@ -217,38 +305,16 @@ impl<V: Vfs + Clone> Database<V> {
                     let transaction: &WriteTxn = workspace.transaction();
                     let element_failure = RefCell::new(None);
                     let result = query
-                        .execute_governed_over_reading_with_seeded_source_and_field_admission(
+                        .execute_governed_over_reading_with_graph_source_and_field_admission(
                             None,
                             policy,
-                            |pattern, allowance| {
-                                selection::select_overlay(
-                                    transaction,
-                                    self,
-                                    query_cx,
-                                    pattern,
-                                    verified.predicates(),
-                                    allowance,
-                                    &controls,
-                                )
+                            MutationGraphSource {
+                                transaction,
+                                database: self,
+                                cx: query_cx,
+                                scope: verified.predicates(),
+                                execution: &controls,
                             },
-                            (verified.predicates().sees_all_incidence()
-                                && verified.predicates().sees_all_fields())
-                            .then_some(
-                                |pattern: &PreparedGraphPattern<GraphValueRow>,
-                                 seeds: fgdb_gql::GraphSeeds<'_>,
-                                 allowance| {
-                                    selection::select_seeded_overlay(
-                                        transaction,
-                                        self,
-                                        query_cx,
-                                        pattern,
-                                        seeds,
-                                        verified.predicates(),
-                                        allowance,
-                                        &controls,
-                                    )
-                                },
-                            ),
                             scoped_element_reader(
                                 transaction,
                                 self,
@@ -517,36 +583,16 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
         // before any await. No RefCell or query result escapes.
         let execution = RefCell::new(&mut *execution);
         let element_failure = RefCell::new(None);
-        let result = mutation.execute_governed_over_reading_with_seeded_source_and_field_admission(
+        let result = mutation.execute_governed_over_reading_with_graph_source_and_field_admission(
             None,
             policy,
-            |pattern, allowance| {
-                selection::select_overlay(
-                    transaction,
-                    database,
-                    cx,
-                    pattern,
-                    scope,
-                    allowance,
-                    &execution,
-                )
+            MutationGraphSource {
+                transaction,
+                database,
+                cx,
+                scope,
+                execution: &execution,
             },
-            (scope.sees_all_incidence() && scope.sees_all_fields()).then_some(
-                |pattern: &PreparedGraphPattern<GraphValueRow>,
-                 seeds: fgdb_gql::GraphSeeds<'_>,
-                 allowance| {
-                    selection::select_seeded_overlay(
-                        transaction,
-                        database,
-                        cx,
-                        pattern,
-                        seeds,
-                        scope,
-                        allowance,
-                        &execution,
-                    )
-                },
-            ),
             scoped_element_reader(
                 transaction,
                 database,

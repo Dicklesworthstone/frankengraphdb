@@ -1192,6 +1192,35 @@ impl PreparedGraphMutation {
         .map(|(batch, _)| batch)
     }
 
+    /// Complete relational host for multipart mutation selection, with
+    /// admission of every computed-map field. Procedures, seeded patterns and
+    /// factors retain exactly the capabilities the host advertises. Each leaf
+    /// receives the remaining native allowance; an admitted host failure never
+    /// falls back to a different reader. Element reads share the same frozen
+    /// cut, and the complete relation enters the ordinary simultaneous reducer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_over_reading_with_graph_source_and_field_admission<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl crate::GraphSetSource<E, C>,
+        mut elements: impl crate::GraphElementReader<E>,
+        mut admit: impl FnMut(PropertyKeyId) -> Result<(), GqlQueryError<E, C>>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        collect::execute_erased(
+            self,
+            policy,
+            None,
+            owned,
+            collect::ErasedSource::Graph(Box::new(source)),
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            Some(&mut admit),
+            &mut checkpoint,
+        )
+        .map(|(batch, _)| batch)
+    }
+
     /// Application transcript, not a durable format or authorization permit.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
