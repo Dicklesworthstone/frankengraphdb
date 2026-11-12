@@ -12,6 +12,31 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### CLI selection of native durable-run sources — qualification pending
+
+Source added 2026-11-12 exposes the native run-plus-suffix profile through local
+`query --buffered`, including its supported external-query sources with
+`--spill-dir`. Callers supply all four row, incidence, image-byte and property-byte
+limits explicitly. Parsing rejects partial, duplicate, nonrepresentable and
+inapplicable profiles before storage opens; the engine's allocation-free
+validator owns capacity arithmetic for both CLI preflight and the view setter.
+The existing source pool and cumulative work allowance are unchanged.
+
+This configures the ordinary buffered view before its existing executor runs.
+Source selection stays lazy: direct streaming `LIMIT 0` does not load an attached
+run; external spilling retains its complete-input semantics before a final page.
+Selected run/suffix failures keep the native typed refusal and terminal behavior.
+The CLI preserves buffered error sources so explicit decoder, suffix and resident
+ceilings report the robot `budget` code. Corruption remains an execution failure;
+storage I/O retains its separate exit and code.
+Analytics and compressed CALL profiles retain their separate admission choices;
+the flags do not add an authorized buffered source or a server execution path.
+CLI regression sources exercise explicit-profile validation and real
+seal/write/query histories, corruption, limits and unchanged read-only storage.
+Pinned formatting and independent source review provide source-level evidence
+only; compilation, runtime, Clippy, UBS and exact-tree qualification remain UNRUN
+under the dependency build limitation described below.
+
 ### Native MATCH over durable runs and post-seal histories — qualification pending
 
 Source added 2026-11-12 for `fgdb-teypc`, `fgdb-w3-tier-r-0tj` and
@@ -31,8 +56,8 @@ demanded typed incidents select their own source without admitting that global
 minimum: only an actual endpoint successor emits an incident identity. One
 incident relation image and locator may remain charged beside the root source,
 reused across outer vertices and edges. Switching relations releases the old
-incident source before admitting its replacement. LIMIT 0 and unpolled/closed
-sources do not load the run.
+incident source before admitting its replacement. Direct streaming LIMIT 0 and
+sources closed before first demand do not load the run.
 
 After a relation changes, the same source combines the unchanged run with only
 its authenticated post-horizon Tier-D blocks. The locator indexes original

@@ -149,8 +149,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// caps the combined base population and raw suffix statements before
     /// suffix payload loading. Other root shapes keep ordinary buffered scans;
     /// their typed incidents may still select independently eligible runs.
-    /// Source selection is lazy; LIMIT 0, unpolled pulls and early close do not
-    /// load a run. Selected-run or suffix failures never retry another source.
+    /// Source selection is lazy; direct streaming LIMIT 0 and close before
+    /// first demand do not load a run. External spooling retains complete-input
+    /// semantics. Selected-run or suffix failures never retry another source.
     /// Encoded extents remain outside this profile.
     pub fn set_native_run_limits(
         &mut self,

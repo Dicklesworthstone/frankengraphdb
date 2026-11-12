@@ -14,6 +14,7 @@ use fgdb_gql::edge_stream::{
 };
 use fgdb_gql::stream::AsyncVertexScanPlan;
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
+use fgdb_strata::tiered::sealed::SealedLimits;
 use fgdb_types::{CommitSeq, QueryCx};
 use std::future::Future;
 use std::io::Write;
@@ -27,10 +28,21 @@ pub(super) struct BufferedOptions {
     enabled: bool,
     memory: Option<u64>,
     source: Option<u64>,
+    native_rows: Option<u64>,
+    native_incidences: Option<u64>,
+    native_image: Option<u64>,
+    native_properties: Option<u64>,
 }
 
 impl BufferedOptions {
-    pub(super) const FLAGS: [&str; 2] = ["--buffer-memory-bytes", "--buffer-source-bytes"];
+    pub(super) const FLAGS: [&str; 6] = [
+        "--buffer-memory-bytes",
+        "--buffer-source-bytes",
+        "--native-run-max-rows",
+        "--native-run-max-incidences",
+        "--native-run-image-bytes",
+        "--native-run-property-bytes",
+    ];
 
     pub(super) fn enable(&mut self) -> Result<(), Failure> {
         if self.enabled {
@@ -48,6 +60,10 @@ impl BufferedOptions {
         let value = match flag {
             "--buffer-memory-bytes" => &mut self.memory,
             "--buffer-source-bytes" => &mut self.source,
+            "--native-run-max-rows" => &mut self.native_rows,
+            "--native-run-max-incidences" => &mut self.native_incidences,
+            "--native-run-image-bytes" => &mut self.native_image,
+            "--native-run-property-bytes" => &mut self.native_properties,
             _ => return Err(Failure::usage("unknown buffered-read limit")),
         };
         set_decimal(value, flag, raw)
@@ -57,7 +73,47 @@ impl BufferedOptions {
         if !self.enabled && (self.memory.is_some() || self.source.is_some()) {
             return Err(Failure::usage("buffer limits require --buffered"));
         }
+        self.native_run_limits()?;
         Ok(())
+    }
+
+    /// The profile has no implicit limits. Validate platform and decoder
+    /// arithmetic before any storage opens, without testing pool fit or
+    /// loading a source: those admissions belong to actual cursor demand.
+    pub(super) fn native_run_limits(&self) -> Result<Option<SealedLimits>, Failure> {
+        let values = (
+            self.native_rows,
+            self.native_incidences,
+            self.native_image,
+            self.native_properties,
+        );
+        if values == (None, None, None, None) {
+            return Ok(None);
+        }
+        if !self.enabled {
+            return Err(Failure::usage("native run limits require --buffered"));
+        }
+        let (Some(rows), Some(incidences), Some(image), Some(properties)) = values else {
+            return Err(Failure::usage(
+                "native run limits require all four of --native-run-max-rows, \
+                 --native-run-max-incidences, --native-run-image-bytes and \
+                 --native-run-property-bytes",
+            ));
+        };
+        let size = |value, name| {
+            usize::try_from(value).map_err(|_| {
+                Failure::usage(format!("{name} exceeds this platform's byte/count range"))
+            })
+        };
+        let limits = SealedLimits {
+            max_rows: size(rows, "--native-run-max-rows")?,
+            max_incidences: size(incidences, "--native-run-max-incidences")?,
+            max_image_bytes: size(image, "--native-run-image-bytes")?,
+            max_property_bytes: size(properties, "--native-run-property-bytes")?,
+        };
+        BufferedReadLimits::validate_native_run_limits(limits)
+            .map_err(|error| Failure::usage(format!("invalid native run limits: {error}")))?;
+        Ok(Some(limits))
     }
 
     pub(super) fn admission(

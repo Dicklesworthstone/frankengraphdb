@@ -81,6 +81,16 @@ pub struct BufferedReadLimits {
 }
 
 impl BufferedReadLimits {
+    /// Validate an explicit native-run decoder profile before opening a source.
+    /// This checks representable capacity only and performs no allocation or
+    /// I/O. Pool admission remains lazy, when a query selects a durable run.
+    /// The same calculation governs `BufferedPartition::set_native_run_limits`.
+    pub fn validate_native_run_limits(
+        limits: crate::tiered::sealed::SealedLimits,
+    ) -> Result<(), BufferedReadError> {
+        scan_access::native_runs::decode_capacity(limits).map(|_| ())
+    }
+
     /// Reserve before decoding a manifest/root. This opening allowance covers
     /// simultaneous encoded frames, V4 segment vectors, flattened references,
     /// descriptors, and bounded cache-policy bookkeeping. Payload and history
@@ -205,7 +215,21 @@ impl core::fmt::Display for BufferedReadError {
         }
     }
 }
-impl std::error::Error for BufferedReadError {}
+impl std::error::Error for BufferedReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error.as_ref()),
+            Self::Buffer(error) => Some(error),
+            Self::Memory(error) => Some(error),
+            Self::Interrupted(error) => Some(error.as_ref()),
+            Self::Limit { .. }
+            | Self::BeyondPublication { .. }
+            | Self::VertexHistoryConflict { .. }
+            | Self::DanglingEndpoint
+            | Self::SizeOverflow => None,
+        }
+    }
+}
 
 /// A returned value retains its own resident charge after the read ends.
 /// Dropping the view does not refund a still-live answer's allocation.
@@ -900,7 +924,7 @@ impl<V: Vfs> BufferedPartition<V> {
     ) -> Result<(), BufferedReadError> {
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         if let Some(limits) = limits {
-            scan_access::native_runs::decode_capacity(limits)?;
+            BufferedReadLimits::validate_native_run_limits(limits)?;
         }
         // A verification reader may already require direct physical reads.
         // Disabling this query profile must not weaken that reader policy.

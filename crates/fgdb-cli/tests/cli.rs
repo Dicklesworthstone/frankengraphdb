@@ -1274,6 +1274,337 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
     );
 }
 
+const NATIVE_RUN_FLAGS: [(&str, &str); 4] = [
+    ("--native-run-max-rows", "64"),
+    ("--native-run-max-incidences", "128"),
+    ("--native-run-image-bytes", "65536"),
+    ("--native-run-property-bytes", "4096"),
+];
+
+fn native_run_arguments() -> Vec<&'static str> {
+    let mut args = vec!["--buffered", "--buffer-memory-bytes", "67108864"];
+    for (flag, value) in NATIVE_RUN_FLAGS {
+        args.extend_from_slice(&[flag, value]);
+    }
+    args
+}
+
+fn native_run_query(fixture: &Fixture, options: &[&str], text: &str) -> Output {
+    let mut args = vec!["--relation", "KNOWS=1", "--property", "score=2"];
+    args.extend_from_slice(options);
+    args.push(text);
+    fixture.robot("query", &args)
+}
+
+/// Seal in a separate CLI process, then publish property replacements,
+/// retirements and lower edge identities through the library. Every subsequent
+/// query process must recover and admit this carried run plus its suffix.
+fn native_run_history(fixture: &Fixture) -> PathBuf {
+    succeeded(&fixture.robot("create", &[]), "created");
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let commit = PurposeContexts::narrow_runtime_root(&root).commit();
+    runtime.block_on(async {
+        let mut writer = Database::open(&commit, fixture.db(), keys()).await.unwrap();
+        let mut first = WriteBatch::new(RelationId(1));
+        for (vertex, value) in [(1, 10), (2, 20), (3, 30)] {
+            first.create_vertex(
+                VId(vertex),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+            );
+        }
+        first.add_edge(
+            EId(101),
+            VId(1),
+            VId(2),
+            vec![(PropertyKeyId(2), CanonicalScalar::Int(7))],
+        );
+        first.add_edge(
+            EId(103),
+            VId(3),
+            VId(1),
+            vec![(PropertyKeyId(2), CanonicalScalar::Int(9))],
+        );
+        writer.write(&commit, first).await.unwrap();
+        let mut second = WriteBatch::new(RelationId(1));
+        second.set_edge_property(EId(101), PropertyKeyId(2), Some(CanonicalScalar::Int(17)));
+        writer.write(&commit, second).await.unwrap();
+        assert_eq!(writer.frontier().unwrap().0, 2);
+    });
+    let sealed = fixture.robot("seal", &["--seal-relation", "1", "--retain-from", "0"]);
+    assert_eq!(succeeded(&sealed, "sealed"), 2);
+    let result = terminal(&sealed);
+    let run = result
+        .split("\"run\":\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert_eq!(run.len(), 64);
+    assert!(run.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let run_path = fixture
+        .db()
+        .join("strata-blocks")
+        .join(format!("{run}.block"));
+    assert!(run_path.is_file());
+    runtime.block_on(async {
+        let mut writer = Database::open(&commit, fixture.db(), keys()).await.unwrap();
+        let mut third = WriteBatch::new(RelationId(1));
+        third.set_edge_property(EId(101), PropertyKeyId(2), None);
+        third.delete_edge(EId(103));
+        third.add_edge(
+            EId(0),
+            VId(3),
+            VId(1),
+            vec![(PropertyKeyId(2), CanonicalScalar::Int(31))],
+        );
+        third.add_edge(
+            EId(42),
+            VId(2),
+            VId(3),
+            vec![(PropertyKeyId(2), CanonicalScalar::Int(32))],
+        );
+        writer.write(&commit, third).await.unwrap();
+        let mut fourth = WriteBatch::new(RelationId(1));
+        fourth.set_edge_property(EId(101), PropertyKeyId(2), Some(CanonicalScalar::Int(77)));
+        fourth.delete_edge(EId(42));
+        fourth.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(40)));
+        writer.write(&commit, fourth).await.unwrap();
+        assert_eq!(writer.frontier().unwrap().0, 4);
+    });
+    run_path
+}
+
+const NATIVE_RUN_CURRENT: &str =
+    "MATCH (a)-[r:KNOWS]->(b) RETURN r,a,b,r.score AS score,a.id AS source,b.id AS target";
+const NATIVE_RUN_LATEST_ROWS: [&str; 2] = [
+    r#"{"v":1,"event":"row","cells":[{"type":"edge","value":"0"},{"type":"vertex","value":"3"},{"type":"vertex","value":"1"},{"type":"int","value":"31"},{"type":"int","value":"30"},{"type":"int","value":"40"}]}"#,
+    r#"{"v":1,"event":"row","cells":[{"type":"edge","value":"101"},{"type":"vertex","value":"1"},{"type":"vertex","value":"2"},{"type":"int","value":"77"},{"type":"int","value":"40"},{"type":"int","value":"20"}]}"#,
+];
+
+#[test]
+fn native_run_cli_profile_preserves_sealed_and_post_seal_history_across_cold_processes() {
+    let fixture = Fixture::new("native-run-history");
+    native_run_history(&fixture);
+    let profile = native_run_arguments();
+    let expected: [(u64, &[&str]); 4] = [
+        (
+            1,
+            &[
+                r#"{"v":1,"event":"row","cells":[{"type":"edge","value":"101"},{"type":"vertex","value":"1"},{"type":"vertex","value":"2"},{"type":"int","value":"7"},{"type":"int","value":"10"},{"type":"int","value":"20"}]}"#,
+                r#"{"v":1,"event":"row","cells":[{"type":"edge","value":"103"},{"type":"vertex","value":"3"},{"type":"vertex","value":"1"},{"type":"int","value":"9"},{"type":"int","value":"30"},{"type":"int","value":"10"}]}"#,
+            ],
+        ),
+        (
+            2,
+            &[
+                r#"{"v":1,"event":"row","cells":[{"type":"edge","value":"101"},{"type":"vertex","value":"1"},{"type":"vertex","value":"2"},{"type":"int","value":"17"},{"type":"int","value":"10"},{"type":"int","value":"20"}]}"#,
+                r#"{"v":1,"event":"row","cells":[{"type":"edge","value":"103"},{"type":"vertex","value":"3"},{"type":"vertex","value":"1"},{"type":"int","value":"9"},{"type":"int","value":"30"},{"type":"int","value":"10"}]}"#,
+            ],
+        ),
+        (
+            3,
+            &[
+                r#"{"v":1,"event":"row","cells":[{"type":"edge","value":"0"},{"type":"vertex","value":"3"},{"type":"vertex","value":"1"},{"type":"int","value":"31"},{"type":"int","value":"30"},{"type":"int","value":"10"}]}"#,
+                r#"{"v":1,"event":"row","cells":[{"type":"edge","value":"42"},{"type":"vertex","value":"2"},{"type":"vertex","value":"3"},{"type":"int","value":"32"},{"type":"int","value":"20"},{"type":"int","value":"30"}]}"#,
+                r#"{"v":1,"event":"row","cells":[{"type":"edge","value":"101"},{"type":"vertex","value":"1"},{"type":"vertex","value":"2"},{"type":"null"},{"type":"int","value":"10"},{"type":"int","value":"20"}]}"#,
+            ],
+        ),
+        (4, &NATIVE_RUN_LATEST_ROWS),
+    ];
+    for (cut, literal) in expected {
+        let text = format!(
+            "MATCH (a)-[r:KNOWS]->(b) FOR SYSTEM_TIME AS OF SEQ {cut} \
+             RETURN r,a,b,r.score AS score,a.id AS source,b.id AS target"
+        );
+        let actual = native_run_query(&fixture, &profile, &text);
+        assert_eq!(succeeded(&actual, "rows"), cut);
+        assert_eq!(rows(&actual), literal, "historical cut {cut}");
+        assert!(terminal(&actual).contains("\"stream\":true"));
+        let ordinary = native_run_query(&fixture, &["--buffered"], &text);
+        assert_eq!(succeeded(&ordinary, "rows"), cut);
+        assert_eq!(
+            rows(&ordinary),
+            literal,
+            "ordinary buffered source at cut {cut}"
+        );
+    }
+    let current = native_run_query(&fixture, &profile, NATIVE_RUN_CURRENT);
+    assert_eq!(succeeded(&current, "rows"), 4);
+    assert_eq!(rows(&current), NATIVE_RUN_LATEST_ROWS);
+    assert_eq!(succeeded(&fixture.robot("compact", &[]), "compacted"), 4);
+    let reopened = native_run_query(&fixture, &profile, NATIVE_RUN_CURRENT);
+    assert_eq!(succeeded(&reopened, "rows"), 4);
+    assert_eq!(reopened.stdout, current.stdout);
+}
+
+#[test]
+fn native_run_cli_profile_is_demand_driven_and_selected_corruption_never_falls_back() {
+    let fixture = Fixture::new("native-run-demand");
+    let run_path = native_run_history(&fixture);
+    let profile = native_run_arguments();
+
+    // The base has three retained incidences, while suffix statements include
+    // superseded and retired versions. The profile bounds their raw combined
+    // population, not the two visible rows returned by the current query.
+    let mut tight = profile.clone();
+    let at = tight
+        .iter()
+        .position(|flag| *flag == "--native-run-max-incidences")
+        .unwrap();
+    tight[at + 1] = "3";
+    let cap = native_run_query(&fixture, &tight, NATIVE_RUN_CURRENT);
+    refused(&cap, 3, "query");
+    assert!(terminal(&cap).contains("\"code\":\"budget\""));
+    assert!(terminal(&cap).contains("native run source incidences"));
+    assert!(rows(&cap).is_empty());
+
+    let spill = fixture.dir.join("native-spill");
+    std::fs::create_dir(&spill).unwrap();
+    let mut spilled = vec![
+        "--spill-dir",
+        spill.to_str().unwrap(),
+        "--spill-memory-bytes",
+        "8388608",
+    ];
+    spilled.extend_from_slice(&profile);
+    let ordered = format!("{NATIVE_RUN_CURRENT} ORDER BY r DESC");
+    let external = native_run_query(&fixture, &spilled, &ordered);
+    assert_eq!(succeeded(&external, "rows"), 4);
+    assert_eq!(
+        rows(&external),
+        [NATIVE_RUN_LATEST_ROWS[1], NATIVE_RUN_LATEST_ROWS[0]]
+    );
+    assert_eq!(std::fs::read_dir(&spill).unwrap().count(), 0);
+
+    let original = std::fs::read(&run_path).unwrap();
+    let mut damaged = original.clone();
+    let middle = damaged.len() / 2;
+    damaged[middle] ^= 1;
+    std::fs::write(&run_path, &damaged).unwrap();
+    let before = directory_bytes(&fixture.db());
+    // Every Tier-D source is healthy. Ordinary cold admission and query work;
+    // the opted-in cursor must nevertheless surface its selected run failure.
+    let ordinary = native_run_query(&fixture, &["--buffered"], NATIVE_RUN_CURRENT);
+    assert_eq!(succeeded(&ordinary, "rows"), 4);
+    assert_eq!(rows(&ordinary), NATIVE_RUN_LATEST_ROWS);
+    let selected = native_run_query(&fixture, &profile, NATIVE_RUN_CURRENT);
+    refused(&selected, 3, "query");
+    assert!(terminal(&selected).contains("\"code\":\"execution\""));
+    assert!(rows(&selected).is_empty());
+
+    // External ordering must consume its complete native input before the
+    // selected page, so LIMIT 0 cannot conceal a selected run failure here.
+    let external_zero = format!("{ordered} LIMIT 0");
+    let failed_order = native_run_query(&fixture, &spilled, &external_zero);
+    refused(&failed_order, 3, "query");
+    assert!(terminal(&failed_order).contains("\"code\":\"execution\""));
+    assert!(!String::from_utf8_lossy(&failed_order.stdout).contains("\"event\":\"columns\""));
+    assert_eq!(std::fs::read_dir(&spill).unwrap().count(), 0);
+
+    let mut quota = profile.clone();
+    quota.extend_from_slice(&["--max-snapshot-records", "0"]);
+    let refused_before_payload = native_run_query(&fixture, &quota, NATIVE_RUN_CURRENT);
+    refused(&refused_before_payload, 3, "query");
+    assert!(terminal(&refused_before_payload).contains("\"code\":\"budget\""));
+    assert!(terminal(&refused_before_payload).contains("SnapshotRecords"));
+    assert!(rows(&refused_before_payload).is_empty());
+
+    let zero_page = format!("{NATIVE_RUN_CURRENT} LIMIT 0");
+    let empty = native_run_query(&fixture, &quota, &zero_page);
+    assert_eq!(succeeded(&empty, "rows"), 4);
+    assert!(rows(&empty).is_empty());
+    // Zero is an explicit profile value, never silently raised. With no
+    // source demand even this profile can finish without reading the bad run.
+    let mut zero = vec!["--buffered"];
+    for (flag, _) in NATIVE_RUN_FLAGS {
+        zero.extend_from_slice(&[flag, "0"]);
+    }
+    assert_eq!(
+        succeeded(&native_run_query(&fixture, &zero, &zero_page), "rows"),
+        4
+    );
+    assert_eq!(directory_bytes(&fixture.db()), before);
+    std::fs::write(&run_path, &original).unwrap();
+    let zero_refusal = native_run_query(&fixture, &zero, NATIVE_RUN_CURRENT);
+    refused(&zero_refusal, 3, "query");
+    assert!(terminal(&zero_refusal).contains("\"code\":\"budget\""));
+    let healthy = native_run_query(&fixture, &profile, NATIVE_RUN_CURRENT);
+    assert_eq!(succeeded(&healthy, "rows"), 4);
+    assert_eq!(rows(&healthy), NATIVE_RUN_LATEST_ROWS);
+}
+
+#[test]
+fn native_run_cli_profile_requires_four_explicit_native_bounds_before_open() {
+    let fixture = Fixture::new("native-run-preflight");
+    let profile = native_run_arguments();
+    let refuse = |args: &[&str]| {
+        refused(
+            &native_run_query(&fixture, args, NATIVE_RUN_CURRENT),
+            2,
+            "usage",
+        );
+        assert!(!fixture.db().exists());
+    };
+    let mut without_buffered = Vec::new();
+    for (flag, value) in NATIVE_RUN_FLAGS {
+        without_buffered.extend_from_slice(&[flag, value]);
+    }
+    refuse(&without_buffered);
+    for (missing, _) in NATIVE_RUN_FLAGS {
+        let mut partial = vec!["--buffered"];
+        for (flag, value) in NATIVE_RUN_FLAGS {
+            if flag != missing {
+                partial.extend_from_slice(&[flag, value]);
+            }
+        }
+        refuse(&partial);
+        let mut repeated = profile.clone();
+        repeated.extend_from_slice(&[missing, "1"]);
+        refuse(&repeated);
+    }
+    for (flag, bad) in [
+        ("--native-run-max-rows", "-1"),
+        ("--native-run-max-incidences", "1e3"),
+        ("--native-run-image-bytes", "1.5"),
+        ("--native-run-property-bytes", "18446744073709551616"),
+        ("--native-run-max-incidences", "18446744073709551615"),
+    ] {
+        let mut invalid = profile.clone();
+        let at = invalid
+            .iter()
+            .position(|candidate| *candidate == flag)
+            .unwrap();
+        invalid[at + 1] = bad;
+        refuse(&invalid);
+    }
+    for extra in [
+        &["--stream"][..],
+        &["--certify-to", "never-created.cert"][..],
+        &["--sealed"][..],
+    ] {
+        let mut incompatible = profile.clone();
+        incompatible.extend_from_slice(extra);
+        refuse(&incompatible);
+    }
+    for (extra, text) in [
+        (&[][..], "CALL fnx.pagerank() YIELD vertex,score"),
+        (&["--sealed"][..], "CALL fnx.pagerank() YIELD vertex,score"),
+        (
+            &["--sealed"][..],
+            "CALL fnx.weakly_connected_components() YIELD vertex RETURN vertex LIMIT 0",
+        ),
+    ] {
+        let mut incompatible = profile.clone();
+        incompatible.extend_from_slice(extra);
+        refused(&native_run_query(&fixture, &incompatible, text), 2, "usage");
+        assert!(!fixture.db().exists());
+    }
+    assert!(!fixture.dir.join("never-created.cert").exists());
+}
+
 /// `--bindings-file` adds its bindings to the flags' (the fixture binds
 /// Person and id by flag), a name or ID repeated across the two is a usage
 /// error, and a FIFO is refused without being opened (opening one blocks).
@@ -2000,12 +2331,7 @@ fn embedded_write_and_transaction_if_current_guard_durable_frontier() {
 
     let stale_txn = fixture.robot(
         "transaction",
-        &[
-            "--if-current",
-            "1",
-            "--write",
-            "CREATE (:Person {id: 88})",
-        ],
+        &["--if-current", "1", "--write", "CREATE (:Person {id: 88})"],
     );
     refused(&stale_txn, 3, "query");
     assert!(

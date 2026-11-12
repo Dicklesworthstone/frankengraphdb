@@ -133,6 +133,30 @@ fn classify_one(error: &(dyn Error + 'static)) -> Option<(Code, Option<usize>)> 
     if error.is::<fgdb_gql::GqlBudgetExceeded>() || error.is::<fgdb_gql::GlaLimitExceeded>() {
         return Some((Code::Budget, None));
     }
+    // Buffered sources retain typed physical admission failures through their
+    // error chain. Only explicit ceilings are budgets: corrupt bytes, invalid
+    // profiles, arithmetic overflow and allocator failure are not one.
+    if matches!(
+        error.downcast_ref::<fgdb::BufferedReadError>(),
+        Some(fgdb::BufferedReadError::Limit { .. })
+    ) || matches!(
+        error.downcast_ref::<fgdb_strata::tiered::memory::MemoryError>(),
+        Some(fgdb_strata::tiered::memory::MemoryError::ResourceExhausted { .. })
+    ) || matches!(
+        error.downcast_ref::<fgdb_strata::tiered::buffer::BufferError>(),
+        Some(
+            fgdb_strata::tiered::buffer::BufferError::ExtentTooLarge { .. }
+                | fgdb_strata::tiered::buffer::BufferError::CacheSlotsExhausted { .. }
+        )
+    ) || matches!(
+        error.downcast_ref::<fgdb_strata::store::StoreError>(),
+        Some(
+            fgdb_strata::store::StoreError::ObjectTooLarge { .. }
+                | fgdb_strata::store::StoreError::RootReferenceLimit { .. }
+        )
+    ) {
+        return Some((Code::Budget, None));
+    }
     if let Some(error) = error.downcast_ref::<fgdb_strata::tiered::sealed::SealedError>()
         && error.is_admission_limit()
     {
@@ -260,5 +284,72 @@ pub(crate) fn unsupported_construct(text: &str) -> Result<(), Failure> {
     match fgdb_gql::GqlUnsupportedConstruct::find(text, false) {
         Some(construct) => Err(Failure::statement(construct)),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Code;
+    use fgdb::BufferedReadError;
+    use fgdb_strata::store::StoreError;
+    use fgdb_strata::tiered::buffer::BufferError;
+    use fgdb_strata::tiered::memory::MemoryError;
+    use fgdb_strata::tiered::sealed::{AdjRunError, SealedError};
+
+    #[test]
+    fn nested_buffered_native_errors_preserve_cli_budget_execution_and_io_codes() {
+        // These errors cross the GQL/source/buffered/store wrappers before
+        // reaching the CLI. Display text cannot establish a budget or I/O code.
+        let cases = [
+            (
+                BufferedReadError::Store(Box::new(StoreError::MalformedAdjRun(Box::new(
+                    AdjRunError::Sealed(SealedError::Limit {
+                        resource: "property bytes",
+                        requested: 8,
+                        limit: 7,
+                    }),
+                )))),
+                3,
+                Code::Budget,
+            ),
+            (
+                BufferedReadError::Buffer(BufferError::Memory(MemoryError::ResourceExhausted {
+                    requested: 8,
+                    available: 7,
+                    limit: 16,
+                })),
+                3,
+                Code::Budget,
+            ),
+            (
+                BufferedReadError::Memory(MemoryError::AllocationFailed { requested: 8 }),
+                3,
+                Code::Execution,
+            ),
+            (
+                BufferedReadError::Store(Box::new(StoreError::MalformedAdjRun(Box::new(
+                    AdjRunError::ChecksumMismatch,
+                )))),
+                3,
+                Code::Execution,
+            ),
+            (
+                BufferedReadError::Store(Box::new(StoreError::RootBlockLoad {
+                    at: 0,
+                    error: Box::new(StoreError::Io(std::io::Error::other(
+                        "ResourceExhausted is only text here",
+                    ))),
+                })),
+                5,
+                Code::Io,
+            ),
+        ];
+        for (source, exit, code) in cases {
+            let error =
+                fgdb::BufferedQueryError::Source(fgdb_gql::stream::VertexScanError::Source(source));
+            let failure = crate::execution_failure(error);
+            assert_eq!(failure.code, exit, "{failure:?}");
+            assert_eq!(failure.refusal, code, "{failure:?}");
+        }
     }
 }

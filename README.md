@@ -397,6 +397,14 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property score=1 \
   --buffered --buffer-memory-bytes 67108864 \
   "MATCH (n) RETURN n AS node, n.score AS score LIMIT 100"
 
+# Select an already-published durable relation run with explicit native limits
+# This small profile also admits the relation's post-seal history under its caps.
+fgdb query --db mydb.fgdbdir --key-file fgdb.keys \
+  --relation KNOWS=1 --property score=1 --buffered --max-work-units 1000000 \
+  --native-run-max-rows 64 --native-run-max-incidences 128 \
+  --native-run-image-bytes 65536 --native-run-property-bytes 4096 \
+  "MATCH (a)-[r:KNOWS]->(b) RETURN r, a, b, r.score AS score LIMIT 100"
+
 # External ORDER BY/DISTINCT with private query scratch in an existing directory
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property score=1 \
   --spill-dir /tmp --spill-memory-bytes 67108864 --spill-disk-bytes 1073741824 \
@@ -635,11 +643,31 @@ Decoded, compressed and cooperative execution share one cancellable kernel. Comp
 
 **Durable compressed relation runs.** `Database::seal_relation` materializes a selected relation as a registered, content-addressed `AdjRunSegment` (FGRN v1). The run preserves parallel edges, historical content versions and aligned edge properties. Its immutable `OriginBirthOrder` comes from each edge's original authenticated creation effect; a later property update cannot replace that origin with its content-version start. Publication attaches the run to a V7 partition root and advances the existing atomic root slot without creating a graph commit or changing the semantic sequence.
 
-`open_sealed_read` and `open_prism_sealed_projection` discover these attachments after a process restart, verify their keyed identities, exact source lineage, dictionaries, stable-ID digest and column bounds, and reopen the compressed source without reconstructing it. Native composed queries and authorized sessions retain the same historical and capability filtering. Ordinary graph writes publish a successor without old run attachments, so a stale run cannot answer a new generation. A cut below the run's retained floor uses the retained Tier-D history; corruption of a selected attached run is an error.
+`open_sealed_read` and `open_prism_sealed_projection` discover these attachments after a process restart, verify their keyed identities, exact source lineage, dictionaries, stable-ID digest and column bounds, and reopen the compressed source without reconstructing it. Native composed queries and authorized sessions retain the same historical and capability filtering. Successor roots may carry run attachments with their original verified horizon; consumers cannot use the base alone beyond that horizon. A cut below the run's retained floor uses the retained Tier-D history; corruption of a selected attached run is an error.
 
 The CLI exposes this maintenance operation as `fgdb seal --seal-relation <u64> [--retain-from <u64>]` with the usual database and key-file arguments. The floor defaults to zero. Its four `--sealed-*` image limits and six `--seal-source-*` source limits can each be set explicitly, including zero. A successful robot response reports `kind=sealed`, the unchanged sequence, relation, retained floor and run identity after root-slot publication. `scrub` retains the authenticated run inventory before checking storage, so a damaged parent root cannot hide an attached run's damaged bytes.
 
 This first durable profile covers one forward relation in one admitted lineage. It retains the complete Tier-D source and still authenticates its history for native pattern/property reads and Prism's vertex directory. Standalone Prism admission discards decoded adjacency as it goes. Source bytes, source records, compressed bytes and properties have separate explicit limits; this is not a page-mapped or overall-RSS bound. Cross-branch attachment, automatic migration, page-level Merkle reads and retention-authorized physical reclamation remain open.
+
+**Native queries over durable runs.** Local `query --buffered` can opt into the durable-run source by supplying all four of `--native-run-max-rows`, `--native-run-max-incidences`, `--native-run-image-bytes` and `--native-run-property-bytes`. There are no implicit native-run limits; each is a decimal platform-size integer, including zero, accepted once. Partial profiles and profiles without `--buffered` refuse before opening storage. The profile also reaches supported native sources beneath `--spill-dir`; it does not expand either executor's supported query shapes. Analytics `CALL fnx` and `--sealed` keep their separate profiles and reject these flags.
+
+Typed edge roots, join children and correlated probes may select an attached
+floor-zero run in plain, non-ECS storage. The source combines the unchanged run
+with its authenticated post-seal statements, preserving historical identities,
+exact properties, retirements and canonical EId order.
+`--native-run-max-incidences` also caps base versions plus raw suffix statements
+before suffix payload reads. Decoder, suffix and locator allocations remain
+inside the existing `--buffer-memory-bytes` pool and share the query's work
+allowance; the CLI never increases either allowance to fit the profile.
+Loading is lazy, so a direct streaming `LIMIT 0` does not decode a run. External
+spilling retains its complete-input semantics, including before a final empty
+page. Once selected, a damaged run or required suffix fails the query. Missing
+or pruned runs and unsupported source shapes keep ordinary buffered reads.
+Complete initial Tier-D admission, whole-run decoding and retained suffix
+memory remain; this is not a page-selective or overall-RSS bound. The Rust API
+exposes the same choice through `BufferedReadView::set_native_run_limits`, with
+allocation-free configuration validation available as
+`BufferedReadLimits::validate_native_run_limits` before opening a view.
 
 Commit-pack publication also reuses members already stored in other packs after fresh identity/plaintext checks, inode sync and durable readback. It groups those proofs by physical pack and waits for the namespace barriers before issuing receipts. Regrouped rebuild batches therefore need to write only their new members. Existing canonical-file damage still refuses ordinary publication; explicit derived-data repair retains its separate authority.
 
