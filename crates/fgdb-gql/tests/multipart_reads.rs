@@ -7127,3 +7127,333 @@ mod graph_reading_list_sources {
         );
     }
 }
+
+mod collect_subqueries {
+    use super::*;
+    use fgdb_gql::GraphIntegerErrorKind;
+
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+
+    fn null() -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Null)
+    }
+
+    fn vertex(value: u128) -> GraphValue {
+        GraphValue::Vertex(VId(value))
+    }
+
+    fn list(values: impl IntoIterator<Item = GraphValue>) -> GraphValue {
+        GraphValue::List(values.into_iter().collect())
+    }
+
+    fn row(values: impl IntoIterator<Item = GraphValue>) -> GraphValueRow {
+        GraphValueRow::from_owned_values(values.into_iter().collect())
+    }
+
+    #[test]
+    fn collect_subqueries_preserve_nulls_duplicates_order_and_absence() {
+        assert_eq!(
+            execute("RETURN COLLECT { UNWIND [3,NULL,3,1] AS x RETURN x } AS values"),
+            vec![row([list([int(3), null(), int(3), int(1)])])]
+        );
+        assert_eq!(
+            execute("RETURN COLLECT { UNWIND [] AS x RETURN x } AS values"),
+            vec![row([list([])])]
+        );
+        // The aggregate and the scalar subquery intentionally have different
+        // NULL semantics: collect(x) drops NULL; COLLECT { RETURN x } retains it.
+        assert_eq!(
+            execute("UNWIND [3,NULL,3,1] AS x RETURN collect(x) AS values"),
+            vec![row([list([int(3), int(3), int(1)])])]
+        );
+        let expected = vec![
+            row([vertex(1), list([vertex(3), vertex(2), vertex(2)])]),
+            row([vertex(2), list([vertex(3)])]),
+            row([vertex(3), list([vertex(4)])]),
+            row([vertex(4), list([])]),
+        ];
+        for statement in [
+            "MATCH (n) RETURN n,COLLECT { MATCH (n)-[:R]->(m) \
+             RETURN m ORDER BY m DESC } AS targets ORDER BY n",
+            "MATCH (n) WITH n,COLLECT { MATCH (n)-[:R]->(m) \
+             RETURN m ORDER BY m DESC } AS targets RETURN n,targets ORDER BY n",
+        ] {
+            assert_eq!(execute(statement), expected, "{statement}");
+        }
+        assert_eq!(
+            execute(
+                "MATCH (n) WITH n ORDER BY n DESC LIMIT 3 \
+                 RETURN n,COLLECT { MATCH (n)-[:R]->(m) RETURN m ORDER BY m DESC } AS targets"
+            ),
+            expected.iter().rev().take(3).cloned().collect::<Vec<_>>()
+        );
+        let arguments = GqlParameters::new()
+            .with_list("items", vec![vertex(1), null(), vertex(4), vertex(1)])
+            .unwrap();
+        let template = prepare_items(
+            "UNWIND $items AS n RETURN n,\
+             COLLECT { MATCH (n)-[:R]->(m) RETURN m ORDER BY m } AS targets,\
+             COLLECT { RETURN n } AS original",
+        );
+        assert_eq!(
+            run(
+                &template.bind_parameters(&arguments).unwrap(),
+                wide(),
+                &mut || Ok(())
+            )
+            .unwrap()
+            .value,
+            vec![
+                row([
+                    vertex(1),
+                    list([vertex(2), vertex(2), vertex(3)]),
+                    list([vertex(1)])
+                ]),
+                row([null(), list([]), list([null()])]),
+                row([vertex(4), list([]), list([vertex(4)])]),
+                row([
+                    vertex(1),
+                    list([vertex(2), vertex(2), vertex(3)]),
+                    list([vertex(1)])
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_subquery_pipelines_compose_with_membership_grouping_and_lazy_list_reuse() {
+        assert_eq!(
+            execute("WITH {p:7} AS collect RETURN (collect{.p}).p AS value"),
+            vec![row([int(7)])]
+        );
+        let values = list([int(3), int(2), int(2)]);
+        assert_eq!(
+            execute(
+                "WITH COLLECT { UNWIND [4,2,2,NULL,3] AS x \
+                 WITH x WHERE x IS NOT NULL RETURN x ORDER BY x DESC SKIP 1 LIMIT 3 } AS values \
+                 RETURN values,2 IN values AS present,size(values) AS total,\
+                 CASE WHEN true THEN values ELSE [1/0] END AS selected,\
+                 coalesce(values,[1/0]) AS first"
+            ),
+            vec![row([
+                values.clone(),
+                GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                int(3),
+                values.clone(),
+                values,
+            ])]
+        );
+        assert_eq!(
+            execute(
+                "RETURN 2 IN COLLECT { UNWIND [1,2,2] AS x RETURN x } AS present,\
+                 size(COLLECT { UNWIND [1,NULL,1] AS x RETURN x }) AS total"
+            ),
+            vec![row([
+                GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                int(3)
+            ])]
+        );
+        for (body, expected) in [
+            ("MATCH (n) RETURN count(n) AS total", vec![int(4)]),
+            (
+                "MATCH (n) WHERE n.p > 99 RETURN count(n) AS total",
+                vec![int(0)],
+            ),
+            ("MATCH (n) WHERE n.p > 99 RETURN n", vec![]),
+            (
+                "MATCH (n) WITH n.p AS value,count(n) AS total RETURN total ORDER BY value",
+                vec![int(1), int(2), int(1)],
+            ),
+            (
+                "UNWIND [3,2,3,1] AS x RETURN DISTINCT x ORDER BY x",
+                vec![int(1), int(2), int(3)],
+            ),
+        ] {
+            let statement = format!("RETURN COLLECT {{ {body} }} AS values");
+            assert_eq!(
+                execute(&statement),
+                vec![row([list(expected)])],
+                "{statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn collect_subqueries_nest_and_capture_list_locals_without_leaking_body_names() {
+        let expected = vec![
+            row([
+                vertex(1),
+                list([list([vertex(3)]), list([vertex(3)]), list([vertex(4)])]),
+            ]),
+            row([vertex(2), list([list([vertex(4)])])]),
+            row([vertex(3), list([list([])])]),
+            row([vertex(4), list([])]),
+        ];
+        assert_eq!(
+            execute(
+                "MATCH (n) RETURN n,COLLECT { MATCH (n)-[:R]->(m) \
+                 RETURN COLLECT { MATCH (m)-[:R]->(last) RETURN last ORDER BY last } AS tails \
+                 ORDER BY m } AS paths ORDER BY n"
+            ),
+            expected
+        );
+        let arguments = GqlParameters::new()
+            .with_list("items", vec![vertex(1), vertex(4), vertex(1)])
+            .unwrap();
+        let query = prepare_items(
+            "WITH $items AS roots RETURN [n IN roots | \
+             COLLECT { MATCH (n)-[:R]->(m) RETURN m ORDER BY m }] AS targets",
+        )
+        .bind_parameters(&arguments)
+        .unwrap();
+        assert_eq!(
+            run(&query, wide(), &mut || Ok(())).unwrap().value,
+            vec![row([list([
+                list([vertex(2), vertex(2), vertex(3)]),
+                list([]),
+                list([vertex(2), vertex(2), vertex(3)]),
+            ])])]
+        );
+        assert_eq!(
+            execute(
+                "WITH COLLECT { MATCH (n) RETURN n ORDER BY n } AS nodes \
+                 RETURN COLLECT { UNWIND nodes AS n RETURN n.p AS value ORDER BY value } AS values"
+            ),
+            vec![row([list([int(1), int(2), int(2), int(3)])])]
+        );
+    }
+
+    #[test]
+    fn collect_subquery_shape_scope_writes_and_lazy_arms_refuse_before_catalog_access() {
+        for statement in [
+            "RETURN COLLECT { MATCH (n) } AS values",
+            "RETURN COLLECT { RETURN 1 AS a,2 AS b } AS values",
+            "MATCH (n) RETURN COLLECT { CREATE (m) RETURN m } AS values",
+            "MATCH (n) RETURN COLLECT { MATCH (n)-[:R]->(private) RETURN private } AS values,private",
+            "RETURN CASE WHEN true THEN [] ELSE COLLECT { MATCH (n) RETURN 1/0 AS bad } END AS values",
+            "RETURN coalesce([],COLLECT { MATCH (n) RETURN 1/0 AS bad }) AS values",
+            "RETURN CASE WHEN true THEN [] ELSE [x IN [1] | COLLECT { MATCH (n) RETURN n }] END AS values",
+            "RETURN COLLECT { RETURN CASE WHEN true THEN [] ELSE COLLECT { RETURN 1/0 AS bad } END AS value } AS values",
+            "WITH true AS end RETURN CASE WHEN end THEN COLLECT { RETURN 1 AS value } ELSE [] END AS values",
+            "WITH true AS end RETURN CASE WHEN (end) THEN COLLECT { RETURN 1 AS value } ELSE [] END AS values",
+            "RETURN {value:CASE WHEN true THEN [] ELSE COLLECT { RETURN 1/0 AS bad } END} AS values",
+        ] {
+            let mut catalog_reads = 0;
+            let result = PreparedGraphSetText::prepare(statement, |kind, name| {
+                catalog_reads += 1;
+                symbols(kind, name)
+            });
+            assert!(result.is_err(), "{statement}");
+            assert_eq!(catalog_reads, 0, "{statement}");
+        }
+    }
+
+    #[test]
+    fn collect_subqueries_rebind_and_keep_cumulative_limits_and_late_errors() {
+        let template = PreparedGraphSetText::prepare(
+            "MATCH (n) RETURN n,COLLECT { MATCH (n)-[:R]->(m) \
+             WHERE m.p >= $minimum RETURN m.p AS value ORDER BY value } AS values ORDER BY n",
+            symbols,
+        )
+        .unwrap();
+        let definition = template.canonical_template_bytes();
+        for (minimum, values) in [
+            (2, vec![vec![2, 2, 2], vec![2], vec![3], vec![]]),
+            (3, vec![vec![], vec![], vec![3], vec![]]),
+        ] {
+            let query = template
+                .bind_parameters(&GqlParameters::new().with_int64("minimum", minimum).unwrap())
+                .unwrap();
+            let measured = run(&query, wide(), &mut || Ok(())).unwrap();
+            assert_eq!(
+                measured.value,
+                values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, values)| {
+                        row([vertex(index as u128 + 1), list(values.into_iter().map(int))])
+                    })
+                    .collect::<Vec<_>>()
+            );
+            let caps = [
+                measured.rows.snapshot_records,
+                measured.rows.result_rows,
+                measured.evaluator.work_units,
+                measured.evaluator.scratch_entries,
+            ];
+            assert_eq!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                    &mut || Ok(())
+                )
+                .unwrap(),
+                measured
+            );
+            for dimension in 0..4 {
+                if caps[dimension] == 0 {
+                    continue;
+                }
+                let mut limited = caps;
+                limited[dimension] -= 1;
+                assert!(
+                    run(
+                        &query,
+                        GqlQueryPolicy::new(limited[0], limited[1], limited[2], limited[3]),
+                        &mut || Ok(())
+                    )
+                    .is_err()
+                );
+            }
+            assert!(matches!(
+                run(&query, wide(), &mut || Err(7)),
+                Err(GqlQueryError::Interrupted(7))
+            ));
+            assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap(), measured);
+        }
+        assert_eq!(template.canonical_template_bytes(), definition);
+        for suffix in ["", " LIMIT 0"] {
+            let query = prepare(&format!(
+                "RETURN COLLECT {{ UNWIND [2,1,0] AS x RETURN 1/x AS value }} AS values{suffix}"
+            ));
+            assert!(matches!(
+                run(&query, wide(), &mut || Ok(())),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                    if error.kind == GraphIntegerErrorKind::DivisionByZero
+            ));
+        }
+    }
+
+    #[test]
+    fn collect_subqueries_keep_unavailable_element_properties_as_null_members() {
+        let query =
+            prepare("MATCH (n) RETURN n,COLLECT { RETURN n.p AS value } AS values ORDER BY n");
+        let result = query
+            .execute_governed_with_elements(
+                wide(),
+                |pattern, remaining| {
+                    pattern.plan().execute_governed_with_properties(
+                        4,
+                        (1..=4).map(VId),
+                        [],
+                        |_, _| Ok::<_, &'static str>(true),
+                        |_, _| Ok(None),
+                        remaining,
+                        || Ok::<_, usize>(()),
+                    )
+                },
+                |_, _, _| panic!("COLLECT is a native read, not a procedure call"),
+                |_, _| Ok(None),
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+        assert_eq!(
+            result.value,
+            (1..=4)
+                .map(|id| row([vertex(id), list([null()])]))
+                .collect::<Vec<_>>()
+        );
+    }
+}

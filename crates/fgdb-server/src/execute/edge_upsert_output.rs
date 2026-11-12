@@ -4,6 +4,7 @@
 use super::{Refusal, convert, write_refusal};
 use fgdb::WriteTxnError;
 use fgdb_gql::algebra::GraphValueRow;
+use fgdb_gql::{GraphAggregateRow, GraphAggregateTextSlot};
 use fgdb_protocol::body::{
     Body, BodyError, ErrorCode, MAX_COLUMNS, MAX_NAME_BYTES, ResultChunk, WireValue,
 };
@@ -32,19 +33,10 @@ fn body_refusal(error: BodyError) -> Refusal {
     Refusal::new(code, error.to_string())
 }
 
-/// The native caller retains its rollback workspace and live permit. Only
-/// completed wire cells escape this helper; a later row failure exposes none.
-/// Admit every borrowed value node and payload before converting the row.
-/// Copy work and the codec's encoded-byte work share the live signed permit.
-/// The codec may retain a temporary row-sized encoding; this is not a new
-/// byte-memory bound. Negotiated frame sizes, flow credit, delivery/revocation
-/// and I/O failures remain transport responsibilities after native completion.
-pub(super) fn collect(
+fn schema(
     columns: &[String],
-    input: &[GraphValueRow],
-    work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
-) -> Result<Vec<Vec<WireValue>>, Refusal> {
-    let mut charge = |units| work(units).map_err(|error| write_refusal(&error));
+    charge: &mut dyn FnMut(u64) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
     charge(1)?;
     if columns.len() > MAX_COLUMNS {
         return Err(body_refusal(BodyError::TooLarge));
@@ -65,6 +57,32 @@ pub(super) fn collect(
     }
     .encode()
     .map_err(body_refusal)?;
+    Ok(())
+}
+
+fn encoded_row(
+    cells: &[WireValue],
+    charge: &mut dyn FnMut(u64) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
+    let bytes = ResultChunk::row_len(cells).map_err(body_refusal)?;
+    let units = u64::try_from(bytes.div_ceil(64)).map_err(|_| body_refusal(BodyError::TooLarge))?;
+    charge(units)
+}
+
+/// The native caller retains its rollback workspace and live permit. Only
+/// completed wire cells escape this helper; a later row failure exposes none.
+/// Admit every borrowed value node and payload before converting the row.
+/// Copy work and the codec's encoded-byte work share the live signed permit.
+/// The codec may retain a temporary row-sized encoding; this is not a new
+/// byte-memory bound. Negotiated frame sizes, flow credit, delivery/revocation
+/// and I/O failures remain transport responsibilities after native completion.
+pub(crate) fn collect(
+    columns: &[String],
+    input: &[GraphValueRow],
+    work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+) -> Result<Vec<Vec<WireValue>>, Refusal> {
+    let mut charge = |units| work(units).map_err(|error| write_refusal(&error));
+    schema(columns, &mut charge)?;
     let mut rows = Vec::new();
     for row in input {
         charge(1)?;
@@ -79,10 +97,41 @@ pub(super) fn collect(
         // Validate and reserve the entire borrowed row before any wire copy.
         admission::row(row.values(), &mut charge)?;
         let cells: Vec<_> = row.values().iter().map(convert::graph).collect();
-        let bytes = ResultChunk::row_len(&cells).map_err(body_refusal)?;
-        let units =
-            u64::try_from(bytes.div_ceil(64)).map_err(|_| body_refusal(BodyError::TooLarge))?;
-        charge(units)?;
+        encoded_row(&cells, &mut charge)?;
+        rows.push(cells);
+    }
+    Ok(rows)
+}
+
+/// Preserve the native aggregate domains and RETURN ordering through the same
+/// bounded borrowed-output admission used by ordinary transaction rows.
+/// No intermediate GraphValueRow can narrow a count, sum or rational average.
+pub(crate) fn collect_aggregate(
+    columns: &[String],
+    slots: &[GraphAggregateTextSlot],
+    input: &[GraphAggregateRow],
+    work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+) -> Result<Vec<Vec<WireValue>>, Refusal> {
+    let mut charge = |units| work(units).map_err(|error| write_refusal(&error));
+    schema(columns, &mut charge)?;
+    if slots.len() != columns.len() {
+        return Err(Refusal::new(
+            ErrorCode::Execution,
+            "native aggregate output width mismatch",
+        ));
+    }
+    let mut rows = Vec::new();
+    for row in input {
+        charge(1)?;
+        admission::aggregate(row, slots, &mut charge)?;
+        let cells: Vec<_> = slots
+            .iter()
+            .map(|slot| match *slot {
+                GraphAggregateTextSlot::GroupKey(at) => convert::graph(&row.keys()[at]),
+                GraphAggregateTextSlot::Aggregate(at) => convert::cell(&row.values()[at]),
+            })
+            .collect();
+        encoded_row(&cells, &mut charge)?;
         rows.push(cells);
     }
     Ok(rows)

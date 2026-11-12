@@ -2,7 +2,7 @@
 
 use super::{Database, Execution, Vfs, WriteTxn, WriteTxnError, selection};
 use fgdb_delta_types::ElementId;
-use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlQueryExecution, GqlQueryPolicy,
     GraphElementMetadata, GraphElementMetadataError, ReverseSymbolCatalog,
@@ -58,16 +58,16 @@ where
 /// All returning owners enter this boundary only after staging their final
 /// effects. Ordinary no-op admission creates no additional read or debit.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn admit_output<V: Vfs + Clone, Clock: FnMut() -> u64>(
+pub(super) fn admit_output<V: Vfs + Clone, Clock: FnMut() -> u64, Row>(
     transaction: &WriteTxn,
     database: &Database<V>,
     cx: &QueryCx,
     scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
     policy: GqlQueryPolicy,
-    result: &mut GqlQueryExecution<GraphValueRow>,
+    result: &mut GqlQueryExecution<Row>,
     admit: impl FnOnce(
-        &[GraphValueRow],
+        &[Row],
         &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
         &mut dyn AuthorizedWriteOutput,
     ) -> Result<(), WriteTxnError>,

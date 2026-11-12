@@ -481,6 +481,36 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteT
         ))
     }
 
+    fn procedure(
+        &mut self,
+        call: &fgdb_gql::PreparedProcedureCall,
+        arguments: &[fgdb_gql::algebra::GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<WriteTxnError, WriteTxnError>>>
+    {
+        if !crate::query::is_catalog(call) {
+            return None;
+        }
+        Some(
+            crate::query::catalog_procedure(
+                call,
+                arguments,
+                policy,
+                |symbol| match symbol {
+                    fgdb_gql::GraphSymbol::Label(id) => self.scope.allows_label(id),
+                    fgdb_gql::GraphSymbol::Relation(id) => self.scope.allows_relation(id),
+                    fgdb_gql::GraphSymbol::Property(id) => self.scope.allows_property(id),
+                },
+                || {
+                    self.cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                    self.execution.borrow_mut().poll()
+                },
+                |units| self.execution.borrow_mut().work(units),
+            )
+            .map_err(|error| error.map_source(|_| WriteTxnError::AuthorizedMutationRefused)),
+        )
+    }
+
     fn element_property(
         &mut self,
         element: fgdb_delta_types::ElementId,
@@ -1724,7 +1754,7 @@ impl<V: Vfs + Clone> Database<V> {
         })
         .map_err(source)?;
         let allowance = remaining(policy, &state.used, state.mutation_effects, true).query;
-        let mut result = query_cx
+        let result = query_cx
             .with_restriction(|| {
                 let controls = RefCell::new(&mut state.execution);
                 let database = RefCell::new(&mut *self);
@@ -1744,6 +1774,85 @@ impl<V: Vfs + Clone> Database<V> {
                 )
             })
             .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
+        self.finish_authorized_chain_read(query_cx, policy, scope, state, result, admit)
+    }
+
+    /// The exact aggregate owner receives the same masked staged source as a
+    /// row read. No integer sum or rational mean crosses a scalar conversion.
+    pub(super) fn read_authorized_chain_aggregate_state<'cx, 'permit, Clock: FnMut() -> u64>(
+        &mut self,
+        query_cx: &QueryCx,
+        read: &fgdb_gql::PreparedGraphSetAggregate,
+        policy: GraphInsertPolicy,
+        scope: &PlannerPredicates,
+        mut state: ChainState<'cx, 'permit, Clock>,
+        admit: impl FnOnce(
+            &[fgdb_gql::GraphAggregateRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<
+        (
+            ChainState<'cx, 'permit, Clock>,
+            GqlQueryExecution<fgdb_gql::GraphAggregateRow>,
+        ),
+        Fault,
+    > {
+        if !scope.rights().can_read() {
+            return Err(source(WriteTxnError::Authorization(
+                Error::PermissionDenied,
+            )));
+        }
+        read.input()
+            .admit_patterns(&mut |pattern| {
+                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                state.execution.checkpoint()?;
+                admit_pattern(pattern, scope)
+            })
+            .map_err(source)?;
+        let allowance = remaining(policy, &state.used, state.mutation_effects, true).query;
+        let result = query_cx
+            .with_restriction(|| {
+                let controls = RefCell::new(&mut state.execution);
+                let database = RefCell::new(&mut *self);
+                read.execute_governed_from_source(
+                    allowance,
+                    ChainSource {
+                        transaction: state.workspace.transaction(),
+                        database: &database,
+                        cx: query_cx,
+                        scope,
+                        execution: &controls,
+                    },
+                    || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        controls.borrow_mut().checkpoint()
+                    },
+                )
+            })
+            .map_err(|error| {
+                error.map_source(|error| {
+                    GraphWriteChainError::Read(fgdb_gql::GraphSetExecutionError::Aggregate(
+                        Box::new(error),
+                    ))
+                })
+            })?;
+        self.finish_authorized_chain_read(query_cx, policy, scope, state, result, admit)
+    }
+
+    fn finish_authorized_chain_read<'cx, 'permit, Clock: FnMut() -> u64, Row>(
+        &self,
+        query_cx: &QueryCx,
+        policy: GraphInsertPolicy,
+        scope: &PlannerPredicates,
+        mut state: ChainState<'cx, 'permit, Clock>,
+        mut result: GqlQueryExecution<Row>,
+        admit: impl FnOnce(
+            &[Row],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<(ChainState<'cx, 'permit, Clock>, GqlQueryExecution<Row>), Fault> {
         // The collector used the remaining allowance. Hydration must see the
         // complete execution bill, including every preceding statement.
         result.rows.snapshot_records = result

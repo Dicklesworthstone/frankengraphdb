@@ -10,7 +10,7 @@ use super::{
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertStats};
 use fgdb_gql::{
-    GqlQueryExecution, GqlQueryPolicy, GraphWriteProgramStats, PreparedGraphSet,
+    GqlParameters, GqlQueryExecution, GqlQueryPolicy, GraphWriteProgramStats, PreparedGraphSet,
     PreparedGraphWriteChain,
 };
 use fgdb_types::{CommitSeq, EmbeddedTxnCompletion, QueryCx};
@@ -216,6 +216,106 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         Ok(())
     }
 
+    /// Explicit statements return before the final commit checkpoints. Check
+    /// again after the host's fallible output admission, while this call still
+    /// owns the workspace, so expiry, retirement or cancellation during
+    /// hydration cannot release rows or restore an active transaction.
+    fn finish_statement(
+        state: &mut chain::ChainState<'_, '_, Clock>,
+        query_cx: &QueryCx,
+    ) -> Result<(), WriteTxnError> {
+        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+        state.execution.checkpoint()
+    }
+
+    /// Prepare one statement under this transaction's retained allowance.
+    ///
+    /// The trusted host supplies the compiler and capability-safe catalog, as
+    /// it does for native authorized autocommit. Original text and parameter
+    /// declarations are charged before compilation; the callback must charge
+    /// additional catalog/binding work through the supplied meter. It receives
+    /// the original non-widenable scope and parameters with a fresh observation
+    /// of the database's trusted statement clock, never a client-supplied one.
+    /// No prepared definition grants authority: `stage_chain` and `read` still
+    /// admit the complete definition before observing or changing graph state.
+    ///
+    /// Preparation does not count as a successfully executed statement. Any
+    /// failure, swallowed meter refusal, cancellation or unwind nevertheless
+    /// aborts the whole unpublished prefix. A host may retain its own detailed
+    /// compiler diagnostic and return `AuthorizedMutationRefused` here; live
+    /// authority and cancellation are checked before that diagnostic escapes.
+    /// The meter retains its first refusal and returns a terminal marker to
+    /// the callback, so a compiler's optional resolver protocol cannot replace
+    /// an authorization failure with an unknown-symbol diagnostic.
+    pub fn prepare_statement<V: Vfs + Clone, T>(
+        &mut self,
+        database: &Database<V>,
+        query_cx: &QueryCx,
+        text: &str,
+        parameters: &GqlParameters,
+        prepare: impl FnOnce(
+            &GqlParameters,
+            &PlannerPredicates,
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<T, WriteTxnError>,
+    ) -> Result<T, WriteTxnError> {
+        let idle = self.state.take().ok_or(WriteTxnError::Finished)?;
+        let mut state = idle.enter(&self.cx);
+        let prepared = self.cx.with_restriction(|| {
+            self.admit_statement(&mut state, database, query_cx)?;
+            state.execution.work(
+                u64::try_from(text.len())
+                    .map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?,
+            )?;
+            if fgdb_gql::reads_element_identity(text) {
+                return Err(WriteTxnError::Authorization(Error::ScopeDenied));
+            }
+            // Calendar observation precedes the pure-query restriction, as it
+            // does in native authorized autocommit. The retained permit has
+            // already authorized this statement, and is checked again after
+            // the host clock callback before the compiler sees its result.
+            let captured = crate::query::capture_authorized_statement_parameters(
+                database.statement_clock.as_ref(),
+                query_cx,
+                fgdb_gql::statement_time_required(text),
+                parameters,
+            );
+            state.execution.checkpoint()?;
+            let captured = captured.map_err(|error| match error {
+                crate::StatementTimeError::Cancelled(error) => WriteTxnError::Interrupted(error),
+                error => WriteTxnError::StatementTime(error),
+            })?;
+            query_cx.with_restriction(|| {
+                for _ in captured.parameter_types() {
+                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                    state.execution.checkpoint()?;
+                }
+                let mut failure = None;
+                let result = prepare(&captured, &self.scope, &mut |units| {
+                    if failure.is_some() {
+                        return Err(WriteTxnError::AuthorizedMutationRefused);
+                    }
+                    query_cx
+                        .checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
+                        .and_then(|()| state.execution.work(units))
+                        .map_err(|error| {
+                            failure = Some(error);
+                            WriteTxnError::AuthorizedMutationRefused
+                        })
+                });
+                if let Some(error) = failure {
+                    return Err(error);
+                }
+                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                state.execution.checkpoint()?;
+                result
+            })
+        })?;
+        self.state = Some(IdleState::leave(state));
+        Ok(prepared)
+    }
+
     /// Stage a prepared native statement, including ordinary single CREATE,
     /// SET, DELETE and MERGE or a chain with WITH/read phases. The compiler
     /// entrypoint is `PreparedGraphWriteChainText::prepare_statement` followed by binding;
@@ -247,7 +347,7 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
             self.admit_statement(&mut state, database, query_cx)
                 .map_err(chain::source)?;
             chain::admit_definition(statement, None, query_cx, &self.scope, &mut state.execution)?;
-            database.stage_authorized_chains(
+            let (mut state, result) = database.stage_authorized_chains(
                 query_cx,
                 core::slice::from_ref(statement),
                 None,
@@ -256,7 +356,9 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
                 state,
                 &mut None,
                 |_, rows, work, output| admit(rows, work, output),
-            )
+            )?;
+            Self::finish_statement(&mut state, query_cx).map_err(chain::source)?;
+            Ok::<_, chain::Fault>((state, result))
         })?;
         self.delivered_rows = self.delivered_rows.saturating_add(result.rows.result_rows);
         self.completed_statements += 1;
@@ -288,14 +390,59 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         let (state, result) = self.cx.with_restriction(|| {
             self.admit_statement(&mut state, database, query_cx)
                 .map_err(chain::source)?;
-            database.read_authorized_chain_state(
+            let (mut state, result) = database.read_authorized_chain_state(
                 query_cx,
                 statement,
                 policy,
                 &self.scope,
                 state,
                 admit,
-            )
+            )?;
+            Self::finish_statement(&mut state, query_cx).map_err(chain::source)?;
+            Ok::<_, chain::Fault>((state, result))
+        })?;
+        self.delivered_rows = self.delivered_rows.saturating_add(result.rows.result_rows);
+        self.completed_statements += 1;
+        self.state = Some(IdleState::leave(state));
+        Ok(result)
+    }
+
+    /// Execute an exact terminal aggregate over the authorized staged graph.
+    /// The source-aware definition retains every pattern, row stage and group
+    /// clause. Counts, wide sums and rational means are returned in their
+    /// native exact domains; the checked callback may hydrate collected graph
+    /// values through the same private overlay as ordinary statement output.
+    /// All source, evaluator, output and statement allowances remain cumulative.
+    pub fn read_aggregate<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        query_cx: &QueryCx,
+        statement: &fgdb_gql::PreparedGraphSetAggregate,
+        admit: impl FnOnce(
+            &[fgdb_gql::GraphAggregateRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+            &mut dyn crate::AuthorizedWriteOutput,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<GqlQueryExecution<fgdb_gql::GraphAggregateRow>, chain::Fault> {
+        let idle = self
+            .state
+            .take()
+            .ok_or_else(|| chain::source(WriteTxnError::Finished))?;
+        let mut state = idle.enter(&self.cx);
+        let policy = self.statement_policy();
+        let (state, result) = self.cx.with_restriction(|| {
+            self.admit_statement(&mut state, database, query_cx)
+                .map_err(chain::source)?;
+            let (mut state, result) = database.read_authorized_chain_aggregate_state(
+                query_cx,
+                statement,
+                policy,
+                &self.scope,
+                state,
+                admit,
+            )?;
+            Self::finish_statement(&mut state, query_cx).map_err(chain::source)?;
+            Ok::<_, chain::Fault>((state, result))
         })?;
         self.delivered_rows = self.delivered_rows.saturating_add(result.rows.result_rows);
         self.completed_statements += 1;

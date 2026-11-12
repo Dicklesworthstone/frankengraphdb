@@ -108,6 +108,43 @@ fn names() -> ReverseSymbolCatalog {
     names
 }
 
+struct Catalog;
+
+impl fgdb_gql::GraphSymbolResolver for Catalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = names();
+        catalog.insert_label(HIDDEN, "Hidden");
+        catalog.insert_property(SECRET, "secret");
+        Some(catalog)
+    }
+}
+
+fn aggregate(text: &str) -> fgdb_gql::PreparedGraphSetAggregate {
+    let params = GqlParameters::new();
+    match fgdb::PreparedNativeRead::prepare(text, &params, Catalog).unwrap() {
+        fgdb::PreparedNativeRead::Aggregate(query) => {
+            fgdb_gql::PreparedGraphSetAggregate::from_complete_input(
+                query.bind_parameters(&params).unwrap(),
+            )
+            .unwrap()
+        }
+        fgdb::PreparedNativeRead::PipelineAggregate(query) if query.requires_relational_input() => {
+            query.bind_relation_parameters(&params).unwrap()
+        }
+        fgdb::PreparedNativeRead::PipelineAggregate(query) => {
+            fgdb_gql::PreparedGraphSetAggregate::from_complete_input(
+                query.bind_parameters(&params).unwrap(),
+            )
+            .unwrap()
+        }
+        _ => panic!("an exact aggregate definition"),
+    }
+}
+
 fn has_error(
     error: &(dyn core::error::Error + 'static),
     predicate: impl Fn(&WriteTxnError) -> bool,
@@ -761,6 +798,201 @@ fn retirement_and_expiry_between_calls_cannot_publish_an_earlier_prefix() {
 }
 
 #[test]
+fn retirement_and_expiry_during_output_admission_abort_before_returning_rows() {
+    run(async |commit, query, txn| {
+        for writing in [false, true] {
+            for retire in [false, true] {
+                let mut db = Database::open_memory(commit, keys()).await.unwrap();
+                let issuer = authority();
+                let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+                let now = Arc::new(AtomicU64::new(NOW));
+                let clock = Arc::clone(&now);
+                let before = db.frontier().unwrap();
+                let mut owner = db
+                    .begin_authorized_write(
+                        txn,
+                        commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        policy(),
+                        10,
+                        move || clock.load(Ordering::Relaxed),
+                    )
+                    .unwrap();
+                owner
+                    .stage_chain(
+                        &mut db,
+                        query,
+                        &chain("CREATE (n:Visible {p:1})"),
+                        |_, _, _| Ok(()),
+                    )
+                    .unwrap();
+                let mut admitted = false;
+                let admit =
+                    |rows: &[fgdb_gql::algebra::GraphValueRow],
+                     _: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+                     output: &mut dyn fgdb::AuthorizedWriteOutput| {
+                        let [GraphValue::Vertex(vertex)] = rows[0].values() else {
+                            panic!("vertex result")
+                        };
+                        assert_eq!(
+                            output.metadata(
+                                ElementId::Vertex(*vertex),
+                                GraphElementMetadata::Properties,
+                                &names(),
+                            )?,
+                            Some(
+                                GraphValue::map(vec![(
+                                    "p".into(),
+                                    integer(if writing { 2 } else { 1 }),
+                                )])
+                                .unwrap()
+                            )
+                        );
+                        admitted = true;
+                        // Hydration succeeded, but authority ceased to be
+                        // live before this successful host callback returned.
+                        if retire {
+                            issuer.retire();
+                        } else {
+                            now.store(1000, Ordering::Relaxed);
+                        }
+                        Ok(())
+                    };
+                let error = if writing {
+                    owner.stage_chain(
+                        &mut db,
+                        query,
+                        &chain("MATCH (n:Visible) SET n.p=2 RETURN n"),
+                        admit,
+                    )
+                } else {
+                    owner.read(&mut db, query, &read("MATCH (n:Visible) RETURN n"), admit)
+                }
+                .unwrap_err();
+                assert!(admitted);
+                assert!(has_error(&error, |error| match error {
+                    WriteTxnError::Authorization(Error::AuthorityRetired) => retire,
+                    WriteTxnError::Authorization(Error::Expired) => !retire,
+                    _ => false,
+                }));
+                assert!(!owner.is_active());
+                assert!(owner.statistics().is_none());
+                assert!(matches!(
+                    owner.commit(&mut db).await,
+                    Err(WriteTxnError::Finished)
+                ));
+                assert!(db.vertices().unwrap().is_empty());
+                assert_eq!(db.frontier().unwrap(), before);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn cancellation_after_output_admission_aborts_reads_writes_and_the_retained_prefix() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    run(async |commit, query, txn| {
+        for writing in [false, true] {
+            let mut output_checkpoint = None;
+            for interrupt in [false, true] {
+                let mut db = Database::open_memory(commit, keys()).await.unwrap();
+                let issuer = authority();
+                let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+                let before = db.frontier().unwrap();
+                let mut owner = db
+                    .begin_authorized_write(
+                        txn,
+                        commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        policy(),
+                        10,
+                        || NOW,
+                    )
+                    .unwrap();
+                owner
+                    .stage_chain(
+                        &mut db,
+                        query,
+                        &chain("CREATE (n:Visible {p:1})"),
+                        |_, _, _| Ok(()),
+                    )
+                    .unwrap();
+                let stop = if interrupt {
+                    Some(output_checkpoint.expect("the successful run observes hydration") + 1)
+                } else {
+                    None
+                };
+                let probe = Arc::new(SimulationCheckpointProbe::new(stop));
+                let query = query.with_checkpoint_probe(Arc::clone(&probe));
+                let mut admitted = false;
+                let mut calls_at_output = 0;
+                let admit =
+                    |rows: &[fgdb_gql::algebra::GraphValueRow],
+                     _: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+                     output: &mut dyn fgdb::AuthorizedWriteOutput| {
+                        let [GraphValue::Vertex(vertex)] = rows[0].values() else {
+                            panic!("vertex result")
+                        };
+                        assert!(
+                            output
+                                .metadata(
+                                    ElementId::Vertex(*vertex),
+                                    GraphElementMetadata::Properties,
+                                    &names(),
+                                )?
+                                .is_some()
+                        );
+                        admitted = true;
+                        calls_at_output = probe.calls();
+                        Ok(())
+                    };
+                let result = if writing {
+                    owner.stage_chain(
+                        &mut db,
+                        &query,
+                        &chain("MATCH (n:Visible) SET n.p=2 RETURN n"),
+                        admit,
+                    )
+                } else {
+                    owner.read(&mut db, &query, &read("MATCH (n:Visible) RETURN n"), admit)
+                };
+                assert!(admitted, "interruption must follow successful hydration");
+                if interrupt {
+                    assert_eq!(Some(calls_at_output), output_checkpoint);
+                    let error = result.unwrap_err();
+                    assert!(has_error(&error, |error| matches!(
+                        error,
+                        WriteTxnError::Interrupted(_)
+                    )));
+                    assert!(!owner.is_active());
+                    assert!(owner.statistics().is_none());
+                    assert!(matches!(
+                        owner.commit(&mut db).await,
+                        Err(WriteTxnError::Finished)
+                    ));
+                } else {
+                    assert_eq!(result.unwrap().value.len(), 1);
+                    assert!(
+                        probe.calls() > calls_at_output,
+                        "output admission must be followed by a live cancellation check"
+                    );
+                    output_checkpoint = Some(calls_at_output);
+                    owner.rollback();
+                }
+                assert!(db.vertices().unwrap().is_empty());
+                assert_eq!(db.frontier().unwrap(), before);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
 fn cancellation_of_a_later_statement_aborts_the_entire_owner() {
     use fgdb_types::context::SimulationCheckpointProbe;
     run(async |commit, query, txn| {
@@ -803,6 +1035,535 @@ fn cancellation_of_a_later_statement_aborts_the_entire_owner() {
             Err(WriteTxnError::Finished)
         ));
         assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn preparation_uses_fresh_host_time_and_the_original_scope_without_publishing() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&calls);
+        db.set_statement_clock(Some(fgdb::StatementClock::new(move |_| {
+            let next = observed.fetch_add(1, Ordering::SeqCst) + 1;
+            Some(
+                fgdb_types::CanonicalTimestamp::offset_only(i128::from(next) * 1_000_000, 0)
+                    .unwrap(),
+            )
+        })));
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let before = db.frontier().unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+            .unwrap();
+        let text = "CREATE (n:Visible {p:datetime().epochMillis})";
+        let untrusted = GqlParameters::new()
+            .with_statement_time(
+                fgdb_types::CanonicalTimestamp::offset_only(99_000_000, 0).unwrap(),
+            )
+            .unwrap();
+        for expected in [1, 2] {
+            let prepared = owner
+                .prepare_statement(&db, query, text, &untrusted, |params, scope, work| {
+                    assert!(scope.allows_label(L));
+                    assert!(!scope.allows_label(HIDDEN));
+                    assert!(scope.allows_property(P));
+                    assert!(!scope.allows_property(SECRET));
+                    assert_eq!(
+                        params.statement_time(),
+                        Some(
+                            &fgdb_types::CanonicalTimestamp::offset_only(expected * 1_000_000, 0)
+                                .unwrap(),
+                        )
+                    );
+                    let declarations: Vec<_> = params.parameter_types().collect();
+                    work(1)?;
+                    let template =
+                        PreparedGraphWriteChainText::prepare_statement_with_parameter_types(
+                            text,
+                            R,
+                            &declarations,
+                            |kind, name: &str| {
+                                work(1).ok()?;
+                                symbols(kind, name).filter(|symbol| match symbol {
+                                    GraphSymbol::Label(id) => scope.allows_label(*id),
+                                    GraphSymbol::Relation(id) => scope.allows_relation(*id),
+                                    GraphSymbol::Property(id) => scope.allows_property(*id),
+                                })
+                            },
+                        )
+                        .map_err(|_| WriteTxnError::AuthorizedMutationRefused)?;
+                    work(1)?;
+                    template
+                        .bind_parameters(params)
+                        .map_err(|_| WriteTxnError::AuthorizedMutationRefused)
+                })
+                .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), expected as u64);
+            assert_eq!(db.frontier().unwrap(), before);
+            owner
+                .stage_chain(&mut db, query, &prepared, |_, _, _| Ok(()))
+                .unwrap();
+        }
+        assert_eq!(owner.statistics().unwrap().completed_statements, 2);
+        assert!(db.vertices().unwrap().is_empty());
+        owner.commit(&mut db).await.unwrap();
+        let mut values: Vec<_> = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.props)
+            .collect();
+        values.sort();
+        assert_eq!(
+            values,
+            vec![
+                vec![(P, CanonicalScalar::Int(1).into())],
+                vec![(P, CanonicalScalar::Int(2).into())],
+            ]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn original_text_and_compiler_work_share_the_transaction_allowance() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let before = db.frontier().unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("CREATE (n:Visible {p:1})"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        // Original ingress bytes are reserved before any parser or catalog
+        // callback, even when most bytes are an ignorable comment.
+        let text = format!("/*{}*/ RETURN 1", "x".repeat(300_000));
+        for _ in 0..2 {
+            owner
+                .prepare_statement(&db, query, &text, &GqlParameters::new(), |_, _, work| {
+                    work(100_000)
+                })
+                .unwrap();
+        }
+        let mut reached = false;
+        let refused =
+            owner.prepare_statement(&db, query, &text, &GqlParameters::new(), |_, _, _| {
+                reached = true;
+                Ok(())
+            });
+        assert!(matches!(refused, Err(WriteTxnError::Authorization(_))));
+        assert!(!reached);
+        assert!(!owner.is_active());
+        assert!(matches!(
+            owner.commit(&mut db).await,
+            Err(WriteTxnError::Finished)
+        ));
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn preparation_errors_swallowed_meters_and_unwinds_abort_the_prefix() {
+    run(async |commit, query, txn| {
+        for fault in 0..5 {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+            let before = db.frontier().unwrap();
+            let mut owner = db
+                .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+                .unwrap();
+            owner
+                .stage_chain(
+                    &mut db,
+                    query,
+                    &chain("CREATE (n:Visible {p:1})"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                owner.prepare_statement(
+                    &db,
+                    query,
+                    "RETURN 1",
+                    &GqlParameters::new(),
+                    |_, _, work| {
+                        match fault {
+                            0 => return Err(WriteTxnError::AuthorizedMutationRefused),
+                            1 => {
+                                assert!(work(u64::MAX).is_err());
+                            }
+                            2 => issuer.retire(),
+                            3 => {
+                                assert!(work(u64::MAX).is_err());
+                                return Err(WriteTxnError::AuthorizedMutationRefused);
+                            }
+                            _ => panic!("compiler callback failed"),
+                        }
+                        Ok(())
+                    },
+                )
+            }));
+            if fault == 4 {
+                assert!(result.is_err());
+            } else {
+                let error = result.unwrap().unwrap_err();
+                if matches!(fault, 1 | 3) {
+                    assert!(matches!(
+                        error,
+                        WriteTxnError::Authorization(fgdb_warden::Error::LimitExceeded(
+                            fgdb_warden::LimitDimension::Work
+                        ))
+                    ));
+                }
+            }
+            assert!(!owner.is_active());
+            assert!(matches!(
+                owner.commit(&mut db).await,
+                Err(WriteTxnError::Finished)
+            ));
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn preparation_refuses_zero_statements_forbidden_identity_and_foreign_handles_before_callbacks() {
+    run(async |commit, query, txn| {
+        for fault in 0..3 {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let foreign = Database::open_memory(commit, keys()).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+            let mut owner = db
+                .begin_authorized_write(
+                    txn,
+                    commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    policy(),
+                    if fault == 0 { 0 } else { 10 },
+                    || NOW,
+                )
+                .unwrap();
+            let text = if fault == 1 {
+                "MATCH (n) RETURN elementId(n)"
+            } else {
+                "RETURN 1"
+            };
+            let database = if fault == 2 { &foreign } else { &db };
+            let mut reached = false;
+            let error = owner
+                .prepare_statement(database, query, text, &GqlParameters::new(), |_, _, _| {
+                    reached = true;
+                    Ok(())
+                })
+                .unwrap_err();
+            assert!(!reached);
+            assert!(match fault {
+                0 => matches!(error, WriteTxnError::StatementLimit { limit: 0 }),
+                1 => matches!(error, WriteTxnError::Authorization(Error::ScopeDenied)),
+                _ => matches!(error, WriteTxnError::WrongDatabase),
+            });
+            assert!(!owner.is_active());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn exact_aggregate_reads_include_staged_rows_without_narrowing_wide_sums_or_means() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let before = db.frontier().unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+            .unwrap();
+        let count = aggregate("MATCH (n:Visible) RETURN count(*) AS c");
+        let empty = owner
+            .read_aggregate(&mut db, query, &count, |_, _, _| Ok(()))
+            .unwrap();
+        assert_eq!(empty.value.len(), 1);
+        assert_eq!(empty.value[0].values()[0].as_count(), Some(0));
+        owner.stage_chain(&mut db, query,
+            &chain("CREATE (:Visible {p:1}), (:Visible {p:2}), (:Visible {p:9223372036854775807}), (:Visible {p:9223372036854775807})"),
+            |_, _, _| Ok(())).unwrap();
+        let exact =
+            aggregate("MATCH (n:Visible) RETURN count(*) AS c, sum(n.p) AS s, avg(n.p) AS a");
+        let result = owner
+            .read_aggregate(&mut db, query, &exact, |rows, _, _| {
+                assert_eq!(rows.len(), 1);
+                Ok(())
+            })
+            .unwrap();
+        let cells = result.value[0].values();
+        let sum = i128::from(i64::MAX) * 2 + 3;
+        assert_eq!(cells[0].as_count(), Some(4));
+        assert_eq!(cells[1].as_integer(), Some(sum));
+        let average = cells[2].as_average().unwrap();
+        assert_eq!((average.numerator(), average.denominator()), (sum, 4));
+        assert_eq!(owner.statistics().unwrap().completed_statements, 3);
+        assert_eq!(owner.statistics().unwrap().selection.result_rows, 2);
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(db.frontier().unwrap(), before);
+        owner.commit(&mut db).await.unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 4);
+        assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn aggregate_sources_preserve_masking_pipeline_filters_and_exact_staged_hydration() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(99), vec![HIDDEN], vec![(P, CanonicalScalar::Int(900))]);
+        db.write(commit, seed).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("CREATE (:Visible {p:1}), (:Visible {p:2}), (:Visible {p:3})"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        let query_plan = aggregate(
+            "MATCH (n) WITH n.p AS p WHERE p >= 2 RETURN count(*) AS c, sum(p) AS s, avg(p) AS a",
+        );
+        let result = owner
+            .read_aggregate(&mut db, query, &query_plan, |_, _, _| Ok(()))
+            .unwrap();
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(result.value[0].values()[0].as_count(), Some(2));
+        assert_eq!(result.value[0].values()[1].as_integer(), Some(5));
+        let mean = result.value[0].values()[2].as_average().unwrap();
+        assert_eq!((mean.numerator(), mean.denominator()), (5, 2));
+        let collect = aggregate("MATCH (n) RETURN collect(n) AS nodes");
+        owner
+            .read_aggregate(&mut db, query, &collect, |rows, _, output| {
+                let Some(GraphValue::List(nodes)) = rows[0].values()[0].as_value() else {
+                    panic!("the native collection domain")
+                };
+                assert_eq!(nodes.len(), 3);
+                let mut properties = Vec::new();
+                for node in nodes.iter() {
+                    let GraphValue::Vertex(vertex) = node else {
+                        panic!("a collected vertex")
+                    };
+                    properties.push(
+                        output
+                            .metadata(
+                                ElementId::Vertex(*vertex),
+                                GraphElementMetadata::Properties,
+                                &names(),
+                            )?
+                            .unwrap(),
+                    );
+                }
+                properties.sort();
+                assert_eq!(
+                    properties,
+                    [1, 2, 3]
+                        .map(|value| GraphValue::map(vec![("p".into(), integer(value))]).unwrap())
+                );
+                Ok(())
+            })
+            .unwrap();
+        owner.rollback();
+        assert_eq!(db.vertices().unwrap().len(), 1);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn aggregate_output_refusals_and_cumulative_row_limits_abort_the_entire_prefix() {
+    run(async |commit, query, txn| {
+        for refusal in 0..3 {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+            let mut allowance = policy();
+            if refusal == 0 {
+                allowance.query = GqlQueryPolicy::new(100_000, 1, 1_000_000, 100_000);
+            }
+            let mut owner = db
+                .begin_authorized_write(txn, commit, &issuer, &token, "main", allowance, 10, || NOW)
+                .unwrap();
+            owner
+                .stage_chain(
+                    &mut db,
+                    query,
+                    &chain("CREATE (:Visible {p:1})"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            let count = aggregate("MATCH (n:Visible) RETURN count(*) AS c");
+            owner
+                .read_aggregate(&mut db, query, &count, |_, _, _| Ok(()))
+                .unwrap();
+            let failed = owner.read_aggregate(&mut db, query, &count, |_, work, _| {
+                match refusal {
+                    1 => return Err(WriteTxnError::AuthorizedMutationRefused),
+                    2 => {
+                        assert!(work(u64::MAX).is_err());
+                    }
+                    _ => panic!("the second group must not pass cumulative row admission"),
+                }
+                Ok(())
+            });
+            assert!(failed.is_err());
+            assert!(!owner.is_active());
+            assert!(matches!(
+                owner.commit(&mut db).await,
+                Err(WriteTxnError::Finished)
+            ));
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn aggregate_output_rechecks_authority_and_cancellation_before_returning_rows() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    run(async |commit, query, txn| {
+        let mut output_checkpoint = None;
+        for fault in 0..4 {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+            let now = Arc::new(AtomicU64::new(NOW));
+            let clock = Arc::clone(&now);
+            let before = db.frontier().unwrap();
+            let mut owner = db
+                .begin_authorized_write(
+                    txn,
+                    commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    policy(),
+                    10,
+                    move || clock.load(Ordering::Relaxed),
+                )
+                .unwrap();
+            owner
+                .stage_chain(
+                    &mut db,
+                    query,
+                    &chain("CREATE (:Visible {p:1})"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            let stop =
+                (fault == 3).then(|| output_checkpoint.expect("the baseline observes output") + 1);
+            let probe = Arc::new(SimulationCheckpointProbe::new(stop));
+            let query = query.with_checkpoint_probe(Arc::clone(&probe));
+            let mut observed = None;
+            let result = owner.read_aggregate(
+                &mut db,
+                &query,
+                &aggregate("MATCH (n:Visible) RETURN count(*) AS c"),
+                |rows, _, _| {
+                    assert_eq!(rows[0].values()[0].as_count(), Some(1));
+                    observed = Some(probe.calls());
+                    match fault {
+                        1 => issuer.retire(),
+                        2 => now.store(1000, Ordering::Relaxed),
+                        _ => {}
+                    }
+                    Ok(())
+                },
+            );
+            assert!(observed.is_some(), "the aggregate reached output admission");
+            if fault == 0 {
+                result.unwrap();
+                output_checkpoint = observed;
+                assert!(probe.calls() > observed.unwrap());
+                owner.rollback();
+            } else {
+                let error = result.unwrap_err();
+                assert!(has_error(&error, |error| match error {
+                    WriteTxnError::Authorization(Error::AuthorityRetired) => fault == 1,
+                    WriteTxnError::Authorization(Error::Expired) => fault == 2,
+                    WriteTxnError::Interrupted(_) => fault == 3,
+                    _ => false,
+                }));
+                if fault == 3 {
+                    assert_eq!(observed, output_checkpoint);
+                }
+                assert!(!owner.is_active());
+                assert!(matches!(
+                    owner.commit(&mut db).await,
+                    Err(WriteTxnError::Finished)
+                ));
+            }
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn catalog_calls_use_the_same_scope_in_explicit_rows_and_aggregate_sources() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+            .unwrap();
+        let statement = fgdb_gql::PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            "CALL db.labels()",
+            &[],
+            &mut Catalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let rows = owner
+            .read(&mut db, query, &statement, |_, _, _| Ok(()))
+            .unwrap();
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[GraphValue::Scalar(
+                CanonicalScalar::ucs_basic_text("Visible").unwrap()
+            )]
+        );
+        assert_eq!(rows.rows.snapshot_records, 0);
+        let count = aggregate("CALL db.labels() YIELD label RETURN count(*) AS c");
+        let result = owner
+            .read_aggregate(&mut db, query, &count, |_, _, _| Ok(()))
+            .unwrap();
+        assert_eq!(result.value[0].values()[0].as_count(), Some(1));
+        owner.rollback();
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }

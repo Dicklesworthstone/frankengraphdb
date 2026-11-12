@@ -12,6 +12,118 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Bolt explicit native write transactions — qualification pending
+
+Source added 2026-11-11 under `fgdb-roadmap-bolt-v2-vb6e` and
+`fgdb-w2-txn-lifecycle-mhae`. The Bolt adapter now composes the native
+`AuthorizedWriteTransaction` owner across BEGIN, RUN and COMMIT.
+Write/default BEGIN with signed Write or ReadWrite rights opens a writer;
+read-only grants and read mode retain the existing pinned read session.
+
+Each accepted statement stages into the same private workspace. Later graph/set
+and exact terminal aggregate reads see earlier staged effects, while other
+connections see committed state. Aggregate inputs retain their complete
+patterns, row pipelines, grouping and output clauses; counts, wide sums and
+rational means preserve their native exact domains. Collected graph values
+are hydrated from the staged workspace. Catalog calls use the retained scope.
+The checked output collector hydrates graph values before publishing a cursor.
+PULL/DISCARD consume provisional results marked `fgdb_transaction_local: true`;
+only COMMIT publishes and returns a commit bookmark. ROLLBACK, RESET,
+GOODBYE, disconnect and any failed statement discard the unpublished prefix.
+Outstanding result cursors must be consumed before COMMIT.
+
+Native authority, source/work/result/creation/mutation/statement allowances
+remain cumulative. Generation admission covers each operation and lock wait;
+no database lock or active-operation permit is held between messages.
+Statement preparation also uses the retained permit, including original text,
+parameter admission, trusted statement time, scoped symbol lookup and binding.
+An explicit read mode on RUN cannot stage a write. Subscription notification
+follows native completion and writer-guard release. A fence after successful
+commit cannot be translated into a retryable precommit refusal.
+
+Regression sources cover the production state machine and real Bolt TCP with
+an independent FGP observer, including own-writes, isolation before commit,
+one publication, rollback/disconnect, restricted rights and output quotas.
+Source/API reviews completed. The aggregate and preparation extension adds
+state-machine and TCP regressions for empty/grouped summaries, exact native
+values, staged collection hydration, original-text budgets and failure rollback.
+Targeted pinned formatting and `git diff --check` passed. Server and smaller
+query-library compile attempts were killed by SIGKILL while checking the pinned
+`asupersync` dependency, before project diagnostics. Runtime tests, Clippy and
+the exact-tree proof remain **UNRUN**; whole-workspace formatting also reports
+pre-existing differences. The broader roadmap beads remain open.
+
+This is a bounded local owner, not durable reattachment or full Bolt V2.
+Explicit writer reads use the native graph/set and exact aggregate subset;
+non-catalog procedure hosts and historical/branch forms refuse and discard
+the staged prefix. Explicit read mode retains the
+broader committed-snapshot reader. Concurrent basis advancement retains the
+native conservative refusal, and full SSI remains separate.
+See `docs/bolt-autocommit-writes.md` for the protocol boundary.
+
+### Correlated COLLECT subqueries — qualification pending
+
+Source added 2026-11-11, related to `fgdb-1f8f7`. A scalar
+`COLLECT { ... RETURN value }` expression now lowers through the existing
+governed Collect Apply operator and relational List continuation. It builds
+nested graph results without another executor, dependency or transcript tag.
+
+```cypher
+MATCH (n:Person)
+RETURN n.name AS name,
+       COLLECT {
+           MATCH (n)-[:KNOWS]->(friend)
+           RETURN friend.name AS name ORDER BY name
+       } AS friends
+ORDER BY name
+```
+
+Bodies may be source-free or correlated, use WITH/filter/grouping/DISTINCT
+and ordered pages, nest further collection subqueries, and capture list-local
+bindings. An explicit one-column RETURN is required. Body variables remain
+private; parameters, catalog admission, depth and execution budgets retain
+their existing owners. Body order, outer occurrence order, duplicate rows and
+NULL members are preserved. Empty bodies yield `[]`; a NULL imported binding
+still permits `COLLECT { RETURN binding }` to yield `[NULL]`. This differs from
+the aggregate `collect(binding)`, which drops NULL inputs.
+
+The current expression owner gathers graph bodies before scalar evaluation.
+Direct COLLECT subqueries inside CASE/COALESCE therefore refuse during
+preparation. A collection first bound in WITH is an ordinary list and can be
+used in either lazy expression. UNION inside a collection body is also outside
+this bounded slice.
+
+Six added regression functions cover those semantics, ordered outer and body
+rows, nested/list-local capture, schema and scope refusals before catalog
+callbacks, rebinding, resource ceilings, cancellation and late errors under
+LIMIT 0. Independent source review caught and corrected private-projection
+ordering and lazy-arm lexical edge cases. Targeted pinned formatting and
+`git diff --check` passed. Compiler attempts were killed by SIGKILL in the
+pinned `asupersync` dependency before project diagnostics; compilation,
+runtime tests, Clippy and exact-tree qualification remain **UNRUN**. The
+broader graph-list language bead remains open.
+
+### Parameterized regular expressions — qualification pending
+
+Source added 2026-11-11 under `fgdb-20foe`. Literal and parameter patterns
+share the existing bounded regex compiler. Expressions such as
+`MATCH (n) WHERE n.name =~ $pattern RETURN n.name` now accept a typed text
+parameter; graph and row filters, RETURN/CASE, aggregate keys and mutation
+expressions use the existing scalar VM and execution metering.
+
+Binding compiles patterns before graph access, preserving template/argument
+identity. NULL yields UNKNOWN while retaining operand validation and lazy CASE
+evaluation. Malformed, oversized, unsupported-profile and wrongly typed
+patterns refuse at preparation/binding, including under LIMIT 0. Row-dependent
+pattern expressions remain outside this surface.
+
+Three new regression functions cover rebinding, literal-equivalent results
+and work, template/bound identities, row WHERE routing, grouping, NULL,
+invalid-pattern preflight and mutation selection/assignment. Source review
+completed; formatting, compilation, tests, Clippy and full proof are **UNRUN**
+because the execution environment became unavailable. The broader language
+bead remains open.
+
 ### Bolt write RETURN graph metadata — qualification pending
 
 Source added 2026-11-11 under `fgdb-roadmap-bolt-v2-vb6e`. Autocommit
@@ -34,8 +146,8 @@ initial exit 137 and a later `syn` SIGKILL); the executor then became unavailabl
 again before its formatted source could be retrieved. This commit preserves
 the complete reviewed source. The exact committed tree's formatting, product
 compilation, Clippy, tests, UBS and full proof remain **UNRUN**, not passing.
-The original roadmap bead remains open; this does not qualify complete Bolt V2
-or explicit write transactions.
+The original roadmap bead remains open; this does not qualify complete Bolt V2.
+The explicit-transaction extension above has its own pending qualification.
 
 ### Prism label and relationship unions — qualification pending
 
@@ -123,9 +235,10 @@ qualify durable maintained views or multi-relation sealed sources.
 Source added 2026-11-11 under `fgdb-w2-txn-lifecycle-mhae`.
 `Database::begin_authorized_write` returns an
 `AuthorizedWriteTransaction<'issuer, Clock>` that stages multiple statements
-and commits once. Its `stage_chain`, `read`, `statistics`, `commit` and
-`rollback` methods expose local explicit ownership of the existing native
-workspace. Dropping the owner discards the unpublished prefix.
+and commits once. Its `prepare_statement`, `stage_chain`, `read`,
+`read_aggregate`, `statistics`, `commit` and `rollback` methods expose local
+explicit ownership of the existing native workspace. Dropping the owner
+discards the unpublished prefix.
 
 The owner retains one live Warden permit, a cloned commit context and the
 canonical transaction workspace. It holds no database borrow or lock while
@@ -133,6 +246,13 @@ idle. Statements reuse the existing authorized chain collectors, original
 before/after image checks, masked overlay reads, conflict witnesses and checked
 graph-output admission. No statement autocommits. Later statements read their
 own earlier effects, while ordinary database reads still see committed state.
+
+Preparation retains the live permit through text admission, parameter capture,
+trusted statement-clock observation and the compiler callback. Meter refusals
+are latched even when the compiler swallows them. Exact terminal aggregates
+reuse the complete authorized staged source and preserve wide integer sums,
+rational averages, grouping and collected graph values. Scoped catalog calls
+are available in both row and aggregate inputs.
 
 `PreparedGraphWriteChainText::prepare_statement` and its
 `prepare_statement_with_parameter_types` counterpart admit ordinary single
@@ -150,9 +270,14 @@ A foreign database handle refuses before its frontier is observed. New
 statements conservatively refuse if the original database basis has advanced;
 the final commit still uses the existing native conflict/completion owner.
 
-Ten native regression sources cover own-writes, one final commit,
+Native regression sources cover own-writes, one final commit,
 rollback/drop/deletion, masking and rights, cumulative quotas, output failures,
-unwind/cancellation, foreign handles, stale basis and retirement/expiry. Two
+unwind/cancellation, foreign handles, stale basis, retirement/expiry, metered
+preparation and exact staged aggregate reads. The
+output-boundary additions recheck cancellation and live authority after a
+successful admission callback, before returning provisional rows or restoring
+active ownership. Tests inject expiry, retirement and cancellation immediately
+after hydration and require the whole earlier prefix to be discarded. Two
 Warden tests cover movable permits and retained terminal behavior. Independent
 source review verified the shared staging/output body against the existing
 autocommit implementation and reviewed the public API and regressions.
@@ -160,9 +285,9 @@ Compilation, runtime tests and exact-tree formatting/Clippy/UBS/full proof are
 **UNRUN** because dependency compilation was killed by resource exhaustion and
 the executor became unavailable before product validation.
 
-This is a local native API. Bolt/FGP explicit write adapters, durable ownership
-leases, reattachment and full SSI remain separate work; the lifecycle roadmap
-bead remains open. Ambiguous commit outcomes retain their native meaning and
+This is a local native API. The Bolt adapter above uses this owner. FGP explicit
+write adapters, durable ownership leases, reattachment and full SSI remain
+separate work; the lifecycle roadmap bead remains open. Ambiguous commit outcomes retain their native meaning and
 are never automatically replayed.
 
 ### Durable embedded database

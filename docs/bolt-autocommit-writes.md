@@ -1,104 +1,187 @@
-# Bolt no-RETURN autocommit writes
+# Bolt writes and explicit transactions
 
-This is a bounded extension to the existing `BoltCompatProfileV1` adapter.
-The HELLO success metadata advertises `fgdb_autocommit_writes: true`. It is
-not a claim of full Neo4j compatibility or explicit write-transaction support.
+The Bolt adapter extends its declared read profile with bounded native
+autocommit writes and explicit write transactions. HELLO advertises
+`fgdb_autocommit_writes: true` and
+`fgdb_explicit_write_transactions: true`. These flags describe the implemented
+subset; they do not claim complete Neo4j or Bolt V2 conformance.
 
-## Supported execution boundary
+## Autocommit execution
 
-An authenticated client with signed Write or ReadWrite rights can issue a
-native no-RETURN write with RUN outside BEGIN. Omitting `mode` uses the Bolt
-default; explicit `mode: "w"` also permits this path. `mode: "r"` never does.
-Existing explicit transactions remain pinned read-only sessions, even when
-BEGIN contains write mode. A driver-managed explicit `execute_write` callback
-is therefore not supported by this extension.
+An authenticated client with signed Write or ReadWrite rights can issue native
+CREATE, INSERT, MERGE, MATCH mutations, write chains and parameterized UNWIND
+programs outside BEGIN. Omitting `mode` uses Bolt's write routing default;
+`mode: "w"` also permits writes. `mode: "r"` never permits a write.
 
-The ordinary native write compiler owns syntax. Its supported CREATE, INSERT,
-MERGE, MATCH mutations, no-RETURN scripts and parameterized UNWIND batches use
-the same capability-authorized writer as FGP/HTTP, without a second executor.
-For example, with operator-declared Person/name/age bindings:
+RUN admits and retains one bounded request. It does not publish mutations.
+The first valid PULL or DISCARD consumes the request and executes its native
+atomic program. RETURN values, including nodes, relationships, paths and nested
+collections, are authorized, hydrated from the unpublished final workspace,
+and admitted against output limits before the sole native commit. Metadata
+is retained with the result; later pages do not query a newer committed state.
+
+For example, with Person/name/age symbols:
 
 ```cypher
 UNWIND $payload.members AS row
 MERGE (n:Person {name:row.name})
 SET n.age=row.age
+RETURN n
 ```
 
-RUN returns an empty `fields` list and retains the bounded request. It does
-not expand argument rows, allocate graph identities, open a transaction or
-publish mutations. Definition admission is not full binding: argument shapes,
-values and downstream UNWIND types can still be refused at consumption.
-The first valid PULL or DISCARD consumes the request and executes one atomic
-native program. There are no result records. Terminal success reports
-`type: "w"`, the native completion bookmark, the database name and
-`fgdb_statements`; it does not invent Neo4j property/node counters.
+DISCARD executes an autocommit write even when the client does not need its
+rows. RESET, GOODBYE or disconnect before consumption abandons the queued
+request. After consumption, RESET cannot undo a published commit. A retained
+request cannot be executed twice.
 
-DISCARD **executes** the write. RESET, GOODBYE or disconnect **before**
-consumption abandons it. The retained request cannot be consumed twice, and an
-execution failure enters the existing Bolt failure state until RESET. This is
-not durable exactly-once delivery or reconnect deduplication. Native argument
-admission, statement limits, signed work limits, field scopes, cancellation,
-commit outcome classification and subscription notifications remain owned by
-the shared executor.
+Terminal success carries the native completion bookmark, database, statement
+count and available creation/update statistics. No-RETURN writes emit no
+records. Partial PULL retains the exact admitted result and does not repeat
+the write.
 
-## Bookmarks, recovery and authority
+## Explicit native transactions
 
-Local bookmarks of the existing form `fgdb:<database>:<sequence>` are accepted.
-Their maximum sequence is checked under the write lock, before any mutation.
-A local bookmark ahead of the current frontier is refused without executing;
-this adapter does not wait for a future sequence. Foreign, non-canonical and
-malformed bookmarks are refused rather than ignored.
+BEGIN in write/default mode with signed Write or ReadWrite authority creates
+one `AuthorizedWriteTransaction`. A read-only capability, or BEGIN with
+`mode: "r"`, retains the existing pinned read session. A routing option never
+confers additional authority.
 
-A queued write captures its original recovery generation. Consumption enters
-that generation and checks it again after acquiring the write lock. A recovery
-or reopen cannot cause the same queued request to be applied to the replacement
-generation. Idle queues retain no active-operation permit or database lock.
+Each RUN in a writable transaction prepares and stages one native statement.
+Successful statements share the original snapshot, earlier unpublished
+effects, conflict observations and cumulative resource allowance. Ordinary
+single CREATE, INSERT, MERGE, SET, REMOVE and DELETE statements use the same
+chain compiler as compound native writes. Standalone graph/set reads and exact
+terminal aggregates use the same authorized private workspace. Scoped catalog
+procedures such as `CALL db.labels()` use the retained capability scope.
 
-Write authority is checked at admission and again by the native executor at
-consumption. Existing issuer and generation fences still protect physical
-socket writes and flushes. Losing the terminal response does **not** prove
-rollback: a native unknown commit outcome remains a non-retryable database
-error, and the adapter never automatically replays the request. RESET after
-consumption cannot undo an already-published commit.
+A transaction can therefore perform the following separate RUN statements:
 
-## Explicit refusals
+```cypher
+CREATE (n:Person {name:$name, age:$age}) RETURN n
+```
 
-Write RETURN is not supported: the deferred path never invokes the returning
-executor or attempts to hydrate graph rows after committing. Explicit write
-transactions, impersonation and non-null `tx_timeout` options are not enabled.
-Write statements in explicit transactions refuse rather than silently becoming
-autocommit operations. Native read queries retain priority over write-like
-words in aliases, literals, labels and comments; syntax admission is not based
-on a keyword match alone.
+```cypher
+MATCH (n:Person {name:$name}) SET n.age=n.age+1 RETURN n
+```
 
-## Regression sources and validation status
+```cypher
+MATCH (n:Person {name:$name}) RETURN n.name, n.age
+```
 
-The three definition-probe tests live in
-`crates/fgdb-gql/src/native_write_text.rs`.
-The eight tests in `crates/fgdb-server/src/bolt/autocommit/tests.rs` cover
-metadata admission, signed budgets, retired issuers, one-time consumption,
-durable recovery, a stale queued request and recovery while PULL waits for
-the writer lock. They use the existing real Chronicle/UnixVfs fixture under
-the deterministic host scheduler, not a substitute graph model.
+```cypher
+MATCH (n:Person) RETURN count(*) AS people, sum(n.age) AS total_age,
+                       avg(n.age) AS mean_age
+```
 
-The five tests in `crates/fgdb-server/tests/bolt_autocommit.rs` use real Bolt TCP
-framing and a separate FGP observer to cover document-root upserts, bookmarks,
-DISCARD, RESET, raw disconnect, write-only authority with zero returned-row
-allowance, read boundaries, native read dispatch and whole-script rollback
-after a later arithmetic failure. Cargo discovers this standalone integration
-target without changing the existing loopback suite or any gate.
+The transaction sees its own changes. Other connections continue to see only
+committed state until COMMIT succeeds.
 
-These source changes and regression tests have **not** been compiled or run
-in the authoring environment. There is no Rust toolchain or dependency
-checkout there. Source review and blob/whitespace checks are not runtime
-evidence. Run the repository's pinned formatting, compilation and test gates
-before release. The focused test targets are:
+Aggregate inputs retain their complete patterns, `WITH` stages, filters and
+grouping. Collected nodes and relationships are hydrated from the staged
+workspace. Counts, wide integer sums and rational averages retain their exact
+native domains until the existing Bolt conversion boundary. As with ordinary
+Bolt aggregate reads, counts and sums fitting signed 64-bit integers use Int,
+larger integers use decimal text, and averages use Float. Native and FGP readers
+retain the exact rational numerator and denominator.
+
+RUN/PULL/DISCARD results are **provisional**. Statement summaries carry
+`fgdb_transaction_local: true` and no commit bookmark. Their counters describe
+that statement, not a durable commit receipt. PULL and DISCARD consume output;
+neither publishes the workspace. Consume or discard every outstanding result
+before COMMIT. The existing query-ID cursor owner supports multiple pending
+results with bounded cursor count and retained memory.
+
+Only COMMIT invokes native completion and returns its bookmark. Subscription
+notifications follow release of the writer guard. No database lock is retained
+between protocol messages. ROLLBACK, RESET, GOODBYE and disconnect discard an
+uncommitted workspace. Any failed statement, output admission, cancellation,
+authority refusal or stale generation aborts the complete unpublished prefix.
+
+An explicit `mode: "r"` on RUN narrows that request to a read. A write under
+that ceiling fails and aborts the transaction. An absent RUN mode inherits the
+owner selected by BEGIN; `mode: "w"` cannot widen a read-only owner.
+
+## Authority, resources and recovery
+
+The native owner retains one live capability permit. Source work, evaluator
+work, result rows, creation, mutation and statement limits apply cumulatively
+across statements. Preparation also spends that permit: original statement
+text, parameter admission, scoped symbol resolution and binding are metered,
+and statement time comes from the database's trusted clock. A swallowed
+compiler-meter refusal still aborts the transaction. Field masking, graph
+metadata and output conversion reuse
+the existing authorized collectors. A final query-cancellation and live-permit
+check follows each successful output-admission callback, before provisional
+rows are released or the active owner is restored.
+
+Every active request enters the retained database generation and rechecks it
+after waiting for a writer guard. An idle transaction holds no active-operation
+permit or database lock. Recovery or reopen fences its old generation; a later
+request cannot silently attach the old workspace to the replacement database.
+
+Bookmarks use `fgdb:<database>:<sequence>`. BEGIN checks the maximum requested
+sequence against the native owner's actual basis. Future bookmarks refuse
+promptly; the adapter has no causal wait queue. A RUN cannot switch databases
+or use a newer bookmark to advance an existing transaction snapshot.
+
+The current native owner conservatively refuses a subsequent statement if
+another commit has advanced its basis. Final COMMIT uses the existing native
+conflict/completion validator. This is the implemented bounded transaction
+model, not a full SSI or concurrent-snapshot qualification.
+
+Issuer and generation fences also protect physical socket writes. A lost
+COMMIT response does not prove rollback. Unknown native outcomes retain their
+non-retryable classification; the server never automatically replays COMMIT or
+the statement prefix.
+
+## Current boundaries
+
+Explicit writer reads use the supported native graph/set and exact aggregate
+subset. Procedure hosts such as `CALL fnx.*`, hybrid retrieval, historical or
+branch selectors unsupported by that owner, and other unsupported syntax
+refuse and discard the entire staged prefix. They do not fall back to a
+committed-state reader or autocommit path. Explicit `mode: "r"` transactions
+retain the existing broader read-session behavior, including procedure reads
+over committed snapshots.
+
+Durable ownership leases, reconnect/reattach, durable result delivery,
+impersonation and non-null `tx_timeout` are outside this extension. The
+bounded write-chain compiler and existing authorization/resource contracts
+continue to determine which statements are accepted.
+
+## Regression sources and qualification
+
+The existing native explicit-transaction target covers shared unpublished
+state, one final commit, rollback/drop, authority, quotas, output failures,
+foreign handles and stale bases. Added output-boundary regressions invalidate
+authority or interrupt execution immediately after successful metadata
+hydration and require the entire staged prefix to be discarded.
+
+Bolt state-machine regressions cover provisional output, own-writes,
+single-commit publication, rollback/reset/GOODBYE/drop, read and write rights,
+mode narrowing, cursor budgets, generation fencing and cumulative limits.
+The real Bolt TCP tests use an independent FGP observer to distinguish
+provisional state from committed state. Aggregate regressions exercise empty
+and grouped summaries, WITH pipelines, collected-node hydration, wide sums and
+the exact-native/Bolt-float average boundary. Preparation regressions cover
+original text budgets, restricted catalog entries and binding failures after
+an earlier staged write.
+
+These changes have undergone source and API review. Targeted pinned formatting
+and `git diff --check` passed. Two local compile attempts (server and the smaller
+query library) were killed by SIGKILL while checking the pinned `asupersync`
+dependency, before project diagnostics. Compilation, runtime tests, Clippy and
+the full exact-tree proof remain **UNRUN** for this source cut. Whole-workspace
+formatting reports pre-existing differences. No broader roadmap bead is closed
+by this implementation.
+
+Focused verification targets, in the repository's pinned execution lane:
 
 ```text
-cargo test -p fgdb-gql --lib native_write_text::tests
-cargo test -p fgdb-server --lib bolt::autocommit::tests
+cargo test -p fgdb --test authorized_explicit_transactions
+cargo test -p fgdb-server --lib bolt::
 cargo test -p fgdb-server --test bolt_autocommit
 ```
 
-Use the repository's configured execution lane and dependency checkout for
-these commands; they are not a replacement for the full exact-tree proof.
+These focused targets do not replace the repository's complete mandatory
+checks and exact-tree proof.

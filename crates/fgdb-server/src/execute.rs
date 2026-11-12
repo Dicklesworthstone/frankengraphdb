@@ -5,7 +5,10 @@
 mod conditional;
 mod difference;
 mod edge_upsert_output;
-pub(crate) use edge_upsert_output::metadata as graph_output_value;
+pub(crate) use edge_upsert_output::{
+    collect as graph_output_rows, collect_aggregate as graph_output_aggregate,
+    metadata as graph_output_value,
+};
 pub(crate) mod ordered;
 mod prepared;
 mod read_batch;
@@ -411,7 +414,7 @@ async fn read_inner(
 /// id()/elementId() (fgdb-j687q, owner ruling 2026-09-30). The authorized
 /// sessions refuse too; this covers the server's own RETURNING and
 /// subscription parsers, which run before any session sees the text.
-fn refuse_element_identity(text: &str) -> Result<(), Refusal> {
+pub(crate) fn refuse_element_identity(text: &str) -> Result<(), Refusal> {
     if fgdb_gql::reads_element_identity(text) {
         return Err(Refusal::new(
             ErrorCode::PermissionDenied,

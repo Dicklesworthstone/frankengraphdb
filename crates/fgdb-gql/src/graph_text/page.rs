@@ -258,6 +258,7 @@ fn admit_page_binding(
                         Integer::Bound(_) => true,
                         Integer::Parameter { index, .. }
                         | Integer::ParameterField { index, .. }
+                        | Integer::RegexParameter { index, .. }
                         | Integer::ListMembers { index, .. } => argument(*index, parameters, bytes),
                     }
             }),

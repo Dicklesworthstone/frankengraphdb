@@ -35,7 +35,9 @@ pub(crate) enum BoundContinuationOperation {
         imports: Vec<usize>,
         result: RowPatternResult,
     },
-    /// A list-local read body, collecting every mapped value in occurrence order.
+    /// A list-local read body or scalar COLLECT subquery, collecting every
+    /// mapped value in occurrence order. A scalar subquery supplies a private
+    /// non-NULL list in `list_column`, so its empty body returns an empty list.
     List {
         body: Box<BoundReadInput>,
         imports: Vec<usize>,
@@ -178,13 +180,13 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     false
 }
 
-/// A multi-clause EXISTS or COUNT body needs the relational owner even when its
-/// enclosing query has only one MATCH and the body has no RETURN. This
+/// A COLLECT or multi-clause EXISTS/COUNT body needs the relational owner even
+/// when its enclosing query has only one MATCH. This
 /// lookahead does not parse expressions: the shared graph lexer and
 /// multipart compiler still admit the whole body.
 fn has_relational_subquery(tokens: &[TextToken<'_>]) -> bool {
     for (index, token) in tokens.iter().enumerate() {
-        if !(token.word("EXISTS") || token.word("COUNT"))
+        if !(token.word("EXISTS") || token.word("COUNT") || token.word("COLLECT"))
             || !tokens.get(index + 1).is_some_and(|next| next.punct(b'{'))
             || index.checked_sub(1).is_some_and(|previous| {
                 tokens[previous].punct(b'.')
@@ -192,6 +194,22 @@ fn has_relational_subquery(tokens: &[TextToken<'_>]) -> bool {
                     || tokens[previous].word("AS")
             })
         {
+            continue;
+        }
+        if token.word("COLLECT") {
+            // Preserve a map projection on a legal binding named collect.
+            // Write introducers remain candidates for explicit read refusal.
+            if tokens.get(index + 2).is_some_and(|body| {
+                [
+                    "MATCH", "OPTIONAL", "WITH", "RETURN", "UNWIND", "CALL", "CREATE", "MERGE",
+                    "SET", "DELETE", "DETACH", "REMOVE",
+                ]
+                .iter()
+                .any(|clause| body.word(clause))
+            }) && !tokens.get(index + 3).is_some_and(|next| next.punct(b':'))
+            {
+                return true;
+            }
             continue;
         }
         let mut depth = 0_usize;

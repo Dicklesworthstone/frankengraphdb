@@ -40,9 +40,15 @@
 //!   and supervised authoritative recovery per served database.
 //! - HTTP/1.1 JSON (`/v1/health`, `/v1/databases/<name>/schema`, `/query`,
 //!   `/write`, `/write-batch`, Admin-only `/compact` and `/scrub`) and the Bolt-compat profile
-//!   (`BoltCompatProfileV1`: reads, explicit read-only transactions, and
-//!   bounded no-`RETURN` autocommit writes) over the same authorized execution
-//!   boundary; optional TLS 1.3 protects every configured listener.
+//!   (the `BoltCompatProfileV1` read base plus bounded autocommit writes with
+//!   `RETURN` and explicit native write transactions) over the same authorized
+//!   execution boundary; optional TLS 1.3 protects every configured listener.
+//!   Explicit writes retain one private workspace across statements, expose
+//!   read-your-own-writes for graph reads and exact aggregates, and publish
+//!   only at `COMMIT`. Preparation shares the retained capability allowance.
+//!   Provisional output
+//!   remains bounded and capability-masked; `ROLLBACK`, `RESET` and disconnect
+//!   discard the unpublished workspace.
 //! - Trusted embedding hosts can compact and scrub a served database through
 //!   [`Server::compact_database`] and [`Server::scrub_database`] while its
 //!   writer lease remains held. Maintenance shares ordinary write admission,
@@ -55,11 +61,13 @@
 //!
 //! Not served, and refused with a typed error rather than approximated: the
 //! durable `PublishedResultStream` class with `RESULT_ACK`/`RESULT_RELEASE`,
-//! prepared writes with RETURN, explicit multi-statement write transactions with
-//! ownership/reattach, durable or capability-masked subscriptions, and HTTP/2,
+//! prepared writes with RETURN, durable transaction ownership/reattachment,
+//! FGP explicit write transactions, durable or capability-masked subscriptions, and HTTP/2,
 //! gRPC and WebSocket adapters.
-//! Because every result is ephemeral, a disconnect can lose undelivered rows
-//! but never a commit: a write's outcome is decided before its first frame.
+//! Results are ephemeral. Autocommit results follow native completion, while
+//! explicit transaction rows are provisional until `COMMIT`. Disconnect can
+//! lose undelivered rows and abandons an uncommitted explicit workspace; it
+//! cannot undo a published commit or establish an ambiguous commit's outcome.
 //!
 //! The engine has no durable catalog yet, so each served database resolves
 //! names through operator-declared [`Symbols`], exactly like the CLI flags.

@@ -185,7 +185,7 @@ fn retained_value(
 
 /// Convert the complete result while the native rollback workspace and signed
 /// permit are live. Even PULL 1 or DISCARD must admit every later row first.
-fn collect_returning(
+pub(super) fn collect_returning(
     rows: Vec<Vec<WireValue>>,
     max_frame_len: usize,
     work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,

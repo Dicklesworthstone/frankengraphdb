@@ -2,7 +2,7 @@
 //!
 //! Official Neo4j drivers connect with `bolt://` (or `neo4j://`, answered
 //! by a single-server routing table) and run Cypher/GQL reads and bounded
-//! autocommit writes. Explicit transactions remain read-only. The
+//! autocommit and explicit native write transactions. The
 //! profile is a negotiated downgrade, never a drop-in-Neo4j claim:
 //!
 //! - Authentication is a Warden capability token in HELLO: the hex token as
@@ -13,13 +13,14 @@
 //!   native write. PULL or DISCARD consumes it as one atomic program
 //!   through the existing authorized writer; RUN alone publishes nothing.
 //!   RESET/disconnect before consumption drops it. Scalar, temporal, list and
-//!   map RETURN values are converted and admitted before commit. Graph-valued
-//!   write output refuses before publication; it requires workspace hydration.
-//!   Explicit write transactions remain unsupported by the server.
+//!   map and graph RETURN values are converted and admitted before commit.
 //!   A lost terminal response never proves rollback and is never auto-replayed.
-//! - An explicit transaction holds one read session from BEGIN to COMMIT,
-//!   so all of its statements read one pinned generation; autocommit read
-//!   RUNs each pin their own. No lock is held across network round trips.
+//! - BEGIN with read mode or a read-only capability holds one pinned read
+//!   session. Write mode with write authority owns the existing native
+//!   workspace: RUN stages provisional results and effects, COMMIT alone
+//!   publishes, and ROLLBACK/RESET/drop discard the complete prefix. Reads see
+//!   earlier staged writes. Native cumulative limits and stale-basis refusals
+//!   apply throughout. No database lock spans network round trips.
 //! - The database is RUN/BEGIN's `db`, or the only served database.
 //! - Local database-qualified bookmarks constrain BEGIN, autocommit reads,
 //!   writes and schema procedures. An unmet floor refuses before execution;
@@ -54,20 +55,26 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use core::future::poll_fn;
 use core::pin::Pin;
 use core::task::Poll;
-use fgdb::{PreparedNativeRead, QueryError, QueryResult};
+use fgdb::{AuthorizedWriteTransaction, PreparedNativeRead, QueryError, QueryResult};
 use fgdb_bolt::message::{
     Dechunker, MAGIC, Map, Request, Response, decode_request, negotiate, structure,
 };
 use fgdb_bolt::packstream::{Value, get};
 use fgdb_gql::algebra::GraphValue;
-use fgdb_gql::{GqlParameters, PreparedGraphBranchText};
-use fgdb_protocol::body::{ErrorCode, WireTimestamp, WireValue};
+use fgdb_gql::{
+    GqlMapArgumentText, GqlParameters, GqlTextOffsets, GraphAggregateTextSlot, GraphSymbol,
+    GraphSymbolKind, GraphSymbolResolver, PreparedGraphAggregateText, PreparedGraphBranchText,
+    PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate, PreparedGraphSetText,
+    PreparedGraphWriteChainText, ReverseSymbolCatalog,
+};
+use fgdb_protocol::body::{Body, ErrorCode, Execute, ExecuteMode, WireTimestamp, WireValue};
 use fgdb_protocol::transport::DuplexIo;
 use fgdb_types::{
     CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime,
-    CommitSeq, EId, PurposeContexts, VId,
+    CommitSeq, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 use fgdb_warden::{Authority, CapabilityToken};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -330,13 +337,317 @@ struct Pending<'s> {
     write: Option<autocommit::PendingWrite>,
 }
 
-/// An explicit transaction: one read session, one pinned generation.
+enum TransactionSession<'s> {
+    Read(Box<ReadSession<'s>>),
+    Write {
+        owner: Box<AuthorizedWriteTransaction<'s, fn() -> u64>>,
+        generation: Generation,
+    },
+}
+
+impl TransactionSession<'_> {
+    fn generation(&self) -> Generation {
+        match self {
+            Self::Read(session) => session.generation(),
+            Self::Write { generation, .. } => generation.clone(),
+        }
+    }
+}
+
+/// One explicit owner and its independently retained provisional results.
 struct Transaction<'s> {
     name: String,
     db: &'s Served,
-    session: ReadSession<'s>,
+    session: TransactionSession<'s>,
     seq: CommitSeq,
     cursors: cursors::Cursors<Pending<'s>>,
+}
+
+enum TransactionStatement {
+    Read(Box<fgdb_gql::PreparedGraphSet>),
+    Aggregate {
+        statement: Box<PreparedGraphSetAggregate>,
+        columns: Vec<String>,
+        slots: Vec<GraphAggregateTextSlot>,
+    },
+    Write(Box<fgdb_gql::PreparedGraphWriteChain>),
+}
+
+impl TransactionStatement {
+    fn columns(&self) -> &[String] {
+        match self {
+            Self::Read(statement) => statement.columns(),
+            Self::Aggregate { columns, .. } => columns,
+            Self::Write(statement) => statement.columns(),
+        }
+    }
+}
+
+fn transaction_statement_error<E: GqlTextOffsets + core::fmt::Display>(
+    lowered: Option<&GqlMapArgumentText>,
+    mut error: E,
+) -> Failure {
+    if let Some(lowered) = lowered {
+        lowered.restore(&mut error);
+    }
+    Failure::from_refusal(Refusal::new(ErrorCode::Statement, error.to_string()))
+}
+
+/// The native owner's meter latches its first refusal. Resolver methods have
+/// an Option return contract, so no failed lookup may continue observing the
+/// catalog or turn the original control refusal into a syntax diagnostic.
+/// Reverse names are copied only after admission and retain the signed scope.
+struct TransactionCatalog<'a> {
+    symbols: &'a crate::Symbols,
+    scope: &'a fgdb_warden::PlannerPredicates,
+    work: RefCell<&'a mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>>,
+    failed: Cell<bool>,
+    denied: Cell<bool>,
+}
+
+impl TransactionCatalog<'_> {
+    fn charge(&self, units: u64) -> Result<(), fgdb::WriteTxnError> {
+        if self.failed.get() {
+            return Err(fgdb::WriteTxnError::AuthorizedMutationRefused);
+        }
+        let result = (self.work.borrow_mut())(units);
+        if result.is_err() {
+            self.failed.set(true);
+        }
+        result
+    }
+
+    fn check(&self) -> Result<(), Failure> {
+        self.charge(0)
+            .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
+        if self.denied.get() {
+            return Err(Failure::from_refusal(crate::execute::write_refusal(
+                &fgdb::WriteTxnError::Authorization(fgdb_warden::Error::ScopeDenied),
+            )));
+        }
+        Ok(())
+    }
+
+    fn admits(&self, symbol: GraphSymbol) -> bool {
+        match symbol {
+            GraphSymbol::Label(id) => self.scope.allows_label(id),
+            GraphSymbol::Relation(id) => self.scope.allows_relation(id),
+            GraphSymbol::Property(id) => self.scope.allows_property(id),
+        }
+    }
+
+    fn copy_name(&self, name: &str) -> Option<String> {
+        self.charge((name.len().div_ceil(64) as u64).saturating_add(1))
+            .ok()?;
+        Some(name.to_owned())
+    }
+}
+
+impl GraphSymbolResolver for &TransactionCatalog<'_> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        if self.denied.get() || self.failed.get() {
+            return None;
+        }
+        self.charge((name.len().div_ceil(64) as u64).saturating_add(1))
+            .ok()?;
+        let symbol = self.symbols.resolve(kind, name);
+        self.charge(0).ok()?;
+        if symbol.is_some_and(|symbol| !self.admits(symbol)) {
+            self.denied.set(true);
+            return None;
+        }
+        symbol
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        if self.denied.get() || self.failed.get() {
+            return None;
+        }
+        self.charge(1).ok()?;
+        let source = self.symbols.borrowed_reverse_catalog();
+        let mut catalog = ReverseSymbolCatalog::new();
+        for (id, name) in &source.labels {
+            // Hidden catalog growth must not change the signed work bill.
+            // Poll live controls during traversal; charge only visible copies.
+            self.charge(0).ok()?;
+            if self.scope.allows_label(*id) {
+                catalog.labels.insert(*id, self.copy_name(name)?);
+            }
+        }
+        for (id, name) in &source.relations {
+            self.charge(0).ok()?;
+            if self.scope.allows_relation(*id) {
+                catalog.relations.insert(*id, self.copy_name(name)?);
+            }
+        }
+        for (id, name) in &source.properties {
+            self.charge(0).ok()?;
+            if self.scope.allows_property(*id) {
+                catalog.properties.insert(*id, self.copy_name(name)?);
+            }
+        }
+        Some(catalog)
+    }
+
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        if self.denied.get() || self.failed.get() || !self.scope.allows_label(id) {
+            return None;
+        }
+        self.charge(1).ok()?;
+        let name = self.symbols.borrowed_reverse_catalog().labels.get(&id)?;
+        self.copy_name(name)
+    }
+
+    fn reverse_relation(&self, id: fgdb_delta_types::RelationId) -> Option<String> {
+        if self.denied.get() || self.failed.get() || !self.scope.allows_relation(id) {
+            return None;
+        }
+        self.charge(1).ok()?;
+        let name = self.symbols.borrowed_reverse_catalog().relations.get(&id)?;
+        self.copy_name(name)
+    }
+}
+
+/// Native read preparation wins over keyword hints: an alias or literal
+/// spelling CREATE cannot turn a read into a write. Every compiler and binding
+/// spends the retained owner allowance. Parameters already carry that owner's
+/// trusted once-per-statement clock; no adapter clock is captured again.
+fn prepare_transaction_statement(
+    db: &Served,
+    text: &str,
+    parameters: &GqlParameters,
+    scope: &fgdb_warden::PlannerPredicates,
+    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+) -> Result<TransactionStatement, Failure> {
+    let catalog = TransactionCatalog {
+        symbols: &db.symbols,
+        scope,
+        work: RefCell::new(work),
+        failed: Cell::new(false),
+        denied: Cell::new(false),
+    };
+    let charge = |units| {
+        catalog
+            .charge(units)
+            .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))
+    };
+    charge(1)?;
+    let lowered_read = GqlMapArgumentText::lower_fields(text, parameters);
+    let (read_text, read_parameters) = lowered_read
+        .as_ref()
+        .map_or((text, parameters), |(lowered, derived)| {
+            (lowered.text(), derived)
+        });
+    let recipe = lowered_read.as_ref().map(|(lowered, _)| lowered);
+    let mut declarations = Vec::new();
+    for declaration in read_parameters.parameter_types() {
+        charge(1)?;
+        declarations.push(declaration);
+    }
+    charge(read_text.len().saturating_sub(text.len()) as u64)?;
+    let read = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+        read_text,
+        &declarations,
+        &mut &catalog,
+    );
+    catalog.check()?;
+    let read_error = match read {
+        Ok(template) => {
+            charge(1)?;
+            return template
+                .bind_parameters(read_parameters)
+                .map(|statement| TransactionStatement::Read(Box::new(statement)))
+                .map_err(|error| transaction_statement_error(recipe, error));
+        }
+        Err(error) => error,
+    };
+    let mut offset = read_error.offset;
+    let mut read_error = transaction_statement_error(recipe, read_error);
+    charge(1)?;
+    let aggregate = PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
+        read_text,
+        &declarations,
+        &catalog,
+    );
+    catalog.check()?;
+    match aggregate {
+        Ok(template) => {
+            charge(1)?;
+            let statement = template
+                .bind_relation_parameters(read_parameters)
+                .map_err(|error| transaction_statement_error(recipe, error))?;
+            return Ok(TransactionStatement::Aggregate {
+                statement: Box::new(statement),
+                columns: template.columns().to_vec(),
+                slots: template.output_slots().to_vec(),
+            });
+        }
+        Err(error) if error.offset > offset => {
+            offset = error.offset;
+            read_error = transaction_statement_error(recipe, error);
+        }
+        Err(_) => {}
+    }
+    charge(1)?;
+    let aggregate = PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
+        read_text,
+        &declarations,
+        &catalog,
+    );
+    catalog.check()?;
+    match aggregate {
+        Ok(template) => {
+            charge(1)?;
+            let statement = template
+                .bind_parameters(read_parameters)
+                .map_err(|error| transaction_statement_error(recipe, error))?;
+            let statement =
+                PreparedGraphSetAggregate::from_complete_input(statement).ok_or_else(|| {
+                    Failure::from_refusal(Refusal::new(
+                        ErrorCode::Statement,
+                        "aggregate input is unsupported in an explicit write transaction",
+                    ))
+                })?;
+            return Ok(TransactionStatement::Aggregate {
+                statement: Box::new(statement),
+                columns: template.columns().to_vec(),
+                slots: template.output_slots().to_vec(),
+            });
+        }
+        Err(error) if error.offset > offset => {
+            read_error = transaction_statement_error(recipe, error);
+        }
+        Err(_) => {}
+    }
+    if !looks_like_write(text) {
+        return Err(read_error);
+    }
+    charge(1)?;
+    let lowered = GqlMapArgumentText::lower(text, parameters);
+    let (text, parameters) = lowered
+        .as_ref()
+        .map_or((text, parameters), |(lowered, derived)| {
+            (lowered.text(), derived)
+        });
+    let recipe = lowered.as_ref().map(|(lowered, _)| lowered);
+    let mut declarations = Vec::new();
+    for declaration in parameters.parameter_types() {
+        charge(1)?;
+        declarations.push(declaration);
+    }
+    let template = PreparedGraphWriteChainText::prepare_statement_with_parameter_types(
+        text,
+        db.write_relation,
+        &declarations,
+        &catalog,
+    );
+    catalog.check()?;
+    let template = template.map_err(|error| transaction_statement_error(recipe, error))?;
+    charge(1)?;
+    template
+        .bind_parameters(parameters)
+        .map(|statement| TransactionStatement::Write(Box::new(statement)))
+        .map_err(|error| transaction_statement_error(recipe, error))
 }
 /// Serve one Bolt connection until GOODBYE, disconnect or drain.
 pub(crate) async fn run(
@@ -505,24 +816,7 @@ impl<'s> Connection<'s> {
                     "PULL or DISCARD every result before COMMIT",
                 ))
             }
-            Request::Commit => match self.transaction.take() {
-                Some(transaction) => {
-                    self.output_database = Some(transaction.db);
-                    self.pending = None;
-                    let generation = transaction.session.generation();
-                    match generation.check() {
-                        Ok(()) => {
-                            self.output_generation = Some(generation);
-                            Ok(vec![(
-                                "bookmark".to_owned(),
-                                Value::string(bookmark(&transaction.name, transaction.seq)),
-                            )])
-                        }
-                        Err(error) => Err(Failure::from_refusal(error.into())),
-                    }
-                }
-                None => Err(Failure::invalid("COMMIT outside a transaction")),
-            },
+            Request::Commit => self.commit_transaction(cx).await,
             Request::Rollback => match self.transaction.take() {
                 Some(transaction) => {
                     self.output_database = Some(transaction.db);
@@ -581,6 +875,10 @@ impl<'s> Connection<'s> {
             ("hints".to_owned(), Value::Map(Vec::new())),
             ("fgdb_profile".to_owned(), Value::string(fgdb_bolt::PROFILE)),
             ("fgdb_autocommit_writes".to_owned(), Value::Bool(true)),
+            (
+                "fgdb_explicit_write_transactions".to_owned(),
+                Value::Bool(true),
+            ),
         ])
     }
 
@@ -623,7 +921,67 @@ impl<'s> Connection<'s> {
         let (name, db) = self.database(extra)?;
         self.output_database = Some(db);
         let token = self.token.as_ref().expect("authenticated");
-        let (session, seq) = causal::session(cx, db, token, &name, extra).await?;
+        let options = causal::options(extra, &name)?;
+        let verified = db
+            .authority
+            .verify_at(token, crate::TRUNK, crate::unix_millis())
+            .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
+        let writable = options.mode == causal::AccessMode::Write
+            && matches!(
+                verified.predicates().rights(),
+                fgdb_warden::Rights::Write | fgdb_warden::Rights::ReadWrite
+            );
+        let (session, seq) = if writable {
+            crate::execute::authorize_write(db, token).map_err(Failure::from_refusal)?;
+            let generation = db
+                .db
+                .generation()
+                .map_err(|error| Failure::from_refusal(error.into()))?;
+            let _operation = generation
+                .enter()
+                .map_err(|error| Failure::from_refusal(error.into()))?;
+            let contexts = PurposeContexts::narrow_runtime_root(cx);
+            let mut guard = db
+                .db
+                .write(cx)
+                .await
+                .map_err(|error| Failure::from_refusal(error.into()))?;
+            generation
+                .check()
+                .map_err(|error| Failure::from_refusal(error.into()))?;
+            let owner = guard
+                .begin_authorized_write(
+                    &contexts.txn(),
+                    &contexts.commit(),
+                    &db.authority,
+                    token,
+                    crate::TRUNK,
+                    db.write_policy.insertion_policy(),
+                    db.max_statements,
+                    crate::unix_millis as fn() -> u64,
+                )
+                .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
+            let seq = owner.basis();
+            if seq < options.minimum_seq {
+                return Err(Failure::new(
+                    "Neo.TransientError.General.DatabaseUnavailable",
+                    "the local bookmark has not been reached; no transaction was opened",
+                ));
+            }
+            generation
+                .check()
+                .map_err(|error| Failure::from_refusal(error.into()))?;
+            (
+                TransactionSession::Write {
+                    owner: Box::new(owner),
+                    generation,
+                },
+                seq,
+            )
+        } else {
+            let (session, seq) = causal::session(cx, db, token, &name, extra).await?;
+            (TransactionSession::Read(Box::new(session)), seq)
+        };
         self.output_generation = Some(session.generation());
         self.transaction = Some(Transaction {
             name,
@@ -633,6 +991,259 @@ impl<'s> Connection<'s> {
             cursors: cursors::Cursors::new(),
         });
         Ok(Vec::new())
+    }
+
+    /// Remove ownership before the first await. Cancellation, recovery or an
+    /// ambiguous completion cannot leave a transaction that COMMIT can replay.
+    async fn commit_transaction(&mut self, cx: &Cx) -> Result<Map, Failure> {
+        let transaction = self
+            .transaction
+            .take()
+            .ok_or_else(|| Failure::invalid("COMMIT outside a transaction"))?;
+        self.output_database = Some(transaction.db);
+        self.pending = None;
+        let generation = transaction.session.generation();
+        self.output_generation = Some(generation.clone());
+        let _operation = generation
+            .enter()
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        let seq = match transaction.session {
+            TransactionSession::Read(_) => transaction.seq,
+            TransactionSession::Write { owner, .. } => {
+                let mut guard = transaction
+                    .db
+                    .db
+                    .write(cx)
+                    .await
+                    .map_err(|error| Failure::from_refusal(error.into()))?;
+                generation
+                    .check()
+                    .map_err(|error| Failure::from_refusal(error.into()))?;
+                let completion = (*owner).commit(&mut guard).await.map_err(|error| {
+                    Failure::from_refusal(crate::execute::write_refusal(&error))
+                })?;
+                drop(guard);
+                match completion {
+                    EmbeddedTxnCompletion::WriteCommitted { commit_seq } => {
+                        transaction.db.commits.committed();
+                        commit_seq
+                    }
+                    EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => snapshot_seq,
+                }
+            }
+        };
+        // Publication has already decided a write outcome. A later recovery
+        // fence must close the guarded socket, never turn this success into a
+        // retryable refusal that could repeat a committed transaction.
+        Ok(vec![(
+            "bookmark".to_owned(),
+            Value::string(bookmark(&transaction.name, seq)),
+        )])
+    }
+
+    /// Stage while the owner is removed from the connection. Any refusal or
+    /// cancelled future abandons the entire prefix. Graph metadata is owned
+    /// from the authorized private overlay before a cursor can be published.
+    async fn run_transaction_statement(
+        &mut self,
+        cx: &Cx,
+        text: &str,
+        arguments: &Map,
+        parameters: &GqlParameters,
+        request_read_only: bool,
+    ) -> Result<Map, Failure> {
+        let mut transaction = self.transaction.take().expect("write owner selected");
+        let db = transaction.db;
+        let token = self.token.as_ref().expect("authenticated");
+        crate::execute::authorize_write(db, token).map_err(Failure::from_refusal)?;
+        crate::execute::refuse_element_identity(text).map_err(Failure::from_refusal)?;
+        let generation = transaction.session.generation();
+        self.output_database = Some(db);
+        self.output_generation = Some(generation.clone());
+        let _operation = generation
+            .enter()
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        let TransactionSession::Write { owner, .. } = &mut transaction.session else {
+            unreachable!("write owner selected");
+        };
+        // Preserve the complete request/value bounds of the other adapters.
+        Execute {
+            mode: ExecuteMode::Write,
+            statement: text.to_owned(),
+            parameters: wire_parameters(arguments)?,
+        }
+        .encode()
+        .map_err(|error| Failure::invalid(error.to_string()))?;
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        let query_cx = crate::query_cx(&contexts);
+        query_cx
+            .checkpoint()
+            .map_err(|_| Failure::invalid("transaction preparation cancelled"))?;
+        let mut guard = db
+            .db
+            .write(cx)
+            .await
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        generation
+            .check()
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        crate::execute::authorize_write(db, token).map_err(Failure::from_refusal)?;
+        let mut preparation_refusal = None;
+        let statement = owner
+            .prepare_statement(
+                &guard,
+                &query_cx,
+                text,
+                parameters,
+                |parameters, scope, work| match prepare_transaction_statement(
+                    db, text, parameters, scope, work,
+                ) {
+                    Ok(statement) => Ok(statement),
+                    Err(error) => {
+                        preparation_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    }
+                },
+            )
+            .map_err(|error| {
+                // The native owner retains control failures even if a parser's
+                // Option resolver reports an unrelated missing-symbol error.
+                if matches!(&error, fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    && let Some(refusal) = preparation_refusal
+                {
+                    return refusal;
+                }
+                Failure::from_refusal(crate::execute::write_refusal(&error))
+            })?;
+        let columns = statement.columns().to_vec();
+        let is_write = matches!(&statement, TransactionStatement::Write(_));
+        if is_write && request_read_only {
+            return Err(read_only());
+        }
+        let before = owner
+            .statistics()
+            .ok_or_else(|| Failure::invalid("transaction is finished"))?;
+        let mut admitted = None;
+        let mut output_refusal = None;
+        let mut collect =
+            |rows: Result<Vec<Vec<WireValue>>, Refusal>,
+             work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+             metadata: &mut dyn fgdb::AuthorizedWriteOutput| {
+                let output = rows.and_then(|rows| {
+                    autocommit::collect_returning(
+                        rows,
+                        self.server.limits.max_frame_len as usize,
+                        work,
+                        metadata,
+                        db.symbols.borrowed_reverse_catalog(),
+                    )
+                });
+                match output {
+                    Ok(rows) => {
+                        admitted = Some(rows);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        output_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    }
+                }
+            };
+        let result = match &statement {
+            TransactionStatement::Read(statement) => owner
+                .read(&mut guard, &query_cx, statement, |rows, work, metadata| {
+                    collect(
+                        crate::execute::graph_output_rows(&columns, rows, work),
+                        work,
+                        metadata,
+                    )
+                })
+                .map(|_| ()),
+            TransactionStatement::Aggregate {
+                statement, slots, ..
+            } => owner
+                .read_aggregate(&mut guard, &query_cx, statement, |rows, work, metadata| {
+                    collect(
+                        crate::execute::graph_output_aggregate(&columns, slots, rows, work),
+                        work,
+                        metadata,
+                    )
+                })
+                .map(|_| ()),
+            TransactionStatement::Write(statement) => owner
+                .stage_chain(&mut guard, &query_cx, statement, |rows, work, metadata| {
+                    collect(
+                        crate::execute::graph_output_rows(&columns, rows, work),
+                        work,
+                        metadata,
+                    )
+                })
+                .map(|_| ()),
+        };
+        drop(guard);
+        result.map_err(|error| {
+            Failure::from_refusal(
+                output_refusal.unwrap_or_else(|| crate::execute::write_refusal(&error)),
+            )
+        })?;
+        generation
+            .check()
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        let after = owner
+            .statistics()
+            .expect("successful statement retains owner");
+        let vertices = after.created_vertices - before.created_vertices;
+        let edges = after.created_edges - before.created_edges;
+        let changed =
+            vertices != 0 || edges != 0 || after.mutation_effects != before.mutation_effects;
+        let mut stats = vec![("contains-updates".to_owned(), Value::Bool(changed))];
+        for (name, count) in [
+            ("nodes-created", vertices),
+            ("relationships-created", edges),
+        ] {
+            if count != 0 {
+                let count = i64::try_from(count)
+                    .map_err(|_| Failure::invalid("transaction statement count is out of range"))?;
+                stats.push((name.to_owned(), Value::Int(count)));
+            }
+        }
+        // Counters describe this provisional statement. Only COMMIT returns
+        // the native completion bookmark; PULL/DISCARD never publish a write.
+        let summary = vec![
+            (
+                "type".to_owned(),
+                Value::string(if is_write { "w" } else { "r" }),
+            ),
+            ("t_last".to_owned(), Value::Int(0)),
+            ("db".to_owned(), Value::string(transaction.name.clone())),
+            ("stats".to_owned(), Value::Map(stats)),
+            ("fgdb_transaction_local".to_owned(), Value::Bool(true)),
+        ];
+        let pending = Pending {
+            rows: admitted.expect("checked statement output admission ran"),
+            database: transaction.name.clone(),
+            db,
+            seq: None,
+            generation,
+            write: Some(autocommit::PendingWrite::Completed(summary)),
+        };
+        self.transaction = Some(transaction);
+        let qid = match self.buffer_result(cx, pending) {
+            Ok(Some(qid)) => qid,
+            Ok(None) => unreachable!("transaction result has an owner"),
+            Err(error) => {
+                self.transaction = None;
+                return Err(error);
+            }
+        };
+        Ok(vec![
+            (
+                "fields".to_owned(),
+                Value::List(columns.into_iter().map(Value::String).collect()),
+            ),
+            ("t_first".to_owned(), Value::Int(0)),
+            ("qid".to_owned(), Value::Int(qid)),
+        ])
     }
 
     async fn run(
@@ -662,6 +1273,19 @@ impl<'s> Connection<'s> {
         // path, including for these forms; this hint grants no authority.
         let schema_metadata = self.transaction.is_none() && schema_procedure(query).is_some();
         let arguments = statement_parameters(parameters)?;
+        if self.transaction.as_ref().is_some_and(|transaction| {
+            matches!(&transaction.session, TransactionSession::Write { .. })
+        }) {
+            return self
+                .run_transaction_statement(
+                    cx,
+                    query,
+                    parameters,
+                    &arguments,
+                    get(extra, "mode").and_then(Value::as_str) == Some("r"),
+                )
+                .await;
+        }
         if let Some(metadata) =
             self.queue_autocommit_write(cx, query, parameters, &arguments, extra)?
         {
@@ -686,7 +1310,10 @@ impl<'s> Connection<'s> {
         self.output_database = Some(db);
         let session = match autocommit.as_mut() {
             Some(session) => session,
-            None => &mut self.transaction.as_mut().expect("in a transaction").session,
+            None => match &mut self.transaction.as_mut().expect("in a transaction").session {
+                TransactionSession::Read(session) => session.as_mut(),
+                TransactionSession::Write { .. } => unreachable!("write owner dispatched above"),
+            },
         };
         let generation = session.generation();
         self.output_generation = Some(generation.clone());
@@ -821,8 +1448,8 @@ impl<'s> Connection<'s> {
     }
 
     /// A single-server routing table, so `neo4j://` URIs work: this server
-    /// is every role. Only autocommit writes are admitted here;
-    /// explicit transactions remain read-only even when routed as WRITE.
+    /// advertises READ and WRITE roles. Writes use autocommit or an admitted
+    /// explicit write owner; routing cannot widen an existing read-only owner.
     fn route(&mut self, io: &Io, routing: &Map, extra: &Map) -> Result<Map, Failure> {
         let (name, db) = self.database(extra)?;
         self.output_database = Some(db);
@@ -901,7 +1528,7 @@ fn schema_procedure(query: &str) -> Option<(&'static str, SchemaKind)> {
 fn read_only() -> Failure {
     Failure::new(
         "Neo.ClientError.Statement.AccessMode",
-        "Bolt writes require write authority, autocommit and write mode; explicit transactions remain read-only",
+        "Bolt writes require write authority and a write-mode transaction or autocommit",
     )
 }
 
@@ -1874,6 +2501,126 @@ mod tests {
                 START,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn transaction_catalog_hidden_growth_preserves_visible_output_and_signed_work() {
+        use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+        use fgdb_warden::{PlannerPredicates, Rights, Scope};
+
+        fn observe(
+            symbols: &crate::Symbols,
+            scope: &PlannerPredicates,
+        ) -> (ReverseSymbolCatalog, u64, usize) {
+            let mut units = 0;
+            let mut polls = 0;
+            let visible = {
+                let mut work = |bill| {
+                    units += bill;
+                    polls += 1;
+                    Ok(())
+                };
+                let catalog = TransactionCatalog {
+                    symbols,
+                    scope,
+                    work: RefCell::new(&mut work),
+                    failed: Cell::new(false),
+                    denied: Cell::new(false),
+                };
+                let visible = (&catalog).reverse_catalog().unwrap();
+                catalog.check().unwrap();
+                visible
+            };
+            (visible, units, polls)
+        }
+
+        let issuer = authority(0xb017_ca7a);
+        let token = issuer
+            .issue_at(
+                &Grant {
+                    branch: crate::TRUNK.into(),
+                    labels: Scope::only([LabelId(1), LabelId(2)]),
+                    relations: Scope::only([RelationId(1), RelationId(2)]),
+                    properties: Scope::only([PropertyKeyId(1), PropertyKeyId(2)]),
+                    rights: Rights::ReadWrite,
+                    limits: QueryLimits {
+                        max_nodes: 100,
+                        max_work: 1000,
+                        max_rows: 100,
+                    },
+                    expires_at_ms: EXPIRES,
+                },
+                START,
+            )
+            .unwrap();
+        let verified = issuer.verify_at(&token, crate::TRUNK, START).unwrap();
+        let scope = verified.predicates();
+        let kinds = [
+            GraphSymbolKind::Label,
+            GraphSymbolKind::Relation,
+            GraphSymbolKind::Property,
+        ];
+        let mut symbols = crate::Symbols::new();
+        for kind in kinds {
+            symbols.bind(kind, "visible", 1).unwrap();
+        }
+        let (before, before_units, before_polls) = observe(&symbols, scope);
+        assert_eq!(before.labels[&LabelId(1)], "visible");
+        assert_eq!(before.relations[&RelationId(1)], "visible");
+        assert_eq!(before.properties[&PropertyKeyId(1)], "visible");
+        for id in 3..131 {
+            for kind in kinds {
+                symbols
+                    .bind(kind, &format!("hidden_{id}_{}", "x".repeat(96)), id)
+                    .unwrap();
+            }
+        }
+        let (hidden, hidden_units, hidden_polls) = observe(&symbols, scope);
+        assert_eq!(hidden, before);
+        assert_eq!(hidden_units, before_units);
+        assert!(
+            hidden_polls > before_polls,
+            "hidden traversal must still poll live controls"
+        );
+        for kind in kinds {
+            symbols.bind(kind, "also_visible", 2).unwrap();
+        }
+        let (expanded, expanded_units, _) = observe(&symbols, scope);
+        assert_eq!(expanded.labels.len(), 2);
+        assert_eq!(expanded.relations.len(), 2);
+        assert_eq!(expanded.properties.len(), 2);
+        assert!(
+            expanded_units > hidden_units,
+            "permitted catalog copies must spend signed work"
+        );
+
+        // A zero-cost hidden-entry poll is still a live control boundary.
+        // Its refusal latches and prevents both output and any later callback.
+        let calls = Cell::new(0);
+        let polls = Cell::new(0);
+        let mut work = |units| {
+            calls.set(calls.get() + 1);
+            if units == 0 {
+                polls.set(polls.get() + 1);
+                if polls.get() == 3 {
+                    // The first two label IDs are visible; the third is hidden.
+                    return Err(fgdb::WriteTxnError::AuthorizedMutationRefused);
+                }
+            }
+            Ok(())
+        };
+        let catalog = TransactionCatalog {
+            symbols: &symbols,
+            scope,
+            work: RefCell::new(&mut work),
+            failed: Cell::new(false),
+            denied: Cell::new(false),
+        };
+        assert!((&catalog).reverse_catalog().is_none());
+        let stopped = calls.get();
+        assert!(catalog.check().is_err());
+        assert!((&catalog).reverse_catalog().is_none());
+        assert_eq!(calls.get(), stopped);
     }
 
     fn framed_output() -> Vec<u8> {

@@ -142,13 +142,16 @@ grants physical maintenance only; it grants no query reads or writes. Query
 rights cannot be attenuated into Admin rights. Query ceilings apply to query
 execution; maintenance uses the server's existing engine/recovery ownership.
 
---bolt-listen adds the Bolt-compat adapter (BoltCompatProfileV1) for official
-Neo4j drivers: bolt:// or neo4j:// URIs, authenticated with the hex token as a
-bearer credential (or as the basic-auth password). It serves Cypher/GQL reads,
-explicit read-only transactions, and bounded no-RETURN autocommit writes;
-write RETURN and explicit write transactions refuse with
-Neo.ClientError.Statement.AccessMode. The database is the driver's database
-argument, or the only one served.
+--bolt-listen adds the bounded Bolt-compat adapter for Neo4j drivers:
+bolt:// or neo4j:// URIs, authenticated with the hex token as a bearer
+credential (or as the basic-auth password). It serves Cypher/GQL reads,
+autocommit writes with RETURN, and explicit native write transactions with
+read-your-own-writes. BEGIN in write/default mode requires signed Write or
+ReadWrite rights to open a writer; read-only grants and mode:r keep a read
+session. PULL/DISCARD return provisional statement results; only COMMIT
+publishes the explicit transaction. ROLLBACK, RESET and disconnect discard
+uncommitted effects. Durable transaction reattachment remains unsupported.
+The database is the driver's database argument, or the only one served.
 
 token prints the token as hex on stdout. Scopes default to every label,
 relation and property; any --allow-* flag restricts that kind to the listed
