@@ -88,6 +88,25 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteT
         ))
     }
 
+    fn procedure(
+        &mut self,
+        call: &fgdb_gql::PreparedProcedureCall,
+        arguments: &[fgdb_gql::algebra::GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<WriteTxnError, WriteTxnError>>>
+    {
+        selection::procedure(
+            self.transaction,
+            &self.database.borrow(),
+            self.cx,
+            call,
+            arguments,
+            self.scope,
+            policy,
+            self.execution,
+        )
+    }
+
     fn element_property(
         &mut self,
         element: fgdb_delta_types::ElementId,

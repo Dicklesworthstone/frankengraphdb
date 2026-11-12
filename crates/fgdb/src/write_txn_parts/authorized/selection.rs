@@ -2,6 +2,7 @@
 //! already verified write permit; selection never issues a second allowance.
 
 use super::{Database, Error, Execution, Vfs, WriteTxn, WriteTxnError};
+use crate::gql_exec::{AdmissionUsage, source::SourceEvent};
 use crate::query::QueryError;
 use crate::write_txn::overlay_scan::OverlayRows;
 use crate::write_txn::point_effect_selector::{EffectKey, select as select_effects};
@@ -9,10 +10,17 @@ use crate::write_txn::{
     PointReadField, ProjectionReadAttempt, point_find, point_payload_admission,
 };
 use fgdb_delta_types::{ElementId, PropertyKeyId};
-use fgdb_gql::algebra::{GlaOutput, PreparedGraphPattern};
+use fgdb_gql::algebra::{
+    GlaOutput, GraphValue, GraphValueRow, PreparedGraphPattern, VertexScanDomain,
+};
 use fgdb_gql::{
-    GlaExecutionEvent, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphPatternFactorExecution, PreparedGraphPatternFactors,
+    GlaExecutionEvent, GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution,
+    GqlQueryPolicy, GraphPatternFactorExecution, PreparedGraphPatternFactors,
+    PreparedProcedureCall,
+};
+use fgdb_prism::{
+    FnxMeter, FnxReadError, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge,
+    ProjectionError, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
 };
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, QueryCx, VId};
 use fgdb_warden::PlannerPredicates;
@@ -477,6 +485,40 @@ pub(super) fn returning_element_metadata<V: Vfs + Clone, Clock: FnMut() -> u64>(
     )
 }
 
+// The existing pattern callback keeps its original physical capabilities.
+// Procedure refusal stays optional, so an unsupported host is not advertised.
+struct ScopedInputSource<S, P> {
+    patterns: S,
+    procedures: P,
+}
+
+impl<S, P> fgdb_gql::GraphSetSource<WriteTxnError, WriteTxnError> for ScopedInputSource<S, P>
+where
+    S: FnMut(&PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy) -> Selected<GraphValueRow>,
+    P: FnMut(
+        &PreparedProcedureCall,
+        &[GraphValue],
+        GqlQueryPolicy,
+    ) -> Option<Selected<GraphValueRow>>,
+{
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Selected<GraphValueRow> {
+        (self.patterns)(pattern, policy)
+    }
+
+    fn procedure(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Selected<GraphValueRow>> {
+        (self.procedures)(call, arguments, policy)
+    }
+}
+
 /// A MERGE input relation's whole source: `patterns` serves its pattern
 /// leaves, and a carried identity it does not rematch (`a.p` of a WITH
 /// vertex) is read as a MATCH projection reads it. A named hidden field keeps
@@ -496,7 +538,23 @@ pub(super) fn scoped_input<'a, V: Vfs + Clone, Clock: FnMut() -> u64>(
 ) -> impl fgdb_gql::GraphSetSource<WriteTxnError, WriteTxnError> + 'a {
     fgdb_gql::with_element_metadata(
         fgdb_gql::WithElementReads {
-            source: patterns,
+            source: ScopedInputSource {
+                patterns,
+                procedures: move |call: &PreparedProcedureCall,
+                                  arguments: &[GraphValue],
+                                  policy| {
+                    procedure(
+                        transaction,
+                        database,
+                        cx,
+                        call,
+                        arguments,
+                        scope,
+                        policy,
+                        execution,
+                    )
+                },
+            },
             elements: move |element, key| {
                 if !scope.allows_property(key) {
                     return Err(WriteTxnError::Authorization(Error::ScopeDenied));
@@ -730,6 +788,348 @@ pub(super) fn select_seeded_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
             })
         },
     ))
+}
+
+type ProcedureFault = GqlQueryError<WriteTxnError, WriteTxnError>;
+
+/// Every authorized write source shares this dispatch. Catalog calls retain
+/// their existing symbol mask; graph algorithms use the canonical staged
+/// projection below. Hybrid search has no authorized staged host yet.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn procedure<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    cx: &QueryCx,
+    call: &PreparedProcedureCall,
+    arguments: &[GraphValue],
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
+) -> Option<Selected<GraphValueRow>> {
+    if crate::query::is_hybrid(call) {
+        return None;
+    }
+    if crate::query::is_catalog(call) {
+        return Some(
+            crate::query::catalog_procedure(
+                call,
+                arguments,
+                policy,
+                |symbol| match symbol {
+                    fgdb_gql::GraphSymbol::Label(id) => scope.allows_label(id),
+                    fgdb_gql::GraphSymbol::Relation(id) => scope.allows_relation(id),
+                    fgdb_gql::GraphSymbol::Property(id) => scope.allows_property(id),
+                },
+                || {
+                    cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                    execution.borrow_mut().poll()
+                },
+                |units| execution.borrow_mut().work(units),
+            )
+            .map_err(|error| error.map_source(|_| WriteTxnError::AuthorizedMutationRefused)),
+        );
+    }
+    Some(procedure_overlay(
+        transaction,
+        database,
+        cx,
+        call,
+        arguments,
+        scope,
+        policy,
+        execution,
+    ))
+}
+
+fn procedure_failure(error: FnxReadError<crate::ReadError, ProcedureFault>) -> ProcedureFault {
+    match error.split_cancel::<WriteTxnError>() {
+        Err(error) => error,
+        Ok(error) => crate::query::procedure_failure(error).map_source(WriteTxnError::Gql),
+    }
+}
+
+/// The same live write permit owns source admission, projection construction,
+/// arithmetic and private result conversion. Native and signed work interleave
+/// one unit at a time, so an earlier caller refusal cannot be hidden by a later
+/// signed refusal or kernel error. Physical hidden-row scans use a separate,
+/// charge-free cancellation poll.
+struct ProcedureMeter<'a, 'run, 'cx, 'permit, Clock> {
+    cx: &'a QueryCx,
+    execution: &'a RefCell<&'run mut Execution<'cx, 'permit, Clock>>,
+    usage: &'a RefCell<AdmissionUsage>,
+    policy: GqlQueryPolicy,
+}
+
+impl<Clock: FnMut() -> u64> ProcedureMeter<'_, '_, '_, '_, Clock> {
+    fn observe(&self, policy: GqlQueryPolicy, event: SourceEvent) -> Result<(), ProcedureFault> {
+        self.cx
+            .checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(GqlQueryError::Interrupted)?;
+        self.execution
+            .borrow_mut()
+            .checkpoint()
+            .map_err(GqlQueryError::Interrupted)?;
+        self.usage.borrow_mut().observe(policy, event)
+    }
+}
+
+impl<Clock: FnMut() -> u64> FnxMeter<ProcedureFault> for ProcedureMeter<'_, '_, '_, '_, Clock> {
+    fn unit(&mut self) -> Result<(), ProcedureFault> {
+        self.observe(self.policy, SourceEvent::Work)
+    }
+
+    fn poll(&mut self) -> Result<(), ProcedureFault> {
+        self.cx
+            .checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(GqlQueryError::Interrupted)?;
+        let mut execution = self.execution.borrow_mut();
+        execution.poll().map_err(GqlQueryError::Interrupted)?;
+        let now = (execution.clock)();
+        execution
+            .permit
+            .checkpoint_at(now)
+            .map_err(WriteTxnError::Authorization)
+            .map_err(GqlQueryError::Interrupted)
+    }
+}
+
+/// Registered Prism reads over the capability-visible staged graph. This
+/// borrows the same canonical effect owner as MATCH; it never reconstructs
+/// mutations or calls the privileged transaction procedure host. Both full
+/// table witnesses survive empty graphs, failed kernels and outer rollback.
+///
+/// Mask before user selectors, weight resolution and adjacency construction.
+/// Signed/native resource counts depend only on admitted records; hidden
+/// physical history still consumes host cancellation work. The projection is
+/// private statement state, not a retained snapshot certificate or authority.
+#[allow(clippy::too_many_arguments)]
+fn procedure_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    cx: &QueryCx,
+    call: &PreparedProcedureCall,
+    arguments: &[GraphValue],
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
+) -> Selected<GraphValueRow> {
+    if !scope.rights().can_read() {
+        return Err(GqlQueryError::Source(WriteTxnError::Authorization(
+            Error::PermissionDenied,
+        )));
+    }
+    // The native binder rejects incompatible graph laws before source work.
+    let spec = crate::query::bind_procedure(call, arguments)
+        .map_err(|error| error.map_source(WriteTxnError::Gql))?;
+    let options = spec.options_at(transaction.basis);
+    with_overlay(
+        transaction,
+        database,
+        cx,
+        true,
+        true,
+        execution,
+        |overlay| {
+            let overlay = overlay.expect("procedure admission retains even an empty overlay");
+            let usage = RefCell::new(AdmissionUsage::default());
+            let mut meter = ProcedureMeter {
+                cx,
+                execution,
+                usage: &usage,
+                policy,
+            };
+            let mut source_policy = policy;
+            source_policy.evaluator.max_work_units = source_policy
+                .evaluator
+                .max_work_units
+                .min(options.source_limits.max_work_units);
+            source_policy.evaluator.max_scratch_entries = source_policy
+                .evaluator
+                .max_scratch_entries
+                .min(options.source_limits.max_scratch_entries);
+            let mut poll = |_| {
+                cx.checkpoint()
+                    .map_err(WriteTxnError::Interrupted)
+                    .map_err(GqlQueryError::Interrupted)?;
+                execution
+                    .borrow_mut()
+                    .poll()
+                    .map_err(GqlQueryError::Interrupted)
+            };
+            let mut vertices = Vec::new();
+            let mut staging_bytes = 0;
+            overlay.visit_vertices(VertexScanDomain::All, &mut poll, |row, _| {
+                if !scope.allows_vertex(&row.labels) {
+                    return Ok(());
+                }
+                meter.observe(source_policy, SourceEvent::Work)?;
+                for &label in &row.labels {
+                    if scope.allows_label(label) {
+                        meter.observe(source_policy, SourceEvent::Work)?;
+                    }
+                }
+                {
+                    let mut execution = execution.borrow_mut();
+                    execution.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    let now = (execution.clock)();
+                    execution
+                        .permit
+                        .charge_nodes_at(now, 1)
+                        .map_err(WriteTxnError::Authorization)
+                        .map_err(GqlQueryError::Interrupted)?;
+                }
+                meter.observe(source_policy, SourceEvent::SnapshotRecord)?;
+                meter.observe(source_policy, SourceEvent::ScratchEntry)?;
+                if options
+                    .selection
+                    .vertex_labels
+                    .members()
+                    .is_some_and(|labels| {
+                        !labels.iter().any(|label| {
+                            scope.allows_label(*label) && row.labels.binary_search(label).is_ok()
+                        })
+                    })
+                {
+                    return Ok(());
+                }
+                crate::query::push_prism_staged(
+                    &mut vertices,
+                    row.vid,
+                    "vertices",
+                    options.projection_limits.max_vertices,
+                    &mut staging_bytes,
+                    options.source_limits.max_staging_bytes,
+                )
+                .map_err(procedure_failure)
+            })?;
+            let mut edges = Vec::new();
+            overlay
+                .visit_edges(None, &mut poll, |entry, properties, _| {
+                    if !scope.allows_relation(entry.relation)
+                        || !options.selection.relations.contains(entry.relation)
+                        || vertices.binary_search(&entry.src).is_err()
+                        || vertices.binary_search(&entry.dst).is_err()
+                    {
+                        return Ok(());
+                    }
+                    meter.observe(source_policy, SourceEvent::Work)?;
+                    meter.observe(source_policy, SourceEvent::SnapshotRecord)?;
+                    meter.observe(source_policy, SourceEvent::ScratchEntry)?;
+                    if entry.src == entry.dst {
+                        match options.projection.self_loops {
+                            SelfLoopPolicy::Drop => return Ok(()),
+                            SelfLoopPolicy::Reject => {
+                                return Err(procedure_failure(FnxReadError::Projection(
+                                    ProjectionError::SelfLoop(entry.eid),
+                                )));
+                            }
+                            SelfLoopPolicy::Keep => {}
+                        }
+                    }
+                    let weight =
+                        if options.projection.parallel_edges == ParallelEdgePolicy::CollapseUnit {
+                            1.0
+                        } else {
+                            let value = options
+                                .selection
+                                .weight
+                                .property_key()
+                                .filter(|&key| scope.allows_property(key))
+                                .and_then(|key| {
+                                    properties.binary_search_by_key(&key, |(key, _)| *key).ok()
+                                })
+                                .map(|index| &properties[index].1);
+                            options.selection.weight.resolve(value).map_err(|reason| {
+                                procedure_failure(FnxReadError::Weight {
+                                    edge: entry.eid,
+                                    reason,
+                                })
+                            })?
+                        };
+                    crate::query::push_prism_staged(
+                        &mut edges,
+                        ProjectionEdge {
+                            eid: entry.eid,
+                            source: entry.src,
+                            target: entry.dst,
+                            weight,
+                        },
+                        "input edges",
+                        options.projection_limits.max_input_edges,
+                        &mut staging_bytes,
+                        options.source_limits.max_staging_bytes,
+                    )
+                    .map_err(procedure_failure)
+                })
+                .expect("procedure overlay retains the edge table")?;
+            let graph = SnapshotGraphView::build_owned_with_checkpoint(
+                SnapshotBinding {
+                    root: database.snapshot.root.0,
+                    as_of: transaction.basis,
+                },
+                vertices,
+                edges,
+                options.projection,
+                options.projection_limits,
+                || meter.unit(),
+            )
+            .map_err(|error| match error {
+                ProjectionBuildError::Cancelled(error) => error,
+                ProjectionBuildError::Projection(error) => {
+                    procedure_failure(FnxReadError::Projection(error))
+                }
+            })?;
+            let remaining = usage.borrow().remaining(policy);
+            let mut limits = options.execution_limits;
+            limits.max_estimated_work = limits
+                .max_estimated_work
+                .min(usize::try_from(remaining.evaluator.max_work_units).unwrap_or(usize::MAX));
+            // Intermediate CALL rows are private; the enclosing statement owns
+            // signed row delivery. Admit their full conversion shape before the
+            // kernel reserves its output, independently of the outer final page.
+            limits.max_result_rows = limits.max_result_rows.min(
+                usize::try_from(remaining.evaluator.max_scratch_entries).unwrap_or(usize::MAX)
+                    / (spec.outputs().len() + 1),
+            );
+            let mut sink = crate::query::ProcedureRowSink::default();
+            spec.execute_into(
+                &graph,
+                limits,
+                ProcedureMeter {
+                    cx,
+                    execution,
+                    usage: &usage,
+                    policy,
+                },
+                &mut sink,
+            )
+            .map_err(|error| procedure_failure(FnxReadError::Execution(error)))?;
+            for _ in 0..sink.row_count() {
+                meter.observe(policy, SourceEvent::ScratchEntry)?;
+                for _ in spec.outputs() {
+                    meter.observe(policy, SourceEvent::ScratchEntry)?;
+                }
+            }
+            let value = sink
+                .finish()
+                .map_err(|error| error.map_source(WriteTxnError::Gql))?;
+            meter.poll()?;
+            let usage = usage.into_inner();
+            usage.finish(
+                policy,
+                Ok(GqlQueryExecution {
+                    rows: GqlExecutionStats {
+                        snapshot_records: usage.snapshot_records(),
+                        result_rows: value.len() as u64,
+                    },
+                    evaluator: GlaExecutionStats::default(),
+                    value,
+                }),
+            )
+        },
+    )
 }
 
 // One lifetime owner and identical preflight/error ordering for both physical

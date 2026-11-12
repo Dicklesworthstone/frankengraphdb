@@ -786,6 +786,461 @@ where
     result
 }
 
+mod staged_procedures {
+    use super::*;
+    use fgdb_gql::algebra::GraphValueRow;
+    use fgdb_gql::insertion::GraphInsertStats;
+    use fgdb_gql::{GqlQueryError, GqlQueryExecution, GraphWriteChainError};
+    use fgdb_types::CanonicalF64;
+    use fgdb_warden::LimitDimension;
+
+    type Fault = GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
+    type Receipt = (GraphInsertStats, GqlQueryExecution<GraphValueRow>);
+
+    // The old direct shortcut must disappear, the first edge's weight must
+    // change, and a new second hop must exist before the algorithm reads.
+    const PREFIX: &str = "MATCH (a:Visible {p:10})-[old:R]->(b:Visible {p:20}) \
+        SET old.p=4 WITH a,b MATCH (a)-[shortcut:R]->(c:Visible {p:30}) \
+        DELETE shortcut WITH a,b,c CREATE (b)-[:R {p:3}]->(c) WITH a ";
+    const WEIGHTED: &str = "CALL fnx.single_source_dijkstra_path_length(\
+        args => [1], weight => 'p', parallel => 'min', direction => 'directed') \
+        YIELD vertex,distance RETURN vertex,distance ORDER BY vertex";
+
+    fn capability(rows: u64) -> Grant {
+        let mut value = grant(Rights::ReadWrite, rows);
+        value.relations = Scope::only([R]);
+        value
+    }
+
+    async fn database(contexts: &PurposeContexts, hidden: bool) -> Database<MemVfs> {
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for (id, value) in [(1, 10), (2, 20), (3, 30)] {
+            let mut fields = vec![(P, CanonicalScalar::Int(value))];
+            if hidden {
+                fields.push((SECRET, CanonicalScalar::Bool(true)));
+            }
+            seed.create_vertex(VId(id), vec![L], fields);
+        }
+        let mut weight = vec![(P, CanonicalScalar::Int(2))];
+        if hidden {
+            weight.push((SECRET, CanonicalScalar::Bool(true)));
+        }
+        seed.add_edge(EId(1), VId(1), VId(2), weight);
+        seed.add_edge(EId(2), VId(1), VId(3), vec![(P, CanonicalScalar::Int(1))]);
+        if hidden {
+            seed.create_vertex(VId(90), vec![HIDDEN], vec![]);
+            seed.add_edge(
+                EId(90),
+                VId(1),
+                VId(90),
+                vec![(P, CanonicalScalar::Bool(true))],
+            );
+            seed.add_edge(
+                EId(91),
+                VId(90),
+                VId(3),
+                vec![(P, CanonicalScalar::Bool(true))],
+            );
+        }
+        db.write(&commit, seed).await.unwrap();
+        if hidden {
+            // A forbidden relation between visible endpoints must be removed
+            // before weight decoding, just like hidden-endpoint incidence.
+            let mut secret = WriteBatch::new(S);
+            secret.add_edge(
+                EId(92),
+                VId(3),
+                VId(1),
+                vec![(P, CanonicalScalar::Bool(true))],
+            );
+            db.write(&commit, secret).await.unwrap();
+        }
+        db
+    }
+
+    async fn execute(
+        contexts: &PurposeContexts,
+        program: &PreparedGraphWriteChain,
+        hidden: bool,
+        capability: Grant,
+        budget: GraphInsertPolicy,
+    ) -> Result<Receipt, Fault> {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&capability, NOW).unwrap();
+        let mut db = database(contexts, hidden).await;
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let result = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                program,
+                budget,
+                || NOW,
+            )
+            .await;
+        if let Ok((_, _, completion)) = &result {
+            let frontier = db.frontier().unwrap();
+            assert_eq!(frontier.0, before.0.0 + 1);
+            assert_eq!(
+                *completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: frontier
+                }
+            );
+            for vertex in &before.1 {
+                assert_eq!(db.vertex(vertex.vid).unwrap().as_ref(), Some(vertex));
+            }
+            for edge in &before.2 {
+                if edge.entry.eid.0 >= 90 {
+                    assert_eq!(db.edge(edge.entry.eid).unwrap().as_ref(), Some(edge));
+                }
+            }
+        } else {
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
+        }
+        assert_eq!(txn.outstanding_obligations(), 0);
+        result.map(|(stats, rows, _)| (stats, rows))
+    }
+
+    fn distances(values: &[f64]) -> Vec<Vec<GraphValue>> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(at, &distance)| {
+                vec![
+                    GraphValue::Vertex(VId(at as u128 + 1)),
+                    GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(distance))),
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fnx_reads_staged_topology_and_weights_before_masked_projection() {
+        lab(0xc4a1_2115, |contexts| async move {
+            let program = chain(&format!("{PREFIX}{WEIGHTED}"));
+            let expected = execute(&contexts, &program, false, capability(3), policy(3))
+                .await
+                .unwrap();
+            assert_eq!(expected.0.created_edges, 1);
+            assert_eq!(expected.0.created_vertices, 0);
+            assert_eq!(
+                expected
+                    .1
+                    .value
+                    .iter()
+                    .map(|row| row.values().to_vec())
+                    .collect::<Vec<_>>(),
+                distances(&[0.0, 4.0, 7.0])
+            );
+            assert_eq!(
+                execute(&contexts, &program, true, capability(3), policy(3))
+                    .await
+                    .unwrap(),
+                expected
+            );
+
+            // A forbidden weight is absent even when its physical payload is
+            // invalid for Prism. Explicit missing=zero therefore stays usable.
+            let masked_weight = chain(&format!(
+                "{PREFIX}CALL fnx.single_source_dijkstra_path_length(\
+                args => [1], weight => 'secret', missing => 'zero', parallel => 'min') \
+                YIELD vertex,distance RETURN vertex,distance ORDER BY vertex"
+            ));
+            for hidden in [false, true] {
+                let (_, rows) =
+                    execute(&contexts, &masked_weight, hidden, capability(3), policy(3))
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    rows.value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    distances(&[0.0, 0.0, 0.0])
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn standalone_authorized_creates_use_the_same_masked_procedure_host() {
+        lab(0xc4a1_2119, |contexts| async move {
+            const TEXT: &str = "CALL fnx.single_source_shortest_path_length(1) \
+                YIELD vertex,distance CREATE (copy:Visible {p:distance})";
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            for hidden in [false, true] {
+                for returning in [false, true] {
+                    let mut db = database(&contexts, hidden).await;
+                    let before = (db.frontier().unwrap(), db.vertices().unwrap().len());
+                    let token = issuer
+                        .issue_at(&capability(if returning { 3 } else { 0 }), NOW)
+                        .unwrap();
+                    let (stats, completion) = if returning {
+                        let prepared = PreparedGraphInsertQueryText::prepare(
+                            &format!("{TEXT} RETURN copy.p AS value ORDER BY value"),
+                            R,
+                            symbols,
+                        )
+                        .unwrap()
+                        .bind_parameters(&GqlParameters::new())
+                        .unwrap();
+                        let (stats, rows, completion) = db
+                            .execute_graph_insert_query_authorized(
+                                &txn,
+                                &query,
+                                &commit,
+                                &issuer,
+                                &token,
+                                "main",
+                                &prepared,
+                                policy(3),
+                                || NOW,
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            rows.value
+                                .iter()
+                                .map(|row| row.values().to_vec())
+                                .collect::<Vec<_>>(),
+                            [0, 1, 1]
+                                .map(|value| vec![GraphValue::Scalar(CanonicalScalar::Int(value))])
+                        );
+                        (stats, completion)
+                    } else {
+                        let prepared = fgdb_gql::PreparedGraphInsertText::prepare(TEXT, R, symbols)
+                            .unwrap()
+                            .bind_parameters(&GqlParameters::new())
+                            .unwrap();
+                        db.execute_graph_insert_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &issuer,
+                            &token,
+                            "main",
+                            &prepared,
+                            policy(3),
+                            || NOW,
+                        )
+                        .await
+                        .unwrap()
+                    };
+                    assert_eq!(stats.created_vertices, 3);
+                    assert_eq!(stats.created_edges, 0);
+                    assert_eq!(db.vertices().unwrap().len(), before.1 + 3);
+                    let frontier = db.frontier().unwrap();
+                    assert_eq!(frontier.0, before.0.0 + 1);
+                    assert_eq!(
+                        completion,
+                        EmbeddedTxnCompletion::WriteCommitted {
+                            commit_seq: frontier
+                        }
+                    );
+                    assert_eq!(txn.outstanding_obligations(), 0);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn procedure_selected_merges_share_the_staged_source_and_key_visibility() {
+        lab(0xc4a1_2120, |contexts| async move {
+            let program = chain(
+                "CREATE (:Visible {p:99}) WITH 1 AS root \
+                CALL fnx.single_source_shortest_path_length(root) YIELD vertex,distance \
+                MERGE (copy:Visible {p:distance}) RETURN copy.p AS value ORDER BY value",
+            );
+            for hidden in [false, true] {
+                let (stats, rows) = execute(&contexts, &program, hidden, capability(3), policy(3))
+                    .await
+                    .unwrap();
+                assert_eq!(stats.created_vertices, 3);
+                assert_eq!(stats.created_edges, 0);
+                assert_eq!(
+                    rows.value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    [0, 1, 1].map(|value| vec![GraphValue::Scalar(CanonicalScalar::Int(value))])
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn correlated_unit_call_can_feed_writes_from_its_staged_algorithm_rows() {
+        lab(0xc4a1_2116, |contexts| async move {
+            let program = chain(
+                "WITH 3 AS start CALL (start) { \
+                MATCH (a:Visible {p:30}),(b:Visible {p:20}) \
+                CREATE (a)-[:R {p:3}]->(b) WITH start \
+                CALL fnx.single_source_shortest_path_length(start) YIELD vertex,distance \
+                CREATE (:Visible {p:distance}) } \
+                MATCH (n:Visible) WHERE n.p<10 RETURN start,n.p ORDER BY n.p",
+            );
+            for hidden in [false, true] {
+                let (stats, rows) = execute(&contexts, &program, hidden, capability(2), policy(2))
+                    .await
+                    .unwrap();
+                assert_eq!(stats.created_vertices, 2);
+                assert_eq!(stats.created_edges, 1);
+                assert_eq!(
+                    rows.value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    vec![
+                        vec![
+                            GraphValue::Scalar(CanonicalScalar::Int(3)),
+                            GraphValue::Scalar(CanonicalScalar::Int(0))
+                        ],
+                        vec![
+                            GraphValue::Scalar(CanonicalScalar::Int(3)),
+                            GraphValue::Scalar(CanonicalScalar::Int(1))
+                        ],
+                    ]
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn staged_procedure_limits_share_the_chain_and_ignore_hidden_records() {
+        lab(0xc4a1_2117, |contexts| async move {
+            let program = chain(&format!("{PREFIX}{WEIGHTED}"));
+            let expected = execute(&contexts, &program, false, capability(3), policy(3))
+                .await
+                .unwrap();
+            let (mut refused, mut admitted) = (0, capability(3).limits.max_work);
+            while admitted - refused > 1 {
+                let trial = refused + (admitted - refused) / 2;
+                let mut scope = capability(3);
+                scope.limits.max_work = trial;
+                match execute(&contexts, &program, false, scope, policy(3)).await {
+                    Ok(actual) => {
+                        assert_eq!(actual, expected);
+                        admitted = trial;
+                    }
+                    Err(error) => {
+                        assert_eq!(
+                            authorization(&error),
+                            Some(Error::LimitExceeded(LimitDimension::Work)),
+                            "{error:?}"
+                        );
+                        refused = trial;
+                    }
+                }
+            }
+            for hidden in [false, true] {
+                let mut exact = capability(3);
+                exact.limits.max_work = admitted;
+                assert_eq!(
+                    execute(&contexts, &program, hidden, exact.clone(), policy(3))
+                        .await
+                        .unwrap(),
+                    expected
+                );
+                exact.limits.max_work -= 1;
+                let error = execute(&contexts, &program, hidden, exact, policy(3))
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    authorization(&error),
+                    Some(Error::LimitExceeded(LimitDimension::Work))
+                );
+
+                let mut one_row = capability(3);
+                one_row.limits.max_rows = 1;
+                let error = execute(&contexts, &program, hidden, one_row, policy(3))
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    authorization(&error),
+                    Some(Error::LimitExceeded(LimitDimension::Rows))
+                );
+                let mut no_read = capability(3);
+                no_read.rights = Rights::Write;
+                let error = execute(&contexts, &program, hidden, no_read, policy(3))
+                    .await
+                    .unwrap_err();
+                assert_eq!(authorization(&error), Some(Error::PermissionDenied));
+            }
+        });
+    }
+
+    #[test]
+    fn failed_prism_kernel_aborts_prior_writes_even_with_limit_zero() {
+        lab(0xc4a1_2118, |contexts| async move {
+            let program = chain(&format!(
+                "{PREFIX}CALL fnx.pagerank(0.85,1,1e-12,true) \
+                YIELD vertex,score RETURN vertex LIMIT 0"
+            ));
+            for hidden in [false, true] {
+                let error = execute(&contexts, &program, hidden, capability(0), policy(0))
+                    .await
+                    .unwrap_err();
+                assert!(format!("{error:?}").contains("NotConverged"), "{error:?}");
+            }
+            // Signed work must settle while the kernel runs, before its own
+            // non-convergence error is observable. A shorter allowance refuses
+            // under Warden and leaves the exact same unpublished prefix absent.
+            let (mut refused, mut completed) = (0, capability(0).limits.max_work);
+            while completed - refused > 1 {
+                let trial = refused + (completed - refused) / 2;
+                let mut scope = capability(0);
+                scope.limits.max_work = trial;
+                let error = execute(&contexts, &program, false, scope, policy(0))
+                    .await
+                    .unwrap_err();
+                if authorization(&error) == Some(Error::LimitExceeded(LimitDimension::Work)) {
+                    refused = trial;
+                } else {
+                    assert!(format!("{error:?}").contains("NotConverged"), "{error:?}");
+                    completed = trial;
+                }
+            }
+            for hidden in [false, true] {
+                for (work, kernel_error) in [(completed - 1, false), (completed, true)] {
+                    let mut scope = capability(0);
+                    scope.limits.max_work = work;
+                    let error = execute(&contexts, &program, hidden, scope, policy(0))
+                        .await
+                        .unwrap_err();
+                    if kernel_error {
+                        assert!(format!("{error:?}").contains("NotConverged"), "{error:?}");
+                    } else {
+                        assert_eq!(
+                            authorization(&error),
+                            Some(Error::LimitExceeded(LimitDimension::Work))
+                        );
+                    }
+                }
+            }
+        });
+    }
+}
+
 fn csv_chain(text: &str) -> PreparedGraphWriteChain {
     use fgdb_gql::csv_parameters::CsvParameterLimits;
     use fgdb_gql::{GqlParameterSpec, GqlParameterType};

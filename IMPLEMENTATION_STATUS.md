@@ -12,6 +12,31 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Procedures over staged write graphs — qualification pending
+
+Source added 2026-11-12 connects standalone CREATE and scoped write-chain
+procedure phases to the existing transaction procedure executor. Registered
+analytics, catalog and hybrid reads on these native paths observe earlier
+staged writes, and their result rows can drive later creations. The original
+factor choices, shared work allowance and statement rollback owner remain.
+
+Authorized write chains, standalone creation and scoped MERGE inputs share a
+Prism procedure host over the canonical transaction overlay. It masks vertices,
+relations, endpoints and weight properties before selection and graph
+construction, retains the native table witnesses, and charges the same live
+write permit throughout source admission, projection, kernel work and private
+row conversion. Catalog calls retain their scoped owner. Authorized staged
+hybrid procedures remain unavailable; a selected procedure error never retries
+through a privileged host. Only final statement rows spend delivery allowance.
+
+Three native and six authorized regression sources cover literal staged BFS and
+weighted shortest-path results, earlier body effects, creation and MERGE from
+procedure rows, duplicate occurrences, hidden malformed weights, exact signed
+work boundaries, required read rights, and rollback after source or kernel
+refusal even under LIMIT 0. Pinned formatting and independent source review
+pass. Compilation and runtime qualification remain pending; no broad language,
+Prism or transaction bead is closed by this bounded adapter work.
+
 ### CLI selection of native durable-run sources — qualification pending
 
 Source added 2026-11-12 exposes the native run-plus-suffix profile through local

@@ -488,26 +488,15 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteT
         policy: GqlQueryPolicy,
     ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<WriteTxnError, WriteTxnError>>>
     {
-        if !crate::query::is_catalog(call) {
-            return None;
-        }
-        Some(
-            crate::query::catalog_procedure(
-                call,
-                arguments,
-                policy,
-                |symbol| match symbol {
-                    fgdb_gql::GraphSymbol::Label(id) => self.scope.allows_label(id),
-                    fgdb_gql::GraphSymbol::Relation(id) => self.scope.allows_relation(id),
-                    fgdb_gql::GraphSymbol::Property(id) => self.scope.allows_property(id),
-                },
-                || {
-                    self.cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                    self.execution.borrow_mut().poll()
-                },
-                |units| self.execution.borrow_mut().work(units),
-            )
-            .map_err(|error| error.map_source(|_| WriteTxnError::AuthorizedMutationRefused)),
+        selection::procedure(
+            self.transaction,
+            &self.database.borrow(),
+            self.cx,
+            call,
+            arguments,
+            self.scope,
+            policy,
+            self.execution,
         )
     }
 
