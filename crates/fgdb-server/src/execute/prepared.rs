@@ -2,7 +2,7 @@
 //! Preparation retains syntax/catalog bindings, never arguments or a snapshot.
 
 use super::*;
-use fgdb::PreparedNativeRead;
+use fgdb::{PreparedNativeRead, PreparedNativeWriteScript};
 use fgdb_gql::{GqlParameters, PreparedGraphBranchText, PreparedGraphWriteScript};
 use fgdb_protocol::body::{Prepare, PrepareMode, PreparedExecutionMode};
 use std::sync::Arc;
@@ -23,10 +23,9 @@ pub(crate) enum PreparedWrite {
 }
 
 pub(crate) struct PreparedScript {
-    script: PreparedGraphWriteScript,
-    /// The value-free splice of map arguments standing for property maps
-    /// (fgdb-0s2pq); every execution derives its own arguments through it.
-    lowered: Option<fgdb_gql::GqlMapArgumentText>,
+    /// The native preparation owner retains the checked script and its
+    /// value-free map recipe together, after admitting the original request.
+    native: PreparedNativeWriteScript,
     generation: Generation,
     source_bytes: usize,
 }
@@ -45,25 +44,6 @@ impl PreparedWrite {
             Self::Chain(prepared) => prepared.source_bytes,
         }
     }
-}
-
-/// A script fault of a lowered statement, at the caller's bytes.
-fn restored_fault<E, A, C>(
-    lowered: Option<&fgdb_gql::GqlMapArgumentText>,
-    mut fault: fgdb_gql::GraphWriteScriptExecutionError<E, A, C>,
-) -> fgdb_gql::GraphWriteScriptExecutionError<E, A, C> {
-    use fgdb_gql::GraphWriteScriptExecutionError as F;
-    if let Some(lowered) = lowered {
-        match &mut fault {
-            F::Binding(error)
-            | F::BatchBinding(fgdb_gql::GraphWriteScriptBatchError::Arguments {
-                source: error,
-                ..
-            }) => lowered.restore(error),
-            _ => {}
-        }
-    }
-    fault
 }
 
 pub(crate) struct PreparedReturning {
@@ -291,10 +271,9 @@ async fn prepare_write(
     // Map arguments standing for property maps splice with the representative
     // arguments' keys; the template keeps the keys, never the values.
     let lowered = fgdb_gql::GqlMapArgumentText::lower(&request.statement, &parameters);
-    let (statement, parameters) = lowered.as_ref().map_or(
-        (request.statement.as_str(), &parameters),
-        |(lowered, derived)| (lowered.text(), derived),
-    );
+    let statement = lowered
+        .as_ref()
+        .map_or(request.statement.as_str(), |(lowered, _)| lowered.text());
     // Use the same lowered framing as ReturningTemplate. A map argument can
     // become a literal map, which must keep its established script owner.
     // Cover expanded bytes before the framing probe; no second byte bill is
@@ -325,24 +304,25 @@ async fn prepare_write(
     let (view, published_generation) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     generation.check().map_err(Refusal::from)?;
     published_generation.check().map_err(Refusal::from)?;
-    let script = view.prepare_graph_write_script_authorized(
+    // The native owner must see the originals: its one live permit covers
+    // lowering, catalog resolution and representative binding cumulatively.
+    // The routing probe above supplies no authority or prepaid input credit.
+    let native = view.prepare_graph_write_script_authorized(
         &query,
         &contexts.commit(),
         &db.authority,
         token,
         TRUNK,
-        statement,
-        parameters,
+        &request.statement,
+        &parameters,
         db.symbols.clone(),
         db.write_relation,
         db.max_statements,
         unix_millis,
     );
     generation.check().map_err(Refusal::from)?;
-    let lowered = lowered.map(|(lowered, _)| lowered);
     Ok(PreparedWrite::Script(PreparedScript {
-        script: script.map_err(|error| write_refusal(&restored_fault(lowered.as_ref(), error)))?,
-        lowered,
+        native: native.map_err(|error| write_refusal(&error))?,
         generation,
         source_bytes: request.statement.len(),
     }))
@@ -724,18 +704,19 @@ async fn write_prepared_inner(
     parameters: PreparedParameters<'_>,
 ) -> Result<Answer, Refusal> {
     let _operation = prepared.generation.enter().map_err(Refusal::from)?;
+    let script = prepared.native.script();
     let mut permit = write_permit(db, token)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = crate::query_cx(&contexts);
     // Preserve the direct native script owner's immutable preflight before
     // looking at values, even for an empty or otherwise malformed batch.
-    if prepared.script.requires_read() && !permit.predicates().rights().can_read() {
+    if script.requires_read() && !permit.predicates().rights().can_read() {
         return Err(Refusal::new(
             ErrorCode::PermissionDenied,
             fgdb_warden::Error::PermissionDenied.to_string(),
         ));
     }
-    for statement in prepared.script.statements() {
+    for statement in script.statements() {
         query
             .checkpoint()
             .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
@@ -767,7 +748,7 @@ async fn write_prepared_inner(
             if argument_sets.is_empty() {
                 return Err(write_refusal(&fgdb_gql::GraphWriteScriptBatchError::Empty));
             }
-            let expanded = argument_sets.len() as u128 * prepared.script.statements().len() as u128;
+            let expanded = argument_sets.len() as u128 * script.statements().len() as u128;
             let limit = db
                 .max_statements
                 .min(PreparedGraphWriteScript::MAX_BATCH_STATEMENTS);
@@ -803,7 +784,7 @@ async fn write_prepared_inner(
             NativeParameters::Batch(converted)
         }
     };
-    let lowered = prepared.lowered.as_ref();
+    let lowered = prepared.native.map_arguments();
     let derive = |parameters: GqlParameters| {
         let parameters = match lowered {
             Some(lowered) => query.with_restriction(|| {
@@ -814,7 +795,7 @@ async fn write_prepared_inner(
             None => parameters,
         };
         db.statement_clock
-            .capture_for_template(&query, prepared.script.parameter_schema(), &parameters)
+            .capture_for_template(&query, script.parameter_schema(), &parameters)
             .map(std::borrow::Cow::into_owned)
             .map_err(statement_time_refusal)
     };
@@ -823,10 +804,10 @@ async fn write_prepared_inner(
     let bound = match parameters {
         NativeParameters::Single(parameters) => {
             permit
-                .charge_work_at(unix_millis(), prepared.script.statements().len() as u64)
+                .charge_work_at(unix_millis(), script.statements().len() as u64)
                 .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
             let parameters = derive(parameters)?;
-            let program = query.with_restriction(|| prepared.script.bind_parameters(&parameters));
+            let program = query.with_restriction(|| script.bind_parameters(&parameters));
             query
                 .checkpoint()
                 .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
@@ -861,23 +842,21 @@ async fn write_prepared_inner(
             }
             let mut before_allocation = true;
             let batch = query.with_restriction(|| {
-                prepared
-                    .script
-                    .bind_parameter_sets_controlled(&derived, db.max_statements, |at| {
-                        query.checkpoint().map_err(|error| {
-                            Refusal::new(ErrorCode::Cancelled, error.to_string())
-                        })?;
-                        if at.is_none() && before_allocation {
-                            before_allocation = false;
-                            // The complete expanded bill was reserved before
-                            // conversion. This boundary only rechecks validity.
-                            permit.checkpoint_at(unix_millis())
-                        } else {
-                            permit.charge_work_at(unix_millis(), 1)
-                        }
-                        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
-                        prepared.generation.check().map_err(Refusal::from)
-                    })
+                script.bind_parameter_sets_controlled(&derived, db.max_statements, |at| {
+                    query
+                        .checkpoint()
+                        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+                    if at.is_none() && before_allocation {
+                        before_allocation = false;
+                        // The complete expanded bill was reserved before
+                        // conversion. This boundary only rechecks validity.
+                        permit.checkpoint_at(unix_millis())
+                    } else {
+                        permit.charge_work_at(unix_millis(), 1)
+                    }
+                    .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+                    prepared.generation.check().map_err(Refusal::from)
+                })
             });
             let batch = match batch {
                 Ok(batch) => batch,

@@ -196,8 +196,8 @@ pub use query::{
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteOutput,
-    AuthorizedWriteSession, AuthorizedWriteTransaction, IdentityPermutation, WriteTxn,
-    WriteTxnError,
+    AuthorizedWriteSession, AuthorizedWriteTransaction, IdentityPermutation,
+    PreparedNativeWriteScript, WriteTxn, WriteTxnError,
 };
 
 /// The in-memory [`Vfs`](asupersync::fs::Vfs) behind the embedded spine's

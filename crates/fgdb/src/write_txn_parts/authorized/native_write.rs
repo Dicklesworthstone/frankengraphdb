@@ -6,7 +6,7 @@ use super::{
     GraphWriteProgramPolicy, GraphWriteProgramReceipt, Input, PreparedGraphWriteScript, QueryCx,
     TxnCx, Vfs, WriteTxnError, admission,
 };
-use crate::QueryResult;
+use crate::{PreparedNativeWriteScript, QueryResult};
 use fgdb_delta_types::RelationId;
 use fgdb_gql::unwind_write::{
     GraphUnwindBindError, GraphUnwindBindEvent, GraphUnwindWriteError, GraphUnwindWriteText,
@@ -213,18 +213,56 @@ fn is_chain_admitted<Clock: FnMut() -> u64>(
 
 // The trusted host still owns catalog semantics. This wrapper controls when
 // that host can be called, not the content of a tenant's symbol catalog.
-#[allow(clippy::result_large_err)] // one terminal native script diagnostic
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
 fn prepare<Clock: FnMut() -> u64>(
     cx: &QueryCx,
     execution: &mut Execution<'_, '_, Clock>,
     text: &str,
     params: &GqlParameters,
     relation: RelationId,
+    scope: &PlannerPredicates,
+    max_statements: usize,
     resolver: impl GraphSymbolResolver,
-) -> Result<PreparedGraphWriteScript, Fault> {
+) -> Result<PreparedNativeWriteScript, Fault> {
     cx.with_restriction(|| {
         reserve_input(cx, execution, text, std::slice::from_ref(params))?;
-        prepare_admitted(cx, execution, text, params, relation, resolver)
+        // Keep the original input's bill on this exact compiler allowance.
+        // Only the value-free recipe may escape; generated arguments never
+        // become a second ingress charge or a prepared execution's defaults.
+        let lowered = GqlMapArgumentText::lower(text, params);
+        let (statement, arguments) = lowered
+            .as_ref()
+            .map_or((text, params), |(recipe, derived)| (recipe.text(), derived));
+        let expansion = statement.len().saturating_sub(text.len());
+        if expansion != 0 {
+            execution
+                .work(
+                    u64::try_from(expansion)
+                        .map_err(|_| admission(WriteTxnError::Authorization(Error::TooLarge)))?,
+                )
+                .map_err(admission)?;
+        }
+        let recipe = lowered.as_ref().map(|(recipe, _)| recipe);
+        let prepared = (|| {
+            let script = prepare_admitted(cx, execution, statement, arguments, relation, resolver)?;
+            statement_limit(&script, max_statements)?;
+            let sample = preparation_parameters(
+                arguments,
+                script
+                    .parameter_schema()
+                    .iter()
+                    .any(fgdb_gql::GqlParameterSpec::is_statement_time),
+            )?;
+            let bound = Input::Script(&script, &sample).bind(cx, scope, execution);
+            checkpoint(cx, execution).map_err(admission)?;
+            drop(bound?);
+            Ok(script)
+        })()
+        .map_err(|fault| restored(recipe, fault))?;
+        Ok(PreparedNativeWriteScript {
+            script: prepared,
+            map_arguments: lowered.map(|(recipe, _)| recipe),
+        })
     })
 }
 
@@ -592,7 +630,7 @@ fn prepare_for_namespace(
     relation: RelationId,
     max_statements: usize,
     mut clock: impl FnMut() -> u64,
-) -> Result<PreparedGraphWriteScript, Fault> {
+) -> Result<PreparedNativeWriteScript, Fault> {
     let refusal = |error| admission(WriteTxnError::Authorization(error));
     if authority.namespace() != namespace {
         return Err(refusal(Error::WrongAuthority));
@@ -605,20 +643,16 @@ fn prepare_for_namespace(
         permit,
         clock,
     };
-    let script = prepare(query_cx, &mut execution, text, params, relation, resolver)?;
-    statement_limit(&script, max_statements)?;
-    let sample = preparation_parameters(
+    prepare(
+        query_cx,
+        &mut execution,
+        text,
         params,
-        script
-            .parameter_schema()
-            .iter()
-            .any(fgdb_gql::GqlParameterSpec::is_statement_time),
-    )?;
-    let bound =
-        Input::Script(&script, &sample).bind(query_cx, verified.predicates(), &mut execution);
-    checkpoint(query_cx, &mut execution).map_err(admission)?;
-    drop(bound?);
-    Ok(script)
+        relation,
+        verified.predicates(),
+        max_statements,
+        resolver,
+    )
 }
 
 impl crate::EmbeddedReadView {
@@ -645,7 +679,7 @@ impl crate::EmbeddedReadView {
         relation: RelationId,
         max_statements: usize,
         clock: impl FnMut() -> u64,
-    ) -> Result<PreparedGraphWriteScript, Fault> {
+    ) -> Result<PreparedNativeWriteScript, Fault> {
         prepare_for_namespace(
             self.namespace,
             query_cx,
@@ -670,9 +704,12 @@ impl<V: Vfs + Clone> Database<V> {
     /// transaction or mutation is retained. Representative operands are checked
     /// and discarded. Namespace, live Write authority, cancellation, signed work
     /// and the host statement ceiling govern the same compiler/binder used by
-    /// authorized write sessions. The returned script grants no authority;
-    /// execute it through `execute_graph_write_script_authorized` with a fresh
-    /// capability check and a complete new operand map on every invocation.
+    /// authorized write sessions. Original text/argument bytes, positive text
+    /// expansion, catalog checkpoints and representative binding share ONE
+    /// permit; no lowered argument transcript receives another byte charge.
+    /// The returned metadata retains its value-free map recipe and grants no
+    /// authority. A host admits fresh original arguments before deriving them,
+    /// binding its script and executing through an authorized owner each time.
     ///
     /// The host owns the catalog, branch route, clock, cache bounds and metadata
     /// invalidation. This privileged host API does not export a session-owned
@@ -696,7 +733,7 @@ impl<V: Vfs + Clone> Database<V> {
         relation: RelationId,
         max_statements: usize,
         clock: impl FnMut() -> u64,
-    ) -> Result<PreparedGraphWriteScript, Fault> {
+    ) -> Result<PreparedNativeWriteScript, Fault> {
         prepare_for_namespace(
             self.keys.namespace,
             query_cx,

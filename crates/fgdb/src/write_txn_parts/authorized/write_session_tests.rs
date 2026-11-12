@@ -1384,7 +1384,7 @@ fn every_session_input_reserves_original_bytes_before_capture_or_binding() {
         let query = contexts.query();
         let txn = contexts.txn();
         let issuer = authority();
-        let sample = GqlParameters::new().with_text("unused", "").unwrap();
+        let sample = GqlParameters::new();
         let large = GqlParameters::new()
             .with_text("unused", &"雪".repeat(1000))
             .unwrap();

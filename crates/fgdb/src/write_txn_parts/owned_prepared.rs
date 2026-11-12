@@ -1,3 +1,42 @@
+/// Immutable write-script metadata for a trusted host cache.
+///
+/// Namespace-authorized preparation owns the original input admission, map
+/// lowering, controlled catalog resolution and representative binding under
+/// one live allowance. Only the compiled definition and value-free lowering
+/// recipe survive; no representative operands, snapshot or permit are retained.
+///
+/// This is host metadata, not a request-facing session handle or execution
+/// authority. A host must admit each execution's original arguments before
+/// applying the recipe, then execute the bound program through an authorized
+/// owner. The separate [`AuthorizedPreparedWrite`] handle remains session-bound.
+pub struct PreparedNativeWriteScript {
+    script: fgdb_gql::PreparedGraphWriteScript,
+    map_arguments: Option<fgdb_gql::GqlMapArgumentText>,
+}
+
+impl core::fmt::Debug for PreparedNativeWriteScript {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PreparedNativeWriteScript([REDACTED])")
+    }
+}
+
+impl PreparedNativeWriteScript {
+    /// The compiled definition. Bind the recipe's derived arguments when
+    /// [`Self::map_arguments`] is present; otherwise bind the original arguments.
+    #[must_use]
+    pub fn script(&self) -> &fgdb_gql::PreparedGraphWriteScript {
+        &self.script
+    }
+
+    /// The immutable source/field recipe, without representative values.
+    /// Apply it only after admitting the current execution's original input;
+    /// its offset mapping also restores diagnostics to the caller's source.
+    #[must_use]
+    pub fn map_arguments(&self) -> Option<&fgdb_gql::GqlMapArgumentText> {
+        self.map_arguments.as_ref()
+    }
+}
+
 fn prepare_owned_gql_query(
     statement: &str,
     bind: &RelationBind,

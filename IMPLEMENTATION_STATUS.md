@@ -130,11 +130,18 @@ Independent source/API review found no remaining publication blocker. Pinned
 formatting and final formatting checks pass for all seven changed Rust files.
 Compilation, runtime tests, Clippy, UBS and exact-tree proof remain **UNRUN**.
 
-Definition-only script PREPARE retains its existing original-input preflight
-followed by the namespace compiler's lowered-input preparation. This does not
-establish an exact shared preparation allowance; the execution handoffs above
-do preserve the cumulative allowance. The broader authorization and surface
-beads remain open.
+Definition-only script PREPARE now passes original text and arguments to the
+namespace compiler. One native permit admits those bytes, positive source
+expansion, controlled catalog work and representative binding. Its private
+`PreparedNativeWriteScript` metadata owner retains the checked script and a
+value-free map recipe together; neither representative operands, a graph pin,
+an execution permit nor a statement-time observation survives preparation.
+The server cache uses this owner for fresh execution binding and original-source
+diagnostics. Two added native laws and one server law check exact UTF-8 work
+deltas, whole-map expansion, fresh execution values and time, and source offsets.
+Pinned formatting and independent source review pass; compilation and runtime
+qualification remain pending. The broader authorization and surface beads
+remain open.
 
 ### Independent relationship-upsert batches — qualification pending
 

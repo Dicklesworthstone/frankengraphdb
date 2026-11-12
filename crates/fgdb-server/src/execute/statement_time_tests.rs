@@ -713,3 +713,116 @@ fn write_original_input_refuses_before_clock_capture_or_first_batch_binding() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn write_prepare_keeps_original_map_bytes_in_the_native_preparation_allowance() {
+    let ((), report) = run_async_under_lab(0xc10c_0006, |root| async move {
+        let (mut server, token, _) = served(&root, "write-prepare-original-map-budget").await;
+        let (clock, calls) = counted_clock();
+        install_clock(&root, &mut server, clock).await;
+        {
+            let db = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+            db.symbols
+                .bind(GraphSymbolKind::Property, "stamp", 1)
+                .unwrap();
+            db.symbols
+                .bind(GraphSymbolKind::Property, "need", 2)
+                .unwrap();
+        }
+        let db = &server.databases["test"];
+        let arguments = |value, padding: &str| {
+            vec![(
+                "m".into(),
+                WireValue::Map(vec![
+                    ("key".into(), WireValue::Int(value)),
+                    ("unused".into(), WireValue::Text(padding.into())),
+                ]),
+            )]
+        };
+        let small = arguments(7, "");
+        let large = arguments(7, &"雪".repeat(1024));
+        let small_input = convert::parameters(&small, None).unwrap();
+        let large_input = convert::parameters(&large, None).unwrap();
+        let statement = "CREATE (n {stamp:datetime(), need:$m.key})";
+        let small_request = Prepare {
+            mode: PrepareMode::Write,
+            statement: statement.into(),
+            parameters: small,
+        };
+
+        // Preparation is effect-free, so find its complete native threshold
+        // on one unchanged graph. Only discarded UTF-8 map payload changes
+        // below: catalog, binding and lowered expression work stay identical.
+        let mut low = 0;
+        let mut high = 100_000;
+        while low + 1 < high {
+            let work = low + (high - low) / 2;
+            let limited = token
+                .attenuate(fgdb_warden::Restriction::MaxWork(work))
+                .unwrap();
+            match prepare_statement(&root, db, &limited, &small_request).await {
+                Ok(_) => high = work,
+                Err(error) => {
+                    assert_eq!(error.code, ErrorCode::Budget, "{}", error.message);
+                    low = work;
+                }
+            }
+        }
+        assert!(high > (statement.len() + small_input.canonical_byte_len()) as u64);
+        let delta = (large_input.canonical_byte_len() - small_input.canonical_byte_len()) as u64;
+        let large_request = Prepare {
+            mode: PrepareMode::Write,
+            statement: statement.into(),
+            parameters: large,
+        };
+        let short = token
+            .attenuate(fgdb_warden::Restriction::MaxWork(high + delta - 1))
+            .unwrap();
+        assert_eq!(
+            prepare_statement(&root, db, &short, &large_request)
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::Budget,
+            "original input and representative binding consume one native allowance"
+        );
+        let exact = token
+            .attenuate(fgdb_warden::Restriction::MaxWork(high + delta))
+            .unwrap();
+        let prepared = accepted(prepare_statement(&root, db, &exact, &large_request).await);
+        assert_eq!(state(&root, db).await, (CommitSeq(0), 0));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "PREPARE has no instant");
+
+        // The canonical owner retains a value-free map recipe. Executing the
+        // resulting definition must bind fresh values and one fresh instant.
+        accepted(
+            run_prepared(
+                &root,
+                db,
+                &token,
+                &prepared,
+                PreparedExecutionMode::Write,
+                &arguments(23, ""),
+            )
+            .await,
+        );
+        let answer = accepted(
+            read(
+                &root,
+                db,
+                &token,
+                &request(
+                    ExecuteMode::Read,
+                    "MATCH (n) RETURN n.need AS stored,n.stamp AS captured",
+                ),
+            )
+            .await,
+        );
+        assert_eq!(answer.rows, [vec![WireValue::Int(23), instant(0)]]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state(&root, db).await, (CommitSeq(1), 1));
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

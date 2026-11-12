@@ -5,6 +5,7 @@ use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, WriteTxnError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::{GraphInsertLimitDimension, GraphInsertRequest};
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteProgramError,
@@ -82,6 +83,202 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 
 fn arguments(value: i64) -> GqlParameters {
     GqlParameters::new().with_int64("value", value).unwrap()
+}
+
+#[test]
+fn mapped_preparation_keeps_original_bytes_and_expansion_in_one_exact_allowance() {
+    let ((), report) = run_async_under_lab(0xaa67, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let db = Database::open_memory(&commit, keys()).await.unwrap();
+        let view = db.pinned_read_view().unwrap();
+        let before = db.frontier().unwrap();
+        let issuer = authority();
+        for whole_map in [false, true] {
+            for padding in [String::new(), "雪".repeat(100)] {
+                let text = if whole_map {
+                    "CREATE (:Visible $record)"
+                } else {
+                    "CREATE (:Visible {p:$record.value})"
+                };
+                let entries = if whole_map {
+                    vec![(
+                        "p".into(),
+                        GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&padding).unwrap()),
+                    )]
+                } else {
+                    vec![
+                        ("value".into(), GraphValue::Scalar(CanonicalScalar::Int(7))),
+                        (
+                            "unused".into(),
+                            GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&padding).unwrap()),
+                        ),
+                    ]
+                };
+                let parameters = GqlParameters::new().with_map("record", entries).unwrap();
+                let (recipe, derived) =
+                    fgdb_gql::GqlMapArgumentText::lower(text, &parameters).unwrap();
+                assert_eq!(derived.parameter_types().count(), 1);
+                let expansion = recipe.text().len().saturating_sub(text.len());
+                assert_eq!(expansion > 0, whole_map);
+                let input = (text.len() + parameters.canonical_byte_len() + expansion) as u64;
+                // One declaration, two catalog symbols (each checked before
+                // and after), compiler acceptance, one bound statement,
+                // binding acceptance, and final metadata acceptance.
+                let minimum = input + 1 + 2 * 2 + 1 + 1 + 1 + 1;
+                for from_view in [false, true] {
+                    for ceiling in [input, minimum - 1, minimum] {
+                        let mut allowed = grant();
+                        allowed.limits.max_work = ceiling;
+                        let token = issuer.issue_at(&allowed, 100).unwrap();
+                        let catalog_reads = std::cell::Cell::new(0);
+                        let catalog = |kind, name: &str| {
+                            catalog_reads.set(catalog_reads.get() + 1);
+                            symbols(kind, name)
+                        };
+                        let result = if from_view {
+                            view.prepare_graph_write_script_authorized(
+                                &query,
+                                &commit,
+                                &issuer,
+                                &token,
+                                "main",
+                                text,
+                                &parameters,
+                                catalog,
+                                RelationId(1),
+                                64,
+                                || 100,
+                            )
+                        } else {
+                            db.prepare_graph_write_script_authorized(
+                                &query,
+                                &commit,
+                                &issuer,
+                                &token,
+                                "main",
+                                text,
+                                &parameters,
+                                catalog,
+                                RelationId(1),
+                                64,
+                                || 100,
+                            )
+                        };
+                        if ceiling == minimum {
+                            let prepared = result.unwrap();
+                            assert!(prepared.map_arguments().is_some());
+                            assert_eq!(prepared.script().statements().len(), 1);
+                            assert_eq!(catalog_reads.get(), 2);
+                        } else {
+                            assert_eq!(
+                                authorization(&result.unwrap_err()),
+                                Some(Error::LimitExceeded(LimitDimension::Work))
+                            );
+                            assert_eq!(catalog_reads.get(), if ceiling == input { 0 } else { 2 });
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn mapped_host_metadata_binds_fresh_values_and_restores_original_error_offsets() {
+    let ((), report) = run_async_under_lab(0xaa68, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let record = |value| {
+            GqlParameters::new()
+                .with_map(
+                    "record",
+                    vec![("p".into(), GraphValue::Scalar(CanonicalScalar::Int(value)))],
+                )
+                .unwrap()
+        };
+        let representative = record(99);
+        let prepared = db
+            .prepare_graph_write_script_authorized(
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                "CREATE (:Visible $record)",
+                &representative,
+                symbols,
+                RelationId(1),
+                64,
+                || 100,
+            )
+            .unwrap();
+        drop(representative);
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+        for value in [11, 33] {
+            // This trusted host uses an ample fresh execution grant. The
+            // metadata supplies only a recipe; it cannot retain or reuse 99.
+            let derived = prepared
+                .map_arguments()
+                .unwrap()
+                .arguments(&record(value))
+                .unwrap();
+            db.execute_graph_write_script_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                prepared.script(),
+                &derived,
+                policy(),
+                || 100,
+            )
+            .await
+            .unwrap();
+        }
+        let rows = db.vertices().unwrap();
+        assert_eq!(rows.len(), 2);
+        for value in [11, 33] {
+            assert!(rows.iter().any(|row| {
+                row.props
+                    .contains(&(PropertyKeyId(1), CanonicalScalar::Int(value).into()))
+            }));
+        }
+        let text = "CREATE (:Visible $record); CREATE (:Missing)";
+        let error = db
+            .prepare_graph_write_script_authorized(
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                text,
+                &record(99),
+                symbols,
+                RelationId(1),
+                64,
+                || 100,
+            )
+            .unwrap_err();
+        let GraphWriteScriptExecutionError::Binding(error) = error else {
+            panic!("original compiler diagnostic must survive lowering");
+        };
+        assert_eq!(error.statement, Some(1));
+        assert_eq!(error.offset, text.find("Missing").unwrap());
+        assert_eq!(db.vertices().unwrap(), rows);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -179,7 +376,7 @@ fn published_view_preparation_keeps_namespace_checks_without_retaining_the_snaps
                 &issuer,
                 &token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &arguments(11),
                 policy(),
                 || 100,
@@ -246,7 +443,7 @@ fn host_prepared_write_discards_representative_values_and_rechecks_effect_author
                 &issuer,
                 &token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &GqlParameters::new(),
                 policy,
                 || 100,
@@ -265,7 +462,7 @@ fn host_prepared_write_discards_representative_values_and_rechecks_effect_author
                     &issuer,
                     &token,
                     "main",
-                    &prepared,
+                    prepared.script(),
                     &arguments(value),
                     policy,
                     || 100,
@@ -315,7 +512,7 @@ fn host_prepared_write_discards_representative_values_and_rechecks_effect_author
                 &issuer,
                 &token,
                 "main",
-                &forbidden,
+                forbidden.script(),
                 &arguments(44),
                 policy,
                 || 100,
@@ -342,7 +539,7 @@ fn host_prepared_write_discards_representative_values_and_rechecks_effect_author
                 &issuer,
                 &read_token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &arguments(55),
                 policy,
                 || 100,
@@ -359,7 +556,7 @@ fn host_prepared_write_discards_representative_values_and_rechecks_effect_author
                 &issuer,
                 &token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &arguments(66),
                 policy,
                 || 100,
@@ -419,7 +616,7 @@ fn host_prepared_batch_admits_all_arguments_and_cumulative_limits_before_publica
                 &issuer,
                 &read_token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &invalid_tail,
                 0,
                 policy(),
@@ -437,7 +634,7 @@ fn host_prepared_batch_admits_all_arguments_and_cumulative_limits_before_publica
                 &issuer,
                 &token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &[],
                 4,
                 policy(),
@@ -460,7 +657,7 @@ fn host_prepared_batch_admits_all_arguments_and_cumulative_limits_before_publica
                 &issuer,
                 &token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &invalid_tail,
                 3,
                 policy(),
@@ -485,7 +682,7 @@ fn host_prepared_batch_admits_all_arguments_and_cumulative_limits_before_publica
                 &issuer,
                 &token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &invalid_tail,
                 4,
                 policy(),
@@ -514,7 +711,7 @@ fn host_prepared_batch_admits_all_arguments_and_cumulative_limits_before_publica
                 &issuer,
                 &limited,
                 "main",
-                &prepared,
+                prepared.script(),
                 &values,
                 4,
                 policy(),
@@ -549,7 +746,7 @@ fn host_prepared_batch_admits_all_arguments_and_cumulative_limits_before_publica
                 &issuer,
                 &token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &values,
                 4,
                 limited_policy,
@@ -584,7 +781,7 @@ fn host_prepared_batch_admits_all_arguments_and_cumulative_limits_before_publica
                     &issuer,
                     &token,
                     "main",
-                    &prepared,
+                    prepared.script(),
                     &[arguments(start), arguments(start + 10)],
                     4,
                     policy(),
@@ -646,7 +843,7 @@ fn host_prepared_batch_rolls_back_a_runtime_tail_and_reauthorizes_reuse() {
                 &issuer,
                 &token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &[values(11, 2), values(33, 0)],
                 4,
                 policy(),
@@ -662,7 +859,7 @@ fn host_prepared_batch_rolls_back_a_runtime_tail_and_reauthorizes_reuse() {
             panic!("runtime failure must preserve the original record and statement")
         };
         assert_eq!((location.argument_set, location.statement), (1, 1));
-        assert_eq!(location.span, prepared.statement_span(1).unwrap());
+        assert_eq!(location.span, prepared.script().statement_span(1).unwrap());
         assert!(matches!(
             source,
             GraphWriteProgramError::Insert { statement: 3, .. }
@@ -679,7 +876,7 @@ fn host_prepared_batch_rolls_back_a_runtime_tail_and_reauthorizes_reuse() {
                 &issuer,
                 &token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &[values(11, 2), values(33, 4)],
                 4,
                 policy(),
@@ -712,7 +909,7 @@ fn host_prepared_batch_rolls_back_a_runtime_tail_and_reauthorizes_reuse() {
                 &issuer,
                 &token,
                 "main",
-                &prepared,
+                prepared.script(),
                 &[GqlParameters::new()],
                 4,
                 policy(),
