@@ -44,6 +44,12 @@ fn report(
     for id in &summary.repaired {
         record(out, robot, "capsule", id, "repaired", None)?;
     }
+    for id in &summary.block_repaired {
+        record(out, robot, "block", id, "repaired", None)?;
+    }
+    for id in &summary.metadata_repaired {
+        record(out, robot, "metadata", id, "repaired", None)?;
+    }
     for lost in &summary.lost {
         lost_record(out, robot, "capsule", lost)?;
     }
@@ -59,11 +65,22 @@ fn report(
             "scrub found {lost} lost object(s); they were reported and left untouched"
         )));
     }
+    let extent_repairs =
+        !summary.block_repaired.is_empty() || !summary.metadata_repaired.is_empty();
     if robot {
+        let extra = if extent_repairs {
+            format!(
+                r#","block_repaired":{},"metadata_repaired":{}"#,
+                summary.block_repaired.len(),
+                summary.metadata_repaired.len()
+            )
+        } else {
+            String::new()
+        };
         emit(
             out,
             &format!(
-                r#"{{"v":1,"event":"result","kind":"scrubbed","seq":{seq},"objects":{},"repaired":{},"block_objects":{},"metadata_objects":{}}}"#,
+                r#"{{"v":1,"event":"result","kind":"scrubbed","seq":{seq},"objects":{},"repaired":{},"block_objects":{},"metadata_objects":{}{extra}}}"#,
                 summary.objects,
                 summary.repaired.len(),
                 summary.block_objects,
@@ -71,9 +88,18 @@ fn report(
             ),
         )
     } else {
+        let suffix = if extent_repairs {
+            format!(
+                " ({} block(s), {} metadata object(s) repaired)",
+                summary.block_repaired.len(),
+                summary.metadata_repaired.len()
+            )
+        } else {
+            String::new()
+        };
         writeln!(
             out,
-            "scrubbed (seq {seq}): {} capsule(s) verified, {} repaired; {} data block(s) and {} metadata object(s) verified",
+            "scrubbed (seq {seq}): {} capsule(s) verified, {} repaired; {} data block(s) and {} metadata object(s) verified{suffix}",
             summary.objects,
             summary.repaired.len(),
             summary.block_objects,
@@ -189,6 +215,7 @@ mod tests {
             metadata_objects: 2,
             metadata_clean: vec![id(6)],
             metadata_lost: vec![lost(7, LostReason::Unusable)],
+            ..ScrubSummary::default()
         };
         let mut out = Vec::new();
         let Err(error) = report(&summary, 7, true, &mut out) else {

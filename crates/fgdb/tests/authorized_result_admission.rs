@@ -727,7 +727,6 @@ mod all_target_merge {
     }
 }
 
-
 mod graph_output_metadata {
     use super::*;
     use fgdb_delta_types::ElementId;
@@ -753,7 +752,10 @@ mod graph_output_metadata {
     fn properties(key: i64, value: i64) -> GraphValue {
         GraphValue::map(vec![
             ("key".into(), GraphValue::Scalar(CanonicalScalar::Int(key))),
-            ("value".into(), GraphValue::Scalar(CanonicalScalar::Int(value))),
+            (
+                "value".into(),
+                GraphValue::Scalar(CanonicalScalar::Int(value)),
+            ),
         ])
         .unwrap()
     }
@@ -837,8 +839,11 @@ mod graph_output_metadata {
                     || NOW,
                     |rows, work, output| {
                         work(1)?;
-                        let [GraphValue::Vertex(a), GraphValue::Edge(edge), GraphValue::Vertex(b)] =
-                            rows[0].values()
+                        let [
+                            GraphValue::Vertex(a),
+                            GraphValue::Edge(edge),
+                            GraphValue::Vertex(b),
+                        ] = rows[0].values()
                         else {
                             panic!("CREATE must preserve all three identity domains")
                         };

@@ -2500,13 +2500,16 @@ fn subscriptions_push_a_baseline_then_exact_deltas_until_cancelled() {
             .await
             .unwrap();
 
-        // A capability that hides anything cannot subscribe: maintained
-        // queries are not masked yet, so the refusal precedes registration.
+        // Analytic CALL fnx.* subscriptions still require unrestricted graph
+        // scope, while native GQL subscriptions project over the capability's
+        // pre-expansion quotient Pi_C (FG-INV-20).
         let mut scoped = Client::connect(
             cx,
             addr,
             token(&Grant {
                 labels: Scope::only([LabelId(1)]),
+                relations: Scope::only([RelationId(1)]),
+                properties: Scope::only([PropertyKeyId(1)]),
                 ..grant(Rights::Read)
             }),
         )
@@ -2516,7 +2519,7 @@ fn subscriptions_push_a_baseline_then_exact_deltas_until_cancelled() {
         let refused = scoped
             .subscribe(
                 cx,
-                "SUBSCRIBE TO MATCH (p:Person) RETURN p.name AS name",
+                "SUBSCRIBE TO CALL fnx.connected_components({relations:['KNOWS']}) YIELD vertex, component",
                 vec![],
                 |_| {},
                 |_| Ok(true),
@@ -2524,6 +2527,34 @@ fn subscriptions_push_a_baseline_then_exact_deltas_until_cancelled() {
             .await
             .unwrap_err();
         assert_eq!(server_code(refused), ErrorCode::PermissionDenied);
+        let mut masked_seen = Vec::new();
+        scoped
+            .subscribe(
+                cx,
+                "SUBSCRIBE TO MATCH (p:Person) RETURN p.name AS name, COUNT { MATCH (p)-[:KNOWS]->(:Person) } AS friends, p.age AS age",
+                vec![],
+                |cols| assert_eq!(cols, ["name", "friends", "age"]),
+                |change| {
+                    masked_seen.push(change);
+                    Ok(false)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(masked_seen.len(), 1);
+        assert!(masked_seen[0].snapshot);
+        assert_eq!(
+            masked_seen[0].entries,
+            vec![(
+                1,
+                vec![
+                    WireValue::Text("Ann".into()),
+                    WireValue::Int(0),
+                    WireValue::Null
+                ]
+            )]
+        );
+        scoped.close(cx).await.unwrap();
 
         let changes: Arc<Mutex<Vec<Change>>> = Arc::default();
         let columns: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -2832,7 +2863,7 @@ fn subscriptions_reuse_served_slots_across_129_terminal_paths() {
             let mut denied = grant(Rights::Read);
             let expected = match profile {
                 0 => {
-                    denied.labels = Scope::only([LabelId(1)]);
+                    denied.rights = Rights::Write;
                     ErrorCode::PermissionDenied
                 }
                 1 => {

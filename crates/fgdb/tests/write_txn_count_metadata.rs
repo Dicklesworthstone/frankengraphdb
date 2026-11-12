@@ -475,7 +475,10 @@ fn metadata_finalization_retains_exact_limits_late_errors_and_count_dependencies
             .unwrap();
         assert_eq!(first.value, complete.value);
         assert_eq!(first.rows, complete.rows);
-        assert_eq!(first.evaluator.work_units, complete.evaluator.work_units);
+        assert_eq!(
+            first.evaluator.work_units,
+            complete.evaluator.work_units + 1
+        );
         assert_eq!(
             first.evaluator.scratch_entries,
             complete.evaluator.scratch_entries + 1,
@@ -636,7 +639,7 @@ fn property_filters_and_nonuniversal_endpoint_labels_keep_the_scan_path() {
         let commit = c.commit();
         let txcx = c.txn();
         let cx = c.query();
-        let db = fixture(&commit).await;
+        let mut db = fixture(&commit).await;
         let transaction = db.begin(&txcx).unwrap();
         for (text, expected) in [
             ("MATCH (n) RETURN count(n.p) AS n", 6),

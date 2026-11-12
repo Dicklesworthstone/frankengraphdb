@@ -28,7 +28,7 @@ use fgdb::{
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlExecutionBudget, GqlQueryPolicy};
 use fgdb_types::{CanonicalScalar, QueryCx};
-use fgdb_warden::QueryLimits;
+use fgdb_warden::{PlannerPredicates, QueryLimits};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -38,6 +38,7 @@ pub(crate) struct Subscription {
     pub(crate) consumer: crate::recovery::OwnedSubscription,
     pub(crate) columns: Vec<String>,
     pub(crate) generation: Generation,
+    scope: PlannerPredicates,
     admitted: QueryLimits,
     initial: Option<Delivery>,
     registration_work: u64,
@@ -134,7 +135,7 @@ fn unrestricted(capability: &fgdb_warden::VerifiedCapability) -> Result<(), Refu
     } else {
         Err(Refusal::new(
             ErrorCode::PermissionDenied,
-            "a subscription requires a read capability with unrestricted label, relation and property scope",
+            "analytic CALL fnx.* subscriptions require a read capability with unrestricted label, relation and property scope",
         ))
     }
 }
@@ -405,8 +406,8 @@ pub(crate) async fn subscribe(
         .begin_read_at(TRUNK, now)
         .map_err(authorization)?;
     refuse_element_identity(&statement.statement)?;
-    unrestricted(&capability)?;
-    let limits = capability.predicates().limits();
+    let scope = capability.predicates().clone();
+    let limits = scope.limits();
     let registration_work = db
         .query_policy
         .evaluator
@@ -452,6 +453,9 @@ pub(crate) async fn subscribe(
     let prepared =
         PreparedNativeRead::prepare_subscription(&query, text, parameters, db.symbols.clone())
             .map_err(subscribe_refusal)?;
+    if prepared.has_procedure_call() {
+        unrestricted(&capability)?;
+    }
     let (nodes, source_width) = prepared
         .subscription_footprint(&query, parameters)
         .map_err(native_refusal)?;
@@ -482,10 +486,11 @@ pub(crate) async fn subscribe(
         count: &db.subscriptions,
         accepted: false,
     };
-    let (consumer, (columns, initial)) = prepared.subscribe_scoped(
+    let (consumer, (columns, initial)) = prepared.subscribe_authorized(
         &mut guard,
         &query,
         parameters,
+        &scope,
         reservation.setup,
         |names, batch| {
             let rows = check_rows(batch, row_limit(db.query_policy, limits))?;
@@ -525,6 +530,7 @@ pub(crate) async fn subscribe(
         consumer,
         columns,
         generation,
+        scope,
         admitted: limits,
         initial: Some(initial),
         registration_work,
@@ -547,7 +553,15 @@ pub(crate) async fn poll(
     let mut permit = capability
         .begin_read_at(TRUNK, now)
         .map_err(authorization)?;
-    unrestricted(&capability)?;
+    if !capability
+        .predicates()
+        .same_graph_scope(&subscription.scope)
+    {
+        return Err(Refusal::new(
+            ErrorCode::PermissionDenied,
+            "a subscription poll cannot change the registered capability graph scope",
+        ));
+    }
     let current = capability.predicates().limits();
     let limits = QueryLimits {
         max_nodes: current.max_nodes.min(subscription.admitted.max_nodes),

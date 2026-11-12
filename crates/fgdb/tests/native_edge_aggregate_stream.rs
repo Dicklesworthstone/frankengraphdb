@@ -448,9 +448,7 @@ fn native_edge_aggregate_quotas_late_errors_and_close_keep_one_cumulative_cursor
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let basis = db.write(&commit, seed()).await.unwrap();
             let view = db.read_session().unwrap();
-            let text = format!(
-                "MATCH {pattern} RETURN COUNT(*) AS total, SUM(r.score) AS weight"
-            );
+            let text = format!("MATCH {pattern} RETURN COUNT(*) AS total, SUM(r.score) AS weight");
             let params = GqlParameters::new();
             let prepared = PreparedNativeRead::prepare(&text, &params, symbols()).unwrap();
             let mut full = prepared

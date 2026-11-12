@@ -678,7 +678,10 @@ impl core::fmt::Display for WriteTxnError {
             Self::DeletedElementRead => formatter.write_str("read of a deleted graph element"),
             Self::Finished => formatter.write_str("write transaction is already finished"),
             Self::StatementLimit { limit } => {
-                write!(formatter, "authorized transaction statement limit {limit} reached")
+                write!(
+                    formatter,
+                    "authorized transaction statement limit {limit} reached"
+                )
             }
             Self::WrongDatabase => {
                 formatter.write_str("write transaction belongs to a different database handle")

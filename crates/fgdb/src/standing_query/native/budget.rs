@@ -132,6 +132,15 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             .ok_or(StandingQueryError::Unsupported)?;
         return circuit(cx, plan.left)?.combine(circuit(cx, plan.right)?, stages);
     }
+    if let Some(plan) = query.incremental_collected_count_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
+        let stages = u64::try_from(plan.output.len())
+            .ok()
+            .and_then(|count| count.checked_add(3))
+            .ok_or(StandingQueryError::Unsupported)?;
+        return circuit(cx, &plan.left)?.combine(circuit(cx, &plan.right)?, stages);
+    }
     if let Some(plan) = query.incremental_apply_distinct_with_control(&mut |_| {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)
     })? {

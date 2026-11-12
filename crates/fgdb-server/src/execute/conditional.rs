@@ -57,7 +57,7 @@ async fn write_if_current_inner(
             let contexts = PurposeContexts::narrow_runtime_root(cx);
             let query = crate::query_cx(&contexts);
             let prepared = template.bind_current(&query, db, &parameters)?;
-            write_returning_in_guard(cx, db, token, prepared, guard, |_, rows, _| Ok(rows)).await
+            write_returning_in_guard(cx, db, token, prepared, guard, |_, rows, _, _| Ok(rows)).await
         }
         None => write_stats_in_guard(cx, db, token, &statement.statement, &parameters, guard).await,
     }

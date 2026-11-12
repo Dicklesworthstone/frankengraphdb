@@ -297,7 +297,7 @@ fn authorized_boolean_scores_and_work_exclude_hidden_corpus_and_types() {
     let ((), report) = run_async_under_lab(0xbeac_b003, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let query = c.query();
-        let full = database(&c.commit(), true).await;
+        let mut full = database(&c.commit(), true).await;
         let clean = database(&c.commit(), false).await;
         let options = Options::text(TEXT);
         let issuer = Authority::new(
@@ -411,7 +411,7 @@ fn cancellation_and_final_authority_checks_discard_boolean_results() {
     let ((), report) = run_async_under_lab(0xbeac_b004, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let query = c.query();
-        let db = database(&c.commit(), false).await;
+        let mut db = database(&c.commit(), false).await;
         let options = Options::text(TEXT);
         let issuer = Authority::new(
             AuthKey::from_seed(0xb004),

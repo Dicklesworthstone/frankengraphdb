@@ -435,16 +435,18 @@ fn row_merge_target_reuse_requires_every_branch_to_preserve_keys_and_visibility(
     }
 }
 
-
 #[test]
 fn target_list_merge_dispatch_preserves_scalar_constants_and_lexical_scopes() {
     use fgdb_gql::PreparedGraphWriteChainText;
 
     // Existing parameter-batch copied-map dispatch also covers a WITH
     // continuation; restricting the new list proof must preserve that owner.
-    assert!(PreparedGraphWriteChainText::is_chain(
-        "UNWIND $rows AS row MERGE (n:Person {p:row.p}) WITH n,row SET n += row"
-    ).unwrap());
+    assert!(
+        PreparedGraphWriteChainText::is_chain(
+            "UNWIND $rows AS row MERGE (n:Person {p:row.p}) WITH n,row SET n += row"
+        )
+        .unwrap()
+    );
 
     for head in [
         "MERGE (n:Person {p:1})",
@@ -463,7 +465,10 @@ fn target_list_merge_dispatch_preserves_scalar_constants_and_lexical_scopes() {
             "SET n.active=n.active+1; MERGE (m) SET m.name=[m.p]",
         ] {
             let text = format!("{head} {tail}");
-            assert!(!PreparedGraphWriteChainText::is_chain(&text).unwrap(), "{text}");
+            assert!(
+                !PreparedGraphWriteChainText::is_chain(&text).unwrap(),
+                "{text}"
+            );
         }
         for rhs in [
             "[n.p]",
@@ -479,7 +484,10 @@ fn target_list_merge_dispatch_preserves_scalar_constants_and_lexical_scopes() {
             "CASE WHEN n.active=1 THEN [n.p] ELSE [] END",
         ] {
             let text = format!("{head} SET n.name={rhs} RETURN n.name");
-            assert!(PreparedGraphWriteChainText::is_chain(&text).unwrap(), "{text}");
+            assert!(
+                PreparedGraphWriteChainText::is_chain(&text).unwrap(),
+                "{text}"
+            );
         }
     }
 }
@@ -532,9 +540,14 @@ fn target_list_merge_binds_stored_frames_without_reentering_the_catalog() {
                     [GraphWriteChainStep::VertexMergeQuery(query)] => {
                         let actions = query.merge().actions().unwrap();
                         assert!(actions.on_create.is_empty() && actions.after.is_empty());
-                        let [GraphVertexMergeRowAction::Value {
-                            key, inputs: Some(inputs), ..
-                        }] = &actions.on_match[..] else {
+                        let [
+                            GraphVertexMergeRowAction::Value {
+                                key,
+                                inputs: Some(inputs),
+                                ..
+                            },
+                        ] = &actions.on_match[..]
+                        else {
                             panic!("expected one stored vertex frame: {text}");
                         };
                         assert_eq!(*key, NAME);
@@ -543,9 +556,14 @@ fn target_list_merge_binds_stored_frames_without_reentering_the_catalog() {
                     [GraphWriteChainStep::EdgeUpsertQuery { upsert, .. }] => {
                         let actions = upsert.actions();
                         assert!(actions.on_create.is_empty() && actions.after.is_empty());
-                        let [GraphEdgeMergeRowAction::Value {
-                            key, inputs: Some(inputs), ..
-                        }] = &actions.on_match[..] else {
+                        let [
+                            GraphEdgeMergeRowAction::Value {
+                                key,
+                                inputs: Some(inputs),
+                                ..
+                            },
+                        ] = &actions.on_match[..]
+                        else {
                             panic!("expected one stored relationship frame: {text}");
                         };
                         assert_eq!(*key, NAME);
@@ -554,9 +572,12 @@ fn target_list_merge_binds_stored_frames_without_reentering_the_catalog() {
                     _ => panic!("expected one native MERGE step: {text}"),
                 };
                 assert!(!inputs.is_empty(), "{text}");
-                assert!(inputs.iter().all(|input| matches!(
-                    input, GraphVertexMergeRowInput::Property(_)
-                )), "{text}");
+                assert!(
+                    inputs
+                        .iter()
+                        .all(|input| matches!(input, GraphVertexMergeRowInput::Property(_))),
+                    "{text}"
+                );
                 if rhs == "[n.p,n.p]" {
                     assert_eq!(inputs, &[GraphVertexMergeRowInput::Property(P)]);
                 }
@@ -568,10 +589,14 @@ fn target_list_merge_binds_stored_frames_without_reentering_the_catalog() {
     for rhs in ["[n.p,other.p]", "n.name+[{p:other.p}.p]"] {
         let text = format!("MERGE (n:Person {{p:1}}) SET n.name={rhs}");
         let calls = Cell::new(0);
-        assert!(PreparedGraphWriteChainText::prepare(&text, R, |kind, name| {
-            calls.set(calls.get() + 1);
-            symbols(kind, name)
-        }).is_err(), "{text}");
+        assert!(
+            PreparedGraphWriteChainText::prepare(&text, R, |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
         assert_eq!(calls.get(), 0, "{text}");
     }
 }

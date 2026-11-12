@@ -1109,9 +1109,19 @@ impl BoundSetTextInput {
             stage.append_template_transcript(bytes);
         }
         ordinal(bytes, self.correlations.len());
-        for (from, to) in &self.correlations {
-            ordinal(bytes, *from);
-            ordinal(bytes, *to);
+        for correlation in &self.correlations {
+            match correlation {
+                BoundCorrelation::Column { left, right } => {
+                    ordinal(bytes, *left);
+                    ordinal(bytes, *right);
+                }
+                BoundCorrelation::Identity { left, right, text } => {
+                    bytes.push(0xfe);
+                    bytes.push(u8::from(*text));
+                    ordinal(bytes, *left);
+                    ordinal(bytes, *right);
+                }
+            }
         }
         // Only an owned input appends: every other transcript keeps its bytes.
         if let Some((columns, types)) = self.owned.as_deref() {
@@ -1196,7 +1206,7 @@ pub(crate) enum ReadStageTemplate {
         vertices: Vec<usize>,
         /// The first positional fnx map after its literal schema names have
         /// been resolved. It is not an algorithm argument at execution.
-        graph_projection: Option<crate::ProcedureGraphProjection>,
+        graph_projection: Option<Box<crate::ProcedureGraphProjection>>,
         /// A complete catalog domain captured before parameter binding.
         catalog_symbols: Option<Vec<(crate::GraphSymbol, String)>>,
     },
@@ -1247,6 +1257,12 @@ pub(crate) struct CompoundOrderTemplate {
     pub(crate) parameter_offsets: Vec<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BoundCorrelation {
+    Column { left: usize, right: usize },
+    Identity { left: usize, right: usize, text: bool },
+}
+
 #[derive(Clone)]
 pub(crate) struct BoundSetTextInput {
     pub(crate) selection: Option<PreparedGraphText>,
@@ -1258,7 +1274,7 @@ pub(crate) struct BoundSetTextInput {
     pub(crate) pipeline: Vec<ReadStageTemplate>,
     pub(crate) singleton: bool,
     pub(crate) leading: Vec<ReadStageTemplate>,
-    pub(crate) correlations: Vec<(usize, usize)>,
+    pub(crate) correlations: Vec<BoundCorrelation>,
     pub(crate) row_fields: Vec<ReadValueTemplate>,
     /// A chained write's input (`CREATE (a) WITH a CREATE (b)`): the previous
     /// write's output columns, read through one owned leaf (`SetNode::Owned`)
@@ -1266,6 +1282,14 @@ pub(crate) struct BoundSetTextInput {
     /// Boxed: only chain steps have one, and every read template embeds this.
     #[allow(clippy::type_complexity)]
     pub(crate) owned: Option<Box<(Vec<String>, Vec<GraphSetColumnType>)>>,
+}
+impl BoundSetTextInput {
+    pub(crate) fn has_procedure_call(&self) -> bool {
+        self.leading
+            .iter()
+            .chain(&self.pipeline)
+            .any(|stage| matches!(stage, ReadStageTemplate::Call { .. }))
+    }
 }
 
 // A token view, not a lexer. Only graph_text's existing Lexer constructs these.
@@ -2211,6 +2235,14 @@ impl core::fmt::Debug for PreparedGraphSetText {
     }
 }
 impl PreparedGraphSetText {
+    /// Whether any query arm, continuation, or subquery invokes `CALL proc(...)`.
+    #[must_use]
+    pub fn has_procedure_call(&self) -> bool {
+        self.inputs
+            .iter()
+            .any(|(_, input)| input.has_procedure_call())
+    }
+
     /// UNION/EXCEPT associate left; INTERSECT binds more tightly. Every set
     /// operator defaults to DISTINCT and may explicitly select ALL/DISTINCT.
     /// UNION operands must return the same column names, in any order, and one

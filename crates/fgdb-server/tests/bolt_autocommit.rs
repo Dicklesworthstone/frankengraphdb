@@ -8,11 +8,12 @@ use asupersync::{Budget, Cx};
 use fgdb::{Database, DatabaseKeys};
 use fgdb_bolt::message::{Dechunker, MAGIC, frame};
 use fgdb_bolt::packstream::{Value, decode, encode, get};
+use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::GraphSymbolKind;
 use fgdb_protocol::body::{ExecuteMode, Outcome, WireValue};
 use fgdb_protocol::client::Client;
 use fgdb_server::{DatabaseConfig, Server, ServerLimits, Symbols, issue_token, issuer};
-use fgdb_types::{DatabaseSecurityNamespaceId, PropertyKeyId, PurposeContexts};
+use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1027,10 +1028,7 @@ fn bolt_graph_returning_uses_final_mutations_and_masks_nested_entity_properties(
         );
         assert_eq!(get(node_properties(node), "age"), Some(&Value::Int(1)));
         assert_eq!(nodes, &Value::List(vec![node.clone()]));
-        assert_eq!(
-            metadata,
-            &Value::Map(vec![("node".into(), node.clone())])
-        );
+        assert_eq!(metadata, &Value::Map(vec![("node".into(), node.clone())]));
         let element_id = graph_fields(node, 0x4e)[3].clone();
         assert_eq!(
             get(&done, "bookmark").and_then(Value::as_str),
@@ -1161,10 +1159,7 @@ fn bolt_graph_returning_keeps_relationship_endpoints_and_reverse_path_orientatio
         let edge = graph_fields(relationship, 0x52);
         assert_eq!(edge.len(), 8);
         assert_eq!(edge[3], Value::string("KNOWS"));
-        assert_eq!(
-            edge[4],
-            Value::Map(vec![("age".into(), Value::Int(7))])
-        );
+        assert_eq!(edge[4], Value::Map(vec![("age".into(), Value::Int(7))]));
         assert_eq!(edge[6], graph_fields(ann, 0x4e)[3]);
         assert_eq!(edge[7], graph_fields(bob, 0x4e)[3]);
         assert_eq!(
@@ -1191,10 +1186,7 @@ fn bolt_graph_returning_keeps_relationship_endpoints_and_reverse_path_orientatio
         let path = graph_fields(path, 0x50);
         assert_eq!(path.len(), 3);
         assert_eq!(path[0], Value::List(vec![bob.clone(), ann.clone()]));
-        assert_eq!(
-            path[2],
-            Value::List(vec![Value::Int(-1), Value::Int(1)])
-        );
+        assert_eq!(path[2], Value::List(vec![Value::Int(-1), Value::Int(1)]));
         let Value::List(relationships) = &path[1] else {
             panic!("the path must carry its unbound relationships");
         };
@@ -1202,10 +1194,7 @@ fn bolt_graph_returning_keeps_relationship_endpoints_and_reverse_path_orientatio
         let unbound = graph_fields(&relationships[0], 0x72);
         assert_eq!(unbound.len(), 4);
         assert_eq!(unbound[1], Value::string("KNOWS"));
-        assert_eq!(
-            unbound[2],
-            Value::Map(vec![("age".into(), Value::Int(8))])
-        );
+        assert_eq!(unbound[2], Value::Map(vec![("age".into(), Value::Int(8))]));
         assert_eq!(unbound[3], edge[5]);
         let updated = graph_fields(updated_relationship, 0x52);
         assert_eq!(updated[4], unbound[2]);

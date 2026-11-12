@@ -3944,7 +3944,18 @@ mod tests {
                     &FnxParameters::new(),
                 )
                 .unwrap(),
+                FnxCallSpec::bind(
+                    "CALL fnx.degree_centrality() YIELD vertex,score",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
+                FnxCallSpec::bind(
+                    "CALL fnx.core_number() YIELD vertex,core",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
             ] {
+                assert!(call.supports_sealed_execution());
                 call.validate_sealed_projection(direction).unwrap();
             }
             for call in [
@@ -3956,12 +3967,12 @@ mod tests {
                 )
                 .unwrap(),
                 FnxCallSpec::bind(
-                    "CALL fnx.degree_centrality() YIELD vertex,score",
+                    "CALL fnx.label_propagation_communities() YIELD vertex,component",
                     &FnxParameters::new(),
                 )
                 .unwrap(),
                 FnxCallSpec::bind(
-                    "CALL fnx.core_number() YIELD vertex,core",
+                    "CALL fnx.louvain_communities() YIELD vertex,component",
                     &FnxParameters::new(),
                 )
                 .unwrap(),

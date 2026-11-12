@@ -930,8 +930,7 @@ fn decoded_unions_match_independent_topology_and_reuse_only_the_same_canonical_s
         assert_eq!(actual, db.call_fnx(&cx, DIJKSTRA, &params, opt).unwrap());
         let faults = view.buffer_stats();
         let mut reordered = opt;
-        reordered.selection.vertex_labels =
-            SchemaSelection::any_of(&[LabelId(11), L, L]).unwrap();
+        reordered.selection.vertex_labels = SchemaSelection::any_of(&[LabelId(11), L, L]).unwrap();
         reordered.selection.relations =
             SchemaSelection::any_of(&[RelationId(8), R, RelationId(8)]).unwrap();
         assert!(

@@ -31,6 +31,7 @@ mod selected_cross;
 pub use apply::{SpillSetApplyKind, SpillSetApplyPlan, SpillSetArgumentsPlan, SpillSetCollection};
 pub use procedure::SpillSetProcedurePlan;
 pub use relational_join::SpillSetJoinPlan;
+pub use super::execute::scalar_to_vid;
 
 /// The executing host's pinned, awaitable element-property reader.
 ///
@@ -1478,6 +1479,7 @@ fn compile_stages<'a>(
                 columns: query.columns.clone(),
                 types: query.types.clone(),
                 vertex_seed_column: SpillSetJoinPlan::seed_column_for(right, spec),
+                identity_seed_column: SpillSetJoinPlan::identity_seed_column_for(right, spec),
             }),
             query.types.clone(),
             Operation::Identity,

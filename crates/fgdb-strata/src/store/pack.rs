@@ -193,6 +193,26 @@ pub(super) fn name(bytes: &[u8]) -> String {
     format!("{}.pack", fgdb_crypto::blake3::hash(bytes).to_hex())
 }
 
+/// Extract the 32-byte `ObjectId` stem from a canonical `<64-hex>.pack` path.
+pub(super) fn pack_id_from_path(path: &Path) -> Option<ObjectId> {
+    let stem = path.file_stem()?.to_str()?;
+    if stem.len() != 64 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut id = [0u8; 32];
+    for (dst, pair) in id.iter_mut().zip(stem.as_bytes().as_chunks::<2>().0) {
+        let digit = |c: u8| {
+            if c.is_ascii_digit() {
+                c - b'0'
+            } else {
+                c.to_ascii_lowercase() - b'a' + 10
+            }
+        };
+        *dst = (digit(pair[0]) << 4) | digit(pair[1]);
+    }
+    Some(ObjectId(id))
+}
+
 /// The incumbent complete-pack name without allocating a second payload copy.
 /// Publication checks that path before deduplication so a damaged existing
 /// realization cannot be bypassed by changing the offered group's layout.
@@ -235,6 +255,25 @@ fn decode_table(table: &[u8], file_len: u64) -> Result<Vec<(ObjectId, u64, u32)>
         entries.push((id, offset, len));
     })?;
     Ok(entries)
+}
+
+/// Extract all admitted member object identities from a complete logical pack image.
+pub(super) fn member_ids(bytes: &[u8]) -> Option<Vec<ObjectId>> {
+    if bytes.len() < HEADER_BYTES {
+        return None;
+    }
+    let len = bytes.len() as u64;
+    let count = header_count(&bytes[..HEADER_BYTES], len).ok()? as usize;
+    let table_end = HEADER_BYTES.checked_add(count.checked_mul(ENTRY_BYTES)?)?;
+    if table_end > bytes.len() {
+        return None;
+    }
+    let mut ids = Vec::with_capacity(count);
+    visit_table(&bytes[HEADER_BYTES..table_end], len, |id, _, _| {
+        ids.push(id);
+    })
+    .ok()?;
+    Some(ids)
 }
 
 fn visit_table(
@@ -381,6 +420,10 @@ struct Table {
 pub(super) struct PackIndex {
     dir: PathBuf,
     table: RwLock<Table>,
+    ecs: Option<(
+        super::ecs_extent::StrataEcsConfig,
+        fgdb_types::ids::DatabaseSecurityNamespaceId,
+    )>,
     /// A verification reader must observe its filesystem on every object read,
     /// never a complete pack retained by an earlier read or scrub sweep.
     cache_reads: bool,
@@ -397,15 +440,29 @@ impl PackIndex {
         &self.dir
     }
 
-    /// Index every pack already in `dir`.
-    pub(super) async fn load<V: Vfs>(
+    #[allow(dead_code)]
+    pub(super) fn pack_paths(&self) -> Vec<(PathBuf, ObjectId)> {
+        let table = self.table.read().expect("pack table");
+        table
+            .packs
+            .iter()
+            .filter_map(|p| pack_id_from_path(&p.path).map(|id| (p.path.clone(), id)))
+            .collect()
+    }
+
+    pub(super) async fn load_with_ecs<V: Vfs>(
         cx: &impl StorageReadCx,
         vfs: &V,
         dir: PathBuf,
+        ecs: Option<(
+            super::ecs_extent::StrataEcsConfig,
+            fgdb_types::ids::DatabaseSecurityNamespaceId,
+        )>,
     ) -> Result<Self, StoreError> {
         let index = Self {
             dir,
             table: RwLock::new(Table::default()),
+            ecs,
             cache_reads: true,
             resident: Mutex::new(0),
             #[cfg(test)]
@@ -418,12 +475,25 @@ impl PackIndex {
     /// Re-admit the current on-disk tables without sharing location metadata
     /// or payload residency with an ordinary store. Invalid tables leave their
     /// objects absent; they cannot be rescued by an earlier admitted offset.
+    #[allow(dead_code)]
     pub(super) async fn load_for_verification<V: Vfs>(
         cx: &impl StorageReadCx,
         vfs: &V,
         dir: PathBuf,
     ) -> Result<Self, StoreError> {
-        let mut index = Self::load(cx, vfs, dir).await?;
+        Self::load_for_verification_with_ecs(cx, vfs, dir, None).await
+    }
+
+    pub(super) async fn load_for_verification_with_ecs<V: Vfs>(
+        cx: &impl StorageReadCx,
+        vfs: &V,
+        dir: PathBuf,
+        ecs: Option<(
+            super::ecs_extent::StrataEcsConfig,
+            fgdb_types::ids::DatabaseSecurityNamespaceId,
+        )>,
+    ) -> Result<Self, StoreError> {
+        let mut index = Self::load_with_ecs(cx, vfs, dir, ecs).await?;
         index.cache_reads = false;
         Ok(index)
     }
@@ -478,6 +548,63 @@ impl PackIndex {
         vfs: &V,
         path: &Path,
     ) -> Result<Option<(u64, Vec<(ObjectId, u64, u32)>)>, StoreError> {
+        if let Some((cfg, ns)) = &self.ecs {
+            let Some(pack_id) = pack_id_from_path(path) else {
+                return Ok(None);
+            };
+            let file1 = cx.with_restriction_async(vfs.open_read(path)).await?;
+            let (logical_len, header) =
+                match super::ecs_extent::read_extent_range_with_len_from_file(
+                    cx,
+                    file1,
+                    cfg,
+                    *ns,
+                    super::ecs_extent::ExtentObjectKind::Pack,
+                    pack_id,
+                    0,
+                    HEADER_BYTES,
+                )
+                .await
+                {
+                    Ok(pair) => pair,
+                    Err(Ok(super::ecs_extent::ExtentError::AuthenticationFailed)) => {
+                        return Err(StoreError::Extent(
+                            super::ecs_extent::ExtentError::AuthenticationFailed,
+                        ));
+                    }
+                    Err(Ok(_)) => return Ok(None),
+                    Err(Err(io)) => return Err(StoreError::Io(io)),
+                };
+            let Ok(count) = header_count(&header, logical_len) else {
+                return Ok(None);
+            };
+            let table_bytes = usize::try_from(count).expect("bounded count") * ENTRY_BYTES;
+            let file2 = cx.with_restriction_async(vfs.open_read(path)).await?;
+            let table = match super::ecs_extent::read_extent_range_from_file(
+                cx,
+                file2,
+                cfg,
+                *ns,
+                super::ecs_extent::ExtentObjectKind::Pack,
+                pack_id,
+                HEADER_BYTES as u64,
+                table_bytes,
+            )
+            .await
+            {
+                Ok(t) => t,
+                Err(Ok(super::ecs_extent::ExtentError::AuthenticationFailed)) => {
+                    return Err(StoreError::Extent(
+                        super::ecs_extent::ExtentError::AuthenticationFailed,
+                    ));
+                }
+                Err(Ok(_)) => return Ok(None),
+                Err(Err(io)) => return Err(StoreError::Io(io)),
+            };
+            return Ok(decode_table(&table, logical_len)
+                .ok()
+                .map(|objects| (logical_len, objects)));
+        }
         cx.with_restriction_async(async {
             let mut file = vfs.open_read(path).await?;
             let len = file.metadata().await?.len();
@@ -486,6 +613,11 @@ impl PackIndex {
                 return Ok(None);
             }
             file.read_exact(&mut header).await?;
+            if super::ecs_extent::is_encoded_extent(&header) {
+                return Err(StoreError::Extent(
+                    super::ecs_extent::ExtentError::AuthenticationFailed,
+                ));
+            }
             let Ok(count) = header_count(&header, len) else {
                 return Ok(None);
             };
@@ -608,7 +740,7 @@ impl PackIndex {
         let pack =
             Arc::clone(&self.table.read().expect("pack table").packs[location.pack as usize]);
         if !self.cache_reads {
-            return Self::read_direct(cx, vfs, &pack, location).await;
+            return self.read_direct(cx, vfs, &pack, location).await;
         }
         let start = usize::try_from(location.offset).expect("pack offsets fit memory");
         let end = start + location.len as usize;
@@ -637,7 +769,7 @@ impl PackIndex {
         if !loading {
             // Another read is loading this pack, a walk already drained it,
             // or the resident budget is spent: read just this object.
-            let object = Self::read_direct(cx, vfs, &pack, location).await?;
+            let object = self.read_direct(cx, vfs, &pack, location).await?;
             self.served(&pack, location.entry);
             return Ok(object);
         }
@@ -657,11 +789,36 @@ impl PackIndex {
     }
 
     async fn read_direct<V: Vfs>(
+        &self,
         cx: &impl StorageReadCx,
         vfs: &V,
         pack: &PackFile,
         location: Location,
     ) -> Result<Vec<u8>, StoreError> {
+        if let Some((cfg, ns)) = &self.ecs {
+            let pack_id = pack_id_from_path(&pack.path).ok_or_else(|| {
+                StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pack path does not carry a canonical 64-hex identity",
+                ))
+            })?;
+            let file = cx.with_restriction_async(vfs.open_read(&pack.path)).await?;
+            return super::ecs_extent::read_extent_range_from_file(
+                cx,
+                file,
+                cfg,
+                *ns,
+                super::ecs_extent::ExtentObjectKind::Pack,
+                pack_id,
+                location.offset,
+                location.len as usize,
+            )
+            .await
+            .map_err(|err| match err {
+                Ok(ext_err) => StoreError::Extent(ext_err),
+                Err(io_err) => StoreError::Io(io_err),
+            });
+        }
         cx.with_restriction_async(async {
             let mut file = vfs.open_read(&pack.path).await?;
             file.seek(SeekFrom::Start(location.offset)).await?;
@@ -808,7 +965,33 @@ impl PackIndex {
         self.whole_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let file = cx.with_restriction_async(vfs.open_read(&pack.path)).await?;
-        let bytes = read_bounded(cx, file, MAX_PACK_BYTES).await?;
+        let bytes = if let Some((cfg, ns)) = &self.ecs {
+            let pack_id = pack_id_from_path(&pack.path).ok_or_else(|| {
+                StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pack path does not carry a canonical 64-hex identity",
+                ))
+            })?;
+            let raw = read_bounded(
+                cx,
+                file,
+                super::ecs_extent::max_encoded_bytes_for_limit(MAX_PACK_BYTES, cfg),
+            )
+            .await?;
+            super::ecs_extent::decode_extent(
+                cfg,
+                *ns,
+                super::ecs_extent::ExtentObjectKind::Pack,
+                pack_id,
+                MAX_PACK_BYTES,
+                &raw,
+                false,
+            )
+            .map_err(StoreError::Extent)?
+            .plaintext
+        } else {
+            read_bounded(cx, file, MAX_PACK_BYTES).await?
+        };
         if bytes.len() as u64 != pack.len {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -818,6 +1001,131 @@ impl PackIndex {
         }
         Ok(Arc::from(bytes))
     }
+}
+
+fn preferred_host_map_path() -> fgdb_unsafe_vfs::MapPath {
+    if fgdb_unsafe_vfs::COMPILED_MAP_PATHS.contains(&fgdb_unsafe_vfs::MapPath::Mapped) {
+        fgdb_unsafe_vfs::MapPath::Mapped
+    } else {
+        fgdb_unsafe_vfs::MapPath::Buffered
+    }
+}
+
+fn vfs_error_to_store_error(error: fgdb_unsafe_vfs::VfsError) -> StoreError {
+    match error {
+        fgdb_unsafe_vfs::VfsError::Io(io) => StoreError::Io(io),
+        fgdb_unsafe_vfs::VfsError::Syscall { errno, .. } => {
+            StoreError::Io(std::io::Error::from_raw_os_error(errno))
+        }
+        fgdb_unsafe_vfs::VfsError::EmptyRange => StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            error.to_string(),
+        )),
+        fgdb_unsafe_vfs::VfsError::OutOfRange { .. } => StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            error.to_string(),
+        )),
+    }
+}
+
+fn open_host_range_view(
+    file: &std::fs::File,
+    offset: u64,
+    len: usize,
+) -> Result<fgdb_unsafe_vfs::FileView, StoreError> {
+    let preferred = preferred_host_map_path();
+    if let Some(view) =
+        fgdb_unsafe_vfs::open_view(file, offset, len, preferred).map_err(vfs_error_to_store_error)?
+    {
+        return Ok(view);
+    }
+    fgdb_unsafe_vfs::open_view(file, offset, len, fgdb_unsafe_vfs::MapPath::Buffered)
+        .map_err(vfs_error_to_store_error)?
+        .ok_or_else(|| {
+            StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "buffered host range view unavailable",
+            ))
+        })
+}
+
+/// Synchronously inspect an uncoded host pack's table via [`fgdb_unsafe_vfs::FileView`],
+/// guarded by the caller's [`StorageReadCx`] restriction.
+///
+/// Selects [`fgdb_unsafe_vfs::MapPath::Mapped`] where compiled and falls back to
+/// [`fgdb_unsafe_vfs::MapPath::Buffered`]. The `!Send` [`fgdb_unsafe_vfs::FileView`]
+/// stays strictly inside this synchronous scope and never crosses an `.await`.
+/// Returns `Ok(None)` when the file is shorter than a pack header or carries a
+/// noncanonical header/table shape; encoded ECS extents fail closed with
+/// [`StoreError::Extent`].
+pub fn inspect_host_pack_table(
+    cx: &impl StorageReadCx,
+    path: &Path,
+) -> Result<Option<Vec<(ObjectId, u64, u32)>>, StoreError> {
+    cx.with_restriction(|| {
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        if len < HEADER_BYTES as u64 {
+            return Ok(None);
+        }
+        let header_view = open_host_range_view(&file, 0, HEADER_BYTES)?;
+        if super::ecs_extent::is_encoded_extent(header_view.bytes()) {
+            return Err(StoreError::Extent(
+                super::ecs_extent::ExtentError::AuthenticationFailed,
+            ));
+        }
+        let Ok(count) = header_count(header_view.bytes(), len) else {
+            return Ok(None);
+        };
+        drop(header_view);
+        let table_bytes = usize::try_from(count)
+            .ok()
+            .and_then(|entries| entries.checked_mul(ENTRY_BYTES))
+            .ok_or_else(|| {
+                StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pack table byte length overflow",
+                ))
+            })?;
+        if table_bytes == 0 {
+            return Ok(decode_table(&[], len).ok());
+        }
+        let table_view = open_host_range_view(&file, HEADER_BYTES as u64, table_bytes)?;
+        Ok(decode_table(table_view.bytes(), len).ok())
+    })
+}
+
+/// Synchronously read one bounded byte slice `[offset, offset + len)` from a host
+/// pack file via [`fgdb_unsafe_vfs::FileView`] under the caller's [`StorageReadCx`].
+///
+/// Out-of-range slices are refused by [`fgdb_unsafe_vfs::plan_range`] before any
+/// mapping or read occurs; callers remain responsible for recomputing content
+/// identity over the returned bytes (doctrine 5).
+pub fn read_host_pack_slice(
+    cx: &impl StorageReadCx,
+    path: &Path,
+    offset: u64,
+    len: u32,
+    max_bytes: u64,
+) -> Result<Vec<u8>, StoreError> {
+    let requested = u64::from(len);
+    if requested > max_bytes {
+        return Err(StoreError::ObjectTooLarge {
+            limit: max_bytes,
+            observed: requested,
+        });
+    }
+    let slice_len = usize::try_from(len).map_err(|_| {
+        StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "pack slice length exceeds platform address size",
+        ))
+    })?;
+    cx.with_restriction(|| {
+        let file = std::fs::File::open(path)?;
+        let view = open_host_range_view(&file, offset, slice_len)?;
+        Ok(view.bytes().to_vec())
+    })
 }
 
 #[cfg(test)]
@@ -907,6 +1215,7 @@ mod tests {
         );
         let index = PackIndex {
             dir: PathBuf::new(),
+            ecs: None,
             cache_reads: true,
             table: RwLock::new(table),
             resident: Mutex::new(0),
@@ -1101,6 +1410,7 @@ mod cancellation_tests {
             PackIndex {
                 dir,
                 table: RwLock::new(table),
+                ecs: None,
                 cache_reads: true,
                 resident: Mutex::new(0),
                 whole_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -1240,5 +1550,53 @@ mod cancellation_tests {
         );
         assert_eq!(index.whole_reads(), 2);
         assert_eq!(*index.resident.lock().unwrap(), bytes.len());
+    }
+
+    #[test]
+    fn host_file_view_inspects_pack_table_and_reads_bounded_member_slices() {
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let (index, _vfs, _locations, bytes) = fixture();
+        let path = index.packs()[0].path.clone();
+
+        let table = inspect_host_pack_table(&cx, &path)
+            .expect("host pack inspection succeeds")
+            .expect("valid FGPK pack table");
+        assert_eq!(table.len(), 2);
+        assert_eq!(table[0].0, ObjectId([1; 32]));
+        assert_eq!(table[1].0, ObjectId([2; 32]));
+
+        let first = read_host_pack_slice(&cx, &path, table[0].1, table[0].2, 100)
+            .expect("first packed member slice");
+        assert_eq!(first, b"abc");
+        let second = read_host_pack_slice(&cx, &path, table[1].1, table[1].2, 100)
+            .expect("second packed member slice");
+        assert_eq!(second, b"defg");
+
+        // Zero-length, oversized, and out-of-range slices fail closed via VFS range planning.
+        assert!(matches!(
+            read_host_pack_slice(&cx, &path, table[0].1, 0, 100),
+            Err(StoreError::Io(ref io)) if io.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert!(matches!(
+            read_host_pack_slice(&cx, &path, table[1].1, table[1].2, 3),
+            Err(StoreError::ObjectTooLarge {
+                limit: 3,
+                observed: 4,
+            })
+        ));
+        assert!(matches!(
+            read_host_pack_slice(&cx, &path, bytes.len() as u64, 1, 100),
+            Err(StoreError::Io(ref io)) if io.kind() == io::ErrorKind::UnexpectedEof
+        ));
+
+        // Truncated header returns Ok(None) rather than panicking or reading past EOF.
+        std::fs::write(&path, &bytes[..HEADER_BYTES - 1]).unwrap();
+        assert!(
+            inspect_host_pack_table(&cx, &path)
+                .expect("short file inspected cleanly")
+                .is_none()
+        );
     }
 }

@@ -301,6 +301,42 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(fgdb_gql::GqlQueryError::Source)?;
         cx.with_restriction(|| execute_pattern_at(self, pattern, as_of, policy, || cx.checkpoint()))
     }
+
+    /// Execute a prepared connected pattern under [`fgdb_gql::free_join::CalibratedFreeJoin`]
+    /// with an explicit [`fgdb_gql::free_join::ConformalJoinCalibration`], returning
+    /// the replayable [`fgdb_gql::free_join::JoinDecisionCard`] when the pattern
+    /// compiles to Loom's multiway FreeJoin family (`>= 3` variables and `>= 3`
+    /// fixed-hop edge atoms).
+    #[allow(clippy::type_complexity)]
+    pub fn execute_graph_pattern_calibrated_at<Row: GlaOutput>(
+        &self,
+        cx: &fgdb_types::QueryCx,
+        pattern: &PreparedGraphPattern<Row>,
+        as_of: CommitSeq,
+        calibration: &fgdb_gql::free_join::ConformalJoinCalibration,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        (
+            fgdb_gql::GqlQueryExecution<Row>,
+            Option<fgdb_gql::free_join::JoinDecisionCard>,
+        ),
+        fgdb_gql::GqlQueryError<GqlError, Box<asupersync::error::Error>>,
+    > {
+        self.ensure_readable()
+            .and_then(|()| self.snapshot.check_frontier(as_of))
+            .map_err(GqlError::Read)
+            .map_err(fgdb_gql::GqlQueryError::Source)?;
+        cx.with_restriction(|| {
+            let checkpoint = || cx.checkpoint();
+            checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+            let admitted = AdmittedGqlSnapshot::admit_logical(pattern.plan().clone(), self, as_of)
+                .map_err(GqlError::Read)
+                .map_err(fgdb_gql::GqlQueryError::Source)?;
+            admitted
+                .execute_governed_calibrated(policy, calibration, checkpoint)
+                .map_err(|error| error.map_source(GqlError::Read))
+        })
+    }
 }
 
 impl EmbeddedReadView {
@@ -778,10 +814,30 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
     }
 
     pub(crate) fn execute_governed<C>(
+        self,
+        policy: fgdb_gql::GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<fgdb_gql::GqlQueryExecution<Row>, fgdb_gql::GqlQueryError<ReadError, C>> {
+        self.execute_governed_calibrated(
+            policy,
+            &fgdb_gql::free_join::ConformalJoinCalibration::default(),
+            checkpoint,
+        )
+        .map(|(exec, _card)| exec)
+    }
+
+    pub(crate) fn execute_governed_calibrated<C>(
         mut self,
         policy: fgdb_gql::GqlQueryPolicy,
+        calibration: &fgdb_gql::free_join::ConformalJoinCalibration,
         mut checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<fgdb_gql::GqlQueryExecution<Row>, fgdb_gql::GqlQueryError<ReadError, C>> {
+    ) -> Result<
+        (
+            fgdb_gql::GqlQueryExecution<Row>,
+            Option<fgdb_gql::free_join::JoinDecisionCard>,
+        ),
+        fgdb_gql::GqlQueryError<ReadError, C>,
+    > {
         let mut usage = AdmissionUsage::default();
         self.materialize(&mut |event| {
             checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
@@ -796,6 +852,33 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             },
             fgdb_gql::GqlQueryError::Source,
         )?;
+        if self.seeds.is_none()
+            && !self.logical.projects_edge_properties()
+            && !self.logical.projects_labels()
+            && !self.logical.projects_types()
+            && !self.logical.projects_vertex_property_maps()
+            && !self.logical.projects_edge_property_maps()
+            && let Some(calibrated) =
+                fgdb_gql::free_join::CalibratedFreeJoin::try_compile(self.logical.operators())
+        {
+            let outcome = calibrated.execute_governed_with_calibration(
+                &self.logical,
+                self.snapshot_records,
+                self.vertex_ids(),
+                self.identified_edges(),
+                |vid, predicates| self.matches(vid, predicates),
+                |vid, key| Ok(self.property(vid, key)),
+                calibration,
+                usage.remaining(policy),
+                checkpoint,
+            );
+            return match outcome {
+                Ok((exec, card)) => usage
+                    .finish(policy, Ok(exec))
+                    .map(|exec| (exec, Some(card))),
+                Err(error) => usage.finish(policy, Err(error)).map(|exec| (exec, None)),
+            };
+        }
         let result = self.logical.execute_governed_with_element_maps(
             self.snapshot_records,
             self.vertex_ids(),
@@ -810,7 +893,7 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             usage.remaining(policy),
             checkpoint,
         );
-        usage.finish(policy, result)
+        usage.finish(policy, result).map(|exec| (exec, None))
     }
 }
 pub(crate) fn execute<V: Vfs + Clone>(

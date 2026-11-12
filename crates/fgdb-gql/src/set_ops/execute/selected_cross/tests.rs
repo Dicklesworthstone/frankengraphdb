@@ -823,6 +823,7 @@ fn a_hinted_boundary_is_the_bisected_one_and_an_ascending_left_probes_twice() {
     let right: Vec<_> = (0..1024).map(|key| row(&[Some(key)])).collect();
     let index = Index {
         keys: vec![(0, 0)],
+        id_keys: Vec::new(),
         ordinals: (0..right.len()).collect(),
     };
     let mut comparison = 0;

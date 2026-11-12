@@ -459,3 +459,77 @@ fn durable_run_refuses_unknown_profiles_oversized_counts_and_short_byte_budgets(
         ));
     });
 }
+
+#[test]
+fn fgrn_v2_dual_face_persists_incoming_ef_csr_with_zero_transpose_scratch_and_tamper_refusal() {
+    run(0xf6_7219, |cx| {
+        let (partition, origins, _) = source(false);
+        let segment =
+            AdjRunSegment::from_sealed(&cx, &partition, &origins, SealedLimits::default()).unwrap();
+        let v1_bytes = segment.encode(&cx, SealedLimits::default()).unwrap();
+        let v2_bytes = segment
+            .encode_dual_face(&cx, SealedLimits::default())
+            .unwrap();
+        assert_eq!(&v1_bytes[4..6], &FORMAT.to_le_bytes());
+        assert_eq!(&v2_bytes[4..6], &FORMAT_V2.to_le_bytes());
+        assert!(v2_bytes.len() > v1_bytes.len());
+
+        // V1 backwards compatibility remains intact.
+        let reloaded_v1 = read(&cx, &segment, &v1_bytes).unwrap();
+        assert!(!reloaded_v1.partition().has_durable_incoming());
+
+        // V2 carries durable incoming Elias-Fano CSR index with zero transpose scratch.
+        let reloaded_v2 = read(&cx, &segment, &v2_bytes).unwrap();
+        assert!(reloaded_v2.partition().has_durable_incoming());
+        let inc_a = reloaded_v2
+            .partition()
+            .incoming_index(&cx, super::super::IncomingIndexLimits::default())
+            .unwrap();
+        let inc_b = reloaded_v2
+            .partition()
+            .incoming_index(&cx, super::super::IncomingIndexLimits::default())
+            .unwrap();
+        assert!(inc_a.shares_index_with(&inc_b));
+        assert_eq!(
+            inc_a.stats().charged_workspace_bytes,
+            inc_a.stats().charged_resident_bytes,
+            "durable FGRN-v2 incoming reuse must allocate zero IncidenceRef transpose scratch",
+        );
+
+        // Incoming cursor on V2 matches freshly transposed V1 incoming cursor bit-for-bit.
+        let fresh_inc = reloaded_v1
+            .partition()
+            .incoming_index(&cx, super::super::IncomingIndexLimits::default())
+            .unwrap();
+        let high = VId((1_u128 << 127) + 19);
+        for cut in [1, 2, 3, 4] {
+            for dst in [VId(1), VId(u128::MAX), high] {
+                let mut cur_v2 = inc_a.row(&cx, dst, RELATION, CommitSeq(cut)).unwrap();
+                let mut cur_v1 = fresh_inc.row(&cx, dst, RELATION, CommitSeq(cut)).unwrap();
+                loop {
+                    let a = cur_v2.next(&cx).unwrap();
+                    let b = cur_v1.next(&cx).unwrap();
+                    match (a, b) {
+                        (Some(ea), Some(eb)) => {
+                            assert_eq!(ea.entry, eb.entry);
+                            assert_eq!(ea.properties, eb.properties);
+                        }
+                        (None, None) => break,
+                        other => panic!("mismatch at cut={cut} dst={dst:?}: {other:?}"),
+                    }
+                }
+            }
+        }
+
+        // Corrupting the trailing E_in section (even after resigning frame checksum)
+        // must fail closed during durable incoming index admission.
+        let mut tampered = v2_bytes.clone();
+        let ein_tail = tampered.len() - CHECKSUM_BYTES - 1;
+        tampered[ein_tail] ^= 0xff;
+        resign(&cx, &mut tampered);
+        assert!(
+            read(&cx, &segment, &tampered).is_err(),
+            "tampered FGRN-v2 E_in payload must be refused",
+        );
+    });
+}

@@ -190,6 +190,14 @@ impl PlannerPredicates {
             .all(|clause| original_labels.iter().any(|label| clause.contains(label)))
     }
 
+    /// Allocation-free CNF vertex admission over an ordered label set.
+    #[must_use]
+    pub fn allows_vertex_set(&self, original_labels: &BTreeSet<LabelId>) -> bool {
+        self.label_clauses
+            .iter()
+            .all(|clause| original_labels.iter().any(|label| clause.contains(label)))
+    }
+
     /// Label memberships on which this signed visibility predicate depends.
     /// A transactional reader retains these positive AND negative fields so a
     /// later label change cannot invalidate its admission. Repeated labels
@@ -273,6 +281,44 @@ impl PlannerPredicates {
         self.label_clauses.is_empty() && self.sees_all_properties()
     }
 
+    /// Whether no label, relation, or property caveat restricts graph visibility.
+    #[must_use]
+    pub fn is_unrestricted_graph(&self) -> bool {
+        self.sees_all_incidence() && self.sees_all_fields()
+    }
+
+    /// Whether two compiled predicate sets define the exact same visible graph
+    /// projection `Pi_C` on the same branch, ignoring per-request budget/expiry
+    /// attenuations (`MaxNodes`, `MaxWork`, `MaxRows`, `NotBefore`, `ExpiresAt`).
+    #[must_use]
+    pub fn same_graph_scope(&self, other: &Self) -> bool {
+        if self.branch != other.branch || self.relations != other.relations {
+            return false;
+        }
+        let same_properties = match (&self.properties, &other.properties) {
+            (Scope::All, Scope::All) => self.denied_properties == other.denied_properties,
+            (Scope::Only(left), Scope::Only(right)) => left
+                .iter()
+                .filter(|key| !self.denied_properties.contains(key))
+                .eq(right
+                    .iter()
+                    .filter(|key| !other.denied_properties.contains(key))),
+            (Scope::All, Scope::Only(_)) | (Scope::Only(_), Scope::All) => false,
+        };
+        if !same_properties {
+            return false;
+        }
+        self.label_clauses.iter().all(|left| {
+            other
+                .label_clauses
+                .iter()
+                .any(|right| right.is_subset(left))
+        }) && other
+            .label_clauses
+            .iter()
+            .all(|right| self.label_clauses.iter().any(|left| left.is_subset(right)))
+    }
+
     pub(crate) fn check_at(&self, branch: &str, now_ms: u64) -> Result<(), Error> {
         if branch != self.branch {
             return Err(Error::ScopeDenied);
@@ -284,6 +330,57 @@ impl PlannerPredicates {
             return Err(Error::Expired);
         }
         Ok(())
+    }
+
+    /// Lower an authenticated read capability into [`fgdb_policy::ReadPolicy`] when
+    /// its conjunctive clauses are representable without approximation.
+    ///
+    /// Returns `Ok(None)` when read rights are absent, when a multi-label
+    /// disjunctive clause (`clause.len() > 1`) has no exact pure-conjunctive
+    /// [`fgdb_policy::ReadCaveat`] counterpart, or when unrestricted properties
+    /// carry explicit negative property denials (`Scope::All` with non-empty
+    /// `denied_properties`). Never widens or approximates a restriction.
+    pub fn to_read_policy(&self) -> Result<Option<fgdb_policy::ReadPolicy>, fgdb_policy::PolicyError> {
+        if !self.rights.can_read() {
+            return Ok(None);
+        }
+        if matches!(self.properties, Scope::All) && !self.denied_properties.is_empty() {
+            return Ok(None);
+        }
+        let mut caveats = Vec::new();
+        for clause in &self.label_clauses {
+            match clause.len() {
+                0 => caveats.push(fgdb_policy::ReadCaveat::Labels(Vec::new())),
+                1 => {
+                    let label = *clause.iter().next().expect("singleton label clause");
+                    caveats.push(fgdb_policy::ReadCaveat::HasLabel(label));
+                }
+                _ => return Ok(None),
+            }
+        }
+        if let Scope::Only(relations) = &self.relations {
+            caveats.push(fgdb_policy::ReadCaveat::EdgeTypes(
+                relations.iter().copied().collect(),
+            ));
+        }
+        if let Scope::Only(properties) = &self.properties {
+            let allowed: Vec<PropertyKeyId> = properties
+                .iter()
+                .copied()
+                .filter(|key| !self.denied_properties.contains(key))
+                .collect();
+            caveats.push(fgdb_policy::ReadCaveat::Properties(allowed));
+        }
+        caveats.push(fgdb_policy::ReadCaveat::TimeWindow {
+            not_before: u128::from(self.not_before_ms),
+            expires_at: u128::from(self.expires_at_ms),
+        });
+        caveats.push(fgdb_policy::ReadCaveat::Limits(fgdb_policy::ReadLimits {
+            rows: self.limits.max_rows,
+            work: self.limits.max_work,
+            scratch: self.limits.max_work,
+        }));
+        fgdb_policy::ReadPolicy::compile(&caveats).map(Some)
     }
 }
 

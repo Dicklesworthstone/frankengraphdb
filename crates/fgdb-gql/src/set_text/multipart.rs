@@ -69,6 +69,26 @@ pub(crate) struct BoundReadInput {
     pub(crate) first: BoundSetTextInput,
     pub(crate) continuations: Vec<BoundContinuation>,
 }
+impl BoundReadInput {
+    pub(crate) fn has_procedure_call(&self) -> bool {
+        self.first.has_procedure_call()
+            || self.continuations.iter().any(|part| {
+                part.input.has_procedure_call()
+                    || match &part.operation {
+                        BoundContinuationOperation::Match(_) => false,
+                        BoundContinuationOperation::Pattern { pattern, .. } => {
+                            pattern.has_procedure_call()
+                        }
+                        BoundContinuationOperation::Union { body, .. }
+                        | BoundContinuationOperation::SubqueryBody { body, .. }
+                        | BoundContinuationOperation::List { body, .. }
+                        | BoundContinuationOperation::Apply { body, .. } => {
+                            body.has_procedure_call()
+                        }
+                    }
+            })
+    }
+}
 
 // A routing decision over the already admitted shared lexer tokens, not a
 // second lexer or a fallback after a failed parse. Nested EXISTS/MATCH bodies,

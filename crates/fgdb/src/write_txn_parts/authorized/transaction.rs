@@ -4,8 +4,8 @@
 //! successful calls together; any refusal or unwind aborts the whole prefix.
 
 use super::{
-    Authority, CapabilityToken, CommitCx, Database, Error, Execution, TxnCx, Vfs,
-    Workspace, WriteTxnError, chain,
+    Authority, CapabilityToken, CommitCx, Database, Error, Execution, TxnCx, Vfs, Workspace,
+    WriteTxnError, chain,
 };
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertStats};
@@ -112,13 +112,19 @@ impl<V: Vfs + Clone> Database<V> {
         commit_cx.with_restriction(|| {
             commit_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
             let now = clock();
-            let verified = authority.verify_at(token, branch, now)
+            let verified = authority
+                .verify_at(token, branch, now)
                 .map_err(WriteTxnError::Authorization)?;
             let scope = verified.predicates().clone();
-            let permit = verified.into_write_at(branch, now)
+            let permit = verified
+                .into_write_at(branch, now)
                 .map_err(WriteTxnError::Authorization)?;
             let cx = commit_cx.clone();
-            let mut execution = Execution { cx: &cx, permit, clock };
+            let mut execution = Execution {
+                cx: &cx,
+                permit,
+                clock,
+            };
             execution.checkpoint()?;
             let transaction = self.begin(txn_cx).map_err(WriteTxnError::Write)?;
             let basis = transaction.basis();
@@ -173,7 +179,11 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         let mut policy = self.policy;
         policy.query = GqlQueryPolicy::new(
             policy.query.rows.max_snapshot_records().unwrap_or(u64::MAX),
-            policy.query.rows.max_result_rows().unwrap_or(u64::MAX)
+            policy
+                .query
+                .rows
+                .max_result_rows()
+                .unwrap_or(u64::MAX)
                 .saturating_sub(self.delivered_rows),
             policy.query.evaluator.max_work_units,
             policy.query.evaluator.max_scratch_entries,
@@ -192,11 +202,16 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
         state.execution.checkpoint()?;
         if self.completed_statements >= self.max_statements {
-            return Err(WriteTxnError::StatementLimit { limit: self.max_statements });
+            return Err(WriteTxnError::StatementLimit {
+                limit: self.max_statements,
+            });
         }
         let live = database.frontier().map_err(WriteTxnError::from)?;
         if live != self.basis {
-            return Err(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live });
+            return Err(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            });
         }
         Ok(())
     }
@@ -222,14 +237,16 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
         ) -> Result<(), WriteTxnError>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, chain::Fault> {
         // Leave the owner terminal until the entire call has succeeded.
-        let idle = self.state.take().ok_or_else(|| chain::source(WriteTxnError::Finished))?;
+        let idle = self
+            .state
+            .take()
+            .ok_or_else(|| chain::source(WriteTxnError::Finished))?;
         let mut state = idle.enter(&self.cx);
         let policy = self.statement_policy();
         let (state, result) = self.cx.with_restriction(|| {
-            self.admit_statement(&mut state, database, query_cx).map_err(chain::source)?;
-            chain::admit_definition(
-                statement, None, query_cx, &self.scope, &mut state.execution,
-            )?;
+            self.admit_statement(&mut state, database, query_cx)
+                .map_err(chain::source)?;
+            chain::admit_definition(statement, None, query_cx, &self.scope, &mut state.execution)?;
             database.stage_authorized_chains(
                 query_cx,
                 core::slice::from_ref(statement),
@@ -262,13 +279,22 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
             &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, chain::Fault> {
-        let idle = self.state.take().ok_or_else(|| chain::source(WriteTxnError::Finished))?;
+        let idle = self
+            .state
+            .take()
+            .ok_or_else(|| chain::source(WriteTxnError::Finished))?;
         let mut state = idle.enter(&self.cx);
         let policy = self.statement_policy();
         let (state, result) = self.cx.with_restriction(|| {
-            self.admit_statement(&mut state, database, query_cx).map_err(chain::source)?;
+            self.admit_statement(&mut state, database, query_cx)
+                .map_err(chain::source)?;
             database.read_authorized_chain_state(
-                query_cx, statement, policy, &self.scope, state, admit,
+                query_cx,
+                statement,
+                policy,
+                &self.scope,
+                state,
+                admit,
             )
         })?;
         self.delivered_rows = self.delivered_rows.saturating_add(result.rows.result_rows);
@@ -287,14 +313,20 @@ impl<Clock: FnMut() -> u64> AuthorizedWriteTransaction<'_, Clock> {
     ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
         let idle = self.state.take().ok_or(WriteTxnError::Finished)?;
         let mut state = idle.enter(&self.cx);
-        self.cx.with_restriction_async(async {
-            state.workspace.transaction().ensure_database(database)?;
-            state.execution.checkpoint()?;
-            state.execution.bind_decision(state.workspace.transaction());
-            state.workspace.transaction().complete_controlled(
-                database, &self.cx, None, false, || state.execution.checkpoint(),
-            ).await
-        }).await
+        self.cx
+            .with_restriction_async(async {
+                state.workspace.transaction().ensure_database(database)?;
+                state.execution.checkpoint()?;
+                state.execution.bind_decision(state.workspace.transaction());
+                state
+                    .workspace
+                    .transaction()
+                    .complete_controlled(database, &self.cx, None, false, || {
+                        state.execution.checkpoint()
+                    })
+                    .await
+            })
+            .await
     }
 
     /// Explicitly discard the unpublished prefix and release its snapshot pin.

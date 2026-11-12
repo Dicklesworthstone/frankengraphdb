@@ -164,6 +164,13 @@ impl<K> Charges<K> {
         self.checkpoint.unit().map_err(GqlQueryError::Interrupted)
     }
 
+    pub(crate) fn finish_unit<E, C>(&mut self) -> Result<(), GqlQueryError<E, C>>
+    where
+        K: GovernedCheckpoint<C>,
+    {
+        self.unit()
+    }
+
     /// A Work event or scratch entry inside a run is only counted: the
     /// closure's whole body, so it inlines into the hottest loops.
     #[inline(always)]

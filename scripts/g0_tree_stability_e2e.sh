@@ -954,12 +954,112 @@ run_kernel_identity_cases() {
 }
 run_kernel_identity_cases
 
+# Q (fgdb-rc1017-bridge-wvze5.21): a fresh directory holding only the tracked
+# issues.jsonl, config.yaml, and metadata.json must round-trip cleanly through
+# `br sync --import-only` and `br sync --flush-only` with host-independent
+# (`null`/omitted) `source_repo_path`, and a planted duplicate comment id must
+# fail fresh import naming the colliding comment id.
+run_tracked_corpus_roundtrip_cases() {
+  local br_bin d_ok d_mut expected_lines flushed_lines expected_comments flushed_comments
+  local import_rc flush_rc mut_rc
+
+  br_bin="$(command -v br 2>/dev/null)"
+  if [ -z "$br_bin" ]; then
+    gate_unrun "Q: the br binary is not on PATH; tracked JSONL round-trip did not run"
+    return
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    gate_unrun "Q: jq is not on PATH; tracked JSONL round-trip did not run"
+    return
+  fi
+
+  d_ok="$RUN_DIR/Q_tracked_roundtrip"
+  mkdir -p "$d_ok/repo/.beads"
+  cp "$ROOT/.beads/issues.jsonl" "$d_ok/repo/.beads/issues.jsonl"
+  cp "$ROOT/.beads/config.yaml" "$d_ok/repo/.beads/config.yaml"
+  cp "$ROOT/.beads/metadata.json" "$d_ok/repo/.beads/metadata.json"
+
+  expected_lines="$(wc -l <"$d_ok/repo/.beads/issues.jsonl" | tr -d ' ')"
+  expected_comments="$(jq -s '[.[].comments // [] | length] | add // 0' "$d_ok/repo/.beads/issues.jsonl")"
+
+  (
+    cd "$d_ok/repo" || exit 1
+    RUST_LOG=error "$br_bin" sync --import-only --rebuild \
+      --db "$d_ok/repo/.beads/beads.db" --no-auto-import --no-auto-flush
+  ) >"$d_ok/import.out" 2>"$d_ok/import.err"
+  import_rc=$?
+
+  flush_rc=1
+  if [ "$import_rc" -eq 0 ]; then
+    (
+      cd "$d_ok/repo" || exit 1
+      RUST_LOG=error "$br_bin" sync --flush-only \
+        --db "$d_ok/repo/.beads/beads.db" --no-auto-import --no-auto-flush
+    ) >"$d_ok/flush.out" 2>"$d_ok/flush.err"
+    flush_rc=$?
+  fi
+
+  flushed_lines="$(wc -l <"$d_ok/repo/.beads/issues.jsonl" | tr -d ' ')"
+  flushed_comments="$(jq -s '[.[].comments // [] | length] | add // 0' "$d_ok/repo/.beads/issues.jsonl")"
+
+  if [ "$import_rc" -eq 0 ] \
+    && [ "$flush_rc" -eq 0 ] \
+    && [ "$flushed_lines" -eq "$expected_lines" ] \
+    && [ "$flushed_comments" -eq "$expected_comments" ] \
+    && jq -s -e 'all(.[]; (.source_repo_path // null) == null)' "$ROOT/.beads/issues.jsonl" >/dev/null 2>&1; then
+    gate_pass "Q_roundtrip: tracked .beads corpus imported and flushed cleanly ($flushed_lines issues, $flushed_comments comments, null source_repo_path)"
+  else
+    gate_fail "Q_roundtrip: tracked .beads fresh import/flush failed (import_rc=$import_rc flush_rc=$flush_rc lines=$flushed_lines/$expected_lines comments=$flushed_comments/$expected_comments)"
+    for artifact in import.out import.err flush.out flush.err; do
+      if [ -f "$d_ok/$artifact" ]; then
+        gate_diag "  --- $artifact ---"
+        while IFS= read -r line; do gate_diag "  $line"; done <"$d_ok/$artifact"
+      fi
+    done
+  fi
+  EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
+
+  d_mut="$RUN_DIR/Q_duplicate_comment_mutant"
+  mkdir -p "$d_mut/repo/.beads"
+  cp "$ROOT/.beads/config.yaml" "$d_mut/repo/.beads/config.yaml"
+  cp "$ROOT/.beads/metadata.json" "$d_mut/repo/.beads/metadata.json"
+  jq -c '
+    if .id == "fgdb-rc1017-bridge-wvze5.21" then
+      .comments = ((.comments // []) + [
+        {"id": 999992876, "issue_id": .id, "author": "mutant-a", "text": "planted collision side A", "created_at": "2026-10-21T00:00:00Z"},
+        {"id": 999992876, "issue_id": .id, "author": "mutant-b", "text": "planted collision side B", "created_at": "2026-10-21T00:00:01Z"}
+      ])
+    else . end
+  ' "$ROOT/.beads/issues.jsonl" >"$d_mut/repo/.beads/issues.jsonl"
+
+  (
+    cd "$d_mut/repo" || exit 1
+    RUST_LOG=error "$br_bin" sync --import-only --rebuild \
+      --db "$d_mut/repo/.beads/beads.db" --no-auto-import --no-auto-flush
+  ) >"$d_mut/import.out" 2>"$d_mut/import.err"
+  mut_rc=$?
+
+  if [ "$mut_rc" -ne 0 ] && grep -Fq "999992876" "$d_mut/import.out" "$d_mut/import.err"; then
+    gate_pass "Q_mutant: planted duplicate comment id 999992876 failed fresh import and named the colliding id (rc=$mut_rc)"
+  else
+    gate_fail "Q_mutant: planted duplicate comment id 999992876 did not fail naming the id (rc=$mut_rc)"
+    for artifact in import.out import.err; do
+      if [ -f "$d_mut/$artifact" ]; then
+        gate_diag "  --- $artifact ---"
+        while IFS= read -r line; do gate_diag "  $line"; done <"$d_mut/$artifact"
+      fi
+    done
+  fi
+  EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
+}
+run_tracked_corpus_roundtrip_cases
+
 # --- the zero is licensed by accounting, not by finding nothing --------------
 if [ "$CASES_RUN" -ne 6 ]; then
   gate_unrun "expected 6 cases to execute, $CASES_RUN did"
 fi
-if [ "$EXPORT_CASES_RUN" -ne 12 ]; then
-  gate_unrun "expected 12 Beads-export cases to execute, $EXPORT_CASES_RUN did"
+if [ "$EXPORT_CASES_RUN" -ne 14 ]; then
+  gate_unrun "expected 14 Beads-export cases to execute, $EXPORT_CASES_RUN did"
 fi
 if [ "$SCOPE_CASES_RUN" -ne 1 ]; then
   gate_unrun "expected 1 aggregate-scope case to execute, $SCOPE_CASES_RUN did"

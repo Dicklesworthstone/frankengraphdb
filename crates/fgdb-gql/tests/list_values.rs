@@ -1285,14 +1285,15 @@ mod inferred_collection_parameters {
             GqlParameterType::Int64
         );
         assert_eq!(
-            run(&template, &GqlParameters::new().with_int64("value", 5).unwrap()),
+            run(
+                &template,
+                &GqlParameters::new().with_int64("value", 5).unwrap()
+            ),
             vec![GraphValueRow::from_owned_values(vec![int(5)])]
         );
-        let scalar = PreparedGraphSetText::prepare(
-            "WITH $value AS k RETURN k + 1 AS value",
-            |_, _| None,
-        )
-        .unwrap();
+        let scalar =
+            PreparedGraphSetText::prepare("WITH $value AS k RETURN k + 1 AS value", |_, _| None)
+                .unwrap();
         assert_eq!(
             scalar.parameter_schema()[0].parameter_type,
             GqlParameterType::Int64

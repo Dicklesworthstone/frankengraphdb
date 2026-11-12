@@ -413,10 +413,15 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<BufferedReadView<V>, BufferedOpenError> {
         self.ensure_readable()
             .map_err(|_| BufferedOpenError::RecoveryRequired)?;
-        let partition = self
-            .store
-            .open_buffered_root_with_receipts(cx, self.snapshot.root, &self.receipts, pool, limits)
-            .await?;
+        let admission: crate::SendFuture<'_, _> =
+            Box::pin(self.store.open_buffered_root_with_receipts(
+                cx,
+                self.snapshot.root,
+                &self.receipts,
+                pool,
+                limits,
+            ));
+        let partition = admission.await?;
         Ok(BufferedReadView {
             partition,
             manifest: self.snapshot.manifest,

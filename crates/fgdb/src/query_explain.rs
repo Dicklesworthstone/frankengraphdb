@@ -324,6 +324,20 @@ impl PreparedNativeRead {
         })
     }
 
+    /// Whether this native read invokes an analytic `CALL fnx.*` procedure.
+    #[must_use]
+    pub fn has_procedure_call(&self) -> bool {
+        match self {
+            Self::Set(prepared) => prepared.has_procedure_call(),
+            Self::PipelineAggregate(prepared) => prepared.has_procedure_call(),
+            Self::TemporalSet(prepared) => prepared.has_procedure_call(),
+            Self::Pattern(_)
+            | Self::Aggregate(_)
+            | Self::TemporalPattern(_)
+            | Self::TemporalAggregate(_) => false,
+        }
+    }
+
     /// Return the native template's inferred and explicitly declared parameters.
     #[must_use]
     pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
@@ -480,10 +494,21 @@ pub fn explain_rows(prepared: &PreparedNativeRead) -> Vec<ExplainRow> {
         PreparedNativeRead::TemporalSet(plan) => plan.template_operators(),
         PreparedNativeRead::TemporalAggregate(plan) => plan.template_operators(),
     };
-    for operator in operators {
+    for operator in &operators {
         rows.push(ExplainRow {
-            operator: operator.to_owned(),
+            operator: (*operator).to_owned(),
             detail: "resolved template".to_owned(),
+        });
+    }
+    if matches!(
+        prepared,
+        PreparedNativeRead::Pattern(_) | PreparedNativeRead::TemporalPattern(_)
+    ) && let Some(detail) =
+        fgdb_gql::free_join::CalibratedFreeJoin::template_summary_ascii(&operators)
+    {
+        rows.push(ExplainRow {
+            operator: "JoinDecisionCard".to_owned(),
+            detail,
         });
     }
     for spec in prepared.parameter_schema() {

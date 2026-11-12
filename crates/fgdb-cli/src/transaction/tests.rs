@@ -1180,3 +1180,83 @@ fn write_steps_with_return_run_in_a_transaction_and_roll_back_cleanly() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn if_current_commits_on_matching_frontier_and_refuses_stale_without_effects() {
+    for bad in [
+        vec!["--if-current", "abc", "--write", "CREATE (:Person {p: 1})"],
+        vec![
+            "--if-current",
+            "0",
+            "--if-current",
+            "0",
+            "--write",
+            "CREATE (:Person {p: 1})",
+        ],
+    ] {
+        let mut args = vec![
+            "--db",
+            "unused",
+            "--key-file",
+            "unused",
+            "--label",
+            "Person=1",
+            "--property",
+            "p=1",
+        ];
+        args.extend_from_slice(&bad);
+        let err = crate::parse(
+            &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            "transaction",
+        )
+        .err()
+        .expect("invalid or duplicate --if-current must refuse");
+        assert_eq!(err.code, 2);
+        assert_eq!(err.refusal.name(), "usage");
+    }
+
+    let ((), report) = run_async_under_lab(0x7478_6399, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+
+        let matching = options(&[
+            "--if-current",
+            "0",
+            "--write",
+            "CREATE (n:Person {p: 11})",
+            "--query",
+            "MATCH (n:Person) RETURN n.p AS p",
+        ]);
+        let mut bytes = Vec::new();
+        okay(run(&mut db, &contexts, &matching, None, true, &mut bytes).await);
+        let text = output(bytes);
+        assert!(
+            text.contains("\"kind\":\"committed\",\"basis\":0,\"seq\":1"),
+            "{text}"
+        );
+        assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+
+        let stale = options(&[
+            "--if-current",
+            "0",
+            "--write",
+            "CREATE (n:Person {p: 99})",
+            "--query",
+            "MATCH (n:Person) RETURN n.p AS p",
+        ]);
+        let mut stale_bytes = Vec::new();
+        let err = run(&mut db, &contexts, &stale, None, true, &mut stale_bytes)
+            .await
+            .expect_err("stale --if-current must conflict before executing writes");
+        assert_eq!(err.code, 3);
+        assert_eq!(err.class, "query");
+        assert_eq!(err.refusal.name(), "conflict");
+        assert!(stale_bytes.is_empty());
+        assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+        assert_eq!(committed_values(&db), vec![11]);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

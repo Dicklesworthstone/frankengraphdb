@@ -333,16 +333,29 @@ fn state_from(
     row: &VertexRow,
     meter: &mut Meter<'_>,
 ) -> Result<VertexState, StandingQueryFailure> {
+    state_from_parts(
+        query,
+        &row.labels,
+        row.props.iter().map(|(key, value)| (key, value)),
+        meter,
+    )
+}
+fn state_from_parts<'a>(
+    query: &PreparedGraphAggregate,
+    labels: &[LabelId],
+    props: impl IntoIterator<Item = (&'a PropertyKeyId, &'a CanonicalPropertyValue)>,
+    meter: &mut Meter<'_>,
+) -> Result<VertexState, StandingQueryFailure> {
     let mut state = VertexState::default();
     meter.charge(ZSetEvent::ScratchEntry)?;
-    for label in &row.labels {
+    for label in labels {
         meter.charge(ZSetEvent::Work)?;
         if needs_label(query, *label) {
             meter.charge(ZSetEvent::ScratchEntry)?;
             state.labels.insert(*label);
         }
     }
-    for (key, value) in &row.props {
+    for (key, value) in props {
         meter.charge(ZSetEvent::Work)?;
         if needs_property(query, *key) {
             meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
@@ -662,40 +675,57 @@ impl<V: Vfs + Clone> Database<V> {
             };
             // Registration/rebuild may scan the snapshot. Admit and charge every
             // physical row/payload before merge_all_vertices can allocate it.
+            let active_scope = self.active_registration_scope.and_then(|idx| {
+                match self.standing_queries.get(idx) {
+                    Some(super::StandingQuery::CapabilityScope(scope)) => Some(scope.as_ref()),
+                    _ => None,
+                }
+            });
             let mut records = 0u64;
-            for patch in &self.snapshot.patches {
-                for row in patch.iter() {
-                    records = records
-                        .checked_add(1)
-                        .ok_or(StandingQueryError::Maintenance(
-                            StandingQueryFailure::SnapshotBudget,
-                        ))?;
-                    if policy
-                        .rows
-                        .max_snapshot_records()
-                        .is_some_and(|limit| records > limit)
-                    {
-                        return Err(StandingQueryError::Maintenance(
-                            StandingQueryFailure::SnapshotBudget,
-                        ));
-                    }
-                    meter
-                        .charge(ZSetEvent::Work)
+            let edges = edge::State::for_definition(&definition);
+            if let Some(scope) = active_scope {
+                scope
+                    .admit_vertex_snapshot(&mut records, &mut meter, stored_units)
+                    .map_err(StandingQueryError::Maintenance)?;
+                if edges.is_some() {
+                    scope
+                        .admit_edge_snapshot(&mut records, &mut meter, stored_units)
                         .map_err(StandingQueryError::Maintenance)?;
-                    meter
-                        .units(ZSetEvent::ScratchEntry, 1 + row.labels.len())
-                        .map_err(StandingQueryError::Maintenance)?;
-                    for (_, value) in &row.props {
+                }
+            } else {
+                for patch in &self.snapshot.patches {
+                    for row in patch.iter() {
+                        records = records
+                            .checked_add(1)
+                            .ok_or(StandingQueryError::Maintenance(
+                                StandingQueryFailure::SnapshotBudget,
+                            ))?;
+                        if policy
+                            .rows
+                            .max_snapshot_records()
+                            .is_some_and(|limit| records > limit)
+                        {
+                            return Err(StandingQueryError::Maintenance(
+                                StandingQueryFailure::SnapshotBudget,
+                            ));
+                        }
                         meter
-                            .units(ZSetEvent::ScratchEntry, stored_units(value))
+                            .charge(ZSetEvent::Work)
                             .map_err(StandingQueryError::Maintenance)?;
+                        meter
+                            .units(ZSetEvent::ScratchEntry, 1 + row.labels.len())
+                            .map_err(StandingQueryError::Maintenance)?;
+                        for (_, value) in &row.props {
+                            meter
+                                .units(ZSetEvent::ScratchEntry, stored_units(value))
+                                .map_err(StandingQueryError::Maintenance)?;
+                        }
                     }
                 }
-            }
-            let edges = edge::State::for_definition(&definition);
-            if edges.is_some() {
-                edge::admit_snapshot(&self.snapshot, &mut records, &mut meter)
-                    .map_err(StandingQueryError::Maintenance)?;
+                if edges.is_some() {
+                    edge::admit_snapshot(&self.snapshot, &mut records, &mut meter)
+                        .map_err(StandingQueryError::Maintenance)?;
+                }
             }
             let mut query = StandingQuery {
                 definition,
@@ -705,39 +735,90 @@ impl<V: Vfs + Clone> Database<V> {
                 aggregate: IncrementalAggregate::new(),
                 rows: ZSet::new(),
                 last_delta: None,
-                frontier: self.snapshot.frontier,
+                frontier: self.registration_frontier(),
                 stats: StandingQueryStats::default(),
                 failure: None,
             };
             let mut updates = Vec::new();
-            for row in self.vertices().map_err(StandingQueryError::Read)? {
-                let state = state_from(&query.definition, &row, &mut meter)
-                    .map_err(StandingQueryError::Maintenance)?;
-                if query.edges.is_none() {
-                    contributions(
+            if let Some(scope) = active_scope {
+                for vertex in scope.visible_vertices() {
+                    let state = state_from_parts(
                         &query.definition,
-                        row.vid,
-                        &state,
-                        1,
-                        &mut updates,
+                        &vertex.labels,
+                        vertex.props,
                         &mut meter,
                     )
                     .map_err(StandingQueryError::Maintenance)?;
-                }
-                query.vertices.insert(row.vid, state);
-            }
-            if let Some(edges) = &mut query.edges {
-                for row in self.edges().map_err(StandingQueryError::Read)? {
-                    edges
-                        .seed(
+                    if query.edges.is_none() {
+                        contributions(
                             &query.definition,
-                            &row.entry,
-                            &row.props,
-                            &query.vertices,
+                            vertex.vid,
+                            &state,
+                            1,
                             &mut updates,
                             &mut meter,
                         )
                         .map_err(StandingQueryError::Maintenance)?;
+                    }
+                    query.vertices.insert(vertex.vid, state);
+                }
+                if let Some(edges) = &mut query.edges {
+                    for edge in scope.visible_edges() {
+                        let entry = fgdb_strata::AdjacencyEntry {
+                            src: edge.src,
+                            relation: edge.relation,
+                            dst: edge.dst,
+                            eid: edge.eid,
+                            created_at: scope.visible_frontier,
+                            retired_at: None,
+                        };
+                        let props: Vec<(PropertyKeyId, CanonicalPropertyValue)> = edge
+                            .props
+                            .iter()
+                            .map(|(&key, value)| (key, value.clone()))
+                            .collect();
+                        edges
+                            .seed(
+                                &query.definition,
+                                &entry,
+                                &props,
+                                &query.vertices,
+                                &mut updates,
+                                &mut meter,
+                            )
+                            .map_err(StandingQueryError::Maintenance)?;
+                    }
+                }
+            } else {
+                for row in self.vertices().map_err(StandingQueryError::Read)? {
+                    let state = state_from(&query.definition, &row, &mut meter)
+                        .map_err(StandingQueryError::Maintenance)?;
+                    if query.edges.is_none() {
+                        contributions(
+                            &query.definition,
+                            row.vid,
+                            &state,
+                            1,
+                            &mut updates,
+                            &mut meter,
+                        )
+                        .map_err(StandingQueryError::Maintenance)?;
+                    }
+                    query.vertices.insert(row.vid, state);
+                }
+                if let Some(edges) = &mut query.edges {
+                    for row in self.edges().map_err(StandingQueryError::Read)? {
+                        edges
+                            .seed(
+                                &query.definition,
+                                &row.entry,
+                                &row.props,
+                                &query.vertices,
+                                &mut updates,
+                                &mut meter,
+                            )
+                            .map_err(StandingQueryError::Maintenance)?;
+                    }
                 }
             }
             if let Some(edges) = &mut query.edges {

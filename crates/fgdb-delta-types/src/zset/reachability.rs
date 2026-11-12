@@ -55,11 +55,11 @@ impl<E: core::error::Error + 'static> core::error::Error for ReachabilityError<E
 /// Each reachable pair has weight one, regardless of its number of routes.
 #[derive(PartialEq, Eq)]
 pub struct IncrementalReachability<V: Ord> {
-    edges: ZSet<(V, V)>,
-    outgoing: Relation<V>,
-    incoming: Relation<V>,
-    reachable: Relation<V>,
-    predecessors: Relation<V>,
+    pub(crate) edges: ZSet<(V, V)>,
+    pub(crate) outgoing: Relation<V>,
+    pub(crate) incoming: Relation<V>,
+    pub(crate) reachable: Relation<V>,
+    pub(crate) predecessors: Relation<V>,
 }
 
 impl<V: Ord> Default for IncrementalReachability<V> {

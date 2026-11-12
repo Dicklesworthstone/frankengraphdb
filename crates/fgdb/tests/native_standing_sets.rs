@@ -940,7 +940,11 @@ fn maintained_motif_unions_follow_membership_and_parallel_support() {
         let allowance = GqlQueryPolicy::new(100_000, 6, 10_000_000, 10_000_000);
         let profiles: [(&str, &[LabelId], &[RelationId]); 3] = [
             ("labels:['R','L','R'],", &[LabelId(1), LabelId(2)], &[]),
-            ("relations:['S','R','S'],", &[], &[RelationId(1), RelationId(2)]),
+            (
+                "relations:['S','R','S'],",
+                &[],
+                &[RelationId(1), RelationId(2)],
+            ),
             (
                 "labels:['R','L','R'],relations:['S','R','S'],",
                 &[LabelId(1), LabelId(2)],

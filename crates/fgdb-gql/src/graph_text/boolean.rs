@@ -157,10 +157,11 @@ struct Parsed<'a> {
     program: Vec<SyntaxItem<'a>>,
     extended: bool,
     /// `q.v = m` against an imported row column (fgdb-ezgeq): variable,
-    /// property, row column and offset. Valid only as a top-level AND
+    /// correlation target, row column and offset. Valid only as a top-level AND
     /// conjunct, where it is the join key `(q {v: m})` already makes. With
-    /// no property, `q = m` equates the element itself with the row value.
-    correlations: Vec<(Name<'a>, Option<Name<'a>>, usize, usize)>,
+    /// `Element`, `q = m` equates the element itself with the row value; with
+    /// `Identity`, `id(q) = m` / `elementId(q) = m` equates its scalar identity.
+    correlations: Vec<(Name<'a>, CorrelationTarget<'a>, usize, usize)>,
     /// Non-equality top-level conjuncts owned by a multipart join's ON.
     comparisons: Vec<RowComparison<'a>>,
     /// `v:L` label predicates. Valid only as top-level AND conjuncts, where
@@ -344,8 +345,18 @@ impl<'a> Parser<'a> {
     /// owner. Imported equality uses the ordinary MATCH correlation channel;
     /// OR/NOT never become unconditional join keys.
     pub(super) fn scalar_conjunct(&mut self) -> Result<Option<bool>, GraphPatternTextError> {
-        if let Some((variable, key, row, _)) = self.row_correlation()? {
-            self.read_correlations.push((variable, key, row));
+        if let Some((variable, target, row, _)) = self.identity_row_correlation()? {
+            self.read_correlations.push((variable, target, row));
+            return Ok(Some(false));
+        }
+        if !self.read_row_bindings.is_empty()
+            && let Some((variable, target, row, _)) = self.computed_row_correlation()?
+        {
+            self.read_correlations.push((variable, target, row));
+            return Ok(Some(false));
+        }
+        if let Some((variable, target, row, _)) = self.row_correlation()? {
+            self.read_correlations.push((variable, target, row));
             return Ok(Some(false));
         }
         if !self.starts_scalar_predicate()? {
@@ -562,11 +573,15 @@ impl<'a> Parser<'a> {
             ));
         }
         let at = self.current.at;
+        // Before the scalar or non-equality ON path claims its function call or arithmetic.
+        if let Some(correlation) = self.identity_row_correlation()? {
+            parsed.correlations.push(correlation);
+            return Ok(());
+        }
         if let Some(comparison) = self.computed_row_comparison()? {
             parsed.comparisons.push(comparison);
             return Ok(());
         }
-        // Before the scalar path claims its function call or arithmetic.
         if !self.read_row_bindings.is_empty()
             && let Some(correlation) = self.computed_row_correlation()?
         {
@@ -860,10 +875,233 @@ impl<'a> Parser<'a> {
     /// computes from the leading row, as in `toInteger(row.s)` or `row.a + 1`
     /// (fgdb-2npty): the join key `(v {k: <value>})` makes. The value becomes
     /// a private computed column, as a dotted imported key does.
+    /// `id(v) = <imported>`, `<imported> = id(v)`, `elementId(v) = <imported>`
+    /// or `<imported> = elementId(v)`, where `v` is an unshadowed root vertex
+    /// or unscoped fixed-length relationship of this MATCH and `<imported>`
+    /// reads the leading row without consulting any graph variable (fgdb-2acff).
+    #[allow(clippy::type_complexity)]
+    fn identity_row_correlation(
+        &mut self,
+    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError> {
+        if self.read_row_bindings.is_empty() {
+            return Ok(None);
+        }
+        let at = self.current.at;
+        let roots = (self.syntax.variables.get(..self.syntax.root_variables))
+            .unwrap_or(&self.syntax.variables);
+        let graph_element = |word: &str| -> Option<Name<'a>> {
+            if self.elements.contains(&word)
+                || self
+                    .read_row_bindings
+                    .iter()
+                    .any(|binding| binding.text == word)
+            {
+                return None;
+            }
+            roots
+                .iter()
+                .copied()
+                .find(|variable| variable.text == word)
+                .or_else(|| {
+                    self.syntax
+                        .visible_edge(word)
+                        .filter(|(edge, scoped)| !*scoped && edge.walk.is_none())
+                        .and_then(|(edge, _)| edge.variable)
+                })
+        };
+        let graph_any = |word: &str| -> bool {
+            !self.elements.contains(&word)
+                && !self
+                    .read_row_bindings
+                    .iter()
+                    .any(|binding| binding.text == word)
+                && (self.syntax.variables.iter().any(|var| var.text == word)
+                    || self.syntax.visible_edge(word).is_some()
+                    || self.syntax.names_path(word))
+        };
+        let imported_word = |word: &str| -> bool {
+            !self.elements.contains(&word)
+                && self
+                    .read_row_bindings
+                    .iter()
+                    .any(|binding| binding.text == word)
+        };
+        let identity_call = |first: Token<'a>,
+                             lexer: &mut Lexer<'a>|
+         -> Result<Option<(Name<'a>, bool, Token<'a>)>, GraphPatternTextError> {
+            let TokenKind::Word(func) = first.kind else {
+                return Ok(None);
+            };
+            let text = if func.eq_ignore_ascii_case("id") {
+                false
+            } else if func.eq_ignore_ascii_case("elementId") {
+                true
+            } else {
+                return Ok(None);
+            };
+            if lexer.next()?.kind != TokenKind::Punct(b'(') {
+                return Ok(None);
+            }
+            let arg = lexer.next()?;
+            let TokenKind::Word(word) = arg.kind else {
+                return Ok(None);
+            };
+            let Some(variable) = graph_element(word) else {
+                return Ok(None);
+            };
+            if lexer.next()?.kind != TokenKind::Punct(b')') {
+                return Ok(None);
+            }
+            let after = lexer.next()?;
+            Ok(Some((variable, text, after)))
+        };
+        let atom_boundary = |token: Token<'a>, previous: Option<TokenKind<'a>>| -> bool {
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b')' | b'}' | b']' | b'|') => true,
+                TokenKind::Word(word) => {
+                    ["AND", "OR", "XOR", "INTERSECT", "EXCEPT"]
+                        .iter()
+                        .any(|kw| word.eq_ignore_ascii_case(kw))
+                        || Self::ends_where(word, previous)
+                }
+                _ => false,
+            }
+        };
+        let scan_imported = |start: Token<'a>,
+                             mut lexer: Lexer<'a>,
+                             until_eq: bool|
+         -> Result<Option<(Token<'a>, Lexer<'a>)>, GraphPatternTextError> {
+            let mut token = start;
+            let mut depth = 0_usize;
+            let mut reads_row = false;
+            let mut after_dot = false;
+            let mut previous = None;
+            loop {
+                if depth == 0 {
+                    if until_eq {
+                        if token.kind == TokenKind::Punct(b'=') {
+                            let next = lexer.next()?;
+                            if matches!(next.kind, TokenKind::Punct(b'~' | b'=')) || !reads_row {
+                                return Ok(None);
+                            }
+                            return Ok(Some((next, lexer)));
+                        }
+                        if matches!(token.kind, TokenKind::Punct(b'!' | b'<' | b'>'))
+                            || atom_boundary(token, previous)
+                        {
+                            return Ok(None);
+                        }
+                    } else if atom_boundary(token, previous) {
+                        return Ok(reads_row.then_some((token, lexer)));
+                    } else if matches!(token.kind, TokenKind::Punct(b'=' | b'!' | b'<' | b'>')) {
+                        return Ok(None);
+                    }
+                    if let TokenKind::Word(word) = token.kind
+                        && !after_dot
+                        && ["IN", "IS", "STARTS", "ENDS", "CONTAINS", "BETWEEN", "NOT"]
+                            .iter()
+                            .any(|op| word.eq_ignore_ascii_case(op))
+                    {
+                        return Ok(None);
+                    }
+                }
+                match token.kind {
+                    TokenKind::End => return Ok(None),
+                    TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                    TokenKind::Punct(b')' | b']' | b'}') => {
+                        let Some(next) = depth.checked_sub(1) else {
+                            return Ok(None);
+                        };
+                        depth = next;
+                    }
+                    TokenKind::Word(word) if !after_dot => {
+                        if !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(' | b':')) {
+                            if graph_any(word) {
+                                return Ok(None);
+                            }
+                            reads_row |= imported_word(word);
+                        }
+                    }
+                    _ => {}
+                }
+                after_dot = token.kind == TokenKind::Punct(b'.');
+                previous = Some(token.kind);
+                token = lexer.next()?;
+            }
+        };
+
+        let mut call_lex = self.lexer.clone();
+        if let Some((variable, text, after)) = identity_call(self.current, &mut call_lex)?
+            && after.kind == TokenKind::Punct(b'=')
+        {
+            let rhs = call_lex.next()?;
+            if !matches!(rhs.kind, TokenKind::Punct(b'~' | b'='))
+                && scan_imported(rhs, call_lex, false)?.is_some()
+            {
+                self.capacity(
+                    self.predicates,
+                    MAX_PATTERN_PREDICATES,
+                    crate::algebra::PatternLimitDimension::Predicates,
+                )?;
+                self.advance()?;
+                self.punct(b'(', "(")?;
+                self.advance()?;
+                self.punct(b')', ")")?;
+                self.punct(b'=', "=")?;
+                let row = if !self.row_value_is_computed()?
+                    && let Some(row) = self.imported_row_field()?
+                {
+                    row
+                } else {
+                    self.computed_imported_operand()?
+                };
+                self.predicates += 1;
+                return Ok(Some((
+                    variable,
+                    CorrelationTarget::Identity { text },
+                    row,
+                    at,
+                )));
+            }
+        }
+
+        if let Some((rhs, mut rhs_lex)) = scan_imported(self.current, self.lexer.clone(), true)?
+            && let Some((variable, text, after)) = identity_call(rhs, &mut rhs_lex)?
+            && atom_boundary(after, Some(TokenKind::Punct(b')')))
+        {
+            self.capacity(
+                self.predicates,
+                MAX_PATTERN_PREDICATES,
+                crate::algebra::PatternLimitDimension::Predicates,
+            )?;
+            let row = if !self.row_value_is_computed()?
+                && let Some(row) = self.imported_row_field()?
+            {
+                row
+            } else {
+                self.computed_imported_operand()?
+            };
+            self.punct(b'=', "=")?;
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            self.advance()?;
+            self.punct(b')', ")")?;
+            self.predicates += 1;
+            return Ok(Some((
+                variable,
+                CorrelationTarget::Identity { text },
+                row,
+                at,
+            )));
+        }
+
+        Ok(None)
+    }
+
     #[allow(clippy::type_complexity)]
     fn computed_row_correlation(
         &mut self,
-    ) -> Result<Option<(Name<'a>, Option<Name<'a>>, usize, usize)>, GraphPatternTextError> {
+    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError> {
         let at = self.current.at;
         let mut lexer = self.lexer.clone();
         let (
@@ -907,13 +1145,13 @@ impl<'a> Parser<'a> {
         self.punct(b'=', "=")?;
         let row = self.computed_imported_operand()?;
         self.predicates += 1;
-        Ok(Some((variable, Some(key), row, at)))
+        Ok(Some((variable, CorrelationTarget::Property(key), row, at)))
     }
 
     #[allow(clippy::type_complexity)]
     fn row_correlation(
         &mut self,
-    ) -> Result<Option<(Name<'a>, Option<Name<'a>>, usize, usize)>, GraphPatternTextError> {
+    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError> {
         if let Some(correlation) = self.row_field_correlation()? {
             return Ok(Some(correlation));
         }
@@ -970,7 +1208,7 @@ impl<'a> Parser<'a> {
                 self.punct(b'=', "=")?;
                 self.advance()?;
                 self.predicates += 1;
-                return Ok(Some((variable, None, row, at)));
+                return Ok(Some((variable, CorrelationTarget::Element, row, at)));
             }
         }
         // The atom must end at its fifth token.
@@ -996,7 +1234,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Word(_),
                 TokenKind::Punct(b'.'),
                 TokenKind::Word(_) | TokenKind::DelimitedKeyword(_),
-            ] => (row(name), false),
+                ] => (row(name), false),
             _ => (None, false),
         };
         let Some(row) = row else {
@@ -1019,7 +1257,7 @@ impl<'a> Parser<'a> {
             self.advance()?;
         }
         self.predicates += 1;
-        Ok(Some((variable, Some(key), row, at)))
+        Ok(Some((variable, CorrelationTarget::Property(key), row, at)))
     }
 
     fn literal_starts_in_list(&self) -> Result<bool, GraphPatternTextError> {

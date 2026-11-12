@@ -214,7 +214,11 @@ fn component_unions_share_endpoint_selection_and_maintain_exact_signed_membershi
                     .unwrap();
                 let actual = u64::try_from(db.standing_queries.len() - first).unwrap();
                 assert_eq!(width, 2);
-                assert_eq!(bound, actual + 1, "complete composition plus reserved window");
+                assert_eq!(
+                    bound,
+                    actual + 1,
+                    "complete composition plus reserved window"
+                );
                 let (_, delivered) = db.standing_native_bag(&cx, &handle, policy()).unwrap();
                 assert_eq!(
                     delivered,
@@ -245,7 +249,11 @@ fn component_unions_share_endpoint_selection_and_maintain_exact_signed_membershi
                     change.add_edge(EId(50), VId(3), VId(0), vec![]);
                 }
                 5 => {
-                    change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(9)));
+                    change.set_vertex_property(
+                        VId(1),
+                        PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(9)),
+                    );
                 }
                 6 => {
                     change.set_vertex_label(VId(2), LabelId(1), true);
@@ -277,11 +285,16 @@ fn component_unions_share_endpoint_selection_and_maintain_exact_signed_membershi
                 if matches!(tick, 0 | 1 | 5) {
                     assert!(delta.is_empty(), "unchanged support: {text}, tick {tick}");
                 }
-                delivered.integrate(&delta, LIMBS, &mut |_| Ok::<_, ()>(())).unwrap();
+                delivered
+                    .integrate(&delta, LIMBS, &mut |_| Ok::<_, ()>(()))
+                    .unwrap();
                 assert_eq!(&*delivered, &expected);
                 if tick == 3 {
                     db.rebuild_standing_query(&cx, handle, allowance).unwrap();
-                    assert_eq!(db.standing_native_bag(&cx, handle, policy()).unwrap().1, expected);
+                    assert_eq!(
+                        db.standing_native_bag(&cx, handle, policy()).unwrap().1,
+                        expected
+                    );
                 }
             }
             after = at;
@@ -1212,7 +1225,8 @@ fn every_component_registration_and_rebuild_stage_rolls_back_its_private_suffix(
             let (first, root) = (*first, handle.index);
             let before = db.standing_queries.len();
             let answer = db.standing_native_bag(&cx, &handle, policy()).unwrap();
-            let prepared = PreparedNativeRead::prepare(&text, &GqlParameters::new(), symbols).unwrap();
+            let prepared =
+                PreparedNativeRead::prepare(&text, &GqlParameters::new(), symbols).unwrap();
             let (bound, width) = prepared
                 .subscription_footprint(&cx, &GqlParameters::new())
                 .unwrap();
@@ -1238,7 +1252,10 @@ fn every_component_registration_and_rebuild_stage_rolls_back_its_private_suffix(
                 assert!(db.rebuild_standing_query(&cx, &handle, tight).is_err());
                 assert_eq!(addresses(&db, first, root), identity);
                 assert_eq!(db.standing_queries.len(), before);
-                assert_eq!(db.standing_native_bag(&cx, &handle, policy()).unwrap(), answer);
+                assert_eq!(
+                    db.standing_native_bag(&cx, &handle, policy()).unwrap(),
+                    answer
+                );
             }
             let mut calls = 0;
             {

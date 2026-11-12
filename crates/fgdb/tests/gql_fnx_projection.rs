@@ -25,8 +25,7 @@ const S: RelationId = RelationId(12);
 const COST: PropertyKeyId = PropertyKeyId(13);
 const PRIVATE: PropertyKeyId = PropertyKeyId(14);
 const BRANCH: &str = "projection-test";
-const UNION_WEIGHTED: &str =
-    "CALL fnx.single_source_dijkstra_path_length(\
+const UNION_WEIGHTED: &str = "CALL fnx.single_source_dijkstra_path_length(\
      {labels:['Other','Person','Person'],relations:['S','R','S'],weight:'cost'},1) \
      YIELD node,distance RETURN node,distance ORDER BY node";
 const WEIGHTED: &str = "CALL fnx.single_source_dijkstra_path_length(args => [1], label => 'Person', \

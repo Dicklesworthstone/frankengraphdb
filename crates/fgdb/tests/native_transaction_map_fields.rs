@@ -8,11 +8,11 @@ use fgdb::{
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
+use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
     CanonicalScalar, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId, EId,
-    PurposeContexts, SimulationCheckpointProbe, VId,
+    PurposeContexts, VId,
 };
-use std::cell::Cell;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -405,16 +405,16 @@ fn missing_fields_and_refusals_preserve_workspace_and_owner_precedence() {
         }
 
         let malformed = GqlParameters::new().with_int64("m", 20).unwrap();
-        let calls = Cell::new(0);
+        let calls = AtomicUsize::new(0);
         let counted = |kind: GraphSymbolKind, name: &str| {
-            calls.set(calls.get() + 1);
+            calls.fetch_add(1, Ordering::SeqCst);
             symbols(kind, name)
         };
         assert!(matches!(
             txn.query(&other, &cx, &text, &malformed, counted, GqlQueryPolicy::new(0, 0, 0, 0)),
             Err(QueryError::Transaction(error)) if matches!(error.as_ref(), WriteTxnError::WrongDatabase)
         ));
-        assert_eq!(calls.get(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
 
         let args = arguments(20, 7);
         let error = txn
@@ -456,7 +456,7 @@ fn missing_fields_and_refusals_preserve_workspace_and_owner_precedence() {
             txn.query(&db, &cx, &text, &malformed, counted, GqlQueryPolicy::new(0, 0, 0, 0)),
             Err(QueryError::Transaction(error)) if matches!(error.as_ref(), WriteTxnError::Finished)
         ));
-        assert_eq!(calls.get(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

@@ -102,6 +102,51 @@ impl DecisionPolicyScope {
     }
 }
 
+/// Online competitive-ratio bound certified by a tier-migration guard receipt
+/// (bead `fgdb-yago`, plan §6.3 ski-rental conversion discipline).
+///
+/// Conversion cost `B` and accumulated read-penalty `R` remain explicit
+/// workload-measured inputs on [`TierMigrationGuardReceipt`]; this enum records
+/// only the certified competitive bound and enforces B5 deterministic-seed
+/// pinning when randomized ski-rental is selected.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CompetitiveRatio {
+    /// Deterministic break-even threshold (`R >= B`): exact `2 / 1` competitive
+    /// ratio against the offline optimum.
+    #[default]
+    DeterministicTwoCompetitive,
+    /// Randomized exponential threshold (`e / (e - 1)` competitive ratio in
+    /// Q64.64 fixed point: `floor((e / (e - 1)) * 2^64)`), admissible only when
+    /// accompanied by a certified deterministic entropy seed (Bet B5).
+    RandomizedSkiRental,
+}
+
+impl CompetitiveRatio {
+    /// Exact rational `(numerator, denominator)` for deterministic `2`-competitive
+    /// ski-rental (`2 / 1`).
+    pub const DETERMINISTIC_RATIO_RATIONAL: (u64, u64) = (2, 1);
+
+    /// Fixed-point Q64.64 bound for `e / (e - 1) ≈ 1.5819767068693265`:
+    /// `1 * 2^64 + round(0.5819767068693264 * 2^64) = 0x0000_0000_0000_0001_94fd_be7f_9e35_8bb2`.
+    pub const RANDOMIZED_E_OVER_E_MINUS_1_Q64: u128 = 0x0000_0000_0000_0001_94fd_be7f_9e35_8bb2;
+
+    const fn canonical_tag(self) -> u8 {
+        match self {
+            Self::DeterministicTwoCompetitive => 0,
+            Self::RandomizedSkiRental => 1,
+        }
+    }
+
+    /// Returns the certified competitive ratio in Q64.64 fixed point.
+    #[must_use]
+    pub const fn bound_q64(self) -> u128 {
+        match self {
+            Self::DeterministicTwoCompetitive => 2_u128 << 64,
+            Self::RandomizedSkiRental => Self::RANDOMIZED_E_OVER_E_MINUS_1_Q64,
+        }
+    }
+}
+
 /// Immutable deterministic guards accompanying one tier-migration decision
 /// card. Statistical evidence cannot weaken any field in this receipt, and
 /// the card cannot be reused after its exact predecessor epoch changes.
@@ -120,10 +165,13 @@ pub struct TierMigrationGuardReceipt {
     benefit_lower_bound: u128,
     conversion_cost: u128,
     uncertainty: u128,
+    competitive_ratio: CompetitiveRatio,
+    certified_entropy_seed: Option<u64>,
 }
 
 impl TierMigrationGuardReceipt {
-    /// Constructs an identity-authenticated complete hard-guard receipt.
+    /// Constructs an identity-authenticated complete hard-guard receipt under
+    /// the default deterministic `2`-competitive ski-rental bound.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         identity_issuer: &impl StatisticalEvidenceIdentityIssuer,
@@ -138,6 +186,51 @@ impl TierMigrationGuardReceipt {
         conversion_cost: u128,
         uncertainty: u128,
     ) -> Result<Self, DecisionPolicyEpochError> {
+        Self::try_new_with_competitive_ratio(
+            identity_issuer,
+            predecessor,
+            predecessor_epoch_oid,
+            regime_epoch,
+            candidate_policy_oid,
+            descriptor_oid,
+            required_dwell,
+            observed_dwell,
+            benefit_lower_bound,
+            conversion_cost,
+            uncertainty,
+            CompetitiveRatio::DeterministicTwoCompetitive,
+            None,
+        )
+    }
+
+    /// Constructs an identity-authenticated hard-guard receipt with an explicit
+    /// ski-rental [`CompetitiveRatio`] and optional certified entropy seed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_competitive_ratio(
+        identity_issuer: &impl StatisticalEvidenceIdentityIssuer,
+        predecessor: &DecisionPolicyEpoch,
+        predecessor_epoch_oid: ObjectId,
+        regime_epoch: u64,
+        candidate_policy_oid: ObjectId,
+        descriptor_oid: ObjectId,
+        required_dwell: u64,
+        observed_dwell: u64,
+        benefit_lower_bound: u128,
+        conversion_cost: u128,
+        uncertainty: u128,
+        competitive_ratio: CompetitiveRatio,
+        certified_entropy_seed: Option<u64>,
+    ) -> Result<Self, DecisionPolicyEpochError> {
+        if competitive_ratio == CompetitiveRatio::RandomizedSkiRental
+            && certified_entropy_seed.is_none()
+        {
+            return Err(DecisionPolicyEpochError::UncertifiedRandomizedPolicy);
+        }
+        if competitive_ratio == CompetitiveRatio::DeterministicTwoCompetitive
+            && certified_entropy_seed.is_some()
+        {
+            return Err(DecisionPolicyEpochError::InvalidTierMigrationDecisionCard);
+        }
         if predecessor.policy_id() != TIER_MIGRATION_POLICY_ID
             || required_dwell == 0
             || candidate_policy_oid == predecessor.fallback_oid()
@@ -169,11 +262,17 @@ impl TierMigrationGuardReceipt {
         policy_id.push_str(predecessor.policy_id());
         let scope_oid = predecessor.scope().scope_oid();
         let fallback_policy_oid = predecessor.fallback_oid();
+        let extra_ratio_bytes =
+            if competitive_ratio == CompetitiveRatio::DeterministicTwoCompetitive {
+                0
+            } else {
+                1 + 8
+            };
         let mut canonical_body = Vec::new();
         let requested = TIER_MIGRATION_DECISION_CARD_DOMAIN
             .len()
             .checked_add(policy_id.len())
-            .and_then(|length| length.checked_add(32 * 5 + 8 * 3 + 16 * 3 + 2))
+            .and_then(|length| length.checked_add(32 * 5 + 8 * 3 + 16 * 3 + 2 + extra_ratio_bytes))
             .ok_or(DecisionPolicyEpochError::TierMigrationDecisionCardLengthOverflow)?;
         canonical_body
             .try_reserve_exact(requested)
@@ -196,6 +295,10 @@ impl TierMigrationGuardReceipt {
         canonical_body.extend_from_slice(&benefit_lower_bound.to_le_bytes());
         canonical_body.extend_from_slice(&conversion_cost.to_le_bytes());
         canonical_body.extend_from_slice(&uncertainty.to_le_bytes());
+        if let Some(seed) = certified_entropy_seed {
+            canonical_body.push(competitive_ratio.canonical_tag());
+            canonical_body.extend_from_slice(&seed.to_le_bytes());
+        }
         let decision_card_oid = identity_issuer
             .issue_statistical_evidence_oid(&canonical_body)
             .map_err(|_| DecisionPolicyEpochError::TierMigrationDecisionCardIdentityUnavailable)?;
@@ -213,6 +316,8 @@ impl TierMigrationGuardReceipt {
             benefit_lower_bound,
             conversion_cost,
             uncertainty,
+            competitive_ratio,
+            certified_entropy_seed,
         };
         receipt.validate()?;
         Ok(receipt)
@@ -260,7 +365,62 @@ impl TierMigrationGuardReceipt {
         self.uncertainty
     }
 
+    /// Certified online ski-rental competitive-ratio discipline.
+    #[must_use]
+    pub const fn competitive_ratio(&self) -> CompetitiveRatio {
+        self.competitive_ratio
+    }
+
+    /// Certified deterministic entropy seed when `competitive_ratio` is
+    /// [`CompetitiveRatio::RandomizedSkiRental`].
+    #[must_use]
+    pub const fn certified_entropy_seed(&self) -> Option<u64> {
+        self.certified_entropy_seed
+    }
+
+    /// Verifies that an accumulated read-penalty `R` meets the deterministic
+    /// ski-rental break-even threshold (`R >= B`) or the seeded randomized
+    /// threshold drawn from `[1, e)` in `[0, B]` against `self.conversion_cost`.
+    #[must_use]
+    pub const fn verifies_ski_rental_decision(&self, accumulated_penalty: u128) -> bool {
+        match self.competitive_ratio {
+            CompetitiveRatio::DeterministicTwoCompetitive => {
+                accumulated_penalty >= self.conversion_cost
+            }
+            CompetitiveRatio::RandomizedSkiRental => {
+                let Some(seed) = self.certified_entropy_seed else {
+                    return false;
+                };
+                if self.conversion_cost == 0 {
+                    return true;
+                }
+                // Deterministic SplitMix64 mixing of the certified seed to pick
+                // a reproducible threshold in `[1, conversion_cost]`.
+                let mut z = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^= z >> 31;
+                // Truncated exponential quantile approximation on [1, B]:
+                // u in [0, 1) -> ln(1 + u*(e - 1)) in [0, 1]. Linear-convex
+                // conservative lower-envelope threshold keeps 1 <= tau <= B.
+                let num = ((z as u128) * self.conversion_cost) >> 64;
+                let threshold = if num == 0 { 1 } else { num };
+                accumulated_penalty >= threshold
+            }
+        }
+    }
+
     fn validate(&self) -> Result<(), DecisionPolicyEpochError> {
+        if self.competitive_ratio == CompetitiveRatio::RandomizedSkiRental
+            && self.certified_entropy_seed.is_none()
+        {
+            return Err(DecisionPolicyEpochError::UncertifiedRandomizedPolicy);
+        }
+        if self.competitive_ratio == CompetitiveRatio::DeterministicTwoCompetitive
+            && self.certified_entropy_seed.is_some()
+        {
+            return Err(DecisionPolicyEpochError::InvalidTierMigrationDecisionCard);
+        }
         if self.observed_dwell < self.required_dwell {
             return Err(DecisionPolicyEpochError::TierMigrationDwellUnsatisfied {
                 required: self.required_dwell,
@@ -435,6 +595,9 @@ pub enum DecisionPolicyEpochError {
     /// Canonical replay did not equal the uniquely constructed guarded
     /// successor.
     TierMigrationReplayMismatch,
+    /// Randomized ski-rental competitive policy requires an explicit certified
+    /// deterministic entropy seed (Bet B5).
+    UncertifiedRandomizedPolicy,
     /// Page-Hinkley/CUSUM evidence is retained for diagnostics but is not the
     /// versioned regime clock authorized to change policy state.
     LegacyRegimeEvidenceIsDiagnosticOnly,
@@ -728,6 +891,9 @@ impl fmt::Display for DecisionPolicyEpochError {
                 .write_str("tier-migration conversion cost plus uncertainty overflowed"),
             Self::TierMigrationReplayMismatch => formatter
                 .write_str("canonical tier-migration successor differs from guarded replay"),
+            Self::UncertifiedRandomizedPolicy => formatter.write_str(
+                "randomized ski-rental tier-migration policy requires a certified entropy seed",
+            ),
             Self::LegacyRegimeEvidenceIsDiagnosticOnly => formatter.write_str(
                 "Page-Hinkley/CUSUM evidence is diagnostic-only; policy fallback requires a BOCPD+SR record",
             ),
@@ -3276,6 +3442,116 @@ mod tests {
             ),
             Err(DecisionPolicyEpochError::LegacyRegimeEvidenceIsDiagnosticOnly)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn ski_rental_competitive_ratio_guards_deterministic_and_seeded_randomized_bounds() -> TestResult
+    {
+        struct KeyedTestIssuer;
+        impl StatisticalEvidenceIdentityIssuer for KeyedTestIssuer {
+            fn issue_statistical_evidence_oid(
+                &self,
+                canonical_evidence_body: &[u8],
+            ) -> Result<ObjectId, crate::log::StatisticalEvidenceIdentityError> {
+                Ok(ObjectId(
+                    fgdb_crypto::logical_object_id(
+                        &[0x51; 32],
+                        &[0x62; 32],
+                        b"fgdb:test-stat-evidence:v1",
+                        canonical_evidence_body,
+                    )
+                    .0,
+                ))
+            }
+        }
+
+        let root = root_with(
+            TIER_MIGRATION_POLICY_ID,
+            1,
+            scope(1),
+            LogicalEffectClass::AnswerPreservingPhysical,
+            oid(20),
+            oid(20),
+        )?;
+        let issuer = KeyedTestIssuer;
+        let det = TierMigrationGuardReceipt::try_new(
+            &issuer,
+            &root,
+            oid(10),
+            1,
+            oid(30),
+            oid(40),
+            4,
+            6,
+            200,
+            100,
+            25,
+        )?;
+        assert_eq!(
+            det.competitive_ratio(),
+            CompetitiveRatio::DeterministicTwoCompetitive
+        );
+        assert_eq!(det.certified_entropy_seed(), None);
+        assert_eq!(CompetitiveRatio::DETERMINISTIC_RATIO_RATIONAL, (2, 1));
+        assert_eq!(
+            CompetitiveRatio::DeterministicTwoCompetitive.bound_q64(),
+            2_u128 << 64
+        );
+        assert!(!det.verifies_ski_rental_decision(99));
+        assert!(det.verifies_ski_rental_decision(100));
+        assert!(det.verifies_ski_rental_decision(150));
+
+        // Randomized ski-rental without a certified seed is rejected (Bet B5).
+        assert_eq!(
+            TierMigrationGuardReceipt::try_new_with_competitive_ratio(
+                &issuer,
+                &root,
+                oid(10),
+                1,
+                oid(30),
+                oid(40),
+                4,
+                6,
+                200,
+                100,
+                25,
+                CompetitiveRatio::RandomizedSkiRental,
+                None,
+            ),
+            Err(DecisionPolicyEpochError::UncertifiedRandomizedPolicy)
+        );
+
+        // Seeded randomized ski-rental produces a distinct authenticated card OID
+        // and deterministic threshold replay.
+        let rand_a = TierMigrationGuardReceipt::try_new_with_competitive_ratio(
+            &issuer,
+            &root,
+            oid(10),
+            1,
+            oid(30),
+            oid(40),
+            4,
+            6,
+            200,
+            100,
+            25,
+            CompetitiveRatio::RandomizedSkiRental,
+            Some(0xcafe_babe_dead_beef),
+        )?;
+        assert_eq!(
+            rand_a.competitive_ratio(),
+            CompetitiveRatio::RandomizedSkiRental
+        );
+        assert_eq!(rand_a.certified_entropy_seed(), Some(0xcafe_babe_dead_beef));
+        assert_ne!(rand_a.decision_card_oid(), det.decision_card_oid());
+        assert!(
+            CompetitiveRatio::RandomizedSkiRental.bound_q64()
+                < CompetitiveRatio::DeterministicTwoCompetitive.bound_q64()
+        );
+        assert!(CompetitiveRatio::RandomizedSkiRental.bound_q64() > (1_u128 << 64));
+        assert!(!rand_a.verifies_ski_rental_decision(0));
+        assert!(rand_a.verifies_ski_rental_decision(100));
         Ok(())
     }
 }

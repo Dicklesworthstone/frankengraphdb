@@ -2269,7 +2269,7 @@ impl<'a> Parser<'a> {
             self.take_all_quantifier()?;
             GraphSetQuantifier::All
         };
-        if self.is_punct(b'*') {
+        if !(head || keyword == "WITH") && self.is_punct(b'*') {
             return Err(error(
                 self.current.at,
                 GraphPatternTextErrorKind::Expected("named RETURN items after relationship MERGE"),
@@ -2297,11 +2297,136 @@ impl<'a> Parser<'a> {
             &mut self.write_paths,
             path.map(|(path, _)| path.text).into_iter().collect(),
         );
-        let items = self.write_return_items(&mut EdgeMergeLeaves {
-            returning: &mut returning,
-            columns: &mut *columns,
-            row,
-        });
+        let items = if self.take(b'*')? {
+            let mut star_items = mutation_query::ReturnItems {
+                projection: Vec::new(),
+                grouping: None,
+                output: Vec::new(),
+                spellings: Vec::new(),
+            };
+            if let Some(row) = row {
+                let visible = self.visible_width(row);
+                for (index, &(name, kind)) in row[..visible].iter().enumerate() {
+                    let column = returning.column(EdgeBinding::Input(index), name, kind)?;
+                    star_items.projection.push(ReadProjectionTemplate {
+                        name: name.text.to_owned(),
+                        value: ReadValueTemplate::Column(column),
+                    });
+                    star_items.output.push((name, kind));
+                }
+            } else {
+                let matched: Vec<_> = self
+                    .syntax
+                    .variables
+                    .iter()
+                    .copied()
+                    .chain(
+                        self.syntax
+                            .visible_edges()
+                            .filter_map(|(edge, _)| edge.variable),
+                    )
+                    .chain(self.syntax.path)
+                    .chain(self.syntax.scope_paths.iter().copied())
+                    .filter(|name| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
+                    .collect();
+                for name in matched {
+                    let kind = self
+                        .insertion_match_kind(name.text)
+                        .expect("visible MATCH binding has a domain");
+                    let input = self.mutation_projection(columns, name, None)?;
+                    let column = returning.column(EdgeBinding::Input(input), name, kind)?;
+                    star_items.projection.push(ReadProjectionTemplate {
+                        name: name.text.to_owned(),
+                        value: ReadValueTemplate::Column(column),
+                    });
+                    star_items.output.push((name, kind));
+                }
+            }
+            if let Some(edge) = relationship.filter(|name| {
+                !name.text.starts_with(Self::ANONYMOUS_PREFIX)
+                    && star_items
+                        .output
+                        .iter()
+                        .all(|(existing, _)| existing.text != name.text)
+            }) {
+                let column = returning.column(EdgeBinding::Edge, edge, GraphSetColumnType::Edge)?;
+                star_items.projection.push(ReadProjectionTemplate {
+                    name: edge.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                star_items.output.push((edge, GraphSetColumnType::Edge));
+            }
+            if let Some((path, reverse)) = path.filter(|(name, _)| {
+                !name.text.starts_with(Self::ANONYMOUS_PREFIX)
+                    && star_items
+                        .output
+                        .iter()
+                        .all(|(existing, _)| existing.text != name.text)
+            }) {
+                let column = returning.path_column(reverse, GraphPathFunction::Value, path)?;
+                star_items.projection.push(ReadProjectionTemplate {
+                    name: path.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                star_items.output.push((path, GraphSetColumnType::Path));
+            }
+            if self.take(b',')? {
+                for &(name, _) in &star_items.output {
+                    star_items.spellings.push(name);
+                }
+                let mut extra = self.write_return_items(&mut EdgeMergeLeaves {
+                    returning: &mut returning,
+                    columns: &mut *columns,
+                    row,
+                })?;
+                if extra.grouping.is_some() {
+                    self.write_paths = paths;
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::Expected(
+                            "non-aggregating items after WITH * in relationship MERGE",
+                        ),
+                    )
+                    .into());
+                }
+                for (name, _) in &extra.output {
+                    if star_items
+                        .output
+                        .iter()
+                        .any(|(existing, _)| existing.text == name.text)
+                    {
+                        self.write_paths = paths;
+                        return Err(error(
+                            name.at,
+                            GraphPatternTextErrorKind::Build(
+                                PatternBuildError::DuplicateProjection,
+                            ),
+                        )
+                        .into());
+                    }
+                }
+                star_items.projection.append(&mut extra.projection);
+                star_items.output.append(&mut extra.output);
+                star_items.spellings.append(&mut extra.spellings);
+            }
+            if star_items.output.is_empty() {
+                self.write_paths = paths;
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected(
+                        "named bindings for WITH * after relationship MERGE",
+                    ),
+                )
+                .into());
+            }
+            Ok(star_items)
+        } else {
+            self.write_return_items(&mut EdgeMergeLeaves {
+                returning: &mut returning,
+                columns: &mut *columns,
+                row,
+            })
+        };
         self.write_paths = paths;
         let items = items?;
         returning.projection = items.projection;
@@ -2345,7 +2470,7 @@ impl<'a> Parser<'a> {
         let requested = if self.chain_write && self.at_chained_write()? {
             self.write_chain_reads(&schema)?
         } else {
-            self.write_tail_reads(&schema)?
+            self.write_tail_reads_with_maps(&schema)?
         };
         for (alias, key) in requested {
             let Some(at) = schema[..visible]
@@ -2365,6 +2490,21 @@ impl<'a> Parser<'a> {
             else {
                 continue;
             };
+            if key.text == "*" {
+                let value = crate::set_text::ReadValueTemplate::ElementMetadata {
+                    kind: crate::GraphElementMetadata::Properties,
+                    value: Box::new(returning.projection[at].value.clone()),
+                    catalog: self.syntax.element_catalog.request(),
+                };
+                mutation_query::push_tail_map_read(
+                    &mut returning.projection,
+                    &mut schema,
+                    &mut reads,
+                    (alias, key),
+                    value,
+                )?;
+                continue;
+            }
             let property = match binding {
                 EdgeBinding::Edge => EdgeBinding::Property(key),
                 EdgeBinding::Endpoint { start } => EdgeBinding::EndpointProperty { start, key },

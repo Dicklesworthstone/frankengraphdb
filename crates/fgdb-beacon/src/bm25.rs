@@ -324,8 +324,8 @@ impl CorpusStats {
 
 #[derive(Clone, Default)]
 pub(crate) struct TextSegment {
-    postings: BTreeMap<String, BTreeMap<VId, Arc<Vec<u64>>>>,
-    lengths: BTreeMap<VId, u64>,
+    pub(crate) postings: BTreeMap<String, BTreeMap<VId, Arc<Vec<u64>>>>,
+    pub(crate) lengths: BTreeMap<VId, u64>,
 }
 
 impl TextSegment {

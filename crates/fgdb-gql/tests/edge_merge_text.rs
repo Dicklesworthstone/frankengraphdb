@@ -1083,4 +1083,32 @@ mod matched_chain {
                 .is_err()
         );
     }
+
+    #[test]
+    fn relationship_merge_with_wildcard_carries_visible_bindings_into_optional_match_count() {
+        use fgdb_delta_types::LabelId;
+        use fgdb_gql::PreparedGraphWriteChainText;
+
+        let resolve = |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Relation, "KNOWS") => Some(GraphSymbol::Relation(R)),
+            _ => symbols(kind, name),
+        };
+        let tck_match8_2 = "MATCH (a:Person), (b:Person) \
+                            MERGE (a)-[:KNOWS]->(b) \
+                            WITH * \
+                            OPTIONAL MATCH (a)--(c) \
+                            RETURN count(*) AS n";
+        let template = PreparedGraphWriteChainText::prepare(tck_match8_2, R, resolve)
+            .expect("WITH * after relationship MERGE must prepare as a write chain");
+        assert!(template.returns_rows());
+        let bound = template
+            .bind_parameters(&GqlParameters::new())
+            .expect("zero-parameter chain binds");
+        assert_eq!(bound.columns(), &["n"]);
+
+        // Standalone RETURN * after relationship MERGE remains explicitly refused.
+        let unprojected = "MATCH (a:Person), (b:Person) MERGE (a)-[:KNOWS]->(b) RETURN *";
+        assert!(PreparedGraphWriteChainText::prepare(unprojected, R, resolve).is_err());
+    }
 }

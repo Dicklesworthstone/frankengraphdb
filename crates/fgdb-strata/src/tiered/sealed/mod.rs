@@ -29,7 +29,7 @@ mod buffered;
 mod durable;
 pub(crate) use durable::read_adj_run;
 pub use durable::{
-    ADJ_RUN_OBJECT_KIND, AdjRunError, AdjRunHeader, AdjRunSegment, AdjRunSegmentVersion,
+    ADJ_RUN_OBJECT_KIND, AdjRunError, AdjRunHeader, AdjRunSegment, AdjRunSegmentVersion, FORMAT_V2,
     MAX_ADJ_RUN_BYTES, adj_run_id,
 };
 mod image;
@@ -37,6 +37,8 @@ mod incoming;
 pub use incoming::{
     IncomingIndexLimits, IncomingIndexStats, SealedIncomingCursor, SealedIncomingIndex,
 };
+mod overlay;
+pub use overlay::{SealedDeltaOverlay, StrataNeighborCursor};
 #[cfg(test)]
 mod relation_tests;
 #[cfg(test)]
@@ -198,11 +200,38 @@ pub struct SealedAnchor {
     relation: Option<RelationId>,
     fingerprint: [u8; 32],
     encoded_bytes: usize,
+    admitted_envelope: Option<(PartitionRootVersion, CommitSeq, CommitSeq)>,
 }
 
 impl SealedAnchor {
     pub const fn scope(self) -> SealedScope {
         self.scope
+    }
+
+    /// Envelope root that authenticated a carried run across post-seal commits,
+    /// or `None` when the run belongs directly to `scope.source_root`.
+    pub const fn admitted_envelope_root(self) -> Option<PartitionRootVersion> {
+        match self.admitted_envelope {
+            Some((root, _, _)) => Some(root),
+            None => None,
+        }
+    }
+
+    /// Publication frontier of the root that admitted this run.
+    pub const fn admitted_publication(self) -> CommitSeq {
+        match self.admitted_envelope {
+            Some((_, publication, _)) => publication,
+            None => self.scope.publication,
+        }
+    }
+
+    /// Highest contiguous commit sequence proven free of mutations to this
+    /// relation's adjacency and edge properties (`>= scope.publication`).
+    pub const fn verified_through(self) -> CommitSeq {
+        match self.admitted_envelope {
+            Some((_, _, verified_through)) => verified_through,
+            None => self.scope.publication,
+        }
     }
 
     /// The retained relation, or `None` for a complete partition image. An
@@ -229,11 +258,12 @@ impl SealedAnchor {
     }
 
     pub(super) fn authorize(self, as_of: CommitSeq) -> Result<(), SealedError> {
-        if as_of < self.scope.floor || as_of > self.scope.publication {
+        let ceiling = self.verified_through();
+        if as_of < self.scope.floor || as_of > ceiling {
             return Err(SealedError::SnapshotOutsideAnchor {
                 requested: as_of,
                 floor: self.scope.floor,
-                publication: self.scope.publication,
+                publication: ceiling,
             });
         }
         Ok(())
@@ -264,6 +294,7 @@ pub struct SealedPartition {
     anchor: SealedAnchor,
     image: Arc<Image>,
     retained_bytes: usize,
+    durable_incoming: Option<Arc<incoming::Index>>,
 }
 
 impl core::fmt::Debug for SealedPartition {
@@ -601,6 +632,7 @@ impl SealedPartition {
             relation,
             fingerprint,
             encoded_bytes,
+            admitted_envelope: None,
         };
         Self::check_image_scope(anchor, &image, checkpoint)?;
         let retained_bytes = image.retained_bytes(checkpoint)?;
@@ -609,6 +641,7 @@ impl SealedPartition {
             anchor,
             image: Arc::new(image),
             retained_bytes,
+            durable_incoming: None,
         })
     }
 
@@ -632,6 +665,20 @@ impl SealedPartition {
 
     pub fn shares_image_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.image, &other.image)
+    }
+
+    /// Whether this partition carries a pre-admitted durable `E_in` incoming
+    /// Elias-Fano CSR index (`FGRN` v2), avoiding any `O(|E|)` transpose rebuild.
+    pub fn has_durable_incoming(&self) -> bool {
+        self.durable_incoming.is_some()
+    }
+
+    fn durable_incoming(&self) -> Option<&Arc<incoming::Index>> {
+        self.durable_incoming.as_ref()
+    }
+
+    fn set_durable_incoming(&mut self, incoming: Arc<incoming::Index>) {
+        self.durable_incoming = Some(incoming);
     }
 
     /// Completed image metadata and owned allocation capacities, measured once
@@ -745,6 +792,7 @@ impl SealedPartition {
             anchor,
             image: Arc::new(image),
             retained_bytes,
+            durable_incoming: None,
         })
     }
 

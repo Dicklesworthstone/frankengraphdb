@@ -349,8 +349,7 @@ fn hidden_weight_values_and_label_names_are_absent_before_selection_or_reduction
         }
         opt.selection.vertex_labels = SchemaSelection::ALL;
         let visible = read(&db, &cx, &issuer, &token, CC, opt);
-        opt.selection.vertex_labels =
-            SchemaSelection::any_of(&[LabelId(1), LabelId(99)]).unwrap();
+        opt.selection.vertex_labels = SchemaSelection::any_of(&[LabelId(1), LabelId(99)]).unwrap();
         assert_eq!(read(&db, &cx, &issuer, &token, CC, opt), visible);
         let denied_relations = token
             .attenuate(Restriction::Relations(Scope::only([])))

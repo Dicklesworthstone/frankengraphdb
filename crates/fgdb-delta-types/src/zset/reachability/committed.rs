@@ -13,6 +13,10 @@
 //! the same as the underlying operators. This is caller-driven, in-process
 //! maintenance, not durable view publication, a retention lease or a scheduler.
 
+#[path = "checkpoint.rs"]
+pub mod checkpoint;
+pub use checkpoint::ReachabilityCheckpointError;
+
 use super::{IncrementalReachability, ReachabilityError, ReachabilityUpdate};
 use crate::zset::committed::{CommittedEdgeInput, EdgeInputError, EdgeInputUpdate};
 use crate::zset::event;

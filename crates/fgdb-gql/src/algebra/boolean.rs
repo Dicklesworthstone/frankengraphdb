@@ -902,6 +902,30 @@ impl BoundBooleanExpression {
         }
     }
 
+    pub(crate) fn try_remap_elements(
+        &self,
+        mut map: impl FnMut(BindingSlot) -> Option<BindingSlot>,
+        mut capture: impl FnMut(u32) -> Option<u32>,
+    ) -> Option<Self> {
+        let mut program = Vec::with_capacity(self.program.len());
+        for instruction in self.program.iter() {
+            program.push(
+                instruction
+                    .try_map(&mut |slot, edge| {
+                        if edge {
+                            capture(slot.ordinal()).map(BindingSlot).ok_or(())
+                        } else {
+                            map(*slot).ok_or(())
+                        }
+                    })
+                    .ok()?,
+            );
+        }
+        Some(Self {
+            program: program.into(),
+        })
+    }
+
     /// Versioned, value-independent transcript of the compiled boolean
     /// template. Resolved binding slots, property keys, comparisons and
     /// literal constants are encoded; no database values, statement text or

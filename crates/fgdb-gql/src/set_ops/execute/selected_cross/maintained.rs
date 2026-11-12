@@ -97,7 +97,9 @@ impl PreparedGraphSet {
             let mut op = op.clone();
             if let Some(slots) = slots.as_deref() {
                 let remap = |operand: &mut GraphSetOperand| {
-                    if let GraphSetOperand::Column(column) = operand {
+                    if let GraphSetOperand::Column(column)
+                    | GraphSetOperand::IdentityColumn { column, .. } = operand
+                    {
                         *column = slots[*column];
                     }
                 };

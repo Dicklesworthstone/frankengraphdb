@@ -1246,7 +1246,7 @@ impl PreparedGraphInsertText {
         // reads it: a WITH head, a RETURN, or the implicit `WITH *` directly
         // before the next write.
         let returning = returning
-            || (owned
+            || ((owned || parser.chain_write)
                 && (parser.is_word("WITH")
                     || parser.is_word("RETURN")
                     || parser.at_chained_write()?));
@@ -1262,9 +1262,34 @@ impl PreparedGraphInsertText {
         // Join keys may be absent from CREATE and RETURN. Append their hidden
         // fields without shifting any previously compiled expression slot.
         let mut correlations = Vec::new();
-        for (variable, key, row) in core::mem::take(&mut parser.read_correlations) {
-            let column = parser.mutation_projection(&mut parsed.projections, variable, key)?;
-            correlations.push((row, column));
+        for (variable, target, row) in core::mem::take(&mut parser.read_correlations) {
+            match target {
+                CorrelationTarget::Element => {
+                    let column =
+                        parser.mutation_projection(&mut parsed.projections, variable, None)?;
+                    correlations.push(crate::set_text::BoundCorrelation::Column {
+                        left: row,
+                        right: column,
+                    });
+                }
+                CorrelationTarget::Property(key) => {
+                    let column =
+                        parser.mutation_projection(&mut parsed.projections, variable, Some(key))?;
+                    correlations.push(crate::set_text::BoundCorrelation::Column {
+                        left: row,
+                        right: column,
+                    });
+                }
+                CorrelationTarget::Identity { text } => {
+                    let column =
+                        parser.mutation_projection(&mut parsed.projections, variable, None)?;
+                    correlations.push(crate::set_text::BoundCorrelation::Identity {
+                        left: row,
+                        right: column,
+                        text,
+                    });
+                }
+            }
         }
         let row_fields = core::mem::take(&mut parser.read_row_fields);
         let input_types = parser.insertion_input_types(&row_schema, &parsed.projections);

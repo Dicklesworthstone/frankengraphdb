@@ -1021,7 +1021,14 @@ impl<V: Vfs + Clone> Database<V> {
                     execution,
                 );
                 let (mut state, result) = self.stage_authorized_chains(
-                    query_cx, chains, continuation, policy, scope, state, active_record, admit,
+                    query_cx,
+                    chains,
+                    continuation,
+                    policy,
+                    scope,
+                    state,
+                    active_record,
+                    admit,
                 )?;
                 state.execution.bind_decision(state.workspace.transaction());
                 let completion = state
@@ -1057,229 +1064,222 @@ impl<V: Vfs + Clone> Database<V> {
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
             &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
-    ) -> Result<(ChainState<'cx, 'permit, Clock>, GqlQueryExecution<GraphValueRow>), Fault> {
-                let ChainState {
-                    mut workspace,
-                    mut execution,
-                    mut used,
-                    mut mutation_effects,
-                } = state;
-                let mut last_result = None;
-                for (argument_set, chain) in chains.iter().enumerate() {
-                *active_record = Some(argument_set);
-                let continuation = continuation.or_else(|| chain.read_continuation());
-                // The complete definition was authorized above. Input
-                // materialization now spends both the query's cumulative
-                // allowance and the live signed work meter before copying.
-                let input_policy = remaining(policy, &used, mutation_effects, false).query;
-                let mut rows = match chain.initial_rows_governed(input_policy, || {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                    execution.checkpoint()
-                })? {
-                    Some(input) => {
-                        used.evaluator.work_units = used
-                            .evaluator
-                            .work_units
-                            .saturating_add(input.evaluator.work_units);
-                        used.evaluator.scratch_entries = used
-                            .evaluator
-                            .scratch_entries
-                            .saturating_add(input.evaluator.scratch_entries);
-                        Some(input.value)
-                    }
-                    None => None,
-                };
-                // Independent creation loops have no reads of their held
-                // prefix. stage_batch still checks every original intent's
-                // native before/after images on this same live permit before
-                // the next iteration, then prepares the ordered effects once.
-                let mut frozen = (frozen_chain(chain)
-                    || chain.independent_create_relation().is_some())
+    ) -> Result<
+        (
+            ChainState<'cx, 'permit, Clock>,
+            GqlQueryExecution<GraphValueRow>,
+        ),
+        Fault,
+    > {
+        let ChainState {
+            mut workspace,
+            mut execution,
+            mut used,
+            mut mutation_effects,
+        } = state;
+        let mut last_result = None;
+        for (argument_set, chain) in chains.iter().enumerate() {
+            *active_record = Some(argument_set);
+            let continuation = continuation.or_else(|| chain.read_continuation());
+            // The complete definition was authorized above. Input
+            // materialization now spends both the query's cumulative
+            // allowance and the live signed work meter before copying.
+            let input_policy = remaining(policy, &used, mutation_effects, false).query;
+            let mut rows = match chain.initial_rows_governed(input_policy, || {
+                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                execution.checkpoint()
+            })? {
+                Some(input) => {
+                    used.evaluator.work_units = used
+                        .evaluator
+                        .work_units
+                        .saturating_add(input.evaluator.work_units);
+                    used.evaluator.scratch_entries = used
+                        .evaluator
+                        .scratch_entries
+                        .saturating_add(input.evaluator.scratch_entries);
+                    Some(input.value)
+                }
+                None => None,
+            };
+            // Independent creation loops have no reads of their held
+            // prefix. stage_batch still checks every original intent's
+            // native before/after images on this same live permit before
+            // the next iteration, then prepares the ordered effects once.
+            let mut frozen = (frozen_chain(chain) || chain.independent_create_relation().is_some())
                 .then(FrozenCreations::default);
-                let mut cursor = GraphWriteChainCursor::new(chain, continuation.is_none());
-                let mut at = 0;
-                while let Some(task) = cursor.next(&mut rows, &mut |event| {
-                    cursor_event(
+            let mut cursor = GraphWriteChainCursor::new(chain, continuation.is_none());
+            let mut at = 0;
+            while let Some(task) = cursor.next(&mut rows, &mut |event| {
+                cursor_event(
+                    query_cx,
+                    &mut execution,
+                    policy.query,
+                    &mut used.evaluator,
+                    event,
+                )
+            })? {
+                if let GraphWriteChainTask::Read(read) = &task {
+                    let allowance =
+                        remaining(policy, &used, mutation_effects, read.delivers_rows());
+                    let returning = query_cx
+                        .with_restriction(|| {
+                            let controls = RefCell::new(&mut execution);
+                            let database = RefCell::new(&mut *self);
+                            let graph = ChainSource {
+                                transaction: workspace.transaction(),
+                                database: &database,
+                                cx: query_cx,
+                                scope,
+                                execution: &controls,
+                            };
+                            let checkpoint = || {
+                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                                controls.borrow_mut().checkpoint()
+                            };
+                            read.execute_governed(rows.take(), allowance.query, graph, checkpoint)
+                        })
+                        .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
+                    used.selection.snapshot_records = used
+                        .selection
+                        .snapshot_records
+                        .saturating_add(returning.rows.snapshot_records);
+                    used.evaluator.work_units = used
+                        .evaluator
+                        .work_units
+                        .saturating_add(returning.evaluator.work_units);
+                    used.evaluator.scratch_entries = used
+                        .evaluator
+                        .scratch_entries
+                        .saturating_add(returning.evaluator.scratch_entries);
+                    rows = Some(returning.value);
+                    continue;
+                }
+                let GraphWriteChainTask::Write {
+                    step: statement,
+                    continues,
+                    delivers,
+                } = task
+                else {
+                    unreachable!("scoped read phases use the native collector above");
+                };
+                let allowance = remaining(policy, &used, mutation_effects, delivers);
+                let (stats, returning, effects) = if matches!(
+                    statement,
+                    GraphWriteChainStep::VertexMerge(_) | GraphWriteChainStep::VertexMergeQuery(_)
+                ) {
+                    vertices::execute(
+                        workspace.transaction(),
+                        self,
                         query_cx,
+                        statement,
+                        allowance,
+                        rows.take(),
+                        scope,
                         &mut execution,
-                        policy.query,
-                        &mut used.evaluator,
-                        event,
-                    )
-                })? {
-                    if let GraphWriteChainTask::Read(read) = &task {
-                        let allowance =
-                            remaining(policy, &used, mutation_effects, read.delivers_rows());
-                        let returning = query_cx
-                            .with_restriction(|| {
-                                let controls = RefCell::new(&mut execution);
-                                let database = RefCell::new(&mut *self);
-                                let graph = ChainSource {
+                        frozen.as_mut(),
+                        continues,
+                    )?
+                } else if matches!(
+                    statement,
+                    GraphWriteChainStep::EdgeUpsert(_)
+                        | GraphWriteChainStep::EdgeUpsertRows { .. }
+                        | GraphWriteChainStep::EdgeUpsertQuery { .. }
+                ) {
+                    merges::execute_actions(
+                        workspace.transaction(),
+                        self,
+                        query_cx,
+                        statement,
+                        allowance,
+                        rows.take(),
+                        scope,
+                        &mut execution,
+                    )?
+                } else if matches!(
+                    statement,
+                    GraphWriteChainStep::EdgeMerge(_)
+                        | GraphWriteChainStep::EdgeMergeRows { .. }
+                        | GraphWriteChainStep::EdgeMergeQuery(_)
+                ) {
+                    let (stats, returning) = merges::execute(
+                        workspace.transaction(),
+                        self,
+                        query_cx,
+                        statement,
+                        allowance,
+                        rows.take(),
+                        scope,
+                        &mut execution,
+                        frozen.as_mut(),
+                    )?;
+                    (stats, returning, 0)
+                } else if let GraphWriteChainStep::Query(query) = statement {
+                    let collection = query_cx
+                        .with_restriction(|| {
+                            let controls = RefCell::new(&mut execution);
+                            let database = RefCell::new(&mut *self);
+                            query.collect_governed_over(
+                                rows.take(),
+                                allowance,
+                                ChainSource {
                                     transaction: workspace.transaction(),
                                     database: &database,
                                     cx: query_cx,
                                     scope,
                                     execution: &controls,
-                                };
-                                let checkpoint = || {
+                                },
+                                |request| {
+                                    database.borrow_mut().allocate_identity(query_cx, request)
+                                },
+                                || {
                                     query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                                     controls.borrow_mut().checkpoint()
-                                };
-                                read.execute_governed(
-                                    rows.take(),
-                                    allowance.query,
-                                    graph,
-                                    checkpoint,
-                                )
-                            })
-                            .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
-                        used.selection.snapshot_records = used
-                            .selection
-                            .snapshot_records
-                            .saturating_add(returning.rows.snapshot_records);
-                        used.evaluator.work_units = used
-                            .evaluator
-                            .work_units
-                            .saturating_add(returning.evaluator.work_units);
-                        used.evaluator.scratch_entries = used
-                            .evaluator
-                            .scratch_entries
-                            .saturating_add(returning.evaluator.scratch_entries);
-                        rows = Some(returning.value);
-                        continue;
-                    }
-                    let GraphWriteChainTask::Write {
-                        step: statement,
-                        continues,
-                        delivers,
-                    } = task
-                    else {
-                        unreachable!("scoped read phases use the native collector above");
-                    };
-                    let allowance = remaining(policy, &used, mutation_effects, delivers);
-                    let (stats, returning, effects) = if matches!(
-                        statement,
-                        GraphWriteChainStep::VertexMerge(_)
-                            | GraphWriteChainStep::VertexMergeQuery(_)
-                    ) {
-                        vertices::execute(
-                            workspace.transaction(),
-                            self,
-                            query_cx,
-                            statement,
-                            allowance,
-                            rows.take(),
-                            scope,
-                            &mut execution,
-                            frozen.as_mut(),
-                            continues,
-                        )?
-                    } else if matches!(
-                        statement,
-                        GraphWriteChainStep::EdgeUpsert(_)
-                            | GraphWriteChainStep::EdgeUpsertRows { .. }
-                            | GraphWriteChainStep::EdgeUpsertQuery { .. }
-                    ) {
-                        merges::execute_actions(
-                            workspace.transaction(),
-                            self,
-                            query_cx,
-                            statement,
-                            allowance,
-                            rows.take(),
-                            scope,
-                            &mut execution,
-                        )?
-                    } else if matches!(
-                        statement,
-                        GraphWriteChainStep::EdgeMerge(_)
-                            | GraphWriteChainStep::EdgeMergeRows { .. }
-                            | GraphWriteChainStep::EdgeMergeQuery(_)
-                    ) {
-                        let (stats, returning) = merges::execute(
-                            workspace.transaction(),
-                            self,
-                            query_cx,
-                            statement,
-                            allowance,
-                            rows.take(),
-                            scope,
-                            &mut execution,
-                            frozen.as_mut(),
-                        )?;
-                        (stats, returning, 0)
-                    } else if let GraphWriteChainStep::Query(query) = statement {
-                        let collection = query_cx
-                            .with_restriction(|| {
-                                let controls = RefCell::new(&mut execution);
-                                let database = RefCell::new(&mut *self);
-                                query.collect_governed_over(
-                                    rows.take(),
-                                    allowance,
-                                    ChainSource {
-                                        transaction: workspace.transaction(),
-                                        database: &database,
-                                        cx: query_cx,
-                                        scope,
-                                        execution: &controls,
-                                    },
-                                    |request| {
-                                        database.borrow_mut().allocate_identity(query_cx, request)
-                                    },
-                                    || {
-                                        query_cx
-                                            .checkpoint()
-                                            .map_err(WriteTxnError::Interrupted)?;
-                                        controls.borrow_mut().checkpoint()
-                                    },
-                                )
-                            })
-                            .map_err(|error| error.map_source(GraphWriteChainError::Insert))?;
-                        let (creation, output) = collection.into_parts();
-                        // A held projected CREATE is admitted only by the
-                        // independent profile, whose output cannot read the
-                        // graph. Bindings already carry its checked fields.
-                        let (stats, _, _) = insert::stage_proposal(
-                            workspace.transaction(),
-                            self,
-                            query_cx,
-                            query.insertion(),
-                            creation,
-                            &mut execution,
-                            false,
-                            frozen.as_mut(),
-                        )
-                        .map_err(|error| {
-                            error.map_source(|error| {
-                                GraphWriteChainError::Insert(GraphInsertQueryError::Insertion(
-                                    error,
-                                ))
-                            })
-                        })?;
-                        let returning = insert::finish_output(
-                            workspace.transaction(),
-                            self,
-                            query_cx,
-                            output,
-                            scope,
-                            &mut execution,
-                        )
-                        .map_err(|error| {
-                            error.map_source(|error| {
-                                GraphWriteChainError::Insert(GraphInsertQueryError::Returning(
-                                    error,
-                                ))
-                            })
-                        })?;
-                        (stats, returning, 0)
-                    } else {
-                        // Element-reader traits carry only a source error. Keep
-                        // native cancellation separately, as the standalone
-                        // mutation reader does, so a replacement-map read cannot
-                        // turn an interruption into an ordinary source failure.
-                        let element_failure: RefCell<Option<Box<asupersync::error::Error>>> =
-                            RefCell::new(None);
-                        let collected = query_cx.with_restriction(|| {
+                                },
+                            )
+                        })
+                        .map_err(|error| error.map_source(GraphWriteChainError::Insert))?;
+                    let (creation, output) = collection.into_parts();
+                    // A held projected CREATE is admitted only by the
+                    // independent profile, whose output cannot read the
+                    // graph. Bindings already carry its checked fields.
+                    let (stats, _, _) = insert::stage_proposal(
+                        workspace.transaction(),
+                        self,
+                        query_cx,
+                        query.insertion(),
+                        creation,
+                        &mut execution,
+                        false,
+                        frozen.as_mut(),
+                    )
+                    .map_err(|error| {
+                        error.map_source(|error| {
+                            GraphWriteChainError::Insert(GraphInsertQueryError::Insertion(error))
+                        })
+                    })?;
+                    let returning = insert::finish_output(
+                        workspace.transaction(),
+                        self,
+                        query_cx,
+                        output,
+                        scope,
+                        &mut execution,
+                    )
+                    .map_err(|error| {
+                        error.map_source(|error| {
+                            GraphWriteChainError::Insert(GraphInsertQueryError::Returning(error))
+                        })
+                    })?;
+                    (stats, returning, 0)
+                } else {
+                    // Element-reader traits carry only a source error. Keep
+                    // native cancellation separately, as the standalone
+                    // mutation reader does, so a replacement-map read cannot
+                    // turn an interruption into an ordinary source failure.
+                    let element_failure: RefCell<Option<Box<asupersync::error::Error>>> =
+                        RefCell::new(None);
+                    let collected = query_cx.with_restriction(|| {
                             let controls = RefCell::new(&mut execution);
                             let database = RefCell::new(&mut *self);
                             let mut graph = ChainSource {
@@ -1483,209 +1483,211 @@ impl<V: Vfs + Clone> Database<V> {
                                 })),
                             }
                         });
-                        let (proposal, mut returning) = match element_failure.into_inner() {
-                            Some(error) => Err(GqlQueryError::Interrupted(
-                                WriteTxnError::Interrupted(error),
-                            )),
-                            None => collected,
-                        }?;
-                        let (stats, effects) = match proposal {
-                            Proposal::Insert(insertion, proposal) => {
-                                let (stats, _, _) = insert::stage_proposal(
-                                    workspace.transaction(),
-                                    self,
-                                    query_cx,
-                                    insertion,
-                                    proposal,
-                                    &mut execution,
-                                    false,
-                                    frozen.as_mut(),
-                                )
-                                .map_err(|error| {
-                                    error.map_source(|error| {
-                                        GraphWriteChainError::Insert(
-                                            GraphInsertQueryError::Insertion(error),
-                                        )
-                                    })
-                                })?;
-                                (stats, 0)
-                            }
-                            Proposal::Mutation(mutation, proposal, policy) => {
-                                let (staging_policy, tail) = MutationProjectionTail::reserve(
-                                    policy,
-                                    proposal.stats(),
-                                    &returning,
-                                )
-                                .map_err(|error| GqlQueryError::Source(mutation_error(error)))?;
-                                let (staged, _, _) = mutation::stage_proposal(
-                                    workspace.transaction(),
-                                    self,
-                                    query_cx,
-                                    mutation,
-                                    proposal,
-                                    staging_policy,
-                                    scope,
-                                    &mut execution,
-                                    false,
-                                )
-                                .map_err(|error| error.map_source(mutation_error))?;
-                                tail.complete(staged, &mut returning).map_err(|error| {
-                                    GqlQueryError::Source(mutation_error(error))
-                                })?;
-                                (
-                                    GraphInsertStats {
-                                        selection: returning.rows,
-                                        evaluator: returning.evaluator,
-                                        created_vertices: 0,
-                                        created_edges: 0,
-                                    },
-                                    staged.effects,
-                                )
-                            }
-                        };
-
-                        (stats, returning, effects)
-                    };
-                    let observed = u128::from(mutation_effects) + u128::from(effects);
-                    if observed > u128::from(policy.max_mutation_effects) {
-                        return Err(GqlQueryError::Source(mutation_error(
-                            GraphMutationError::EffectLimit {
-                                limit: policy.max_mutation_effects,
-                                observed,
-                            },
-                        )));
-                    }
-                    mutation_effects = observed as u64;
-                    // Query counters include their write prefix and complete
-                    // WITH tail. Do not lose that work or count it twice.
-                    used.selection.snapshot_records = used
-                        .selection
-                        .snapshot_records
-                        .saturating_add(returning.rows.snapshot_records);
-                    used.evaluator.work_units = used
-                        .evaluator
-                        .work_units
-                        .saturating_add(returning.evaluator.work_units);
-                    used.evaluator.scratch_entries = used
-                        .evaluator
-                        .scratch_entries
-                        .saturating_add(returning.evaluator.scratch_entries);
-                    used.created_vertices =
-                        used.created_vertices.saturating_add(stats.created_vertices);
-                    used.created_edges = used.created_edges.saturating_add(stats.created_edges);
-                    rows = Some(returning.value);
-                    at += 1;
-                }
-                if let Some(frozen) = frozen {
-                    finish_frozen(
-                        workspace.transaction(),
-                        self,
-                        query_cx,
-                        frozen,
-                        &mut execution,
-                    )
-                    .map_err(source)?;
-                }
-                let Some(value) = rows else {
-                    return Err(source(WriteTxnError::NoPreparedWrite));
-                };
-                let mut result = GqlQueryExecution {
-                    rows: GqlExecutionStats {
-                        snapshot_records: used.selection.snapshot_records,
-                        result_rows: u64::try_from(value.len())
-                            .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?,
-                    },
-                    evaluator: used.evaluator,
-                    value,
-                };
-                // A continuation is an input to another write, never an
-                // implicit public RETURN. Keep this boundary explicit even
-                // when a future final step retains private rows internally.
-                if !chain.returns_rows() {
-                    result.value.clear();
-                    result.rows.result_rows = 0;
-                }
-                result.rows.snapshot_records = used.selection.snapshot_records;
-                result.evaluator = used.evaluator;
-                if let Some(continuation) = continuation {
-                    result = query_cx.with_restriction(|| {
-                        let controls = RefCell::new(&mut execution);
-                        let database = RefCell::new(&mut *self);
-                        let transaction = workspace.transaction();
-                        let graph = fgdb_gql::WithElementReads {
-                            source: ChainSource {
-                                transaction,
-                                database: &database,
-                                cx: query_cx,
+                    let (proposal, mut returning) = match element_failure.into_inner() {
+                        Some(error) => Err(GqlQueryError::Interrupted(WriteTxnError::Interrupted(
+                            error,
+                        ))),
+                        None => collected,
+                    }?;
+                    let (stats, effects) = match proposal {
+                        Proposal::Insert(insertion, proposal) => {
+                            let (stats, _, _) = insert::stage_proposal(
+                                workspace.transaction(),
+                                self,
+                                query_cx,
+                                insertion,
+                                proposal,
+                                &mut execution,
+                                false,
+                                frozen.as_mut(),
+                            )
+                            .map_err(|error| {
+                                error.map_source(|error| {
+                                    GraphWriteChainError::Insert(GraphInsertQueryError::Insertion(
+                                        error,
+                                    ))
+                                })
+                            })?;
+                            (stats, 0)
+                        }
+                        Proposal::Mutation(mutation, proposal, policy) => {
+                            let (staging_policy, tail) = MutationProjectionTail::reserve(
+                                policy,
+                                proposal.stats(),
+                                &returning,
+                            )
+                            .map_err(|error| GqlQueryError::Source(mutation_error(error)))?;
+                            let (staged, _, _) = mutation::stage_proposal(
+                                workspace.transaction(),
+                                self,
+                                query_cx,
+                                mutation,
+                                proposal,
+                                staging_policy,
                                 scope,
-                                execution: &controls,
-                            },
-                            elements: |element, key| {
-                                selection::returning_element_property(
-                                    transaction,
-                                    &database.borrow(),
-                                    query_cx,
-                                    element,
-                                    key,
-                                    scope,
-                                    &controls,
-                                )
-                            },
-                        };
-                        chain.finish_read_continuation(
-                            continuation,
-                            result,
-                            policy.query,
-                            graph,
-                            || {
-                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                                controls.borrow_mut().checkpoint()
-                            },
-                        )
-                    })?;
-                    used.selection.snapshot_records = result.rows.snapshot_records;
-                    used.evaluator = result.evaluator;
-                }
-                used.selection.result_rows = result.rows.result_rows;
-                last_result = Some(result);
-                }
-                *active_record = None;
-                let mut result = last_result.expect("a nonempty chain batch was admitted");
-                let delivered = u64::try_from(result.value.len())
-                    .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?;
-                execution
-                    .permit
-                    .charge_rows_at((execution.clock)(), delivered)
-                    .map_err(|error| source(WriteTxnError::Authorization(error)))?;
-                let stats = fgdb_gql::GraphWriteProgramStats {
-                    completed_statements: chains.len(),
-                    selection: used.selection,
-                    evaluator: used.evaluator,
-                    target_vertex_visits: 0,
-                    target_edge_visits: 0,
-                    mutation_effects,
-                    created_vertices: used.created_vertices,
-                    created_edges: used.created_edges,
+                                &mut execution,
+                                false,
+                            )
+                            .map_err(|error| error.map_source(mutation_error))?;
+                            tail.complete(staged, &mut returning)
+                                .map_err(|error| GqlQueryError::Source(mutation_error(error)))?;
+                            (
+                                GraphInsertStats {
+                                    selection: returning.rows,
+                                    evaluator: returning.evaluator,
+                                    created_vertices: 0,
+                                    created_edges: 0,
+                                },
+                                staged.effects,
+                            )
+                        }
+                    };
+
+                    (stats, returning, effects)
                 };
-                super::output::admit_output(
+                let observed = u128::from(mutation_effects) + u128::from(effects);
+                if observed > u128::from(policy.max_mutation_effects) {
+                    return Err(GqlQueryError::Source(mutation_error(
+                        GraphMutationError::EffectLimit {
+                            limit: policy.max_mutation_effects,
+                            observed,
+                        },
+                    )));
+                }
+                mutation_effects = observed as u64;
+                // Query counters include their write prefix and complete
+                // WITH tail. Do not lose that work or count it twice.
+                used.selection.snapshot_records = used
+                    .selection
+                    .snapshot_records
+                    .saturating_add(returning.rows.snapshot_records);
+                used.evaluator.work_units = used
+                    .evaluator
+                    .work_units
+                    .saturating_add(returning.evaluator.work_units);
+                used.evaluator.scratch_entries = used
+                    .evaluator
+                    .scratch_entries
+                    .saturating_add(returning.evaluator.scratch_entries);
+                used.created_vertices =
+                    used.created_vertices.saturating_add(stats.created_vertices);
+                used.created_edges = used.created_edges.saturating_add(stats.created_edges);
+                rows = Some(returning.value);
+                at += 1;
+            }
+            if let Some(frozen) = frozen {
+                finish_frozen(
                     workspace.transaction(),
                     self,
                     query_cx,
-                    scope,
+                    frozen,
                     &mut execution,
-                    policy.query,
-                    &mut result,
-                    |rows, work, output| admit(stats, rows, work, output),
                 )
                 .map_err(source)?;
+            }
+            let Some(value) = rows else {
+                return Err(source(WriteTxnError::NoPreparedWrite));
+            };
+            let mut result = GqlQueryExecution {
+                rows: GqlExecutionStats {
+                    snapshot_records: used.selection.snapshot_records,
+                    result_rows: u64::try_from(value.len())
+                        .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?,
+                },
+                evaluator: used.evaluator,
+                value,
+            };
+            // A continuation is an input to another write, never an
+            // implicit public RETURN. Keep this boundary explicit even
+            // when a future final step retains private rows internally.
+            if !chain.returns_rows() {
+                result.value.clear();
+                result.rows.result_rows = 0;
+            }
+            result.rows.snapshot_records = used.selection.snapshot_records;
+            result.evaluator = used.evaluator;
+            if let Some(continuation) = continuation {
+                result = query_cx.with_restriction(|| {
+                    let controls = RefCell::new(&mut execution);
+                    let database = RefCell::new(&mut *self);
+                    let transaction = workspace.transaction();
+                    let graph = fgdb_gql::WithElementReads {
+                        source: ChainSource {
+                            transaction,
+                            database: &database,
+                            cx: query_cx,
+                            scope,
+                            execution: &controls,
+                        },
+                        elements: |element, key| {
+                            selection::returning_element_property(
+                                transaction,
+                                &database.borrow(),
+                                query_cx,
+                                element,
+                                key,
+                                scope,
+                                &controls,
+                            )
+                        },
+                    };
+                    chain.finish_read_continuation(
+                        continuation,
+                        result,
+                        policy.query,
+                        graph,
+                        || {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            controls.borrow_mut().checkpoint()
+                        },
+                    )
+                })?;
+                used.selection.snapshot_records = result.rows.snapshot_records;
                 used.evaluator = result.evaluator;
-                execution.bind_decision(workspace.transaction());
-                Ok((ChainState {
-                    workspace,
-                    execution,
-                    used,
-                    mutation_effects,
-                }, result))
+            }
+            used.selection.result_rows = result.rows.result_rows;
+            last_result = Some(result);
+        }
+        *active_record = None;
+        let mut result = last_result.expect("a nonempty chain batch was admitted");
+        let delivered = u64::try_from(result.value.len())
+            .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?;
+        execution
+            .permit
+            .charge_rows_at((execution.clock)(), delivered)
+            .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+        let stats = fgdb_gql::GraphWriteProgramStats {
+            completed_statements: chains.len(),
+            selection: used.selection,
+            evaluator: used.evaluator,
+            target_vertex_visits: 0,
+            target_edge_visits: 0,
+            mutation_effects,
+            created_vertices: used.created_vertices,
+            created_edges: used.created_edges,
+        };
+        super::output::admit_output(
+            workspace.transaction(),
+            self,
+            query_cx,
+            scope,
+            &mut execution,
+            policy.query,
+            &mut result,
+            |rows, work, output| admit(stats, rows, work, output),
+        )
+        .map_err(source)?;
+        used.evaluator = result.evaluator;
+        execution.bind_decision(workspace.transaction());
+        Ok((
+            ChainState {
+                workspace,
+                execution,
+                used,
+                mutation_effects,
+            },
+            result,
+        ))
     }
 
     /// A standalone read retains the same masked overlay and signed allowance
@@ -1703,9 +1705,17 @@ impl<V: Vfs + Clone> Database<V> {
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
             &mut dyn crate::AuthorizedWriteOutput,
         ) -> Result<(), WriteTxnError>,
-    ) -> Result<(ChainState<'cx, 'permit, Clock>, GqlQueryExecution<GraphValueRow>), Fault> {
+    ) -> Result<
+        (
+            ChainState<'cx, 'permit, Clock>,
+            GqlQueryExecution<GraphValueRow>,
+        ),
+        Fault,
+    > {
         if !scope.rights().can_read() {
-            return Err(source(WriteTxnError::Authorization(Error::PermissionDenied)));
+            return Err(source(WriteTxnError::Authorization(
+                Error::PermissionDenied,
+            )));
         }
         read.admit_patterns(&mut |pattern| {
             query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
@@ -1736,15 +1746,23 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
         // The collector used the remaining allowance. Hydration must see the
         // complete execution bill, including every preceding statement.
-        result.rows.snapshot_records = result.rows.snapshot_records
+        result.rows.snapshot_records = result
+            .rows
+            .snapshot_records
             .saturating_add(state.used.selection.snapshot_records);
-        result.evaluator.work_units = result.evaluator.work_units
+        result.evaluator.work_units = result
+            .evaluator
+            .work_units
             .saturating_add(state.used.evaluator.work_units);
-        result.evaluator.scratch_entries = result.evaluator.scratch_entries
+        result.evaluator.scratch_entries = result
+            .evaluator
+            .scratch_entries
             .saturating_add(state.used.evaluator.scratch_entries);
         let delivered = u64::try_from(result.value.len())
             .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?;
-        state.execution.permit
+        state
+            .execution
+            .permit
             .charge_rows_at((state.execution.clock)(), delivered)
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
         super::output::admit_output(

@@ -1004,7 +1004,9 @@ fn concurrent_bead_creation_cannot_red_another_panes_tree() {
     );
 
     // Pane B creates k beads while pane A holds a freeze taken before any of
-    // them landed. Every k must leave pane A's tree green.
+    // them landed. Every k must leave pane A's tree green -- including when a
+    // concurrently created bead sorts lexicographically ahead of line 1
+    // (`"fgdb-01q9"`).
     for k in 1..=5 {
         let mut grown = corpus.clone();
         for i in 0..k {
@@ -1018,16 +1020,81 @@ fn concurrent_bead_creation_cannot_red_another_panes_tree() {
             "{k} concurrently created bead(s) changed pane A's verdict"
         );
     }
-
-    // Vacuity control. Floors that never fire would pass every assertion above
-    // while protecting nothing, so losing a record MUST still be caught.
-    let first_line_end = corpus.find('\n').expect("corpus has a first record") + 1;
-    let shrunk = corpus[first_line_end..].to_string();
-    let codes = write_and_validate(&shrunk);
-    assert!(
-        codes.iter().any(|code| code.ends_with("_below_floor")),
-        "deleting a bead must trip a floor, got {codes:?}"
+    let low_hash = format!(
+        "{{\"id\":\"fgdb-00000\",\"title\":\"low-hash concurrent create\",\"status\":\"open\",\"labels\":[\"b1\"]}}\n{corpus}"
     );
+    assert_eq!(
+        write_and_validate(&low_hash),
+        repo_verdict,
+        "a low-hash bead sorting at line 1 must not change pane A's verdict"
+    );
+
+    // Vacuity controls (fgdb-rc1111-arch-floor-vacuity-2cskq). Floors that
+    // never fire would pass every assertion above while protecting nothing, yet
+    // deleting line 1 unconditionally assumed line 1 sat on a zero-slack floor
+    // (breaking as soon as any valid bead with id < "fgdb-01q9" sorted first).
+    // Prove both source-count and resolution-class floors fire deterministically
+    // on both `corpus` and `low_hash`:
+    let base_registry = architecture::load_from_repo(&fixture).expect("fixture registry loads");
+    let count_floor = base_registry.bead_provenance.bead_count_floor;
+    assert!(count_floor > 0, "bead_count_floor must be positive");
+    for (label, candidate) in [("corpus", corpus.as_str()), ("low_hash", low_hash.as_str())] {
+        let lines: Vec<&str> = candidate.lines().collect();
+        assert!(
+            lines.len() >= count_floor,
+            "{label} must start at or above bead_count_floor ({} < {count_floor})",
+            lines.len()
+        );
+
+        // 1. Sub-floor corpus truncation must trip `bead_source_count_below_floor`.
+        let mut sub_floor = lines[..count_floor - 1].join("\n");
+        sub_floor.push('\n');
+        let sub_codes = write_and_validate(&sub_floor);
+        assert!(
+            sub_codes
+                .iter()
+                .any(|code| code == "bead_source_count_below_floor"),
+            "{label}: truncating to {} (< {count_floor}) must trip bead_source_count_below_floor, got {sub_codes:?}",
+            count_floor - 1
+        );
+
+        // 2. Tightened count floor (`observed_lines`) + deleting line 1 must trip
+        //    `bead_source_count_below_floor` regardless of which bead sits at line 1.
+        let first_line_end = candidate.find('\n').expect("candidate has a first record") + 1;
+        fs::write(&beads, &candidate[first_line_end..]).expect("shrunk candidate writes");
+        let mut tight_registry = base_registry.clone();
+        tight_registry.bead_provenance.bead_count_floor = lines.len();
+        let tight_codes: Vec<String> =
+            architecture::validate_architecture(&tight_registry, &fixture)
+                .into_iter()
+                .map(|violation| violation.code)
+                .collect();
+        assert!(
+            tight_codes
+                .iter()
+                .any(|code| code == "bead_source_count_below_floor"),
+            "{label}: deleting line 1 under tight bead_count_floor={} must trip bead_source_count_below_floor, got {tight_codes:?}",
+            lines.len()
+        );
+
+        // 3. Removing a tight `exact_override` record (`fgdb-01q9`, floor 19 == 19)
+        //    by identity rather than line number must trip
+        //    `bead_resolution_class_count_below_floor` even when `fgdb-00000` is line 1.
+        let mut without_override = lines
+            .iter()
+            .copied()
+            .filter(|line| !line.contains("\"id\":\"fgdb-01q9\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        without_override.push('\n');
+        let override_codes = write_and_validate(&without_override);
+        assert!(
+            override_codes
+                .iter()
+                .any(|code| code == "bead_resolution_class_count_below_floor"),
+            "{label}: removing exact_override fgdb-01q9 must trip bead_resolution_class_count_below_floor, got {override_codes:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

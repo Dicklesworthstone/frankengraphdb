@@ -8,7 +8,7 @@ use crate::ranking::{Ranked, retain_best};
 use crate::{BeaconError, WorkControl};
 
 const MAX_DIMENSIONS: usize = 65_536;
-const MAX_LEVEL: usize = 32;
+pub(crate) const MAX_LEVEL: usize = 32;
 
 #[cfg(test)]
 thread_local! {
@@ -123,11 +123,11 @@ pub struct Neighbor {
 }
 
 #[derive(Clone)]
-struct Node {
-    id: VId,
-    vector: Arc<[f32]>,
-    norm: f64,
-    links: Vec<Vec<usize>>,
+pub(crate) struct Node {
+    pub(crate) id: VId,
+    pub(crate) vector: Arc<[f32]>,
+    pub(crate) norm: f64,
+    pub(crate) links: Vec<Vec<usize>>,
 }
 
 /// An immutable HNSW segment. Construction uses sorted VIds and ID-derived
@@ -135,10 +135,10 @@ struct Node {
 /// change its topology. It is not a durable object or a transaction authority.
 #[derive(Clone)]
 pub struct Hnsw {
-    config: HnswConfig,
-    nodes: Vec<Node>,
-    entry: Option<usize>,
-    top_level: usize,
+    pub(crate) config: HnswConfig,
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) entry: Option<usize>,
+    pub(crate) top_level: usize,
 }
 
 impl core::fmt::Debug for Hnsw {

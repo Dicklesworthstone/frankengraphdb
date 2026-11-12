@@ -53,10 +53,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// retained. Repeating a seal is content-addressed and idempotent in graph
     /// semantics; it does not create a Chronicle commit or advance the frontier.
     ///
-    /// This first durable profile retains the complete Tier-D source. Queries
-    /// in `[floor, frontier]` can reopen the run; earlier cuts still use the
-    /// retained Tier-D history. A later ordinary graph write publishes a fresh
-    /// root without old attachments, preventing stale compressed reads.
+    /// This profile retains the complete Tier-D source. Queries in
+    /// `[floor, verified_through]` reopen the run directly; earlier cuts and
+    /// cuts after an unsealed edge mutation on `relation` use the retained
+    /// Tier-D history, while commits that do not mutate `relation`'s edges
+    /// carry its attachment forward across subsequent roots.
     ///
     /// Source admission, compressed output and retained origin cardinality
     /// have explicit limits. Origins are reconstructed from original committed
@@ -133,12 +134,29 @@ impl<V: Vfs + Clone> Database<V> {
             .await?;
         // Fully stage the replacement before the externally visible swap. The
         // immutable graph payloads and their indexes are shared with old views.
+        let previous_root = self.snapshot.root;
         let mut snapshot = (*self.snapshot).clone();
         snapshot.root = root;
         snapshot.manifest = manifest;
-        snapshot.sealed_source_root = Some(source_root);
+        if self
+            .attached_runs
+            .values()
+            .all(|entry| entry.resolved_source_root(source_root.0) == source_root.0)
+        {
+            snapshot.sealed_source_root = Some(source_root);
+        }
         let mut attached_runs = self.attached_runs.clone();
-        attached_runs.insert(relation, run_id);
+        attached_runs.insert(
+            relation,
+            fgdb_strata::root::runs::AdjRunRef::carried(
+                relation,
+                run_id.0,
+                source_root.0,
+                floor,
+                frontier,
+                frontier,
+            ),
+        );
         query_cx
             .checkpoint()
             .map_err(SealedError::Interrupted)
@@ -162,6 +180,8 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(SealPublicationError::Publication)?;
         // No suspension may separate successful publication from this swap.
         self.slot_generation = next_generation;
+        self.receipts.rebind_root_binding(previous_root, root);
+        self.receipts.rebind_root_binding(source_root, root);
         self.snapshot = Arc::new(snapshot);
         self.attached_runs = attached_runs;
         self.state = DatabaseState::Healthy {

@@ -11,4 +11,5 @@ workspace = true
 [dependencies]
 asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "3d0151aecae2443a735388e6ae4fbd387e78db2c", version = "=0.6.0", default-features = false }
 fgdb-delta-types = { path = "../fgdb-delta-types" }
+fgdb-policy = { path = "../fgdb-policy" }
 fgdb-types = { path = "../fgdb-types" }

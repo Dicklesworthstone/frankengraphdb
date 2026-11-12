@@ -734,3 +734,416 @@ fn text_chain_batches_cross_the_real_wire_and_keep_one_atomic_completion() {
         fixture.stop(cx, 1, 3, 2).await;
     });
 }
+
+#[test]
+fn four_thousand_distinct_key_vertex_and_relationship_merges_scale_linearly_and_enforce_late_row_scope()
+ {
+    use std::collections::BTreeSet;
+
+    run(async |cx| {
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        let commit = contexts.commit();
+        let txn = contexts.txn();
+        let query = contexts.query();
+
+        // 1. Measure exact snapshot-record (max_nodes) and work-unit (max_work)
+        // consumption across 1,000, 2,000, and 4,000 distinct-key MERGE rows via
+        // tight capability-permit binary search, proving linear 1:2:4 scaling.
+        let mut symbols = Symbols::new();
+        for (kind, name, id) in [
+            (GraphSymbolKind::Label, "Person", 1),
+            (GraphSymbolKind::Property, "name", 1),
+            (GraphSymbolKind::Property, "age", 2),
+            (GraphSymbolKind::Property, "secret", 3),
+            (GraphSymbolKind::Relation, "KNOWS", 1),
+        ] {
+            symbols.bind(kind, name, id).unwrap();
+        }
+        let default_config = DatabaseConfig::new("social", keys(), issuer_key());
+        let authority = issuer(issuer_key(), &keys(), 1).unwrap();
+        let vertex_stmt = "MERGE (n:Person {name: $name}) SET n.age = $age";
+        let measure_min_work = async |count: usize| -> u64 {
+            let params: Vec<_> = (0..count)
+                .map(|i| {
+                    fgdb_gql::GqlParameters::new()
+                        .with_scalar(
+                            "name",
+                            fgdb_types::CanonicalScalar::ucs_basic_text(&format!("p-{i:04}"))
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .with_int64("age", (i % 97) as i64)
+                        .unwrap()
+                })
+                .collect();
+            let mut low = 1_u64;
+            let mut high = DatabaseConfig::DEFAULT_QUERY_LIMITS[2];
+            while low < high {
+                let mid = low + (high - low) / 2;
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let token = authority
+                    .issue_at(
+                        &Grant {
+                            branch: fgdb_server::TRUNK.into(),
+                            labels: Scope::All,
+                            relations: Scope::All,
+                            properties: Scope::All,
+                            rights: Rights::ReadWrite,
+                            limits: QueryLimits {
+                                max_nodes: DatabaseConfig::DEFAULT_QUERY_LIMITS[0],
+                                max_work: mid,
+                                max_rows: 0,
+                            },
+                            expires_at_ms: u64::MAX / 2,
+                        },
+                        500,
+                    )
+                    .unwrap();
+                let mut session = db
+                    .authorized_write_session(
+                        &txn,
+                        &commit,
+                        &authority,
+                        &token,
+                        fgdb_server::TRUNK,
+                        symbols.clone(),
+                        fgdb_delta_types::RelationId(1),
+                        default_config.write_policy,
+                        count,
+                        || 1_000,
+                    )
+                    .unwrap();
+                if session
+                    .query_batch_stats(&query, vertex_stmt, &params)
+                    .await
+                    .is_ok()
+                {
+                    high = mid;
+                } else {
+                    low = mid + 1;
+                }
+            }
+            low
+        };
+        let w1000 = measure_min_work(1_000).await;
+        let w2000 = measure_min_work(2_000).await;
+        let w4000 = measure_min_work(4_000).await;
+        // Exact affine-linear scaling check W(N) = c_0 + c_1 * N:
+        // marginal work per 1,000 rows is constant (zero quadratic drift),
+        // and 4x input stays strictly below 4x total work.
+        let delta_1k_to_2k = w2000 - w1000;
+        let delta_1k_to_4k = w4000 - w1000;
+        assert!(
+            delta_1k_to_2k > 0 && delta_1k_to_4k == delta_1k_to_2k * 3 && w4000 < w1000 * 4,
+            "expected exact affine-linear work scaling: w1000={w1000}, w2000={w2000}, w4000={w4000}"
+        );
+
+        // 2. Real FGP TCP server with default ServerLimits and default host
+        // query/work/snapshot limits (100,000 snapshot records, 10,000,000 work),
+        // raising only max_statements = 4,000.
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "fgdb-server-4k-merge-batch-{}-{time}",
+            std::process::id(),
+        ));
+        drop(Database::create(&commit, &path, keys()).await.unwrap());
+        let mut server = Server::new(cx, ServerLimits::default()).unwrap();
+        let mut config = DatabaseConfig::new("social", keys(), issuer_key());
+        assert_eq!(
+            config.query_policy.rows.max_snapshot_records(),
+            Some(100_000),
+            "must run under default 100k snapshot-record ceiling"
+        );
+        config.symbols = symbols.clone();
+        config.max_statements = 4_000;
+        server.open_database(cx, &path, config).await.unwrap();
+        let shutdown = server.shutdown();
+        let server = Arc::new(server);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut task = cx
+            .spawn(move |child| async move { server.serve(&child, listener).await.unwrap() })
+            .unwrap();
+
+        let connect = async |grant_spec: &Grant| -> Client {
+            let token = issue_token(&authority, grant_spec).unwrap();
+            let mut client = Client::connect(cx, address, token).await.unwrap();
+            client.select(cx, "social").await.unwrap();
+            client
+        };
+        let mut writer = connect(&grant(Rights::ReadWrite, 0)).await;
+
+        // 2a. Forbidden property in late row 1,023 (MAX_BATCH_ARGUMENT_SETS = 1,024,
+        // > 2.2x past the old ~447-row O(N^2) cliff) under restricted Grant refuses
+        // the whole 1,024-statement batch with PermissionDenied and 0 effects.
+        let mut restricted = connect(&Grant {
+            branch: fgdb_server::TRUNK.into(),
+            labels: Scope::All,
+            relations: Scope::All,
+            properties: Scope::Only(BTreeSet::from([
+                fgdb_delta_types::PropertyKeyId(1),
+                fgdb_delta_types::PropertyKeyId(2),
+            ])),
+            rights: Rights::ReadWrite,
+            limits: QueryLimits {
+                max_nodes: 100_000,
+                max_work: 10_000_000,
+                max_rows: 0,
+            },
+            expires_at_ms: u64::MAX / 2,
+        })
+        .await;
+        let mut late_forbidden_args: Vec<Vec<(String, WireValue)>> = (0..1_024)
+            .map(|i| {
+                vec![
+                    ("name".into(), WireValue::Text(format!("p-{i:04}"))),
+                    (
+                        "props".into(),
+                        WireValue::Map(vec![("age".into(), WireValue::Int((i % 97) as i64))]),
+                    ),
+                ]
+            })
+            .collect();
+        late_forbidden_args[1_023][1] = (
+            "props".into(),
+            WireValue::Map(vec![("secret".into(), WireValue::Int(999))]),
+        );
+        let late_refusal = restricted
+            .execute_batch(
+                cx,
+                "MERGE (n:Person {name: $name}) SET n += $props",
+                late_forbidden_args,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &late_refusal,
+                ClientError::Server {
+                    code: ErrorCode::PermissionDenied | ErrorCode::Statement,
+                    message,
+                } if message.contains("argument set 1023")
+            ),
+            "forbidden property at row 1,023 must refuse the whole 1,024-row batch: {late_refusal:?}"
+        );
+        restricted.close(cx).await.unwrap();
+
+        // 2b. Commit 4,000 distinct-key vertex MERGE statements across 4 x 1,000-row
+        // FGP EXECUTE_BATCH frames (respecting MAX_BATCH_ARGUMENT_SETS = 1,024 while
+        // exceeding the old ~447-row / 100k-snapshot-record cliff by >35x on chunk 4).
+        for chunk in 0..4_u64 {
+            let base = (chunk as usize) * 1_000;
+            let vertex_args: Vec<Vec<(String, WireValue)>> = (base..base + 1_000)
+                .map(|i| {
+                    vec![
+                        ("name".into(), WireValue::Text(format!("p-{i:04}"))),
+                        ("age".into(), WireValue::Int((i % 97) as i64)),
+                    ]
+                })
+                .collect();
+            assert_eq!(
+                writer
+                    .execute_batch(cx, vertex_stmt, vertex_args)
+                    .await
+                    .unwrap(),
+                Outcome::WriteCommitted {
+                    seq: chunk + 1,
+                    statements: 1_000,
+                }
+            );
+        }
+
+        // 2c. Commit 4,000 distinct-endpoint relationship MERGE statements across
+        // 4 x 1,000-row FGP EXECUTE_BATCH frames against all 4,000 committed vertices
+        // under default 100k snapshot-record limits.
+        let edge_stmt = "MATCH (a:Person {name: $src}), (b:Person {name: $dst}) \
+                         MERGE (a)-[r:KNOWS]->(b) SET r.age = $w";
+        for chunk in 0..4_u64 {
+            let base = (chunk as usize) * 1_000;
+            let edge_args: Vec<Vec<(String, WireValue)>> = (base..base + 1_000)
+                .map(|i| {
+                    vec![
+                        ("src".into(), WireValue::Text(format!("p-{i:04}"))),
+                        (
+                            "dst".into(),
+                            WireValue::Text(format!("p-{:04}", (i + 1) % 4_000)),
+                        ),
+                        ("w".into(), WireValue::Int((i % 53) as i64)),
+                    ]
+                })
+                .collect();
+            assert_eq!(
+                writer
+                    .execute_batch(cx, edge_stmt, edge_args)
+                    .await
+                    .unwrap(),
+                Outcome::WriteCommitted {
+                    seq: 5 + chunk,
+                    statements: 1_000,
+                }
+            );
+        }
+        writer.close(cx).await.unwrap();
+
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+
+        // 3. Reopen durable DB and prove exact final-graph & receipt parity with
+        // sequential per-statement authorized execution on a reference DB (using
+        // 64 rows for per-statement commit comparison to keep runtime fast while
+        // checking full 4,000 durable vertices & 4,000 durable edges on the wire DB).
+        let durable = Database::open(&commit, &path, keys()).await.unwrap();
+        assert_eq!(durable.frontier().unwrap(), CommitSeq(8));
+        assert_eq!(durable.vertices().unwrap().len(), 4_000);
+        assert_eq!(durable.edges().unwrap().len(), 4_000);
+
+        let parity_n = 64_usize;
+        let mut batch_db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seq_db = Database::open_memory(&commit, keys()).await.unwrap();
+        let rw_token = authority
+            .issue_at(&grant(Rights::ReadWrite, 0), 500)
+            .unwrap();
+        let parity_v_params: Vec<_> = (0..parity_n)
+            .map(|i| {
+                fgdb_gql::GqlParameters::new()
+                    .with_scalar(
+                        "name",
+                        fgdb_types::CanonicalScalar::ucs_basic_text(&format!("p-{i:04}")).unwrap(),
+                    )
+                    .unwrap()
+                    .with_int64("age", (i % 97) as i64)
+                    .unwrap()
+            })
+            .collect();
+        let parity_e_params: Vec<_> = (0..parity_n)
+            .map(|i| {
+                fgdb_gql::GqlParameters::new()
+                    .with_scalar(
+                        "src",
+                        fgdb_types::CanonicalScalar::ucs_basic_text(&format!("p-{i:04}")).unwrap(),
+                    )
+                    .unwrap()
+                    .with_scalar(
+                        "dst",
+                        fgdb_types::CanonicalScalar::ucs_basic_text(&format!(
+                            "p-{:04}",
+                            (i + 1) % parity_n
+                        ))
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .with_int64("w", (i % 53) as i64)
+                    .unwrap()
+            })
+            .collect();
+
+        let (batch_v_stats, _) = batch_db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &authority,
+                &rw_token,
+                fgdb_server::TRUNK,
+                symbols.clone(),
+                fgdb_delta_types::RelationId(1),
+                default_config.write_policy,
+                parity_n,
+                || 1_000,
+            )
+            .unwrap()
+            .query_batch_stats(&query, vertex_stmt, &parity_v_params)
+            .await
+            .unwrap();
+        let (batch_e_stats, _) = batch_db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &authority,
+                &rw_token,
+                fgdb_server::TRUNK,
+                symbols.clone(),
+                fgdb_delta_types::RelationId(1),
+                default_config.write_policy,
+                parity_n,
+                || 1_000,
+            )
+            .unwrap()
+            .query_batch_stats(&query, edge_stmt, &parity_e_params)
+            .await
+            .unwrap();
+
+        let mut seq_created_vertices = 0;
+        let mut seq_created_edges = 0;
+        for p in &parity_v_params {
+            let (s, _) = seq_db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &authority,
+                    &rw_token,
+                    fgdb_server::TRUNK,
+                    symbols.clone(),
+                    fgdb_delta_types::RelationId(1),
+                    default_config.write_policy,
+                    1,
+                    || 1_000,
+                )
+                .unwrap()
+                .query_stats(&query, vertex_stmt, p)
+                .await
+                .unwrap();
+            seq_created_vertices += s.created_vertices;
+        }
+        for p in &parity_e_params {
+            let (s, _) = seq_db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &authority,
+                    &rw_token,
+                    fgdb_server::TRUNK,
+                    symbols.clone(),
+                    fgdb_delta_types::RelationId(1),
+                    default_config.write_policy,
+                    1,
+                    || 1_000,
+                )
+                .unwrap()
+                .query_stats(&query, edge_stmt, p)
+                .await
+                .unwrap();
+            seq_created_edges += s.created_edges;
+        }
+        assert_eq!(batch_v_stats.created_vertices, seq_created_vertices);
+        assert_eq!(batch_e_stats.created_edges, seq_created_edges);
+        let canonical_graph = |db: &Database<_>| {
+            let vertices = db.vertices().unwrap();
+            let by_vid: std::collections::BTreeMap<_, _> = vertices
+                .iter()
+                .map(|v| (v.vid, (v.labels.clone(), v.props.clone(), v.retired_at)))
+                .collect();
+            let mut logical_vertices: Vec<_> = by_vid.values().cloned().collect();
+            logical_vertices.sort();
+            let mut logical_edges: Vec<_> = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .map(|e| {
+                    (
+                        by_vid[&e.entry.src].clone(),
+                        e.entry.relation,
+                        by_vid[&e.entry.dst].clone(),
+                        e.props,
+                        e.entry.retired_at,
+                    )
+                })
+                .collect();
+            logical_edges.sort();
+            (logical_vertices, logical_edges)
+        };
+        assert_eq!(canonical_graph(&batch_db), canonical_graph(&seq_db));
+    });
+}

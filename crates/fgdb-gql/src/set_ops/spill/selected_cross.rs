@@ -7,6 +7,7 @@ pub(super) struct Selection {
     code: Box<[GraphSetPredicateOp]>,
     columns: Option<Box<[usize]>>,
     vertex_seed_column: Option<usize>,
+    identity_seed_column: Option<(usize, bool)>,
     property_seed_column: Option<(usize, fgdb_delta_types::PropertyKeyId)>,
 }
 
@@ -54,7 +55,7 @@ pub(super) fn compile(
             .collect::<Vec<_>>()
             .into_boxed_slice()
     });
-    let (vertex_seed_column, property_seed_column) =
+    let (vertex_seed_column, identity_seed_column, property_seed_column) =
         if right.order.is_empty() && right.offset == 0 && right.count.is_none() {
             if let SetNode::Pattern(pattern) = &right.node {
                 let mut free = |_| Ok::<(), core::convert::Infallible>(());
@@ -65,23 +66,39 @@ pub(super) fn compile(
                     &mut free,
                 )
                 .unwrap_or_else(|never| match never {});
-                let identity = pattern.seeded_root_column().and_then(|root| {
+                let root = pattern.seeded_root_column();
+                let identity = root.and_then(|root| {
                     keys.iter()
                         .find_map(|&(left, right)| (right == root).then_some(left))
                 });
-                let property = if identity.is_none() {
+                let id_seed = if identity.is_none() {
+                    root.and_then(|root| {
+                        super::super::execute::selected_cross_id_probe_keys(
+                            left.types.len(),
+                            code,
+                            columns.as_deref(),
+                            &mut free,
+                        )
+                        .unwrap_or_else(|never| match never {})
+                        .into_iter()
+                        .find_map(|(left, right, text)| (right == root).then_some((left, text)))
+                    })
+                } else {
+                    None
+                };
+                let property = if identity.is_none() && id_seed.is_none() {
                     keys.iter().find_map(|&(left, right)| {
                         pattern.seeded_root_property(right).map(|key| (left, key))
                     })
                 } else {
                     None
                 };
-                (identity, property)
+                (identity, id_seed, property)
             } else {
-                (None, None)
+                (None, None, None)
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
     let plan = SpillSetCrossPlan {
         left: Box::new(AsyncSpillSetPlan::compile_at(
@@ -102,6 +119,7 @@ pub(super) fn compile(
             code: code.into(),
             columns,
             vertex_seed_column,
+            identity_seed_column,
             property_seed_column,
         }),
     };
@@ -143,6 +161,21 @@ impl SpillSetCrossPlan {
             return None;
         }
         self.selection.as_ref()?.vertex_seed_column
+    }
+
+    /// A necessary `id(n) = col` (`false`) or `elementId(n) = col` (`true`)
+    /// correlation on the right pattern's root.
+    pub fn identity_seed_column(&self) -> Option<(usize, bool)> {
+        if !matches!(
+            self.right().source(),
+            AsyncSpillSetSourcePlan::Vertex(_)
+                | AsyncSpillSetSourcePlan::Edge(_)
+                | AsyncSpillSetSourcePlan::Join(_)
+                | AsyncSpillSetSourcePlan::Walk(_)
+        ) {
+            return None;
+        }
+        self.selection.as_ref()?.identity_seed_column
     }
 
     /// A necessary scalar equality between one leading column and the right

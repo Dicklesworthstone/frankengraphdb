@@ -89,9 +89,9 @@ pub enum IndexMutation {
 }
 
 #[derive(Clone)]
-struct StoredDocument {
-    vector: Option<Arc<[f32]>>,
-    text: Option<AnalyzedText>,
+pub(crate) struct StoredDocument {
+    pub(crate) vector: Option<Arc<[f32]>>,
+    pub(crate) text: Option<AnalyzedText>,
 }
 
 impl StoredDocument {
@@ -151,9 +151,9 @@ impl StoredDocument {
 }
 
 #[derive(Clone)]
-struct LiveDocument {
-    generation: u64,
-    document: Arc<StoredDocument>,
+pub(crate) struct LiveDocument {
+    pub(crate) generation: u64,
+    pub(crate) document: Arc<StoredDocument>,
 }
 
 #[derive(Default)]
@@ -208,10 +208,10 @@ impl StagedSize {
     }
 }
 
-struct Segment {
-    generation: u64,
-    vector: Option<Hnsw>,
-    text: TextSegment,
+pub(crate) struct Segment {
+    pub(crate) generation: u64,
+    pub(crate) vector: Option<Hnsw>,
+    pub(crate) text: TextSegment,
 }
 
 impl Segment {
@@ -252,16 +252,16 @@ impl Segment {
     }
 }
 
-struct Generation {
-    config: Arc<IndexConfig>,
-    sequence: u64,
-    live: BTreeMap<VId, LiveDocument>,
-    segments: Vec<Arc<Segment>>,
-    corpus: CorpusStats,
-    vector_documents: usize,
-    vector_values: usize,
-    text_bytes: usize,
-    document_terms: usize,
+pub(crate) struct Generation {
+    pub(crate) config: Arc<IndexConfig>,
+    pub(crate) sequence: u64,
+    pub(crate) live: BTreeMap<VId, LiveDocument>,
+    pub(crate) segments: Vec<Arc<Segment>>,
+    pub(crate) corpus: CorpusStats,
+    pub(crate) vector_documents: usize,
+    pub(crate) vector_values: usize,
+    pub(crate) text_bytes: usize,
+    pub(crate) document_terms: usize,
 }
 
 impl Generation {
@@ -318,7 +318,7 @@ impl Generation {
         Ok(())
     }
 
-    fn add_stats(
+    pub(crate) fn add_stats(
         &mut self,
         document: &StoredDocument,
         work: &mut dyn WorkControl,
@@ -347,7 +347,7 @@ impl Generation {
         Ok(())
     }
 
-    fn check_limits(&self) -> Result<(), BeaconError> {
+    pub(crate) fn check_limits(&self) -> Result<(), BeaconError> {
         for (resource, actual, limit) in [
             ("live documents", self.live.len(), self.config.max_documents),
             (
@@ -443,7 +443,7 @@ pub struct ApplyReport {
 /// persistent-tree/O(delta) performance claim; index segments themselves share.
 #[derive(Clone)]
 pub struct BeaconIndex {
-    current: Arc<Generation>,
+    pub(crate) current: Arc<Generation>,
 }
 
 impl core::fmt::Debug for BeaconIndex {

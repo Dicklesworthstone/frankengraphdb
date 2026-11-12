@@ -158,6 +158,7 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Word(word)
                     if !matches!(previous, Some(TokenKind::Punct(b'.')))
+                        && !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
                         && self
                             .read_row_bindings
                             .iter()
@@ -179,7 +180,7 @@ impl<'a> Parser<'a> {
     #[allow(clippy::type_complexity)]
     pub(super) fn row_field_correlation(
         &mut self,
-    ) -> Result<Option<(Name<'a>, Option<Name<'a>>, usize, usize)>, GraphPatternTextError> {
+    ) -> Result<Option<(Name<'a>, CorrelationTarget<'a>, usize, usize)>, GraphPatternTextError> {
         if self.read_row_bindings.is_empty() {
             return Ok(None);
         }
@@ -249,11 +250,11 @@ impl<'a> Parser<'a> {
         // successful lookahead cannot bypass graph property name limits or
         // make a reserved delimited map key a graph-property identifier.
         let variable = self.property_variable()?;
-        let key = if source.keys.is_empty() {
-            None
+        let target = if source.keys.is_empty() {
+            CorrelationTarget::Element
         } else {
             self.punct(b'.', ".")?;
-            Some(self.name()?)
+            CorrelationTarget::Property(self.name()?)
         };
         let row = if let Some(row) = row {
             row
@@ -263,6 +264,6 @@ impl<'a> Parser<'a> {
                 .expect("lookahead proved an imported field")
         };
         self.predicates += 1;
-        Ok(Some((variable, key, row, at)))
+        Ok(Some((variable, target, row, at)))
     }
 }

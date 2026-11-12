@@ -176,8 +176,9 @@ impl<V: Vfs + Clone> Database<V> {
         if definition.operand_count() != 0 {
             return Err(StandingQueryError::Unsupported);
         }
+        let frontier = self.registration_frontier();
         cx.with_restriction(|| {
-            State::build(definition, self.snapshot.frontier, policy, &mut || {
+            State::build(definition, frontier, policy, &mut || {
                 cx.checkpoint()
                     .map_err(|_| StandingQueryFailure::Interrupted)
             })

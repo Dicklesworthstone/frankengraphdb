@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 mod bm25;
+mod checkpoint;
 mod control;
 mod exact_fusion;
 pub mod expansion;
@@ -23,6 +24,7 @@ pub mod read;
 
 pub use bm25::boolean::BooleanTextQuery;
 pub use bm25::{Bm25, Bm25Config, Bm25Stats, EditDistance, TextHit, TextMatch};
+pub use checkpoint::BeaconCheckpointError;
 pub use control::{BeaconError, WorkBudget, WorkControl};
 pub use exact_fusion::graph::{GraphHybridHit, GraphHybridQuery};
 pub use exact_fusion::{ExactHybridHit, ExactHybridQuery, ExactRrfProfile, ExactRrfScore};

@@ -161,8 +161,7 @@ fn selection_digest_preserves_legacy_bytes_and_canonical_union_membership() {
     let reordered = FnxSelection {
         vertex_labels: SchemaSelection::any_of(&[LabelId(u64::MAX), LabelId(7), LabelId(7)])
             .unwrap(),
-        relations: SchemaSelection::any_of(&[RelationId(2), RelationId(1), RelationId(2)])
-            .unwrap(),
+        relations: SchemaSelection::any_of(&[RelationId(2), RelationId(1), RelationId(2)]).unwrap(),
         ..base
     };
     assert_eq!(union, reordered);

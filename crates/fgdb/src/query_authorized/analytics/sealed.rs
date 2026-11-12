@@ -285,7 +285,11 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
                     let labels =
                         u32::try_from(row.labels.len()).map_err(|_| Error::SizeOverflow)?;
                     admit(Step::Vertex(labels))?;
-                    if !options.selection.vertex_labels.intersects_sorted(&row.labels) {
+                    if !options
+                        .selection
+                        .vertex_labels
+                        .intersects_sorted(&row.labels)
+                    {
                         return Ok(());
                     }
                     push_staged(

@@ -38,6 +38,7 @@ pub const ADJ_RUN_OBJECT_KIND: u16 = 0x058d;
 pub const MAX_ADJ_RUN_BYTES: usize = 256 * 1024 * 1024;
 const MAGIC: &[u8; 4] = b"FGRN";
 const FORMAT: u16 = 1;
+pub const FORMAT_V2: u16 = 2;
 const PROFILE: u16 = 1;
 const CHECKSUM_BYTES: usize = 32;
 const CHECKSUM_DOMAIN: &[u8] = b"fgdb.strata.adj-run-checksum.v1";
@@ -293,6 +294,18 @@ impl AdjRunSegment {
         let origin_identity =
             IdentityColumn::try_new(&identities, identity_limits(identities.len(), limits))
                 .map_err(SealedError::Identity)?;
+        let mut partition = partition.clone();
+        if partition.durable_incoming().is_none() {
+            let incoming = partition.incoming_index(
+                cx,
+                super::IncomingIndexLimits {
+                    max_rows: limits.max_rows,
+                    max_incidences: limits.max_incidences,
+                    max_workspace_bytes: usize::MAX / 2,
+                },
+            )?;
+            partition.set_durable_incoming(incoming.index_arc());
+        }
         checkpoint(cx)?;
         Ok(Self {
             header: AdjRunHeader {
@@ -305,7 +318,7 @@ impl AdjRunSegment {
                 destination_map_id,
                 canonical_stable_id_digest,
             },
-            partition: partition.clone(),
+            partition,
             origins: selected.into(),
             origin_identity: Arc::new(origin_identity),
         })
@@ -323,6 +336,16 @@ impl AdjRunSegment {
         self.partition
     }
 
+    pub(crate) fn bind_envelope(
+        &mut self,
+        envelope_root: PartitionRootVersion,
+        envelope_publication: CommitSeq,
+        verified_through: CommitSeq,
+    ) {
+        self.partition.anchor.admitted_envelope =
+            Some((envelope_root, envelope_publication, verified_through));
+    }
+
     pub fn origin(&self, eid: EId) -> Option<OriginBirthOrder<EId>> {
         origin_in(&self.origins, eid)
     }
@@ -331,9 +354,30 @@ impl AdjRunSegment {
     /// embedded FGSI image, compressed identity column, origins and checksum.
     /// A complete encoded run is in memory; this is not a mapped-page writer.
     pub fn encode(&self, cx: &QueryCx, limits: SealedLimits) -> Result<Vec<u8>, AdjRunError> {
+        self.encode_versioned(cx, limits, false)
+    }
+
+    /// Encode canonical FGRN-v2 dual-face (`E_out` + `E_in` Elias-Fano CSR)
+    /// bytes so cold reload and `SealedGraphView` (`Reversed` / `Undirected`)
+    /// serve incoming traversals directly without `O(|E|)` transpose rebuild.
+    pub fn encode_dual_face(
+        &self,
+        cx: &QueryCx,
+        limits: SealedLimits,
+    ) -> Result<Vec<u8>, AdjRunError> {
+        self.encode_versioned(cx, limits, true)
+    }
+
+    fn encode_versioned(
+        &self,
+        cx: &QueryCx,
+        limits: SealedLimits,
+        dual_face: bool,
+    ) -> Result<Vec<u8>, AdjRunError> {
         checkpoint(cx)?;
+        let max_bytes = limits.max_image_bytes.min(MAX_ADJ_RUN_BYTES);
         let image = self.partition.encode(cx, limits)?;
-        let mut scalars = Output::new(limits.max_image_bytes.min(MAX_ADJ_RUN_BYTES));
+        let mut scalars = Output::new(max_bytes);
         for (_, origin) in self.origins.iter() {
             checkpoint(cx)?;
             for scalar in [
@@ -344,11 +388,41 @@ impl AdjRunSegment {
                 scalars.put(encode_u64(scalar).as_bytes())?;
             }
         }
+        let incoming_bytes = if dual_face {
+            let owned;
+            let index_ref = match self.partition.durable_incoming() {
+                Some(idx) => idx,
+                None => {
+                    owned = self
+                        .partition
+                        .incoming_index(
+                            cx,
+                            super::IncomingIndexLimits {
+                                max_rows: limits.max_rows,
+                                max_incidences: limits.max_incidences,
+                                max_workspace_bytes: usize::MAX / 2,
+                            },
+                        )?
+                        .index_arc();
+                    &owned
+                }
+            };
+            Some(super::incoming::encode_durable_index(
+                index_ref,
+                self.header.relation,
+                &self.partition.image,
+                max_bytes,
+                &mut || checkpoint(cx),
+            )?)
+        } else {
+            None
+        };
         let identity = &self.origin_identity;
         let descriptor = identity.descriptor();
-        let mut out = Output::new(limits.max_image_bytes.min(MAX_ADJ_RUN_BYTES));
+        let mut out = Output::new(max_bytes);
         out.put(MAGIC)?;
-        out.put(&FORMAT.to_le_bytes())?;
+        let fmt = if dual_face { FORMAT_V2 } else { FORMAT };
+        out.put(&fmt.to_le_bytes())?;
         out.put(&PROFILE.to_le_bytes())?;
         let header = self.header;
         out.put(&header.scope.source_root.0.0)?;
@@ -384,6 +458,13 @@ impl AdjRunSegment {
         for chunk in scalars.bytes.chunks(4096) {
             checkpoint(cx)?;
             out.put(chunk)?;
+        }
+        if let Some(incoming_bytes) = incoming_bytes {
+            out.count(incoming_bytes.len())?;
+            for chunk in incoming_bytes.chunks(4096) {
+                checkpoint(cx)?;
+                out.put(chunk)?;
+            }
         }
         let checksum = hash_chunks(cx, CHECKSUM_DOMAIN, &out.bytes)?;
         out.put(&checksum)?;
@@ -535,7 +616,7 @@ fn decode(
         return Err(AdjRunError::NotARun);
     }
     let version = u16::from_le_bytes(input.array()?);
-    if version != FORMAT {
+    if version != FORMAT && version != FORMAT_V2 {
         return Err(AdjRunError::UnsupportedFormat(version));
     }
     let profile = u16::from_le_bytes(input.array()?);
@@ -584,6 +665,12 @@ fn decode(
     let image_bytes = input.take(image_len)?;
     let identity_bytes = input.take(identity_len)?;
     let scalar_bytes = input.take(scalar_len)?;
+    let incoming_bytes = if version == FORMAT_V2 {
+        let len = input.count()?;
+        Some(input.take(len)?)
+    } else {
+        None
+    };
     if input.at != input.bytes.len() {
         return Err(SealedError::TrailingBytes.into());
     }
@@ -592,10 +679,21 @@ fn decode(
         relation: Some(relation),
         fingerprint: image_fingerprint,
         encoded_bytes: image_len,
+        admitted_envelope: None,
     };
-    let partition = SealedPartition::reload(cx, anchor, image_bytes, limits, resolver)?;
+    let mut partition = SealedPartition::reload(cx, anchor, image_bytes, limits, resolver)?;
     if partition.image.rows.len() != row_count || partition.image.incidences != incidence_count {
         return Err(AdjRunError::NonCanonical);
+    }
+    if let Some(incoming_bytes) = incoming_bytes {
+        let incoming = super::incoming::decode_durable_index(
+            incoming_bytes,
+            relation,
+            &partition.image,
+            limits,
+            &mut || checkpoint(cx),
+        )?;
+        partition.set_durable_incoming(incoming);
     }
     let ids = IdentityColumn::<EId>::try_from_scalar_payload(
         identity_bytes,

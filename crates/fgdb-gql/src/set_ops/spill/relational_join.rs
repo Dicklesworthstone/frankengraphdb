@@ -11,6 +11,7 @@ pub struct SpillSetJoinPlan {
     pub(super) columns: Vec<String>,
     pub(super) types: Vec<GraphSetColumnType>,
     pub(super) vertex_seed_column: Option<usize>,
+    pub(super) identity_seed_column: Option<(usize, bool)>,
 }
 impl SpillSetJoinPlan {
     pub(super) fn seed_column_for(right: &PreparedGraphSet, spec: &RowJoinSpec) -> Option<usize> {
@@ -45,6 +46,37 @@ impl SpillSetJoinPlan {
             .find_map(|(left, right)| (right == root).then_some(left))
     }
 
+    pub(super) fn identity_seed_column_for(
+        right: &PreparedGraphSet,
+        spec: &RowJoinSpec,
+    ) -> Option<(usize, bool)> {
+        if !matches!(
+            spec.kind(),
+            RowJoinKind::Inner | RowJoinKind::Left | RowJoinKind::Semi | RowJoinKind::Anti
+        ) || !right.order.is_empty()
+            || right.offset != 0
+            || right.count.is_some()
+            || !spec.keys().is_empty()
+        {
+            return None;
+        }
+        let SetNode::Pattern(pattern) = &right.node else {
+            return None;
+        };
+        let root = pattern.seeded_root_column()?;
+        let code = spec.predicate()?;
+        let mut free = |_| Ok::<(), core::convert::Infallible>(());
+        super::super::execute::selected_cross_id_probe_keys(
+            spec.left_types().len(),
+            code,
+            None,
+            &mut free,
+        )
+        .unwrap_or_else(|never| match never {})
+        .into_iter()
+        .find_map(|(left, right, text)| (right == root).then_some((left, text)))
+    }
+
     /// A necessary left identity column for this join's safe right root.
     /// Restrict only source admission after the COMPLETE left child; the
     /// original native matcher still owns domain equality and all witnesses.
@@ -60,6 +92,21 @@ impl SpillSetJoinPlan {
             return None;
         }
         self.vertex_seed_column
+    }
+
+    /// A necessary `id(n) = col` (`false`) or `elementId(n) = col` (`true`)
+    /// left scalar column for this join's safe right root.
+    pub fn identity_seed_column(&self) -> Option<(usize, bool)> {
+        if !matches!(
+            self.right().source(),
+            AsyncSpillSetSourcePlan::Vertex(_)
+                | AsyncSpillSetSourcePlan::Edge(_)
+                | AsyncSpillSetSourcePlan::Join(_)
+                | AsyncSpillSetSourcePlan::Walk(_)
+        ) {
+            return None;
+        }
+        self.identity_seed_column
     }
 
     pub fn left(&self) -> &AsyncSpillSetPlan {

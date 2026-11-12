@@ -22,11 +22,43 @@ pub(in crate::query::view::spool::sort) enum SeedPlan<'a> {
     Join(&'a fgdb_gql::spill_set::SpillSetJoinPlan),
 }
 
-impl SeedPlan<'_> {
-    fn column(self) -> Option<usize> {
+#[derive(Clone, Copy)]
+enum SeedColumn {
+    Vertex(usize),
+    Identity { column: usize, text: bool },
+}
+
+impl SeedColumn {
+    fn extract(self, row: &GraphValueRow) -> Option<VId> {
         match self {
-            Self::Cross(plan) => plan.vertex_seed_column(),
-            Self::Join(plan) => plan.vertex_seed_column(),
+            Self::Vertex(column) => match &row.values()[column] {
+                GraphValue::Vertex(vid) => Some(*vid),
+                _ => None,
+            },
+            Self::Identity { column, text } => {
+                fgdb_gql::spill_set::scalar_to_vid(&row.values()[column], text)
+            }
+        }
+    }
+}
+
+impl SeedPlan<'_> {
+    fn column(self) -> Option<SeedColumn> {
+        match self {
+            Self::Cross(plan) => plan
+                .vertex_seed_column()
+                .map(SeedColumn::Vertex)
+                .or_else(|| {
+                    plan.identity_seed_column()
+                        .map(|(column, text)| SeedColumn::Identity { column, text })
+                }),
+            Self::Join(plan) => plan
+                .vertex_seed_column()
+                .map(SeedColumn::Vertex)
+                .or_else(|| {
+                    plan.identity_seed_column()
+                        .map(|(column, text)| SeedColumn::Identity { column, text })
+                }),
         }
     }
 
@@ -154,8 +186,8 @@ where
             SpillSetRowError::Control(error) => error,
             SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
         })?;
-        if let GraphValue::Vertex(vid) = &row.row.values()[column] {
-            if seeds.is_none() && single.is_some_and(|first| first != *vid) {
+        if let Some(vid) = column.extract(&row.row) {
+            if seeds.is_none() && single.is_some_and(|first| first != vid) {
                 // Decide optional capacity before any right-source effect.
                 // Only this affordability refusal keeps the ordinary lane;
                 // already spent seed work is never erased, and no failure
@@ -178,7 +210,7 @@ where
                     .push(single.take().expect("a second distinct seed"));
                 seeds = Some(batch);
             }
-            if seeds.is_none() && single == Some(*vid) {
+            if seeds.is_none() && single == Some(vid) {
                 continue;
             }
             host::event(
@@ -194,9 +226,9 @@ where
                 if seeds.values.len() == count {
                     return Err(NativeSpoolError::IncompleteCursor);
                 }
-                seeds.values.push(*vid);
+                seeds.values.push(vid);
             } else {
-                single = Some(*vid);
+                single = Some(vid);
             }
         }
     }
