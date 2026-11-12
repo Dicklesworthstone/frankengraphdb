@@ -7326,6 +7326,236 @@ mod collect_subqueries {
     }
 
     #[test]
+    fn collect_subquery_unions_keep_bags_nulls_and_branch_local_pages() {
+        assert_eq!(
+            execute(
+                "RETURN COLLECT { UNWIND [3,1,1] AS x RETURN x AS value \
+                 UNION ALL UNWIND [2,1] AS y RETURN y AS value } AS values"
+            ),
+            vec![row([list([int(1), int(1), int(1), int(2), int(3)])])]
+        );
+        for quantifier in ["UNION", "UNION DISTINCT"] {
+            assert_eq!(
+                execute(&format!(
+                    "UNWIND [1,1,NULL] AS outer RETURN outer,COLLECT {{ \
+                     RETURN outer AS value {quantifier} RETURN outer AS value }} AS values"
+                )),
+                vec![
+                    row([int(1), list([int(1)])]),
+                    row([int(1), list([int(1)])]),
+                    row([null(), list([null()])]),
+                ],
+                "DISTINCT belongs to each outer occurrence"
+            );
+        }
+        assert_eq!(
+            execute(
+                "RETURN COLLECT { RETURN NULL AS value UNION ALL RETURN NULL AS value } AS values"
+            ),
+            vec![row([list([null(), null()])])]
+        );
+        assert_eq!(
+            execute(
+                "RETURN COLLECT { \
+                 UNWIND [1,3,2] AS x RETURN x AS value ORDER BY value DESC LIMIT 1 \
+                 UNION ALL \
+                 UNWIND [9,8] AS y RETURN y AS value ORDER BY value LIMIT 1 } AS values"
+            ),
+            vec![row([list([int(3), int(8)])])]
+        );
+        assert_eq!(
+            execute(
+                "RETURN COLLECT { UNWIND [] AS x RETURN x AS value \
+                 UNION ALL UNWIND [] AS y RETURN y AS value } AS values"
+            ),
+            vec![row([list([])])]
+        );
+    }
+
+    #[test]
+    fn collect_subquery_unions_correlate_every_branch_and_nested_list_local() {
+        let expected = vec![
+            row([vertex(1), list([vertex(2), vertex(2), vertex(3)])]),
+            row([vertex(2), list([vertex(1), vertex(1), vertex(3)])]),
+            row([vertex(3), list([vertex(1), vertex(2), vertex(4)])]),
+            row([vertex(4), list([vertex(3)])]),
+        ];
+        let statement = "MATCH (n) RETURN n,COLLECT { \
+                         MATCH (n)-[:R]->(m) RETURN m AS neighbor \
+                         UNION ALL MATCH (m)-[:R]->(n) RETURN m AS neighbor \
+                         } AS neighbors ORDER BY n";
+        assert_eq!(execute(statement), expected);
+        assert_eq!(
+            execute(&statement.replace("UNION ALL", "UNION")),
+            vec![
+                row([vertex(1), list([vertex(2), vertex(3)])]),
+                row([vertex(2), list([vertex(1), vertex(3)])]),
+                row([vertex(3), list([vertex(1), vertex(2), vertex(4)])]),
+                row([vertex(4), list([vertex(3)])]),
+            ]
+        );
+        assert_eq!(
+            execute(
+                "WITH 2 AS x,3 AS y RETURN COLLECT { \
+                 WITH x RETURN x AS value UNION ALL WITH y RETURN y AS value } AS values"
+            ),
+            vec![row([list([int(2), int(3)])])]
+        );
+        assert_eq!(
+            execute(
+                "RETURN [x IN [2,1] | COLLECT { \
+                 RETURN COLLECT { RETURN x AS value UNION ALL RETURN x+1 AS value } AS nested \
+                 UNION ALL RETURN [] AS nested }] AS values"
+            ),
+            vec![row([list([
+                list([list([]), list([int(2), int(3)])]),
+                list([list([]), list([int(1), int(2)])]),
+            ])])]
+        );
+    }
+
+    #[test]
+    fn returning_count_and_exists_subqueries_use_the_same_native_union() {
+        for (quantifier, count) in [("UNION ALL", 2), ("UNION", 1)] {
+            assert_eq!(
+                execute(&format!(
+                    "UNWIND [1,1,NULL] AS x RETURN x,COUNT {{ \
+                     RETURN x AS value {quantifier} RETURN x AS value }} AS total,\
+                     EXISTS {{ RETURN x AS value {quantifier} RETURN x AS value }} AS present"
+                )),
+                [int(1), int(1), null()]
+                    .into_iter()
+                    .map(|x| row([x, int(count), GraphValue::Scalar(CanonicalScalar::Bool(true))]))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            execute(
+                "RETURN COUNT { UNWIND [] AS x RETURN x AS value \
+                 UNION ALL UNWIND [] AS y RETURN y AS value } AS total,\
+                 EXISTS { UNWIND [] AS x RETURN x AS value \
+                 UNION ALL UNWIND [] AS y RETURN y AS value } AS present"
+            ),
+            vec![row([int(0), GraphValue::Scalar(CanonicalScalar::Bool(false))])]
+        );
+    }
+
+    #[test]
+    fn collect_subquery_unions_preflight_every_branch_before_catalog_access() {
+        for body in [
+            "RETURN 1 AS value UNION ALL RETURN 2 AS other",
+            "RETURN 1 AS value UNION ALL RETURN 2 AS value,3 AS extra",
+            "RETURN 1 AS value UNION RETURN 2 AS value UNION ALL RETURN 3 AS value",
+            "WITH 1 AS private RETURN private AS value UNION ALL RETURN private AS value",
+            "RETURN 1 AS value UNION ALL CREATE (n) RETURN 2 AS value",
+            "MATCH (n {p:1}) RETURN n AS value UNION ALL RETURN [1] AS value",
+            "RETURN 1 AS value UNION ALL MATCH (n)",
+        ] {
+            let statement = format!("UNWIND [] AS outer RETURN COLLECT {{ {body} }} AS values");
+            let mut reads = 0;
+            let result = PreparedGraphSetText::prepare(&statement, |kind, name| {
+                reads += 1;
+                symbols(kind, name)
+            });
+            assert!(result.is_err(), "{statement}");
+            assert_eq!(reads, 0, "{statement}");
+        }
+    }
+
+    #[test]
+    fn collect_subquery_unions_rebind_and_share_all_work_and_failure_limits() {
+        let template = PreparedGraphSetText::prepare(
+            "MATCH (n) RETURN n,COLLECT { \
+             MATCH (n)-[:R]->(m) WHERE m.p >= $minimum RETURN m.p AS value \
+             UNION ALL RETURN $extra AS value } AS values ORDER BY n",
+            symbols,
+        )
+        .unwrap();
+        let definition = template.canonical_template_bytes();
+        for (minimum, extra, values) in [
+            (2, 7, vec![vec![2, 2, 2, 7], vec![2, 7], vec![3, 7], vec![7]]),
+            (3, 9, vec![vec![9], vec![9], vec![3, 9], vec![9]]),
+        ] {
+            let query = template
+                .bind_parameters(
+                    &GqlParameters::new()
+                        .with_int64("minimum", minimum)
+                        .unwrap()
+                        .with_int64("extra", extra)
+                        .unwrap(),
+                )
+                .unwrap();
+            let measured = run(&query, wide(), &mut || Ok(())).unwrap();
+            assert_eq!(
+                measured.value,
+                values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, values)| row([
+                        vertex(index as u128 + 1),
+                        list(values.into_iter().map(int)),
+                    ]))
+                    .collect::<Vec<_>>()
+            );
+            let caps = [
+                measured.rows.snapshot_records,
+                measured.rows.result_rows,
+                measured.evaluator.work_units,
+                measured.evaluator.scratch_entries,
+            ];
+            assert_eq!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                    &mut || Ok(())
+                )
+                .unwrap(),
+                measured
+            );
+            for dimension in 0..4 {
+                if caps[dimension] == 0 {
+                    continue;
+                }
+                let mut limited = caps;
+                limited[dimension] -= 1;
+                assert!(
+                    run(
+                        &query,
+                        GqlQueryPolicy::new(limited[0], limited[1], limited[2], limited[3]),
+                        &mut || Ok(())
+                    )
+                    .is_err()
+                );
+            }
+            let mut checks = 0;
+            run(&query, wide(), &mut || {
+                checks += 1;
+                Ok(())
+            })
+            .unwrap();
+            let mut seen = 0;
+            assert!(matches!(
+                run(&query, wide(), &mut || {
+                    seen += 1;
+                    if seen == checks { Err(7) } else { Ok(()) }
+                }),
+                Err(GqlQueryError::Interrupted(7))
+            ));
+        }
+        assert_eq!(template.canonical_template_bytes(), definition);
+        for suffix in ["", " LIMIT 0"] {
+            let query = prepare(&format!(
+                "RETURN COLLECT {{ RETURN 1 AS value UNION ALL RETURN 1/0 AS value }} AS values{suffix}"
+            ));
+            assert!(matches!(
+                run(&query, wide(), &mut || Ok(())),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                    if error.kind == GraphIntegerErrorKind::DivisionByZero
+            ));
+        }
+    }
+
+    #[test]
     fn collect_subquery_shape_scope_writes_and_lazy_arms_refuse_before_catalog_access() {
         for statement in [
             "RETURN COLLECT { MATCH (n) } AS values",

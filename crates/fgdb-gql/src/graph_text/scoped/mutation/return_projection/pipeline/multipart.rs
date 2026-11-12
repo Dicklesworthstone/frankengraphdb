@@ -2321,12 +2321,21 @@ impl<'a> Parser<'a> {
         let call_body = core::mem::replace(&mut self.call_body, true);
         let existence_body = core::mem::replace(&mut self.existence_body, implicit_return);
         let optional_body = core::mem::take(&mut self.optional_body);
-        let parsed = self.multipart_parts_from(
-            statement,
-            false,
-            incoming[..captures].to_vec(),
-            call_depth + 1,
-        );
+        // Each UNION branch imports the original outer row, independently of
+        // projections or local names in earlier branches. Compose the native
+        // union inside the expression's Apply so DISTINCT never merges values
+        // belonging to different outer occurrences. A single body retains its
+        // existing ordering and implicit-return rules.
+        let parsed = self
+            .multipart_call_body(
+                statement,
+                incoming,
+                true,
+                (0..captures).collect(),
+                incoming[..captures].to_vec(),
+                call_depth + 1,
+            )
+            .map(|(body, returned, _)| (body, returned));
         let mut remainder = self.take_part_syntax()?;
         self.syntax = outer_syntax;
         self.syntax.parameters = remainder.parameters;

@@ -90,8 +90,18 @@ the aggregate `collect(binding)`, which drops NULL inputs.
 The current expression owner gathers graph bodies before scalar evaluation.
 Direct COLLECT subqueries inside CASE/COALESCE therefore refuse during
 preparation. A collection first bound in WITH is an ordinary list and can be
-used in either lazy expression. UNION inside a collection body is also outside
-this bounded slice.
+used in either lazy expression.
+
+The 2026-11-12 extension admits UNION, UNION DISTINCT and UNION ALL inside
+collection bodies through the existing native set operator. Each branch sees
+the original correlated row and returns the same single-column schema;
+deduplication stays local to each outer occurrence. Returning COUNT and EXISTS
+subquery branches use the same composition. Native integration regression
+sources cover capability masking in every branch, pinned snapshots and staged
+transaction reads. The new regressions remain UNRUN: dependency compilation
+was killed by SIGKILL, and the serial retry lost its execution environment
+before project compilation or a terminal verdict. Exact-tree qualification
+remains open.
 
 Six added regression functions cover those semantics, ordered outer and body
 rows, nested/list-local capture, schema and scope refusals before catalog

@@ -199,6 +199,95 @@ fn returning_union_preserves_pinned_and_staged_reads_and_filters_every_authorize
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn collection_union_uses_one_snapshot_overlay_and_capability_for_every_branch() {
+    let ((), report) = run_async_under_lab(0xca11_0013, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit).await;
+        let statement = "MATCH (n:L) WHERE n.p=10 WITH COLLECT { \
+            MATCH (n)-[:R]->(m) RETURN m.p AS value \
+            UNION ALL MATCH (n)-[:S]->(m) RETURN m.p AS value \
+            } AS collected UNWIND collected AS p RETURN p ORDER BY p";
+        let args = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(statement, &args, symbols).unwrap();
+        let pinned = db.read_session().unwrap();
+        let before = vec![20, 20, 30, 40];
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &args, policy()).unwrap()),
+            before
+        );
+
+        let issuer =
+            Authority::new(AuthKey::from_seed(0xca13), NS, "graph", SchemaEpoch(0), 1).unwrap();
+        for (relations, expected) in [
+            (vec![R, S], vec![20, 20, 30]),
+            (vec![R], vec![20, 20]),
+            (vec![S], vec![30]),
+        ] {
+            let mut grant = Grant::read_only(
+                "main",
+                1_000,
+                QueryLimits {
+                    max_nodes: 1_000,
+                    max_work: 1_000_000,
+                    max_rows: 1_000,
+                },
+            );
+            grant.labels = Scope::only([L]);
+            grant.relations = Scope::only(relations);
+            grant.properties = Scope::only([P]);
+            let token = issuer.issue_at(&grant, 100).unwrap();
+            assert_eq!(
+                values(
+                    prepared
+                        .execute_authorized(
+                            &db,
+                            &cx,
+                            &issuer,
+                            &token,
+                            "main",
+                            &args,
+                            policy(),
+                            || 100,
+                        )
+                        .unwrap()
+                ),
+                expected
+            );
+        }
+
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut change = WriteBatch::new(R);
+        change.delete_edge(EId(1));
+        change.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(35)));
+        txn.write(&mut db, change).unwrap();
+        assert_eq!(
+            values(
+                prepared
+                    .execute_in_transaction(&txn, &db, &cx, &args, policy())
+                    .unwrap()
+            ),
+            vec![20, 35, 40]
+        );
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &args, policy()).unwrap()),
+            before
+        );
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &args, policy()).unwrap()),
+            vec![20, 35, 40]
+        );
+        assert_eq!(
+            values(pinned.query(&cx, statement, &args, symbols, policy()).unwrap()),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 fn allocator(request: GraphInsertRequest) -> Result<ElementId, &'static str> {
     Ok(match request {
         GraphInsertRequest::Vertex { row, vertex } => {
