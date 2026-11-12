@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-11 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-12 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -186,6 +186,37 @@ ordering and lazy-arm lexical edge cases. Targeted pinned formatting and
 pinned `asupersync` dependency before project diagnostics; compilation,
 runtime tests, Clippy and exact-tree qualification remain **UNRUN**. The
 broader graph-list language bead remains open.
+
+### Implicit-return COUNT and EXISTS unions — qualification pending
+
+Source added 2026-11-12 for `fgdb-og3db` and `fgdb-2ht8c`. COUNT bodies may
+omit RETURN in every UNION ALL branch; EXISTS bodies may omit it in every
+UNION, UNION DISTINCT or UNION ALL branch. Branches keep independent copies
+of the original imports, their local names, filters and pages. A private
+literal projection after each completed branch gives different local schemas
+one native union shape without dropping duplicate occurrences. The union
+remains inside the expression's existing Apply owner.
+
+For example, `COUNT { MATCH (n)-[:R]->(a) UNION ALL MATCH (n)-[:S]->(b) }`
+counts both relation bags for the same outer occurrence. COUNT with DISTINCT
+UNION still requires explicit RETURN in every branch. Mixing returning and
+implicit branches refuses before catalog access; CALL and COLLECT continue
+to require RETURN. Return classification scans only the span already consumed
+by the ordinary branch parser, so nested RETURN clauses and variables or
+properties named `union` cannot change the outer contract.
+
+Four GQL regression functions cover bags, NULL and optional rows, differing
+branch schemas, independent correlation, local pages, nested/list-local
+bodies, return-contract preflight, rebinding, exact resource ceilings,
+interruptions and late failures under LIMIT 0. A native integration regression
+covers capability filtering in every branch, pinned snapshots and staged
+transaction overlays. These are added regression sources, not passing runtime
+evidence. Targeted pinned formatting and `git diff --check` passed, and
+independent source/API review found no remaining blocker. Compilation,
+runtime tests, Clippy, UBS and exact-tree qualification remain **UNRUN**:
+the earlier execution host disconnected before product compilation, and
+the restored host has not returned a terminal build verdict. The broader
+language beads remain open.
 
 ### Parameterized regular expressions — qualification pending
 

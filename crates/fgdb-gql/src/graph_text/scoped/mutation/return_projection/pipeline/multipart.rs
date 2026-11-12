@@ -1241,7 +1241,7 @@ pub(super) fn relational_subquery_body(
                         return Ok(true);
                     }
                     matched = true;
-                } else if ["RETURN", "OPTIONAL", "UNWIND", "CALL"]
+                } else if ["RETURN", "OPTIONAL", "UNWIND", "CALL", "UNION"]
                     .iter()
                     .any(|clause| word.eq_ignore_ascii_case(clause))
                     || (word.eq_ignore_ascii_case("WITH")
@@ -1266,7 +1266,41 @@ impl<'a> Parser<'a> {
     }
 
     fn at_existence_end(&self) -> bool {
-        self.existence_body && self.is_punct(b'}')
+        self.existence_body && (self.is_punct(b'}') || self.is_word("UNION"))
+    }
+
+    /// The existing bounded lexer distinguishes grammar words from quoted
+    /// strings and delimited/schema names. Only a RETURN at this body's level
+    /// counts: a nested CALL, COLLECT or EXISTS does not return for its owner.
+    /// Scan only the span already consumed by the ordinary branch parser.
+    /// UNION is also a legal variable/property name, so lexical lookahead
+    /// cannot choose where a branch ends.
+    fn read_branch_returns(
+        mut token: Token<'a>,
+        mut lexer: Lexer<'a>,
+        end: usize,
+    ) -> Result<bool, GraphPatternTextError> {
+        let mut depth = 0_usize;
+        while token.at < end {
+            match token.kind {
+                TokenKind::End => return Ok(false),
+                TokenKind::Word(word) if depth == 0 => {
+                    if word.eq_ignore_ascii_case("RETURN") {
+                        return Ok(true);
+                    }
+                }
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    let Some(outer) = depth.checked_sub(1) else {
+                        return Ok(false);
+                    };
+                    depth = outer;
+                }
+                _ => {}
+            }
+            token = lexer.next()?;
+        }
+        Ok(false)
     }
 
     /// An unhoisted graph test of a completed row belongs to the multipart
@@ -1388,6 +1422,7 @@ impl<'a> Parser<'a> {
             self.punct(b')', ") after a row-scope existence predicate")?;
         }
         if !matches!(self.current.kind, TokenKind::End)
+            && !self.at_existence_end()
             && ![
                 "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "ORDER", "SKIP", "LIMIT",
             ]
@@ -2218,8 +2253,14 @@ impl<'a> Parser<'a> {
             self.word("EXISTS")?;
         }
         self.punct(b'{', "{")?;
-        let (body, _) =
-            self.multipart_read_subquery(statement, incoming, captures, call_depth, at, true)?;
+        let (body, _) = self.multipart_read_subquery(
+            statement,
+            incoming,
+            captures,
+            call_depth,
+            at,
+            Some(result),
+        )?;
         Ok(UnresolvedContinuationOperation::SubqueryBody {
             body: Box::new(body),
             imports: (0..captures).collect(),
@@ -2243,7 +2284,7 @@ impl<'a> Parser<'a> {
         self.word("COLLECT")?;
         self.punct(b'{', "{")?;
         let (body, returned) =
-            self.multipart_read_subquery(statement, incoming, captures, call_depth, at, false)?;
+            self.multipart_read_subquery(statement, incoming, captures, call_depth, at, None)?;
         if returned.len() != 1 {
             return Err(expected(
                 at,
@@ -2300,7 +2341,7 @@ impl<'a> Parser<'a> {
         captures: usize,
         call_depth: usize,
         at: usize,
-        implicit_return: bool,
+        result: Option<RowPatternResult>,
     ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
         if call_depth >= 8 {
             return Err(expected(at, "at most eight nested read subquery bodies"));
@@ -2320,7 +2361,7 @@ impl<'a> Parser<'a> {
         let comparisons = self.read_comparisons.take();
         let element_reads = core::mem::replace(&mut self.call_element_reads, true);
         let call_body = core::mem::replace(&mut self.call_body, true);
-        let existence_body = core::mem::replace(&mut self.existence_body, implicit_return);
+        let existence_body = core::mem::replace(&mut self.existence_body, result.is_some());
         let optional_body = core::mem::take(&mut self.optional_body);
         // Each UNION branch imports the original outer row, independently of
         // projections or local names in earlier branches. Compose the native
@@ -2335,6 +2376,7 @@ impl<'a> Parser<'a> {
                 (0..captures).collect(),
                 incoming[..captures].to_vec(),
                 call_depth + 1,
+                result,
             )
             .map(|(body, returned, _)| (body, returned));
         let mut remainder = self.take_part_syntax()?;
@@ -3189,8 +3231,15 @@ impl<'a> Parser<'a> {
         let previous_reads = core::mem::replace(&mut self.call_element_reads, true);
         let previous_body = core::mem::replace(&mut self.call_body, true);
         let previous_existence = core::mem::take(&mut self.existence_body);
-        let body =
-            self.multipart_call_body(statement, incoming, scoped, imports, schema, call_depth + 1);
+        let body = self.multipart_call_body(
+            statement,
+            incoming,
+            scoped,
+            imports,
+            schema,
+            call_depth + 1,
+            None,
+        );
         self.call_body = previous_body;
         self.call_element_reads = previous_reads;
         self.existence_body = previous_existence;
@@ -3250,9 +3299,9 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// Parse complete returning branches with the same lexer and parameter
-    /// table. The body remains a native relation: UNION is built before the
-    /// caller's Apply, so DISTINCT is local to each outer occurrence.
+    /// Parse complete branches with the same lexer and parameter table. CALL
+    /// and COLLECT require RETURN; COUNT/EXISTS can omit it in every arm.
+    /// UNION remains inside Apply, so DISTINCT is local to each outer row.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn multipart_call_body(
         &mut self,
@@ -3262,9 +3311,13 @@ impl<'a> Parser<'a> {
         imports: Vec<usize>,
         schema: RowSchema<'a>,
         call_depth: usize,
+        result: Option<RowPatternResult>,
     ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>, Vec<usize>), GraphSetTextError> {
+        let start = (self.current, self.lexer.clone());
         let (mut body, mut exports) =
             self.multipart_parts_from(statement, false, schema.clone(), call_depth)?;
+        let returning =
+            result.is_none() || Self::read_branch_returns(start.0, start.1, self.current.at)?;
         let mut branches = Vec::new();
         let mut shared = imports.clone();
         let mut union_quantifier = None;
@@ -3277,6 +3330,12 @@ impl<'a> Parser<'a> {
                 self.take_word("DISTINCT")?;
                 GraphSetQuantifier::Distinct
             };
+            if !returning
+                && matches!(result, Some(RowPatternResult::Count))
+                && quantifier == GraphSetQuantifier::Distinct
+            {
+                return Err(expected(at, "RETURN in every DISTINCT COUNT UNION branch"));
+            }
             if union_quantifier.is_some_and(|previous| previous != quantifier) {
                 return Err(GraphSetTextError {
                     offset: at,
@@ -3302,13 +3361,25 @@ impl<'a> Parser<'a> {
             self.read_row_bindings.clear();
             self.boundary_reads = None;
             self.projected_sources = None;
-            // Reaching UNION requires an explicit RETURN in the first arm.
-            // Every subsequent arm must return too, even in COUNT/EXISTS,
-            // where a final implicit pattern could otherwise appear compatible.
-            let implicit_return = core::mem::take(&mut self.existence_body);
+            let start = (self.current, self.lexer.clone());
+            let implicit_return = core::mem::replace(&mut self.existence_body, result.is_some());
             let parsed = self.multipart_parts_from(statement, false, branch_schema, call_depth);
             self.existence_body = implicit_return;
-            let (branch, returned) = parsed?;
+            let (mut branch, mut returned) = parsed?;
+            if result.is_some()
+                && Self::read_branch_returns(start.0, start.1, self.current.at)? != returning
+            {
+                return Err(expected(at, "RETURN in all UNION branches or in none"));
+            }
+            if !returning {
+                // An implicit body exports no names. Keep every completed
+                // occurrence, including branch-local filter/page effects,
+                // while giving independently named branches one shared shape.
+                if branches.is_empty() {
+                    exports = Self::implicit_union_witness(&mut body, at);
+                }
+                returned = Self::implicit_union_witness(&mut branch, at);
+            }
             let columns: Vec<_> = exports
                 .iter()
                 .map(|(name, _)| name.text.to_owned())
@@ -3379,6 +3450,21 @@ impl<'a> Parser<'a> {
             self.admit_multipart_size(&body)?;
         }
         Ok((body, exports, shared))
+    }
+
+    fn implicit_union_witness(body: &mut UnresolvedReadInput<'a>, at: usize) -> RowSchema<'a> {
+        const NAME: &str = "__fg_union_witness";
+        let witness =
+            GqlScalarParameter::new(CanonicalScalar::Bool(true)).expect("true is a bounded scalar");
+        body.append_stages(vec![ReadStageTemplate::Project {
+            at,
+            projection: vec![ReadProjectionTemplate {
+                name: NAME.to_owned(),
+                value: ReadValueTemplate::Literal(witness),
+            }],
+            quantifier: GraphSetQuantifier::All,
+        }]);
+        vec![(Name { text: NAME, at }, GraphSetColumnType::Scalar)]
     }
 
     /// A completed CALL or OPTIONAL Apply owns a typed row, including NULL

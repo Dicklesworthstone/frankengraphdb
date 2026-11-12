@@ -1122,9 +1122,9 @@ struct Parser<'a> {
     /// Inside an inline CALL body. Its terminal RETURN may aggregate the
     /// body's rows, once per outer row, as a row-domain aggregate stage.
     call_body: bool,
-    /// An EXISTS body may finish with its completed read relation instead
-    /// of an explicit RETURN. Only its matching closing brace is terminal;
-    /// a nested ordinary CALL still requires its own RETURN.
+    /// An EXISTS/COUNT body may finish its branch with the completed read
+    /// relation at UNION or its closing brace, without an explicit RETURN.
+    /// A nested ordinary CALL still requires its own RETURN.
     existence_body: bool,
     /// The next graph part is an optional Apply's body: it ends at its
     /// deferred WHERE and exports only its own bindings

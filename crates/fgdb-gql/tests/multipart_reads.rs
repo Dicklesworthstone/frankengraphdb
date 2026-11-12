@@ -7326,6 +7326,267 @@ mod collect_subqueries {
     }
 
     #[test]
+    fn implicit_expression_unions_preserve_bags_correlation_and_branch_local_rows() {
+        for (body, counts) in [
+            (
+                "MATCH (n)-[:R]->(m) UNION ALL MATCH (n)-[:R]->(other)",
+                [6, 2, 2, 0],
+            ),
+            (
+                "MATCH (n)-[:R]->(m) UNION ALL MATCH (n) WITH 'constant' AS marker,1 AS extra",
+                [4, 2, 2, 1],
+            ),
+            (
+                "MATCH (n)-[:R]->(m) WITH m ORDER BY m SKIP 1 LIMIT 1 \
+                 UNION ALL MATCH (n)-[:R]->(other) WITH other LIMIT 1",
+                [2, 1, 1, 0],
+            ),
+            (
+                "OPTIONAL MATCH (n)-[:R]->(m) UNION ALL MATCH (n) WITH n WHERE false",
+                [3, 1, 1, 1],
+            ),
+            (
+                "WITH 1 AS marker MATCH (n) UNION ALL MATCH (n)-[:R]->(m)",
+                [7, 5, 5, 4],
+            ),
+        ] {
+            let statement = format!("MATCH (n) RETURN n,COUNT {{ {body} }} AS total ORDER BY n");
+            assert_eq!(
+                execute(&statement),
+                counts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, count)| row([vertex(index as u128 + 1), int(count)]))
+                    .collect::<Vec<_>>(),
+                "{statement}"
+            );
+        }
+        for quantifier in ["UNION", "UNION DISTINCT", "UNION ALL"] {
+            let statement = format!(
+                "MATCH (n) RETURN n,EXISTS {{ WITH n WHERE false \
+                 {quantifier} MATCH (n)-[:R]->(other) WITH other,1 AS extra }} AS present ORDER BY n"
+            );
+            assert_eq!(
+                execute(&statement),
+                [true, true, true, false]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, present)| row([
+                        vertex(index as u128 + 1),
+                        GraphValue::Scalar(CanonicalScalar::Bool(present)),
+                    ]))
+                    .collect::<Vec<_>>(),
+                "{statement}"
+            );
+        }
+        assert_eq!(
+            execute(
+                "RETURN COUNT { UNWIND [1,1,NULL] AS x \
+                 UNION ALL UNWIND [2,3] AS y WITH y,42 AS extra } AS total"
+            ),
+            vec![row([int(5)])]
+        );
+        assert_eq!(
+            execute(
+                "RETURN EXISTS { UNWIND [] AS x UNION UNWIND [NULL] AS y } AS present,\
+                 EXISTS { UNWIND [] AS x UNION ALL UNWIND [] AS y } AS absent"
+            ),
+            vec![row([
+                GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                GraphValue::Scalar(CanonicalScalar::Bool(false)),
+            ])]
+        );
+    }
+
+    #[test]
+    fn implicit_expression_unions_keep_nested_return_and_union_names_in_their_own_scope() {
+        for body in [
+            "CALL { RETURN 1 AS seed } UNION ALL WITH 2 AS other",
+            "WITH COLLECT { RETURN 1 AS value } AS xs UNION ALL WITH 2 AS other",
+            "WITH 'RETURN UNION' AS words UNION ALL WITH {return:1} AS record",
+        ] {
+            let statement = format!("RETURN COUNT {{ {body} }} AS total");
+            assert_eq!(execute(&statement), vec![row([int(2)])], "{statement}");
+        }
+        // The ordinary parser establishes each branch boundary. An alias,
+        // operand or property called union cannot end the return-contract scan.
+        for body in [
+            "WITH {union:1} AS m WITH m.union AS x RETURN x UNION RETURN 2 AS x",
+            "WITH 1 AS union WITH union AS x RETURN x UNION RETURN 2 AS x",
+        ] {
+            let statement = format!("RETURN COUNT {{ {body} }} AS total");
+            assert_eq!(execute(&statement), vec![row([int(2)])], "{statement}");
+        }
+        assert_eq!(
+            execute(
+                "WITH 1 AS union RETURN COUNT { WITH union AS x RETURN x \
+                 UNION ALL RETURN union AS x } AS total"
+            ),
+            vec![row([int(2)])]
+        );
+        assert_eq!(
+            execute(
+                "MATCH (n) RETURN n,COUNT { MATCH (n)-[:R]->(m) WITH m \
+                 WHERE EXISTS { MATCH (m) RETURN m } \
+                 UNION ALL MATCH (n)-[:R]->(other) WHERE false } AS total ORDER BY n"
+            ),
+            [3, 1, 1, 0]
+                .into_iter()
+                .enumerate()
+                .map(|(index, count)| row([vertex(index as u128 + 1), int(count)]))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            execute(
+                "MATCH (n) WHERE EXISTS { WITH n WHERE false \
+                 UNION MATCH (n)-[:R]->(other) } RETURN n ORDER BY n"
+            ),
+            vec![row([vertex(1)]), row([vertex(2)]), row([vertex(3)])]
+        );
+        assert_eq!(
+            execute(
+                "MATCH (n) WHERE n.p=1 RETURN [x IN [n,n] | COUNT { \
+                 MATCH (x)-[:R]->(m) UNION ALL MATCH (x)-[:R]->(other) }] AS totals"
+            ),
+            vec![row([list([int(6), int(6)])])]
+        );
+    }
+
+    #[test]
+    fn implicit_expression_unions_preflight_return_contracts_and_every_branch() {
+        for expression in [
+            "COUNT { MATCH (n)-[:R]->(m) UNION MATCH (n)-[:R]->(other) }",
+            "COUNT { MATCH (n)-[:R]->(m) UNION DISTINCT MATCH (n)-[:R]->(other) }",
+            "COUNT { WITH 1 AS x UNION ALL RETURN 2 AS x }",
+            "COUNT { RETURN 1 AS x UNION ALL WITH 2 AS x }",
+            "EXISTS { WITH 1 AS x UNION RETURN 2 AS x }",
+            "EXISTS { RETURN 1 AS x UNION WITH 2 AS x }",
+            "COUNT { CALL { RETURN 1 AS x } UNION ALL RETURN 2 AS x }",
+            "EXISTS { MATCH (n)-[:R]->(m) UNION ALL CREATE (other) }",
+            "COLLECT { WITH 1 AS x UNION ALL WITH 2 AS x }",
+        ] {
+            let statement = format!("UNWIND [] AS n RETURN {expression} AS value");
+            let mut reads = 0;
+            let result = PreparedGraphSetText::prepare(&statement, |kind, name| {
+                reads += 1;
+                symbols(kind, name)
+            });
+            assert!(result.is_err(), "{statement}");
+            assert_eq!(reads, 0, "{statement}");
+        }
+        let statement = "CALL { WITH 1 AS x UNION ALL WITH 2 AS x } RETURN x";
+        let mut reads = 0;
+        let result = PreparedGraphSetText::prepare(statement, |kind, name| {
+            reads += 1;
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "{statement}");
+        assert_eq!(reads, 0);
+        // DISTINCT COUNT has a meaningful row identity when all arms return.
+        assert_eq!(
+            execute("RETURN COUNT { RETURN 1 AS x UNION RETURN 1 AS x } AS total"),
+            vec![row([int(1)])]
+        );
+    }
+
+    #[test]
+    fn implicit_expression_unions_rebind_and_retain_limits_interruptions_and_late_errors() {
+        let template = PreparedGraphSetText::prepare(
+            "MATCH (n) RETURN n,COUNT { \
+             MATCH (n)-[:R]->(m) WITH m WHERE m.p >= $minimum LIMIT $take \
+             UNION ALL \
+             MATCH (n)-[:R]->(other) WITH other WHERE other.p >= $minimum LIMIT $take \
+             } AS total ORDER BY n",
+            symbols,
+        )
+        .unwrap();
+        let definition = template.canonical_template_bytes();
+        for (minimum, take, counts) in [
+            (2, 5, [6, 2, 2, 0]),
+            (3, 1, [0, 0, 2, 0]),
+            (2, 0, [0, 0, 0, 0]),
+        ] {
+            let query = template
+                .bind_parameters(
+                    &GqlParameters::new()
+                        .with_int64("minimum", minimum)
+                        .unwrap()
+                        .with_uint64("take", take)
+                        .unwrap(),
+                )
+                .unwrap();
+            let measured = run(&query, wide(), &mut || Ok(())).unwrap();
+            assert_eq!(
+                measured.value,
+                counts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, count)| row([vertex(index as u128 + 1), int(count)]))
+                    .collect::<Vec<_>>()
+            );
+            let caps = [
+                measured.rows.snapshot_records,
+                measured.rows.result_rows,
+                measured.evaluator.work_units,
+                measured.evaluator.scratch_entries,
+            ];
+            assert_eq!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                    &mut || Ok(())
+                )
+                .unwrap(),
+                measured
+            );
+            for dimension in 0..4 {
+                if caps[dimension] == 0 {
+                    continue;
+                }
+                let mut limited = caps;
+                limited[dimension] -= 1;
+                assert!(
+                    run(
+                        &query,
+                        GqlQueryPolicy::new(limited[0], limited[1], limited[2], limited[3]),
+                        &mut || Ok(())
+                    )
+                    .is_err()
+                );
+            }
+            let mut checks = 0_usize;
+            run(&query, wide(), &mut || {
+                checks += 1;
+                Ok(())
+            })
+            .unwrap();
+            for stop in [1, checks.div_ceil(2), checks] {
+                let mut seen = 0;
+                assert!(matches!(
+                    run(&query, wide(), &mut || {
+                        seen += 1;
+                        if seen == stop { Err(7) } else { Ok(()) }
+                    }),
+                    Err(GqlQueryError::Interrupted(7))
+                ));
+            }
+        }
+        assert_eq!(template.canonical_template_bytes(), definition);
+        for kind in ["COUNT", "EXISTS"] {
+            for suffix in ["", " LIMIT 0"] {
+                let query = prepare(&format!(
+                    "RETURN {kind} {{ WITH 1 AS first UNION ALL WITH 1/0 AS later }} AS value{suffix}"
+                ));
+                assert!(matches!(
+                    run(&query, wide(), &mut || Ok(())),
+                    Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                        if error.kind == GraphIntegerErrorKind::DivisionByZero
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn collect_subquery_unions_keep_bags_nulls_and_branch_local_pages() {
         assert_eq!(
             execute(
