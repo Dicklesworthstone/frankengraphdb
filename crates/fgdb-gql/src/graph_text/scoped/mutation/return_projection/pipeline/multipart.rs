@@ -3297,8 +3297,13 @@ impl<'a> Parser<'a> {
             self.read_row_bindings.clear();
             self.boundary_reads = None;
             self.projected_sources = None;
-            let (branch, returned) =
-                self.multipart_parts_from(statement, false, branch_schema, call_depth)?;
+            // Reaching UNION already required a RETURN in the first arm.
+            // Every later arm must return too, even in COUNT/EXISTS bodies
+            // whose final single-query RETURN would otherwise be optional.
+            let implicit_return = core::mem::take(&mut self.existence_body);
+            let parsed = self.multipart_parts_from(statement, false, branch_schema, call_depth);
+            self.existence_body = implicit_return;
+            let (branch, returned) = parsed?;
             let columns: Vec<_> = exports
                 .iter()
                 .map(|(name, _)| name.text.to_owned())

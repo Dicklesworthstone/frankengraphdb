@@ -81,6 +81,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         self.run_scoped(
             cx,
             |view, branch, scope, resolver, policy, execution| {
+                admit_text_input(&mut execution.borrow_mut(), text, params).map_err(control)?;
                 let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
                 let (text, params) = lowered
                     .as_ref()

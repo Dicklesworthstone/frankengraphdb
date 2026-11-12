@@ -18,6 +18,25 @@ use crate::query::{aggregates, values};
 use crate::{PreparedNativeRead, QueryResult, QueryValue};
 use fgdb_gql::{GqlParameters, GraphSymbolResolver, PreparedGraphBranchText};
 
+// Admit the caller's original input before lexical scans, map-field lowering,
+// parameter binding or catalog callbacks. Cached transcript lengths include
+// names and shared payloads per occurrence without allocating an encoding.
+// This is an ingress price on the SAME permit as execution, not a count of
+// compiler instructions; generated arguments and trusted statement time are
+// not charged again. Its cost cannot depend on hidden graph/catalog contents.
+fn admit_text_input<Clock: FnMut() -> u64>(
+    execution: &mut Execution<'_, '_, Clock>,
+    text: &str,
+    params: &GqlParameters,
+) -> Result<(), QueryError> {
+    let bytes = text
+        .len()
+        .checked_add(params.canonical_byte_len())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| execution.refusal(fgdb_warden::Error::TooLarge))?;
+    execution.reserve_work(bytes)
+}
+
 // Only metadata and complete result rows leave the dispatcher. The outer
 // authorized owner still performs the sole signed delivery admission.
 fn rows_of(
@@ -246,6 +265,7 @@ impl<V: Vfs + Clone> Database<V> {
             None,
             clock,
             |snapshot, at, scope, execution| {
+                admit_text_input(&mut execution.borrow_mut(), text, params)?;
                 let selector_error =
                     |error: fgdb_gql::GraphBranchTextError| QueryError::Unsupported {
                         diagnostics: vec![error.to_string()],

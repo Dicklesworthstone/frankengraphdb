@@ -917,6 +917,14 @@ fn projected_collection_limits_and_late_errors_never_publish_partial_lists() {
     let db = runtime.block_on(collection_database(&contexts.commit(), true));
     let authority = issuer();
     let args = GqlParameters::new();
+    // Keep the exact execution allowance (including 32 work units) independent
+    // of text admission: this fixture imports a trusted, precompiled template.
+    let selector = std::sync::Arc::new(
+        fgdb_gql::PreparedGraphBranchText::prepare(COLLECTION_TEXT).unwrap(),
+    );
+    let native = std::sync::Arc::new(
+        fgdb::PreparedNativeRead::prepare(selector.statement(), &args, symbols).unwrap(),
+    );
     for (signed, native_policy, signed_dimension) in [
         (
             QueryLimits {
@@ -961,8 +969,8 @@ fn projected_collection_limits_and_late_errors_never_publish_partial_lists() {
         let mut allowed = grant();
         allowed.limits = signed;
         let token = authority.issue_at(&allowed, 100).unwrap();
-        let mut session = db
-            .authorized_read_session(
+        let (mut session, prepared) = db
+            .authorized_prepared_read_session(
                 &cx,
                 &authority,
                 &token,
@@ -970,9 +978,10 @@ fn projected_collection_limits_and_late_errors_never_publish_partial_lists() {
                 symbols,
                 native_policy,
                 || 100,
+                std::sync::Arc::clone(&selector),
+                std::sync::Arc::clone(&native),
             )
             .unwrap();
-        let prepared = session.prepare(&cx, COLLECTION_TEXT, &args).unwrap();
         let error = match session.stream(&cx, &prepared, &args) {
             Err(error) => error,
             Ok(mut cursor) => {

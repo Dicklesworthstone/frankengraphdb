@@ -243,10 +243,20 @@ fn hidden_collation_cannot_change_native_or_signed_prefix_refusals() {
         let token = issuer.issue_at(&grant(), 100).unwrap();
         let args = GqlParameters::new();
         let run = |db: &Database<MemVfs>, token: &CapabilityToken, policy| {
-            let mut session = db
-                .authorized_read_session(&cx, &issuer, token, "main", symbols, policy, || 100)
+            let (selector, native) = trusted_template(PREFIX, &args, symbols);
+            let (mut session, prepared) = db
+                .authorized_prepared_read_session(
+                    &cx,
+                    &issuer,
+                    token,
+                    "main",
+                    symbols,
+                    policy,
+                    || 100,
+                    selector,
+                    native,
+                )
                 .unwrap();
-            let prepared = session.prepare(&cx, PREFIX, &args).unwrap();
             let cursor = session.stream(&cx, &prepared, &args);
             cursor.and_then(|cursor| cursor.collect::<Result<Vec<_>, _>>())
         };

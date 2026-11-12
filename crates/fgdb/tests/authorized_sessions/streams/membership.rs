@@ -186,10 +186,20 @@ fn hidden_membership_histories_do_not_change_native_or_signed_refusal_thresholds
         let args = arguments();
         let text = "MATCH (n) WHERE n.p IN $members RETURN n AS id, n.p AS p";
         let run = |db: &Database<MemVfs>, token: &CapabilityToken, policy| {
-            let mut session = db
-                .authorized_read_session(&cx, &issuer, token, "main", symbols, policy, || 100)
+            let (selector, native) = trusted_template(text, &args, symbols);
+            let (mut session, prepared) = db
+                .authorized_prepared_read_session(
+                    &cx,
+                    &issuer,
+                    token,
+                    "main",
+                    symbols,
+                    policy,
+                    || 100,
+                    selector,
+                    native,
+                )
                 .unwrap();
-            let prepared = session.prepare(&cx, text, &args).unwrap();
             let cursor = session.stream(&cx, &prepared, &args);
             cursor.and_then(|cursor| cursor.collect::<Result<Vec<_>, _>>())
         };

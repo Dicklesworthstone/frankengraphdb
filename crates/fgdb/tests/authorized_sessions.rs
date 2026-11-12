@@ -1,4 +1,6 @@
 //! Public read-only sessions over actual committed generations and Warden.
+#[path = "authorized_sessions/admission.rs"]
+mod admission;
 #[path = "authorized_sessions/streams.rs"]
 mod streams;
 

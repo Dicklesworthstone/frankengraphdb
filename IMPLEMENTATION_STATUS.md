@@ -493,6 +493,12 @@ Pinned formatting and patch applicability checks are available for this source a
 
 This is a real embedded read-view subset. It is not authorization negotiation, lease/reattach, cursor ownership, server transport, or the synchronous facade.
 
+### Signed admission before native read compilation
+
+Source added 2026-11-12 for the embedded read-budget work in `fgdb-w10-embedded-54r.1`: textual authorized reads reserve the original UTF-8 statement length plus the original canonical parameter-byte length from their retained signed work permit before field lowering, selector parsing, parameter binding or catalog callbacks. The same allocation-free, checked admission applies to one-shot authorized reads, session preparation, the common query/batch path and two-cut result differences. It prices the complete original input, including unused map payloads and branch-only arguments; derived parameters and trusted statement-time values are not charged again. Expiry and authority retirement retain precedence.
+
+Three new regressions in `crates/fgdb/tests/authorized_sessions/admission.rs` cover zero catalog callbacks under insufficient input allowance, the exact original-input charge plus existing preparation checkpoints, and terminal authority failures. Existing cursor-budget fixtures import trusted precompiled templates through the established attachment API so their original execution limits remain unchanged. Prepared execution/rebinding and server-side prepared argument lowering retain their prior accounting. Compilation and runtime validation remain **UNRUN** after dependency compilation was killed for memory pressure and the execution environment disconnected; the broader bead and exact-tree qualification remain open.
+
 ### Recovery through intact physical copies
 
 Packed-object readers now recover from a missing, truncated or identity-invalid cached copy through intact older packs, loose objects, or packs published after the reader opened (`fgdb-0qjmf`). The caller's exact object-family identity or decoder proves each candidate; a valid transcript from another family cannot satisfy the read. Discovery runs at most once per failed read and can retain a repair discovered before an unrelated non-interruption error. If every candidate fails, the original refusal remains authoritative. `Interrupted` stops copy recovery immediately.

@@ -337,6 +337,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// Prepare once using only this session's fixed trusted catalog. Parameters
     /// supply declared types; payloads are rebound on execute. The original
     /// branch selector is retained, including shared/exclusive parameter rules.
+    /// Original UTF-8 source and canonical argument bytes spend signed work
+    /// before lowering or parsing; preparation never retains the payloads.
     pub fn prepare(
         &mut self,
         cx: &QueryCx,
@@ -345,6 +347,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     ) -> Result<AuthorizedPreparedRead, QueryError> {
         let owner = Arc::clone(&self.owner);
         self.run(cx, |_, branch, _, resolver, _, execution| {
+            admit_text_input(&mut execution.borrow_mut(), text, params)?;
             let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
             let (text, params) = lowered
                 .as_ref()
@@ -454,6 +457,7 @@ fn text_at<R: GraphSymbolResolver>(
     text: &str,
     params: &GqlParameters,
 ) -> Result<((QueryResult, CommitSeq), usize), QueryError> {
+    admit_text_input(&mut execution.borrow_mut(), text, params)?;
     // A record field keying a pattern is the constant it holds (fgdb-8srlm).
     let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
     let (text, params) = lowered

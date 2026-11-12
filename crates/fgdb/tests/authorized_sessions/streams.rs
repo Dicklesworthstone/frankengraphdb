@@ -4,6 +4,24 @@ use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::stream::VertexScanState;
 use fgdb_types::EId;
 
+// Source-budget tests import host-prepared templates so their exact signed
+// limits measure the cursor, independently of the separately priced compiler.
+fn trusted_template(
+    text: &str,
+    args: &GqlParameters,
+    resolver: impl fgdb_gql::GraphSymbolResolver,
+) -> (
+    std::sync::Arc<fgdb_gql::PreparedGraphBranchText>,
+    std::sync::Arc<fgdb::PreparedNativeRead>,
+) {
+    let selector = fgdb_gql::PreparedGraphBranchText::prepare(text).unwrap();
+    let selected = selector.bind_parameters(args).unwrap();
+    let native =
+        fgdb::PreparedNativeRead::prepare(selected.statement(), selected.parameters(), resolver)
+            .unwrap();
+    (std::sync::Arc::new(selector), std::sync::Arc::new(native))
+}
+
 fn rows_result(columns: &[String], rows: Vec<GraphValueRow>) -> QueryResult {
     QueryResult::Rows {
         columns: columns.to_vec(),
@@ -1133,11 +1151,20 @@ fn exact_signed_work_is_cumulative_through_eof_not_refreshed_for_each_row() {
             let mut grant = grant();
             grant.limits.max_work = limit;
             let token = issuer.issue_at(&grant, 100).unwrap();
-            let mut session = db
-                .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
-                .unwrap();
-            let prepared = session
-                .prepare(&cx, "MATCH (n) RETURN n AS id, n.p AS p", &args)
+            let (selector, native) =
+                trusted_template("MATCH (n) RETURN n AS id, n.p AS p", &args, symbols);
+            let (mut session, prepared) = db
+                .authorized_prepared_read_session(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols,
+                    policy(),
+                    || 100,
+                    selector,
+                    native,
+                )
                 .unwrap();
             let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
             assert_eq!(cursor.next().unwrap().unwrap(), expected_row(1, 7));
@@ -1312,8 +1339,9 @@ fn streamed_limits_and_native_meters_cannot_count_hidden_vertices() {
                 }
             }
             let run = |db: &Database<MemVfs>, token: &CapabilityToken, policy| {
-                let mut session = db
-                    .authorized_read_session(
+                let (selector, native) = trusted_template(text, &args, stream_symbols);
+                let (mut session, prepared) = db
+                    .authorized_prepared_read_session(
                         &cx,
                         &issuer,
                         token,
@@ -1321,9 +1349,10 @@ fn streamed_limits_and_native_meters_cannot_count_hidden_vertices() {
                         stream_symbols,
                         policy,
                         || 100,
+                        selector,
+                        native,
                     )
                     .unwrap();
-                let prepared = session.prepare(&cx, text, &args).unwrap();
                 let cursor = session.stream(&cx, &prepared, &args);
                 cursor.and_then(|cursor| cursor.collect::<Result<Vec<_>, _>>())
             };

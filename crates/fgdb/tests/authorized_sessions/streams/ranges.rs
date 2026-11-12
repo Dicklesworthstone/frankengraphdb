@@ -172,10 +172,20 @@ fn hidden_range_values_cannot_change_native_or_signed_work_thresholds() {
         let args = GqlParameters::new();
         let text = "MATCH (n) WHERE n.p >= 7 AND n.p < 8 RETURN n AS id, n.p AS p";
         let run = |db: &Database<MemVfs>, token: &CapabilityToken, policy| {
-            let mut session = db
-                .authorized_read_session(&cx, &issuer, token, "main", symbols, policy, || 100)
+            let (selector, native) = trusted_template(text, &args, symbols);
+            let (mut session, prepared) = db
+                .authorized_prepared_read_session(
+                    &cx,
+                    &issuer,
+                    token,
+                    "main",
+                    symbols,
+                    policy,
+                    || 100,
+                    selector,
+                    native,
+                )
                 .unwrap();
-            let prepared = session.prepare(&cx, text, &args).unwrap();
             let cursor = session.stream(&cx, &prepared, &args);
             cursor.and_then(|cursor| cursor.collect::<Result<Vec<_>, _>>())
         };

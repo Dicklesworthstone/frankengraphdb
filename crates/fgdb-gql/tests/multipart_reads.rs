@@ -7460,6 +7460,27 @@ mod collect_subqueries {
             assert!(result.is_err(), "{statement}");
             assert_eq!(reads, 0, "{statement}");
         }
+        // Matching columns must not conceal a missing RETURN in the last arm:
+        // once a branch returns, every COUNT/EXISTS UNION branch must return.
+        for kind in ["COUNT", "EXISTS"] {
+            for statement in [
+                format!("RETURN {kind} {{ RETURN 1 AS x UNION ALL WITH 2 AS x }} AS value"),
+                format!(
+                    "MATCH (n) RETURN {kind} {{ RETURN n UNION ALL MATCH (n) }} AS value"
+                ),
+                format!(
+                    "MATCH (n) RETURN {kind} {{ RETURN n UNION MATCH (n) }} AS value"
+                ),
+            ] {
+                let mut reads = 0;
+                let result = PreparedGraphSetText::prepare(&statement, |kind, name| {
+                    reads += 1;
+                    symbols(kind, name)
+                });
+                assert!(result.is_err(), "{statement}");
+                assert_eq!(reads, 0, "{statement}");
+            }
+        }
     }
 
     #[test]
