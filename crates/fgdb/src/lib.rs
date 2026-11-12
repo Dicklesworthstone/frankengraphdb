@@ -5890,6 +5890,10 @@ impl<V: Vfs + Clone> Database<V> {
         // exits next) does not pay for an index: road-ny spent 295 of its
         // 3,269 compaction samples building one nothing read. A serving
         // handle keeps its index warm across the compaction.
+        // Consolidation preserves every historical edge statement. Carry the
+        // already-authenticated runs with their original source and coverage;
+        // a stale run still needs its post-seal delta overlay after compaction.
+        let carried_runs: Vec<_> = self.attached_runs.values().copied().collect();
         let (mut snapshot, writer, receipts, published_root) = publish_and_snapshot(
             cx,
             &self.store,
@@ -5902,6 +5906,7 @@ impl<V: Vfs + Clone> Database<V> {
             self.snapshot.adjacency.get().is_some(),
             self.snapshot.property_index.get().is_some(),
             DataPublication::Ordinary,
+            &carried_runs,
         )
         .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
@@ -5947,7 +5952,6 @@ impl<V: Vfs + Clone> Database<V> {
         self.heads.versions = versions;
         self.snapshot = Arc::new(snapshot);
         self.published_root = published_root;
-        self.attached_runs.clear();
         self.writer = writer;
         // The receipts now hold every durable object of both generations, and
         // their root memo is the replacement root's.
@@ -6577,6 +6581,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             true,
             true,
             DataPublication::Ordinary,
+            &[],
         )
         .await?;
         return Ok((snapshot, writer, heads, receipts, published_root));
@@ -7082,6 +7087,7 @@ async fn rebuild<V: Vfs>(
         true,
         true,
         data_publication,
+        &[],
     )
     .await?;
     Ok((
@@ -7610,6 +7616,10 @@ async fn fold_stream<V: Vfs>(
 /// `receipts` seeds the publication: objects it already holds are durable
 /// under a published generation, so they are neither re-read nor re-synced.
 /// Open and recovery pass empty receipts and earn every object.
+/// `carried_runs` contains authenticated membership from an equivalent prior
+/// generation, with its original source, floor and verified frontier intact.
+/// Attach it before the manifest is addressed so one slot publication selects
+/// both the replacement Tier-D history and the retained compressed runs.
 ///
 /// Type-erased because open, recovery and compaction all end here: a caller's
 /// `Send` proof stops at `dyn Future + Send` instead of descending through
@@ -7630,6 +7640,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
     build_adjacency: bool,
     build_property_index: bool,
     data_publication: DataPublication,
+    carried_runs: &'a [fgdb_strata::root::runs::AdjRunRef],
 ) -> SendFuture<'a, Result<PublishedGeneration, RebuildError>> {
     Box::pin(publish_and_snapshot_inner(
         cx,
@@ -7643,6 +7654,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
         build_adjacency,
         build_property_index,
         data_publication,
+        carried_runs,
     ))
 }
 
@@ -7659,6 +7671,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     build_adjacency: bool,
     build_property_index: bool,
     data_publication: DataPublication,
+    carried_runs: &[fgdb_strata::root::runs::AdjRunRef],
 ) -> Result<PublishedGeneration, RebuildError> {
     // This replacement writer is owned by the publication, so sealing it in
     // place needs no copy of its complete live maps. Return the sealed fold
@@ -7702,7 +7715,10 @@ async fn publish_and_snapshot_inner<V: Vfs>(
         batch.put_patch_verified(cx, &patch.bytes).await?;
     }
     batch.finish(cx).await?;
-    let verified_root = store.verify_root(cx, &root, &mut receipts).await?;
+    let mut verified_root = store.verify_root(cx, &root, &mut receipts).await?;
+    if !carried_runs.is_empty() {
+        store.attach_runs_to_verified_root(&mut verified_root, carried_runs)?;
+    }
     let root_id = verified_root.id();
     let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
         .expect("one root is one canonical record");

@@ -1829,3 +1829,490 @@ fn published_fgrn_v2_dual_face_and_post_seal_delta_overlay_serve_both_directions
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+
+#[test]
+fn compaction_carries_native_multi_relation_runs_through_reopen_and_damage() {
+    use fgdb_strata::root::runs::{AdjRunRef, ROOT_FORMAT_V7, ROOT_FORMAT_V8};
+
+    let ((), report) = run_async_under_lab(0xd870_0010, |runtime| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+        let cx = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let (mut db, historical) = fixture(&cx, &vfs).await;
+        let pinned = db.read_session().unwrap();
+        let expected = answers(&pinned, &query);
+        let expected_history = answers(&historical, &query);
+        let source_root = db.partition_root().unwrap();
+        let markers = vfs
+            .read(&vfs.database_dir().join(COMMIT_LOG_NAME))
+            .await
+            .unwrap();
+        let r_run = db
+            .seal_relation(
+                &cx,
+                &query,
+                R,
+                CommitSeq(1),
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let other_run = db
+            .seal_relation(
+                &cx,
+                &query,
+                OTHER,
+                CommitSeq(2),
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let pinned_sealed = cold(&vfs, &cx, &query, CommitSeq(3)).await;
+        let store = BlockStore::open_existing_for_read_with_vfs(
+            &cx,
+            vfs.clone(),
+            vfs.database_dir(),
+            KEY,
+            NS,
+        )
+        .await
+        .unwrap();
+        let max_root_bytes = RootReadLimits::default().max_root_bytes;
+        let before = db.partition_root().unwrap();
+        let before_bytes = store.get_root_bytes(&cx, before).await.unwrap();
+        assert_eq!(
+            u16::from_be_bytes([before_bytes[4], before_bytes[5]]),
+            ROOT_FORMAT_V7
+        );
+        let r_bytes = store.get_adj_run_bytes(&cx, r_run).await.unwrap();
+        let other_bytes = store.get_adj_run_bytes(&cx, other_run).await.unwrap();
+
+        db.compact(&cx).await.unwrap();
+
+        // The fixture has patched history: this must exercise physical replacement.
+        let compacted = db.partition_root().unwrap();
+        assert_ne!(compacted, before);
+        assert_ne!(
+            store
+                .get_root_run_source(&cx, compacted, max_root_bytes)
+                .await
+                .unwrap(),
+            source_root
+        );
+        let compacted_bytes = store.get_root_bytes(&cx, compacted).await.unwrap();
+        assert_eq!(
+            u16::from_be_bytes([compacted_bytes[4], compacted_bytes[5]]),
+            ROOT_FORMAT_V8
+        );
+        let mut expected_refs = vec![
+            AdjRunRef::carried(
+                R,
+                r_run.0,
+                source_root.0,
+                CommitSeq(1),
+                CommitSeq(3),
+                CommitSeq(3),
+            ),
+            AdjRunRef::carried(
+                OTHER,
+                other_run.0,
+                source_root.0,
+                CommitSeq(2),
+                CommitSeq(3),
+                CommitSeq(3),
+            ),
+        ];
+        assert_eq!(
+            store
+                .published_adj_run_refs(&cx, compacted, max_root_bytes)
+                .await
+                .unwrap(),
+            expected_refs
+        );
+        assert_eq!(store.get_adj_run_bytes(&cx, r_run).await.unwrap(), r_bytes);
+        assert_eq!(
+            store.get_adj_run_bytes(&cx, other_run).await.unwrap(),
+            other_bytes
+        );
+        assert_eq!(db.frontier().unwrap(), CommitSeq(3));
+        assert_eq!(
+            vfs.read(&vfs.database_dir().join(COMMIT_LOG_NAME))
+                .await
+                .unwrap(),
+            markers
+        );
+        assert_eq!(answers(&db.read_session().unwrap(), &query), expected);
+        assert_eq!(answers(&pinned, &query), expected);
+        assert_eq!(sealed_answers(&pinned_sealed, &query), expected);
+        assert_eq!(
+            sealed_answers(&cold(&vfs, &cx, &query, CommitSeq(2)).await, &query),
+            expected_history
+        );
+        assert_eq!(
+            sealed_answers(&cold(&vfs, &cx, &query, CommitSeq(3)).await, &query),
+            expected
+        );
+
+        // A second compaction is a no-op and cannot replace the retained inventory.
+        let manifest = db.manifest().unwrap();
+        db.compact(&cx).await.unwrap();
+        assert_eq!(db.partition_root().unwrap(), compacted);
+        assert_eq!(db.manifest().unwrap(), manifest);
+        assert_eq!(
+            store
+                .published_adj_run_refs(&cx, compacted, max_root_bytes)
+                .await
+                .unwrap(),
+            expected_refs
+        );
+
+        drop(db);
+        let mut db = Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        assert_eq!(db.partition_root().unwrap(), compacted);
+        let mut c4 = WriteBatch::new(R);
+        c4.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(101)));
+        assert_eq!(db.write(&cx, c4).await.unwrap(), CommitSeq(4));
+        for reference in &mut expected_refs {
+            reference.verified_through = Some(CommitSeq(4));
+        }
+        let root_4 = db.partition_root().unwrap();
+        assert_eq!(
+            store
+                .published_adj_run_refs(&cx, root_4, max_root_bytes)
+                .await
+                .unwrap(),
+            expected_refs
+        );
+        let expected_4 = answers(&db.read_session().unwrap(), &query);
+        assert_eq!(
+            sealed_answers(&cold(&vfs, &cx, &query, CommitSeq(4)).await, &query),
+            expected_4
+        );
+        assert_eq!(answers(&historical, &query), expected_history);
+        assert_eq!(answers(&pinned, &query), expected);
+        assert_eq!(sealed_answers(&pinned_sealed, &query), expected);
+
+        // A carried run remains an authenticated dependency after maintenance.
+        // Healthy Tier-D history cannot silently replace damaged attached bytes.
+        let run_path = store.path(r_run.0);
+        vfs.write(&run_path, b"corrupt retained run after compaction")
+            .await
+            .unwrap();
+        assert!(
+            store
+                .get_published_adj_run(
+                    &query,
+                    root_4,
+                    R,
+                    CommitSeq(4),
+                    SealedLimits::default(),
+                    max_root_bytes,
+                )
+                .await
+                .is_err()
+        );
+        let error = Database::open_sealed_read_with_vfs(
+            &cx,
+            &query,
+            vfs.clone(),
+            vfs.database_dir(),
+            keys(),
+            Some(CommitSeq(4)),
+            R,
+            SealedLimits::default(),
+            RootReadLimits::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, SealedProjectionOpenError::Store(_)),
+            "{error:?}"
+        );
+        let summary = db.scrub(&cx).await.unwrap();
+        assert_eq!(summary.block_lost.len(), 1);
+        assert_eq!(summary.block_lost[0].object_id, r_run.0);
+        assert!(matches!(
+            db.state(),
+            DatabaseState::NeedsAuthoritativeRecovery(_)
+        ));
+        assert_eq!(answers(&pinned, &query), expected);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+
+#[test]
+fn compaction_preserves_mixed_run_lineages_and_post_seal_overlay_horizons() {
+    use fgdb_strata::root::runs::AdjRunRef;
+
+    let ((), report) = run_async_under_lab(0xd870_0011, |runtime| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+        let cx = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let (mut db, historical) = fixture(&cx, &vfs).await;
+        let r_source = db.partition_root().unwrap();
+        let r_run = db
+            .seal_relation(
+                &cx,
+                &query,
+                R,
+                CommitSeq(1),
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let store = BlockStore::open_existing_for_read_with_vfs(
+            &cx,
+            vfs.clone(),
+            vfs.database_dir(),
+            KEY,
+            NS,
+        )
+        .await
+        .unwrap();
+        let max_root_bytes = RootReadLimits::default().max_root_bytes;
+
+        // R remains valid through commit 4; OTHER is then sealed from a newer base.
+        let mut c4 = WriteBatch::new(OTHER);
+        c4.add_edge(
+            EId(401),
+            VId(1),
+            VId(4),
+            vec![(P, CanonicalScalar::Int(41))],
+        );
+        c4.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(220)));
+        assert_eq!(db.write(&cx, c4).await.unwrap(), CommitSeq(4));
+        let pinned_4 = db.read_session().unwrap();
+        let other_source = store
+            .get_root_run_source(&cx, db.partition_root().unwrap(), max_root_bytes)
+            .await
+            .unwrap();
+        assert_ne!(other_source, r_source);
+        let other_run = db
+            .seal_relation(
+                &cx,
+                &query,
+                OTHER,
+                CommitSeq(2),
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+
+        // Mutating R ends its direct-read horizon; OTHER can advance through 5.
+        let mut c5 = WriteBatch::new(R);
+        c5.delete_edge(EId(4));
+        c5.set_edge_property(EDGE, P, Some(CanonicalScalar::Int(700)));
+        c5.add_edge(
+            EId(501),
+            VId(4),
+            VId(1),
+            vec![(P, CanonicalScalar::Int(51))],
+        );
+        assert_eq!(db.write(&cx, c5).await.unwrap(), CommitSeq(5));
+        let pinned_5 = db.read_session().unwrap();
+        let expected_refs = vec![
+            AdjRunRef::carried(
+                R,
+                r_run.0,
+                r_source.0,
+                CommitSeq(1),
+                CommitSeq(3),
+                CommitSeq(4),
+            ),
+            AdjRunRef::carried(
+                OTHER,
+                other_run.0,
+                other_source.0,
+                CommitSeq(2),
+                CommitSeq(4),
+                CommitSeq(5),
+            ),
+        ];
+        let before = db.partition_root().unwrap();
+        assert_eq!(
+            store
+                .published_adj_run_refs(&cx, before, max_root_bytes)
+                .await
+                .unwrap(),
+            expected_refs
+        );
+        let before_base = store
+            .get_root_run_source(&cx, before, max_root_bytes)
+            .await
+            .unwrap();
+
+        db.compact(&cx).await.unwrap();
+
+        let compacted = db.partition_root().unwrap();
+        assert_ne!(compacted, before);
+        assert_ne!(
+            store
+                .get_root_run_source(&cx, compacted, max_root_bytes)
+                .await
+                .unwrap(),
+            before_base
+        );
+        assert_eq!(
+            store
+                .published_adj_run_refs(&cx, compacted, max_root_bytes)
+                .await
+                .unwrap(),
+            expected_refs
+        );
+        assert!(
+            store
+                .get_published_adj_run(
+                    &query,
+                    compacted,
+                    R,
+                    CommitSeq(5),
+                    SealedLimits::default(),
+                    max_root_bytes,
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_published_adj_run(
+                    &query,
+                    compacted,
+                    OTHER,
+                    CommitSeq(5),
+                    SealedLimits::default(),
+                    max_root_bytes,
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        drop(db);
+        let mut db = Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        assert_eq!(db.partition_root().unwrap(), compacted);
+        let mut c6 = WriteBatch::new(OTHER);
+        c6.delete_edge(EId(401));
+        c6.add_edge(
+            EId(601),
+            VId(4),
+            VId(2),
+            vec![(P, CanonicalScalar::Int(61))],
+        );
+        assert_eq!(db.write(&cx, c6).await.unwrap(), CommitSeq(6));
+        let root_6 = db.partition_root().unwrap();
+        // Neither stale horizon may jump over its relation's unmerged mutation.
+        assert_eq!(
+            store
+                .published_adj_run_refs(&cx, root_6, max_root_bytes)
+                .await
+                .unwrap(),
+            expected_refs
+        );
+        let expected_6 = answers(&db.read_session().unwrap(), &query);
+        db.compact(&cx).await.unwrap();
+        let compacted_6 = db.partition_root().unwrap();
+        assert_ne!(compacted_6, root_6);
+        assert_eq!(
+            store
+                .published_adj_run_refs(&cx, compacted_6, max_root_bytes)
+                .await
+                .unwrap(),
+            expected_refs
+        );
+
+        drop(db);
+        let db = Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        assert_eq!(db.partition_root().unwrap(), compacted_6);
+        // Each relation now needs its own delta interval from its original run.
+        // Compare both directions to a fresh Tier-D seal after cold recovery.
+        for (relation, horizon) in [(R, CommitSeq(4)), (OTHER, CommitSeq(5))] {
+            let overlay = db
+                .open_sealed_delta_overlay(
+                    &query,
+                    relation,
+                    Some(CommitSeq(6)),
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap()
+                .expect("compaction retains a run for every carried relation");
+            assert_eq!(overlay.verified_through(), horizon);
+            let fresh = store
+                .seal_relation(
+                    &query,
+                    compacted_6,
+                    CommitSeq(6),
+                    relation,
+                    SealedLimits::default(),
+                )
+                .await
+                .unwrap();
+            let incoming = fresh
+                .incoming_index(
+                    &query,
+                    fgdb_strata::tiered::sealed::IncomingIndexLimits::default(),
+                )
+                .unwrap();
+            for vertex in [VId(1), VId(2), VId(3), VId(4), VId(99)] {
+                let mut actual = overlay.outgoing_cursor(&query, vertex).unwrap();
+                let mut expected = fresh.row(&query, vertex, relation, CommitSeq(6)).unwrap();
+                loop {
+                    match (actual.next(&query).unwrap(), expected.next(&query).unwrap()) {
+                        (Some(actual), Some(expected)) => {
+                            assert_eq!(actual.entry, expected.entry);
+                            assert_eq!(actual.properties, expected.properties);
+                        }
+                        (None, None) => break,
+                        other => panic!("compacted outgoing mismatch for {relation:?}: {other:?}"),
+                    }
+                }
+                let mut actual = overlay.incoming_cursor(&query, vertex).unwrap();
+                let mut expected = incoming
+                    .row(&query, vertex, relation, CommitSeq(6))
+                    .unwrap();
+                loop {
+                    match (actual.next(&query).unwrap(), expected.next(&query).unwrap()) {
+                        (Some(actual), Some(expected)) => {
+                            assert_eq!(actual.entry, expected.entry);
+                            assert_eq!(actual.properties, expected.properties);
+                        }
+                        (None, None) => break,
+                        other => panic!("compacted incoming mismatch for {relation:?}: {other:?}"),
+                    }
+                }
+            }
+        }
+        for (cut, pinned) in [
+            (CommitSeq(2), &historical),
+            (CommitSeq(4), &pinned_4),
+            (CommitSeq(5), &pinned_5),
+        ] {
+            assert_eq!(
+                sealed_answers(&cold(&vfs, &cx, &query, cut).await, &query),
+                answers(pinned, &query)
+            );
+        }
+        assert_eq!(answers(&db.read_session().unwrap(), &query), expected_6);
+        assert_eq!(
+            sealed_answers(&cold(&vfs, &cx, &query, CommitSeq(6)).await, &query),
+            expected_6
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

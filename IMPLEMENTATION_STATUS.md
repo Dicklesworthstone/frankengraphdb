@@ -12,6 +12,26 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Persistent sealed runs through compaction — qualification pending
+
+Source added 2026-11-12 for `fgdb-w3-seal-compact-h3p` and
+`fgdb-rc1111-persistent-tier-r-7hsan`. Consolidation now carries the selected
+root's authenticated relation-run inventory into the replacement root before
+the existing manifest and root-slot publication. Each run keeps its original
+source root, retained floor, publication and verified-through frontier.
+Compaction does not reseal an image or promote an outdated run: readers still
+combine its unchanged compressed base with the required post-seal delta suffix.
+Pinned generations remain independent, and later writes retain the same run
+membership.
+
+The change uses the existing V7/V8 root envelope and publication owner; the
+consolidation floor remains zero. Regression sources cover persisted membership,
+historical and current results, writable reopen, subsequent writes and damaged
+run refusal. Independent source review is recorded with the landing. Rust
+compilation, runtime tests, formatting, Clippy, UBS and exact-tree proof are
+**UNRUN** because the execution workspace is unavailable. The broader storage
+beads remain open.
+
 ### Bolt explicit native write transactions — qualification pending
 
 Source added 2026-11-11 under `fgdb-roadmap-bolt-v2-vb6e` and
