@@ -1143,8 +1143,9 @@ fn exact_signed_work_is_cumulative_through_eof_not_refreshed_for_each_row() {
             );
             // Every work charge samples time once. The only other samples are
             // one opening time, two admitted-node charges, and three delivery
-            // charges (two rows plus EOF). No internal usage is exposed.
-            calls.get() - before - 1 - 2 - 3
+            // charges (two rows plus EOF). The original argument transcript is
+            // one bulk charge: replace its one sample with its exact byte cost.
+            calls.get() - before - 1 - 2 - 3 + args.canonical_byte_len() as u64 - 1
         };
         assert!(work > 10);
         for limit in [work, work - 1] {
@@ -1164,6 +1165,7 @@ fn exact_signed_work_is_cumulative_through_eof_not_refreshed_for_each_row() {
                     || 100,
                     selector,
                     native,
+                    None,
                 )
                 .unwrap();
             let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
@@ -1351,6 +1353,7 @@ fn streamed_limits_and_native_meters_cannot_count_hidden_vertices() {
                         || 100,
                         selector,
                         native,
+                        None,
                     )
                     .unwrap();
                 let cursor = session.stream(&cx, &prepared, &args);

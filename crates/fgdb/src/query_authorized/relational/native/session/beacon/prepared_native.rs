@@ -492,6 +492,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             if !Arc::ptr_eq(&owner, &index.owner) {
                 return Err(QueryError::Authorization(WardenError::ScopeDenied));
             }
+            prepared.admit_input(&owner, params, &mut execution.borrow_mut())?;
             let selected = prepared
                 .selector
                 .bind_parameters(params)

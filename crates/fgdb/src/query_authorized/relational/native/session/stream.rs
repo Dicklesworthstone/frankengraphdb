@@ -909,11 +909,7 @@ fn open<'q, C: FnMut() -> u64, Plan, Output>(
     ))));
     execution.borrow_mut().checkpoint()?;
     let selected = (|| {
-        if !Arc::ptr_eq(owner, &prepared.owner) {
-            return Err(QueryError::Authorization(
-                AuthorizationError::WrongAuthority,
-            ));
-        }
+        prepared.admit_input(owner, params, &mut execution.borrow_mut())?;
         let selected = prepared
             .selector
             .bind_parameters(params)

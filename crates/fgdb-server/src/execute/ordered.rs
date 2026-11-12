@@ -147,6 +147,7 @@ pub(crate) async fn read_ordered_session<'a>(
                 unix_millis as fn() -> u64,
                 Arc::clone(&prepared.selector),
                 Arc::clone(&prepared.native),
+                prepared.lowered.clone(),
                 scratch,
                 destination,
                 auxiliary,

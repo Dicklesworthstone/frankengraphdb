@@ -37,6 +37,18 @@ fn admit_text_input<Clock: FnMut() -> u64>(
     execution.reserve_work(bytes)
 }
 
+// Every prepared execution admits the original argument transcript before
+// selector copies, map-field lowering or binding. Its immutable definition
+// has already been admitted; derived arguments are not a second input charge.
+fn admit_parameter_input<Clock: FnMut() -> u64>(
+    execution: &mut Execution<'_, '_, Clock>,
+    params: &GqlParameters,
+) -> Result<(), QueryError> {
+    let bytes = u64::try_from(params.canonical_byte_len())
+        .map_err(|_| execution.refusal(fgdb_warden::Error::TooLarge))?;
+    execution.reserve_work(bytes)
+}
+
 // Only metadata and complete result rows leave the dispatcher. The outer
 // authorized owner still performs the sole signed delivery admission.
 fn rows_of(
@@ -346,6 +358,7 @@ impl PreparedNativeRead {
             None,
             clock,
             |snapshot, at, scope, execution| {
+                admit_parameter_input(&mut execution.borrow_mut(), params)?;
                 rows_of(
                     native_at(self, params, snapshot, at, scope, execution, policy)?,
                     &mut columns,

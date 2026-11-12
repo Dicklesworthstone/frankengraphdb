@@ -10,56 +10,9 @@ use std::sync::Arc;
 pub(crate) struct PreparedRead {
     pub(super) selector: Arc<PreparedGraphBranchText>,
     pub(super) native: Arc<PreparedNativeRead>,
-    lowered: Option<fgdb_gql::GqlMapArgumentText>,
+    pub(super) lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
     pub(crate) generation: Generation,
     pub(crate) source_bytes: usize,
-}
-
-impl PreparedRead {
-    /// Rebind the caller's map fields under current authority. The attached
-    /// native template and branch selector share the same lowered statement;
-    /// neither owns representative argument values from PREPARE.
-    pub(crate) fn arguments<'p>(
-        &self,
-        cx: &fgdb_types::QueryCx,
-        db: &Served,
-        token: &CapabilityToken,
-        parameters: &'p GqlParameters,
-    ) -> Result<std::borrow::Cow<'p, GqlParameters>, Refusal> {
-        let Some(lowered) = &self.lowered else {
-            return Ok(std::borrow::Cow::Borrowed(parameters));
-        };
-        let now = unix_millis();
-        let capability = db
-            .authority
-            .verify_at(token, TRUNK, now)
-            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
-        let mut permit = capability
-            .begin_read_at(TRUNK, now)
-            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
-        let _operation = self.generation.enter().map_err(Refusal::from)?;
-        cx.checkpoint()
-            .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-        let arguments = (|| {
-            let selected = self
-                .selector
-                .bind_parameters(parameters)
-                .map_err(branch_error)?;
-            authorized_branch(&selected)?;
-            lowered
-                .arguments(parameters)
-                .map(std::borrow::Cow::Owned)
-                .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
-        })();
-        // Invalidated authority/generation wins over a malformed field too.
-        permit
-            .checkpoint_at(unix_millis())
-            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
-        cx.checkpoint()
-            .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-        self.generation.check().map_err(Refusal::from)?;
-        arguments
-    }
 }
 
 pub(crate) enum PreparedWrite {
@@ -221,9 +174,29 @@ pub(crate) async fn prepare_read(
         .checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
     let generation = db.db.generation().map_err(Refusal::from)?;
+    let parameters = query.with_restriction(|| {
+        convert::parameters(&request.parameters, None)
+            .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
+    });
+    permit
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    generation.check().map_err(Refusal::from)?;
+    // Reserve the original argument transcript before lowering or binding. A
+    // failed reservation returns its exact cause, as statement admission does;
+    // malformed wire values still pass through the final validity checks.
+    if let Ok(parameters) = &parameters {
+        let bytes = u64::try_from(parameters.canonical_byte_len())
+            .map_err(|_| Refusal::new(ErrorCode::Budget, "prepared argument input is too large"))?;
+        permit
+            .charge_work_at(unix_millis(), bytes)
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    }
     let definition = query.with_restriction(|| {
-        let parameters = convert::parameters(&request.parameters, None)
-            .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+        let parameters = parameters?;
         let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(&request.statement, &parameters);
         let (statement, parameters) = lowered.as_ref().map_or(
             (request.statement.as_str(), &parameters),
@@ -254,7 +227,7 @@ pub(crate) async fn prepare_read(
     Ok(PreparedRead {
         selector: Arc::new(selector),
         native: Arc::new(native),
-        lowered,
+        lowered: lowered.map(Arc::new),
         generation,
         source_bytes: request.statement.len(),
     })
@@ -867,6 +840,7 @@ pub(crate) async fn read_prepared_session<'a>(
         unix_millis as fn() -> u64,
         Arc::clone(&prepared.selector),
         Arc::clone(&prepared.native),
+        prepared.lowered.clone(),
     );
     prepared.generation.check().map_err(Refusal::from)?;
     let (native, template) = admitted.map_err(query_refusal)?;
@@ -904,7 +878,6 @@ async fn read_prepared_inner(
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let (mut session, template) = read_prepared_session(cx, db, token, prepared).await?;
     let query = crate::query_cx(&contexts);
-    let parameters = prepared.arguments(&query, db, token, &parameters)?;
     let result = session
         .native
         .execute_with_snapshot(&query, &template, &parameters);

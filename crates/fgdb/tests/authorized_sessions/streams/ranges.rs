@@ -184,6 +184,7 @@ fn hidden_range_values_cannot_change_native_or_signed_work_thresholds() {
                     || 100,
                     selector,
                     native,
+                    None,
                 )
                 .unwrap();
             let cursor = session.stream(&cx, &prepared, &args);

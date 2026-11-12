@@ -198,6 +198,7 @@ fn hidden_membership_histories_do_not_change_native_or_signed_refusal_thresholds
                     || 100,
                     selector,
                     native,
+                    None,
                 )
                 .unwrap();
             let cursor = session.stream(&cx, &prepared, &args);

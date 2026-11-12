@@ -150,13 +150,12 @@ fn prepared_map_fields_rebind_across_native_delivery_modes_and_recovery() {
             let parameters = crate::convert::parameters(&parameters, None).unwrap();
             let (mut session, template) =
                 ok(crate::execute::read_prepared_session(&root, db, &token, &definition).await);
-            let derived = ok(definition.arguments(&query, db, &token, &parameters));
             // The original property-only canonical order needs a blocking
             // sort and remains a native source-profile refusal. Explicit root
             // identity order admits that same typed map predicate lazily.
             assert_eq!(
                 session
-                    .stream_prepared(&query, &template, &derived)
+                    .stream_prepared(&query, &template, &parameters)
                     .err()
                     .unwrap()
                     .code,
@@ -212,7 +211,6 @@ fn prepared_map_fields_rebind_across_native_delivery_modes_and_recovery() {
         .await);
         let template = template.unwrap();
         let rebound = crate::convert::parameters(&arguments(Some(30)), None).unwrap();
-        let rebound = ok(ordered.arguments(&query, db, &token, &rebound));
         {
             let execution = ok(session.start(&query, &template, &rebound));
             let mut cursor = ok(execution.finish().await);
@@ -258,8 +256,8 @@ fn prepared_map_fields_rebind_across_native_delivery_modes_and_recovery() {
         );
         assert!(db.authority.retire());
         assert_eq!(
-            definition
-                .arguments(&query, db, &token, &fgdb_gql::GqlParameters::new())
+            read_prepared(&root, db, &token, &definition, &[])
+                .await
                 .err()
                 .unwrap()
                 .code,
@@ -1398,6 +1396,141 @@ fn prepared_chain_batch_slots_precede_allocation_and_keep_native_binding_coordin
         );
         assert_eq!(guard.frontier().unwrap(), CommitSeq(basis.0 + 1));
         drop(guard);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_read_original_argument_bytes_share_the_execution_allowance() {
+    let ((), report) = run_async_under_lab(0x79a0_0443, |root| async move {
+        let (mut server, token, _) = served(&root, "prepared-read-work-input").await;
+        let db = std::sync::Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+        db.symbols
+            .bind(fgdb_gql::GraphSymbolKind::Property, "p", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = contexts.query();
+        let mut batch = fgdb::WriteBatch::new(fgdb_delta_types::RelationId(1));
+        batch.create_vertex(
+            fgdb_types::VId(1),
+            vec![],
+            vec![(
+                fgdb_delta_types::PropertyKeyId(1),
+                fgdb_types::CanonicalScalar::Int(7),
+            )],
+        );
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), batch)
+            .await
+            .unwrap();
+        let arguments = |padding: &str| {
+            vec![(
+                "m".into(),
+                WireValue::Map(vec![
+                    ("key".into(), WireValue::Int(7)),
+                    ("unused".into(), WireValue::Text(padding.into())),
+                ]),
+            )]
+        };
+        let small = arguments("");
+        let large = arguments(&"雪".repeat(1024));
+        let small_input = crate::convert::parameters(&small, None).unwrap();
+        let large_input = crate::convert::parameters(&large, None).unwrap();
+        let statement = "MATCH (n {p: $m.key}) RETURN n.p AS p ORDER BY n";
+        let preparation_work = (statement.len() + small_input.canonical_byte_len()) as u64;
+        let request = Prepare {
+            mode: PrepareMode::Read,
+            statement: statement.into(),
+            parameters: small.clone(),
+        };
+        let short = token
+            .attenuate(fgdb_warden::Restriction::MaxWork(preparation_work - 1))
+            .unwrap();
+        assert_eq!(
+            prepare_read(&root, db, &short, &request)
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::Budget,
+            "argument reservation keeps its typed refusal after a successful text reservation"
+        );
+        let exact = token
+            .attenuate(fgdb_warden::Restriction::MaxWork(preparation_work))
+            .unwrap();
+        let definition = ok(prepare_read(&root, db, &exact, &request).await);
+        let expected = vec![vec![WireValue::Int(7)]];
+        assert_eq!(
+            ok(read_prepared(&root, db, &token, &definition, &large).await).rows,
+            expected
+        );
+
+        // Find the native owner's exact execution threshold on an unchanged
+        // graph, then change only map bytes that lowering discards. The same
+        // row, predicate, projection and delivery work must remain admitted.
+        let mut low = 0;
+        let mut high = 100_000;
+        while low + 1 < high {
+            let work = low + (high - low) / 2;
+            let scoped = token
+                .attenuate(fgdb_warden::Restriction::MaxWork(work))
+                .unwrap();
+            match read_prepared(&root, db, &scoped, &definition, &small).await {
+                Ok(answer) => {
+                    assert_eq!(answer.rows, expected);
+                    high = work;
+                }
+                Err(error) => {
+                    assert_eq!(error.code, ErrorCode::Budget, "{}", error.message);
+                    low = work;
+                }
+            }
+        }
+        assert!(high > small_input.canonical_byte_len() as u64);
+        let delta = (large_input.canonical_byte_len() - small_input.canonical_byte_len()) as u64;
+        for (work, succeeds) in [(high + delta - 1, false), (high + delta, true)] {
+            let scoped = token
+                .attenuate(fgdb_warden::Restriction::MaxWork(work))
+                .unwrap();
+            let answer = read_prepared(&root, db, &scoped, &definition, &large).await;
+            if succeeds {
+                assert_eq!(ok(answer).rows, expected);
+            } else {
+                assert_eq!(answer.err().unwrap().code, ErrorCode::Budget);
+            }
+        }
+
+        let scoped = token
+            .attenuate(fgdb_warden::Restriction::MaxWork(
+                large_input.canonical_byte_len() as u64,
+            ))
+            .unwrap();
+        let (mut session, prepared) =
+            ok(crate::execute::read_prepared_session(&root, db, &scoped, &definition).await);
+        assert_eq!(
+            session
+                .stream_prepared(&query, &prepared, &large_input)
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::Budget
+        );
+        assert_eq!(
+            crate::execute::read_prepared_difference(
+                &root, db, &scoped, &definition, &large, 0, 1,
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            ErrorCode::Budget
+        );
+        drop(session);
         server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");

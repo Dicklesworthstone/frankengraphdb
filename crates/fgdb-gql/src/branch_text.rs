@@ -8,6 +8,7 @@
 use crate::{GqlParameterValue, GqlParameters, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS};
 use fgdb_types::CanonicalScalar;
 use std::borrow::Cow;
+use std::sync::Arc;
 
 pub const MAX_GRAPH_BRANCH_NAME_BYTES: usize = 128;
 
@@ -105,7 +106,8 @@ enum Selector {
 /// admitted by this facade. Quoted names use doubled quotes, not interpolation.
 #[derive(Clone)]
 pub struct PreparedGraphBranchText {
-    statement: String,
+    source: Arc<str>,
+    statement: Arc<str>,
     selector: Option<Selector>,
     selector_offset: usize,
 }
@@ -182,8 +184,10 @@ impl PreparedGraphBranchText {
             }
         }
         let Some(index) = selected else {
+            let source: Arc<str> = text.into();
             return Ok(Self {
-                statement: text.to_owned(),
+                statement: Arc::clone(&source),
+                source,
                 selector: None,
                 selector_offset: 0,
             });
@@ -273,7 +277,8 @@ impl PreparedGraphBranchText {
         // names. Native offsets remain offsets into the caller's source text.
         statement.replace_range(first.start..value.end, &" ".repeat(value.end - first.start));
         Ok(Self {
-            statement,
+            source: text.into(),
+            statement: statement.into(),
             selector: Some(selector),
             selector_offset: value.start,
         })
@@ -282,6 +287,14 @@ impl PreparedGraphBranchText {
     #[must_use]
     pub fn has_selector(&self) -> bool {
         self.selector.is_some()
+    }
+
+    /// The exact source supplied during preparation, including its selector.
+    /// Trusted hosts can compare a retained argument-lowering recipe without
+    /// reparsing or allowing a different recipe to change the binding contract.
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
     }
 
     /// The selector-free statement is an explicit plaintext export. It has not
@@ -498,6 +511,8 @@ mod tests {
             "MATCH (n) RETURN n.name AT BRANCH 'résumé''s'",
         ] {
             let prepared = PreparedGraphBranchText::prepare(source).unwrap();
+            assert_eq!(prepared.source(), source);
+            assert_eq!(prepared.clone().source(), source);
             let args = GqlParameters::new();
             let bound = prepared.bind_parameters(&args).unwrap();
             assert_eq!(bound.branch(), Some("résumé's"));
@@ -547,7 +562,9 @@ mod tests {
         ] {
             let prepared = PreparedGraphBranchText::prepare(source).unwrap();
             assert!(!prepared.has_selector());
+            assert_eq!(prepared.source(), source);
             assert_eq!(prepared.statement(), source);
+            assert!(Arc::ptr_eq(&prepared.source, &prepared.statement));
         }
     }
 

@@ -255,6 +255,7 @@ fn hidden_collation_cannot_change_native_or_signed_prefix_refusals() {
                     || 100,
                     selector,
                     native,
+                    None,
                 )
                 .unwrap();
             let cursor = session.stream(&cx, &prepared, &args);

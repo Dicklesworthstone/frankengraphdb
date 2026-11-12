@@ -135,11 +135,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         self.run_scoped(
             cx,
             |view, branch, scope, _, policy, execution| {
-                if !Arc::ptr_eq(&owner, &prepared.owner) {
-                    return Err(control(QueryError::Authorization(
-                        AuthorizationError::WrongAuthority,
-                    )));
-                }
+                prepared
+                    .admit_input(&owner, params, &mut execution.borrow_mut())
+                    .map_err(control)?;
                 let selected = prepared
                     .selector
                     .bind_parameters(params)

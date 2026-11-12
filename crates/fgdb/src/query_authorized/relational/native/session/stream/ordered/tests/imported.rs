@@ -61,6 +61,7 @@ fn imported_ordered_templates_rebind_at_a_fresh_pin_without_catalog_callbacks() 
                 || 100,
                 Arc::clone(&selector),
                 Arc::clone(&native),
+                None,
                 scratch,
                 destination,
                 file(&cx, &pool).await.0,
@@ -142,6 +143,7 @@ fn ordered_import_admits_authority_before_templates_limits_and_scratch() {
                 || now,
                 selected,
                 Arc::clone(&native),
+                None,
                 scratch,
                 destination,
                 file(&cx, &pool).await.0,
@@ -193,6 +195,7 @@ fn imported_handles_keep_exact_session_ownership_and_branch_rebinding() {
                     || 100,
                     Arc::clone(&selector),
                     Arc::clone(&native),
+                    None,
                     scratch,
                     destination,
                     file(&cx, &pool).await.0,
@@ -273,6 +276,7 @@ mod projected {
                 clock as fn() -> u64,
                 selector,
                 native,
+                None,
                 scratch,
                 destination,
                 file(cx, pool).await.0,
@@ -808,4 +812,132 @@ mod projected {
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
+}
+
+#[test]
+fn imported_map_input_and_external_sort_reserve_one_live_allowance() {
+    let ((), report) = run_async_under_lab(0x8600_0028, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = database(&contexts.commit()).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let arguments = |padding: &str| {
+            GqlParameters::new()
+                .with_text("route", "main")
+                .unwrap()
+                .with_map(
+                    "record",
+                    vec![
+                        ("key".into(), scalar(3)),
+                        (
+                            "unused".into(),
+                            GraphValue::Scalar(CanonicalScalar::ucs_basic_text(padding).unwrap()),
+                        ),
+                    ],
+                )
+                .unwrap()
+        };
+        let small = arguments("");
+        let large = arguments(&"雪".repeat(1024));
+        let text = "AT BRANCH $route MATCH (n:L {p: $record.key}) RETURN n.p AS p ORDER BY p";
+        let (lowered, derived) = fgdb_gql::GqlMapArgumentText::lower_fields(text, &small).unwrap();
+        let (selector, native) = retained(lowered.text(), &derived);
+        let lowered = Arc::new(lowered);
+        let (scratch, _) = file(&cx, &pool).await;
+        let (destination, _) = file(&cx, &pool).await;
+        let (mut session, prepared) = db
+            .authorized_prepared_ordered_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                policy(),
+                || 100,
+                selector.clone(),
+                native.clone(),
+                Some(lowered.clone()),
+                scratch,
+                destination,
+                file(&cx, &pool).await.0,
+                limits(),
+            )
+            .unwrap();
+        let mut opening_work = Vec::new();
+        for args in [&small, &large] {
+            let opened = session
+                .session
+                .open_ordered(&cx, &prepared, args, limits())
+                .unwrap();
+            opening_work.push(opened.execution.borrow().permit.usage().work);
+            drop(opened);
+            let mut cursor = session
+                .execute_ordered(&cx, &prepared, args)
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(values(&mut cursor).await, vec![vec![scalar(3)]; 2]);
+            drop(cursor);
+            let mut cursor = session
+                .difference_stream(&cx, &prepared, args, CommitSeq(0), CommitSeq(1))
+                .unwrap()
+                .await
+                .unwrap();
+            let (weight, row) = cursor.next_change().await.unwrap().unwrap();
+            assert_eq!(weight, 2);
+            assert_eq!(
+                GraphValueRow::decode_canonical(row.as_ref())
+                    .unwrap()
+                    .values(),
+                &[scalar(3)]
+            );
+            assert!(cursor.next_change().await.unwrap().is_none());
+            drop(cursor);
+            assert_eq!(pool.used(), 0);
+        }
+        assert_eq!(
+            opening_work[1] - opening_work[0],
+            (large.canonical_byte_len() - small.canonical_byte_len()) as u64,
+            "unused UTF-8 payload is admitted exactly once before deriving the same scalar"
+        );
+        assert!(opening_work[1] >= large.canonical_byte_len() as u64 + limits().max_sort_work);
+        drop(session);
+
+        // Each reservation fits alone. Their sum and the opening checkpoints
+        // must fit the same permit before any external execution is returned.
+        let mut allowed = grant();
+        allowed.limits.max_work = opening_work[1] - 1;
+        let token = issuer.issue_at(&allowed, 100).unwrap();
+        let (scratch, a) = file(&cx, &pool).await;
+        let (destination, b) = file(&cx, &pool).await;
+        let (mut session, prepared) = db
+            .authorized_prepared_ordered_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                policy(),
+                || 100,
+                selector,
+                native,
+                Some(lowered),
+                scratch,
+                destination,
+                file(&cx, &pool).await.0,
+                limits(),
+            )
+            .unwrap();
+        refusal(
+            session.execute_ordered(&cx, &prepared, &large),
+            AuthorizationError::LimitExceeded(LimitDimension::Work),
+        );
+        assert!(!session.is_closed());
+        assert!(a.0.lock().unwrap().bytes.get_ref().is_empty());
+        assert!(b.0.lock().unwrap().bytes.get_ref().is_empty());
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -72,7 +72,7 @@ pub struct AuthorizedPreparedRead {
     owner: Arc<()>,
     selector: Arc<PreparedGraphBranchText>,
     native: Arc<PreparedNativeRead>,
-    lowered: Option<fgdb_gql::GqlMapArgumentText>,
+    lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
     parameter_schema: Option<Box<[fgdb_gql::GqlParameterSpec]>>,
 }
 
@@ -99,6 +99,24 @@ impl AuthorizedPreparedRead {
     }
     pub fn facade_class(&self) -> crate::NativeReadClass {
         self.native.facade_class()
+    }
+
+    // Credentials are already live when this is called. Ownership precedes
+    // input accounting, and the original transcript precedes every selector
+    // copy or derived map field. Batch preflight calls this once per binding;
+    // its later execution reuses that reservation on the same permit.
+    fn admit_input<Clock: FnMut() -> u64>(
+        &self,
+        owner: &Arc<()>,
+        params: &GqlParameters,
+        execution: &mut Execution<'_, '_, Clock>,
+    ) -> Result<(), QueryError> {
+        if !Arc::ptr_eq(owner, &self.owner) {
+            return Err(QueryError::Authorization(
+                AuthorizationError::WrongAuthority,
+            ));
+        }
+        admit_parameter_input(execution, params)
     }
 
     // Bind only after the caller has admitted this exact owner and live permit.
@@ -366,7 +384,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             );
             execution.borrow_mut().checkpoint()?;
             let native = native?;
-            let lowered = lowered.map(|(lowered, _)| lowered);
+            let lowered = lowered.map(|(lowered, _)| Arc::new(lowered));
             let parameter_schema = lowered.as_ref().map(|lowered| {
                 lowered
                     .field_parameter_schema(native.parameter_schema())
@@ -409,6 +427,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     ) -> Result<(QueryResult, CommitSeq), QueryError> {
         let owner = Arc::clone(&self.owner);
         self.run(cx, |view, branch, scope, _, policy, execution| {
+            prepared.admit_input(&owner, params, &mut execution.borrow_mut())?;
             prepared_at(
                 view, branch, scope, policy, execution, &owner, prepared, params,
             )
@@ -420,23 +439,32 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         cx: &QueryCx,
         selector: Arc<PreparedGraphBranchText>,
         native: Arc<PreparedNativeRead>,
+        lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
     ) -> Result<AuthorizedPreparedRead, QueryError> {
         let owner = Arc::clone(&self.owner);
         self.run(cx, |_, _, _, _, _, _| {
             if crate::query::explain::without_terminator(selector.statement()) != native.statement()
+                || lowered
+                    .as_ref()
+                    .is_some_and(|lowered| lowered.text() != selector.source())
             {
                 return Err(QueryError::Authorization(
                     AuthorizationError::WrongAuthority,
                 ));
             }
             refuse_element_identity(selector.statement())?;
+            let parameter_schema = lowered.as_ref().map(|lowered| {
+                lowered
+                    .field_parameter_schema(native.parameter_schema())
+                    .into_boxed_slice()
+            });
             Ok((
                 AuthorizedPreparedRead {
                     owner,
                     selector,
                     native,
-                    lowered: None,
-                    parameter_schema: None,
+                    lowered,
+                    parameter_schema,
                 },
                 0,
             ))
@@ -521,6 +549,8 @@ fn prepared_at(
     prepared: &AuthorizedPreparedRead,
     params: &GqlParameters,
 ) -> Result<((QueryResult, CommitSeq), usize), QueryError> {
+    // execute_with_snapshot or batch preflight reserved this binding's original
+    // input on execution before reaching this shared evaluator.
     if !Arc::ptr_eq(owner, &prepared.owner) {
         return Err(QueryError::Authorization(
             AuthorizationError::WrongAuthority,
@@ -572,6 +602,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// or catalog callbacks. This privileged Database constructor is the only
     /// attachment seam; the narrowed session cannot accept an arbitrary plan.
     /// Its returned handle remains bound to this exact session.
+    /// A supplied map-field recipe is retained without argument values and
+    /// must name exactly the selector's source. Execution accepts the caller's
+    /// original arguments, admitting their complete byte transcript before
+    /// deriving fields under its own retained permit.
     ///
     /// The host must validate that the template's catalog belongs to this
     /// database, branch and trusted resolver, just as for raw
@@ -598,10 +632,11 @@ impl<V: Vfs + Clone> Database<V> {
         clock: C,
         selector: Arc<PreparedGraphBranchText>,
         native: Arc<PreparedNativeRead>,
+        lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
     ) -> Result<(AuthorizedReadSession<'a, R, C>, AuthorizedPreparedRead), QueryError> {
         let mut session =
             self.authorized_read_session(cx, authority, token, branch, resolver, policy, clock)?;
-        let prepared = session.attach_prepared(cx, selector, native)?;
+        let prepared = session.attach_prepared(cx, selector, native, lowered)?;
         Ok((session, prepared))
     }
 
@@ -687,10 +722,11 @@ impl EmbeddedReadView {
         clock: C,
         selector: Arc<PreparedGraphBranchText>,
         native: Arc<PreparedNativeRead>,
+        lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
     ) -> Result<(AuthorizedReadSession<'a, R, C>, AuthorizedPreparedRead), QueryError> {
         let mut session =
             self.authorized_read_session(cx, authority, token, branch, resolver, policy, clock)?;
-        let prepared = session.attach_prepared(cx, selector, native)?;
+        let prepared = session.attach_prepared(cx, selector, native, lowered)?;
         Ok((session, prepared))
     }
 }

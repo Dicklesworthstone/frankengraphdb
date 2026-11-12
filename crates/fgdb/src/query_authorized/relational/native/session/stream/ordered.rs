@@ -158,6 +158,7 @@ impl<V: Vfs + Clone> Database<V> {
         clock: C,
         selector: Arc<PreparedGraphBranchText>,
         native: Arc<PreparedNativeRead>,
+        lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
         scratch: SpillFile<A>,
         destination: SpillFile<B>,
         auxiliary: SpillFile<D>,
@@ -169,7 +170,7 @@ impl<V: Vfs + Clone> Database<V> {
     {
         let (session, prepared) = self
             .authorized_prepared_read_session(
-                cx, authority, token, branch, resolver, policy, clock, selector, native,
+                cx, authority, token, branch, resolver, policy, clock, selector, native, lowered,
             )
             .map_err(authorized)?;
         limits.validate()?;
@@ -242,6 +243,7 @@ impl EmbeddedReadView {
         clock: C,
         selector: Arc<PreparedGraphBranchText>,
         native: Arc<PreparedNativeRead>,
+        lowered: Option<Arc<fgdb_gql::GqlMapArgumentText>>,
         scratch: SpillFile<A>,
         destination: SpillFile<B>,
         auxiliary: SpillFile<D>,
@@ -253,7 +255,7 @@ impl EmbeddedReadView {
     {
         let (session, prepared) = self
             .authorized_prepared_read_session(
-                cx, authority, token, branch, resolver, policy, clock, selector, native,
+                cx, authority, token, branch, resolver, policy, clock, selector, native, lowered,
             )
             .map_err(authorized)?;
         limits.validate()?;

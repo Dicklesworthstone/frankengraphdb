@@ -979,6 +979,7 @@ fn projected_collection_limits_and_late_errors_never_publish_partial_lists() {
                 || 100,
                 std::sync::Arc::clone(&selector),
                 std::sync::Arc::clone(&native),
+                None,
             )
             .unwrap();
         let error = match session.stream(&cx, &prepared, &args) {

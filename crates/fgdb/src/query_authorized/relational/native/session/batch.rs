@@ -107,11 +107,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             admit(statements.len(), execution)?;
             for &(prepared, params) in statements {
                 execution.borrow_mut().checkpoint()?;
-                if !Arc::ptr_eq(&owner, &prepared.owner) {
-                    return Err(QueryError::Authorization(
-                        AuthorizationError::WrongAuthority,
-                    ));
-                }
+                prepared.admit_input(&owner, params, &mut execution.borrow_mut())?;
                 let selected = prepared
                     .selector
                     .bind_parameters(params)

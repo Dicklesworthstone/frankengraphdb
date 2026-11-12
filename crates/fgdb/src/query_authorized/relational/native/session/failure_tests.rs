@@ -629,6 +629,7 @@ fn all_native_host_facades_keep_branch_framing_and_one_trailing_terminator() {
                     || 100,
                     selector,
                     native,
+                    None,
                 )
                 .unwrap();
             assert_eq!(prepared.facade_class(), class);
@@ -670,6 +671,7 @@ fn retained_host_templates_share_metadata_but_earn_fresh_pins_and_exact_session_
                 || 100,
                 Arc::clone(&selector),
                 Arc::clone(&native),
+                None,
             )
             .unwrap();
         assert!(Arc::ptr_eq(&first_handle.selector, &selector));
@@ -707,6 +709,7 @@ fn retained_host_templates_share_metadata_but_earn_fresh_pins_and_exact_session_
                 || 100,
                 Arc::clone(&selector),
                 Arc::clone(&native),
+                None,
             )
             .unwrap();
         assert!(Arc::ptr_eq(&second_handle.selector, &selector));
@@ -778,6 +781,7 @@ fn host_template_import_checks_source_coherence_and_identity_after_authenticatio
                 || 100,
                 Arc::clone(&selector),
                 Arc::clone(&native),
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -804,6 +808,7 @@ fn host_template_import_checks_source_coherence_and_identity_after_authenticatio
                     || now,
                     Arc::clone(&mismatch),
                     Arc::clone(&native),
+                    None,
                 ),
                 expected,
             );
@@ -823,6 +828,7 @@ fn host_template_import_checks_source_coherence_and_identity_after_authenticatio
                     || 100,
                     Arc::clone(&selector),
                     Arc::clone(&identity_native),
+                    None,
                 ),
                 AuthorizationError::WrongAuthority,
             );
@@ -837,6 +843,7 @@ fn host_template_import_checks_source_coherence_and_identity_after_authenticatio
                     || 100,
                     identity_selector,
                     identity_native,
+                    None,
                 ),
                 AuthorizationError::ScopeDenied,
             );
@@ -874,6 +881,7 @@ fn every_host_template_constructor_expiry_cut_releases_its_new_pin() {
                 clock,
                 Arc::clone(&selector),
                 Arc::clone(&native),
+                None,
             )
             .unwrap();
         let checkpoints = calls.get();
@@ -894,6 +902,7 @@ fn every_host_template_constructor_expiry_cut_releases_its_new_pin() {
                     clock,
                     Arc::clone(&selector),
                     Arc::clone(&native),
+                    None,
                 ),
                 AuthorizationError::Expired,
             );
@@ -939,6 +948,7 @@ fn imported_templates_use_current_scope_and_keep_stream_credentials_live() {
                     || 100,
                     Arc::clone(&selector),
                     Arc::clone(&native),
+                    None,
                 )
                 .unwrap();
             assert_eq!(
@@ -962,6 +972,7 @@ fn imported_templates_use_current_scope_and_keep_stream_credentials_live() {
                 || now.get(),
                 selector,
                 native,
+                None,
             )
             .unwrap();
         let mut cursor = session.stream(&cx, &prepared, &params).unwrap();

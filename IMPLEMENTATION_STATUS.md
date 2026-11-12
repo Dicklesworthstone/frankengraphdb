@@ -604,11 +604,41 @@ The ordinary unresolved parser records binding origins and rebuilds the complete
 
 This is a real embedded read-view subset. It is not authorization negotiation, lease/reattach, cursor ownership, server transport, or the synchronous facade.
 
-### Signed admission before native read compilation
+### Signed admission before native read compilation and prepared binding
 
-Source added 2026-11-12 for the embedded read-budget work in `fgdb-w10-embedded-54r.1`: textual authorized reads reserve the original UTF-8 statement length plus the original canonical parameter-byte length from their retained signed work permit before field lowering, selector parsing, parameter binding or catalog callbacks. The same allocation-free, checked admission applies to one-shot authorized reads, session preparation, the common query/batch path and two-cut result differences. It prices the complete original input, including unused map payloads and branch-only arguments; derived parameters and trusted statement-time values are not charged again. Expiry and authority retirement retain precedence.
+Source added 2026-11-12 for `fgdb-w10-embedded-54r` and `fgdb-w10-qos-cxp`.
+Textual authorized reads reserve the original UTF-8 statement length plus
+the original canonical parameter-byte length before field lowering, selector
+parsing, binding or catalog callbacks. Prepared invocations now reserve their
+original canonical argument bytes on the live native execution permit before
+selector binding, map-field derivation or native binding. Unused map payloads
+and branch-only arguments remain part of that input. Derived fields and trusted
+statement-time values are not charged as a second input.
 
-Three new regressions in `crates/fgdb/tests/authorized_sessions/admission.rs` cover zero catalog callbacks under insufficient input allowance, the exact original-input charge plus existing preparation checkpoints, and terminal authority failures. Existing cursor-budget fixtures import trusted precompiled templates through the established attachment API so their original execution limits remain unchanged. Prepared execution/rebinding and server-side prepared argument lowering retain their prior accounting. Compilation and runtime validation remain **UNRUN** after dependency compilation was killed for memory pressure and the execution environment disconnected; the broader bead and exact-tree qualification remain open.
+The retained native owner applies this admission to buffered execution, source
+and aggregate cursors, ordered spill execution, Beacon reads and standalone
+authorized prepared reads. Prepared batches preflight each invocation's input
+cumulatively; differences admit one binding for both endpoints. FGP prepared
+delivery forwards original arguments and retains its immutable lowering recipe
+in the authorized handle, removing the separate temporary argument permit.
+Trusted attachment checks exact recipe/selector source coherence and preserves
+the original public map parameter schema. Definition preparation and later
+execution retain their existing separate operation permits.
+
+Server PREPARE also admits original source and argument bytes before lowering.
+Fresh authority, cancellation and generation checks precede the argument
+reservation; a failed reservation retains its typed Budget refusal. Handle
+ownership, expiry and retired-authority precedence remain enforced. Regression
+sources cover unused UTF-8 payloads, malformed-binding precedence, exact byte
+boundaries, batch/difference accounting, recipe coherence, original arguments
+across native/server delivery modes, retained ordering allowance and EOF work.
+
+Targeted pinned formatting, whole-tree whitespace checks and independent
+source/API and call-site reviews passed. Compilation, runtime tests, Clippy
+and exact-tree qualification remain **UNRUN**. Earlier dependency builds were
+killed for memory pressure; in this session the restored host's available
+memory fell below the controlled launch threshold before Cargo was started.
+The broader embedded and QoS beads remain open.
 
 ### Recovery through intact physical copies
 
