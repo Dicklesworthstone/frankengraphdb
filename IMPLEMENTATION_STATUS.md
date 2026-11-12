@@ -12,6 +12,28 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Sealed-run continuity during checkpoint recovery — qualification pending
+
+Source added 2026-11-12 for `fgdb-rc1111-persistent-tier-r-7hsan` and
+`fgdb-w2-retention-checkpoints-cn1l`. When Chronicle contains committed work
+beyond the selected root slot, suffix recovery now carries that checkpoint's
+authenticated relation-run inventory into the healed root. Native V7
+references are resolved against the original checkpoint's source and publication
+before being carried as V8; existing V8 sources, floors, publications and
+verification horizons remain exact. Replay does not certify new mutations as
+already included in an old run. Subsequent reads continue through the bounded
+post-seal delta overlay, and later writes cannot advance coverage across that
+unmerged interval. Explicit authoritative rebuild still reconstructs from
+Chronicle without inheriting the selected root's derived run membership.
+
+Regression sources cover native V7, covered V8 and stale V8 checkpoints at two
+post-commit publication fault stages, original run bytes and provenance,
+literal recovered mutations, bidirectional overlays, historical and pinned
+views, a second reopen, later writes and authoritative rebuild. Independent
+source/API review found no blocker. Rust compilation, runtime tests, formatting,
+Clippy, UBS and exact-tree proof remain **UNRUN** because the execution workspace
+is unavailable. The broader recovery and persistent Tier-R beads remain open.
+
 ### Persistent sealed runs through compaction — qualification pending
 
 Source added 2026-11-12 for `fgdb-w3-seal-compact-h3p` and

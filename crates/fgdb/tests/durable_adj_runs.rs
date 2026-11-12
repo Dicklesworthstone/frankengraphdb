@@ -2316,3 +2316,457 @@ fn compaction_preserves_mixed_run_lineages_and_post_seal_overlay_horizons() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+async fn assert_recovered_suffix_overlay_matches_graph(
+    db: &Database<MemVfs>,
+    oracle: &Database<MemVfs>,
+    query: &QueryCx,
+    cut: CommitSeq,
+    verified_through: CommitSeq,
+) {
+    let overlay = db
+        .open_sealed_delta_overlay(
+            query,
+            R,
+            Some(cut),
+            SealedLimits::default(),
+            RootReadLimits::default(),
+        )
+        .await
+        .unwrap()
+        .expect("recovery must preserve the run and its required delta overlay");
+    assert_eq!(overlay.verified_through(), verified_through);
+    assert_eq!(overlay.as_of(), cut);
+    assert!(overlay.base_run().partition().has_durable_incoming());
+    let expected = oracle
+        .edges_at(cut)
+        .unwrap()
+        .into_iter()
+        .filter(|edge| edge.entry.relation == R)
+        .collect::<Vec<_>>();
+    for vertex in [VId(1), VId(2), VId(3), VId(4), VId(99), VId(1000)] {
+        let mut wanted_out = expected
+            .iter()
+            .filter(|edge| edge.entry.src == vertex)
+            .map(|edge| {
+                (
+                    edge.entry.eid,
+                    edge.entry.src,
+                    edge.entry.dst,
+                    edge.entry.created_at,
+                    edge.entry.retired_at,
+                    edge.props.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        wanted_out.sort_by_key(|edge| (edge.2, edge.0, edge.3));
+        let mut outgoing = overlay.outgoing_cursor(query, vertex).unwrap();
+        let mut actual_out = Vec::new();
+        while let Some(edge) = outgoing.next(query).unwrap() {
+            actual_out.push((
+                edge.entry.eid,
+                edge.entry.src,
+                edge.entry.dst,
+                edge.entry.created_at,
+                edge.entry.retired_at,
+                edge.properties.to_vec(),
+            ));
+        }
+        assert_eq!(actual_out, wanted_out, "outgoing {vertex:?} at {cut:?}");
+
+        let mut wanted_in = expected
+            .iter()
+            .filter(|edge| edge.entry.dst == vertex)
+            .map(|edge| {
+                (
+                    edge.entry.eid,
+                    edge.entry.src,
+                    edge.entry.dst,
+                    edge.entry.created_at,
+                    edge.entry.retired_at,
+                    edge.props.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        wanted_in.sort_by_key(|edge| (edge.1, edge.0, edge.3));
+        let mut incoming = overlay.incoming_cursor(query, vertex).unwrap();
+        let mut actual_in = Vec::new();
+        while let Some(edge) = incoming.next(query).unwrap() {
+            actual_in.push((
+                edge.entry.eid,
+                edge.entry.src,
+                edge.entry.dst,
+                edge.entry.created_at,
+                edge.entry.retired_at,
+                edge.properties.to_vec(),
+            ));
+        }
+        assert_eq!(actual_in, wanted_in, "incoming {vertex:?} at {cut:?}");
+    }
+}
+
+#[test]
+fn checkpoint_suffix_recovery_retains_v7_v8_runs_and_unverified_deltas() {
+    let ((), report) = run_async_under_lab(0xd870_0101, |runtime| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+        let cx = contexts.commit();
+        let query = contexts.query();
+        // 0: native V7, 1: V8 with an advanced verified horizon, 2: V8
+        // already stale before the crash. Both early and late post-D2 faults
+        // must recover from the selected checkpoint, never an orphan root.
+        for checkpoint_kind in 0..3 {
+            for stage in [
+                DerivedPublicationStage::FoldCommittedTemplate,
+                DerivedPublicationStage::PublishRootSlot,
+            ] {
+                let vfs = MemVfs::new().unwrap();
+                let oracle_vfs = MemVfs::new().unwrap();
+                let (mut db, historical) = fixture(&cx, &vfs).await;
+                let (mut oracle, _) = fixture(&cx, &oracle_vfs).await;
+                let source_root = db.partition_root().unwrap();
+                let run_id = db
+                    .seal_relation(
+                        &cx,
+                        &query,
+                        R,
+                        CommitSeq(1),
+                        SealedLimits::default(),
+                        RootReadLimits::default(),
+                    )
+                    .await
+                    .unwrap();
+                if checkpoint_kind != 0 {
+                    let mut advance = WriteBatch::new(if checkpoint_kind == 1 {
+                        OTHER
+                    } else {
+                        R
+                    });
+                    if checkpoint_kind == 1 {
+                        advance.set_vertex_property(
+                            VId(1),
+                            P,
+                            Some(CanonicalScalar::Int(100)),
+                        );
+                    } else {
+                        advance.add_edge(
+                            EId(401),
+                            VId(4),
+                            VId(1),
+                            vec![(P, CanonicalScalar::Int(41))],
+                        );
+                    }
+                    assert_eq!(
+                        db.write(&cx, advance.clone()).await.unwrap(),
+                        CommitSeq(4)
+                    );
+                    assert_eq!(oracle.write(&cx, advance).await.unwrap(), CommitSeq(4));
+                }
+                let basis = db.frontier().unwrap();
+                let verified_through = if checkpoint_kind == 1 {
+                    CommitSeq(4)
+                } else {
+                    CommitSeq(3)
+                };
+                let selected = db.partition_root().unwrap();
+                let store = BlockStore::open_existing_for_read_with_vfs(
+                    &cx,
+                    vfs.clone(),
+                    vfs.database_dir(),
+                    KEY,
+                    NS,
+                )
+                .await
+                .unwrap();
+                let selected_bytes = store.get_root_bytes(&cx, selected).await.unwrap();
+                assert_eq!(
+                    u16::from_be_bytes([selected_bytes[4], selected_bytes[5]]),
+                    if checkpoint_kind == 0 {
+                        fgdb_strata::root::runs::ROOT_FORMAT_V7
+                    } else {
+                        fgdb_strata::root::runs::ROOT_FORMAT_V8
+                    }
+                );
+                let expected_reference = fgdb_strata::root::runs::AdjRunRef::carried(
+                    R,
+                    run_id.0,
+                    source_root.0,
+                    CommitSeq(1),
+                    CommitSeq(3),
+                    verified_through,
+                );
+                let run_bytes = store.get_adj_run_bytes(&cx, run_id).await.unwrap();
+                let pinned = db.read_session().unwrap();
+                let pinned_answers = answers(&pinned, &query);
+                let pinned_sealed = cold(&vfs, &cx, &query, basis).await;
+                assert_eq!(sealed_answers(&pinned_sealed, &query), pinned_answers);
+                let slot_path = vfs.database_dir().join("manifest.root");
+                let selected_slot = vfs.read(&slot_path).await.unwrap();
+
+                let mut suffix = WriteBatch::new(R);
+                suffix.add_edge(
+                    EId(501),
+                    VId(4),
+                    VId(2),
+                    vec![(P, CanonicalScalar::Int(51))],
+                );
+                suffix.delete_edge(EId(4));
+                suffix.set_edge_property(EDGE, P, Some(CanonicalScalar::Int(700)));
+                let recovered_cut = oracle.write(&cx, suffix.clone()).await.unwrap();
+                assert_eq!(recovered_cut, CommitSeq(basis.0 + 1));
+                let error = db
+                    .write_with_publication_failure(&cx, suffix, stage)
+                    .await
+                    .unwrap_err();
+                let WriteError::CommittedNeedsRecovery { recovery, source } = error else {
+                    panic!("the injected fault must occur after a durable commit");
+                };
+                assert_eq!(recovery.durable_frontier, recovered_cut);
+                assert_eq!(recovery.published_frontier, basis);
+                assert_eq!(recovery.failed_stage, stage);
+                assert!(matches!(
+                    *source,
+                    RebuildError::InjectedPublicationFailure(actual) if actual == stage
+                ));
+                assert_eq!(vfs.read(&slot_path).await.unwrap(), selected_slot);
+                assert!(matches!(db.frontier(), Err(ReadError::RecoveryRequired(_))));
+                assert_eq!(answers(&pinned, &query), pinned_answers);
+                assert_eq!(sealed_answers(&pinned_sealed, &query), pinned_answers);
+                drop(db);
+
+                let mut db =
+                    Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
+                        .await
+                        .unwrap();
+                assert_eq!(db.frontier().unwrap(), recovered_cut);
+                let recovered_root = db.partition_root().unwrap();
+                assert_ne!(recovered_root, selected);
+                let recovered_bytes = store.get_root_bytes(&cx, recovered_root).await.unwrap();
+                assert_eq!(
+                    u16::from_be_bytes([recovered_bytes[4], recovered_bytes[5]]),
+                    fgdb_strata::root::runs::ROOT_FORMAT_V8
+                );
+                assert_eq!(
+                    decode_root_runs(&recovered_bytes).unwrap().unwrap().runs,
+                    vec![expected_reference],
+                    "replay preserves the selected run's original provenance and coverage"
+                );
+                assert_eq!(store.get_adj_run_bytes(&cx, run_id).await.unwrap(), run_bytes);
+                assert!(
+                    store
+                        .get_published_adj_run(
+                            &query,
+                            recovered_root,
+                            R,
+                            recovered_cut,
+                            SealedLimits::default(),
+                            RootReadLimits::default().max_root_bytes,
+                        )
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "a replayed mutation must not be certified as already in the run"
+                );
+                let old_run = store
+                    .get_published_adj_run(
+                        &query,
+                        recovered_root,
+                        R,
+                        CommitSeq(2),
+                        SealedLimits::default(),
+                        RootReadLimits::default().max_root_bytes,
+                    )
+                    .await
+                    .unwrap()
+                    .expect("historical cuts still use the same immutable run");
+                assert_eq!(old_run.header().scope.source_root, source_root);
+                assert_eq!(old_run.header().scope.publication, CommitSeq(3));
+                assert_eq!(
+                    old_run.origin(EDGE),
+                    Some(OriginBirthOrder::new(CommitSeq(1), 6, 0, EDGE))
+                );
+
+                assert!(db.edge(EId(4)).unwrap().is_none());
+                assert_eq!(
+                    db.edge(EDGE).unwrap().unwrap().props,
+                    vec![(
+                        P,
+                        fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(700)),
+                    )]
+                );
+                let inserted = db.edge(EId(501)).unwrap().unwrap();
+                assert_eq!(inserted.entry.created_at, recovered_cut);
+                assert_eq!((inserted.entry.src, inserted.entry.dst), (VId(4), VId(2)));
+                assert_eq!(db.edges().unwrap(), oracle.edges().unwrap());
+                assert_eq!(
+                    sealed_answers(&cold(&vfs, &cx, &query, CommitSeq(2)).await, &query),
+                    answers(&historical, &query)
+                );
+                assert_eq!(
+                    sealed_answers(&cold(&vfs, &cx, &query, basis).await, &query),
+                    pinned_answers
+                );
+                for sequence in verified_through.0 + 1..=recovered_cut.0 {
+                    assert_recovered_suffix_overlay_matches_graph(
+                        &db,
+                        &oracle,
+                        &query,
+                        CommitSeq(sequence),
+                        verified_through,
+                    )
+                    .await;
+                }
+
+                // The second reopen uses the healed checkpoint without a
+                // suffix and must retain exactly its newly published root.
+                drop(db);
+                db = Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
+                    .await
+                    .unwrap();
+                assert_eq!(db.partition_root().unwrap(), recovered_root);
+                assert_eq!(
+                    store
+                        .published_adj_run_refs(
+                            &cx,
+                            recovered_root,
+                            RootReadLimits::default().max_root_bytes,
+                        )
+                        .await
+                        .unwrap(),
+                    vec![expected_reference]
+                );
+
+                // An unaffected later commit cannot jump the verified horizon
+                // over the replayed relation mutation.
+                let mut unrelated = WriteBatch::new(OTHER);
+                unrelated.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(300)));
+                let next_cut = oracle.write(&cx, unrelated.clone()).await.unwrap();
+                assert_eq!(db.write(&cx, unrelated).await.unwrap(), next_cut);
+                let mut next = WriteBatch::new(R);
+                next.delete_edge(EId(501));
+                next.set_edge_property(EDGE, P, Some(CanonicalScalar::Int(701)));
+                next.add_edge(
+                    EId(601),
+                    VId(1),
+                    VId(4),
+                    vec![(P, CanonicalScalar::Int(61))],
+                );
+                let final_cut = oracle.write(&cx, next.clone()).await.unwrap();
+                assert_eq!(db.write(&cx, next).await.unwrap(), final_cut);
+                assert_eq!(
+                    store
+                        .published_adj_run_refs(
+                            &cx,
+                            db.partition_root().unwrap(),
+                            RootReadLimits::default().max_root_bytes,
+                        )
+                        .await
+                        .unwrap(),
+                    vec![expected_reference]
+                );
+                for sequence in verified_through.0 + 1..=final_cut.0 {
+                    assert_recovered_suffix_overlay_matches_graph(
+                        &db,
+                        &oracle,
+                        &query,
+                        CommitSeq(sequence),
+                        verified_through,
+                    )
+                    .await;
+                }
+                assert_eq!(
+                    sealed_answers(&cold(&vfs, &cx, &query, final_cut).await, &query),
+                    answers(&oracle.read_session().unwrap(), &query)
+                );
+                assert_eq!(answers(&pinned, &query), pinned_answers);
+                assert_eq!(sealed_answers(&pinned_sealed, &query), pinned_answers);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authoritative_rebuild_does_not_inherit_selected_run_membership() {
+    let ((), report) = run_async_under_lab(0xd870_0102, |runtime| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+        let cx = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let (mut db, _) = fixture(&cx, &vfs).await;
+        db.seal_relation(
+            &cx,
+            &query,
+            R,
+            CommitSeq(1),
+            SealedLimits::default(),
+            RootReadLimits::default(),
+        )
+        .await
+        .unwrap();
+        let store = BlockStore::open_existing_for_read_with_vfs(
+            &cx,
+            vfs.clone(),
+            vfs.database_dir(),
+            KEY,
+            NS,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .published_adj_run_refs(
+                    &cx,
+                    db.partition_root().unwrap(),
+                    RootReadLimits::default().max_root_bytes,
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut suffix = WriteBatch::new(R);
+        suffix.delete_edge(EId(4));
+        suffix.set_edge_property(EDGE, P, Some(CanonicalScalar::Int(700)));
+        assert!(matches!(
+            db.write_with_publication_failure(
+                &cx,
+                suffix,
+                DerivedPublicationStage::PublishRootSlot,
+            )
+            .await,
+            Err(WriteError::CommittedNeedsRecovery { .. })
+        ));
+        // This explicit path deliberately rebuilds from Chronicle alone.
+        // Only the checkpoint-selected suffix path may carry attachments.
+        let db = db.recover_authoritatively(&cx).await.unwrap();
+        assert_eq!(db.frontier().unwrap(), CommitSeq(4));
+        assert!(db.edge(EId(4)).unwrap().is_none());
+        assert_eq!(
+            db.edge(EDGE).unwrap().unwrap().props,
+            vec![(
+                P,
+                fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(700)),
+            )]
+        );
+        let root = db.partition_root().unwrap();
+        assert!(
+            store
+                .published_adj_run_refs(&cx, root, RootReadLimits::default().max_root_bytes)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let bytes = store.get_root_bytes(&cx, root).await.unwrap();
+        assert!(decode_root_runs(&bytes).unwrap().is_none());
+        assert_eq!(
+            sealed_answers(&cold(&vfs, &cx, &query, CommitSeq(4)).await, &query),
+            answers(&db.read_session().unwrap(), &query)
+        );
+        drop(db);
+        let db = Database::open_with_vfs(&cx, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        assert_eq!(db.partition_root().unwrap(), root);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

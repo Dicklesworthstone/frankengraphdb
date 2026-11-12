@@ -6564,6 +6564,29 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         next_birth_ordinal,
     };
     if frontier.0 > published_at.0 {
+        // The selected checkpoint's authenticated run membership survives
+        // suffix replay. Resolve V7's implicit provenance against its ORIGINAL
+        // base and publication before a replacement root can carry it as V8.
+        // Keep every verified horizon unchanged: replay may mutate that
+        // relation, so later reads must still admit its post-seal delta suffix.
+        let mut carried_runs = store
+            .published_adj_run_refs(cx, root_id, fgdb_strata::root::MAX_ROOT_READ_BYTES)
+            .await?;
+        if !carried_runs.is_empty() {
+            let source_root = store
+                .get_root_run_source(cx, root_id, fgdb_strata::root::MAX_ROOT_READ_BYTES)
+                .await?;
+            for reference in &mut carried_runs {
+                *reference = fgdb_strata::root::runs::AdjRunRef::carried(
+                    reference.relation,
+                    reference.run,
+                    reference.resolved_source_root(source_root.0),
+                    reference.floor,
+                    reference.resolved_publication(published_at),
+                    reference.resolved_verified_through(published_at),
+                );
+            }
+        }
         // The suffix advanced the fold: republish through the shared tail so
         // the durable root/manifest catch up (the slot heals in bind). That
         // publication syncs every object again and earns its own receipts.
@@ -6581,7 +6604,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             true,
             true,
             DataPublication::Ordinary,
-            &[],
+            &carried_runs,
         )
         .await?;
         return Ok((snapshot, writer, heads, receipts, published_root));
@@ -7616,7 +7639,7 @@ async fn fold_stream<V: Vfs>(
 /// `receipts` seeds the publication: objects it already holds are durable
 /// under a published generation, so they are neither re-read nor re-synced.
 /// Open and recovery pass empty receipts and earn every object.
-/// `carried_runs` contains authenticated membership from an equivalent prior
+/// `carried_runs` contains authenticated membership from a prior admitted
 /// generation, with its original source, floor and verified frontier intact.
 /// Attach it before the manifest is addressed so one slot publication selects
 /// both the replacement Tier-D history and the retained compressed runs.
