@@ -40,7 +40,7 @@ pub const MAX_COLUMNS: usize = 4096;
 pub const MAX_ROWS_PER_CHUNK: usize = 1 << 20;
 /// Lists and maps nest at most this deep.
 pub const MAX_VALUE_DEPTH: usize = 64;
-/// Total value nodes in one decoded body.
+/// Total value nodes in one encoded or decoded body.
 pub const MAX_VALUE_NODES: usize = 1 << 22;
 
 /// Structural, data-independent body failures.
@@ -74,8 +74,11 @@ impl core::error::Error for BodyError {}
 // Primitive codec
 // ---------------------------------------------------------------------------
 
+/// One body owns one value-node allowance, including every parameter map and
+/// every result row. The unchecked `put` primitive stays separate so decoder
+/// tests can construct deliberately invalid bytes.
 #[derive(Default)]
-struct Out(Vec<u8>);
+struct Out(Vec<u8>, usize);
 
 impl Out {
     fn u8(&mut self, v: u8) {
@@ -187,6 +190,17 @@ impl<'a> In<'a> {
         }
         Ok(n)
     }
+    /// Every collection member costs at least one value node. Refuse a
+    /// declared collection that cannot fit the body's remaining allowance
+    /// before reserving its storage; recursive children still spend their
+    /// exact cost through `node` when decoded.
+    fn value_count(&mut self, min_item_bytes: usize) -> Result<usize, BodyError> {
+        let count = self.count(MAX_VALUE_NODES, min_item_bytes)?;
+        if count > MAX_VALUE_NODES.saturating_sub(self.nodes) {
+            return Err(BodyError::TooLarge);
+        }
+        Ok(count)
+    }
     fn bytes(&mut self, limit: usize) -> Result<&'a [u8], BodyError> {
         let n = usize::try_from(self.u32()?).map_err(|_| BodyError::TooLarge)?;
         if n > limit {
@@ -201,11 +215,7 @@ impl<'a> In<'a> {
             .map_err(|_| BodyError::InvalidUtf8)
     }
     fn node(&mut self) -> Result<(), BodyError> {
-        self.nodes += 1;
-        if self.nodes > MAX_VALUE_NODES {
-            return Err(BodyError::TooLarge);
-        }
-        Ok(())
+        admit_value_nodes(&mut self.nodes, 1)
     }
     fn finish(self) -> Result<(), BodyError> {
         if self.at == self.bytes.len() {
@@ -222,6 +232,14 @@ fn check_len(n: usize, limit: usize) -> Result<(), BodyError> {
     } else {
         Ok(())
     }
+}
+
+fn admit_value_nodes(nodes: &mut usize, additional: usize) -> Result<(), BodyError> {
+    *nodes = nodes
+        .checked_add(additional)
+        .filter(|total| *total <= MAX_VALUE_NODES)
+        .ok_or(BodyError::TooLarge)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -341,10 +359,11 @@ pub const MAX_LOCAL_DATETIME_BYTES: usize = MAX_DATE_BYTES + 1 + MAX_LOCAL_TIME_
 pub const MAX_DURATION_BYTES: usize = 96;
 
 impl WireValue {
-    fn check(&self, depth: usize) -> Result<(), BodyError> {
+    fn check(&self, depth: usize, nodes: &mut usize) -> Result<(), BodyError> {
         if depth > MAX_VALUE_DEPTH {
             return Err(BodyError::TooDeep);
         }
+        admit_value_nodes(nodes, 1)?;
         match self {
             Self::Decimal(v) | Self::Text(v) => check_len(v.len(), MAX_SCALAR_BYTES),
             Self::Date(v) => check_len(v.len(), MAX_DATE_BYTES),
@@ -357,11 +376,11 @@ impl WireValue {
                 .zone
                 .as_ref()
                 .map_or(Ok(()), |z| check_len(z.identifier.len(), MAX_NAME_BYTES)),
-            Self::Path { steps, .. } => check_len(steps.len(), MAX_VALUE_NODES),
-            Self::Vertices(v) | Self::Edges(v) => check_len(v.len(), MAX_VALUE_NODES),
+            Self::Path { steps, .. } => admit_value_nodes(nodes, steps.len()),
+            Self::Vertices(v) | Self::Edges(v) => admit_value_nodes(nodes, v.len()),
             Self::List(items) => {
                 check_len(items.len(), MAX_VALUE_NODES)?;
-                items.iter().try_for_each(|item| item.check(depth + 1))
+                items.iter().try_for_each(|item| item.check(depth + 1, nodes))
             }
             Self::Map(entries) => {
                 check_len(entries.len(), MAX_VALUE_NODES)?;
@@ -372,7 +391,7 @@ impl WireValue {
                 }
                 entries.iter().try_for_each(|(key, value)| {
                     check_len(key.len(), MAX_NAME_BYTES)?;
-                    value.check(depth + 1)
+                    value.check(depth + 1, nodes)
                 })
             }
             Self::Average { denominator, .. } if *denominator == 0 => Err(BodyError::Noncanonical),
@@ -541,7 +560,7 @@ impl WireValue {
             tag::EDGE => Self::Edge(input.u128()?),
             tag::PATH => {
                 let start = input.u128()?;
-                let n = input.count(MAX_VALUE_NODES, 32)?;
+                let n = input.value_count(32)?;
                 let mut steps = Vec::with_capacity(n);
                 for _ in 0..n {
                     input.node()?;
@@ -550,7 +569,7 @@ impl WireValue {
                 Self::Path { start, steps }
             }
             t @ (tag::VERTICES | tag::EDGES) => {
-                let n = input.count(MAX_VALUE_NODES, 16)?;
+                let n = input.value_count(16)?;
                 let mut ids = Vec::with_capacity(n);
                 for _ in 0..n {
                     input.node()?;
@@ -563,7 +582,7 @@ impl WireValue {
                 }
             }
             tag::LIST => {
-                let n = input.count(MAX_VALUE_NODES, 1)?;
+                let n = input.value_count(1)?;
                 let mut items = Vec::with_capacity(n);
                 for _ in 0..n {
                     items.push(Self::get(input, depth + 1)?);
@@ -571,7 +590,7 @@ impl WireValue {
                 Self::List(items)
             }
             tag::MAP => {
-                let n = input.count(MAX_VALUE_NODES, 5)?;
+                let n = input.value_count(5)?;
                 let mut entries: Vec<(String, WireValue)> = Vec::with_capacity(n);
                 for _ in 0..n {
                     let key = input.text(MAX_NAME_BYTES)?;
@@ -936,7 +955,7 @@ body!(
         out.len(s.parameters.len());
         for (name, value) in &s.parameters {
             check_len(name.len(), MAX_NAME_BYTES)?;
-            value.check(0)?;
+            value.check(0, &mut out.1)?;
             out.text(name);
             value.put(&mut out);
         }
@@ -1064,7 +1083,7 @@ fn put_parameters(out: &mut Out, parameters: &[(String, WireValue)]) -> Result<(
     out.len(parameters.len());
     for (name, value) in parameters {
         check_len(name.len(), MAX_NAME_BYTES)?;
-        value.check(0)?;
+        value.check(0, &mut out.1)?;
         out.text(name);
         value.put(out);
     }
@@ -1114,44 +1133,6 @@ pub struct ExecuteReadStatements {
     pub statements: Vec<Execute>,
 }
 
-/// Mirror the decoder's body-wide node admission before encoding a mixed
-/// batch. Depth remains bounded during this walk, even for an invalid caller
-/// value that has not yet passed the ordinary parameter-shape validation.
-fn read_statement_value_nodes(
-    value: &WireValue,
-    depth: usize,
-    remaining: &mut usize,
-) -> Result<(), BodyError> {
-    if depth > MAX_VALUE_DEPTH {
-        return Err(BodyError::TooDeep);
-    }
-    *remaining = remaining.checked_sub(1).ok_or(BodyError::TooLarge)?;
-    match value {
-        WireValue::List(values) => {
-            for value in values {
-                read_statement_value_nodes(value, depth + 1, remaining)?;
-            }
-        }
-        WireValue::Map(entries) => {
-            for (_, value) in entries {
-                read_statement_value_nodes(value, depth + 1, remaining)?;
-            }
-        }
-        WireValue::Path { steps, .. } => {
-            *remaining = remaining
-                .checked_sub(steps.len())
-                .ok_or(BodyError::TooLarge)?;
-        }
-        WireValue::Vertices(ids) | WireValue::Edges(ids) => {
-            *remaining = remaining
-                .checked_sub(ids.len())
-                .ok_or(BodyError::TooLarge)?;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 body!(
     ExecuteReadStatements,
     |s, out| {
@@ -1159,16 +1140,12 @@ body!(
         if s.statements.is_empty() {
             return Err(BodyError::Noncanonical);
         }
-        let mut remaining = MAX_VALUE_NODES;
         out.len(s.statements.len());
         for statement in &s.statements {
             if statement.mode != ExecuteMode::Read {
                 return Err(BodyError::Noncanonical);
             }
             check_len(statement.statement.len(), MAX_STATEMENT_BYTES)?;
-            for (_, value) in &statement.parameters {
-                read_statement_value_nodes(value, 0, &mut remaining)?;
-            }
             out.u8(0);
             out.text(&statement.statement);
             put_parameters(&mut out, &statement.parameters)?;
@@ -1504,13 +1481,21 @@ pub struct ResultChunk {
 impl ResultChunk {
     /// The encoded size of one row, as a chunker needs to fill a frame.
     pub fn row_len(row: &[WireValue]) -> Result<usize, BodyError> {
+        Self::row_cost(row).map(|(bytes, _)| bytes)
+    }
+
+    /// Encoded bytes (including the row-width prefix) and value nodes for one
+    /// independently admissible row. Chunkers must bound both cumulative costs;
+    /// several valid rows can otherwise form a body its decoder must refuse.
+    pub fn row_cost(row: &[WireValue]) -> Result<(usize, usize), BodyError> {
+        check_len(row.len(), MAX_COLUMNS)?;
         let mut out = Out::default();
         out.len(row.len());
         for value in row {
-            value.check(0)?;
+            value.check(0, &mut out.1)?;
             value.put(&mut out);
         }
-        Ok(out.0.len())
+        Ok((out.0.len(), out.1))
     }
 }
 
@@ -1535,7 +1520,7 @@ body!(
             check_len(row.len(), MAX_COLUMNS)?;
             out.len(row.len());
             for value in row {
-                value.check(0)?;
+                value.check(0, &mut out.1)?;
                 value.put(&mut out);
             }
         }
@@ -1682,7 +1667,7 @@ body!(
             out.i128(*weight);
             out.len(row.len());
             for value in row {
-                value.check(0)?;
+                value.check(0, &mut out.1)?;
                 value.put(&mut out);
             }
         }
@@ -1816,11 +1801,14 @@ body!(
         }
         out.len(s.entries.len());
         for (weight, row) in &s.entries {
+            if *weight == 0 {
+                return Err(BodyError::Noncanonical);
+            }
             check_len(row.len(), MAX_COLUMNS)?;
             out.i128(*weight);
             out.len(row.len());
             for value in row {
-                value.check(0)?;
+                value.check(0, &mut out.1)?;
                 value.put(&mut out);
             }
         }
@@ -2259,6 +2247,264 @@ mod tests {
         assert_eq!(duplicate.encode(), Err(BodyError::Noncanonical));
     }
 
+    /// Keep the large packed-ID fixture owned by one body at a time. A packed
+    /// member is a decoder node but occupies 16 bytes, much less than a full
+    /// WireValue tree with millions of nodes.
+    fn exact_node_boundary<B: Body + fmt::Debug + PartialEq>(body: &B) {
+        let bytes = body.encode().expect("exact body node allowance");
+        assert_eq!(&B::decode(&bytes).unwrap(), body);
+    }
+
+    macro_rules! body_node_boundary {
+        ($body:expr, $($field:tt)+) => {{
+            let mut body = $body;
+            exact_node_boundary(&body);
+            // The fixture's last scalar costs one node; this list costs two.
+            body.$($field)+ = WireValue::List(vec![WireValue::Null]);
+            assert_eq!(body.encode(), Err(BodyError::TooLarge));
+            body.$($field)+ = WireValue::Null;
+            body
+        }};
+    }
+
+    #[test]
+    fn every_parameter_body_admits_exactly_one_shared_node_allowance() {
+        let parameters = vec![
+            ("a".into(), WireValue::Vertices(vec![1; MAX_VALUE_NODES - 2])),
+            ("b".into(), WireValue::Null),
+        ];
+        let handle = PreparedHandle([7; 16]);
+        let parameters = body_node_boundary!(
+            Execute {
+                mode: ExecuteMode::Read,
+                statement: "RETURN $a,$b".into(),
+                parameters,
+            },
+            parameters[1].1
+        )
+        .parameters;
+        let parameters = body_node_boundary!(
+            Prepare {
+                mode: PrepareMode::Read,
+                statement: "RETURN $a,$b".into(),
+                parameters,
+            },
+            parameters[1].1
+        )
+        .parameters;
+        let parameters = body_node_boundary!(
+            ExecutePrepared {
+                handle,
+                mode: PreparedExecutionMode::Buffered,
+                parameters,
+            },
+            parameters[1].1
+        )
+        .parameters;
+        let parameters = body_node_boundary!(
+            ExecuteConditionalWrite {
+                expected_seq: 3,
+                statement: "CREATE (n) RETURN $a,$b".into(),
+                parameters,
+            },
+            parameters[1].1
+        )
+        .parameters;
+        let parameters = body_node_boundary!(
+            ExecuteDiff {
+                mode: DiffMode::Buffered,
+                before: 1,
+                after: 3,
+                statement: "RETURN $a,$b".into(),
+                parameters,
+            },
+            parameters[1].1
+        )
+        .parameters;
+        let mut parameters = body_node_boundary!(
+            ExecutePreparedDiff {
+                mode: DiffMode::Buffered,
+                before: 1,
+                after: 3,
+                handle,
+                parameters,
+            },
+            parameters[1].1
+        )
+        .parameters;
+
+        // The allowance also crosses independent argument maps and statements.
+        let second = parameters.split_off(1);
+        let argument_sets = body_node_boundary!(
+            ExecuteBatch {
+                statement: "CREATE (n)".into(),
+                argument_sets: vec![parameters, second],
+            },
+            argument_sets[1][0].1
+        )
+        .argument_sets;
+        let argument_sets = body_node_boundary!(
+            ExecutePreparedBatch {
+                handle,
+                argument_sets,
+            },
+            argument_sets[1][0].1
+        )
+        .argument_sets;
+        let statements = argument_sets
+            .into_iter()
+            .map(|parameters| Execute {
+                mode: ExecuteMode::Read,
+                statement: "RETURN 1".into(),
+                parameters,
+            })
+            .collect();
+        let _ = body_node_boundary!(
+            ExecuteReadStatements { statements },
+            statements[1].parameters[0].1
+        );
+    }
+
+    #[test]
+    fn every_result_body_admits_exactly_one_shared_node_allowance() {
+        let chunk = body_node_boundary!(
+            ResultChunk {
+                columns: Some(vec!["value".into()]),
+                rows: vec![
+                    vec![WireValue::Edges(vec![2; MAX_VALUE_NODES - 2])],
+                    vec![WireValue::Null],
+                ],
+            },
+            rows[1][0]
+        );
+        let rows = body_node_boundary!(
+            ReadBatchResultChunk {
+                index: 0,
+                seq: 3,
+                last: true,
+                chunk,
+            },
+            chunk.rows[1][0]
+        )
+        .chunk
+        .rows;
+        let entries = body_node_boundary!(
+            DiffResultChunk {
+                columns: None,
+                entries: rows.into_iter().map(|row| (1, row)).collect(),
+            },
+            entries[1].1[0]
+        )
+        .entries;
+        let _ = body_node_boundary!(
+            SubscriptionBatch {
+                frontier: 3,
+                snapshot: false,
+                last: true,
+                columns: None,
+                entries,
+            },
+            entries[1].1[0]
+        );
+    }
+
+    #[test]
+    fn subscription_encoding_refuses_zero_weight_before_delivery() {
+        let mut batch = SubscriptionBatch {
+            frontier: 3,
+            snapshot: false,
+            last: true,
+            columns: None,
+            entries: vec![(0, Vec::new())],
+        };
+        assert_eq!(batch.encode(), Err(BodyError::Noncanonical));
+        let mut raw = Out::default();
+        raw.u64(3);
+        raw.u8(0);
+        raw.u8(1);
+        raw.u8(0);
+        raw.u32(1);
+        raw.i128(0);
+        raw.u32(0);
+        assert_eq!(
+            SubscriptionBatch::decode(&raw.0),
+            Err(BodyError::Noncanonical)
+        );
+        for weight in [i128::MIN, -1, 1, i128::MAX] {
+            batch.entries[0].0 = weight;
+            assert_eq!(
+                SubscriptionBatch::decode(&batch.encode().unwrap()).unwrap(),
+                batch
+            );
+        }
+    }
+
+    #[test]
+    fn result_row_cost_matches_literal_bytes_and_decoder_nodes() {
+        let row = vec![
+            WireValue::Null,
+            WireValue::List(vec![
+                WireValue::Bool(true),
+                WireValue::Map(vec![("x".into(), WireValue::Edges(vec![1, 2]))]),
+            ]),
+            WireValue::Path {
+                start: 1,
+                steps: vec![(3, 2)],
+            },
+        ];
+        // Row prefix 4, null 1, nested list 54, one-step path 53.
+        // Nodes: null 1, list/bool/map/edges/two IDs 6, path/step 2.
+        assert_eq!(ResultChunk::row_cost(&row).unwrap(), (112, 9));
+        assert_eq!(ResultChunk::row_len(&row).unwrap(), 112);
+        let chunk = ResultChunk {
+            columns: None,
+            rows: vec![row],
+        };
+        let bytes = chunk.encode().unwrap();
+        assert_eq!(bytes.len(), 5 + 112);
+        assert_eq!(ResultChunk::decode(&bytes).unwrap(), chunk);
+        let wide = vec![WireValue::Null; MAX_COLUMNS + 1];
+        assert_eq!(ResultChunk::row_cost(&wide), Err(BodyError::TooLarge));
+        assert_eq!(ResultChunk::row_len(&wide), Err(BodyError::TooLarge));
+    }
+
+    #[test]
+    fn collection_counts_check_remaining_nodes_before_reserving_members() {
+        for (value, header_len) in [
+            (WireValue::List(vec![WireValue::Null; 2]), 5),
+            (
+                WireValue::Map(vec![
+                    ("a".into(), WireValue::Null),
+                    ("b".into(), WireValue::Null),
+                ]),
+                5,
+            ),
+            (
+                WireValue::Path {
+                    start: 1,
+                    steps: vec![(2, 3), (4, 5)],
+                },
+                21,
+            ),
+            (WireValue::Vertices(vec![1, 2]), 5),
+            (WireValue::Edges(vec![1, 2]), 5),
+        ] {
+            let mut raw = Out::default();
+            value.put(&mut raw);
+            let mut exact = In::new(&raw.0);
+            exact.nodes = MAX_VALUE_NODES - 3;
+            assert_eq!(WireValue::get(&mut exact, 0).unwrap(), value);
+            assert_eq!(exact.nodes, MAX_VALUE_NODES);
+
+            let mut short = In::new(&raw.0);
+            short.nodes = MAX_VALUE_NODES - 2;
+            assert_eq!(WireValue::get(&mut short, 0), Err(BodyError::TooLarge));
+            // Only the collection header was consumed: no child read, and
+            // the refusal precedes the collection's Vec::with_capacity.
+            assert_eq!(short.at, header_len);
+        }
+    }
+
     #[test]
     fn heterogeneous_read_statements_share_the_body_value_node_limit() {
         let mut bytes = vec![0, 0, 0, 2];
@@ -2321,14 +2567,11 @@ mod tests {
             (WireValue::Vertices(vec![1, 2]), 3),
             (WireValue::Edges(vec![1, 2]), 3),
         ] {
-            let mut exact = nodes;
-            read_statement_value_nodes(&value, 0, &mut exact).unwrap();
-            assert_eq!(exact, 0);
-            let mut short = nodes - 1;
-            assert_eq!(
-                read_statement_value_nodes(&value, 0, &mut short),
-                Err(BodyError::TooLarge)
-            );
+            let mut exact = MAX_VALUE_NODES - nodes;
+            value.check(0, &mut exact).unwrap();
+            assert_eq!(exact, MAX_VALUE_NODES);
+            let mut short = MAX_VALUE_NODES - nodes + 1;
+            assert_eq!(value.check(0, &mut short), Err(BodyError::TooLarge));
         }
     }
 
