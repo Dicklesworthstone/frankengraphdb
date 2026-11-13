@@ -64,6 +64,7 @@ these values; callers cannot authenticate merely by constructing the structs.
 | EXECUTE_CONDITIONAL_WRITE | 0x0028 | client |
 | EXECUTE_READ_BATCH | 0x0029 | client |
 | READ_BATCH_RESULT_CHUNK / READ_BATCH_RESULT_END | 0x002a / 0x002b | server |
+| EXECUTE_READ_STATEMENTS | 0x002c | client |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -91,7 +92,7 @@ there is no resynchronization by scanning untrusted payload bytes.
 `Connection::validate_client_header` enforces direction, phase, complete binding,
 nonzero request IDs and control/child-stream distinction. EXECUTE, EXECUTE_BATCH, PREPARE,
 EXECUTE_PREPARED, EXECUTE_PREPARED_BATCH, EXECUTE_DIFF, EXECUTE_PREPARED_DIFF,
-EXECUTE_CONDITIONAL_WRITE, EXECUTE_READ_BATCH and RELEASE_PREPARED use the control stream; child stream IDs
+EXECUTE_CONDITIONAL_WRITE, EXECUTE_READ_BATCH, EXECUTE_READ_STATEMENTS and RELEASE_PREPARED use the control stream; child stream IDs
 are minted by the server. Cancellation
 and credit address admitted streams. ACK/release may address independent durable
 owners, which the owning service must authenticate and validate separately.
@@ -175,6 +176,7 @@ redacted from `Debug`.
 | EXECUTE_CONDITIONAL_WRITE | `expected_seq u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending); native text writes only, including RETURN |
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
 | EXECUTE_READ_BATCH | the same body as EXECUTE_BATCH, under an explicit read-only request tag; one read statement and its ordered argument sets |
+| EXECUTE_READ_STATEMENTS | `statements u32` (1–32), then that many EXECUTE payloads: `mode u8` (must be 0), `statement text`, canonical `parameters [(name text, value)]`; one body-wide decoded-value limit |
 | EXECUTE_PREPARED_BATCH | nonzero connection-owned `handle [16]`, `argument_sets u32`, then that many parameter maps with the same canonical encoding and shared bounds as EXECUTE_BATCH; the handle must name a write template |
 | EXECUTE_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_PREPARED_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, nonzero connection-owned `handle [16]`, execution `parameters [(name text, value)]`; the handle must name a read template |
@@ -214,7 +216,7 @@ exactly the canonical text a server emits — vertex, edge
 
 ## fgdbd: the served subset
 
-### Consistent parameterized read batches
+### Consistent read batches
 
 `EXECUTE_READ_BATCH` evaluates one read statement for every supplied argument
 set through one authorized native read session. Ordinary current reads share
@@ -225,7 +227,22 @@ and label/property scope remain identical to individual authorized reads, and
 all results share one signed execution allowance. A later read cannot reset
 the batch's row, node or work budget. Writes refuse without effects.
 
-The body reuses `ExecuteBatch` without adding a mode byte. Parameter names in
+`EXECUTE_READ_STATEMENTS` accepts 1–32 distinct statement texts, each with its
+own parameter map, through the same native batch owner. Each member retains
+the EXECUTE payload layout, but its mode must be `Read` (0); non-read modes
+refuse during encoding or decoding before dispatch. Native compilation still
+checks that every text is a read. A later malformed or write-spelled statement
+may follow earlier private read work, but no mutation or successful result
+prefix escapes. This is the FGP counterpart of HTTP `/query-batch` with a
+`statements` array. It does not create an explicit transaction or durable result.
+
+The new request keeps the existing version-1 header and all existing frame
+and body bytes unchanged. Older servers reject its unknown frame kind; clients
+never retry it as independent reads or another operation. Its operation-specific
+count bound is checked before allocating the statement vector, and all members
+share the same decoded-value-node allowance and negotiated frame limit.
+
+`EXECUTE_READ_BATCH` continues to reuse `ExecuteBatch` without adding a mode byte. Parameter names in
 each set are strictly ascending and unique. The wire codec allows 1–1024 sets;
 the current native served owner admits at most 32 reads. The entire request,
 its argument values and every result are admitted before the first result
@@ -254,7 +271,30 @@ database generation; recovery during credit or socket waits prevents a stale
 successful terminal.
 
 The Rust client offers `execute_read_batch` for a fully buffered answer and
-`execute_read_batch_streaming` for callbacks during delivery. The latter
+`execute_read_batch_streaming` for callbacks during delivery.
+`execute_read_statements` and `execute_read_statements_streaming` accept a
+`Vec<Execute>` of distinct reads and use those same result types and callbacks.
+For example, one request can return a graph summary alongside a detailed list
+without allowing a concurrent writer to move the snapshot between them:
+
+```rust
+use fgdb_protocol::body::{Execute, ExecuteMode};
+
+let answer = client.execute_read_statements(cx, vec![
+    Execute {
+        mode: ExecuteMode::Read,
+        statement: "MATCH (n:Person) RETURN count(*) AS people".into(),
+        parameters: vec![],
+    },
+    Execute {
+        mode: ExecuteMode::Read,
+        statement: "MATCH (n:Person) RETURN n.name AS name ORDER BY name".into(),
+        parameters: vec![],
+    },
+]).await?;
+```
+
+The streaming form
 reports columns as `(index, seq, names)`, rows as `(index, values)`, and each
 result end as `(index, seq, rows)`. These callbacks remain provisional until
 the single successful batch terminal returns. A callback error sends one

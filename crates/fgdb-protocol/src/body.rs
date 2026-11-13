@@ -34,6 +34,8 @@ pub const MAX_PARAMETERS: usize = 1024;
 /// Argument sets in one batch request. The served database also bounds
 /// expanded write statements and the number of reads in a consistent batch.
 pub const MAX_BATCH_ARGUMENT_SETS: usize = 1024;
+/// Distinct reads sharing one native snapshot and cumulative signed allowance.
+pub const MAX_READ_BATCH_STATEMENTS: usize = 32;
 pub const MAX_COLUMNS: usize = 4096;
 pub const MAX_ROWS_PER_CHUNK: usize = 1 << 20;
 /// Lists and maps nest at most this deep.
@@ -1102,6 +1104,98 @@ pub struct ExecuteBatch {
     pub argument_sets: Vec<Vec<(String, WireValue)>>,
 }
 
+/// Distinct read statements in one authorized, pinned native session. Results
+/// retain their request order, schemas and selected historical cuts and use
+/// the existing read-batch delivery frames. Every mode must be Read; native
+/// compilation still verifies each statement is read-only. A later refusal
+/// discards all private results before any successful output is delivered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecuteReadStatements {
+    pub statements: Vec<Execute>,
+}
+
+/// Mirror the decoder's body-wide node admission before encoding a mixed
+/// batch. Depth remains bounded during this walk, even for an invalid caller
+/// value that has not yet passed the ordinary parameter-shape validation.
+fn read_statement_value_nodes(
+    value: &WireValue,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<(), BodyError> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(BodyError::TooDeep);
+    }
+    *remaining = remaining.checked_sub(1).ok_or(BodyError::TooLarge)?;
+    match value {
+        WireValue::List(values) => {
+            for value in values {
+                read_statement_value_nodes(value, depth + 1, remaining)?;
+            }
+        }
+        WireValue::Map(entries) => {
+            for (_, value) in entries {
+                read_statement_value_nodes(value, depth + 1, remaining)?;
+            }
+        }
+        WireValue::Path { steps, .. } => {
+            *remaining = remaining
+                .checked_sub(steps.len())
+                .ok_or(BodyError::TooLarge)?;
+        }
+        WireValue::Vertices(ids) | WireValue::Edges(ids) => {
+            *remaining = remaining
+                .checked_sub(ids.len())
+                .ok_or(BodyError::TooLarge)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+body!(
+    ExecuteReadStatements,
+    |s, out| {
+        check_len(s.statements.len(), MAX_READ_BATCH_STATEMENTS)?;
+        if s.statements.is_empty() {
+            return Err(BodyError::Noncanonical);
+        }
+        let mut remaining = MAX_VALUE_NODES;
+        out.len(s.statements.len());
+        for statement in &s.statements {
+            if statement.mode != ExecuteMode::Read {
+                return Err(BodyError::Noncanonical);
+            }
+            check_len(statement.statement.len(), MAX_STATEMENT_BYTES)?;
+            for (_, value) in &statement.parameters {
+                read_statement_value_nodes(value, 0, &mut remaining)?;
+            }
+            out.u8(0);
+            out.text(&statement.statement);
+            put_parameters(&mut out, &statement.parameters)?;
+        }
+    },
+    |input| {
+        // Each statement has one mode byte and two u32 length/count fields.
+        let count = input.count(MAX_READ_BATCH_STATEMENTS, 9)?;
+        if count == 0 {
+            return Err(BodyError::Noncanonical);
+        }
+        let mut statements = Vec::with_capacity(count);
+        for _ in 0..count {
+            if input.u8()? != 0 {
+                return Err(BodyError::Noncanonical);
+            }
+            // One input retains the value-node bound across all statements.
+            statements.push(Execute {
+                mode: ExecuteMode::Read,
+                statement: input.text(MAX_STATEMENT_BYTES)?,
+                parameters: get_parameters(&mut input)?,
+            });
+        }
+        ExecuteReadStatements { statements }
+    }
+);
+
 /// Rebind a connection-owned write template for every argument set, then
 /// execute one atomic, stats-only program. A read handle is never promoted to
 /// a write. All records share the ordinary batch limits and completion; this
@@ -2083,6 +2177,159 @@ mod tests {
             BodyError::TrailingBytes,
             "a trailing byte must be refused"
         );
+    }
+
+    #[test]
+    fn heterogeneous_read_batches_have_fixed_bytes_and_read_only_bounded_members() {
+        let first = Execute {
+            mode: ExecuteMode::Read,
+            statement: "RETURN 1".into(),
+            parameters: vec![],
+        };
+        let batch = ExecuteReadStatements {
+            statements: vec![
+                first.clone(),
+                Execute {
+                    mode: ExecuteMode::Read,
+                    statement: "RETURN $x".into(),
+                    parameters: vec![("x".into(), WireValue::Null)],
+                },
+            ],
+        };
+        let mut expected = vec![0, 0, 0, 2, 0, 0, 0, 0, 8];
+        expected.extend_from_slice(b"RETURN 1");
+        expected.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 9]);
+        expected.extend_from_slice(b"RETURN $x");
+        expected.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, b'x', tag::NULL]);
+        assert_eq!(batch.encode().unwrap(), expected);
+        assert_eq!(ExecuteReadStatements::decode(&expected).unwrap(), batch);
+        every_prefix_refuses::<ExecuteReadStatements>(&expected);
+        let mut extra = expected.clone();
+        extra.push(0);
+        assert_eq!(
+            ExecuteReadStatements::decode(&extra),
+            Err(BodyError::TrailingBytes)
+        );
+        for mode in [
+            ExecuteMode::Write,
+            ExecuteMode::Subscribe,
+            ExecuteMode::ReadStream,
+            ExecuteMode::ReadOrdered,
+        ] {
+            let mut invalid = batch.clone();
+            invalid.statements[1].mode = mode;
+            assert_eq!(invalid.encode(), Err(BodyError::Noncanonical));
+        }
+        for mode in [1, 2, 3, 4, 255] {
+            let mut invalid = expected.clone();
+            // The second member starts after count + first Execute payload.
+            invalid[21] = mode;
+            assert_eq!(
+                ExecuteReadStatements::decode(&invalid),
+                Err(BodyError::Noncanonical)
+            );
+        }
+        for count in [0, MAX_READ_BATCH_STATEMENTS, MAX_READ_BATCH_STATEMENTS + 1] {
+            let batch = ExecuteReadStatements {
+                statements: vec![first.clone(); count],
+            };
+            match count {
+                0 => assert_eq!(batch.encode(), Err(BodyError::Noncanonical)),
+                MAX_READ_BATCH_STATEMENTS => {
+                    assert_eq!(
+                        ExecuteReadStatements::decode(&batch.encode().unwrap()).unwrap(),
+                        batch
+                    );
+                }
+                _ => assert_eq!(batch.encode(), Err(BodyError::TooLarge)),
+            }
+        }
+        assert_eq!(
+            ExecuteReadStatements::decode(&0_u32.to_be_bytes()),
+            Err(BodyError::Noncanonical)
+        );
+        assert_eq!(
+            ExecuteReadStatements::decode(&33_u32.to_be_bytes()),
+            Err(BodyError::TooLarge)
+        );
+        let mut duplicate = batch;
+        duplicate.statements[1]
+            .parameters
+            .push(("x".into(), WireValue::Int(1)));
+        assert_eq!(duplicate.encode(), Err(BodyError::Noncanonical));
+    }
+
+    #[test]
+    fn heterogeneous_read_statements_share_the_body_value_node_limit() {
+        let mut bytes = vec![0, 0, 0, 2];
+        for _ in 0..2 {
+            bytes.extend_from_slice(&[0, 0, 0, 0, 9]);
+            bytes.extend_from_slice(b"RETURN $x");
+            bytes.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, b'x', tag::LIST]);
+            bytes.extend_from_slice(&((MAX_VALUE_NODES / 2) as u32).to_be_bytes());
+            bytes.resize(bytes.len() + MAX_VALUE_NODES / 2, tag::NULL);
+        }
+        assert_eq!(
+            ExecuteReadStatements::decode(&bytes),
+            Err(BodyError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn heterogeneous_read_statement_encoding_admits_one_cumulative_node_budget() {
+        let statement = |value| Execute {
+            mode: ExecuteMode::Read,
+            statement: "RETURN $x".into(),
+            parameters: vec![("x".into(), value)],
+        };
+        // Each identity list fits independently; both roots plus their members
+        // must fit one body allowance. Compressed IDs keep this boundary law's
+        // memory below an equivalent multi-million-node tree of WireValues.
+        let mut batch = ExecuteReadStatements {
+            statements: vec![
+                statement(WireValue::Vertices(vec![1; MAX_VALUE_NODES / 2])),
+                statement(WireValue::Edges(vec![2; MAX_VALUE_NODES / 2])),
+            ],
+        };
+        assert_eq!(batch.encode(), Err(BodyError::TooLarge));
+        let WireValue::Edges(values) = &mut batch.statements[1].parameters[0].1 else {
+            unreachable!()
+        };
+        values.truncate(values.len() - 2);
+        let bytes = batch
+            .encode()
+            .expect("the exact node allowance is admitted");
+        drop(batch);
+        assert!(ExecuteReadStatements::decode(&bytes).is_ok());
+
+        // Literal accounting independent of the encoder: scalar roots cost
+        // one; list/map roots and packed path/identity members count too.
+        for (value, nodes) in [
+            (WireValue::Null, 1),
+            (WireValue::List(vec![WireValue::Null]), 2),
+            (
+                WireValue::Map(vec![("x".into(), WireValue::List(vec![WireValue::Null]))]),
+                3,
+            ),
+            (
+                WireValue::Path {
+                    start: 1,
+                    steps: vec![(2, 3), (4, 5)],
+                },
+                3,
+            ),
+            (WireValue::Vertices(vec![1, 2]), 3),
+            (WireValue::Edges(vec![1, 2]), 3),
+        ] {
+            let mut exact = nodes;
+            read_statement_value_nodes(&value, 0, &mut exact).unwrap();
+            assert_eq!(exact, 0);
+            let mut short = nodes - 1;
+            assert_eq!(
+                read_statement_value_nodes(&value, 0, &mut short),
+                Err(BodyError::TooLarge)
+            );
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::execute::ordered::ordered_generation;
-use crate::execute::{ReadBatchAnswer, read_batch as execute_read_batch};
+use crate::execute::{ReadBatchAnswer, read_batch as execute_read_batch, read_statement_batch};
 use fgdb_protocol::body::{
     BodyError, MAX_COLUMNS, MAX_NAME_BYTES, MAX_ROWS_PER_CHUNK, MAX_VALUE_NODES,
     ReadBatchResultChunk, ReadBatchResultEnd,
@@ -11,6 +11,20 @@ use fgdb_protocol::body::{
 use fgdb_types::PurposeContexts;
 
 const BATCH_PREFIX_BYTES: usize = 4 + 8 + 1;
+
+pub(super) enum ReadBatchStatement<'a> {
+    Parameterized(&'a ExecuteBatch),
+    Statements(&'a [Execute]),
+}
+
+impl ReadBatchStatement<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Parameterized(statement) => statement.argument_sets.len(),
+            Self::Statements(statements) => statements.len(),
+        }
+    }
+}
 
 fn charge_value_nodes(value: &WireValue, remaining: &mut usize) -> Result<(), BodyError> {
     *remaining = remaining.checked_sub(1).ok_or(BodyError::TooLarge)?;
@@ -142,7 +156,7 @@ impl Lane {
         request: u64,
         stream: StreamId,
         binding: Binding,
-        statement: &ExecuteBatch,
+        statement: ReadBatchStatement<'_>,
     ) -> Result<(), Stop> {
         // Read rights precede recovery/configuration inspection. This same
         // generation fences admission, data-dependent errors and every send.
@@ -157,16 +171,17 @@ impl Lane {
         self.send_generation = Some(generation.clone());
         let mut window = FlowWindow::new(self.initial_window, self.maximum_window)
             .map_err(|_| Stop::Transport)?;
+        let expected = statement.len();
+        let execution = match statement {
+            ReadBatchStatement::Parameterized(statement) => {
+                execute_read_batch(cx, db, token, statement)
+            }
+            ReadBatchStatement::Statements(statements) => {
+                read_statement_batch(cx, db, token, statements)
+            }
+        };
         let answer = self
-            .read_progress(
-                cx,
-                waiter,
-                &mut window,
-                stream,
-                request,
-                binding,
-                execute_read_batch(cx, db, token, statement),
-            )
+            .read_progress(cx, waiter, &mut window, stream, request, binding, execution)
             .await?;
         generation.check().map_err(Stop::Recovery)?;
         let answer = match answer {
@@ -181,7 +196,7 @@ impl Lane {
         let frame_budget = self.send_limits.max_frame_len() - framing;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let query = crate::query_cx(&contexts);
-        if let Err(error) = preflight(&answer, statement.argument_sets.len(), frame_budget, || {
+        if let Err(error) = preflight(&answer, expected, frame_budget, || {
             query
                 .checkpoint()
                 .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;

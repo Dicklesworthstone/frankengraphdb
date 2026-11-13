@@ -43,6 +43,9 @@ mod row_predicates;
 #[path = "loopback/read_batch.rs"]
 mod read_batch;
 
+#[path = "loopback/read_statements.rs"]
+mod read_statements;
+
 fn issuer_key() -> AuthKey {
     AuthKey::from_seed(8501)
 }

@@ -12,6 +12,38 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Heterogeneous consistent read batches over FGP — transport qualification pending
+
+Source added 2026-11-13 exposes the existing native mixed-statement read batch
+through `EXECUTE_READ_STATEMENTS` (0x002c). The Rust client provides
+`execute_read_statements` and `execute_read_statements_streaming` for 1–32
+independent read texts, parameter maps and result schemas. Ordinary current
+reads share one pinned session; explicit historical selectors retain their
+individual cuts. All reads share the same cumulative signed execution allowance.
+
+The request uses the existing authorized batch executor and result delivery
+owner. Native execution and whole-answer wire preflight finish before the
+first schema or row; a later execution/preflight refusal exposes no successful
+prefix. Streaming refers to delivery of that buffered result. Existing flow
+credit, cancellation/draining, authority and database-generation fences apply.
+Structural non-read modes refuse before dispatch; write-spelled read text
+cannot mutate. The client and decoder both enforce one body-wide value-node
+allowance across every statement. Existing frame encodings are unchanged;
+older servers reject the new request without a client fallback.
+
+Three codec regressions cover fixed bytes, truncated/trailing payloads,
+count/mode/parameter rules and exact cumulative node admission. Five TCP
+regression sources cover mixed schemas and historical cuts, masking, shared
+budgets, late errors, connection reuse, flow windows and callback cancellation.
+The pinned core protocol suite passes **32 unit tests and 17 protocol tests**
+with one test thread; core protocol Clippy with `-D warnings`, changed-file
+formatting and whitespace checks pass. The optional transport/client and
+server compilation and TCP execution remain **UNRUN** after the pinned
+asupersync compiler was SIGKILLed in both ordinary and reduced-memory builds.
+Full workspace and exact-tree qualification remain open. This closes a native
+SDK entry-point gap, without claiming explicit FGP transactions or full FGP
+conformance.
+
 ### Capability-scoped maintained analytics — qualification pending
 
 Source added 2026-11-12 for `fgdb-scoped-maintained-analytics-s047k` connects

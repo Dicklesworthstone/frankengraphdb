@@ -1,8 +1,36 @@
 //! One pinned, authorized native read batch and its ordered result streams.
 
 use super::*;
-use crate::body::{ReadBatchResultChunk, ReadBatchResultEnd};
+use crate::body::{ExecuteReadStatements, ReadBatchResultChunk, ReadBatchResultEnd};
 use crate::read_batch::ReadBatchProgress;
+
+enum ReadBatchRequest {
+    Parameterized(ExecuteBatch),
+    Statements(ExecuteReadStatements),
+}
+
+impl ReadBatchRequest {
+    fn len(&self) -> usize {
+        match self {
+            Self::Parameterized(batch) => batch.argument_sets.len(),
+            Self::Statements(batch) => batch.statements.len(),
+        }
+    }
+
+    fn canonicalize(&mut self) {
+        let sort = |parameters: &mut Vec<(String, WireValue)>| {
+            parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        };
+        match self {
+            Self::Parameterized(batch) => batch.argument_sets.iter_mut().for_each(sort),
+            Self::Statements(batch) => {
+                for statement in &mut batch.statements {
+                    sort(&mut statement.parameters);
+                }
+            }
+        }
+    }
+}
 
 /// One result in request order, retaining its exact selected historical cut.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,13 +60,45 @@ impl Client {
         statement: &str,
         argument_sets: Vec<Vec<(String, WireValue)>>,
     ) -> Result<ReadBatchAnswer, ClientError> {
+        self.collect_read_batch(
+            cx,
+            ReadBatchRequest::Parameterized(ExecuteBatch {
+                statement: statement.to_owned(),
+                argument_sets,
+            }),
+        )
+        .await
+    }
+
+    /// Execute 1–32 distinct reads with independent parameters and schemas in
+    /// one pinned native session. All statements share one signed allowance.
+    /// Each mode must be Read; write text still refuses at native compilation.
+    /// A late refusal returns no successful prefix and performs no mutation.
+    /// Older servers reject this request's frame kind; the client never retries
+    /// it as independent reads that could observe different snapshots.
+    pub async fn execute_read_statements(
+        &mut self,
+        cx: &Cx,
+        statements: Vec<Execute>,
+    ) -> Result<ReadBatchAnswer, ClientError> {
+        self.collect_read_batch(
+            cx,
+            ReadBatchRequest::Statements(ExecuteReadStatements { statements }),
+        )
+        .await
+    }
+
+    async fn collect_read_batch(
+        &mut self,
+        cx: &Cx,
+        request: ReadBatchRequest,
+    ) -> Result<ReadBatchAnswer, ClientError> {
         let mut metadata = Vec::new();
         let mut rows: Vec<Vec<Vec<WireValue>>> = Vec::new();
         let end = self
-            .execute_read_batch_streaming(
+            .read_batch_request(
                 cx,
-                statement,
-                argument_sets,
+                request,
                 |_, seq, columns| {
                     metadata.push((seq, columns.to_vec()));
                     Ok(())
@@ -82,7 +142,52 @@ impl Client {
         &mut self,
         cx: &Cx,
         statement: &str,
-        mut argument_sets: Vec<Vec<(String, WireValue)>>,
+        argument_sets: Vec<Vec<(String, WireValue)>>,
+        on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
+        on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
+        on_result_end: impl FnMut(u32, u64, u64) -> Result<(), ClientError>,
+    ) -> Result<ReadBatchResultEnd, ClientError> {
+        self.read_batch_request(
+            cx,
+            ReadBatchRequest::Parameterized(ExecuteBatch {
+                statement: statement.to_owned(),
+                argument_sets,
+            }),
+            on_columns,
+            on_row,
+            on_result_end,
+        )
+        .await
+    }
+
+    /// Stream a heterogeneous read batch using the same result indexes, exact
+    /// snapshot sequences, shared flow credit and cancellation contract as
+    /// [`Self::execute_read_batch_streaming`]. Execution remains buffered before
+    /// delivery. All callbacks are provisional until the single terminal.
+    /// Invalid count/mode/value encodings send nothing and leave the connection
+    /// reusable; a dropped outstanding request requires reconnecting.
+    pub async fn execute_read_statements_streaming(
+        &mut self,
+        cx: &Cx,
+        statements: Vec<Execute>,
+        on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
+        on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
+        on_result_end: impl FnMut(u32, u64, u64) -> Result<(), ClientError>,
+    ) -> Result<ReadBatchResultEnd, ClientError> {
+        self.read_batch_request(
+            cx,
+            ReadBatchRequest::Statements(ExecuteReadStatements { statements }),
+            on_columns,
+            on_row,
+            on_result_end,
+        )
+        .await
+    }
+
+    async fn read_batch_request(
+        &mut self,
+        cx: &Cx,
+        mut request: ReadBatchRequest,
         mut on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
         mut on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
         mut on_result_end: impl FnMut(u32, u64, u64) -> Result<(), ClientError>,
@@ -90,22 +195,24 @@ impl Client {
         if self.selected.is_none() {
             return Err(ClientError::Protocol("select a database first"));
         }
-        let expected = u32::try_from(argument_sets.len())
-            .map_err(|_| ClientError::Body(BodyError::TooLarge))?;
-        for parameters in &mut argument_sets {
-            parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-        }
-        let request = self
-            .send(
-                cx,
-                FrameKind::ExecuteReadBatch,
-                StreamId::CONTROL,
-                &ExecuteBatch {
-                    statement: statement.to_owned(),
-                    argument_sets,
-                },
-            )
-            .await?;
+        let expected =
+            u32::try_from(request.len()).map_err(|_| ClientError::Body(BodyError::TooLarge))?;
+        request.canonicalize();
+        let request = match request {
+            ReadBatchRequest::Parameterized(body) => {
+                self.send(cx, FrameKind::ExecuteReadBatch, StreamId::CONTROL, &body)
+                    .await?
+            }
+            ReadBatchRequest::Statements(body) => {
+                self.send(
+                    cx,
+                    FrameKind::ExecuteReadStatements,
+                    StreamId::CONTROL,
+                    &body,
+                )
+                .await?
+            }
+        };
         let mut progress = ReadBatchProgress::new(expected);
         let mut stream = None;
         let mut callback_error = None;

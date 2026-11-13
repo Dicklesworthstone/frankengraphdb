@@ -21,9 +21,9 @@ use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
     Execute, ExecuteBatch, ExecuteConditionalWrite, ExecuteDiff, ExecuteMode, ExecutePrepared,
-    ExecutePreparedBatch, ExecutePreparedDiff, Hello, HelloAck, Outcome, Ping, Prepare, Prepared,
-    PreparedExecutionMode, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd,
-    SelectDatabase, WindowUpdate, WireValue,
+    ExecutePreparedBatch, ExecutePreparedDiff, ExecuteReadStatements, Hello, HelloAck, Outcome,
+    Ping, Prepare, Prepared, PreparedExecutionMode, PreparedHandle, Ready, ReleasePrepared,
+    ResultChunk, ResultEnd, SelectDatabase, WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -137,6 +137,7 @@ enum Statement {
     Native(Execute),
     Batch(ExecuteBatch),
     ReadBatch(ExecuteBatch),
+    ReadStatements(ExecuteReadStatements),
     ConditionalWrite(ExecuteConditionalWrite),
     Difference(ExecuteDiff),
     PreparedDifference {
@@ -798,29 +799,29 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     }
                 }
             }
-            FrameKind::ExecuteReadBatch => {
+            FrameKind::ExecuteReadBatch | FrameKind::ExecuteReadStatements => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
                 };
-                let Ok(statement) = ExecuteBatch::decode(frame.payload()) else {
+                let (statement, malformed) = match header.kind() {
+                    FrameKind::ExecuteReadBatch => (
+                        ExecuteBatch::decode(frame.payload()).map(Statement::ReadBatch),
+                        "malformed EXECUTE_READ_BATCH",
+                    ),
+                    FrameKind::ExecuteReadStatements => (
+                        ExecuteReadStatements::decode(frame.payload())
+                            .map(Statement::ReadStatements),
+                        "malformed EXECUTE_READ_STATEMENTS",
+                    ),
+                    _ => unreachable!("read batch request selected"),
+                };
+                let Ok(statement) = statement else {
                     return lane
-                        .fatal(
-                            cx,
-                            request,
-                            ErrorCode::Protocol,
-                            "malformed EXECUTE_READ_BATCH",
-                        )
+                        .fatal(cx, request, ErrorCode::Protocol, malformed)
                         .await;
                 };
                 match lane
-                    .execute_statement(
-                        cx,
-                        &waiter,
-                        db,
-                        token,
-                        request,
-                        Statement::ReadBatch(statement),
-                    )
+                    .execute_statement(cx, &waiter, db, token, request, statement)
                     .await
                 {
                     Ok(()) | Err(Stop::Cancelled) => {}
@@ -1187,7 +1188,16 @@ impl Lane {
             self.send_generation = None;
             return delivered;
         }
-        if let Statement::ReadBatch(statement) = &statement {
+        let read_batch = match &statement {
+            Statement::ReadBatch(statement) => {
+                Some(read_batch::ReadBatchStatement::Parameterized(statement))
+            }
+            Statement::ReadStatements(statement) => Some(
+                read_batch::ReadBatchStatement::Statements(&statement.statements),
+            ),
+            _ => None,
+        };
+        if let Some(statement) = read_batch {
             let delivered = self
                 .read_batch(cx, waiter, db, token, request, stream, binding, statement)
                 .await;
@@ -1352,7 +1362,9 @@ impl Lane {
                 }
             },
             Statement::Batch(statement) => write_batch(cx, db, token, &statement).await,
-            Statement::ReadBatch(_) => unreachable!("read batch dispatched above"),
+            Statement::ReadBatch(_) | Statement::ReadStatements(_) => {
+                unreachable!("read batch dispatched above")
+            }
             Statement::ConditionalWrite(statement) => {
                 write_if_current(cx, db, token, &statement).await
             }
@@ -1833,6 +1845,7 @@ impl Lane {
             FrameKind::Execute
             | FrameKind::ExecuteBatch
             | FrameKind::ExecuteReadBatch
+            | FrameKind::ExecuteReadStatements
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
@@ -2194,6 +2207,7 @@ impl Lane {
             FrameKind::Execute
             | FrameKind::ExecuteBatch
             | FrameKind::ExecuteReadBatch
+            | FrameKind::ExecuteReadStatements
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
