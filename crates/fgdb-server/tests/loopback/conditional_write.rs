@@ -294,3 +294,102 @@ fn http_conditional_writes_parse_exact_sequences_and_authorize_before_body() {
         task.join(cx).await.unwrap();
     });
 }
+
+#[test]
+fn fgp_conditional_hybrid_writes_search_staged_values_and_roll_back_as_one_statement() {
+    run(async |cx| {
+        let (address, shutdown, mut task) = start(cx, "conditional-staged-hybrid").await;
+        let mut owner = connected(cx, address, &grant(Rights::ReadWrite)).await;
+        let seeded = owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Company {name:'needle',age:'hidden malformed vector'})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            seeded.outcome,
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 1
+            }
+        );
+
+        let mut permitted = grant(Rights::ReadWrite);
+        permitted.labels = Scope::only([LabelId(1)]);
+        let mut client = connected(cx, address, &permitted).await;
+        let statement = "CREATE (fresh:Person {name:'needle',age:7}) WITH fresh \
+            CALL hybrid.search(text => 'needle', text_property => 'name', \
+                vector => [7.0], vector_properties => ['age'], candidates => 1, k => 1) \
+            YIELD node SET node.age = node.age + 1 RETURN node.name AS name, node.age AS age";
+        let written = client
+            .execute_write_if_current(cx, 1, statement, vec![])
+            .await
+            .unwrap();
+        assert_eq!(written.columns, ["name", "age"]);
+        assert_eq!(written.rows, [vec![text("needle"), WireValue::Int(8)]]);
+        assert_eq!(
+            written.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1
+            }
+        );
+
+        // The selected hit is the newly staged zero-valued vertex. The final
+        // expression therefore fails only after the search has consumed the
+        // transaction overlay; neither that vertex nor any result may publish.
+        let failing = "CREATE (fresh:Person {name:'rollback',age:0}) WITH fresh \
+            CALL hybrid.search(vector => [0.0], vector_properties => ['age'], \
+                candidates => 1, k => 1) \
+            YIELD node RETURN 1 / node.age AS invalid";
+        let error = client
+            .execute_write_if_current(cx, 2, failing, vec![])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            server_code(error),
+            ErrorCode::Statement | ErrorCode::Execution
+        ));
+        let observed = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN n.name AS name, n.age AS age",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(observed.rows, [vec![text("needle"), WireValue::Int(8)]]);
+        assert_eq!(observed.outcome, Outcome::Rows { seq: 2 });
+
+        // A stale conditional retry is rejected before executing the entire
+        // create/search/update chain, so it cannot create a second document.
+        assert_eq!(
+            server_code(
+                client
+                    .execute_write_if_current(cx, 1, statement, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Conflict
+        );
+        let count = owner
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN count(*) AS people",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(count.rows, [vec![WireValue::Int(1)]]);
+        assert_eq!(count.outcome, Outcome::Rows { seq: 2 });
+        client.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}

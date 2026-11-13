@@ -12,6 +12,28 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Authorized hybrid retrieval over staged writes — qualification pending
+
+Source added 2026-11-12 for `fgdb-authorized-staged-hybrid-w7g9p` connects
+`CALL hybrid.search` to the canonical authorized transaction overlay. Text,
+vector and materialized graph retrieval observe earlier CREATE, SET and DELETE
+effects, and returned vertex identities can feed later writes in the same
+statement. All authorized write-source families share the adapter.
+
+Vertex, property, relation and endpoint masks apply before corpus statistics,
+vector validation and routing, or graph expansion. Native work, scratch and
+source limits share the original signed permit and retain the first typed
+refusal. Private search rows do not consume the final delivery allowance.
+The surrounding statement owns rollback and its single final publication.
+Explicit indexed and demand graph profiles refuse before overlay acquisition;
+this adapter does not substitute a materialized scan for those requests.
+
+Regression sources cover staged multimodal retrieval, hidden malformed data,
+resource boundaries and rollback. The FGP conditional-write regression also
+covers create/search/update, stale-frontier rejection and a late result error
+without publication. Compilation and executable qualification are pending;
+the bead remains in progress until the pinned gates and exact-tree proof pass.
+
 ### UNION inside write-bearing CALL — qualification pending
 
 Source added 2026-11-12 extends the native scoped write-chain owner for
@@ -65,9 +87,10 @@ construction, retains the native table witnesses, and charges the same live
 write permit throughout source admission, projection, kernel work and private
 row conversion. The complete-source mutation collector preserves optional seeded
 reads and feeds the existing simultaneous proposal reducer; computed-map fields
-retain their individual authorization checks. Catalog calls retain their scoped owner. Authorized staged
-hybrid procedures remain unavailable; a selected procedure error never retries
-through a privileged host. Only final statement rows spend delivery allowance.
+retain their individual authorization checks. Catalog calls retain their scoped
+owner. Authorized staged hybrid procedures now use the masked Beacon adapter
+described above; a selected procedure error never retries through a privileged
+host. Only final statement rows spend delivery allowance.
 
 Six native and eight authorized regression sources cover literal staged BFS and
 weighted shortest-path results, earlier body effects, creation and MERGE from

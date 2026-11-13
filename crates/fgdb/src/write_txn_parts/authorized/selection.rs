@@ -9,6 +9,9 @@ use crate::write_txn::point_effect_selector::{EffectKey, select as select_effect
 use crate::write_txn::{
     PointReadField, ProjectionReadAttempt, point_find, point_payload_admission,
 };
+use fgdb_beacon::expansion::{ExpansionDirection, ExpansionGraph};
+use fgdb_beacon::read::Search;
+use fgdb_beacon::{BeaconError, BeaconIndex, WorkControl};
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_gql::algebra::{
     GlaOutput, GraphValue, GraphValueRow, PreparedGraphPattern, VertexScanDomain,
@@ -794,7 +797,8 @@ type ProcedureFault = GqlQueryError<WriteTxnError, WriteTxnError>;
 
 /// Every authorized write source shares this dispatch. Catalog calls retain
 /// their existing symbol mask; graph algorithms use the canonical staged
-/// projection below. Hybrid search has no authorized staged host yet.
+/// projection below. Hybrid search builds its corpus from the same masked
+/// overlay before statistics, vector routing or graph expansion can observe it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn procedure<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &WriteTxn,
@@ -807,7 +811,16 @@ pub(super) fn procedure<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &RefCell<&mut Execution<'_, '_, Clock>>,
 ) -> Option<Selected<GraphValueRow>> {
     if crate::query::is_hybrid(call) {
-        return None;
+        return Some(hybrid_overlay(
+            transaction,
+            database,
+            cx,
+            call,
+            arguments,
+            scope,
+            policy,
+            execution,
+        ));
     }
     if crate::query::is_catalog(call) {
         return Some(
@@ -893,6 +906,371 @@ impl<Clock: FnMut() -> u64> FnxMeter<ProcedureFault> for ProcedureMeter<'_, '_, 
             .map_err(WriteTxnError::Authorization)
             .map_err(GqlQueryError::Interrupted)
     }
+}
+
+/// Beacon's narrow error sum must not erase an earlier signed/native refusal.
+/// One shared meter covers the selected source, all retrieval lanes and private
+/// output. Hidden physical history only polls cancellation, without clock or
+/// resource observations that could depend on the hidden population.
+struct HybridMeter<'a, 'run, 'cx, 'permit, Clock> {
+    meter: ProcedureMeter<'a, 'run, 'cx, 'permit, Clock>,
+    scratch: usize,
+    scratch_limit: usize,
+    failure: Option<ProcedureFault>,
+    refusal: Option<BeaconError>,
+}
+
+impl<Clock: FnMut() -> u64> HybridMeter<'_, '_, '_, '_, Clock> {
+    fn retain(&mut self, result: Result<(), ProcedureFault>) -> Result<(), BeaconError> {
+        result.map_err(|error| {
+            if self.failure.is_none() {
+                self.failure = Some(error);
+            }
+            self.refuse(BeaconError::Cancelled)
+        })
+    }
+
+    fn refuse(&mut self, error: BeaconError) -> BeaconError {
+        self.refusal.get_or_insert(error).clone()
+    }
+
+    fn observe(&mut self, event: SourceEvent) -> Result<(), BeaconError> {
+        if let Some(error) = &self.refusal {
+            return Err(error.clone());
+        }
+        let result = self.meter.observe(self.meter.policy, event);
+        self.retain(result)
+    }
+
+    fn poll_hidden(&mut self) -> Result<(), BeaconError> {
+        if let Some(error) = &self.refusal {
+            return Err(error.clone());
+        }
+        let result = self
+            .meter
+            .cx
+            .checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .and_then(|()| self.meter.execution.borrow_mut().poll())
+            .map_err(GqlQueryError::Interrupted);
+        self.retain(result)
+    }
+
+    fn admit_vertex(&mut self) -> Result<(), BeaconError> {
+        self.observe(SourceEvent::SnapshotRecord)?;
+        let result = {
+            let mut execution = self.meter.execution.borrow_mut();
+            let now = (execution.clock)();
+            execution
+                .permit
+                .charge_nodes_at(now, 1)
+                .map_err(WriteTxnError::Authorization)
+                .map_err(GqlQueryError::Interrupted)
+        };
+        self.retain(result)
+    }
+}
+
+impl<Clock: FnMut() -> u64> WorkControl for HybridMeter<'_, '_, '_, '_, Clock> {
+    fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+        if let Some(error) = &self.refusal {
+            return Err(error.clone());
+        }
+        for _ in 0..units {
+            self.observe(SourceEvent::Work)?;
+        }
+        Ok(())
+    }
+
+    fn reserve_scratch(&mut self, entries: usize) -> Result<(), BeaconError> {
+        if let Some(error) = &self.refusal {
+            return Err(error.clone());
+        }
+        for _ in 0..entries {
+            self.observe(SourceEvent::ScratchEntry)?;
+            if self.scratch == self.scratch_limit {
+                return Err(self.refuse(BeaconError::ResourceLimit {
+                    resource: "authorized staged search scratch entries",
+                    limit: self.scratch_limit,
+                }));
+            }
+            self.scratch += 1;
+        }
+        Ok(())
+    }
+}
+
+/// Forward BOTH hooks: the generic immutable-source wrapper deliberately has
+/// no shared scratch promise, whereas this native statement owns one allowance.
+struct HybridWork<'a, W>(&'a RefCell<W>);
+
+impl<W: WorkControl> WorkControl for HybridWork<'_, W> {
+    fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+        self.0.borrow_mut().charge(units)
+    }
+
+    fn reserve_scratch(&mut self, entries: usize) -> Result<(), BeaconError> {
+        self.0.borrow_mut().reserve_scratch(entries)
+    }
+}
+
+/// Text/vector/graph retrieval over one capability-visible transaction cut.
+/// Reuse the canonical overlay and Beacon kernels; a privileged index cannot
+/// be made safe by filtering its final hits, because hidden documents would
+/// already have changed BM25 statistics, HNSW routing and graph reachability.
+///
+/// The existing staged default is materialized. Explicit indexed/demand graph
+/// requests require a different authorized source and refuse before overlay
+/// acquisition; no failed or unsupported source is retried under another one.
+#[allow(clippy::too_many_arguments)]
+fn hybrid_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    cx: &QueryCx,
+    call: &PreparedProcedureCall,
+    arguments: &[GraphValue],
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
+) -> Selected<GraphValueRow> {
+    if !scope.rights().can_read() {
+        return Err(GqlQueryError::Source(WriteTxnError::Authorization(
+            Error::PermissionDenied,
+        )));
+    }
+    let (search, eligible) =
+        crate::query::HybridSearch::bind_filtered(call, arguments, transaction.basis, policy)
+            .map_err(|error| crate::query::hybrid_refusal(error).map_source(WriteTxnError::Gql))?;
+    if search.uses_indexed_graph() || search.uses_demand_graph() {
+        return Err(
+            crate::query::hybrid_refusal(crate::query::HybridCallError::Combination(
+                "authorized staged graph search requires materialized graph_access",
+            ))
+            .map_source(WriteTxnError::Gql),
+        );
+    }
+    let options = search.options();
+    let query = search.query();
+    let expansion = search.expansion();
+    let reads_edges = query.graph_enabled()
+        && expansion.max_hops != 0
+        && !expansion.seeds.is_empty()
+        && expansion
+            .relation
+            .is_none_or(|relation| scope.allows_relation(relation));
+    with_overlay(
+        transaction,
+        database,
+        cx,
+        reads_edges,
+        true,
+        execution,
+        |overlay| {
+            let overlay = overlay.expect("hybrid admission retains even an empty overlay");
+            let usage = RefCell::new(AdmissionUsage::default());
+            let work = RefCell::new(HybridMeter {
+                meter: ProcedureMeter {
+                    cx,
+                    execution,
+                    usage: &usage,
+                    policy,
+                },
+                scratch: 0,
+                scratch_limit: options
+                    .policy
+                    .max_source_scratch
+                    .min(if query.graph_enabled() {
+                        expansion.limits.max_source_scratch
+                    } else {
+                        usize::MAX
+                    }),
+                failure: None,
+                refusal: None,
+            });
+            let result = (|| {
+                work.borrow_mut().charge(1)?;
+                let config = if query.is_graph_only() {
+                    options.validate_graph_only(query)?;
+                    None
+                } else {
+                    let config = options.config_for_graph(query)?;
+                    Search::Hybrid(query.source_query())
+                        .validate(&config, &mut HybridWork(&work))?;
+                    Some(config)
+                };
+                let filter = crate::query::EndpointFilter::prepare_with_admission(
+                    eligible,
+                    query.retrieval.k,
+                    policy.evaluator.max_scratch_entries,
+                    &mut HybridWork(&work),
+                    || work.borrow_mut().reserve_scratch(1),
+                )?;
+                let mut graph = if query.graph_enabled() {
+                    if expansion.seeds.len() > expansion.limits.max_seed_ids {
+                        return Err(BeaconError::ResourceLimit {
+                            resource: "expansion seed IDs",
+                            limit: expansion.limits.max_seed_ids,
+                        });
+                    }
+                    Some(ExpansionGraph::new(expansion.limits))
+                } else {
+                    None
+                };
+                let mut rows = Vec::new();
+                let mut selected = 0;
+                let limit = options.policy.max_staging_rows.min(
+                    config
+                        .as_ref()
+                        .map_or(options.index.max_documents, |config| config.max_documents),
+                );
+                let mut poll = |_| work.borrow_mut().poll_hidden();
+                overlay.visit_vertices(VertexScanDomain::All, &mut poll, |row, _| {
+                    if !scope.allows_vertex(&row.labels) {
+                        return Ok(());
+                    }
+                    work.borrow_mut().admit_vertex()?;
+                    for &label in &row.labels {
+                        if scope.allows_label(label) {
+                            work.borrow_mut().charge(1)?;
+                        }
+                    }
+                    if options.vertex_label.is_some_and(|label| {
+                        !scope.allows_label(label) || row.labels.binary_search(&label).is_err()
+                    }) {
+                        return Ok(());
+                    }
+                    if selected == limit {
+                        return Err(BeaconError::ResourceLimit {
+                            resource: "staged vertices",
+                            limit,
+                        });
+                    }
+                    selected += 1;
+                    if let Some(graph) = &mut graph {
+                        work.borrow_mut().reserve_scratch(1)?;
+                        graph.insert_vertex(row.vid, &mut HybridWork(&work))?;
+                    }
+                    if config.is_some() {
+                        work.borrow_mut().reserve_scratch(1)?;
+                        rows.try_reserve(1)
+                            .map_err(|_| BeaconError::ResourceLimit {
+                                resource: "vertex staging allocation",
+                                limit,
+                            })?;
+                        rows.push(row);
+                    }
+                    Ok(())
+                })?;
+                let index = if let Some(config) = config {
+                    let projected = rows.into_iter().map(|row| {
+                        options.projection.project(
+                            row.vid,
+                            &config,
+                            |key| {
+                                if !scope.allows_property(key) {
+                                    return None;
+                                }
+                                row.props
+                                    .binary_search_by_key(&key, |(key, _)| *key)
+                                    .ok()
+                                    .map(|slot| &row.props[slot].1)
+                            },
+                            &mut HybridWork(&work),
+                        )
+                    });
+                    Some(BeaconIndex::try_build(
+                        config.clone(),
+                        projected,
+                        &mut HybridWork(&work),
+                    )?)
+                } else {
+                    None
+                };
+                let graph_hits = if let Some(mut graph) = graph {
+                    if reads_edges {
+                        overlay
+                            .visit_edges(None, &mut poll, |edge, _, _| {
+                                if !scope.allows_relation(edge.relation)
+                                    || expansion
+                                        .relation
+                                        .is_some_and(|relation| relation != edge.relation)
+                                    || !graph.contains(edge.src)
+                                    || !graph.contains(edge.dst)
+                                {
+                                    return Ok(());
+                                }
+                                work.borrow_mut().observe(SourceEvent::SnapshotRecord)?;
+                                // Retained arcs are separately admitted even when
+                                // parallel edges later collapse to one adjacency.
+                                let arcs = if expansion.direction == ExpansionDirection::Undirected
+                                {
+                                    2
+                                } else {
+                                    1
+                                };
+                                work.borrow_mut().reserve_scratch(arcs)?;
+                                graph.insert_edge(
+                                    edge.src,
+                                    edge.dst,
+                                    expansion.direction,
+                                    &mut HybridWork(&work),
+                                )
+                            })
+                            .expect("hybrid overlay retains requested edges")?;
+                    }
+                    graph.expand_filtered(
+                        expansion.seeds,
+                        expansion.max_hops,
+                        expansion.include_seeds,
+                        query.graph_candidates,
+                        |id, _| Ok(filter.admits(id, &work)),
+                        &mut HybridWork(&work),
+                    )?
+                } else {
+                    Vec::new()
+                };
+                let hits = filter.finish(match index {
+                    Some(index) => index.snapshot().hybrid_search_graph_filtered(
+                        query,
+                        &graph_hits,
+                        |id| filter.admits(id, &work),
+                        &mut HybridWork(&work),
+                    ),
+                    None => query.fuse_graph_only(
+                        &graph_hits,
+                        |id| filter.admits(id, &work),
+                        &mut HybridWork(&work),
+                    ),
+                })?;
+                for _ in &hits {
+                    work.borrow_mut()
+                        .reserve_scratch(1 + call.outputs().len())?;
+                }
+                work.borrow_mut().charge(1)?;
+                Ok(hits)
+            })();
+            if let Some(error) = work.into_inner().failure {
+                return Err(error);
+            }
+            let hits = result.map_err(|error| {
+                crate::query::hybrid_refusal(crate::query::HybridCallError::Index(error))
+                    .map_source(WriteTxnError::Gql)
+            })?;
+            let value = search.rows(hits);
+            let usage = usage.into_inner();
+            usage.finish(
+                policy,
+                Ok(GqlQueryExecution {
+                    rows: GqlExecutionStats {
+                        snapshot_records: usage.snapshot_records(),
+                        result_rows: value.len() as u64,
+                    },
+                    evaluator: GlaExecutionStats::default(),
+                    value,
+                }),
+            )
+        },
+    )
 }
 
 /// Registered Prism reads over the capability-visible staged graph. This
