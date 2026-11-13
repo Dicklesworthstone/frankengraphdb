@@ -5114,3 +5114,583 @@ mod post_write_mutations {
         });
     }
 }
+
+mod staged_hybrid_contracts {
+    use super::*;
+    use fgdb_gql::algebra::GraphValueRow;
+    use fgdb_gql::insertion::GraphInsertStats;
+    use fgdb_gql::{GqlQueryError, GqlQueryExecution, GraphWriteChainError};
+    use fgdb_types::CanonicalDecimal;
+    use fgdb_warden::LimitDimension;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const BODY: PropertyKeyId = PropertyKeyId(3);
+    const X: PropertyKeyId = PropertyKeyId(4);
+    type Fault = GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
+    type Receipt = (GraphInsertStats, GqlQueryExecution<GraphValueRow>);
+
+    // The selected document initially fails the text predicate. Its direct
+    // graph shortcut is removed and replaced with a path through an ineligible
+    // middle vertex before retrieval; the vector coordinate also changes.
+    const PREFIX: &str = "MATCH (a:Visible {p:10})-[shortcut:R]->(target:Visible {p:30}) \
+         DELETE shortcut WITH a,target MATCH (middle:Visible {p:20}) \
+         CREATE (middle)-[:R]->(target) WITH a,target \
+         SET target.body='graph', target.x=0 WITH a,target ";
+    const SEARCH: &str = "CALL hybrid.search(text => 'graph', text_property => 'body', \
+         vector => [0], vector_properties => ['x'], metric => 'l2', \
+         seeds => [1], max_hops => 2, eligible => [3], candidates => 1, \
+         graph_candidates => 1, k => 1, \
+         text_weight => 61, vector_weight => 61, graph_weight => 61)";
+    const OUTPUTS: &str = "YIELD node,score,vector_rank,text_rank,graph_rank,graph_hops \
+         RETURN node,node.p,score,vector_rank,text_rank,graph_rank,graph_hops";
+
+    fn text(value: &str) -> CanonicalScalar {
+        CanonicalScalar::ucs_basic_text(value).unwrap()
+    }
+
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+
+    fn decimal(value: i128) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Decimal(
+            CanonicalDecimal::from_integer(value).unwrap(),
+        ))
+    }
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "body") => Some(GraphSymbol::Property(BODY)),
+            (GraphSymbolKind::Property, "x") => Some(GraphSymbol::Property(X)),
+            _ => super::symbols(kind, name),
+        }
+    }
+
+    fn program(text: &str) -> PreparedGraphWriteChain {
+        assert!(
+            PreparedGraphWriteChainText::is_chain(text).unwrap(),
+            "{text}"
+        );
+        PreparedGraphWriteChainText::prepare(text, R, symbols)
+            .expect(text)
+            .bind_parameters(&GqlParameters::new())
+            .expect(text)
+    }
+
+    fn capability(rows: u64) -> Grant {
+        let mut value = grant(Rights::ReadWrite, rows);
+        value.relations = Scope::only([R]);
+        value.properties = Scope::only([P, BODY, X]);
+        value
+    }
+
+    async fn database(contexts: &PurposeContexts, hidden: bool) -> Database<MemVfs> {
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, value, body, coordinate) in
+            [(1, 10, "graph", 0), (2, 20, "graph", 1), (3, 30, "old", 2)]
+        {
+            let mut properties = vec![
+                (P, CanonicalScalar::Int(value)),
+                (BODY, text(body)),
+                (X, CanonicalScalar::Int(coordinate)),
+            ];
+            if hidden {
+                // Forbidden on a visible vertex: neither a valid text field
+                // nor a valid numeric embedding, and it must stay unobserved.
+                properties.insert(1, (SECRET, CanonicalScalar::Bool(true)));
+            }
+            batch.create_vertex(VId(id), vec![L], properties);
+        }
+        batch.add_edge(EId(1), VId(1), VId(2), vec![]);
+        batch.add_edge(EId(2), VId(1), VId(3), vec![]);
+        if hidden {
+            batch.create_vertex(
+                VId(90),
+                vec![HIDDEN],
+                vec![
+                    (P, CanonicalScalar::Int(90)),
+                    (BODY, CanonicalScalar::Int(123)),
+                    (X, CanonicalScalar::Bool(true)),
+                ],
+            );
+            // A valid hidden document also changes BM25 corpus statistics if
+            // visibility is applied only after projection or ranking.
+            batch.create_vertex(
+                VId(91),
+                vec![HIDDEN],
+                vec![
+                    (P, CanonicalScalar::Int(91)),
+                    (BODY, text("graph graph graph")),
+                    (X, CanonicalScalar::Int(0)),
+                ],
+            );
+            batch.add_edge(EId(90), VId(1), VId(90), vec![]);
+            batch.add_edge(EId(91), VId(90), VId(3), vec![]);
+        }
+        db.write(&commit, batch).await.unwrap();
+        if hidden {
+            // With relation omitted from SEARCH, this shortcut would change
+            // the literal hop count unless descriptor masking precedes BFS.
+            let mut shortcut = WriteBatch::new(S);
+            shortcut.add_edge(EId(92), VId(1), VId(3), vec![]);
+            db.write(&commit, shortcut).await.unwrap();
+        }
+        db
+    }
+
+    async fn execute_with_clock(
+        contexts: &PurposeContexts,
+        statement: &PreparedGraphWriteChain,
+        hidden: bool,
+        scope: Grant,
+        budget: GraphInsertPolicy,
+        clock: impl FnMut() -> u64,
+    ) -> Result<Receipt, Fault> {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let mut db = database(contexts, hidden).await;
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let result = db
+            .execute_graph_write_chain_authorized(
+                &txn, &query, &commit, &issuer, &token, "main", statement, budget, clock,
+            )
+            .await;
+        if let Ok((stats, _, completion)) = &result {
+            let frontier = db.frontier().unwrap();
+            assert_eq!(frontier.0, before.0.0 + 1);
+            assert_eq!(
+                *completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: frontier,
+                }
+            );
+            assert_eq!(
+                db.vertices().unwrap().len(),
+                before.1.len() + stats.created_vertices as usize
+            );
+            for vertex in &before.1 {
+                if vertex.labels.contains(&HIDDEN) {
+                    assert_eq!(db.vertex(vertex.vid).unwrap().as_ref(), Some(vertex));
+                } else if hidden {
+                    assert!(
+                        db.vertex(vertex.vid)
+                            .unwrap()
+                            .unwrap()
+                            .props
+                            .contains(&(SECRET, CanonicalScalar::Bool(true).into()))
+                    );
+                }
+            }
+            for edge in &before.2 {
+                if edge.entry.eid.0 >= 90 {
+                    assert_eq!(db.edge(edge.entry.eid).unwrap().as_ref(), Some(edge));
+                }
+            }
+        } else {
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                ),
+                before,
+                "a failed search or delivery must publish no statement prefix",
+            );
+        }
+        assert_eq!(txn.outstanding_obligations(), 0);
+        result.map(|(stats, rows, _)| (stats, rows))
+    }
+
+    async fn execute(
+        contexts: &PurposeContexts,
+        statement: &PreparedGraphWriteChain,
+        hidden: bool,
+        scope: Grant,
+        budget: GraphInsertPolicy,
+    ) -> Result<Receipt, Fault> {
+        execute_with_clock(contexts, statement, hidden, scope, budget, || NOW).await
+    }
+
+    fn values(result: &GqlQueryExecution<GraphValueRow>) -> Vec<Vec<GraphValue>> {
+        result
+            .value
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect()
+    }
+
+    fn search_error<'a>(
+        error: &'a (dyn core::error::Error + 'static),
+    ) -> Option<&'a fgdb::HybridCallError> {
+        let mut cause = Some(error);
+        while let Some(error) = cause {
+            if let Some(search) = error.downcast_ref::<fgdb::HybridCallError>() {
+                return Some(search);
+            }
+            cause = error.source();
+        }
+        None
+    }
+
+    #[test]
+    fn three_lanes_read_staged_rewrites_and_feed_creation_without_hidden_influence() {
+        lab(0xc4a1_2301, |contexts| async move {
+            let statement = program(&format!(
+                "{PREFIX}{SEARCH} \
+                 YIELD node,score,vector_rank,text_rank,graph_rank,graph_hops,text_score \
+                 CREATE (copy:Visible {{p:node.p}}) \
+                 RETURN node,node.p,score,vector_rank,text_rank,graph_rank,graph_hops,\
+                 copy.p,text_score"
+            ));
+            let expected = execute(&contexts, &statement, false, capability(1), policy(1))
+                .await
+                .unwrap();
+            assert_eq!(expected.0.created_vertices, 1);
+            assert_eq!(expected.0.created_edges, 1);
+            let rows = values(&expected.1);
+            assert_eq!(rows.len(), 1);
+            // Eligibility precedes each one-candidate limit. Its excluded
+            // middle vertex still participates in the two-hop path. RRF is
+            // 61/(60+1) from each of the three lanes, hence exactly Decimal 3.
+            assert_eq!(
+                rows[0][..8],
+                [
+                    GraphValue::Vertex(VId(3)),
+                    int(30),
+                    decimal(3),
+                    int(1),
+                    int(1),
+                    int(1),
+                    int(2),
+                    int(30),
+                ]
+            );
+            assert!(matches!(
+                rows[0][8],
+                GraphValue::Scalar(CanonicalScalar::Float(value)) if value.get() > 0.0
+            ));
+            assert_eq!(
+                execute(&contexts, &statement, true, capability(1), policy(1))
+                    .await
+                    .unwrap(),
+                expected,
+                "hidden malformed values, corpus documents and shortcuts change neither scores nor work",
+            );
+        });
+    }
+
+    #[test]
+    fn lane_selection_and_forbidden_projection_fields_keep_literal_ranks() {
+        lab(0xc4a1_2302, |contexts| async move {
+            let cases = [
+                (
+                    "text => 'graph', text_property => 'body', text_weight => 61",
+                    [None, Some(1), None, None],
+                ),
+                (
+                    "vector => [0], vector_properties => ['x'], metric => 'l2', \
+                     vector_weight => 61",
+                    [Some(1), None, None, None],
+                ),
+                (
+                    "seeds => [1], max_hops => 2, graph_candidates => 1, graph_weight => 61",
+                    [None, None, Some(1), Some(2)],
+                ),
+                (
+                    "text => 'graph', text_property => 'secret', \
+                     seeds => [1], max_hops => 2, graph_candidates => 1, graph_weight => 61",
+                    [None, None, Some(1), Some(2)],
+                ),
+                (
+                    "vector => [0], vector_properties => ['secret'], metric => 'l2', \
+                     seeds => [1], max_hops => 2, graph_candidates => 1, graph_weight => 61",
+                    [None, None, Some(1), Some(2)],
+                ),
+            ];
+            for (arguments, ranks) in cases {
+                let statement = program(&format!(
+                    "{PREFIX}CALL hybrid.search({arguments}, eligible => [3], \
+                     candidates => 1, k => 1) {OUTPUTS}"
+                ));
+                let expected = execute(&contexts, &statement, false, capability(1), policy(1))
+                    .await
+                    .unwrap();
+                let mut row = vec![GraphValue::Vertex(VId(3)), int(30), decimal(1)];
+                row.extend(
+                    ranks.map(|rank| rank.map_or(GraphValue::Scalar(CanonicalScalar::Null), int)),
+                );
+                assert_eq!(values(&expected.1), vec![row], "{arguments}");
+                assert_eq!(
+                    execute(&contexts, &statement, true, capability(1), policy(1))
+                        .await
+                        .unwrap(),
+                    expected,
+                    "{arguments}",
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn newly_staged_documents_and_private_search_rows_drive_more_writes() {
+        lab(0xc4a1_2303, |contexts| async move {
+            let prefix = "CREATE (fresh:Visible {p:40,body:'new graph',x:0}) WITH fresh \
+                CALL hybrid.search(text => 'new', text_property => 'body', \
+                vector => [0], vector_properties => ['x'], metric => 'l2', \
+                seeds => [fresh], include_seeds => true, max_hops => 0, \
+                eligible => [fresh], candidates => 1, graph_candidates => 1, k => 1, \
+                text_weight => 61, vector_weight => 61, graph_weight => 61) \
+                YIELD node,score,graph_hops CREATE (copy:Visible {p:node.p})";
+            for hidden in [false, true] {
+                let statement = program(&format!("{prefix} RETURN node.p,copy.p,score,graph_hops"));
+                let (stats, rows) =
+                    execute(&contexts, &statement, hidden, capability(1), policy(1))
+                        .await
+                        .unwrap();
+                assert_eq!(stats.created_vertices, 2);
+                assert_eq!(stats.created_edges, 0);
+                assert_eq!(
+                    values(&rows),
+                    vec![vec![int(40), int(40), decimal(3), int(0)]]
+                );
+
+                // This form returns no public rows. Its internal CALL result
+                // can still feed CREATE with a zero signed delivery allowance.
+                let (stats, rows) = execute(
+                    &contexts,
+                    &program(prefix),
+                    hidden,
+                    capability(0),
+                    policy(1),
+                )
+                .await
+                .unwrap();
+                assert_eq!(stats.created_vertices, 2);
+                assert!(rows.value.is_empty());
+            }
+        });
+    }
+
+    #[test]
+    fn repeated_searches_share_signed_work_and_final_delivery_allowances() {
+        lab(0xc4a1_2304, |contexts| async move {
+            let statement = program(&format!(
+                "{PREFIX}{SEARCH} YIELD node WITH node AS first \
+                 {SEARCH} YIELD node RETURN first.p,node.p"
+            ));
+            let expected = execute(&contexts, &statement, false, capability(1), policy(1))
+                .await
+                .unwrap();
+            assert_eq!(values(&expected.1), vec![vec![int(30), int(30)]]);
+            let measured = expected.0;
+            assert!(measured.selection.snapshot_records > 0);
+            assert!(measured.evaluator.work_units > 0);
+            assert!(measured.evaluator.scratch_entries > 0);
+            let exact = GraphInsertPolicy::new(
+                GqlQueryPolicy::new(
+                    measured.selection.snapshot_records,
+                    1,
+                    measured.evaluator.work_units,
+                    measured.evaluator.scratch_entries,
+                ),
+                100,
+                100,
+            );
+            for hidden in [false, true] {
+                assert_eq!(
+                    execute(&contexts, &statement, hidden, capability(1), exact)
+                        .await
+                        .unwrap(),
+                    expected,
+                    "the complete statement fits its reported native allowance",
+                );
+                for dimension in 0..3 {
+                    let mut budget = exact;
+                    match dimension {
+                        0 => {
+                            budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                                measured.selection.snapshot_records - 1,
+                                1,
+                            )
+                        }
+                        1 => budget.query.evaluator.max_work_units -= 1,
+                        _ => budget.query.evaluator.max_scratch_entries -= 1,
+                    }
+                    let error = execute(&contexts, &statement, hidden, capability(1), budget)
+                        .await
+                        .expect_err("both searches must spend one native statement allowance");
+                    assert_eq!(authorization(&error), None, "{error:?}");
+                }
+            }
+            let (mut refused, mut admitted) = (0, capability(1).limits.max_work);
+            while admitted - refused > 1 {
+                let trial = refused + (admitted - refused) / 2;
+                let mut scope = capability(1);
+                scope.limits.max_work = trial;
+                match execute(&contexts, &statement, false, scope, policy(1)).await {
+                    Ok(actual) => {
+                        assert_eq!(actual, expected);
+                        admitted = trial;
+                    }
+                    Err(error) => {
+                        assert_eq!(
+                            authorization(&error),
+                            Some(Error::LimitExceeded(LimitDimension::Work)),
+                            "{error:?}",
+                        );
+                        refused = trial;
+                    }
+                }
+            }
+            assert!(admitted > 1);
+            for hidden in [false, true] {
+                for (work, succeeds) in [(admitted - 1, false), (admitted, true)] {
+                    let mut scope = capability(1);
+                    scope.limits.max_work = work;
+                    let actual = execute(&contexts, &statement, hidden, scope, policy(1)).await;
+                    if succeeds {
+                        assert_eq!(actual.unwrap(), expected);
+                    } else {
+                        assert_eq!(
+                            authorization(&actual.unwrap_err()),
+                            Some(Error::LimitExceeded(LimitDimension::Work)),
+                        );
+                    }
+                }
+                let error = execute(&contexts, &statement, hidden, capability(0), policy(1))
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    authorization(&error),
+                    Some(Error::LimitExceeded(LimitDimension::Rows)),
+                );
+                for rights in [Rights::Read, Rights::Write] {
+                    let mut scope = capability(1);
+                    scope.rights = rights;
+                    let error = execute(&contexts, &statement, hidden, scope, policy(1))
+                        .await
+                        .unwrap_err();
+                    assert_eq!(authorization(&error), Some(Error::PermissionDenied));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn failed_projection_and_unavailable_profiles_rollback_even_with_limit_zero() {
+        lab(0xc4a1_2305, |contexts| async move {
+            for hidden in [false, true] {
+                for page in ["", " LIMIT 0"] {
+                    let statement = program(&format!(
+                        "{PREFIX}SET target.x='not numeric' WITH target \
+                         {SEARCH} YIELD node RETURN node{page}"
+                    ));
+                    let error = execute(&contexts, &statement, hidden, capability(1), policy(1))
+                        .await
+                        .unwrap_err();
+                    assert!(
+                        matches!(search_error(&error), Some(fgdb::HybridCallError::Index(_))),
+                        "{error:?}",
+                    );
+                }
+                for access in ["indexed", "demand"] {
+                    let statement = program(&format!(
+                        "{PREFIX}CALL hybrid.search(seeds => [1], max_hops => 2, \
+                         graph_access => '{access}', k => 1) \
+                         YIELD node RETURN node LIMIT 0"
+                    ));
+                    let error = execute(&contexts, &statement, hidden, capability(0), policy(1))
+                        .await
+                        .unwrap_err();
+                    assert!(
+                        matches!(
+                            search_error(&error),
+                            Some(fgdb::HybridCallError::Combination(
+                                "authorized staged graph search requires materialized graph_access"
+                            )),
+                        ),
+                        "{access}: {error:?}",
+                    );
+                }
+                for page in ["", " LIMIT 0"] {
+                    let statement = program(&format!(
+                        "{PREFIX}CALL hybrid.search(vector => [0], \
+                         vector_properties => ['x'], metric => 'l2', ann => 4, k => 1) \
+                         YIELD node RETURN node{page}"
+                    ));
+                    let error = execute(&contexts, &statement, hidden, capability(1), policy(1))
+                        .await
+                        .unwrap_err();
+                    assert!(
+                        matches!(
+                            search_error(&error),
+                            Some(fgdb::HybridCallError::Combination(
+                                "authorized transaction search requires exact vector retrieval"
+                            )),
+                        ),
+                        "{page}: {error:?}",
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn live_token_expiry_refuses_a_partially_executed_hybrid_chain() {
+        lab(0xc4a1_2306, |contexts| async move {
+            let statement = program(&format!(
+                "{PREFIX}{SEARCH} YIELD node CREATE (copy:Visible {{p:node.p}}) \
+                 RETURN copy.p"
+            ));
+            let calls = Arc::new(AtomicU64::new(0));
+            let observed = Arc::clone(&calls);
+            let expected = execute_with_clock(
+                &contexts,
+                &statement,
+                false,
+                capability(1),
+                policy(1),
+                move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    NOW
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(values(&expected.1), vec![vec![int(30)]]);
+            let completed_calls = calls.load(Ordering::SeqCst);
+            assert!(completed_calls > 2);
+            for hidden in [false, true] {
+                let calls = Arc::new(AtomicU64::new(0));
+                let observed = Arc::clone(&calls);
+                let expires_after = completed_calls / 2;
+                let error = execute_with_clock(
+                    &contexts,
+                    &statement,
+                    hidden,
+                    capability(1),
+                    policy(1),
+                    move || {
+                        if observed.fetch_add(1, Ordering::SeqCst) < expires_after {
+                            NOW
+                        } else {
+                            10_000
+                        }
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(authorization(&error), Some(Error::Expired));
+                assert!(calls.load(Ordering::SeqCst) > expires_after);
+            }
+        });
+    }
+}

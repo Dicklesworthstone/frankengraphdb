@@ -1665,3 +1665,222 @@ fn bolt_explicit_write_only_grants_commit_without_rows_and_refuse_read_followups
         finish(cx, shutdown, serving).await;
     });
 }
+
+#[test]
+fn bolt_explicit_hybrid_reads_track_the_staged_graph_and_rollback() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "explicit-staged-hybrid").await;
+        let mut observer = Client::connect(cx, fgp, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        let stored = "MATCH (n:Person) RETURN n.name AS name,n.age AS age ORDER BY name";
+        let search = "CALL hybrid.search(text => $needle, text_property => 'name', \
+            label => 'Person', candidates => 1, k => 1) YIELD node \
+            RETURN node,node.name AS name,node.age AS age";
+        let mut client = login(address, &grant(Rights::ReadWrite)).await;
+        client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request(
+                    "CREATE (a:Person {name:'stagedneedle',age:7}), \
+                     (b:Person {name:'quiet',age:2}), (a)-[:KNOWS]->(b)",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let created = client.expect(0x2f, consume(), SUCCESS).await;
+        assert!(get(&created, "bookmark").is_none());
+
+        client
+            .expect(
+                0x10,
+                request(
+                    search,
+                    vec![("needle".into(), Value::string("stagedneedle"))],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let (rows, provisional) = client.pull_all().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1..], [Value::string("stagedneedle"), Value::Int(7)]);
+        assert_eq!(
+            get(node_properties(&rows[0][0]), "name"),
+            Some(&Value::string("stagedneedle")),
+            "Bolt graph hydration must use the private workspace"
+        );
+        assert_eq!(
+            get(&provisional, "fgdb_transaction_local"),
+            Some(&Value::Bool(true))
+        );
+        assert!(get(&provisional, "bookmark").is_none());
+
+        for (query, expected) in [
+            (
+                "CALL hybrid.search(vector => [8], vector_properties => ['age'], \
+                 metric => 'l2', candidates => 1, k => 1) YIELD node \
+                 RETURN node.name AS name",
+                "stagedneedle",
+            ),
+            (
+                "MATCH (seed:Person {name:'stagedneedle'}) \
+                 CALL hybrid.search(seeds => [seed], relation => 'KNOWS', \
+                 max_hops => 1, include_seeds => false, graph_candidates => 1, k => 1) \
+                 YIELD node RETURN node.name AS name",
+                "quiet",
+            ),
+        ] {
+            client
+                .expect(0x10, request(query, vec![], vec![]), SUCCESS)
+                .await;
+            let (rows, provisional) = client.pull_all().await;
+            assert_eq!(rows, [vec![Value::string(expected)]], "{query}");
+            assert!(get(&provisional, "bookmark").is_none());
+        }
+        let before = observer
+            .execute(cx, ExecuteMode::Read, stored, vec![])
+            .await
+            .unwrap();
+        assert!(
+            before.rows.is_empty(),
+            "search cannot publish staged effects"
+        );
+        assert_eq!(before.outcome, Outcome::Rows { seq: 0 });
+
+        client
+            .expect(
+                0x10,
+                request(
+                    "MATCH (n:Person {name:'stagedneedle'}) \
+                     SET n.name='revisedneedle',n.age=11",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        client.expect(0x2f, consume(), SUCCESS).await;
+        for needle in ["stagedneedle", "revisedneedle"] {
+            client
+                .expect(
+                    0x10,
+                    request(
+                        search,
+                        vec![("needle".into(), Value::string(needle))],
+                        vec![],
+                    ),
+                    SUCCESS,
+                )
+                .await;
+            let (rows, provisional) = client.pull_all().await;
+            if needle == "stagedneedle" {
+                assert!(rows.is_empty(), "a later search must retract old text");
+            } else {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    rows[0][1..],
+                    [Value::string("revisedneedle"), Value::Int(11)]
+                );
+                assert_eq!(
+                    get(node_properties(&rows[0][0]), "age"),
+                    Some(&Value::Int(11))
+                );
+            }
+            assert!(get(&provisional, "bookmark").is_none());
+        }
+        let committed = client.expect(0x12, vec![], SUCCESS).await;
+        assert_eq!(
+            get(&committed, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        let expected = [
+            vec![text("quiet"), WireValue::Int(2)],
+            vec![text("revisedneedle"), WireValue::Int(11)],
+        ];
+        let visible = observer
+            .execute(cx, ExecuteMode::Read, stored, vec![])
+            .await
+            .unwrap();
+        assert_eq!(visible.rows, expected);
+        assert_eq!(visible.outcome, Outcome::Rows { seq: 1 });
+
+        client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request(
+                    "CREATE (:Person {name:'rollbackneedle',age:9})",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        client.expect(0x2f, consume(), SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request(
+                    search,
+                    vec![("needle".into(), Value::string("rollbackneedle"))],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let (own, _) = client.pull_all().await;
+        assert_eq!(own.len(), 1);
+        assert_eq!(
+            own[0][1..],
+            [Value::string("rollbackneedle"), Value::Int(9)]
+        );
+        client.expect(0x13, vec![], SUCCESS).await;
+
+        // A requested access profile cannot retry the privileged snapshot
+        // host. Its refusal aborts all previous statements in this owner.
+        client.expect(0x11, vec![Value::Map(vec![])], SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request(
+                    "CREATE (:Person {name:'refusedneedle',age:13})",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        client.expect(0x2f, consume(), SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                request(
+                    "CALL hybrid.search(seeds => [1], max_hops => 0, \
+                     include_seeds => true, graph_access => 'demand') \
+                     YIELD node RETURN node.name AS name",
+                    vec![],
+                    vec![],
+                ),
+                FAILURE,
+            )
+            .await;
+        client.expect(0x12, vec![], IGNORED).await;
+        client.expect(0x0f, vec![], SUCCESS).await;
+        let unchanged = observer
+            .execute(cx, ExecuteMode::Read, stored, vec![])
+            .await
+            .unwrap();
+        assert_eq!(unchanged.rows, expected);
+        assert_eq!(unchanged.outcome, Outcome::Rows { seq: 1 });
+
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
+        observer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}

@@ -55,13 +55,25 @@ The surrounding statement owns rollback and its single final publication.
 Explicit indexed and demand graph profiles refuse before overlay acquisition;
 this adapter does not substitute a materialized scan for those requests.
 
+Source extended 2026-11-13 requires exact vector retrieval: explicit ANN
+requests refuse before source acquisition because these private rows can feed
+later mutation. The retained permit is revalidated after result conversion.
+
 Regression sources cover staged multimodal retrieval, hidden malformed data,
-resource boundaries and rollback. The FGP conditional-write regression also
-covers create/search/update, stale-frontier rejection and a late result error
-without publication. Pinned formatting of changed Rust files and independent source/API review pass.
-The pinned check exited 101 after unchanged `asupersync` rustc was SIGKILLed,
-before first-party compilation. Runtime tests, Clippy and exact-tree proof
-remain UNRUN, and the bead stays in progress.
+exact native and signed resource boundaries, private rows with zero public
+allowance, rollback under LIMIT 0, and live capability expiry. The FGP
+conditional-write regression covers create/search/update, stale-frontier
+rejection and late result errors without publication. Further FGP regressions
+cover raw and freshly rebound prepared write chains; Bolt explicit transactions
+cover staged text, vectors, topology, property hydration, commit, rollback and
+failed-transaction reset after a refused search profile.
+
+Pinned-nightly formatting of the changed Rust files and whitespace checks pass.
+Workspace formatting reports existing differences in untouched files. Two
+focused build attempts, including single-job compilation without debug info or
+incremental state, were SIGKILLed in the pinned asupersync dependency before
+first-party compilation. Product compilation, runtime tests, Clippy, UBS and
+exact-tree qualification remain **UNRUN**; the bead stays in progress.
 
 ### UNION inside write-bearing CALL — qualification pending
 

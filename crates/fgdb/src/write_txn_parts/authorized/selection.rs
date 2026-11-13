@@ -1051,6 +1051,19 @@ fn hybrid_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
     }
     let options = search.options();
     let query = search.query();
+    // This source can select later mutation targets; ANN cannot satisfy the
+    // exact-input requirement for Mutate (plan section 8.3).
+    if matches!(
+        query.retrieval.vector_mode,
+        fgdb_beacon::VectorSearch::Approximate { .. }
+    ) {
+        return Err(
+            crate::query::hybrid_refusal(crate::query::HybridCallError::Combination(
+                "authorized transaction search requires exact vector retrieval",
+            ))
+            .map_source(WriteTxnError::Gql),
+        );
+    }
     let expansion = search.expansion();
     let reads_edges = query.graph_enabled()
         && expansion.max_hops != 0
@@ -1249,7 +1262,10 @@ fn hybrid_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 work.borrow_mut().charge(1)?;
                 Ok(hits)
             })();
-            if let Some(error) = work.into_inner().failure {
+            let HybridMeter {
+                mut meter, failure, ..
+            } = work.into_inner();
+            if let Some(error) = failure {
                 return Err(error);
             }
             let hits = result.map_err(|error| {
@@ -1257,6 +1273,7 @@ fn hybrid_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     .map_source(WriteTxnError::Gql)
             })?;
             let value = search.rows(hits);
+            meter.poll()?;
             let usage = usage.into_inner();
             usage.finish(
                 policy,
