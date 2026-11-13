@@ -75,6 +75,7 @@ Usage: fgdb [--robot] <command>
          diff --before <seq> --after <seq> [--stream] <gql>
   remote --addr <ip:port> --token-file <file> --database <name> --rows-file <file>
          [--csv-types name=type,...] [--read-mode buffered|source|ordered] query <gql>
+  remote --addr <ip:port> --token-file <file> --database <name> --statements-file <file> query-batch
   remote --addr <ip:port> --token-file <file> --database <name> [--param name=value]... [--if-current <seq>] write <gql>
   remote --addr <ip:port> --token-file <file> --database <name> --rows-file <file>
          [--csv-types name=type,...] write <gql>
@@ -143,6 +144,15 @@ delivery begins. Each columns record carries its one-based statement and exact s
 rows carry statement. Only one final read_batch result confirms the entire batch.
 Explicit temporal selectors keep their own cuts; ordinary reads share the pinned cut.
 A late delivery error leaves all output provisional. No retry or mode fallback occurs.
+remote query-batch --statements-file <file> submits 1..=32 different reads in that
+same pinned-session batch. The UTF-8 JSON array contains objects with a statement
+string and an optional parameters object using the typed --param spellings.
+Each read keeps its own schema and parameter names. The complete regular file
+is admitted before credentials or connection: at most 1048576 bytes, 65536 bytes
+per JSON string, with cumulative value and encoded-frame limits as well.
+No positional statement, argument-file, --param, --read-mode or --consistent-batch
+option is accepted. The server compiles every read before any successful output.
+TLS options apply. An older server refuses without independent-query fallback.
 remote write --rows-file executes the complete JSON/CSV input as ONE atomic batch.
 remote write --if-current <seq> accepts one text write only if the selected
 database is still at that exact revision. The server checks under the writer

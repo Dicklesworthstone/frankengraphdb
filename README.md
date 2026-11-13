@@ -575,6 +575,10 @@ fgdb remote --addr 127.0.0.1:7687 --token-file token --database social query "MA
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
   --rows-file names.json query 'MATCH (p:Person {name: $name}) RETURN p.name'
 
+# Different reads in one pinned session, each with its own parameters and columns
+fgdb --robot remote --addr 127.0.0.1:7687 --token-file token --database social \
+  --statements-file reads.json query-batch
+
 # Live changefeed: a baseline, then one exact delta per commit
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
   subscribe "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"
@@ -589,6 +593,19 @@ python3 -c 'from neo4j import GraphDatabase, bearer_auth
 d = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=bearer_auth(open("token").read().strip()))
 print(d.execute_query("MATCH (p:Person) RETURN p LIMIT 3").records)'
 ```
+
+**Consistent multi-query reads.** `remote query-batch --statements-file reads.json` accepts a JSON array of 1–32 objects. Each has a nonempty `statement` string and an optional `parameters` object using the same typed strings as `--param`:
+
+```json
+[
+  {"statement":"MATCH (p:Person) RETURN count(*) AS people"},
+  {"statement":"MATCH (p:Person {name:$name}) RETURN p.name","parameters":{"name":"text:Ada"}}
+]
+```
+
+Ordinary reads share one pinned native session and one cumulative signed allowance. Explicit historical selectors retain their own cuts. Every statement executes and passes wire admission before the server sends successful output; write text refuses. The CLI flushes each result's columns and rows with a one-based `statement` index and puts the exact selected sequence on each columns record. Only the single terminal `result` with `kind=read_batch` completes the batch. A later delivery failure leaves the entire prefix provisional and cancels and drains the active request. There is no retry as separate queries on older servers or after a refusal.
+
+The complete regular UTF-8 file is decoded before credentials or connection. Raw input is limited to 1 MiB, each JSON string to 64 KiB, and the encoded request to the client frame limit. Nested parameters retain the existing depth and value limits. This command accepts the ordinary address, database, token and TLS options; it takes no positional statement, `--param`, argument-file, read-mode or `--consistent-batch` options. Execution is buffered on the server, with incremental delivery to the CLI.
 
 **Composable catalog discovery.** `CALL db.labels()`, `CALL db.relationshipTypes()` and `CALL db.propertyKeys()` enumerate the host's declared symbol bindings in name order, including declarations not yet used by graph data. Their default columns are `label`, `relationshipType` and `propertyKey`. Bare calls, `YIELD *`, aliases, filters, joins, aggregation and parameterized prepared reads use the native query pipeline in the embedded API, CLI, FGP, HTTP and Bolt:
 

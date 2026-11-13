@@ -49,6 +49,9 @@ struct RemoteOptions {
     /// A complete typed argument file: one atomic write batch, or repeated
     /// prepared reads with one completed result block per argument set.
     rows_file: Option<PathBuf>,
+    /// Distinct read texts and their own arguments, executed in one pinned
+    /// session with one cumulative allowance and one batch completion.
+    statements_file: Option<PathBuf>,
     /// Admit every parameter set against one pinned read session and share its
     /// execution allowance. The batch has one successful terminal record.
     consistent_batch: bool,
@@ -81,6 +84,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut tls_server_name = None;
     let mut tls_ca_file = None;
     let mut rows_file = None;
+    let mut statements_file = None;
     let mut consistent_batch = false;
     let mut csv_types = None;
     let mut prepared_jsonl = None;
@@ -115,6 +119,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
                 expected_seq = Some(diff::parse_cut(&value()?, flag)?);
             }
             "--rows-file" if rows_file.is_none() => rows_file = Some(PathBuf::from(value()?)),
+            "--statements-file" if statements_file.is_none() => {
+                statements_file = Some(PathBuf::from(value()?));
+            }
             "--consistent-batch" if !consistent_batch => consistent_batch = true,
             "--prepared-jsonl" if prepared_jsonl.is_none() => {
                 prepared_jsonl = Some(PathBuf::from(value()?));
@@ -181,16 +188,24 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         }
         at += 1;
     }
-    let [verb, statement] = <[String; 2]>::try_from(positional)
-        .map_err(|_| Failure::usage("remote needs query|write|subscribe|diff and one statement"))?;
-    let mode = match verb.as_str() {
+    let (verb, statement) = match positional.as_slice() {
+        [verb] if verb == "query-batch" => (verb.as_str(), String::new()),
+        [verb, statement] if verb != "query-batch" => (verb.as_str(), statement.clone()),
+        _ => {
+            return Err(Failure::usage(
+                "remote needs query|write|subscribe|diff and one statement, or query-batch --statements-file",
+            ));
+        }
+    };
+    let mode = match verb {
         "query" => read_mode.unwrap_or(ExecuteMode::Read),
+        "query-batch" => ExecuteMode::Read,
         "write" => ExecuteMode::Write,
         "subscribe" => ExecuteMode::Subscribe,
         "diff" => ExecuteMode::Read,
         _ => {
             return Err(Failure::usage(
-                "remote needs query, write, subscribe or diff",
+                "remote needs query, query-batch, write, subscribe or diff",
             ));
         }
     };
@@ -219,12 +234,27 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         return Err(Failure::usage("--max-batches applies only to subscribe"));
     }
     if rows_file.is_some()
-        && (!matches!(verb.as_str(), "query" | "write")
+        && (!matches!(verb, "query" | "write") || !parameters.is_empty() || !param_files.is_empty())
+    {
+        return Err(Failure::usage(
+            "--rows-file applies only to query or write and cannot be combined with --param or --param-file",
+        ));
+    }
+    if (verb == "query-batch") != statements_file.is_some() {
+        return Err(Failure::usage(
+            "--statements-file is required by and applies only to remote query-batch",
+        ));
+    }
+    if statements_file.is_some()
+        && (rows_file.is_some()
+            || csv_types.is_some()
+            || prepared_jsonl.is_some()
+            || consistent_batch
             || !parameters.is_empty()
             || !param_files.is_empty())
     {
         return Err(Failure::usage(
-            "--rows-file applies only to query or write and cannot be combined with --param or --param-file",
+            "--statements-file supplies every read and its parameters; it cannot combine with argument-file, parameter or --consistent-batch options",
         ));
     }
     if csv_types.is_some() && rows_file.is_none() {
@@ -296,6 +326,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         max_batches,
         tls,
         rows_file,
+        statements_file,
         consistent_batch,
         csv_types,
         prepared_jsonl,
@@ -587,6 +618,21 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
                 .await
                 .map_err(failure)?;
             writes.execute(&cx, &mut client, robot, out).await?;
+            let _ = client.close(&cx).await;
+            Ok(())
+        });
+    }
+    if let Some(path) = &options.statements_file {
+        return runtime.block_on(async {
+            // Decode and admit the whole request before reading credentials.
+            // A malformed later statement never submits an earlier prefix.
+            let batch = batch::ReadStatements::read(&cx, path).await?;
+            let mut client = connect(&cx, &options).await?;
+            client
+                .select(&cx, &options.database)
+                .await
+                .map_err(failure)?;
+            batch.execute(&cx, &mut client, robot, out).await?;
             let _ = client.close(&cx).await;
             Ok(())
         });
@@ -1105,6 +1151,63 @@ pub(crate) fn packed_vector_controlled<C>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_read_files_require_their_own_command_and_no_competing_input() {
+        let base = [
+            "--addr",
+            "127.0.0.1:7688",
+            "--token-file",
+            "token.hex",
+            "--database",
+            "social",
+        ];
+        let parse_batch = |extra: &[&str]| {
+            let mut args = base.to_vec();
+            args.extend(["query-batch", "--statements-file", "reads.json"]);
+            args.extend_from_slice(extra);
+            parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>())
+        };
+        let options = parse_batch(&[]).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(options.statements_file, Some(PathBuf::from("reads.json")));
+        assert_eq!(options.mode, ExecuteMode::Read);
+        assert!(options.statement.is_empty());
+        assert!(
+            parse_batch(&["--tls-server-name", "db.example", "--tls-ca-file", "ca.pem"]).is_ok()
+        );
+        for flags in [
+            vec!["RETURN 1"],
+            vec!["--statements-file", "again.json"],
+            vec!["--rows-file", "rows.json"],
+            vec!["--csv-types", "id=int64"],
+            vec!["--prepared-jsonl", "writes.jsonl"],
+            vec!["--consistent-batch"],
+            vec!["--param", "id=int:1"],
+            vec!["--param-file", "ids=ids.json"],
+            vec!["--read-mode", "buffered"],
+            vec!["--read-mode", "source"],
+            vec!["--if-current", "1"],
+            vec!["--max-batches", "1"],
+            vec!["--before", "1"],
+            vec!["--stream"],
+            vec!["--write-mode", "stats"],
+        ] {
+            assert_eq!(
+                parse_batch(&flags)
+                    .err()
+                    .expect("competing input refused")
+                    .code,
+                2,
+                "{flags:?}"
+            );
+        }
+        let mut args = base.to_vec();
+        args.push("query-batch");
+        assert!(parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
+        for verb in ["query", "write", "subscribe"] {
+            assert!(self::options(verb, &["--statements-file", "reads.json"]).is_err());
+        }
+    }
 
     #[test]
     fn subscription_reset_is_a_terminal_with_an_optional_complete_checkpoint() {

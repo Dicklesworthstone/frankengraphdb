@@ -12,6 +12,34 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Heterogeneous consistent read batches from the CLI — qualification pending
+
+Source added 2026-11-12 for `fgdb-5jyok.1` exposes the existing
+`EXECUTE_READ_STATEMENTS` operation as `fgdb remote query-batch
+--statements-file reads.json`. A finite JSON array supplies 1–32 independent
+read texts and typed parameter maps. Ordinary reads share one pinned native
+session and one cumulative signed allowance; historical selectors keep their
+own cuts. Each result retains its own schema, one-based statement index and
+exact sequence. The existing `read_batch` robot terminal confirms the entire
+delivery, with no new result framing.
+
+Complete regular-file, controlled JSON, typed-value and encoded-frame admission
+precedes credential access and connection. Output failure uses the existing
+cancel-and-drain owner. Refused or unsupported operations never fall back to
+independent reads. Existing parameterized consistent batches share the same
+delivery implementation and retain their human and robot output.
+
+Eight regression sources cover flags, independent parameter domains, malformed
+late input, raw and encoded size bounds, cancellation during JSON parsing,
+different schemas and historical cuts, refusals, and failed output delivery.
+Changed-file pinned formatting and whitespace checks pass; independent source
+review found and corrected a JSON-parser cancellation gap. Production-only
+static UBS checking reports zero critical findings (65 warnings
+and 111 informational findings in the selected files). Compilation and
+runtime qualification remain pending after the pinned asupersync compiler
+was SIGKILLed before first-party compilation in ordinary and serial/no-debug
+checks. This source change does not claim a passing workspace gate.
+
 ### Heterogeneous consistent read batches over FGP — transport qualification pending
 
 Source added 2026-11-13 exposes the existing native mixed-statement read batch
