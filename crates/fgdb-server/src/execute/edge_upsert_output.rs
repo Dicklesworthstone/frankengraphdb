@@ -36,6 +36,7 @@ fn body_refusal(error: BodyError) -> Refusal {
 fn schema(
     columns: &[String],
     charge: &mut dyn FnMut(u64) -> Result<(), Refusal>,
+    frame_budget: Option<usize>,
 ) -> Result<(), Refusal> {
     charge(1)?;
     if columns.len() > MAX_COLUMNS {
@@ -51,38 +52,68 @@ fn schema(
     }
     // Even an empty result carries its schema. Use the same structural codec
     // as actual delivery so invalid names cannot fail only after a write lands.
-    ResultChunk {
+    let bytes = ResultChunk {
         columns: Some(columns.to_vec()),
         rows: Vec::new(),
     }
     .encode()
-    .map_err(body_refusal)?;
+    .map_err(body_refusal)?
+    .len();
+    // The frame budget excludes the column-presence byte and row count.
+    // A schema may occupy its own frame without the first result row.
+    if frame_budget.is_some_and(|limit| bytes - (1 + 4) > limit) {
+        return Err(Refusal::new(
+            ErrorCode::Budget,
+            "the write RETURN column list exceeds the negotiated frame limit",
+        ));
+    }
     Ok(())
 }
 
 fn encoded_row(
     cells: &[WireValue],
     charge: &mut dyn FnMut(u64) -> Result<(), Refusal>,
+    frame_budget: Option<usize>,
 ) -> Result<(), Refusal> {
-    let bytes = ResultChunk::row_len(cells).map_err(body_refusal)?;
+    let (bytes, _) = ResultChunk::row_cost(cells).map_err(body_refusal)?;
     let units = u64::try_from(bytes.div_ceil(64)).map_err(|_| body_refusal(BodyError::TooLarge))?;
-    charge(units)
+    charge(units)?;
+    if frame_budget.is_some_and(|limit| bytes > limit) {
+        return Err(Refusal::new(
+            ErrorCode::Budget,
+            "a write RETURN row exceeds the negotiated frame limit",
+        ));
+    }
+    Ok(())
 }
 
 /// The native caller retains its rollback workspace and live permit. Only
 /// completed wire cells escape this helper; a later row failure exposes none.
 /// Admit every borrowed value node and payload before converting the row.
 /// Copy work and the codec's encoded-byte work share the live signed permit.
-/// The codec may retain a temporary row-sized encoding; this is not a new
-/// byte-memory bound. Negotiated frame sizes, flow credit, delivery/revocation
-/// and I/O failures remain transport responsibilities after native completion.
+/// This unframed collector also serves HTTP and Bolt's own representation
+/// admission. FGP supplies its negotiated frame budget through the same
+/// collector before native completion.
 pub(crate) fn collect(
     columns: &[String],
     input: &[GraphValueRow],
     work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
 ) -> Result<Vec<Vec<WireValue>>, Refusal> {
+    collect_with_frame_budget(columns, input, work, None)
+}
+
+/// Admit schema and rows independently: the transport may send a schema-only
+/// first frame. The existing native permit pays the same codec work once.
+/// This is representability admission, not flow-credit reservation; revocation,
+/// cancellation and I/O remain live transport responsibilities.
+pub(super) fn collect_with_frame_budget(
+    columns: &[String],
+    input: &[GraphValueRow],
+    work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+    frame_budget: Option<usize>,
+) -> Result<Vec<Vec<WireValue>>, Refusal> {
     let mut charge = |units| work(units).map_err(|error| write_refusal(&error));
-    schema(columns, &mut charge)?;
+    schema(columns, &mut charge, frame_budget)?;
     let mut rows = Vec::new();
     for row in input {
         charge(1)?;
@@ -97,7 +128,7 @@ pub(crate) fn collect(
         // Validate and reserve the entire borrowed row before any wire copy.
         admission::row(row.values(), &mut charge)?;
         let cells: Vec<_> = row.values().iter().map(convert::graph).collect();
-        encoded_row(&cells, &mut charge)?;
+        encoded_row(&cells, &mut charge, frame_budget)?;
         rows.push(cells);
     }
     Ok(rows)
@@ -113,7 +144,7 @@ pub(crate) fn collect_aggregate(
     work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
 ) -> Result<Vec<Vec<WireValue>>, Refusal> {
     let mut charge = |units| work(units).map_err(|error| write_refusal(&error));
-    schema(columns, &mut charge)?;
+    schema(columns, &mut charge, None)?;
     if slots.len() != columns.len() {
         return Err(Refusal::new(
             ErrorCode::Execution,
@@ -131,7 +162,7 @@ pub(crate) fn collect_aggregate(
                 GraphAggregateTextSlot::Aggregate(at) => convert::cell(&row.values()[at]),
             })
             .collect();
-        encoded_row(&cells, &mut charge)?;
+        encoded_row(&cells, &mut charge, None)?;
         rows.push(cells);
     }
     Ok(rows)
@@ -354,6 +385,67 @@ mod tests {
         .expect_err("host work refusal cannot be ignored");
         assert_eq!(polls, 1);
         assert_eq!(error.code, ErrorCode::PermissionDenied);
+    }
+
+    #[test]
+    fn negotiated_frames_admit_schema_and_rows_separately_at_exact_boundaries() {
+        let columns = vec!["x".to_owned()];
+        let cells = vec![WireValue::Text("abc".to_owned())];
+        // The independent schema is 4 + 4 + 1 bytes; the row is
+        // 4 + 1 + 4 + 3 bytes. Together they cannot fit the 12-byte budget.
+        let mut unframed_work = 0;
+        schema(
+            &columns,
+            &mut |units| {
+                unframed_work += units;
+                Ok(())
+            },
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        encoded_row(
+            &cells,
+            &mut |units| {
+                unframed_work += units;
+                Ok(())
+            },
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        let mut framed_work = 0;
+        schema(
+            &columns,
+            &mut |units| {
+                framed_work += units;
+                Ok(())
+            },
+            Some(12),
+        )
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        encoded_row(
+            &cells,
+            &mut |units| {
+                framed_work += units;
+                Ok(())
+            },
+            Some(12),
+        )
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(framed_work, unframed_work);
+
+        schema(&columns, &mut |_| Ok(()), Some(9))
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let error = schema(&columns, &mut |_| Ok(()), Some(8))
+            .expect_err("a schema must fit even without rows");
+        assert_eq!(error.code, ErrorCode::Budget);
+        let error = encoded_row(&cells, &mut |_| Ok(()), Some(11))
+            .expect_err("an oversized row must refuse before completion");
+        assert_eq!(error.code, ErrorCode::Budget);
+        assert!(!error.message.contains("abc"));
+
+        schema(&[], &mut |_| Ok(()), Some(4))
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(schema(&[], &mut |_| Ok(()), Some(3)).is_err());
     }
 
     #[test]

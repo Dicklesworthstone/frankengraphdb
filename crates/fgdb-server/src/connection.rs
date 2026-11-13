@@ -8,9 +8,11 @@
 
 use crate::commits::CommitWatcher;
 use crate::execute::{
-    Answer, PreparedDefinition, Refusal, poll, prepare_statement, read, run_prepared,
-    run_prepared_batch, subscribe, write, write_batch, write_if_current,
+    Answer, PreparedDefinition, Refusal, poll, prepare_statement, read, run_prepared_batch,
+    run_prepared_framed, subscribe, write_batch, write_framed, write_if_current_framed,
 };
+#[cfg(test)]
+use crate::execute::run_prepared;
 use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
 use crate::{Served, Server};
@@ -21,9 +23,10 @@ use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
     Execute, ExecuteBatch, ExecuteConditionalWrite, ExecuteDiff, ExecuteMode, ExecutePrepared,
-    ExecutePreparedBatch, ExecutePreparedDiff, ExecuteReadStatements, Hello, HelloAck, Outcome,
-    Ping, Prepare, Prepared, PreparedExecutionMode, PreparedHandle, Ready, ReleasePrepared,
-    ResultChunk, ResultEnd, SelectDatabase, WindowUpdate, WireValue,
+    ExecutePreparedBatch, ExecutePreparedDiff, ExecuteReadStatements, Hello, HelloAck,
+    MAX_ROWS_PER_CHUNK, MAX_VALUE_NODES, Outcome, Ping, Prepare, Prepared, PreparedExecutionMode,
+    PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
+    WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -1353,10 +1356,17 @@ impl Lane {
             self.send_generation = None;
             return delivered;
         }
+        // Deterministic output representability belongs to the private write
+        // workspace, before its sole completion. Schema and rows may occupy
+        // separate frames; current flow credit does not constrain admission.
+        let frame_budget =
+            self.send_limits.max_frame_len() - binding.header_len() - CHUNK_OVERHEAD;
         let answer = match statement {
             Statement::Native(statement) => match statement.mode {
                 ExecuteMode::Read => read(cx, db, token, &statement).await,
-                ExecuteMode::Write => write(cx, db, token, &statement).await,
+                ExecuteMode::Write => {
+                    write_framed(cx, db, token, &statement, frame_budget).await
+                }
                 ExecuteMode::Subscribe | ExecuteMode::ReadStream | ExecuteMode::ReadOrdered => {
                     unreachable!("stream dispatched above")
                 }
@@ -1366,14 +1376,25 @@ impl Lane {
                 unreachable!("read batch dispatched above")
             }
             Statement::ConditionalWrite(statement) => {
-                write_if_current(cx, db, token, &statement).await
+                write_if_current_framed(cx, db, token, &statement, frame_budget).await
             }
             Statement::Prepared {
                 definition,
                 parameters,
                 mode,
             } => match definition {
-                Ok(definition) => run_prepared(cx, db, token, &definition, mode, &parameters).await,
+                Ok(definition) => {
+                    run_prepared_framed(
+                        cx,
+                        db,
+                        token,
+                        &definition,
+                        mode,
+                        &parameters,
+                        frame_budget,
+                    )
+                    .await
+                }
                 Err(refusal) => Err(refusal),
             },
             Statement::PreparedBatch {
@@ -1908,6 +1929,7 @@ impl Lane {
         binding: Binding,
         answer: Answer,
     ) -> Result<(), Stop> {
+        let committed = matches!(&answer.outcome, Outcome::WriteCommitted { .. });
         self.send_generation = Some(answer.generation);
         let mut window = FlowWindow::new(self.initial_window, self.maximum_window)
             .map_err(|_| Stop::Transport)?;
@@ -1922,54 +1944,61 @@ impl Lane {
                 .unwrap_or(usize::MAX)
                 .saturating_sub(framing)
                 .min(frame_budget);
-            let row_room = usize::try_from(available.rows).unwrap_or(usize::MAX);
+            let row_room = usize::try_from(available.rows)
+                .unwrap_or(usize::MAX)
+                .min(MAX_ROWS_PER_CHUNK);
             let mut size = columns.as_ref().map_or(0, |names| {
                 4 + names.iter().map(|name| 4 + name.len()).sum::<usize>()
             });
             if size > frame_budget {
                 return self
-                    .refuse(
+                    .refuse_result(
                         cx,
                         request,
                         stream,
                         binding,
-                        ErrorCode::Execution,
+                        committed,
                         "the column list exceeds the negotiated frame limit",
                     )
                     .await;
             }
             let mut chunk_rows = Vec::new();
+            let mut nodes = 0;
             if size <= byte_room {
                 while chunk_rows.len() < row_room {
                     let Some(row) = rows.peek() else { break };
-                    let Ok(len) = ResultChunk::row_len(row) else {
+                    let Ok((len, row_nodes)) = ResultChunk::row_cost(row) else {
                         return self
-                            .refuse(
+                            .refuse_result(
                                 cx,
                                 request,
                                 stream,
                                 binding,
-                                ErrorCode::Execution,
+                                committed,
                                 "a result value exceeds the wire bounds",
                             )
                             .await;
                     };
-                    if size + len > frame_budget && chunk_rows.is_empty() && columns.is_none() {
+                    if len > frame_budget.saturating_sub(size)
+                        && chunk_rows.is_empty()
+                        && columns.is_none()
+                    {
                         return self
-                            .refuse(
+                            .refuse_result(
                                 cx,
                                 request,
                                 stream,
                                 binding,
-                                ErrorCode::Execution,
+                                committed,
                                 "a result row exceeds the negotiated frame limit",
                             )
                             .await;
                     }
-                    if size + len > byte_room {
+                    if len > byte_room - size || row_nodes > MAX_VALUE_NODES - nodes {
                         break;
                     }
                     size += len;
+                    nodes += row_nodes;
                     chunk_rows.extend(rows.next());
                 }
             }
@@ -1986,12 +2015,12 @@ impl Lane {
             };
             let Ok(payload) = chunk.encode() else {
                 return self
-                    .refuse(
+                    .refuse_result(
                         cx,
                         request,
                         stream,
                         binding,
-                        ErrorCode::Execution,
+                        committed,
                         "a result value exceeds the wire bounds",
                     )
                     .await;
@@ -2024,6 +2053,30 @@ impl Lane {
         )
         .map_err(|_| Stop::Transport)?;
         self.credited(cx, waiter, &mut window, stream, &frame, 0)
+            .await
+    }
+
+    /// Native writes preflight deterministic framing before completion. If a
+    /// later invariant or codec refusal still prevents delivery, a committed
+    /// effect must never look like a statement failure safe to retry.
+    async fn refuse_result(
+        &mut self,
+        cx: &Cx,
+        request: u64,
+        stream: StreamId,
+        binding: Binding,
+        committed: bool,
+        message: &str,
+    ) -> Result<(), Stop> {
+        let (code, message) = if committed {
+            (
+                ErrorCode::OutcomeUnknown,
+                "write completed, but its result could not be fully delivered; do not replay the write",
+            )
+        } else {
+            (ErrorCode::Execution, message)
+        };
+        self.refuse(cx, request, stream, binding, code, message)
             .await
     }
 

@@ -417,10 +417,41 @@ pub(crate) fn run_prepared<'a>(
         )
         | (PreparedDefinition::WriteReturning(prepared), PreparedExecutionMode::WriteReturning) => {
             Box::pin(write_returning_prepared(
-                cx, db, token, prepared, parameters,
+                cx, db, token, prepared, parameters, None,
             ))
         }
         _ => Box::pin(async { Err(mode_refusal()) }),
+    }
+}
+
+/// Apply the connection's negotiated output limit to the same immutable
+/// template and fresh authorized write owner. Read and stats-only script
+/// classes retain their original executor; no handle can change its class.
+pub(crate) fn run_prepared_framed<'a>(
+    cx: &'a Cx,
+    db: &'a Served,
+    token: &'a CapabilityToken,
+    definition: &'a PreparedDefinition,
+    mode: PreparedExecutionMode,
+    parameters: &'a [(String, WireValue)],
+    frame_budget: usize,
+) -> Execution<'a> {
+    match (definition, mode) {
+        (
+            PreparedDefinition::Write(PreparedWrite::Chain(prepared)),
+            PreparedExecutionMode::Write,
+        )
+        | (PreparedDefinition::WriteReturning(prepared), PreparedExecutionMode::WriteReturning) => {
+            Box::pin(write_returning_prepared(
+                cx,
+                db,
+                token,
+                prepared,
+                parameters,
+                Some(frame_budget),
+            ))
+        }
+        _ => run_prepared(cx, db, token, definition, mode, parameters),
     }
 }
 
@@ -632,6 +663,7 @@ async fn write_returning_prepared(
     token: &CapabilityToken,
     prepared: &PreparedReturning,
     parameters: &[(String, WireValue)],
+    frame_budget: Option<usize>,
 ) -> Result<Answer, Refusal> {
     let _operation = prepared.generation.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
@@ -670,12 +702,13 @@ async fn write_returning_prepared(
     // final wire admission and publication share its cumulative allowance.
     // The original generation is checked again after waiting for the writer.
     // No conversion, new authority check or retry follows native completion.
-    write_returning_checked(
+    write_returning_admitted(
         cx,
         db,
         &execution_token,
         bound,
         Some((&prepared.generation, fgdb_types::CommitSeq(0))),
+        frame_budget,
         |_, rows, _, _| Ok(rows),
     )
     .await

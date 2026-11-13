@@ -12,6 +12,40 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### FGP value and write-result admission — qualification pending
+
+The protocol codec now shares one value-node allowance across each complete
+request or result body. Encoder admission matches the decoder for nested
+lists/maps, packed identity vectors and paths, including parameters spread
+across batch records. Collection decoding refuses a declared count that cannot
+fit the remaining node allowance before reserving member storage. Row-cost
+measurement exposes both encoded bytes and value nodes to chunk assembly;
+zero-weight subscription entries refuse symmetrically.
+
+Raw, prepared and exact-frontier conditional FGP writes admit their complete
+RETURN schema and every delivered row against the negotiated frame limit
+inside the existing checked native write owner, while rollback is still
+available. The same signed permit pays the existing conversion/codec work.
+Schemas and rows are admitted separately, allowing a schema-only first frame.
+Ordinary result chunks respect both the row-count and cumulative value-node
+ceilings. A defensive framing refusal reached after a committed write reports
+OutcomeUnknown, with no automatic retry. Cancellation and transport failure
+continue to govern delivery and do not establish rollback.
+
+Five protocol regression sources cover exact and one-over node boundaries
+across nine request bodies and four output bodies, literal row costs, early
+collection refusal and nonzero subscription weights. A collector regression
+covers independent schema/row thresholds and unchanged work. Three TCP
+regression sources cover raw/prepared/conditional rollback, freshly rebound
+parameters, stale-frontier precedence, a late oversized row with zero result
+prefix, exact-size schema-separated delivery, LIMIT 0 and durable reopen.
+
+Source review and independent boundary arithmetic are complete. Compilation,
+Rustfmt, Clippy, UBS, runtime tests and full exact-tree qualification remain
+UNRUN because the execution environment disconnected after its workspace disk
+filled. This bounded work belongs to `fgdb-w10-fgp-core-5b1` and
+`fgdb-w10-result-machines-eh7`; neither broader bead is closed.
+
 ### Heterogeneous consistent read batches from the CLI — qualification pending
 
 Source added 2026-11-12 for `fgdb-5jyok.1` exposes the existing

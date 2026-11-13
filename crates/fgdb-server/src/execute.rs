@@ -13,14 +13,14 @@ pub(crate) mod ordered;
 mod prepared;
 mod read_batch;
 mod subscription;
-pub(crate) use conditional::{authorize_write, write_if_current};
+pub(crate) use conditional::{authorize_write, write_if_current, write_if_current_framed};
 pub(crate) use difference::{DifferenceAnswer, read_difference, read_prepared_difference};
 pub(crate) use prepared::{
-    PreparedDefinition, PreparedRead, prepare_statement, read_prepared_session, run_prepared,
-    run_prepared_batch,
+    PreparedDefinition, PreparedRead, prepare_statement, read_prepared_session,
+    run_prepared_batch, run_prepared_framed,
 };
 #[cfg(test)]
-pub(crate) use prepared::{prepare_read, read_prepared};
+pub(crate) use prepared::{prepare_read, read_prepared, run_prepared};
 pub(crate) use read_batch::{ReadBatchAnswer, read_batch, read_statement_batch};
 pub(crate) use subscription::{poll, subscribe};
 
@@ -121,7 +121,26 @@ pub(crate) fn write<'a>(
     token: &'a CapabilityToken,
     statement: &'a Execute,
 ) -> Execution<'a> {
-    Box::pin(write_inner(cx, db, token, statement, None))
+    Box::pin(write_inner(cx, db, token, statement, None, None))
+}
+
+/// Admit every RETURN schema and row against the negotiated FGP frame budget
+/// while the native write still owns its private rollback workspace.
+pub(crate) fn write_framed<'a>(
+    cx: &'a Cx,
+    db: &'a Served,
+    token: &'a CapabilityToken,
+    statement: &'a Execute,
+    frame_budget: usize,
+) -> Execution<'a> {
+    Box::pin(write_inner(
+        cx,
+        db,
+        token,
+        statement,
+        None,
+        Some(frame_budget),
+    ))
 }
 
 /// Consume one deferred no-RETURN request in its original recovery generation.
@@ -141,6 +160,7 @@ pub(crate) fn write_no_return_at<'a>(
         token,
         statement,
         Some((generation, minimum_seq)),
+        None,
     ))
 }
 
@@ -475,6 +495,7 @@ async fn write_inner(
     token: &CapabilityToken,
     statement: &Execute,
     deferred: Option<(&Generation, fgdb_types::CommitSeq)>,
+    frame_budget: Option<usize>,
 ) -> Result<Answer, Refusal> {
     let mut permit = write_permit(db, token)?;
     let _operation = match deferred {
@@ -525,7 +546,7 @@ async fn write_inner(
     if let Some(returning) = returning? {
         let execution_token = write_execution_token(&permit, token)?;
         if deferred.is_none() {
-            return write_returning(cx, db, &execution_token, returning).await;
+            return write_returning(cx, db, &execution_token, returning, frame_budget).await;
         }
         // Bolt retains a no-RETURN definition at RUN and executes it only at
         // PULL/DISCARD. Chains use the same checked owner as projected writes,
@@ -984,8 +1005,18 @@ async fn write_returning(
     db: &Served,
     token: &CapabilityToken,
     prepared: Returning,
+    frame_budget: Option<usize>,
 ) -> Result<Answer, Refusal> {
-    write_returning_checked(cx, db, token, prepared, None, |_, rows, _, _| Ok(rows)).await
+    write_returning_admitted(
+        cx,
+        db,
+        token,
+        prepared,
+        None,
+        frame_budget,
+        |_, rows, _, _| Ok(rows),
+    )
+    .await
 }
 
 /// A surface owns its final representation BEFORE the native commit, not a
@@ -1012,6 +1043,27 @@ pub(crate) async fn write_returning_checked<R: Send>(
     ) -> Result<R, Refusal>
     + Send,
 ) -> Result<Answer<R>, Refusal> {
+    write_returning_admitted(cx, db, token, prepared, deferred, None, collect).await
+}
+
+/// The shared checked owner for surface-specific collection and FGP frame
+/// admission. A framed caller only narrows output representability; it cannot
+/// change the statement's authority, generation, effects or completion owner.
+async fn write_returning_admitted<R: Send>(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    prepared: Returning,
+    deferred: Option<(&Generation, fgdb_types::CommitSeq)>,
+    frame_budget: Option<usize>,
+    collect: impl FnMut(
+        &[String],
+        Vec<Vec<WireValue>>,
+        &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+        &mut dyn fgdb::AuthorizedWriteOutput,
+    ) -> Result<R, Refusal>
+    + Send,
+) -> Result<Answer<R>, Refusal> {
     let _operation = match deferred {
         Some((generation, _)) => generation.enter(),
         None => db.db.enter(),
@@ -1030,7 +1082,7 @@ pub(crate) async fn write_returning_checked<R: Send>(
             ));
         }
     }
-    write_returning_in_guard(cx, db, token, prepared, guard, collect).await
+    write_returning_in_guard(cx, db, token, prepared, guard, frame_budget, collect).await
 }
 
 /// Preserve native RETURN admission and completion under an already-owned
@@ -1042,6 +1094,7 @@ async fn write_returning_in_guard<R: Send>(
     token: &CapabilityToken,
     prepared: Returning,
     mut guard: crate::recovery::WriteGuard<'_>,
+    frame_budget: Option<usize>,
     mut collect: impl FnMut(
         &[String],
         Vec<Vec<WireValue>>,
@@ -1069,7 +1122,12 @@ async fn write_returning_in_guard<R: Send>(
     let mut output = |rows: &[fgdb_gql::algebra::GraphValueRow],
                       work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
                       metadata: &mut dyn fgdb::AuthorizedWriteOutput| {
-        let rows = edge_upsert_output::collect(&columns, rows, work)?;
+        let rows = edge_upsert_output::collect_with_frame_budget(
+            &columns,
+            rows,
+            work,
+            frame_budget,
+        )?;
         collect(&columns, rows, work, metadata)
     };
     let result = match &prepared {

@@ -24,7 +24,25 @@ pub(crate) fn write_if_current<'a>(
     token: &'a CapabilityToken,
     statement: &'a ExecuteConditionalWrite,
 ) -> Execution<'a> {
-    Box::pin(write_if_current_inner(cx, db, token, statement))
+    Box::pin(write_if_current_inner(cx, db, token, statement, None))
+}
+
+/// The same exact-frontier owner with negotiated FGP output admission before
+/// completion. The frontier comparison still precedes binding and execution.
+pub(crate) fn write_if_current_framed<'a>(
+    cx: &'a Cx,
+    db: &'a Served,
+    token: &'a CapabilityToken,
+    statement: &'a ExecuteConditionalWrite,
+    frame_budget: usize,
+) -> Execution<'a> {
+    Box::pin(write_if_current_inner(
+        cx,
+        db,
+        token,
+        statement,
+        Some(frame_budget),
+    ))
 }
 
 async fn write_if_current_inner(
@@ -32,6 +50,7 @@ async fn write_if_current_inner(
     db: &Served,
     token: &CapabilityToken,
     statement: &ExecuteConditionalWrite,
+    frame_budget: Option<usize>,
 ) -> Result<Answer, Refusal> {
     authorize_write(db, token)?;
     let _operation = db.db.enter().map_err(Refusal::from)?;
@@ -93,6 +112,7 @@ async fn write_if_current_inner(
                 &execution_token,
                 prepared,
                 guard,
+                frame_budget,
                 |_, rows, _, _| Ok(rows),
             )
             .await
