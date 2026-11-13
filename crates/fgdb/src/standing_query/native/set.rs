@@ -53,8 +53,9 @@ fn component_source(
     relations: SchemaSelection<RelationId>,
     labels: SchemaSelection<LabelId>,
     strong: bool,
+    scoped: bool,
 ) -> Result<AnalyticSource, StandingQueryError> {
-    if labels.is_all() && (relations.is_all() || relations.single().is_some()) {
+    if !scoped && labels.is_all() && (relations.is_all() || relations.single().is_some()) {
         return Ok(AnalyticSource::Components(
             match (strong, relations.single()) {
                 (false, Some(relation)) => components::ComponentRelation::Weak(relation),
@@ -225,8 +226,9 @@ fn selected_topology(
 fn core_source(
     relations: SchemaSelection<RelationId>,
     labels: SchemaSelection<LabelId>,
+    scoped: bool,
 ) -> Result<AnalyticSource, StandingQueryError> {
-    if labels.is_all() && (relations.is_all() || relations.single().is_some()) {
+    if !scoped && labels.is_all() && (relations.is_all() || relations.single().is_some()) {
         return Ok(AnalyticSource::CoreNumbers(relations.single()));
     }
     Ok(AnalyticSource::SelectedCoreNumbers {
@@ -238,8 +240,9 @@ fn triangle_source(
     relations: SchemaSelection<RelationId>,
     labels: SchemaSelection<LabelId>,
     output: triangle_counts::Output,
+    scoped: bool,
 ) -> Result<AnalyticSource, StandingQueryError> {
-    if labels.is_all() && (relations.is_all() || relations.single().is_some()) {
+    if !scoped && labels.is_all() && (relations.is_all() || relations.single().is_some()) {
         return Ok(AnalyticSource::TriangleCounts(relations.single(), output));
     }
     Ok(AnalyticSource::SelectedTriangleCounts {
@@ -251,8 +254,12 @@ fn triangle_source(
 /// The compiler and subscription footprint share one source-free admission.
 /// Only the complete, explicit topology contract has an existing derivative;
 /// future duplicates or self-loops cannot silently defeat a Reject policy.
+/// A scoped registration always compiles topology through ordinary row
+/// sources, which read the capability projection before any analytic kernel
+/// sees vertex lifetimes or incidence. Direct graph sources are privileged.
 pub(super) fn analytic_procedure(
     query: &PreparedGraphSet,
+    scoped: bool,
 ) -> Result<Option<(AnalyticSource, RowProjectionSpec)>, StandingQueryError> {
     let Some(call) = query.incremental_procedure() else {
         return Ok(None);
@@ -291,12 +298,12 @@ pub(super) fn analytic_procedure(
     // neither changes reachability between distinct vertices.
     let (source, value_type, value_field) = match bound.algorithm() {
         FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => (
-            component_source(relations, labels, false)?,
+            component_source(relations, labels, false, scoped)?,
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
         FnxAlgorithm::StronglyConnectedComponents => (
-            component_source(relations, labels, true)?,
+            component_source(relations, labels, true, scoped)?,
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
@@ -304,18 +311,28 @@ pub(super) fn analytic_procedure(
             if options.projection.self_loops == SelfLoopPolicy::Drop =>
         {
             (
-                core_source(relations, labels)?,
+                core_source(relations, labels, scoped)?,
                 GraphSetColumnType::Scalar,
                 FnxOutput::Core,
             )
         }
         FnxAlgorithm::Triangles if options.projection.self_loops == SelfLoopPolicy::Drop => (
-            triangle_source(relations, labels, triangle_counts::Output::Triangles)?,
+            triangle_source(
+                relations,
+                labels,
+                triangle_counts::Output::Triangles,
+                scoped,
+            )?,
             GraphSetColumnType::Scalar,
             FnxOutput::Triangles,
         ),
         FnxAlgorithm::ClusteringCoefficient => (
-            triangle_source(relations, labels, triangle_counts::Output::Clustering)?,
+            triangle_source(
+                relations,
+                labels,
+                triangle_counts::Output::Clustering,
+                scoped,
+            )?,
             GraphSetColumnType::Scalar,
             FnxOutput::Score,
         ),
@@ -633,7 +650,9 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 self.group_input,
             )?;
             self.append(query)
-        } else if let Some((source, spec)) = analytic_procedure(query)? {
+        } else if let Some((source, spec)) =
+            analytic_procedure(query, self.database.active_registration_scope.is_some())?
+        {
             let state = match source {
                 AnalyticSource::Components(relation) => StandingQuery::Components(Box::new(
                     self.database

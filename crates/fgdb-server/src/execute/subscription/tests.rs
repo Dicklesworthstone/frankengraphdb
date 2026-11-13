@@ -141,6 +141,293 @@ fn subscription_map_fields_bind_the_same_key_for_baseline_and_later_deltas() {
 }
 
 #[test]
+fn scoped_analytic_subscriptions_match_visible_graphs_across_hidden_and_visible_commits() {
+    use fgdb::WriteBatch;
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_gql::GraphSymbolKind;
+    use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+    use fgdb_warden::Scope;
+    use std::collections::BTreeMap;
+
+    let ((), report) = run_async_under_lab(0x79a0_20cb, |root| async move {
+        let (mut clean, clean_token, _) = served(&root, "analytic-visible").await;
+        let (mut noisy, noisy_token, _) = served(&root, "analytic-hidden").await;
+        for server in [&mut clean, &mut noisy] {
+            let db = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+            for (kind, name, id) in [
+                (GraphSymbolKind::Label, "Visible", 1),
+                (GraphSymbolKind::Label, "Secret", 2),
+                (GraphSymbolKind::Relation, "R", 1),
+                (GraphSymbolKind::Relation, "Hidden", 2),
+                (GraphSymbolKind::Property, "secret", 2),
+            ] {
+                db.symbols.bind(kind, name, id).unwrap();
+            }
+        }
+        let clean = &clean.databases["test"];
+        let noisy = &noisy.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+
+        // Physical history differs before registration. The extra endpoint
+        // and its allowed-relation incidences must disappear before analytics.
+        let mut hidden = WriteBatch::new(RelationId(1));
+        hidden.create_vertex(VId(20), vec![LabelId(2)], vec![]);
+        noisy
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&commit, hidden)
+            .await
+            .unwrap();
+        for db in [clean, noisy] {
+            let mut seed = WriteBatch::new(RelationId(1));
+            for id in 1..=4 {
+                seed.create_vertex(VId(id), vec![LabelId(1)], vec![]);
+            }
+            for (eid, from, to) in [(1, 1, 2), (2, 2, 3), (3, 3, 1), (4, 1, 2), (5, 2, 1)] {
+                seed.add_edge(EId(eid), VId(from), VId(to), vec![]);
+            }
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit, seed)
+                .await
+                .unwrap();
+        }
+        let mut crossing = WriteBatch::new(RelationId(1));
+        crossing.add_edge(EId(50), VId(1), VId(20), vec![]);
+        crossing.add_edge(EId(51), VId(20), VId(4), vec![]);
+        crossing.set_vertex_label(VId(1), LabelId(2), true);
+        crossing.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(9)));
+        noisy
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&commit, crossing)
+            .await
+            .unwrap();
+        let mut hidden_relation = WriteBatch::new(RelationId(2));
+        hidden_relation.add_edge(EId(52), VId(1), VId(4), vec![]);
+        noisy
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&commit, hidden_relation)
+            .await
+            .unwrap();
+
+        let attenuate = |token: &CapabilityToken| {
+            token
+                .attenuate(Restriction::Labels(Scope::only([LabelId(1)])))
+                .unwrap()
+                .attenuate(Restriction::Relations(Scope::only([RelationId(1)])))
+                .unwrap()
+                .attenuate(Restriction::Properties(Scope::only([])))
+                .unwrap()
+                .attenuate(Restriction::MaxNodes(40_000))
+                .unwrap()
+                .attenuate(Restriction::MaxWork(200_000))
+                .unwrap()
+                .attenuate(Restriction::MaxRows(8))
+                .unwrap()
+        };
+        let clean_token = attenuate(&clean_token);
+        let noisy_token = attenuate(&noisy_token);
+        let mut subscriptions = Vec::new();
+        for (metric, field, directed) in [
+            ("connected_components", "component", false),
+            ("weakly_connected_components", "component", true),
+            ("strongly_connected_components", "component", true),
+            ("core_number", "core", false),
+            ("triangles", "triangles", false),
+            ("clustering_coefficient", "score", false),
+        ] {
+            let direction = if directed { "directed" } else { "undirected" };
+            let statement = request(&format!(
+                "SUBSCRIBE TO CALL fnx.{metric}({{parallel:'collapse',self_loops:'drop',direction:'{direction}'}}) \
+                 YIELD vertex AS member,{field} AS value RETURN member,value"
+            ));
+            let a = success(subscribe(&root, clean, &clean_token, &statement).await);
+            let b = success(subscribe(&root, noisy, &noisy_token, &statement).await);
+            assert_eq!(a.columns, ["member", "value"]);
+            assert_eq!(a.columns, b.columns);
+            assert_eq!(a.registration_nodes, b.registration_nodes);
+            assert_eq!(a.registration_work, b.registration_work);
+            subscriptions.push((metric, a, b, BTreeMap::<(u128, i64), i128>::new()));
+        }
+
+        // These expectations are the hand-derived answers for a triangle
+        // with a reciprocal/parallel side and an isolated fourth vertex.
+        // Then remove the closing arc, then attach the isolate to the path.
+        // Finally delete vertex 2 physically in the clean graph, but only
+        // hide it by removing its allowed label in the noisy graph. Both
+        // must retract its lifetime and every incident analytic edge.
+        for tick in 0..4 {
+            if tick != 0 {
+                for (index, db) in [clean, noisy].into_iter().enumerate() {
+                    let mut change = WriteBatch::new(RelationId(1));
+                    if tick == 1 {
+                        change.delete_edge(EId(3));
+                    } else if tick == 2 {
+                        change.add_edge(EId(6), VId(3), VId(4), vec![]);
+                    } else if index == 0 {
+                        change.delete_vertex(VId(2));
+                    } else {
+                        change.set_vertex_label(VId(2), LabelId(1), false);
+                    }
+                    db.db
+                        .write(&root)
+                        .await
+                        .unwrap()
+                        .write(&commit, change)
+                        .await
+                        .unwrap();
+                }
+            }
+            for (metric, a, b, previous) in &mut subscriptions {
+                let component = metric.ends_with("connected_components");
+                let values: [i64; 4] = if component {
+                    if tick == 3 && *metric != "strongly_connected_components" {
+                        [1, 0, 3, 3]
+                    } else if *metric == "strongly_connected_components" && tick != 0 {
+                        [1, 1, 3, 4]
+                    } else if tick == 2 {
+                        [1, 1, 1, 1]
+                    } else {
+                        [1, 1, 1, 4]
+                    }
+                } else if *metric == "core_number" {
+                    match tick {
+                        0 => [2, 2, 2, 0],
+                        1 => [1, 1, 1, 0],
+                        2 => [1, 1, 1, 1],
+                        _ => [0, 0, 1, 1],
+                    }
+                } else if tick == 0 {
+                    [1, 1, 1, 0]
+                } else {
+                    [0; 4]
+                };
+                let current: BTreeMap<_, _> = values
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, _)| tick != 3 || *index != 1)
+                    .map(|(index, value)| (((index + 1) as u128, value), 1))
+                    .collect();
+                let mut expected = current.clone();
+                for (row, weight) in previous.iter() {
+                    *expected.entry(*row).or_default() -= weight;
+                }
+                let expected: Vec<_> = expected
+                    .into_iter()
+                    .filter(|(_, weight)| *weight != 0)
+                    .map(|((vertex, value), weight)| {
+                        let value = if component {
+                            WireValue::Vertex(value as u128)
+                        } else if *metric == "clustering_coefficient" {
+                            WireValue::Float(value as f64)
+                        } else {
+                            WireValue::Int(value)
+                        };
+                        (weight, vec![WireValue::Vertex(vertex), value])
+                    })
+                    .collect();
+                let left = success(poll(&root, clean, &clean_token, a).await).unwrap();
+                let right = success(poll(&root, noisy, &noisy_token, b).await).unwrap();
+                assert_eq!(left.entries, expected, "{metric}, tick {tick}");
+                assert_eq!(right.entries, expected, "{metric}, hidden tick {tick}");
+                assert_eq!(left.batch.from(), right.batch.from());
+                assert_eq!(left.batch.frontier(), CommitSeq(tick + 1));
+                assert_eq!(left.batch.frontier(), right.batch.frontier());
+                let repeated = success(poll(&root, noisy, &noisy_token, b).await).unwrap();
+                assert!(Arc::ptr_eq(&right.batch, &repeated.batch));
+                a.consumer.acknowledge(left.batch.receipt()).unwrap();
+                b.consumer.acknowledge(right.batch.receipt()).unwrap();
+                *previous = current;
+            }
+
+            let mut hidden = WriteBatch::new(RelationId(2));
+            for index in 0..32_u128 {
+                let id = 1_000 + u128::from(tick) * 32 + index;
+                hidden.create_vertex(VId(id), vec![LabelId(2)], vec![]);
+                hidden.add_edge(EId(id), VId(1), VId(id), vec![]);
+            }
+            hidden.set_vertex_property(
+                VId(1),
+                PropertyKeyId(2),
+                Some(CanonicalScalar::Int(tick as i64)),
+            );
+            noisy
+                .db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&commit, hidden)
+                .await
+                .unwrap();
+            for (_, a, b, _) in &mut subscriptions {
+                assert!(success(poll(&root, clean, &clean_token, a).await).is_none());
+                assert!(success(poll(&root, noisy, &noisy_token, b).await).is_none());
+            }
+        }
+
+        let statement = request(
+            "SUBSCRIBE TO CALL fnx.connected_components({parallel:'collapse'}) YIELD vertex,component",
+        );
+        for (db, token) in [(clean, &clean_token), (noisy, &noisy_token)] {
+            for restriction in [
+                Restriction::MaxNodes(0),
+                Restriction::MaxWork(0),
+                Restriction::MaxRows(2),
+            ] {
+                let denied = token.attenuate(restriction).unwrap();
+                refused(
+                    subscribe(&root, db, &denied, &statement).await,
+                    ErrorCode::Budget,
+                );
+                assert_eq!(db.subscriptions.load(Ordering::Acquire), 6);
+            }
+            let unsupported = request(
+                "SUBSCRIBE TO CALL fnx.degree_centrality({parallel:'collapse'}) YIELD vertex,score LIMIT 0",
+            );
+            refused(
+                subscribe(&root, db, token, &unsupported).await,
+                ErrorCode::Statement,
+            );
+            assert_eq!(db.subscriptions.load(Ordering::Acquire), 6);
+        }
+        for (_, a, b, _) in &mut subscriptions {
+            let changed = noisy_token
+                .attenuate(Restriction::Relations(Scope::only([])))
+                .unwrap();
+            refused(
+                poll(&root, noisy, &changed, b).await,
+                ErrorCode::PermissionDenied,
+            );
+            let expired = noisy_token
+                .attenuate(Restriction::ExpiresBefore(1))
+                .unwrap();
+            refused(
+                poll(&root, noisy, &expired, b).await,
+                ErrorCode::PermissionDenied,
+            );
+            a.consumer.close();
+            b.consumer.close();
+        }
+        drop(clean.db.write(&root).await.unwrap());
+        drop(noisy.db.write(&root).await.unwrap());
+        assert_eq!(clean.subscriptions.load(Ordering::Acquire), 0);
+        assert_eq!(noisy.subscriptions.load(Ordering::Acquire), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn zero_signed_grants_refuse_before_installation_and_source_free_needs_no_nodes() {
     let ((), report) = run_async_under_lab(0x79a0_0301, |root| async move {
         let (mut server, token, _) = served(&root, "subscription-zero-grants").await;
@@ -691,7 +978,7 @@ fn component_calls_subscribe_over_native_replay_with_full_width_vertex_outputs()
 }
 
 #[test]
-fn component_subscription_scope_and_projection_refusals_precede_registration() {
+fn component_subscription_scopes_mask_topology_and_unsupported_profiles_refuse() {
     use fgdb_delta_types::{LabelId, RelationId};
     use fgdb_types::{EId, VId};
     use fgdb_warden::Scope;
@@ -737,11 +1024,20 @@ fn component_subscription_scope_and_projection_refusals_precede_registration() {
                     .await
                     .unwrap();
             }
-            for capability in &scoped {
-                refused(
-                    subscribe(&root, db, capability, &statement).await,
-                    ErrorCode::PermissionDenied,
-                );
+            for (index, capability) in scoped.iter().enumerate() {
+                let mut projected = success(subscribe(&root, db, capability, &statement).await);
+                let initial = success(poll(&root, db, capability, &mut projected).await).unwrap();
+                let expected = if hidden && index != 0 {
+                    vec![
+                        (1, vec![WireValue::Vertex(1), WireValue::Vertex(1)]),
+                        (1, vec![WireValue::Vertex(1), WireValue::Vertex(2)]),
+                    ]
+                } else {
+                    vec![]
+                };
+                assert_eq!(initial.entries, expected);
+                projected.consumer.close();
+                drop(db.db.write(&root).await.unwrap());
                 assert_eq!(db.subscriptions.load(Ordering::Acquire), 0);
             }
         }
@@ -940,7 +1236,7 @@ fn clustering_subscription_replays_degree_only_scores_empty_ticks_and_canonical_
 }
 
 #[test]
-fn clustering_subscription_refuses_hidden_topology_before_registration_or_delivery() {
+fn clustering_subscription_masks_hidden_topology_before_registration_or_delivery() {
     use fgdb_delta_types::{LabelId, RelationId};
     use fgdb_types::{EId, VId};
     use fgdb_warden::Scope;
@@ -990,11 +1286,19 @@ fn clustering_subscription_refuses_hidden_topology_before_registration_or_delive
                     .await
                     .unwrap();
             }
-            for token in &scoped {
-                refused(
-                    subscribe(&root, db, token, &statement).await,
-                    ErrorCode::PermissionDenied,
-                );
+            for (index, token) in scoped.iter().enumerate() {
+                let mut projected = success(subscribe(&root, db, token, &statement).await);
+                let initial = success(poll(&root, db, token, &mut projected).await).unwrap();
+                let expected = if hidden && index != 0 {
+                    [1, 2, 3]
+                        .map(|vertex| (1, vec![WireValue::Float(1.0), WireValue::Vertex(vertex)]))
+                        .to_vec()
+                } else {
+                    vec![]
+                };
+                assert_eq!(initial.entries, expected);
+                projected.consumer.close();
+                drop(db.db.write(&root).await.unwrap());
                 assert_eq!(db.subscriptions.load(Ordering::Acquire), 0);
             }
         }
@@ -1117,11 +1421,12 @@ fn selected_union_analytics_subscriptions_replay_exact_changes_without_exposing_
                  {{relations:['S','R','S'],labels:['M','L','M'],parallel:'collapse',self_loops:'drop'}}) \
                  YIELD vertex AS node,{field} AS value RETURN node,value"
             ));
-            // Selecting a label does not relax the analytic authorization gate.
-            refused(
-                subscribe(&root, db, &scoped, &statement).await,
-                ErrorCode::PermissionDenied,
-            );
+            // Explicit selectors intersect the capability-projected topology.
+            let mut projected = success(subscribe(&root, db, &scoped, &statement).await);
+            let empty = success(poll(&root, db, &scoped, &mut projected).await).unwrap();
+            assert!(empty.entries.is_empty());
+            projected.consumer.close();
+            drop(db.db.write(&root).await.unwrap());
             let mut subscription = success(subscribe(&root, db, &token, &statement).await);
             assert_eq!(subscription.columns, ["node", "value"]);
             let initial = success(poll(&root, db, &token, &mut subscription).await).unwrap();

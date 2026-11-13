@@ -12,6 +12,33 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Capability-scoped maintained analytics — qualification pending
+
+Source added 2026-11-12 for `fgdb-scoped-maintained-analytics-s047k` connects
+the existing component, core and triangle maintainers to capability-projected
+subscription inputs. Connected, weakly connected and strongly connected
+components, core numbers, triangles and clustering coefficients can now
+register through native and server subscription owners under narrowed label,
+relation and property scopes, within their existing maintained profiles.
+
+Scoped registrations always compile the selected row topology, including
+isolated visible vertices and both endpoint masks. They never use privileged
+direct graph sources. Resource preflight accounts for the complete projected
+circuit. Selected maintainers validate and bootstrap at the capability-visible
+frontier, so hidden history does not change their public sequence or make the
+parent frontier inconsistent. Unsupported procedures and profiles still refuse
+before source access. Existing polling authority, replay, ACK and cleanup owners
+remain in force.
+
+The six-algorithm server regression compares literal expected answers, deltas,
+frontiers and registration reservations across clean and hidden-data databases.
+It covers hidden prehistory and later hidden-only commits, reciprocal/parallel
+edges, isolates, deletion, insertion, and physical endpoint deletion versus
+loss of its permitted label. It also checks budgets and changed/expired tokens.
+Pinned formatting of changed Rust files and independent source/API review pass. The pinned compiler
+was SIGKILLed inside unchanged `asupersync`, before first-party compilation;
+runtime tests, Clippy and exact-tree qualification remain UNRUN.
+
 ### Authorized hybrid retrieval over staged writes — qualification pending
 
 Source added 2026-11-12 for `fgdb-authorized-staged-hybrid-w7g9p` connects
@@ -31,8 +58,10 @@ this adapter does not substitute a materialized scan for those requests.
 Regression sources cover staged multimodal retrieval, hidden malformed data,
 resource boundaries and rollback. The FGP conditional-write regression also
 covers create/search/update, stale-frontier rejection and a late result error
-without publication. Compilation and executable qualification are pending;
-the bead remains in progress until the pinned gates and exact-tree proof pass.
+without publication. Pinned formatting of changed Rust files and independent source/API review pass.
+The pinned check exited 101 after unchanged `asupersync` rustc was SIGKILLed,
+before first-party compilation. Runtime tests, Clippy and exact-tree proof
+remain UNRUN, and the bead stays in progress.
 
 ### UNION inside write-bearing CALL — qualification pending
 

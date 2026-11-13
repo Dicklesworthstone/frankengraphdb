@@ -128,18 +128,6 @@ fn subscribe_refusal(error: SubscribeError) -> Refusal {
     }
 }
 
-fn unrestricted(capability: &fgdb_warden::VerifiedCapability) -> Result<(), Refusal> {
-    let scope = capability.predicates();
-    if scope.sees_all_incidence() && scope.sees_all_fields() {
-        Ok(())
-    } else {
-        Err(Refusal::new(
-            ErrorCode::PermissionDenied,
-            "analytic CALL fnx.* subscriptions require a read capability with unrestricted label, relation and property scope",
-        ))
-    }
-}
-
 fn checkpoint(cx: &QueryCx) -> Result<(), Refusal> {
     cx.checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))
@@ -453,11 +441,8 @@ pub(crate) async fn subscribe(
     let prepared =
         PreparedNativeRead::prepare_subscription(&query, text, parameters, db.symbols.clone())
             .map_err(subscribe_refusal)?;
-    if prepared.has_procedure_call() {
-        unrestricted(&capability)?;
-    }
     let (nodes, source_width) = prepared
-        .subscription_footprint(&query, parameters)
+        .subscription_footprint_authorized(&query, parameters, &scope)
         .map_err(native_refusal)?;
     let reservation = reserve(
         db.query_policy,
