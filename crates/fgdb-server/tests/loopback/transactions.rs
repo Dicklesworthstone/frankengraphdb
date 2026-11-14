@@ -168,7 +168,10 @@ fn http_transactions_abort_late_refusals_and_keep_cumulative_authority() {
         let scope = grant(Rights::ReadWrite);
         for (mode, statement, expected) in [
             ("read", "RETURN $missing AS absent", 400),
-            ("write", "CREATE (:Person {age:1/0})", 400),
+            // Native arithmetic errors remain execution refusals, including
+            // a mutation that reads a value staged by the first statement.
+            ("write", "CREATE (:Person {age:1/0})", 500),
+            ("write", "MATCH (n:Person) SET n.age=n.age/(n.age-10)", 500),
             ("read", "CREATE (:Person {age:99})", 403),
         ] {
             let request = format!(
@@ -178,6 +181,9 @@ fn http_transactions_abort_late_refusals_and_keep_cumulative_authority() {
             );
             let (status, body) = http_transaction(address, &scope, &request).await;
             assert_eq!(status, expected, "{statement}: {body}");
+            if expected == 500 {
+                assert!(body.contains("\"code\":\"execution\""), "{body}");
+            }
             assert!(!body.contains("\"results\""), "{body}");
             assert!(!body.contains("\"committed\""), "{body}");
             assert_eq!(

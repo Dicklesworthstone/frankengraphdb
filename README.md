@@ -108,6 +108,25 @@ RETURN person, friend
 
 Each person keeps qualifying friends, including parallel-edge occurrences, or one row with a NULL friend when none qualify. The predicate runs inside the optional match before null extension. Subquery-local names remain private; later clauses retain the original outer bindings. Multi-clause subquery bodies use the same native expression and correlated `Apply` operators as ordinary reads, with their existing work, scratch, cancellation and authorization controls. Runtime-qualified on 2026-11-11 via [native_optional_subqueries.rs](crates/fgdb/tests/native_optional_subqueries.rs); full workspace gate status is tracked in [implementation status](IMPLEMENTATION_STATUS.md).
 
+### Optional subqueries and procedures — qualification pending
+
+The text front end now lowers returning read-only `OPTIONAL CALL` bodies through the existing native optional `Apply` operator:
+
+```cypher
+MATCH (person:Person)
+OPTIONAL CALL (person) {
+    MATCH (person)-[:KNOWS]->(friend)
+    RETURN friend
+}
+RETURN person, friend
+```
+
+Each incoming person occurrence retains all qualifying body results, or one row with a NULL friend when the body returns none. Explicit import lists and legacy importing `WITH` use the existing scope rules; wildcard `CALL (*)` imports are not part of this increment.
+
+Named procedures also accept `OPTIONAL CALL fnx.bridges(direction => 'undirected') YIELD node, neighbor RETURN node, neighbor`. A `WHERE` attached to `YIELD` filters inside the optional invocation before null extension. A subsequent explicit `WITH ... WHERE` filters its completed output. Procedure errors, cancellation and authorization or budget refusals still propagate.
+
+Source added 2026-11-14; focused regressions are committed, but compilation was interrupted during dependency preparation and the runtime tests did not execute. See [implementation status](IMPLEMENTATION_STATUS.md) for the precise qualification boundary.
+
 ### Maintained correlated graph queries
 
 Standing queries and native subscriptions can maintain eligible returning `CALL` subqueries and `OPTIONAL MATCH` continuations through the existing incremental joins and projections:

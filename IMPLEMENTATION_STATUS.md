@@ -12,6 +12,61 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Atomic HTTP transactions and OPTIONAL CALL — qualification pending
+
+Source added 2026-11-14 in `ad50728` and `84d5aac` implements two bounded surface
+features through the existing native transaction and relational owners.
+
+`POST /v1/databases/<name>/transaction` accepts 1–32 independently parameterized
+Read/Write statements. Later statements see earlier staged effects, while the
+original capability, basis and cumulative allowances remain in force. All input
+adaptation precedes BEGIN; all result conversion and admission of the complete
+typed JSON response precede the sole COMMIT. Retention includes JSON escaping
+and a reservation for maximum completion counters. A definite earlier failure
+discards the unpublished workspace and exposes no successful prefix. Native
+unknown completion remains unknown, and physical response bytes retain the
+original recovery-generation fence. Read-only scripts still require write
+authority because this endpoint owns a write-capable transaction; read-only
+credentials use `/query-batch`. The full request, response, limits and curl
+example are in [the Fabric protocol](docs/FABRIC_PROTOCOL.md#atomic-http-transaction-scripts).
+
+Inline returning read-only `OPTIONAL CALL` and named optional procedures lower
+through native Optional Apply. Empty invocations preserve each caller occurrence
+and null-extend only exported columns. A procedure's attached `YIELD ... WHERE`
+belongs inside optional evaluation; an explicit following `WITH ... WHERE`
+filters the completed row. Existing typed identities, imports, aggregation,
+UNION, host errors, capability masking and cumulative cancellation/resource
+controls remain owned by the native operators. Optional write bodies, wildcard
+scope imports and full language conformance are outside this increment.
+[The README](README.md#optional-subqueries-and-procedures--qualification-pending)
+shows the syntax.
+
+Committed regression sources cover HTTP staged visibility, one completion,
+rollback, empty/net-zero writes, cumulative and escaped output limits,
+authorization, input cancellation and recovery fences; query sources cover
+empty results, duplicates, parallel edges, NULL correlation, aggregate/UNION
+semantics, procedure filtering and errors, cumulative limits, cancellation,
+private transaction topology, pinned snapshots, certificate replay and masked
+authorized results. The late arithmetic HTTP regression preserves the existing
+native `execution` class (HTTP 500), including a data-dependent mutation failure.
+
+Qualification is incomplete. Pinned Rustfmt and whitespace checks passed for
+the two feature checkpoints. Scoped static UBS over the four changed HTTP Rust
+files exited 0 with 0 critical findings, 285 warnings and 55 informational
+findings; it ran with `--no-cargo` and is not runtime evidence. Whole-workspace
+`cargo fmt --check` exited 1 on pre-existing formatting differences.
+
+The pinned `nightly-2026-08-31` toolchain and `cargo fetch --locked` completed.
+`cargo check --locked -p fgdb-gql -p fgdb -p fgdb-server -p fgdb-cli --lib --bins`
+was still compiling dependencies (last observed: `nix` and `num-bigint`) when
+the execution environment became unavailable. No terminal compiler verdict was
+received. Changed-source compilation is interrupted/unqualified; targeted
+runtime tests, Clippy, full workspace tests and exact-tree proof remain
+**UNRUN**, and the final documentation/test-expectation update could not be
+rechecked locally. No passing integrated-tree verdict is claimed. The existing
+`fgdb-w10-adapters-b1f` and `fgdb-w5-parsers-nje` beads remain open with their
+original broader scope and blockers.
+
 ### Explicit no-effect writes retain write completion — qualification pending
 
 Source updated 2026-11-14 preserves the compiler's write classification when
