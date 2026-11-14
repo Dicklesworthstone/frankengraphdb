@@ -137,6 +137,10 @@ impl Connection {
             | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteReadStatements
             | FrameKind::ExecutePreparedReadBatch
+            | FrameKind::BeginTransaction
+            | FrameKind::ExecuteTransaction
+            | FrameKind::CommitTransaction
+            | FrameKind::RollbackTransaction
             | FrameKind::ExecutePrepared
             | FrameKind::ExecutePreparedBatch
             | FrameKind::ExecuteDiff

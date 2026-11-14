@@ -52,6 +52,15 @@ pub enum FrameKind {
     ReadBatchResultEnd = 0x002b,
     ExecuteReadStatements = 0x002c,
     ExecutePreparedReadBatch = 0x002d,
+    BeginTransaction = 0x002e,
+    TransactionBegun = 0x002f,
+    ExecuteTransaction = 0x0030,
+    CommitTransaction = 0x0031,
+    TransactionCommitted = 0x0032,
+    RollbackTransaction = 0x0033,
+    TransactionRolledBack = 0x0034,
+    TransactionResultChunk = 0x0035,
+    TransactionResultEnd = 0x0036,
 }
 
 impl TryFrom<u16> for FrameKind {
@@ -99,6 +108,15 @@ impl TryFrom<u16> for FrameKind {
             0x002b => Self::ReadBatchResultEnd,
             0x002c => Self::ExecuteReadStatements,
             0x002d => Self::ExecutePreparedReadBatch,
+            0x002e => Self::BeginTransaction,
+            0x002f => Self::TransactionBegun,
+            0x0030 => Self::ExecuteTransaction,
+            0x0031 => Self::CommitTransaction,
+            0x0032 => Self::TransactionCommitted,
+            0x0033 => Self::RollbackTransaction,
+            0x0034 => Self::TransactionRolledBack,
+            0x0035 => Self::TransactionResultChunk,
+            0x0036 => Self::TransactionResultEnd,
             _ => return Err(ProtocolError::UnknownFrameKind),
         })
     }

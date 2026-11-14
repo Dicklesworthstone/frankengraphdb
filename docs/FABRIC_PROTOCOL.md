@@ -65,6 +65,12 @@ these values; callers cannot authenticate merely by constructing the structs.
 | EXECUTE_READ_BATCH | 0x0029 | client |
 | READ_BATCH_RESULT_CHUNK / READ_BATCH_RESULT_END | 0x002a / 0x002b | server |
 | EXECUTE_READ_STATEMENTS | 0x002c | client |
+| EXECUTE_PREPARED_READ_BATCH | 0x002d | client |
+| BEGIN_TRANSACTION / TRANSACTION_BEGUN | 0x002e / 0x002f | client / server |
+| EXECUTE_TRANSACTION | 0x0030 | client |
+| COMMIT_TRANSACTION / TRANSACTION_COMMITTED | 0x0031 / 0x0032 | client / server |
+| ROLLBACK_TRANSACTION / TRANSACTION_ROLLED_BACK | 0x0033 / 0x0034 | client / server |
+| TRANSACTION_RESULT_CHUNK / TRANSACTION_RESULT_END | 0x0035 / 0x0036 | server |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -177,6 +183,13 @@ redacted from `Debug`.
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
 | EXECUTE_READ_BATCH | the same body as EXECUTE_BATCH, under an explicit read-only request tag; one read statement and its ordered argument sets |
 | EXECUTE_READ_STATEMENTS | `statements u32` (1–32), then that many EXECUTE payloads: `mode u8` (must be 0), `statement text`, canonical `parameters [(name text, value)]`; one body-wide decoded-value limit |
+| BEGIN_TRANSACTION | empty |
+| TRANSACTION_BEGUN | nonzero connection-owned `handle [16]`, `basis u64` |
+| EXECUTE_TRANSACTION | `handle [16]`, then EXECUTE fields with mode restricted to 0 (Read) or 1 (Write); ordinary shared value-node and parameter bounds apply |
+| COMMIT_TRANSACTION / ROLLBACK_TRANSACTION / TRANSACTION_ROLLED_BACK | `handle [16]` |
+| TRANSACTION_COMMITTED | `handle [16]`, outcome tag 1 (WriteCommitted) or 2 (ReadClosed), `seq u64`, `statements u64`; ordinary Rows is invalid |
+| TRANSACTION_RESULT_CHUNK | RESULT_CHUNK encoding: first-frame columns and canonical rows, delivered provisionally |
+| TRANSACTION_RESULT_END | `handle [16]`, positive one-based `statement u64`, exact delivered `rows u64`; no commit claim |
 | EXECUTE_PREPARED_BATCH | nonzero connection-owned `handle [16]`, `argument_sets u32`, then that many parameter maps with the same canonical encoding and shared bounds as EXECUTE_BATCH; the handle must name a write template |
 | EXECUTE_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_PREPARED_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, nonzero connection-owned `handle [16]`, execution `parameters [(name text, value)]`; the handle must name a read template |
@@ -213,6 +226,40 @@ exactly the canonical text a server emits — vertex, edge
 `statement`, `permission_denied`, `budget`, `conflict`, `execution`,
 `outcome_unknown`, `busy`, `draining`, `cancelled`, `database_recovering`
 (tag 14) and `database_unavailable` (tag 15).
+
+### Explicit transaction client contract
+
+The additive explicit-transaction profile separates provisional statement
+delivery from durable completion. Requests and BEGIN/COMMIT/ROLLBACK replies use
+the selected Ready control stream. Each statement uses a freshly minted child
+stream with TRANSACTION_RESULT_CHUNK/END and the ordinary byte/row flow window.
+The END must echo the current handle, the next one-based statement ordinal and
+the exact delivered row count. It is not a snapshot answer or a commit receipt.
+
+The Rust client exposes `begin_transaction`, `execute_transaction`,
+`execute_transaction_streaming`, `commit_transaction` and
+`rollback_transaction`. The first method returns `TransactionBegun`; a
+collected statement returns `TransactionAnswer { columns, rows, end }`.
+Only commit returns `Outcome::WriteCommitted` or `Outcome::ReadClosed`.
+The completion count must equal successfully delivered statement calls; a
+read-close retains BEGIN's basis, while a committed write advances it.
+A handle is local to one connection and grants no authority on another one.
+
+The client blocks unrelated business requests and authority refresh while an
+explicit owner is active. Local mode/value/frame admission failures send
+nothing and preserve the owner. Definite execution refusals discard it.
+Invalid, incomplete or foreign responses leave the wire request outstanding:
+subsequent operations refuse locally until reconnect, and no write is retried.
+
+A rejected columns/row callback sends QUERY_CANCEL and drains the response
+before returning the callback error. A serving adapter must abort the owner
+both for an in-flight cancellation and for a late cancellation of its latest
+provisional stream: END may already be in flight when the callback rejects.
+TCP order places the cancellation before the client's next request. Dropping
+an uncompleted future or losing transport requires disconnect, which abandons
+an unpublished workspace. Losing COMMIT's response can instead leave the
+durable outcome unknown. None of these selectors is a durable lease,
+reattachment token, result ACK or replay capability.
 
 ## fgdbd: the served subset
 

@@ -488,6 +488,10 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::ExecuteReadBatch,
         FrameKind::ExecuteReadStatements,
         FrameKind::ExecutePreparedReadBatch,
+        FrameKind::BeginTransaction,
+        FrameKind::ExecuteTransaction,
+        FrameKind::CommitTransaction,
+        FrameKind::RollbackTransaction,
         FrameKind::ExecutePrepared,
         FrameKind::ExecutePreparedBatch,
         FrameKind::ExecuteDiff,
@@ -531,6 +535,11 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::DiffResultEnd,
         FrameKind::ReadBatchResultChunk,
         FrameKind::ReadBatchResultEnd,
+        FrameKind::TransactionBegun,
+        FrameKind::TransactionCommitted,
+        FrameKind::TransactionRolledBack,
+        FrameKind::TransactionResultChunk,
+        FrameKind::TransactionResultEnd,
     ] {
         let response = frame(kind, Binding::Ready(ready()), StreamId::CONTROL, &[]);
         assert_eq!(
@@ -579,8 +588,22 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::try_from(0x002d),
         Ok(FrameKind::ExecutePreparedReadBatch)
     );
+    for (tag, kind) in [
+        (0x002e, FrameKind::BeginTransaction),
+        (0x002f, FrameKind::TransactionBegun),
+        (0x0030, FrameKind::ExecuteTransaction),
+        (0x0031, FrameKind::CommitTransaction),
+        (0x0032, FrameKind::TransactionCommitted),
+        (0x0033, FrameKind::RollbackTransaction),
+        (0x0034, FrameKind::TransactionRolledBack),
+        (0x0035, FrameKind::TransactionResultChunk),
+        (0x0036, FrameKind::TransactionResultEnd),
+    ] {
+        assert_eq!(FrameKind::try_from(tag), Ok(kind));
+        assert_eq!(kind as u16, tag);
+    }
     assert_eq!(
-        FrameKind::try_from(0x002e),
+        FrameKind::try_from(0x0037),
         Err(ProtocolError::UnknownFrameKind)
     );
 }

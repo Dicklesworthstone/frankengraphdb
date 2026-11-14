@@ -2140,6 +2140,12 @@ body!(
     }
 );
 
+mod transaction;
+pub use transaction::{
+    ExecuteTransaction, TransactionBegun, TransactionCompletion, TransactionHandle,
+    TransactionResultEnd, TransactionSelector,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

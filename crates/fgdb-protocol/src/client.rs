@@ -33,6 +33,9 @@ pub use diff::DiffAnswer;
 #[path = "client/read_batch.rs"]
 mod read_batch;
 pub use read_batch::{ReadBatchAnswer, ReadBatchResult};
+#[path = "client/transaction.rs"]
+mod transaction;
+pub use transaction::TransactionAnswer;
 
 /// What a client can fail with. Server refusals keep their public class.
 #[derive(Debug)]
@@ -139,6 +142,7 @@ pub struct Client {
     /// Survives a dropped future: only a validated response can release it.
     outstanding_request: Option<u64>,
     selected: Option<Selected>,
+    transaction: Option<transaction::TransactionState>,
 }
 
 impl core::fmt::Debug for Client {
@@ -187,6 +191,7 @@ impl Client {
             next_request: 1,
             outstanding_request: None,
             selected: None,
+            transaction: None,
         };
         let mut client_nonce = [0u8; 32];
         cx.random_bytes(&mut client_nonce);
@@ -1105,6 +1110,22 @@ impl Client {
                 "an earlier request is unfinished; reconnect",
             ));
         }
+        if self.transaction.is_some()
+            && !matches!(
+                kind,
+                FrameKind::ExecuteTransaction
+                    | FrameKind::CommitTransaction
+                    | FrameKind::RollbackTransaction
+                    | FrameKind::Ping
+                    | FrameKind::Drain
+                    | FrameKind::WindowUpdate
+                    | FrameKind::QueryCancel
+            )
+        {
+            return Err(ClientError::Protocol(
+                "an explicit transaction is active; finish it first",
+            ));
+        }
         let request = self.next_request;
         let next_request = request
             .checked_add(1)
@@ -1221,8 +1242,18 @@ fn server_header(header: &Header, expected: Binding) -> Result<(), ProtocolError
         FrameKind::HelloAck | FrameKind::AuthOk => header.binding() == Binding::Transport,
         FrameKind::Ready => matches!(expected, Binding::Session(_)) && header.binding() == expected,
         FrameKind::Error => header.binding() == expected,
-        FrameKind::Prepared | FrameKind::PreparedReleased => {
+        FrameKind::Prepared
+        | FrameKind::PreparedReleased
+        | FrameKind::TransactionBegun
+        | FrameKind::TransactionCommitted
+        | FrameKind::TransactionRolledBack => {
             if !matches!(expected, Binding::Ready(_)) || !header.stream_id().is_control() {
+                return Err(ProtocolError::InvalidState);
+            }
+            header.binding() == expected
+        }
+        FrameKind::TransactionResultChunk | FrameKind::TransactionResultEnd => {
+            if !matches!(expected, Binding::Ready(_)) || header.stream_id().is_control() {
                 return Err(ProtocolError::InvalidState);
             }
             header.binding() == expected
@@ -1286,13 +1317,22 @@ impl ResultProgress {
         frame_bytes: u64,
         available_bytes: u64,
     ) -> Result<(), &'static str> {
+        self.finish_rows(end.rows, frame_bytes, available_bytes)
+    }
+
+    fn finish_rows(
+        &self,
+        rows: u64,
+        frame_bytes: u64,
+        available_bytes: u64,
+    ) -> Result<(), &'static str> {
         if frame_bytes > available_bytes {
             return Err("server exceeded its flow credit");
         }
         if self.columns.is_none() {
             return Err("END before columns");
         }
-        if end.rows != self.rows {
+        if rows != self.rows {
             return Err("END row count differs from delivery");
         }
         Ok(())
@@ -4809,6 +4849,331 @@ fn server_error(frame: &Frame) -> ClientError {
             message: body.message,
         },
         Err(error) => ClientError::Body(error),
+    }
+
+    fn transaction_begun(request: u64, handle: crate::body::TransactionHandle) -> Frame {
+        rpc(
+            FrameKind::TransactionBegun,
+            request,
+            StreamId::CONTROL,
+            &crate::body::TransactionBegun { handle, basis: 3 },
+        )
+    }
+
+    fn transaction_chunk(request: u64, values: &[i64]) -> Frame {
+        rpc(
+            FrameKind::TransactionResultChunk,
+            request,
+            StreamId([5; 16]),
+            &ResultChunk {
+                columns: Some(vec!["value".into()]),
+                rows: values.iter().map(|v| vec![WireValue::Int(*v)]).collect(),
+            },
+        )
+    }
+
+    fn transaction_end(
+        request: u64,
+        handle: crate::body::TransactionHandle,
+        statement: u64,
+        rows: u64,
+    ) -> Frame {
+        rpc(
+            FrameKind::TransactionResultEnd,
+            request,
+            StreamId([5; 16]),
+            &crate::body::TransactionResultEnd { handle, statement, rows },
+        )
+    }
+
+    fn transaction_statement(mode: ExecuteMode) -> Execute {
+        Execute {
+            mode,
+            statement: "RETURN $a".into(),
+            parameters: vec![("a".into(), WireValue::Int(11))],
+        }
+    }
+
+    #[test]
+    fn explicit_transaction_client_separates_provisional_rows_from_one_commit() {
+        let ((), report) = run_async_under_lab(0x79a0_0410, |root| async move {
+            let handle = crate::body::TransactionHandle([0x61; 16]);
+            let completion = Outcome::WriteCommitted { seq: 4, statements: 2 };
+            let io = script(vec![
+                transaction_begun(4, handle),
+                transaction_chunk(5, &[11]),
+                transaction_end(5, handle, 1, 1),
+                transaction_chunk(6, &[12]),
+                transaction_end(6, handle, 2, 1),
+                rpc(
+                    FrameKind::TransactionCommitted,
+                    7,
+                    StreamId::CONTROL,
+                    &crate::body::TransactionCompletion { handle, outcome: completion },
+                ),
+                rpc(FrameKind::Pong, 8, StreamId::CONTROL, &Ping { nonce: 7 }),
+            ]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            assert_eq!(client.begin_transaction(&root).await.unwrap().basis, 3);
+            let before = written.lock().unwrap().len();
+            assert!(client.execute(&root, ExecuteMode::Read, "RETURN 9", vec![]).await.is_err());
+            assert!(client.refresh_authority(&root, vec![1]).await.is_err());
+            assert!(client.begin_transaction(&root).await.is_err());
+            assert!(client.execute_transaction(
+                &root,
+                crate::body::TransactionHandle([0x62; 16]),
+                &transaction_statement(ExecuteMode::Read),
+            ).await.is_err());
+            assert_eq!(written.lock().unwrap().len(), before);
+            let first = client.execute_transaction(
+                &root, handle, &transaction_statement(ExecuteMode::Write),
+            ).await.unwrap();
+            assert_eq!(first.columns, ["value"]);
+            assert_eq!(first.rows, [vec![WireValue::Int(11)]]);
+            assert_eq!(first.end.statement, 1);
+            let second = client.execute_transaction(
+                &root, handle, &transaction_statement(ExecuteMode::Read),
+            ).await.unwrap();
+            assert_eq!(second.rows, [vec![WireValue::Int(12)]]);
+            assert_eq!(second.end.statement, 2);
+            assert_eq!(client.commit_transaction(&root, handle).await.unwrap(), completion);
+            client.ping(&root, 7).await.unwrap();
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                frames.iter().filter(|f| f.header().kind() == FrameKind::CommitTransaction).count(),
+                1
+            );
+            assert_eq!(
+                frames.iter().filter(|f| f.header().kind() == FrameKind::ExecuteTransaction).count(),
+                2
+            );
+            assert!(!frames.iter().any(|f| f.header().kind() == FrameKind::Execute));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn explicit_transaction_local_admission_preserves_owner_until_rollback() {
+        let ((), report) = run_async_under_lab(0x79a0_0411, |root| async move {
+            let handle = crate::body::TransactionHandle([0x61; 16]);
+            let io = script(vec![
+                transaction_begun(4, handle),
+                rpc(
+                    FrameKind::TransactionRolledBack, 5, StreamId::CONTROL,
+                    &crate::body::TransactionSelector { handle },
+                ),
+                rpc(FrameKind::Pong, 6, StreamId::CONTROL, &Ping { nonce: 8 }),
+            ]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            client.begin_transaction(&root).await.unwrap();
+            let before = written.lock().unwrap().len();
+            for mode in [ExecuteMode::Subscribe, ExecuteMode::ReadStream, ExecuteMode::ReadOrdered] {
+                assert!(client.execute_transaction(
+                    &root, handle, &transaction_statement(mode),
+                ).await.is_err());
+            }
+            let mut duplicate = transaction_statement(ExecuteMode::Write);
+            duplicate.parameters.push(("a".into(), WireValue::Int(99)));
+            assert!(client.execute_transaction(&root, handle, &duplicate).await.is_err());
+            let mut oversized = transaction_statement(ExecuteMode::Write);
+            oversized.statement = "x".repeat(5000);
+            assert!(client.execute_transaction(&root, handle, &oversized).await.is_err());
+            assert_eq!(written.lock().unwrap().len(), before);
+            client.rollback_transaction(&root, handle).await.unwrap();
+            client.ping(&root, 8).await.unwrap();
+            let frames = sent_frames(&written.lock().unwrap());
+            assert!(!frames.iter().any(|f| f.header().kind() == FrameKind::ExecuteTransaction));
+            assert!(!frames.iter().any(|f| f.header().kind() == FrameKind::CommitTransaction));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn rejected_provisional_output_cancels_before_another_transaction_can_begin() {
+        let ((), report) = run_async_under_lab(0x79a0_0412, |root| async move {
+            for reject_columns in [false, true] {
+                let handle = crate::body::TransactionHandle([0x61; 16]);
+                let successor = crate::body::TransactionHandle([0x62; 16]);
+                // The complete result fits the initial window. END can already
+                // be in flight before the callback's QUERY_CANCEL reaches the
+                // peer; it still cannot be interpreted as a committed result.
+                let io = script(vec![
+                    transaction_begun(4, handle),
+                    transaction_chunk(5, &[11, 12]),
+                    transaction_end(5, handle, 1, 2),
+                    transaction_begun(7, successor),
+                    rpc(
+                        FrameKind::TransactionRolledBack, 8, StreamId::CONTROL,
+                        &crate::body::TransactionSelector { handle: successor },
+                    ),
+                ]);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                client.begin_transaction(&root).await.unwrap();
+                let mut rows_seen = 0;
+                let result = client.execute_transaction_streaming(
+                    &root, handle, &transaction_statement(ExecuteMode::Write),
+                    |_| {
+                        if reject_columns {
+                            Err(ClientError::Protocol("application rejected provisional output"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |_| {
+                        rows_seen += 1;
+                        Err(ClientError::Protocol("application rejected provisional output"))
+                    },
+                ).await;
+                assert!(matches!(
+                    result,
+                    Err(ClientError::Protocol("application rejected provisional output"))
+                ));
+                assert_eq!(rows_seen, usize::from(!reject_columns));
+                assert!(client.commit_transaction(&root, handle).await.is_err());
+                assert_eq!(client.begin_transaction(&root).await.unwrap().handle, successor);
+                client.rollback_transaction(&root, successor).await.unwrap();
+                let frames = sent_frames(&written.lock().unwrap());
+                let tail: Vec<_> = frames[3..].iter().map(|f| f.header().kind()).collect();
+                assert_eq!(tail, [
+                    FrameKind::BeginTransaction,
+                    FrameKind::ExecuteTransaction,
+                    FrameKind::QueryCancel,
+                    FrameKind::BeginTransaction,
+                    FrameKind::RollbackTransaction,
+                ]);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn malformed_provisional_results_poison_the_request_and_cannot_be_committed() {
+        let ((), report) = run_async_under_lab(0x79a0_0413, |root| async move {
+            for scenario in 0..7 {
+                let handle = crate::body::TransactionHandle([0x61; 16]);
+                let mut frames = vec![transaction_begun(4, handle)];
+                match scenario {
+                    0 => frames.push(transaction_end(5, handle, 1, 0)),
+                    1 => {
+                        frames.push(transaction_chunk(5, &[11]));
+                        frames.push(transaction_end(
+                            5, crate::body::TransactionHandle([0x62; 16]), 1, 1,
+                        ));
+                    }
+                    2 => {
+                        frames.push(transaction_chunk(5, &[11]));
+                        frames.push(transaction_end(5, handle, 2, 1));
+                    }
+                    3 => {
+                        frames.push(transaction_chunk(5, &[11]));
+                        frames.push(transaction_end(5, handle, 1, 2));
+                    }
+                    4 => frames.push(result_chunk(5, &[11])),
+                    5 => frames.push(rpc(
+                        FrameKind::TransactionResultChunk, 5, StreamId([5; 16]),
+                        &ResultChunk {
+                            columns: Some(vec!["value".into()]),
+                            rows: vec![vec![]],
+                        },
+                    )),
+                    _ => frames.push(transaction_chunk(5, &[11, 12, 13])),
+                }
+                let io = script_with_window(frames, 65536, 2);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                client.begin_transaction(&root).await.unwrap();
+                assert!(client.execute_transaction(
+                    &root, handle, &transaction_statement(ExecuteMode::Write),
+                ).await.is_err());
+                let before = written.lock().unwrap().len();
+                requires_reconnect(client.commit_transaction(&root, handle).await);
+                requires_reconnect(client.ping(&root, 1).await);
+                assert_eq!(written.lock().unwrap().len(), before);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn lost_or_ambiguous_transaction_completion_never_replays_commit() {
+        let ((), report) = run_async_under_lab(0x79a0_0414, |root| async move {
+            for scenario in 0..7 {
+                let handle = crate::body::TransactionHandle([0x61; 16]);
+                let mut frames = vec![transaction_begun(4, handle)];
+                match scenario {
+                    0 => {}
+                    1 => frames.push(rpc(
+                        FrameKind::TransactionCommitted, 5, StreamId::CONTROL,
+                        &crate::body::TransactionCompletion {
+                            handle: crate::body::TransactionHandle([0x62; 16]),
+                            outcome: Outcome::WriteCommitted { seq: 4, statements: 1 },
+                        },
+                    )),
+                    2 => frames.push(rpc(
+                        FrameKind::Error, 5, StreamId::CONTROL,
+                        &ErrorBody { code: ErrorCode::OutcomeUnknown, message: "unknown".into() },
+                    )),
+                    _ => frames.push(rpc(
+                        FrameKind::TransactionCommitted, 5, StreamId::CONTROL,
+                        &crate::body::TransactionCompletion {
+                            handle,
+                            outcome: match scenario {
+                                3 => Outcome::WriteCommitted { seq: 3, statements: 0 },
+                                4 => Outcome::ReadClosed { seq: 4, statements: 0 },
+                                5 => Outcome::ReadClosed { seq: 3, statements: 1 },
+                                _ => Outcome::WriteCommitted { seq: 4, statements: 0 },
+                            },
+                        },
+                    )),
+                }
+                let io = script(frames);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                client.begin_transaction(&root).await.unwrap();
+                assert!(client.commit_transaction(&root, handle).await.is_err());
+                let before = written.lock().unwrap().len();
+                assert!(client.commit_transaction(&root, handle).await.is_err());
+                assert_eq!(written.lock().unwrap().len(), before);
+                let frames = sent_frames(&written.lock().unwrap());
+                assert_eq!(
+                    frames.iter().filter(|f| f.header().kind() == FrameKind::CommitTransaction).count(),
+                    1
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn empty_explicit_transaction_accepts_only_its_own_read_close() {
+        let ((), report) = run_async_under_lab(0x79a0_0415, |root| async move {
+            let handle = crate::body::TransactionHandle([0x61; 16]);
+            let outcome = Outcome::ReadClosed { seq: 3, statements: 0 };
+            let io = script(vec![
+                transaction_begun(4, handle),
+                rpc(
+                    FrameKind::TransactionCommitted,
+                    5,
+                    StreamId::CONTROL,
+                    &crate::body::TransactionCompletion { handle, outcome },
+                ),
+                rpc(FrameKind::Pong, 6, StreamId::CONTROL, &Ping { nonce: 9 }),
+            ]);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            client.begin_transaction(&root).await.unwrap();
+            assert_eq!(client.commit_transaction(&root, handle).await.unwrap(), outcome);
+            client.ping(&root, 9).await.unwrap();
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
 
