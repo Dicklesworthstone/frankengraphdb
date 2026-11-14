@@ -3,7 +3,9 @@
 
 use super::*;
 use crate::execute::ordered::ordered_generation;
-use crate::execute::{ReadBatchAnswer, read_batch as execute_read_batch, read_statement_batch};
+use crate::execute::{
+    ReadBatchAnswer, read_batch as execute_read_batch, read_prepared_batch, read_statement_batch,
+};
 use fgdb_protocol::body::{
     BodyError, MAX_COLUMNS, MAX_NAME_BYTES, MAX_ROWS_PER_CHUNK, MAX_VALUE_NODES,
     ReadBatchResultChunk, ReadBatchResultEnd,
@@ -15,6 +17,10 @@ const BATCH_PREFIX_BYTES: usize = 4 + 8 + 1;
 pub(super) enum ReadBatchStatement<'a> {
     Parameterized(&'a ExecuteBatch),
     Statements(&'a [Execute]),
+    Prepared {
+        definition: Result<&'a crate::execute::PreparedRead, Refusal>,
+        arguments: &'a [Vec<(String, WireValue)>],
+    },
 }
 
 impl ReadBatchStatement<'_> {
@@ -22,6 +28,7 @@ impl ReadBatchStatement<'_> {
         match self {
             Self::Parameterized(statement) => statement.argument_sets.len(),
             Self::Statements(statements) => statements.len(),
+            Self::Prepared { arguments, .. } => arguments.len(),
         }
     }
 }
@@ -179,6 +186,17 @@ impl Lane {
             ReadBatchStatement::Statements(statements) => {
                 read_statement_batch(cx, db, token, statements)
             }
+            ReadBatchStatement::Prepared {
+                definition,
+                arguments,
+            } => match definition {
+                Ok(prepared) => read_prepared_batch(cx, db, token, prepared, arguments),
+                Err(error) => {
+                    return self
+                        .refuse_read_batch(cx, request, stream, binding, error)
+                        .await;
+                }
+            },
         };
         let answer = self
             .read_progress(cx, waiter, &mut window, stream, request, binding, execution)

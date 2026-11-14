@@ -98,7 +98,8 @@ there is no resynchronization by scanning untrusted payload bytes.
 `Connection::validate_client_header` enforces direction, phase, complete binding,
 nonzero request IDs and control/child-stream distinction. EXECUTE, EXECUTE_BATCH, PREPARE,
 EXECUTE_PREPARED, EXECUTE_PREPARED_BATCH, EXECUTE_DIFF, EXECUTE_PREPARED_DIFF,
-EXECUTE_CONDITIONAL_WRITE, EXECUTE_READ_BATCH, EXECUTE_READ_STATEMENTS and RELEASE_PREPARED use the control stream; child stream IDs
+EXECUTE_CONDITIONAL_WRITE, EXECUTE_READ_BATCH, EXECUTE_READ_STATEMENTS,
+EXECUTE_PREPARED_READ_BATCH and RELEASE_PREPARED use the control stream; child stream IDs
 are minted by the server. Cancellation
 and credit address admitted streams. ACK/release may address independent durable
 owners, which the owning service must authenticate and validate separately.
@@ -191,6 +192,7 @@ redacted from `Debug`.
 | TRANSACTION_RESULT_CHUNK | RESULT_CHUNK encoding: first-frame columns and canonical rows, delivered provisionally |
 | TRANSACTION_RESULT_END | `handle [16]`, positive one-based `statement u64`, exact delivered `rows u64`; no commit claim |
 | EXECUTE_PREPARED_BATCH | nonzero connection-owned `handle [16]`, `argument_sets u32`, then that many parameter maps with the same canonical encoding and shared bounds as EXECUTE_BATCH; the handle must name a write template |
+| EXECUTE_PREPARED_READ_BATCH | nonzero connection-owned `handle [16]`, `argument_sets u32` (1–32), then canonical parameter maps; all values share one body-wide node allowance and the handle must name a read template |
 | EXECUTE_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_PREPARED_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, nonzero connection-owned `handle [16]`, execution `parameters [(name text, value)]`; the handle must name a read template |
 | PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending), optional terminal `mode u8` (omitted = read, 1 = stats-only write; explicit 0 is noncanonical) |
@@ -283,11 +285,35 @@ may follow earlier private read work, but no mutation or successful result
 prefix escapes. This is the FGP counterpart of HTTP `/query-batch` with a
 `statements` array. It does not create an explicit transaction or durable result.
 
-The new request keeps the existing version-1 header and all existing frame
-and body bytes unchanged. Older servers reject its unknown frame kind; clients
-never retry it as independent reads or another operation. Its operation-specific
-count bound is checked before allocating the statement vector, and all members
-share the same decoded-value-node allowance and negotiated frame limit.
+`EXECUTE_PREPARED_READ_BATCH` reuses one connection-owned prepared read for
+1–32 argument sets. The server attaches the immutable template once to one
+fresh authorized read session and calls its native prepared-batch executor.
+All original argument transcripts and owner/branch bindings are admitted by
+that same permit before graph evaluation. Each execution binds its own values;
+representative values used at PREPARE never become defaults. Current reads
+share the new session's pin, and temporal arguments retain their individual
+selected cuts. No parsing or catalog resolution is repeated for each record.
+
+Prepared handles retain their ordinary connection, authority-refresh, release
+and database-recovery fences. A missing, released, foreign or write-class
+handle refuses; read authorization precedes that refusal. Native execution,
+conversion and complete wire preflight finish before the first schema or row.
+A later binding, execution, quota or representability failure emits no successful
+prefix. The existing read-batch delivery owner provides byte/row flow credit,
+generation and authority checks, callback cancellation and terminal draining.
+
+Rust clients use `execute_prepared_read_batch(cx, handle, argument_sets)` or
+`execute_prepared_read_batch_streaming(cx, handle, argument_sets, on_columns,
+on_row, on_result_end)`. Streaming concerns delivery of the buffered native
+answer. Every callback is provisional until the single batch terminal succeeds.
+This operation adds no write, explicit transaction, durable result or retry
+semantics; the write-only `EXECUTE_PREPARED_BATCH` keeps its existing contract.
+
+These requests keep the existing version-1 header and all existing frame and
+body bytes unchanged. Older servers reject an unknown request kind; clients
+never retry it as independent reads or another operation. Each operation-specific
+count bound is checked before allocating its vector, and all members share
+the same decoded-value-node allowance and negotiated frame limit.
 
 `EXECUTE_READ_BATCH` continues to reuse `ExecuteBatch` without adding a mode byte. Parameter names in
 each set are strictly ascending and unique. The wire codec allows 1–1024 sets;
@@ -351,10 +377,20 @@ or server refusal permits connection reuse; a dropped future, malformed
 response or incomplete stream requires reconnecting. Neither API retries an
 argument set or falls back to independent reads.
 
-Native execution remains buffered before delivery. This explicit operation
-does not change ordinary queries or existing repeated rows-file reads, and
-does not select native source streaming, ordered spilling, subscription or
-difference execution. No prepared read-batch tag is claimed by this profile.
+Native execution remains buffered before delivery. These explicit operations
+do not change ordinary queries or existing repeated rows-file reads, and
+do not select native source streaming, ordered spilling, subscription or
+difference execution.
+
+The CLI selects the prepared form explicitly with `remote --prepared-batch
+--rows-file <path> query <statement>`. It reads and validates the complete JSON
+or CSV argument file, the 1–32-set bound and both wire envelopes before
+credentials or a connection are opened. It prepares once from the first set's
+structural types, then supplies every complete set through one prepared batch.
+`--prepared-batch` requires buffered reads and is mutually exclusive with
+`--consistent-batch`; the latter keeps its raw-statement semantics. Both paths
+use the same indexed schema/row output and single successful `read_batch`
+terminal. A refusal has no automatic retry or independent-read fallback.
 
 ### Finite historical NET differences
 

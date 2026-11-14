@@ -1,19 +1,20 @@
 //! A finite typed file is admitted before authentication. Writes become one
 //! atomic native batch; queries reuse one prepared read on one connection.
-//! Every read has its own current or explicitly selected snapshot and complete
-//! output block, in file order. The server owns binding, authority and budgets.
+//! Ordinary prepared reads complete independently. Consistent read batches
+//! share one pinned session and allowance, with one final output completion.
+//! The server owns binding, authority and budgets.
 //! Refusals never retry, reprepare or switch execution modes.
 
-use super::{Failure, Json, emit, failure, parameter, parse_json};
+use super::{Failure, Json, emit, failure, parameter};
 use asupersync::Cx;
 use asupersync::io::AsyncReadExt;
 use fgdb_gql::csv_parameters::{CsvParameterLimits, decode_csv_parameters};
 use fgdb_gql::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters};
 use fgdb_protocol::MAX_HEADER_LEN;
 use fgdb_protocol::body::{
-    Body, Execute, ExecuteBatch, ExecuteMode, ExecuteReadStatements, MAX_BATCH_ARGUMENT_SETS,
-    MAX_NAME_BYTES, MAX_PARAMETERS, MAX_READ_BATCH_STATEMENTS, Outcome, PreparedReadMode,
-    WireValue,
+    Body, Execute, ExecuteBatch, ExecuteMode, ExecutePreparedReadBatch, ExecuteReadStatements,
+    MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS, MAX_READ_BATCH_STATEMENTS,
+    Outcome, Prepare, PrepareMode, PreparedHandle, PreparedReadMode, WireValue,
 };
 use fgdb_protocol::client::{CLIENT_MAX_FRAME, Client, ClientError};
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
@@ -247,8 +248,18 @@ impl PreparedBatch {
         if input.len() > MAX_INPUT_BYTES {
             return Err(Failure::usage("--rows-file exceeds 1048576 bytes"));
         }
-        let json = parse_json(input, super::MAX_JSON_VALUES, super::MAX_JSON_TOKEN_BYTES)
-            .map_err(|_| Failure::usage("--rows-file must contain one valid JSON array"))?;
+        let json = fgdb_protocol::json::parse_json_controlled(
+            input,
+            super::MAX_JSON_VALUES,
+            super::MAX_JSON_TOKEN_BYTES,
+            |_| checkpoint(),
+        )
+        .map_err(|error| match error {
+            fgdb_protocol::json::JsonParseError::Invalid(_) => {
+                Failure::usage("--rows-file must contain one valid JSON array")
+            }
+            fgdb_protocol::json::JsonParseError::Interrupted(error) => error,
+        })?;
         checkpoint()?;
         let Json::Array(records) = json else {
             return Err(Failure::usage("--rows-file must contain a JSON array"));
@@ -491,10 +502,76 @@ impl PreparedBatch {
         )
         .await
     }
+
+    /// Both requests must fit before credentials are read. The handle is
+    /// fixed-width and nonzero; these placeholder bytes never leave the client.
+    /// The negotiated limit is checked again by the client before each send.
+    pub(super) fn admit_prepared_reads(&self) -> Result<(), Failure> {
+        if self.body.argument_sets.is_empty()
+            || self.body.argument_sets.len() > MAX_READ_BATCH_STATEMENTS
+        {
+            return Err(Failure::usage(format!(
+                "--prepared-batch needs 1..={MAX_READ_BATCH_STATEMENTS} argument sets"
+            )));
+        }
+        let prepare = Prepare {
+            mode: PrepareMode::Read,
+            statement: self.body.statement.clone(),
+            parameters: self.body.argument_sets[0].clone(),
+        };
+        let execute = ExecutePreparedReadBatch {
+            handle: PreparedHandle([1; 16]),
+            argument_sets: self.body.argument_sets.clone(),
+        };
+        let maximum = (CLIENT_MAX_FRAME as usize).saturating_sub(MAX_HEADER_LEN);
+        if prepare.encode().map_err(Failure::usage)?.len() > maximum
+            || execute.encode().map_err(Failure::usage)?.len() > maximum
+        {
+            return Err(Failure::usage(
+                "prepared read batch exceeds the client frame limit; it was not sent",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Prepare once, then rebind every argument set in one native read batch.
+    /// Preparing does not acquire the execution snapshot or consume a row.
+    pub(super) async fn execute_prepared_reads(
+        self,
+        cx: &Cx,
+        client: &mut Client,
+        robot: bool,
+        out: &mut impl Write,
+    ) -> Result<(), Failure> {
+        cx.checkpoint().map_err(Failure::query)?;
+        let representative = self
+            .body
+            .argument_sets
+            .first()
+            .ok_or_else(|| Failure::usage("--rows-file needs at least one argument set"))?
+            .clone();
+        let handle = client
+            .prepare_read(cx, &self.body.statement, representative)
+            .await
+            .map_err(failure)?;
+        execute_consistent_reads(
+            cx,
+            client,
+            ConsistentReads::Prepared(ExecutePreparedReadBatch {
+                handle,
+                argument_sets: self.body.argument_sets,
+            }),
+            robot,
+            out,
+        )
+        .await
+        // Closing the invocation's connection releases its prepared template.
+    }
 }
 
 enum ConsistentReads {
     Parameters(ExecuteBatch),
+    Prepared(ExecutePreparedReadBatch),
     Statements(ExecuteReadStatements),
 }
 
@@ -506,7 +583,7 @@ async fn execute_consistent_reads(
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let label = match &request {
-        ConsistentReads::Parameters(_) => "argument set",
+        ConsistentReads::Parameters(_) | ConsistentReads::Prepared(_) => "argument set",
         ConsistentReads::Statements(_) => "statement",
     };
     let sink = std::sync::Mutex::new(BatchReadOutput {
@@ -528,6 +605,19 @@ async fn execute_consistent_reads(
                 .execute_read_batch_streaming(
                     cx,
                     &body.statement,
+                    body.argument_sets,
+                    |index, seq, columns| lock().columns(cx, index, seq, columns),
+                    |index, row| lock().row(cx, index, &row),
+                    |index, seq, rows| lock().result_end(index, seq, rows),
+                )
+                .await
+        }
+
+        ConsistentReads::Prepared(body) => {
+            client
+                .execute_prepared_read_batch_streaming(
+                    cx,
+                    body.handle,
                     body.argument_sets,
                     |index, seq, columns| lock().columns(cx, index, seq, columns),
                     |index, row| lock().row(cx, index, &row),
@@ -880,6 +970,56 @@ mod tests {
         let error = PreparedBatch::parse(&(statement + " "), "[{}]", || Ok(()))
             .err()
             .unwrap();
+        assert_eq!(error.code, 2);
+        assert!(error.message.contains("frame limit"));
+    }
+
+    #[test]
+    fn prepared_read_admission_checks_its_own_count_and_both_wire_requests() {
+        for count in [1, MAX_READ_BATCH_STATEMENTS] {
+            let input = format!("[{}]", vec!["{}"; count].join(","));
+            let batch = PreparedBatch::parse("RETURN 1", &input, || Ok(()))
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            batch
+                .admit_prepared_reads()
+                .unwrap_or_else(|error| panic!("{}", error.message));
+        }
+        // The ordinary file grammar allows more independent reads than one
+        // consistent native batch. Refuse this before reading credentials.
+        let input = format!("[{}]", vec!["{}"; MAX_READ_BATCH_STATEMENTS + 1].join(","));
+        let batch = PreparedBatch::parse("RETURN 1", &input, || Ok(()))
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let error = batch.admit_prepared_reads().expect_err("batch count bound");
+        assert_eq!(error.code, 2);
+        assert!(error.message.contains("1..=32"));
+
+        // Both encodings differ from the ordinary argument-file envelope.
+        // Exercise the fixed handle overhead with a short, unexecuted text.
+        let mut batch = PreparedBatch {
+            body: ExecuteBatch {
+                statement: "x".into(),
+                argument_sets: vec![vec![("x".into(), WireValue::Text(String::new()))]],
+            },
+        };
+        let overhead = ExecutePreparedReadBatch {
+            handle: PreparedHandle([1; 16]),
+            argument_sets: batch.body.argument_sets.clone(),
+        }
+        .encode()
+        .unwrap()
+        .len();
+        let payload = (CLIENT_MAX_FRAME as usize) - MAX_HEADER_LEN - overhead;
+        batch.body.argument_sets[0][0].1 = WireValue::Text("x".repeat(payload));
+        batch
+            .admit_prepared_reads()
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let WireValue::Text(value) = &mut batch.body.argument_sets[0][0].1 else {
+            unreachable!();
+        };
+        value.push('x');
+        assert!(batch.body.encode().unwrap().len()
+            <= (CLIENT_MAX_FRAME as usize) - MAX_HEADER_LEN);
+        let error = batch.admit_prepared_reads().expect_err("fixed handle overhead");
         assert_eq!(error.code, 2);
         assert!(error.message.contains("frame limit"));
     }

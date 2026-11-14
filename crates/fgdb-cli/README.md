@@ -2,8 +2,8 @@
 
 `fgdb-cli` owns the one `fgdb` binary (`src/main.rs`). Every command opens the
 real `fgdb::Database` directory through the production Asupersync runtime and
-purpose-narrowed contexts. There is no alternate engine, no network client and
-no daemon. Use one process at a time per database directory: the embedded owner
+purpose-narrowed contexts. The remote commands connect to `fgdbd` through its
+FGP client. Use one process at a time per embedded database directory: the embedded owner
 does not add cross-process coordination. Anyone holding the key file has full
 access to the data. The CLI is not a sandbox.
 
@@ -308,6 +308,43 @@ fgdb --robot search --db ./graph --key-file ./graph.keys \
   --text 'graph memory' --text-property title \
   --vector 0.1,0.9 --vector-property x --vector-property y --k 5
 ```
+
+## Consistent prepared reads from a server
+
+`remote query --prepared-batch --rows-file` prepares one read template and
+executes every argument set in one pinned server session. Ordinary reads share
+the execution snapshot and one cumulative signed allowance. An explicit
+temporal selector can choose a different retained cut for each argument set;
+the corresponding columns record reports that exact sequence.
+
+Use a JSON array of objects whose values use the typed `--param` spellings:
+
+```json
+[
+  {"name": "text:Ada"},
+  {"name": "text:Grace"}
+]
+```
+
+```sh
+fgdb --robot remote --addr 127.0.0.1:7688 --token-file ./token.hex \
+  --database social --rows-file ./names.json --prepared-batch \
+  query 'MATCH (n:Person {name:$name}) RETURN n.name AS name'
+```
+
+CSV input uses the same `--csv-types` declarations as ordinary remote argument
+files. The first argument set supplies the prepared template's structural
+operand types; all sets supply fresh values when the batch executes. The
+complete file and both request envelopes are checked before credential access.
+The batch accepts 1–32 sets and buffered read mode. It cannot combine with
+`--consistent-batch`, which keeps its existing raw-text binding behavior.
+
+Execution and wire admission finish before delivery begins. Robot columns and
+rows carry a one-based `statement`; columns also carry the exact `seq`.
+Only the single terminal `result kind=read_batch` confirms complete delivery.
+An output error cancels and drains the request, and no refusal retries,
+reprepares, or falls back to independent reads. Use the ordinary TLS options
+when connecting through an encrypted endpoint.
 
 ## Robot mode
 

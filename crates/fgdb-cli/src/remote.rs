@@ -55,6 +55,9 @@ struct RemoteOptions {
     /// Admit every parameter set against one pinned read session and share its
     /// execution allowance. The batch has one successful terminal record.
     consistent_batch: bool,
+    /// Reuse one prepared template in a consistent buffered read batch.
+    /// The first argument set fixes structural operand types.
+    prepared_batch: bool,
     /// Explicit CSV column types; absent means the typed JSON file format.
     csv_types: Option<batch::CsvSchema>,
     /// Typed JSONL input, one fresh prepared autocommit per physical record.
@@ -86,6 +89,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut rows_file = None;
     let mut statements_file = None;
     let mut consistent_batch = false;
+    let mut prepared_batch = false;
     let mut csv_types = None;
     let mut prepared_jsonl = None;
     let mut write_mode = None;
@@ -123,6 +127,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
                 statements_file = Some(PathBuf::from(value()?));
             }
             "--consistent-batch" if !consistent_batch => consistent_batch = true,
+            "--prepared-batch" if !prepared_batch => prepared_batch = true,
             "--prepared-jsonl" if prepared_jsonl.is_none() => {
                 prepared_jsonl = Some(PathBuf::from(value()?));
             }
@@ -250,11 +255,12 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             || csv_types.is_some()
             || prepared_jsonl.is_some()
             || consistent_batch
+            || prepared_batch
             || !parameters.is_empty()
             || !param_files.is_empty())
     {
         return Err(Failure::usage(
-            "--statements-file supplies every read and its parameters; it cannot combine with argument-file, parameter or --consistent-batch options",
+            "--statements-file supplies every read and its parameters; it cannot combine with argument-file, parameter or batch-mode options",
         ));
     }
     if csv_types.is_some() && rows_file.is_none() {
@@ -263,6 +269,18 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     if consistent_batch && (verb != "query" || mode != ExecuteMode::Read || rows_file.is_none()) {
         return Err(Failure::usage(
             "--consistent-batch requires remote query --rows-file with --read-mode buffered",
+        ));
+    }
+    if prepared_batch
+        && (verb != "query" || mode != ExecuteMode::Read || rows_file.is_none())
+    {
+        return Err(Failure::usage(
+            "--prepared-batch requires remote query --rows-file with --read-mode buffered",
+        ));
+    }
+    if prepared_batch && consistent_batch {
+        return Err(Failure::usage(
+            "choose either --prepared-batch or --consistent-batch",
         ));
     }
     if prepared_jsonl.is_some()
@@ -328,6 +346,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         rows_file,
         statements_file,
         consistent_batch,
+        prepared_batch,
         csv_types,
         prepared_jsonl,
         write_mode: write_mode.unwrap_or_default(),
@@ -648,6 +667,9 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
                 options.csv_types.as_ref(),
             )
             .await?;
+            if options.prepared_batch {
+                batch.admit_prepared_reads()?;
+            }
             let mut client = connect(&cx, &options).await?;
             client
                 .select(&cx, &options.database)
@@ -655,6 +677,10 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
                 .map_err(failure)?;
             if options.mode == ExecuteMode::Write {
                 batch.execute(&cx, &mut client, robot, out).await?;
+            } else if options.prepared_batch {
+                batch
+                    .execute_prepared_reads(&cx, &mut client, robot, out)
+                    .await?;
             } else if options.consistent_batch {
                 batch
                     .execute_consistent_reads(&cx, &mut client, robot, out)
@@ -1282,6 +1308,87 @@ mod tests {
                     .expect("invalid TLS flags refuse");
                 assert_eq!(failure.code, 2);
             }
+        }
+    }
+
+    #[test]
+    fn prepared_batches_require_one_buffered_query_argument_file() {
+        for flags in [
+            vec!["--prepared-batch", "--rows-file", "rows.json"],
+            vec![
+                "--rows-file", "rows.csv", "--csv-types", "name=text",
+                "--prepared-batch",
+            ],
+            vec![
+                "--prepared-batch", "--rows-file", "rows.json",
+                "--read-mode", "buffered",
+            ],
+        ] {
+            let parsed =
+                options("query", &flags).unwrap_or_else(|error| panic!("{}", error.message));
+            assert!(parsed.prepared_batch);
+            assert!(!parsed.consistent_batch);
+            assert_eq!(parsed.mode, ExecuteMode::Read);
+        }
+        assert!(
+            !options("query", &["--rows-file", "rows.json"])
+                .unwrap_or_else(|error| panic!("{}", error.message))
+                .prepared_batch
+        );
+        for (verb, flags) in [
+            ("query", vec!["--prepared-batch"]),
+            ("write", vec!["--prepared-batch", "--rows-file", "rows.json"]),
+            ("subscribe", vec!["--prepared-batch", "--rows-file", "rows.json"]),
+            (
+                "query",
+                vec![
+                    "--prepared-batch", "--rows-file", "rows.json",
+                    "--read-mode", "source",
+                ],
+            ),
+            (
+                "query",
+                vec![
+                    "--prepared-batch", "--rows-file", "rows.json",
+                    "--read-mode", "ordered",
+                ],
+            ),
+            (
+                "query",
+                vec![
+                    "--prepared-batch", "--prepared-batch",
+                    "--rows-file", "rows.json",
+                ],
+            ),
+            (
+                "query",
+                vec![
+                    "--prepared-batch", "--consistent-batch",
+                    "--rows-file", "rows.json",
+                ],
+            ),
+            (
+                "query",
+                vec![
+                    "--prepared-batch", "--rows-file", "rows.json",
+                    "--param", "name=text:Ada",
+                ],
+            ),
+            (
+                "query",
+                vec![
+                    "--prepared-batch", "--rows-file", "rows.json",
+                    "--statements-file", "reads.json",
+                ],
+            ),
+        ] {
+            assert_eq!(
+                options(verb, &flags)
+                    .err()
+                    .expect("invalid prepared batch flags")
+                    .code,
+                2
+            );
         }
     }
 

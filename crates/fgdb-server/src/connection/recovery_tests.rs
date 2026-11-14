@@ -378,13 +378,14 @@ fn recovery_resets_credit_blocked_subscriptions_at_the_last_complete_batch() {
 #[test]
 fn recovery_refuses_consistent_read_batches_before_send_and_while_credit_blocked() {
     let ((), report) = run_async_under_lab(0x79a0_0109, |root| async move {
-        for before_first_byte in [true, false] {
+        for (before_first_byte, prepared) in [(true, false), (false, false), (true, true), (false, true)] {
             let (server, token, _) = served(
                 &root,
-                if before_first_byte {
-                    "read-batch-unwritten"
-                } else {
-                    "read-batch-credit"
+                match (before_first_byte, prepared) {
+                    (true, false) => "read-batch-unwritten",
+                    (false, false) => "read-batch-credit",
+                    (true, true) => "prepared-read-batch-unwritten",
+                    (false, true) => "prepared-read-batch-credit",
                 },
             )
             .await;
@@ -405,16 +406,36 @@ fn recovery_refuses_consistent_read_batches_before_send_and_while_credit_blocked
                 false,
             );
             let waiter = server.shutdown.waiter();
+            let statement = if prepared {
+                let definition = crate::execute::prepare_read(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        mode: fgdb_protocol::body::PrepareMode::Read,
+                        statement: "MATCH (n) RETURN 7 AS value".into(),
+                        parameters: vec![],
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+                Statement::PreparedReadBatch {
+                    definition: Ok(Arc::new(PreparedDefinition::from(definition))),
+                    argument_sets: vec![vec![], vec![]],
+                }
+            } else {
+                Statement::ReadBatch(ExecuteBatch {
+                    statement: "MATCH (n) RETURN 7 AS value".into(),
+                    argument_sets: vec![vec![], vec![]],
+                })
+            };
             let mut execution = Box::pin(lane.execute_statement(
                 &root,
                 &waiter,
                 db,
                 &token,
                 1,
-                Statement::ReadBatch(ExecuteBatch {
-                    statement: "MATCH (n) RETURN 7 AS value".into(),
-                    argument_sets: vec![vec![], vec![]],
-                }),
+                statement,
             ));
             poll_fn(|task| {
                 assert!(execution.as_mut().poll(task).is_pending());

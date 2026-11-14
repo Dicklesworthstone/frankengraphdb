@@ -23,7 +23,8 @@ use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
     Execute, ExecuteBatch, ExecuteConditionalWrite, ExecuteDiff, ExecuteMode, ExecutePrepared,
-    ExecutePreparedBatch, ExecutePreparedDiff, ExecuteReadStatements, Hello, HelloAck,
+    ExecutePreparedBatch, ExecutePreparedDiff, ExecutePreparedReadBatch, ExecuteReadStatements,
+    Hello, HelloAck,
     MAX_ROWS_PER_CHUNK, MAX_VALUE_NODES, Outcome, Ping, Prepare, Prepared, PreparedExecutionMode,
     PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
     WireValue,
@@ -153,6 +154,10 @@ enum Statement {
         parameters: Vec<(String, WireValue)>,
     },
     PreparedBatch {
+        definition: Result<Arc<PreparedDefinition>, Refusal>,
+        argument_sets: Vec<Vec<(String, WireValue)>>,
+    },
+    PreparedReadBatch {
         definition: Result<Arc<PreparedDefinition>, Refusal>,
         argument_sets: Vec<Vec<(String, WireValue)>>,
     },
@@ -802,7 +807,9 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     }
                 }
             }
-            FrameKind::ExecuteReadBatch | FrameKind::ExecuteReadStatements => {
+            FrameKind::ExecuteReadBatch
+            | FrameKind::ExecuteReadStatements
+            | FrameKind::ExecutePreparedReadBatch => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
                 };
@@ -815,6 +822,15 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                         ExecuteReadStatements::decode(frame.payload())
                             .map(Statement::ReadStatements),
                         "malformed EXECUTE_READ_STATEMENTS",
+                    ),
+                    FrameKind::ExecutePreparedReadBatch => (
+                        ExecutePreparedReadBatch::decode(frame.payload()).map(|statement| {
+                            Statement::PreparedReadBatch {
+                                definition: prepared_statements.get(statement.handle),
+                                argument_sets: statement.argument_sets,
+                            }
+                        }),
+                        "malformed EXECUTE_PREPARED_READ_BATCH",
                     ),
                     _ => unreachable!("read batch request selected"),
                 };
@@ -1198,6 +1214,21 @@ impl Lane {
             Statement::ReadStatements(statement) => Some(
                 read_batch::ReadBatchStatement::Statements(&statement.statements),
             ),
+            Statement::PreparedReadBatch {
+                definition,
+                argument_sets,
+            } => Some(read_batch::ReadBatchStatement::Prepared {
+                definition: match definition {
+                    Ok(definition) => definition.read().ok_or_else(|| {
+                        Refusal::new(
+                            ErrorCode::Statement,
+                            "a prepared read batch requires a read handle",
+                        )
+                    }),
+                    Err(error) => Err(Refusal::new(error.code, error.message.clone())),
+                },
+                arguments: argument_sets,
+            }),
             _ => None,
         };
         if let Some(statement) = read_batch {
@@ -1372,7 +1403,9 @@ impl Lane {
                 }
             },
             Statement::Batch(statement) => write_batch(cx, db, token, &statement).await,
-            Statement::ReadBatch(_) | Statement::ReadStatements(_) => {
+            Statement::ReadBatch(_)
+            | Statement::ReadStatements(_)
+            | Statement::PreparedReadBatch { .. } => {
                 unreachable!("read batch dispatched above")
             }
             Statement::ConditionalWrite(statement) => {
@@ -1867,6 +1900,7 @@ impl Lane {
             | FrameKind::ExecuteBatch
             | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteReadStatements
+            | FrameKind::ExecutePreparedReadBatch
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
@@ -2261,6 +2295,7 @@ impl Lane {
             | FrameKind::ExecuteBatch
             | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteReadStatements
+            | FrameKind::ExecutePreparedReadBatch
             | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared

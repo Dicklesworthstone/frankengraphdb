@@ -492,3 +492,377 @@ fn http_read_batches_share_authority_and_preserve_each_selected_cut() {
         task.join(cx).await.unwrap();
     });
 }
+
+async fn refuse_prepared_batch_without_prefix(
+    cx: &Cx,
+    client: &mut Client,
+    handle: fgdb_protocol::body::PreparedHandle,
+    arguments: Vec<Vec<(String, WireValue)>>,
+) -> ClientError {
+    let seen = std::sync::atomic::AtomicUsize::new(0);
+    let failure = client
+        .execute_prepared_read_batch_streaming(
+            cx,
+            handle,
+            arguments,
+            |_, _, _| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+    failure
+}
+
+#[test]
+fn prepared_read_batches_rebind_masked_current_and_historical_inputs_on_one_pin() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "prepared-read-batch-values").await;
+        let mut writer = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:'Ann',age:10}), (:Person {name:'Bob',age:20}), (:Company {name:'Hidden',age:999})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut permitted = grant(Rights::Read);
+        permitted.labels = Scope::only([LabelId(1)]);
+        permitted.limits.max_rows = 4;
+        permitted.limits.max_nodes = 4;
+        let mut reader = Client::connect(cx, addr, token(&permitted)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let current = reader
+            .prepare_read(
+                cx,
+                "MATCH (n) WHERE n.age >= $minimum RETURN n.age AS age ORDER BY age",
+                vec![("minimum".into(), WireValue::Int(1000))],
+            )
+            .await
+            .unwrap();
+        let arguments = || {
+            [0, 20]
+                .into_iter()
+                .map(|minimum| vec![("minimum".into(), WireValue::Int(minimum))])
+                .collect()
+        };
+        let first = reader
+            .execute_prepared_read_batch(cx, current, arguments())
+            .await
+            .unwrap();
+        assert_eq!((first.end.results, first.end.rows), (2, 3));
+        assert!(first.results.iter().all(|result| result.seq == 1));
+        assert_eq!(
+            first.results[0].rows,
+            vec![vec![WireValue::Int(10)], vec![WireValue::Int(20)]]
+        );
+        assert_eq!(first.results[1].rows, vec![vec![WireValue::Int(20)]]);
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person {name:'Ann'}) SET n.age=30",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let next = reader
+            .execute_prepared_read_batch(cx, current, arguments())
+            .await
+            .unwrap();
+        assert!(next.results.iter().all(|result| result.seq == 2));
+        for result in &next.results {
+            assert_eq!(result.columns, ["age"]);
+            assert_eq!(
+                result.rows,
+                vec![vec![WireValue::Int(20)], vec![WireValue::Int(30)]]
+            );
+        }
+        let historical = reader
+            .prepare_read(
+                cx,
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $cut RETURN n.age AS age ORDER BY age",
+                vec![("cut".into(), WireValue::Count(2))],
+            )
+            .await
+            .unwrap();
+        let answer = reader
+            .execute_prepared_read_batch(
+                cx,
+                historical,
+                vec![
+                    vec![("cut".into(), WireValue::Count(1))],
+                    vec![("cut".into(), WireValue::Count(2))],
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer.results[0].seq, 1);
+        assert_eq!(answer.results[0].rows, first.results[0].rows);
+        assert_eq!(answer.results[1].seq, 2);
+        assert_eq!(answer.results[1].rows, next.results[0].rows);
+        reader.release_prepared(cx, current).await.unwrap();
+        reader.release_prepared(cx, historical).await.unwrap();
+        reader.close(cx).await.unwrap();
+        writer.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn prepared_read_batches_share_signed_rows_nodes_and_work_without_a_successful_prefix() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "prepared-read-batch-limits").await;
+        let mut writer = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {age:10}), (:Person {age:20})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        for dimension in ["rows", "nodes", "work"] {
+            let mut scope = grant(Rights::Read);
+            let (statement, parameter, count) = match dimension {
+                "rows" => {
+                    scope.limits.max_rows = 3;
+                    ("MATCH (n) RETURN n.age AS age", vec![], 2)
+                }
+                "nodes" => {
+                    scope.limits.max_nodes = 3;
+                    ("MATCH (n) RETURN n.age AS age", vec![], 2)
+                }
+                _ => {
+                    scope.limits.max_work = 256;
+                    (
+                        "RETURN $value AS value",
+                        vec![("value".into(), WireValue::Int(7))],
+                        32,
+                    )
+                }
+            };
+            let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+            reader.select(cx, "social").await.unwrap();
+            let handle = reader
+                .prepare_read(cx, statement, parameter.clone())
+                .await
+                .unwrap();
+            let failure = refuse_prepared_batch_without_prefix(
+                cx,
+                &mut reader,
+                handle,
+                vec![parameter.clone(); count],
+            )
+            .await;
+            assert_eq!(server_code(failure), ErrorCode::Budget, "{dimension}");
+            let one = reader
+                .execute_prepared_read_batch(cx, handle, vec![parameter])
+                .await
+                .unwrap();
+            assert_eq!(one.end.results, 1);
+            assert_eq!(one.end.rows, if dimension == "work" { 1 } else { 2 });
+            reader.close(cx).await.unwrap();
+        }
+        writer.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn prepared_read_batches_refuse_late_binding_execution_and_frame_errors_atomically() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "prepared-read-batch-errors").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        for (statement, representative, arguments) in [
+            (
+                "RETURN 12/$divisor AS value",
+                vec![("divisor".into(), WireValue::Int(3))],
+                vec![
+                    vec![("divisor".into(), WireValue::Int(3))],
+                    vec![("divisor".into(), WireValue::Int(0))],
+                ],
+            ),
+            (
+                "RETURN $value AS value",
+                vec![("value".into(), WireValue::Int(7))],
+                vec![vec![("value".into(), WireValue::Int(7))], vec![]],
+            ),
+            (
+                "RETURN range(1,$end) AS values",
+                vec![("end".into(), WireValue::Int(1))],
+                vec![
+                    vec![("end".into(), WireValue::Int(1))],
+                    vec![("end".into(), WireValue::Int(2000))],
+                ],
+            ),
+        ] {
+            let handle = client
+                .prepare_read(cx, statement, representative.clone())
+                .await
+                .unwrap();
+            let failure =
+                refuse_prepared_batch_without_prefix(cx, &mut client, handle, arguments).await;
+            if statement.contains("range") {
+                let ClientError::Server { code, message } = failure else {
+                    panic!("expected a wire refusal");
+                };
+                assert_eq!(code, ErrorCode::Execution);
+                assert!(message.contains("negotiated frame limit"));
+            } else {
+                assert!(matches!(failure, ClientError::Server { .. }));
+            }
+            let answer = client
+                .execute_prepared_read_batch(cx, handle, vec![representative])
+                .await
+                .unwrap();
+            assert_eq!((answer.end.results, answer.end.rows), (1, 1));
+            client.release_prepared(cx, handle).await.unwrap();
+        }
+        let write = client
+            .prepare_write(cx, "CREATE (:Person)", vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            server_code(
+                refuse_prepared_batch_without_prefix(cx, &mut client, write, vec![vec![]]).await
+            ),
+            ErrorCode::Statement
+        );
+        let unchanged = client
+            .execute(cx, ExecuteMode::Read, "MATCH (n) RETURN n", vec![])
+            .await
+            .unwrap();
+        assert!(unchanged.rows.is_empty());
+        assert_eq!(unchanged.outcome, Outcome::Rows { seq: 0 });
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn prepared_read_batches_keep_connection_authority_and_template_lifetime_fences() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "prepared-read-batch-handles").await;
+        let credential = token(&grant(Rights::Read));
+        let mut client = Client::connect(cx, addr, credential.clone()).await.unwrap();
+        client.select(cx, "social").await.unwrap();
+        let handle = client.prepare_read(cx, "RETURN 7 AS value", vec![]).await.unwrap();
+        let mut foreign = Client::connect(cx, addr, credential.clone()).await.unwrap();
+        foreign.select(cx, "social").await.unwrap();
+        assert_eq!(
+            server_code(
+                refuse_prepared_batch_without_prefix(cx, &mut foreign, handle, vec![vec![]]).await
+            ),
+            ErrorCode::Statement
+        );
+        let mut write_only = Client::connect(cx, addr, token(&grant(Rights::Write))).await.unwrap();
+        write_only.select(cx, "social").await.unwrap();
+        assert_eq!(
+            server_code(
+                refuse_prepared_batch_without_prefix(cx, &mut write_only, handle, vec![vec![]]).await
+            ),
+            ErrorCode::PermissionDenied
+        );
+        let boundary = client
+            .execute_prepared_read_batch(cx, handle, vec![vec![]; 32])
+            .await
+            .unwrap();
+        assert_eq!((boundary.end.results, boundary.end.rows), (32, 32));
+        client.refresh_authority(cx, credential).await.unwrap();
+        assert_eq!(
+            server_code(
+                refuse_prepared_batch_without_prefix(cx, &mut client, handle, vec![vec![]]).await
+            ),
+            ErrorCode::Statement
+        );
+        let handle = client.prepare_read(cx, "RETURN 7 AS value", vec![]).await.unwrap();
+        client.release_prepared(cx, handle).await.unwrap();
+        assert_eq!(
+            server_code(
+                refuse_prepared_batch_without_prefix(cx, &mut client, handle, vec![vec![]]).await
+            ),
+            ErrorCode::Statement
+        );
+        client.close(cx).await.unwrap();
+        foreign.close(cx).await.unwrap();
+        write_only.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn prepared_read_batch_callback_cancellation_drains_and_reuses_the_original_template() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "prepared-read-batch-cancel").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        let handle = client
+            .prepare_read(cx, "UNWIND range(1,20) AS value RETURN value", vec![])
+            .await
+            .unwrap();
+        for stage in 0..3 {
+            let result = client
+                .execute_prepared_read_batch_streaming(
+                    cx,
+                    handle,
+                    vec![vec![], vec![]],
+                    |_, _, _| {
+                        if stage == 0 {
+                            Err(ClientError::Protocol("sink stopped"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |_, _| {
+                        if stage == 1 {
+                            Err(ClientError::Protocol("sink stopped"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |_, _, _| Err(ClientError::Protocol("sink stopped")),
+                )
+                .await;
+            assert!(matches!(result, Err(ClientError::Protocol("sink stopped"))));
+            let next = client
+                .execute_prepared_read_batch(cx, handle, vec![vec![]])
+                .await
+                .unwrap();
+            assert_eq!((next.end.results, next.end.rows), (1, 20));
+            assert_eq!(next.results[0].rows.first(), Some(&vec![WireValue::Int(1)]));
+            assert_eq!(next.results[0].rows.last(), Some(&vec![WireValue::Int(20)]));
+        }
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
