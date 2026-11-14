@@ -12,6 +12,7 @@
 mod batch;
 mod diff;
 mod prepared_writes;
+mod transaction;
 
 use super::refusal::Code;
 use super::{Failure, emit, float_text, hex, render_row_body, render_rows};
@@ -49,9 +50,11 @@ struct RemoteOptions {
     /// A complete typed argument file: one atomic write batch, or repeated
     /// prepared reads with one completed result block per argument set.
     rows_file: Option<PathBuf>,
-    /// Distinct read texts and their own arguments, executed in one pinned
-    /// session with one cumulative allowance and one batch completion.
+    /// Complete statement input for a consistent read batch or one explicit
+    /// transaction. Every record retains its own text and typed arguments.
     statements_file: Option<PathBuf>,
+    /// The statements file is a mixed read/write transaction script.
+    transaction: bool,
     /// Admit every parameter set against one pinned read session and share its
     /// execution allowance. The batch has one successful terminal record.
     consistent_batch: bool,
@@ -194,23 +197,27 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         at += 1;
     }
     let (verb, statement) = match positional.as_slice() {
-        [verb] if verb == "query-batch" => (verb.as_str(), String::new()),
-        [verb, statement] if verb != "query-batch" => (verb.as_str(), statement.clone()),
+        [verb] if matches!(verb.as_str(), "query-batch" | "transaction") => {
+            (verb.as_str(), String::new())
+        }
+        [verb, statement] if !matches!(verb.as_str(), "query-batch" | "transaction") => {
+            (verb.as_str(), statement.clone())
+        }
         _ => {
             return Err(Failure::usage(
-                "remote needs query|write|subscribe|diff and one statement, or query-batch --statements-file",
+                "remote needs query|write|subscribe|diff and one statement, or query-batch|transaction --statements-file",
             ));
         }
     };
     let mode = match verb {
         "query" => read_mode.unwrap_or(ExecuteMode::Read),
         "query-batch" => ExecuteMode::Read,
-        "write" => ExecuteMode::Write,
+        "write" | "transaction" => ExecuteMode::Write,
         "subscribe" => ExecuteMode::Subscribe,
         "diff" => ExecuteMode::Read,
         _ => {
             return Err(Failure::usage(
-                "remote needs query, query-batch, write, subscribe or diff",
+                "remote needs query, query-batch, transaction, write, subscribe or diff",
             ));
         }
     };
@@ -245,9 +252,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--rows-file applies only to query or write and cannot be combined with --param or --param-file",
         ));
     }
-    if (verb == "query-batch") != statements_file.is_some() {
+    if matches!(verb, "query-batch" | "transaction") != statements_file.is_some() {
         return Err(Failure::usage(
-            "--statements-file is required by and applies only to remote query-batch",
+            "--statements-file is required by and applies only to remote query-batch or transaction",
         ));
     }
     if statements_file.is_some()
@@ -260,7 +267,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             || !param_files.is_empty())
     {
         return Err(Failure::usage(
-            "--statements-file supplies every read and its parameters; it cannot combine with argument-file, parameter or batch-mode options",
+            "--statements-file supplies every statement and its parameters; it cannot combine with argument-file, parameter or batch-mode options",
         ));
     }
     if csv_types.is_some() && rows_file.is_none() {
@@ -345,6 +352,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         tls,
         rows_file,
         statements_file,
+        transaction: verb == "transaction",
         consistent_batch,
         prepared_batch,
         csv_types,
@@ -637,6 +645,23 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
                 .await
                 .map_err(failure)?;
             writes.execute(&cx, &mut client, robot, out).await?;
+            let _ = client.close(&cx).await;
+            Ok(())
+        });
+    }
+    if let Some(path) = &options.statements_file
+        && options.transaction
+    {
+        return runtime.block_on(async {
+            // Admit every step before credentials, connection or BEGIN. The
+            // shared client driver owns provisional delivery and final commit.
+            let script = transaction::TransactionScript::read(&cx, path).await?;
+            let mut client = connect(&cx, &options).await?;
+            client
+                .select(&cx, &options.database)
+                .await
+                .map_err(failure)?;
+            script.execute(&cx, &mut client, robot, out).await?;
             let _ = client.close(&cx).await;
             Ok(())
         });
@@ -1233,6 +1258,60 @@ mod tests {
         for verb in ["query", "write", "subscribe"] {
             assert!(self::options(verb, &["--statements-file", "reads.json"]).is_err());
         }
+    }
+
+    #[test]
+    fn transaction_scripts_require_one_file_and_reject_unrelated_execution_flags() {
+        let base = [
+            "--addr",
+            "127.0.0.1:7688",
+            "--token-file",
+            "token.hex",
+            "--database",
+            "social",
+        ];
+        let script = |extra: &[&str]| {
+            let mut args = base.to_vec();
+            args.extend(["transaction", "--statements-file", "steps.json"]);
+            args.extend_from_slice(extra);
+            parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>())
+        };
+        let options = script(&[]).unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(options.transaction);
+        assert_eq!(options.statements_file, Some(PathBuf::from("steps.json")));
+        assert_eq!(options.mode, ExecuteMode::Write);
+        assert!(options.statement.is_empty());
+        assert!(
+            script(&["--tls-server-name", "db.example", "--tls-ca-file", "ca.pem"]).is_ok()
+        );
+        for flags in [
+            vec!["RETURN 1"],
+            vec!["--statements-file", "again.json"],
+            vec!["--rows-file", "rows.json"],
+            vec!["--csv-types", "id=int64"],
+            vec!["--prepared-jsonl", "writes.jsonl"],
+            vec!["--consistent-batch"],
+            vec!["--prepared-batch"],
+            vec!["--param", "id=int:1"],
+            vec!["--param-file", "ids=ids.json"],
+            vec!["--read-mode", "buffered"],
+            vec!["--read-mode", "source"],
+            vec!["--if-current", "1"],
+            vec!["--max-batches", "1"],
+            vec!["--before", "1"],
+            vec!["--after", "1"],
+            vec!["--stream"],
+            vec!["--write-mode", "stats"],
+        ] {
+            assert_eq!(
+                script(&flags).err().expect("unrelated input refused").code,
+                2,
+                "{flags:?}"
+            );
+        }
+        let mut args = base.to_vec();
+        args.push("transaction");
+        assert!(parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
     }
 
     #[test]

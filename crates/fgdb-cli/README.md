@@ -346,6 +346,73 @@ An output error cancels and drains the request, and no refusal retries,
 reprepares, or falls back to independent reads. Use the ordinary TLS options
 when connecting through an encrypted endpoint.
 
+## Mixed read/write transactions on a server
+
+`remote transaction --statements-file` runs a finite script through one explicit
+FGP transaction. Each step supplies its own statement and typed parameters;
+reads and writes observe the preceding steps' staged effects. All steps share
+the server's original capability and cumulative execution limits.
+
+For example, save the following as `steps.json`, with `Person`, `name` and
+`age` bound by the server:
+
+```json
+[
+  {
+    "mode": "write",
+    "statement": "CREATE (:Person {name: $name, age: $age})",
+    "parameters": {"name": "text:Ada", "age": "int:37"}
+  },
+  {
+    "mode": "read",
+    "statement": "MATCH (p:Person) WHERE p.name = $name RETURN p.age AS age",
+    "parameters": {"name": "text:Ada"}
+  },
+  {
+    "mode": "write",
+    "statement": "MATCH (p:Person) WHERE p.name = $name SET p.age = $age RETURN p.age AS age",
+    "parameters": {"name": "text:Ada", "age": "int:38"}
+  }
+]
+```
+
+```sh
+fgdb --robot remote --addr 127.0.0.1:7688 --token-file ./token.hex \
+  --database social transaction --statements-file ./steps.json
+```
+
+The regular UTF-8 input file must contain 1–32 objects, at most 1 MiB in total.
+Each object requires `mode` (`read` or `write`) and a nonempty `statement`;
+`parameters` is optional and uses the existing typed argument grammar. Unknown
+fields, malformed later records and client-sized request overflows refuse
+before credentials or connection creation. After negotiation, the SDK checks
+**every** transaction envelope against the peer's frame limit before BEGIN.
+GQL syntax, symbols, permissions and execution limits are still checked by the
+server. A late refusal discards the unpublished prefix.
+
+Columns and rows stream as they arrive. In robot mode every such record carries
+a one-based `statement` and `provisional:true`; columns also carry
+`basis_seq`, the original transaction snapshot. These records do not assert
+that any effect committed. The single final `result` has
+`kind:"transaction"`, `outcome:"write_committed"` or
+`outcome:"read_closed"`, the completed `seq`, `basis_seq`,
+`statements` and total row `count`.
+
+Every provisional output flush must succeed before COMMIT is attempted.
+A rejected output callback stops the script and cancels or rolls back its
+unpublished owner. If the commit response is lost, the outcome can be unknown:
+there is no successful terminal, rollback claim or automatic retry. If writing
+the final output fails **after** confirmed completion, the diagnostic retains
+the known sequence; repeating the script could duplicate effects.
+
+The server requires Write or ReadWrite authority to begin, and reads also need
+Read authority. TLS flags work as for other remote commands. This command does
+not accept positional GQL, `--param`, `--rows-file`, prepared-input flags,
+read modes or `--if-current`. Savepoints, reattachment, historical writer reads
+and durable outcome lookup remain outside this connection-scoped profile.
+The CLI streams delivery without collecting the full script's results; each
+server statement still uses the existing buffered execution owner.
+
 ## Robot mode
 
 `fgdb --robot <command>` writes versioned NDJSON on stdout: an `invocation`

@@ -289,6 +289,22 @@ The collected client retains all result rows; streaming delivery avoids that
 client-side collection but does not alter the server's buffered statement
 execution profile.
 
+The CLI exposes the managed driver as
+`remote transaction --statements-file <file>`. A bounded regular UTF-8 JSON
+array contains 1–32 records with explicit `mode: "read" | "write"`,
+`statement` and optional typed `parameters`. Local input admission finishes
+before credential access, and negotiated envelope admission still precedes
+BEGIN. This uses the existing server bindings and original signed allowance.
+
+CLI schema and row records carry a one-based `statement` and
+`provisional:true`; schema records also carry `basis_seq`. No statement END
+emits a success record. The final `kind:"transaction"` result carries
+`outcome:"write_committed" | "read_closed"`, the completed `seq`,
+`basis_seq`, `statements` and total row `count`. The CLI flushes each
+provisional record before allowing the next step or COMMIT. Unknown completion
+emits no success and no rollback claim. A final output error after a validated
+receipt retains the known completion sequence in its diagnostic.
+
 ## fgdbd: the served subset
 
 ### Explicit native transactions

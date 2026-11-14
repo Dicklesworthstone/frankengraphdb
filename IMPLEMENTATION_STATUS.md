@@ -79,6 +79,30 @@ and full exact-tree qualification remain **UNRUN**. These repairs do not close
 `fgdb-w2-txn-lifecycle-mhae`, `fgdb-w4-ssi-witnesses-jds`,
 `fgdb-w10-fgp-core-5b1` or `fgdb-w10-result-machines-eh7`.
 
+The CLI now exposes this driver as `remote transaction --statements-file`.
+Its complete regular UTF-8 JSON array contains 1–32 explicitly classified
+read/write statements with independent typed arguments. Controlled parsing,
+input/value bounds and client frame admission precede credentials. The command
+rejects unrelated input, read-mode, conditional-write and prepared-mode flags.
+
+Columns and rows flush without collecting the full answer and carry an
+explicit provisional marker plus a one-based statement index; columns retain
+the original basis sequence. Only the final `transaction` result asserts
+write-commit or read-close completion. Original output failures are retained.
+Unknown completion produces no success or rollback claim, while output failure
+after a validated receipt retains the known sequence and forbids automatic
+replay. Established-connection transport failures keep the I/O exit class.
+
+The CLI regression sources exercise literal robot/human output, empty results,
+full-width and fresh parameters, late refusals, callback cancellation with END
+in flight, exact negotiated frame boundaries, lost completion and failed final
+flush. Parser controls cover malformed late input, finite count and byte/value
+bounds, and cancellation. The independent robot schema freeze is extended for
+the transaction fields; its previously missing prepared-batch description is
+also reconciled with the already implemented contract. Source/API review and
+JSON parsing of the embedded schema completed. All Rust compilation, runtime
+tests and repository gates remain **UNRUN** under the executor failure above.
+
 ### Consistent prepared read batches across FGP and the CLI — qualification pending
 
 Source added 2026-11-14 exposes `EXECUTE_PREPARED_READ_BATCH` (0x002d)

@@ -27,7 +27,7 @@ const MAX_INPUT_BYTES: usize = CLIENT_MAX_FRAME as usize;
 
 /// Read a finite file before credentials or transport are acquired. Metadata
 /// and actual bytes both enforce the bound, including a file growing mid-read.
-async fn read_input(cx: &Cx, path: &Path, flag: &str) -> Result<Vec<u8>, Failure> {
+pub(super) async fn read_input(cx: &Cx, path: &Path, flag: &str) -> Result<Vec<u8>, Failure> {
     cx.checkpoint().map_err(Failure::io)?;
     let named = asupersync::fs::metadata(path)
         .await
