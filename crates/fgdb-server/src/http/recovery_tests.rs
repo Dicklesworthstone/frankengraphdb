@@ -3,6 +3,64 @@ use crate::recovery::tests::{WakeCounter, WireIo, fail_after_marker, served, set
 use asupersync::lab::run_async_under_lab;
 
 #[test]
+fn transaction_success_and_error_responses_keep_the_original_recovery_fence() {
+    let ((), report) = run_async_under_lab(0xba7c_1004, |root| async move {
+        for (name, failed) in [
+            ("http-transaction-success-fence", false),
+            ("http-transaction-error-fence", true),
+        ] {
+            let (server, token, _) = served(&root, name).await;
+            let db = &server.databases["test"];
+            let output = Arc::new(OutputAuthority::new());
+            let mut request = asupersync::http::h1::types::RequestBuilder::new(
+                Method::Post,
+                "/v1/databases/test/transaction",
+            )
+            .header(
+                "Authorization",
+                format!("Bearer {}", fgdb_protocol::json::hex(&token.encode())),
+            )
+            .build();
+            request.body = if failed {
+                br#"{"statements":[{"mode":"write","statement":"CREATE (n) RETURN 1 AS prefix"},{"mode":"read","statement":"RETURN $missing AS absent"}]}"#.to_vec()
+            } else {
+                br#"{"statements":[{"mode":"write","statement":"CREATE (n) RETURN 1 AS value"}]}"#
+                    .to_vec()
+            };
+            let response = respond(&root, &server, request, &output).await;
+            let body = std::str::from_utf8(&response.body).unwrap();
+            if failed {
+                assert_eq!(response.status, 400, "{body}");
+                assert!(!body.contains("\"results\""), "{body}");
+            } else {
+                assert_eq!(response.status, 200, "{body}");
+                assert!(body.contains("\"committed\":true"), "{body}");
+            }
+            {
+                let guard = db.db.read(&root).await.unwrap();
+                assert_eq!(guard.frontier().unwrap().0, u64::from(!failed));
+                assert_eq!(guard.vertices().unwrap().len(), usize::from(!failed));
+            }
+            fail_after_marker(&root, db, 71).await;
+            let (io, wire) = WireIo::new(vec![], false);
+            let mut io = GuardedIo::new(io, root.clone(), output);
+            let sent = AsyncWrite::poll_write(
+                Pin::new(&mut io),
+                &mut Context::from_waker(std::task::Waker::noop()),
+                &response.body,
+            );
+            assert!(
+                matches!(sent, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::PermissionDenied)
+            );
+            assert_eq!(wire.writes.load(Ordering::Relaxed), 0);
+            settled(db).await;
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn batched_and_historical_read_errors_retain_the_output_recovery_fence() {
     let ((), report) = run_async_under_lab(0xba7c_1003, |root| async move {
         for (name, failed, difference) in [

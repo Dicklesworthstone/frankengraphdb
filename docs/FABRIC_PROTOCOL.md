@@ -366,6 +366,80 @@ The implementation and regression sources are present. Runtime qualification
 is pending: the execution environment disconnected before changed-source
 compilation, formatting, Clippy or tests ran. See IMPLEMENTATION_STATUS.md.
 
+### Atomic HTTP transaction scripts
+
+`POST /v1/databases/<name>/transaction` runs 1–32 independently parameterized
+statements through the same native write owner used by explicit FGP transactions.
+The complete JSON body is adapted and checked before opening that owner. Every
+entry requires an explicit `"mode":"read"` or `"mode":"write"`; native
+preparation still classifies the statement, and a read-mode entry cannot mutate.
+
+```json
+{
+  "statements": [
+    {
+      "mode": "write",
+      "statement": "CREATE (:Person {name:$name,age:$age})",
+      "parameters": {"name": "Ada", "age": 37}
+    },
+    {
+      "mode": "read",
+      "statement": "MATCH (n:Person) RETURN n.name AS name,n.age AS age"
+    },
+    {
+      "mode": "write",
+      "statement": "MATCH (n:Person {name:$name}) SET n.age=n.age+1 RETURN n.age AS age",
+      "parameters": {"name": "Ada"}
+    }
+  ]
+}
+```
+
+Save that body as `transaction.json` and send it with the same bearer credential
+used by the other HTTP database routes:
+
+```sh
+curl --fail-with-body http://127.0.0.1:7474/v1/databases/social/transaction \
+  -H "Authorization: Bearer $FGDB_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data-binary @transaction.json
+```
+
+Later statements read earlier staged effects. All statements retain the original
+capability, snapshot basis and cumulative native allowances, including result-row
+limits. The endpoint requires write authority even for a script containing only
+reads; use `/query-batch` with read-only credentials. Reads, `MATCH` and `MERGE`
+also require read rights. Existing label, relation and property restrictions
+apply before observation and effects.
+
+The response has the shape
+`{"v":1,"basis":B,"results":[{"columns":[...],"rows":[...]},...],"seq":N,"statements":M,"committed":true|false}`.
+`basis` is the original pinned cut; each result reflects its statement's private
+workspace at execution time. Results have independent schemas and use the shared
+typed JSON cell encoding. `results[i]` corresponds to `statements[i]` in request
+order, including an empty `columns`/`rows` result for a write without `RETURN`.
+The response becomes available only after the whole script completes.
+The one final native completion supplies `seq`,
+`statements` and `committed`. A script containing only reads closes without a
+write marker. A successfully executed write retains a write completion even if
+it matched no rows or a later statement removed its net graph effect.
+
+The complete retained JSON response, including a reservation for the largest
+possible final completion, must fit `ServerLimits::max_frame_len` (1 MiB by
+default). This is one cumulative response ceiling; JSON escaping and typed cell
+envelopes count. Native row/schema representability and signed execution limits
+also apply. Input uses HTTP's existing 8 MiB body limit, bounded JSON parser and
+native parameter/value limits. The server checks cancellation, authority and
+database generation during adaptation and result assembly.
+
+All result encoding and size admission finish before COMMIT. A failed statement,
+quota, result conversion or output admission discards the complete unpublished
+workspace and returns one error without successful-prefix results. Only the
+final native commit can publish, and the HTTP transport rechecks authority and
+the original recovery generation before every physical write and flush. Lost
+responses and `outcome_unknown` can mean the transaction committed; no request is
+retried and there is no HTTP transaction handle, resume or outcome lookup.
+
 ### Consistent read batches
 
 `EXECUTE_READ_BATCH` evaluates one read statement for every supplied argument

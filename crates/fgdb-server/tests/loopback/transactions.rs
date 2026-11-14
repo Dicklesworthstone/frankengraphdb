@@ -4,9 +4,9 @@
 use super::*;
 use asupersync::io::{AsyncRead, AsyncWrite};
 use fgdb_protocol::body::{
-    Auth, AuthOk, AuthRefresh, Body, Credential, Empty, ErrorBody, Execute,
-    ExecuteTransaction, Hello, Ready, ResultChunk, SelectDatabase, TransactionBegun,
-    TransactionResultEnd, TransactionSelector,
+    Auth, AuthOk, AuthRefresh, Body, Credential, Empty, ErrorBody, Execute, ExecuteTransaction,
+    Hello, Ready, ResultChunk, SelectDatabase, TransactionBegun, TransactionResultEnd,
+    TransactionSelector,
 };
 use fgdb_protocol::transport::{FrameReader, FrameWriter};
 use fgdb_protocol::{Binding, Frame, FrameKind, FrameLimits, StreamId};
@@ -36,6 +36,326 @@ async fn ages(cx: &Cx, client: &mut Client) -> Vec<Vec<WireValue>> {
         .await
         .unwrap()
         .rows
+}
+
+async fn start_http(
+    cx: &Cx,
+    name: &str,
+) -> (
+    SocketAddr,
+    fgdb_server::Shutdown,
+    asupersync::runtime::TaskHandle<()>,
+) {
+    let server = Arc::new(served(cx, name).await);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let shutdown = server.shutdown();
+    let task = cx
+        .spawn(move |child| async move {
+            server
+                .serve_http(&child, listener, vec!["127.0.0.1".into()])
+                .await
+                .unwrap();
+        })
+        .unwrap();
+    (address, shutdown, task)
+}
+
+async fn http_transaction(address: SocketAddr, scope: &Grant, body: &str) -> (u16, String) {
+    http(
+        address,
+        "POST",
+        "/v1/databases/social/transaction",
+        "127.0.0.1",
+        Some(&token(scope)),
+        body,
+    )
+    .await
+}
+
+async fn http_ages(address: SocketAddr) -> String {
+    let (status, body) = http(
+        address,
+        "POST",
+        "/v1/databases/social/query",
+        "127.0.0.1",
+        Some(&token(&grant(Rights::Read))),
+        r#"{"statement":"MATCH (n:Person) RETURN n.age AS age ORDER BY age"}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    body
+}
+
+#[test]
+fn http_transactions_share_staged_state_and_publish_one_native_completion() {
+    run(async |cx| {
+        let (address, shutdown, mut server) = start_http(cx, "http-transaction-atomic").await;
+        let scope = grant(Rights::ReadWrite);
+        let (status, body) = http_transaction(
+            address,
+            &scope,
+            r#"{"statements":[
+              {"mode":"write","statement":"CREATE (n:Person $props) RETURN n.name AS name","parameters":{"props":{"name":"Ann","age":21}}},
+              {"mode":"read","statement":"MATCH (n:Person) RETURN n.age AS before"},
+              {"mode":"write","statement":"MATCH (n:Person) SET n.age=n.age+$increment RETURN n.age AS after","parameters":{"increment":1}},
+              {"mode":"read","statement":"MATCH (n:Person) RETURN count(*) AS n,sum(n.age) AS total"}
+            ]}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"basis":0,"results":[{"columns":["name"],"rows":[[{"type":"text","value":"Ann"}]]},{"columns":["before"],"rows":[[{"type":"int","value":"21"}]]},{"columns":["after"],"rows":[[{"type":"int","value":"22"}]]},{"columns":["n","total"],"rows":[[{"type":"count","value":"1"},{"type":"wideint","value":"22"}]]}],"seq":1,"statements":4,"committed":true}"#
+        );
+        assert_eq!(
+            http_ages(address).await,
+            r#"{"v":1,"columns":["age"],"rows":[[{"type":"int","value":"22"}]],"seq":1}"#
+        );
+
+        let (status, body) = http_transaction(
+            address,
+            &scope,
+            r#"{"statements":[{"mode":"read","statement":"RETURN 7 AS value"}]}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"basis":1,"results":[{"columns":["value"],"rows":[[{"type":"int","value":"7"}]]}],"seq":1,"statements":1,"committed":false}"#
+        );
+
+        // A successful explicit write keeps its write completion even when
+        // no target matches, or when later effects erase its net graph delta.
+        let (status, body) = http_transaction(
+            address,
+            &scope,
+            r#"{"statements":[{"mode":"write","statement":"MATCH (n:Person {age:99}) SET n.age=100"}]}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"basis":1,"results":[{"columns":[],"rows":[]}],"seq":2,"statements":1,"committed":true}"#
+        );
+        let (status, body) = http_transaction(
+            address,
+            &scope,
+            r#"{"statements":[
+              {"mode":"write","statement":"CREATE (:Person {age:99})"},
+              {"mode":"write","statement":"MATCH (n:Person {age:99}) DELETE n"}
+            ]}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"basis":2,"results":[{"columns":[],"rows":[]},{"columns":[],"rows":[]}],"seq":3,"statements":2,"committed":true}"#
+        );
+        assert_eq!(
+            http_ages(address).await,
+            r#"{"v":1,"columns":["age"],"rows":[[{"type":"int","value":"22"}]],"seq":3}"#
+        );
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn http_transactions_abort_late_refusals_and_keep_cumulative_authority() {
+    run(async |cx| {
+        let (address, shutdown, mut server) = start_http(cx, "http-transaction-refusals").await;
+        let scope = grant(Rights::ReadWrite);
+        for (mode, statement, expected) in [
+            ("read", "RETURN $missing AS absent", 400),
+            ("write", "CREATE (:Person {age:1/0})", 400),
+            ("read", "CREATE (:Person {age:99})", 403),
+        ] {
+            let request = format!(
+                r#"{{"statements":[{{"mode":"write","statement":"CREATE (:Person {{age:10}}) RETURN 1 AS prefix"}},{{"mode":{},"statement":{}}}]}}"#,
+                fgdb_protocol::json::quote(mode),
+                fgdb_protocol::json::quote(statement),
+            );
+            let (status, body) = http_transaction(address, &scope, &request).await;
+            assert_eq!(status, expected, "{statement}: {body}");
+            assert!(!body.contains("\"results\""), "{body}");
+            assert!(!body.contains("\"committed\""), "{body}");
+            assert_eq!(
+                http_ages(address).await,
+                r#"{"v":1,"columns":["age"],"rows":[],"seq":0}"#
+            );
+        }
+
+        let mut limited = scope.clone();
+        limited.limits.max_rows = 1;
+        let (status, body) = http_transaction(
+            address,
+            &limited,
+            r#"{"statements":[
+              {"mode":"write","statement":"CREATE (:Person {age:10})"},
+              {"mode":"read","statement":"RETURN 1 AS first"},
+              {"mode":"read","statement":"RETURN 2 AS second"}
+            ]}"#,
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        assert!(body.contains("\"budget\""), "{body}");
+        assert!(!body.contains("\"results\""), "{body}");
+
+        let mut scoped = scope;
+        scoped.properties = Scope::only([PropertyKeyId(1)]);
+        let (status, body) = http_transaction(
+            address,
+            &scoped,
+            r#"{"statements":[
+              {"mode":"write","statement":"CREATE (:Person {name:'prefix'})"},
+              {"mode":"write","statement":"CREATE (:Person {age:99})"}
+            ]}"#,
+        )
+        .await;
+        assert_eq!(status, 403, "{body}");
+        assert!(!body.contains("\"results\""), "{body}");
+        assert_eq!(
+            http_ages(address).await,
+            r#"{"v":1,"columns":["age"],"rows":[],"seq":0}"#
+        );
+
+        let (status, body) = http_transaction(address, &grant(Rights::Read), "not JSON").await;
+        assert_eq!(status, 403, "write authority precedes parsing: {body}");
+        let (status, body) = http_transaction(
+            address,
+            &grant(Rights::Write),
+            r#"{"statements":[
+              {"mode":"write","statement":"CREATE (:Person {age:11})"},
+              {"mode":"read","statement":"MATCH (n:Person) RETURN n.age"}
+            ]}"#,
+        )
+        .await;
+        assert_eq!(status, 403, "a write-only grant cannot read: {body}");
+        assert_eq!(
+            http_ages(address).await,
+            r#"{"v":1,"columns":["age"],"rows":[],"seq":0}"#
+        );
+
+        let (status, body) = http_transaction(
+            address,
+            &grant(Rights::Write),
+            r#"{"statements":[{"mode":"write","statement":"CREATE (:Person {age:12})"}]}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            http_ages(address).await,
+            r#"{"v":1,"columns":["age"],"rows":[[{"type":"int","value":"12"}]],"seq":1}"#
+        );
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn http_transaction_request_admission_rejects_late_invalid_entries_whole() {
+    run(async |cx| {
+        let (address, shutdown, mut server) = start_http(cx, "http-transaction-input").await;
+        let scope = grant(Rights::ReadWrite);
+        for invalid in [
+            r#"{"statement":"RETURN 1"}"#,
+            r#"{"mode":"subscribe","statement":"RETURN 1"}"#,
+            r#"{"mode":"read","statement":"   "}"#,
+            r#"{"mode":"write","statement":"CREATE (:Person)","unexpected":true}"#,
+            r#"{"mode":"read","statement":"RETURN $n","parameters":{"n":{"$uint64":"18446744073709551616"}}}"#,
+            r#"{"mode":"read","statement":"RETURN $n","parameters":[]}"#,
+            "null",
+        ] {
+            let request = format!(
+                r#"{{"statements":[{{"mode":"write","statement":"CREATE (:Person {{age:1}})"}},{invalid}]}}"#
+            );
+            let (status, body) = http_transaction(address, &scope, &request).await;
+            assert_eq!(status, 400, "{request}: {body}");
+            assert!(!body.contains("\"results\""), "{body}");
+        }
+        for request in [
+            r#"{"statements":[]}"#.to_owned(),
+            r#"{"statements":{},"statement":"CREATE (:Person)"}"#.to_owned(),
+            r#"{"statements":[{"mode":"read","statement":"RETURN 1"}],"extra":1}"#.to_owned(),
+            format!(
+                r#"{{"statements":[{}]}}"#,
+                vec![r#"{"mode":"write","statement":"CREATE (:Person {age:1})"}"#; 33].join(",")
+            ),
+        ] {
+            let (status, body) = http_transaction(address, &scope, &request).await;
+            assert_eq!(status, 400, "{body}");
+        }
+        assert_eq!(
+            http_ages(address).await,
+            r#"{"v":1,"columns":["age"],"rows":[],"seq":0}"#
+        );
+        let request = format!(
+            r#"{{"statements":[{}]}}"#,
+            vec![
+                r#"{"mode":"read","statement":"RETURN $value AS value","parameters":{"value":7}}"#;
+                32
+            ]
+            .join(",")
+        );
+        let (status, body) = http_transaction(address, &scope, &request).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body.matches(r#""columns":["value"]"#).count(), 32);
+        assert!(
+            body.ends_with(r#""seq":0,"statements":32,"committed":false}"#),
+            "{body}"
+        );
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn http_transactions_admit_cumulative_and_escaped_json_output_before_commit() {
+    run(async |cx| {
+        let (address, shutdown, mut server) = start_http(cx, "http-transaction-output").await;
+        let scope = grant(Rights::ReadWrite);
+        for (value, copies) in [("x".repeat(2000), 3), ("\n".repeat(2500), 1)] {
+            let statement = format!(
+                r#"{{"mode":"read","statement":"RETURN $value AS value","parameters":{{"value":{}}}}}"#,
+                fgdb_protocol::json::quote(&value),
+            );
+            let request = format!(
+                r#"{{"statements":[{{"mode":"write","statement":"CREATE (:Person {{age:50}})"}},{}]}}"#,
+                vec![statement; copies].join(","),
+            );
+            // Every binary row is below 4096 bytes. The HTTP failure is
+            // cumulative response retention or JSON escaping, not FGP's cap.
+            let (status, body) = http_transaction(address, &scope, &request).await;
+            assert_eq!(status, 422, "{body}");
+            assert!(body.contains("complete transaction response"), "{body}");
+            assert!(!body.contains("\"results\""), "{body}");
+            assert!(!body.contains("\"committed\""), "{body}");
+            assert_eq!(
+                http_ages(address).await,
+                r#"{"v":1,"columns":["age"],"rows":[],"seq":0}"#
+            );
+        }
+        // The same first statement fits by itself, and a complete result is
+        // available after the earlier output refusals left no committed prefix.
+        let request = format!(
+            r#"{{"statements":[{{"mode":"write","statement":"CREATE (:Person {{age:60}}) RETURN $value AS value","parameters":{{"value":{}}}}}]}}"#,
+            fgdb_protocol::json::quote(&"x".repeat(2000)),
+        );
+        let (status, body) = http_transaction(address, &scope, &request).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.len() <= 4096);
+        assert!(
+            body.ends_with(r#""seq":1,"statements":1,"committed":true}"#),
+            "{body}"
+        );
+        assert_eq!(
+            http_ages(address).await,
+            r#"{"v":1,"columns":["age"],"rows":[[{"type":"int","value":"60"}]],"seq":1}"#
+        );
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
 }
 
 #[test]
@@ -80,7 +400,9 @@ fn explicit_statements_share_staged_state_and_publish_one_atomic_commit() {
         assert_eq!(selected.columns, ["age"]);
         assert_eq!(
             selected.rows,
-            (1..=6).map(|age| vec![WireValue::Int(age)]).collect::<Vec<_>>()
+            (1..=6)
+                .map(|age| vec![WireValue::Int(age)])
+                .collect::<Vec<_>>()
         );
         assert_eq!(selected.end.statement, 2);
         assert_eq!(selected.end.rows, 6);
@@ -267,7 +589,9 @@ fn provisional_callback_cancellation_aborts_before_and_after_end_can_fit() {
                     |_| Ok(()),
                     |_| {
                         calls += 1;
-                        Err(ClientError::Protocol("application rejected provisional row"))
+                        Err(ClientError::Protocol(
+                            "application rejected provisional row",
+                        ))
                     },
                 )
                 .await
@@ -392,8 +716,7 @@ fn raw_transaction_handles_are_connection_scoped_and_busy_requests_keep_the_owne
             .await
             .unwrap();
         let credential = token(&scope);
-        let (mut reader, mut writer, binding) =
-            raw_connection(cx, addr, credential.clone()).await;
+        let (mut reader, mut writer, binding) = raw_connection(cx, addr, credential.clone()).await;
         // The identical bearer on another connection has no transaction owner.
         send_raw(
             &mut writer,
@@ -407,7 +730,10 @@ fn raw_transaction_handles_are_connection_scoped_and_busy_requests_keep_the_owne
         .await;
         let error = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
         assert_eq!(error.header().kind(), FrameKind::Error);
-        assert_eq!(ErrorBody::decode(error.payload()).unwrap().code, ErrorCode::Statement);
+        assert_eq!(
+            ErrorBody::decode(error.payload()).unwrap().code,
+            ErrorCode::Statement
+        );
         send_raw(
             &mut writer,
             cx,
@@ -433,7 +759,10 @@ fn raw_transaction_handles_are_connection_scoped_and_busy_requests_keep_the_owne
         )
         .await;
         let error = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
-        assert_eq!(ErrorBody::decode(error.payload()).unwrap().code, ErrorCode::Busy);
+        assert_eq!(
+            ErrorBody::decode(error.payload()).unwrap().code,
+            ErrorCode::Busy
+        );
         let replacement = fgdb_warden::CapabilityToken::decode(&credential)
             .unwrap()
             .attenuate(Restriction::MaxRows(1))
@@ -452,7 +781,10 @@ fn raw_transaction_handles_are_connection_scoped_and_busy_requests_keep_the_owne
         )
         .await;
         let error = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
-        assert_eq!(ErrorBody::decode(error.payload()).unwrap().code, ErrorCode::Busy);
+        assert_eq!(
+            ErrorBody::decode(error.payload()).unwrap().code,
+            ErrorCode::Busy
+        );
 
         // The original owner and grant survived both Busy replies. Two rows
         // would fail if AUTH_REFRESH had silently replaced its MaxRows.
@@ -514,18 +846,26 @@ fn raw_transaction_handles_are_connection_scoped_and_busy_requests_keep_the_owne
             10,
             StreamId::CONTROL,
             binding,
-            &TransactionSelector { handle: begun.handle },
+            &TransactionSelector {
+                handle: begun.handle,
+            },
         )
         .await;
         let error = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
         assert_eq!(error.header().request_id(), 10);
-        assert_eq!(ErrorBody::decode(error.payload()).unwrap().code, ErrorCode::Statement);
+        assert_eq!(
+            ErrorBody::decode(error.payload()).unwrap().code,
+            ErrorCode::Statement
+        );
         drop(reader);
         drop(writer);
 
         assert_eq!(
             owner.commit_transaction(cx, own.handle).await.unwrap(),
-            Outcome::WriteCommitted { seq: 1, statements: 1 }
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 1
+            }
         );
         let mut observer = connect(cx, addr, &grant(Rights::Read)).await;
         assert_eq!(ages(cx, &mut observer).await, [vec![WireValue::Int(1)]]);

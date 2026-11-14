@@ -20,6 +20,7 @@
 //! POST /v1/databases/<name>/write          (write)
 //! POST /v1/databases/<name>/write-if-current (exact-frontier conditional write)
 //! POST /v1/databases/<name>/write-batch    (one atomic ingestion program)
+//! POST /v1/databases/<name>/transaction    (up to 32 mixed statements, one commit)
 //! POST /v1/databases/<name>/compact        (Admin only, empty body)
 //! POST /v1/databases/<name>/scrub          (Admin only, empty body)
 //!      Authorization: Bearer <hex capability token>
@@ -38,6 +39,10 @@
 //! returns one refusal with no successful prefix. Native host limits still
 //! apply per statement. Unsigned parameters such as an AS OF SEQ cut use
 //! `{"$uint64":"1"}`; ordinary JSON integers retain their signed type.
+//! A transaction takes a `statements` array with an explicit `"mode":"read"`
+//! or `"mode":"write"` on every entry. It requires write authority, shares one
+//! native workspace and cumulative allowance, admits its complete JSON output
+//! before commit, and returns all results beside one terminal completion.
 //! A write answers
 //! `{"v":1,"seq":N,"statements":M,"committed":true|false}`, with `columns`
 //! and `rows` first when it is a `CREATE/INSERT ... RETURN`. A refusal answers
@@ -52,6 +57,7 @@
 
 #[path = "studio/mod.rs"]
 mod studio;
+mod transaction;
 
 use crate::Server;
 use crate::commits::CommitWatcher;
@@ -952,7 +958,7 @@ pub(crate) async fn respond<'s>(
     let mode = match verb {
         "query" => Some(ExecuteMode::Read),
         "write" => Some(ExecuteMode::Write),
-        "write-batch" | "query-batch" | "query-diff" | "write-if-current" => None,
+        "write-batch" | "query-batch" | "query-diff" | "write-if-current" | "transaction" => None,
         _ => {
             return json_response(
                 404,
@@ -985,6 +991,9 @@ pub(crate) async fn respond<'s>(
     };
     if !output.protected(cx, &db.authority, verified) {
         return refusal_response(ErrorCode::Execution, "connection unavailable");
+    }
+    if verb == "transaction" {
+        return transaction::respond(cx, server, db, &token, &request, output).await;
     }
     if verb == "query-batch" {
         // As with historical differences, read rights precede body parsing.
