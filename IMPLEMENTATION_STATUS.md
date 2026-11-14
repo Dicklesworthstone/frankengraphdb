@@ -12,6 +12,24 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Capability-scoped point mutations — qualification pending
+
+Source updated 2026-11-14 routes both returning and nonreturning mutation
+continuations through the canonical seeded overlay selector under narrowed
+capabilities. The selector applies visibility masks before expansion, declines
+hidden seed properties and retains its existing fallback and transaction
+observations. Point-target SET/REMOVE continuations no longer require full
+incidence and property authority to avoid admitting the unrelated graph.
+
+The focused regression covers property roots, earlier staged creation and
+rekeying, returning and nonreturning mutations, equal-key hidden vertices,
+hidden properties, and identical accounting across 8- and 128-vertex visible
+populations. It also checks exact allowances and atomic rollback one work unit
+below the measured requirement. Independent source review, pinned Rustfmt for
+the changed files, and whitespace checks passed. Runtime and exact-tree
+qualification remain pending; no performance or full-SSI claim is made.
+The existing `fgdb-2acff` and `fgdb-cpny9` work remains open.
+
 ### Managed FGP transaction batches — qualification pending
 
 The Rust client's `execute_transaction_batch` and callback-based counterpart

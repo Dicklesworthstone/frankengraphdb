@@ -5695,7 +5695,6 @@ mod staged_hybrid_contracts {
     }
 }
 
-
 #[test]
 fn narrowed_write_continuations_seed_carried_identities_and_keep_one_shared_budget() {
     lab(0xc4a1_2301, |contexts| async move {
@@ -5739,7 +5738,9 @@ fn narrowed_write_continuations_seed_carried_identities_and_keep_one_shared_budg
                     seed.add_edge(EId(1), VId(1), VId(2), vec![]);
                     if hidden {
                         seed.create_vertex(
-                            VId(900), vec![HIDDEN], vec![(P, CanonicalScalar::Int(901))],
+                            VId(900),
+                            vec![HIDDEN],
+                            vec![(P, CanonicalScalar::Int(901))],
                         );
                         seed.add_edge(EId(900), VId(1), VId(900), vec![]);
                         seed.add_edge(EId(901), VId(900), VId(3), vec![]);
@@ -5771,15 +5772,20 @@ fn narrowed_write_continuations_seed_carried_identities_and_keep_one_shared_budg
                             0,
                         ),
                         None => GraphInsertPolicy::new(
-                            GqlQueryPolicy::new(32, 1, 1_000_000, 100_000), 1, 0,
+                            GqlQueryPolicy::new(32, 1, 1_000_000, 100_000),
+                            1,
+                            0,
                         ),
                     };
                     if let Some(dimension) = below {
                         let stats = measured.expect("first execution measures the complete chain");
                         match dimension {
-                            0 => budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
-                                stats.selection.snapshot_records - 1, 1,
-                            ),
+                            0 => {
+                                budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                                    stats.selection.snapshot_records - 1,
+                                    1,
+                                )
+                            }
                             1 => budget.query.evaluator.max_work_units -= 1,
                             2 => budget.query.evaluator.max_scratch_entries -= 1,
                             _ => unreachable!(),
@@ -5787,14 +5793,28 @@ fn narrowed_write_continuations_seed_carried_identities_and_keep_one_shared_budg
                     }
                     let outcome = db
                         .execute_graph_write_chain_authorized(
-                            &txn, &query, &commit, &issuer, &token, "main",
-                            &program, budget.with_mutation_limit(2), || NOW,
+                            &txn,
+                            &query,
+                            &commit,
+                            &issuer,
+                            &token,
+                            "main",
+                            &program,
+                            budget.with_mutation_limit(2),
+                            || NOW,
                         )
                         .await;
                     if below.is_some() {
-                        assert!(outcome.is_err(), "one-less allowance must refuse: {below:?}");
+                        assert!(
+                            outcome.is_err(),
+                            "one-less allowance must refuse: {below:?}"
+                        );
                         assert_eq!(
-                            (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+                            (
+                                db.frontier().unwrap(),
+                                db.vertices().unwrap(),
+                                db.edges().unwrap()
+                            ),
                             before,
                             "the initial CREATE and earlier SET cannot survive a late refusal",
                         );
@@ -5839,6 +5859,168 @@ fn narrowed_write_continuations_seed_carried_identities_and_keep_one_shared_budg
                         );
                     }
                     assert_eq!(txn.outstanding_obligations(), 0);
+                }
+            }
+        }
+    });
+}
+
+/// A mutation's MATCH is selective even when the caller cannot see every
+/// label, field or relation. Both native mutation families must use the masked
+/// seeded source, including property winners created or rekeyed by this chain.
+#[test]
+fn narrowed_mutation_matches_seed_property_roots_with_and_without_return() {
+    lab(0xc4a1_2302, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        for returning in [false, true] {
+            let mut text = String::from(
+                "CREATE (made:Visible {p:1000}) WITH made SET made.p=99 \
+                 WITH made UNWIND [20,99] AS key MATCH (n:Visible {p:key}) \
+                 SET n.p=n.p+1",
+            );
+            if returning {
+                text.push_str(" RETURN n.p AS p ORDER BY p");
+            }
+            let program = chain(&text);
+            let mut measured: Option<fgdb_gql::insertion::GraphInsertStats> = None;
+            for population in [8_u128, 128] {
+                for hidden in [false, true] {
+                    for below in [false, true] {
+                        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                        let mut seed = WriteBatch::new(R);
+                        for id in 1..=population {
+                            let mut fields = vec![(P, CanonicalScalar::Int((id * 10) as i64))];
+                            if hidden {
+                                fields.push((SECRET, CanonicalScalar::Int(77)));
+                            }
+                            seed.create_vertex(VId(id), vec![L], fields);
+                        }
+                        if hidden {
+                            for (id, value) in [(900, 20), (901, 99)] {
+                                seed.create_vertex(
+                                    VId(id),
+                                    vec![HIDDEN],
+                                    vec![(P, CanonicalScalar::Int(value))],
+                                );
+                            }
+                        }
+                        db.write(&commit, seed).await.unwrap();
+                        let before = (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap(),
+                        );
+                        let mut capability = grant(Rights::ReadWrite, 2);
+                        capability.relations = Scope::only([R]);
+                        capability.limits.max_nodes = 32;
+                        let token = issuer.issue_at(&capability, NOW).unwrap();
+                        let mut budget = match measured {
+                            Some(stats) => GraphInsertPolicy::new(
+                                GqlQueryPolicy::new(
+                                    stats.selection.snapshot_records,
+                                    2,
+                                    stats.evaluator.work_units,
+                                    stats.evaluator.scratch_entries,
+                                ),
+                                1,
+                                0,
+                            ),
+                            None => GraphInsertPolicy::new(
+                                GqlQueryPolicy::new(32, 2, 1_000_000, 100_000),
+                                1,
+                                0,
+                            ),
+                        };
+                        if below {
+                            budget.query.evaluator.max_work_units -= 1;
+                        }
+                        let outcome = db
+                            .execute_graph_write_chain_authorized(
+                                &txn,
+                                &query,
+                                &commit,
+                                &issuer,
+                                &token,
+                                "main",
+                                &program,
+                                budget.with_mutation_limit(3),
+                                || NOW,
+                            )
+                            .await;
+                        if below {
+                            assert!(outcome.is_err(), "the complete chain shares one allowance");
+                            assert_eq!(
+                                (
+                                    db.frontier().unwrap(),
+                                    db.vertices().unwrap(),
+                                    db.edges().unwrap()
+                                ),
+                                before,
+                                "late refusal must discard the CREATE, rekey and selected SETs",
+                            );
+                            assert_eq!(txn.outstanding_obligations(), 0);
+                            continue;
+                        }
+                        let (stats, rows, completion) = outcome.unwrap();
+                        let expected_rows = if returning {
+                            vec![
+                                vec![GraphValue::Scalar(CanonicalScalar::Int(21))],
+                                vec![GraphValue::Scalar(CanonicalScalar::Int(100))],
+                            ]
+                        } else {
+                            Vec::new()
+                        };
+                        assert_eq!(
+                            rows.value
+                                .iter()
+                                .map(|row| row.values().to_vec())
+                                .collect::<Vec<_>>(),
+                            expected_rows,
+                        );
+                        assert_eq!((stats.created_vertices, stats.created_edges), (1, 0));
+                        assert!(stats.selection.snapshot_records < 32);
+                        if let Some(expected) = measured {
+                            assert_eq!(
+                                stats, expected,
+                                "unrelated visible vertices and hidden matches cannot change usage",
+                            );
+                        } else {
+                            measured = Some(stats);
+                        }
+                        for old in &before.1 {
+                            let mut expected = old.clone();
+                            if old.vid == VId(2) {
+                                expected.created_at = fgdb_types::CommitSeq(before.0.0 + 1);
+                                expected
+                                    .props
+                                    .iter_mut()
+                                    .find(|(key, _)| *key == P)
+                                    .unwrap()
+                                    .1 = CanonicalScalar::Int(21).into();
+                            }
+                            assert_eq!(db.vertex(old.vid).unwrap().unwrap(), expected);
+                        }
+                        let created = db
+                            .vertices()
+                            .unwrap()
+                            .into_iter()
+                            .filter(|vertex| !before.1.iter().any(|old| old.vid == vertex.vid))
+                            .collect::<Vec<_>>();
+                        assert_eq!(created.len(), 1);
+                        assert_eq!(
+                            created[0].props,
+                            vec![(P, CanonicalScalar::Int(100).into())]
+                        );
+                        assert_eq!(db.edges().unwrap(), before.2);
+                        assert_eq!(
+                            completion,
+                            EmbeddedTxnCompletion::WriteCommitted {
+                                commit_seq: fgdb_types::CommitSeq(before.0.0 + 1),
+                            },
+                        );
+                        assert_eq!(txn.outstanding_obligations(), 0);
+                    }
                 }
             }
         }

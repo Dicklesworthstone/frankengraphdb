@@ -1459,28 +1459,31 @@ impl<V: Vfs + Clone> Database<V> {
                                         allowance.query,
                                         allowance.max_mutation_effects,
                                     );
+                                    // The canonical seeded source masks before
+                                    // expansion and declines hidden seed keys.
+                                    // Narrow authority therefore retains the
+                                    // same selective path as other chain steps.
                                     let proposal = mutation
                                         .execute_governed_over_reading_with_seeded_source_and_field_admission(
                                             rows.take(),
                                             policy,
                                             |pattern, budget| graph.pattern(pattern, budget),
-                                            (scope.sees_all_incidence() && scope.sees_all_fields())
-                                                .then_some(
-                                                    |pattern: &PreparedGraphPattern<GraphValueRow>,
-                                                     seeds: fgdb_gql::GraphSeeds<'_>,
-                                                     budget| {
-                                                        selection::select_seeded_overlay(
-                                                            transaction,
-                                                            &database.borrow(),
-                                                            query_cx,
-                                                            pattern,
-                                                            seeds,
-                                                            scope,
-                                                            budget,
-                                                            &controls,
-                                                        )
-                                                    },
-                                                ),
+                                            Some(
+                                                |pattern: &PreparedGraphPattern<GraphValueRow>,
+                                                 seeds: fgdb_gql::GraphSeeds<'_>,
+                                                 budget| {
+                                                    selection::select_seeded_overlay(
+                                                        transaction,
+                                                        &database.borrow(),
+                                                        query_cx,
+                                                        pattern,
+                                                        seeds,
+                                                        scope,
+                                                        budget,
+                                                        &controls,
+                                                    )
+                                                },
+                                            ),
                                             elements,
                                             |key| {
                                                 mutation::admit_computed_property(
@@ -1511,23 +1514,22 @@ impl<V: Vfs + Clone> Database<V> {
                                             rows.take(),
                                             policy,
                                             |pattern, budget| graph.pattern(pattern, budget),
-                                            (scope.sees_all_incidence() && scope.sees_all_fields())
-                                                .then_some(
-                                                    |pattern: &PreparedGraphPattern<GraphValueRow>,
-                                                     seeds: fgdb_gql::GraphSeeds<'_>,
-                                                     budget| {
-                                                        selection::select_seeded_overlay(
-                                                            transaction,
-                                                            &database.borrow(),
-                                                            query_cx,
-                                                            pattern,
-                                                            seeds,
-                                                            scope,
-                                                            budget,
-                                                            &controls,
-                                                        )
-                                                    },
-                                                ),
+                                            Some(
+                                                |pattern: &PreparedGraphPattern<GraphValueRow>,
+                                                 seeds: fgdb_gql::GraphSeeds<'_>,
+                                                 budget| {
+                                                    selection::select_seeded_overlay(
+                                                        transaction,
+                                                        &database.borrow(),
+                                                        query_cx,
+                                                        pattern,
+                                                        seeds,
+                                                        scope,
+                                                        budget,
+                                                        &controls,
+                                                    )
+                                                },
+                                            ),
                                             elements,
                                             |key| {
                                                 mutation::admit_computed_property(
