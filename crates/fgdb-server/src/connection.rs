@@ -1809,7 +1809,9 @@ impl Lane {
                 .unwrap_or(usize::MAX)
                 .saturating_sub(framing)
                 .min(frame_budget);
-            let row_room = usize::try_from(available.rows).unwrap_or(usize::MAX);
+            let row_room = usize::try_from(available.rows)
+                .unwrap_or(usize::MAX)
+                .min(MAX_ROWS_PER_CHUNK);
             let mut size = columns.as_ref().map_or(0, |names| {
                 4 + names.iter().map(|name| 4 + name.len()).sum::<usize>()
             });
@@ -1827,12 +1829,15 @@ impl Lane {
                     .and(Err(Stop::Cancelled));
             }
             let mut part = Vec::new();
+            let mut nodes = 0;
             if size <= byte_room {
                 while part.len() < row_room {
                     let Some((_, row)) = entries.peek() else {
                         break;
                     };
-                    let Ok(len) = fgdb_protocol::body::SubscriptionBatch::entry_len(row) else {
+                    let Ok((len, entry_nodes)) =
+                        fgdb_protocol::body::SubscriptionBatch::entry_cost(row)
+                    else {
                         return self
                             .refuse(
                                 cx,
@@ -1845,7 +1850,10 @@ impl Lane {
                             .await
                             .and(Err(Stop::Cancelled));
                     };
-                    if size + len > frame_budget && part.is_empty() {
+                    // A schema and the first entry can each fit alone even
+                    // when their sum does not. Send a schema-only fragment,
+                    // then retry that entry without inventing a refusal.
+                    if len > frame_budget {
                         return self
                             .refuse(
                                 cx,
@@ -1858,10 +1866,11 @@ impl Lane {
                             .await
                             .and(Err(Stop::Cancelled));
                     }
-                    if size + len > byte_room {
+                    if len > byte_room - size || entry_nodes > MAX_VALUE_NODES - nodes {
                         break;
                     }
                     size += len;
+                    nodes += entry_nodes;
                     part.extend(entries.next());
                 }
             }

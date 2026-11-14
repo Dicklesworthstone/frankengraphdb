@@ -1821,7 +1821,15 @@ body!(
 impl SubscriptionBatch {
     /// The encoded size of one entry, as a chunker needs to fill a frame.
     pub fn entry_len(row: &[WireValue]) -> Result<usize, BodyError> {
-        Ok(16 + ResultChunk::row_len(row)?)
+        Self::entry_cost(row).map(|(bytes, _)| bytes)
+    }
+
+    /// Encoded bytes (including the signed weight) and value nodes for one
+    /// entry. Frames must bound both cumulative costs independently of flow
+    /// credit: individually valid entries can exceed the body's node limit.
+    pub fn entry_cost(row: &[WireValue]) -> Result<(usize, usize), BodyError> {
+        let (bytes, nodes) = ResultChunk::row_cost(row)?;
+        Ok((16 + bytes, nodes))
     }
 }
 
@@ -2515,6 +2523,21 @@ mod tests {
         // Nodes: null 1, list/bool/map/edges/two IDs 6, path/step 2.
         assert_eq!(ResultChunk::row_cost(&row).unwrap(), (112, 9));
         assert_eq!(ResultChunk::row_len(&row).unwrap(), 112);
+        // A signed subscription weight adds exactly 16 bytes and no value
+        // nodes; empty tuples still consume an entry and its width prefix.
+        assert_eq!(SubscriptionBatch::entry_cost(&row).unwrap(), (128, 9));
+        assert_eq!(SubscriptionBatch::entry_len(&row).unwrap(), 128);
+        assert_eq!(SubscriptionBatch::entry_cost(&[]).unwrap(), (20, 0));
+        let batch = SubscriptionBatch {
+            frontier: 7,
+            snapshot: false,
+            last: true,
+            columns: None,
+            entries: vec![(-3, row.clone())],
+        };
+        let bytes = batch.encode().unwrap();
+        assert_eq!(bytes.len(), 15 + 128);
+        assert_eq!(SubscriptionBatch::decode(&bytes).unwrap(), batch);
         let chunk = ResultChunk {
             columns: None,
             rows: vec![row],
@@ -2525,6 +2548,8 @@ mod tests {
         let wide = vec![WireValue::Null; MAX_COLUMNS + 1];
         assert_eq!(ResultChunk::row_cost(&wide), Err(BodyError::TooLarge));
         assert_eq!(ResultChunk::row_len(&wide), Err(BodyError::TooLarge));
+        assert_eq!(SubscriptionBatch::entry_cost(&wide), Err(BodyError::TooLarge));
+        assert_eq!(SubscriptionBatch::entry_len(&wide), Err(BodyError::TooLarge));
     }
 
     #[test]

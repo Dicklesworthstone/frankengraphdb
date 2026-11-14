@@ -15,9 +15,26 @@ fn lane(
     writes: impl IntoIterator<Item = usize>,
     flush_pending: bool,
 ) -> (Lane, Arc<WireState>) {
+    lane_with_limits(
+        cx,
+        db,
+        token,
+        writes,
+        flush_pending,
+        FrameLimits::new(4096).unwrap(),
+    )
+}
+
+fn lane_with_limits(
+    cx: &Cx,
+    db: &Arc<Served>,
+    token: &CapabilityToken,
+    writes: impl IntoIterator<Item = usize>,
+    flush_pending: bool,
+    limits: FrameLimits,
+) -> (Lane, Arc<WireState>) {
     let (io, state) = WireIo::new(writes, flush_pending);
     let (reader, writer) = split_duplex(cx, Box::new(io) as Box<dyn DuplexIo>).unwrap();
-    let limits = FrameLimits::new(4096).unwrap();
     let session = SessionBinding {
         transcript: [0x71; 32],
         auth_generation: 1,
@@ -57,7 +74,11 @@ fn lane(
 }
 
 fn frames(bytes: &[u8]) -> Vec<Frame> {
-    let mut decoder = fgdb_protocol::Decoder::new(FrameLimits::new(4096).unwrap());
+    frames_with_limits(bytes, FrameLimits::new(4096).unwrap())
+}
+
+fn frames_with_limits(bytes: &[u8], limits: FrameLimits) -> Vec<Frame> {
+    let mut decoder = fgdb_protocol::Decoder::new(limits);
     let mut offset = 0;
     let mut result = Vec::new();
     while offset < bytes.len() {
@@ -70,6 +91,168 @@ fn frames(bytes: &[u8]) -> Vec<Frame> {
         );
     }
     result
+}
+
+#[test]
+fn subscription_schema_and_exact_frame_entry_can_use_separate_fragments() {
+    let ((), report) = run_async_under_lab(0x79a0_0110, |root| async move {
+        let (server, token, _) = served(&root, "subscription-schema-fragment").await;
+        let db = &server.databases["test"];
+        for oversized in [false, true] {
+            let (mut lane, wire) = lane(&root, db, &token, [], false);
+            let binding = lane.conn.binding();
+            let stream = StreamId([0x39; 16]);
+            let child = lane.conn.admit_child(stream, ChildKind::Subscription).unwrap();
+            lane.send_generation = Some(db.db.generation().unwrap());
+            let waiter = server.shutdown.waiter();
+            let mut window = FlowWindow::new(lane.initial_window, lane.maximum_window).unwrap();
+            let framing = binding.header_len() + 15;
+            let budget = lane.send_limits.max_frame_len() - framing;
+            // The entry is exactly weight(16) + row width(4) + text tag(1)
+            // + text length(4) + payload. Its column list fits separately.
+            let text = "x".repeat(budget - 25 + usize::from(oversized));
+            let columns = vec!["payload".repeat(100)];
+            let mut pending_columns = Some(columns.clone());
+            let result = lane
+                .send_batch(
+                    &root,
+                    &waiter,
+                    &mut window,
+                    1,
+                    stream,
+                    binding,
+                    7,
+                    true,
+                    &mut pending_columns,
+                    vec![(1, vec![WireValue::Text(text.clone())])],
+                )
+                .await;
+            let sent = frames(&wire.bytes());
+            if oversized {
+                assert!(matches!(result, Err(Stop::Cancelled)));
+                assert_eq!(sent.len(), 1, "no baseline prefix before refusal");
+                assert_eq!(sent[0].header().kind(), FrameKind::Error);
+                assert_eq!(
+                    ErrorBody::decode(sent[0].payload()).unwrap().code,
+                    ErrorCode::Execution
+                );
+                assert_eq!(pending_columns, Some(columns));
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(sent.len(), 2);
+                assert!(sent.iter().all(|frame| {
+                    frame.header().kind() == FrameKind::SubscriptionBatch
+                        && frame.header().stream_id() == stream
+                        && frame.header().request_id() == 1
+                }));
+                let schema = SubscriptionBatch::decode(sent[0].payload()).unwrap();
+                assert_eq!(schema.columns, Some(columns));
+                assert!(schema.entries.is_empty());
+                assert!(!schema.last);
+                let data = SubscriptionBatch::decode(sent[1].payload()).unwrap();
+                assert!(data.columns.is_none());
+                assert_eq!(data.entries, [(1, vec![WireValue::Text(text)])]);
+                assert!(data.last);
+                assert!(schema.snapshot && data.snapshot);
+                assert_eq!((schema.frontier, data.frontier), (7, 7));
+                assert_eq!(sent[1].header().frame_len(), 4096);
+                assert!(pending_columns.is_none());
+                assert_eq!(
+                    window.available(),
+                    SendCost {
+                        bytes: lane.initial_window.bytes
+                            - sent.iter().map(|frame| frame.header().frame_len() as u64).sum::<u64>(),
+                        rows: 0,
+                    }
+                );
+            }
+            lane.conn.child_terminal(stream, child, ChildTerminus::EphemeralCompleted).unwrap();
+            assert_eq!(lane.conn.sends_in_flight(), 0);
+        }
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn subscription_fragments_obey_body_node_and_entry_limits_with_large_flow_credit() {
+    let ((), report) = run_async_under_lab(0x79a0_0111, |root| async move {
+        let (server, token, _) = served(&root, "subscription-body-fragments").await;
+        let db = &server.databases["test"];
+        for node_bound in [true, false] {
+            let limits = FrameLimits::new(80 << 20).unwrap();
+            let (mut lane, wire) = lane_with_limits(&root, db, &token, [], false, limits);
+            lane.initial_window = SendCost {
+                bytes: 160 << 20,
+                rows: MAX_ROWS_PER_CHUNK as u64 + 2,
+            };
+            lane.maximum_window = lane.initial_window;
+            let binding = lane.conn.binding();
+            let stream = StreamId([0x3a; 16]);
+            let child = lane.conn.admit_child(stream, ChildKind::Subscription).unwrap();
+            lane.send_generation = Some(db.db.generation().unwrap());
+            let waiter = server.shutdown.waiter();
+            let mut window = FlowWindow::new(lane.initial_window, lane.maximum_window).unwrap();
+            let (mut columns, entries) = if node_bound {
+                // Both packed lists fit separately; their roots make the
+                // combined node count exceed the body limit by exactly two.
+                (
+                    Some(vec!["ids".to_owned()]),
+                    vec![
+                        (3, vec![WireValue::Vertices(vec![1; MAX_VALUE_NODES / 2])]),
+                        (-2, vec![WireValue::Edges(vec![2; MAX_VALUE_NODES / 2])]),
+                    ],
+                )
+            } else {
+                (Some(Vec::new()), vec![(1, Vec::new()); MAX_ROWS_PER_CHUNK + 1])
+            };
+            let expected_rows = entries.len() as u64;
+            assert!(lane
+                .send_batch(
+                    &root, &waiter, &mut window, 1, stream, binding, 9, false,
+                    &mut columns, entries,
+                )
+                .await
+                .is_ok());
+            let sent = frames_with_limits(&wire.bytes(), limits);
+            assert_eq!(sent.len(), 2);
+            let mut delivered = 0;
+            for (index, frame) in sent.iter().enumerate() {
+                assert_eq!(frame.header().kind(), FrameKind::SubscriptionBatch);
+                assert_eq!(frame.header().stream_id(), stream);
+                let part = SubscriptionBatch::decode(frame.payload()).unwrap();
+                assert_eq!(part.frontier, 9);
+                assert!(!part.snapshot);
+                assert_eq!(part.last, index == 1);
+                assert_eq!(part.columns.is_some(), index == 0);
+                delivered += part.entries.len() as u64;
+                if node_bound {
+                    assert_eq!(part.entries.len(), 1);
+                    assert_eq!(part.entries[0].0, if index == 0 { 3 } else { -2 });
+                    match &part.entries[0].1[..] {
+                        [WireValue::Vertices(ids)] if index == 0 => {
+                            assert_eq!(ids.len(), MAX_VALUE_NODES / 2);
+                            assert!(ids.iter().all(|id| *id == 1));
+                        }
+                        [WireValue::Edges(ids)] if index == 1 => {
+                            assert_eq!(ids.len(), MAX_VALUE_NODES / 2);
+                            assert!(ids.iter().all(|id| *id == 2));
+                        }
+                        other => panic!("unexpected subscription fragment: {other:?}"),
+                    }
+                } else {
+                    assert_eq!(part.entries.len(), if index == 0 { MAX_ROWS_PER_CHUNK } else { 1 });
+                    assert!(part.entries.iter().all(|(weight, row)| *weight == 1 && row.is_empty()));
+                }
+            }
+            assert_eq!(delivered, expected_rows);
+            assert_eq!(window.available().rows, lane.initial_window.rows - expected_rows);
+            lane.conn.child_terminal(stream, child, ChildTerminus::EphemeralCompleted).unwrap();
+            assert_eq!(lane.conn.sends_in_flight(), 0);
+        }
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 /// Feed real FGP frames through the complete connection dispatcher while the
