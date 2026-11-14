@@ -5991,7 +5991,9 @@ fn narrowed_mutation_matches_seed_property_roots_with_and_without_return() {
                         for old in &before.1 {
                             let mut expected = old.clone();
                             if old.vid == VId(2) {
-                                expected.created_at = fgdb_types::CommitSeq(before.0.0 + 1);
+                                // SET creates a new property version, not a new
+                                // vertex birth. Keep its original creation
+                                // sequence and birth ordinal across the commit.
                                 expected
                                     .props
                                     .iter_mut()
