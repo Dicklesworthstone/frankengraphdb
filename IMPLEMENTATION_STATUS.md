@@ -12,6 +12,38 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Managed FGP transaction batches — qualification pending
+
+The Rust client's `execute_transaction_batch` and callback-based counterpart
+compose the existing explicit transaction owner for 1–32 independent Read/Write
+statements. All modes, values and complete transaction request envelopes are
+admitted against the negotiated frame limit before BEGIN, including selector
+overhead. The server retains the original signed authority, cumulative native
+limits and staged own-write visibility. No new wire operation or commit lane
+is introduced.
+
+Collected results become available only after a validated native completion.
+Streaming callbacks carry statement indexes and the original basis; all remain
+provisional until the final completion. A rejected statement-end callback rolls
+back the drained owner before another statement or commit. Existing row/schema
+rejection uses cancellation and terminal draining. A guard fences active
+ownership on future drop or unwind; unconfirmed rollback cannot leave the
+connection available for another operation. Once COMMIT is attempted, the
+driver sends no rollback or retry and preserves unknown completion.
+
+Regression sources cover mixed statements, independent typed arguments, exact
+negotiated-envelope admission before BEGIN, late local and server refusals,
+callback rollback, cleanup fencing and missing or invalid commit receipts.
+Source review is separate from execution evidence. Compilation, Rustfmt,
+Clippy, UBS, runtime tests and exact-tree qualification remain **UNRUN**: the
+workspace disk was full, then the executor disconnected during dependency
+setup before a compiler process was acknowledged. The existing
+`fgdb-w2-txn-lifecycle-mhae`, `fgdb-w10-fgp-core-5b1` and
+`fgdb-w10-result-machines-eh7` work remains open. This is the connection-scoped
+local transaction subset, without durable leases, reattachment, outcome lookup
+or full SSI.
+
+
 ### Transaction dependencies and subscription wire bounds — qualification pending
 
 The first ordinary graph read in an authorized native transaction now retains

@@ -263,6 +263,32 @@ an unpublished workspace. Losing COMMIT's response can instead leave the
 durable outcome unknown. None of these selectors is a durable lease,
 reattachment token, result ACK or replay capability.
 
+The managed client methods `execute_transaction_batch` and
+`execute_transaction_batch_streaming` compose that same owner for 1–32
+independently parameterized Read/Write statements. They canonicalize all
+arguments and admit every complete transaction envelope against the negotiated
+frame limit **before BEGIN**. Server syntax, symbol binding, capability checks
+and cumulative native allowances remain authoritative.
+
+The collected method returns `TransactionBatchAnswer { results, end }` only
+after validated completion. The streaming method invokes indexed schema, row
+and statement-end callbacks; schemas receive the original basis and every
+callback remains provisional. A result-end callback may refuse after the
+statement has drained: the driver rolls back once and never proceeds to the
+next statement or commit. In-result rejection keeps the existing
+cancel-and-drain behavior. A dropped or unwinding managed operation fences an
+active owner, including the otherwise idle interval between statements.
+Unconfirmed cleanup requires reconnecting.
+
+Only the final commit response constructs
+`TransactionBatchEnd { basis, statements, rows, outcome }`. Once COMMIT is
+attempted, the driver sends neither rollback nor another commit. Unknown
+completion does not return a successful prefix or an abort claim. This API
+adds no wire tag, durable ownership lease, recovery lookup or automatic retry.
+The collected client retains all result rows; streaming delivery avoids that
+client-side collection but does not alter the server's buffered statement
+execution profile.
+
 ## fgdbd: the served subset
 
 ### Explicit native transactions

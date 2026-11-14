@@ -22,7 +22,226 @@ pub struct TransactionAnswer {
     pub end: TransactionResultEnd,
 }
 
+/// Maximum number of statements in a managed client transaction batch.
+/// The server's retained native statement and capability limits may be lower.
+pub const MAX_TRANSACTION_BATCH_STATEMENTS: usize = 32;
+
+/// One statement's delivered rows in a completely committed or read-closed
+/// managed batch. The original transaction basis is carried by the batch end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransactionBatchResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<WireValue>>,
+}
+
+/// Completion of one managed transaction, constructed only after the existing
+/// explicit-transaction client validates the native completion receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransactionBatchEnd {
+    pub basis: u64,
+    pub statements: u32,
+    pub rows: u64,
+    pub outcome: Outcome,
+}
+
+/// A complete managed transaction. No successful prefix is returned if any
+/// statement or the final commit fails. A lost commit response remains unknown.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransactionBatchAnswer {
+    pub results: Vec<TransactionBatchResult>,
+    pub end: TransactionBatchEnd,
+}
+
+/// Dropping a managed operation must not leave its private owner available to
+/// a later call, including a panic in the between-statement callback. An idle
+/// owner needs the same reconnect fence as an incomplete wire request. This
+/// guard never sends from Drop and never claims that a write was rolled back.
+struct TransactionBatchGuard<'a> {
+    client: &'a mut Client,
+}
+
+impl TransactionBatchGuard<'_> {
+    async fn abort(
+        &mut self,
+        cx: &Cx,
+        handle: TransactionHandle,
+        error: ClientError,
+    ) -> ClientError {
+        // A decoded statement refusal or drained callback cancellation already
+        // discarded the owner. An incomplete request cannot accept cleanup.
+        if self.client.transaction.is_some()
+            && self.client.outstanding_request.is_none()
+            && self.client.rollback_transaction(cx, handle).await.is_err()
+        {
+            self.fence();
+        }
+        error
+    }
+
+    fn fence(&mut self) {
+        self.client.transaction = None;
+        // No further request may be sent on a connection whose cleanup is
+        // unconfirmed. This marker is local; it is not a fabricated wire reply.
+        self.client
+            .outstanding_request
+            .get_or_insert(self.client.next_request);
+    }
+}
+
+impl Drop for TransactionBatchGuard<'_> {
+    fn drop(&mut self) {
+        if self.client.transaction.is_some() {
+            self.fence();
+        }
+    }
+}
+
 impl Client {
+
+    /// Execute 1–32 independently parameterized Read/Write statements through
+    /// one explicit native transaction and return all results after completion.
+    /// Later statements observe earlier staged effects. The existing native
+    /// owner retains the original capability and cumulative execution limits.
+    ///
+    /// Every request body is admitted before BEGIN. No statement is retried,
+    /// reclassified or sent as an autocommit. This collected form retains all
+    /// returned rows; use the streaming form to avoid that client-side bag.
+    pub async fn execute_transaction_batch(
+        &mut self,
+        cx: &Cx,
+        statements: Vec<Execute>,
+    ) -> Result<TransactionBatchAnswer, ClientError> {
+        let mut columns = Vec::new();
+        let mut rows: Vec<Vec<Vec<WireValue>>> = Vec::new();
+        let end = self
+            .execute_transaction_batch_streaming(
+                cx,
+                statements,
+                |_, _, names| {
+                    columns.push(names.to_vec());
+                    Ok(())
+                },
+                |index, row| {
+                    let index = index as usize;
+                    if rows.len() <= index {
+                        rows.resize_with(index + 1, Vec::new);
+                    }
+                    rows[index].push(row);
+                    Ok(())
+                },
+                |_, _| Ok(()),
+            )
+            .await?;
+        let mut rows = rows.into_iter();
+        let results = columns
+            .into_iter()
+            .map(|columns| TransactionBatchResult {
+                columns,
+                rows: rows.next().unwrap_or_default(),
+            })
+            .collect();
+        Ok(TransactionBatchAnswer { results, end })
+    }
+
+    /// Deliver a finite mixed read/write script through one native workspace.
+    /// Callback indexes are zero-based; the schema callback carries the
+    /// original pinned basis and the result-end callback carries its row count.
+    /// Every callback is provisional until this method returns successfully.
+    /// Earlier statements' effects become visible to the following statements,
+    /// and only the final validated COMMIT response establishes completion.
+    ///
+    /// Complete mode, value, count and negotiated-frame admission precedes
+    /// BEGIN, including the transaction selector's wire overhead. The server
+    /// still owns syntax, binding, authorization and cumulative budgets.
+    /// Callback rejection stops the script and discards its unpublished owner:
+    /// in-result rejection uses cancellation/draining; rejection after a
+    /// statement END uses explicit rollback. Failed cleanup, an incomplete
+    /// response, a dropped future or an unwinding callback requires reconnecting.
+    ///
+    /// No operation is retried. Once COMMIT is attempted, this method never
+    /// sends rollback or another commit; an incomplete response can mean the
+    /// write committed. Disconnect or a callback result is not a commit receipt.
+    pub async fn execute_transaction_batch_streaming(
+        &mut self,
+        cx: &Cx,
+        mut statements: Vec<Execute>,
+        mut on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
+        mut on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
+        mut on_result_end: impl FnMut(u32, u64) -> Result<(), ClientError>,
+    ) -> Result<TransactionBatchEnd, ClientError> {
+        if statements.is_empty() || statements.len() > MAX_TRANSACTION_BATCH_STATEMENTS {
+            return Err(ClientError::Protocol(
+                "a transaction batch needs 1..=32 statements",
+            ));
+        }
+        for statement in &mut statements {
+            if statement.statement.trim().is_empty() {
+                return Err(ClientError::Protocol(
+                    "transaction batch statements must not be empty",
+                ));
+            }
+            statement
+                .parameters
+                .sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+            // The selector is fixed-width. This nonzero value is used only to
+            // run the real codec and frame admission; it is never transmitted.
+            let body = ExecuteTransaction {
+                handle: TransactionHandle([1; 16]),
+                statement: statement.clone(),
+            };
+            Frame::new(
+                FrameKind::ExecuteTransaction,
+                self.next_request,
+                StreamId::CONTROL,
+                self.binding,
+                body.encode()?,
+                self.send_limits,
+            )
+            .map_err(|_| ClientError::Protocol("request exceeds the negotiated frame limit"))?;
+        }
+        let count = statements.len() as u32;
+        let begun = self.begin_transaction(cx).await?;
+        let mut owner = TransactionBatchGuard { client: self };
+        let mut rows = 0_u64;
+        for (index, statement) in statements.iter().enumerate() {
+            let index = index as u32;
+            let result = owner
+                .client
+                .execute_transaction_streaming(
+                    cx,
+                    begun.handle,
+                    statement,
+                    |names| on_columns(index, begun.basis, names),
+                    |row| on_row(index, row),
+                )
+                .await;
+            let end = match result {
+                Ok(end) => end,
+                Err(error) => return Err(owner.abort(cx, begun.handle, error).await),
+            };
+            let Some(total) = rows.checked_add(end.rows) else {
+                return Err(owner
+                    .abort(
+                        cx,
+                        begun.handle,
+                        ClientError::Protocol("transaction batch row counter overflow"),
+                    )
+                    .await);
+            };
+            if let Err(error) = on_result_end(index, end.rows) {
+                return Err(owner.abort(cx, begun.handle, error).await);
+            }
+            rows = total;
+        }
+        let outcome = owner.client.commit_transaction(cx, begun.handle).await?;
+        Ok(TransactionBatchEnd {
+            basis: begun.basis,
+            statements: count,
+            rows,
+            outcome,
+        })
+    }
+
     /// Open one explicit native write workspace on the selected database.
     /// It retains the original authority and cumulative budgets through
     /// commit or rollback. Disconnect abandons unpublished effects. This is
