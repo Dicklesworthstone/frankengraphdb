@@ -487,6 +487,7 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::ExecuteBatch,
         FrameKind::ExecuteReadBatch,
         FrameKind::ExecuteReadStatements,
+        FrameKind::ExecutePreparedReadBatch,
         FrameKind::ExecutePrepared,
         FrameKind::ExecutePreparedBatch,
         FrameKind::ExecuteDiff,
@@ -576,6 +577,10 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
     );
     assert_eq!(
         FrameKind::try_from(0x002d),
+        Ok(FrameKind::ExecutePreparedReadBatch)
+    );
+    assert_eq!(
+        FrameKind::try_from(0x002e),
         Err(ProtocolError::UnknownFrameKind)
     );
 }

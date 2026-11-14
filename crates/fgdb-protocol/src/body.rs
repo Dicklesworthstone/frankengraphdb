@@ -1184,6 +1184,18 @@ pub struct ExecutePreparedBatch {
     pub argument_sets: Vec<Vec<(String, WireValue)>>,
 }
 
+/// Rebind one connection-owned read template for 1–32 argument sets in one
+/// pinned native session and one cumulative signed allowance. Ordinary reads
+/// share the session frontier; explicit temporal parameters select each
+/// result's cut. The complete answer is admitted before read-batch delivery.
+/// A write handle refuses without execution. The distinct request tag never
+/// falls back to independent prepared executions on older servers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutePreparedReadBatch {
+    pub handle: PreparedHandle,
+    pub argument_sets: Vec<Vec<(String, WireValue)>>,
+}
+
 /// Execute native write text only when the selected database's current
 /// committed frontier equals `expected_seq`. The server checks the predicate
 /// under the same exclusive writer ownership retained through completion.
@@ -1371,6 +1383,39 @@ body!(
             argument_sets.push(get_parameters(&mut input)?);
         }
         ExecutePreparedBatch {
+            handle,
+            argument_sets,
+        }
+    }
+);
+
+body!(
+    ExecutePreparedReadBatch,
+    |s, out| {
+        s.handle.check()?;
+        check_len(s.argument_sets.len(), MAX_READ_BATCH_STATEMENTS)?;
+        if s.argument_sets.is_empty() {
+            return Err(BodyError::Noncanonical);
+        }
+        out.array(&s.handle.0);
+        out.len(s.argument_sets.len());
+        for parameters in &s.argument_sets {
+            put_parameters(&mut out, parameters)?;
+        }
+    },
+    |input| {
+        let handle = PreparedHandle(input.array()?);
+        handle.check()?;
+        let count = input.count(MAX_READ_BATCH_STATEMENTS, 4)?;
+        if count == 0 {
+            return Err(BodyError::Noncanonical);
+        }
+        let mut argument_sets = Vec::with_capacity(count);
+        for _ in 0..count {
+            // One input owns all values, including nested values across sets.
+            argument_sets.push(get_parameters(&mut input)?);
+        }
+        ExecutePreparedReadBatch {
             handle,
             argument_sets,
         }
@@ -2351,6 +2396,14 @@ mod tests {
             argument_sets[1][0].1
         )
         .argument_sets;
+        let argument_sets = body_node_boundary!(
+            ExecutePreparedReadBatch {
+                handle,
+                argument_sets,
+            },
+            argument_sets[1][0].1
+        )
+        .argument_sets;
         let statements = argument_sets
             .into_iter()
             .map(|parameters| Execute {
@@ -2978,6 +3031,69 @@ mod tests {
         assert_eq!(
             ExecutePreparedBatch::decode(&over),
             Err(BodyError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn prepared_read_batches_bind_exact_handles_and_the_native_read_count_bound() {
+        let handle = PreparedHandle([0x2d; 16]);
+        let request = ExecutePreparedReadBatch {
+            handle,
+            argument_sets: vec![vec![], vec![("a".into(), WireValue::Null)]],
+        };
+        let mut bytes = vec![0x2d; 16];
+        bytes.extend_from_slice(&[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 0]);
+        assert_eq!(request.encode().unwrap(), bytes);
+        assert_eq!(ExecutePreparedReadBatch::decode(&bytes).unwrap(), request);
+        every_prefix_refuses::<ExecutePreparedReadBatch>(&bytes);
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(
+            ExecutePreparedReadBatch::decode(&trailing),
+            Err(BodyError::TrailingBytes)
+        );
+        let mut missing = bytes.clone();
+        missing[..16].fill(0);
+        assert_eq!(
+            ExecutePreparedReadBatch::decode(&missing),
+            Err(BodyError::Noncanonical)
+        );
+        assert_eq!(
+            ExecutePreparedReadBatch {
+                handle: PreparedHandle([0; 16]),
+                argument_sets: vec![vec![]],
+            }
+            .encode(),
+            Err(BodyError::Noncanonical)
+        );
+        for (count, error) in [
+            (0, BodyError::Noncanonical),
+            (33, BodyError::TooLarge),
+        ] {
+            let request = ExecutePreparedReadBatch {
+                handle,
+                argument_sets: vec![vec![]; count],
+            };
+            assert_eq!(request.encode(), Err(error));
+            let mut invalid = vec![0x2d; 16];
+            invalid.extend_from_slice(&(count as u32).to_be_bytes());
+            assert_eq!(ExecutePreparedReadBatch::decode(&invalid), Err(error));
+        }
+        let maximum = ExecutePreparedReadBatch {
+            handle,
+            argument_sets: vec![vec![]; 32],
+        };
+        assert_eq!(
+            ExecutePreparedReadBatch::decode(&maximum.encode().unwrap()).unwrap(),
+            maximum
+        );
+        let mut duplicate = vec![0x2d; 16];
+        duplicate.extend_from_slice(&[
+            0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, b'a', 0, 0, 0, 0, 1, b'a', 0,
+        ]);
+        assert_eq!(
+            ExecutePreparedReadBatch::decode(&duplicate),
+            Err(BodyError::Noncanonical)
         );
     }
 

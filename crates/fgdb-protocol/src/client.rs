@@ -1392,7 +1392,8 @@ mod tests {
     use super::*;
     use crate::body::{
         DiffMode, DiffResultChunk, DiffResultEnd, ErrorBody, ExecuteConditionalWrite, ExecuteDiff,
-        ExecutePreparedDiff, ReadBatchResultChunk, ReadBatchResultEnd, SubscriptionReset,
+        ExecutePreparedDiff, ExecutePreparedReadBatch, ReadBatchResultChunk, ReadBatchResultEnd,
+        SubscriptionReset,
     };
     use crate::{Posture, SessionBinding};
     use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -1757,6 +1758,104 @@ mod tests {
                 assert_eq!(update.rows, 1);
                 assert!(update.bytes > 0 && update.bytes <= 8192);
             }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn prepared_read_batch_client_keeps_exact_handle_cuts_and_fresh_canonical_arguments() {
+        let ((), report) = run_async_under_lab(0x79a0_04b8, |root| async move {
+            let io = script_with_window(
+                vec![
+                    read_batch_part(0, 17, true, false, &[4]),
+                    read_batch_part(0, 17, false, true, &[5]),
+                    read_batch_part(1, 2, true, true, &[]),
+                    read_batch_end(2, 2),
+                ],
+                8192,
+                1,
+            );
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            let handle = PreparedHandle([0x2d; 16]);
+            let answer = client
+                .execute_prepared_read_batch(
+                    &root,
+                    handle,
+                    vec![
+                        vec![
+                            ("z".into(), WireValue::Int(4)),
+                            ("a".into(), WireValue::Int(3)),
+                        ],
+                        vec![("a".into(), WireValue::Int(7))],
+                    ],
+                )
+                .await
+                .unwrap();
+            assert_eq!((answer.end.results, answer.end.rows), (2, 2));
+            assert_eq!(answer.results[0].seq, 17);
+            assert_eq!(answer.results[1].seq, 2);
+            assert_eq!(
+                answer.results[0].rows,
+                vec![vec![WireValue::Int(4)], vec![WireValue::Int(5)]]
+            );
+            assert!(answer.results[1].rows.is_empty());
+            let sent = sent_frames(&written.lock().unwrap());
+            assert_eq!(sent[3].header().kind(), FrameKind::ExecutePreparedReadBatch);
+            let request = ExecutePreparedReadBatch::decode(sent[3].payload()).unwrap();
+            assert_eq!(request.handle, handle);
+            assert_eq!(
+                request.argument_sets,
+                vec![
+                    vec![
+                        ("a".into(), WireValue::Int(3)),
+                        ("z".into(), WireValue::Int(4)),
+                    ],
+                    vec![("a".into(), WireValue::Int(7))],
+                ]
+            );
+            assert!(sent[4..].iter().all(|frame| {
+                frame.header().kind() == FrameKind::WindowUpdate
+            }));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn prepared_read_batch_local_refusals_send_nothing_and_leave_the_connection_usable() {
+        let ((), report) = run_async_under_lab(0x79a0_04b9, |root| async move {
+            let io = script(vec![
+                read_batch_part(0, 3, true, true, &[7]),
+                read_batch_end(1, 1),
+            ]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            let handle = PreparedHandle([0x2d; 16]);
+            for (selected, arguments) in [
+                (handle, vec![]),
+                (handle, vec![vec![]; 33]),
+                (PreparedHandle([0; 16]), vec![vec![]]),
+                (
+                    handle,
+                    vec![vec![("x".into(), WireValue::Null), ("x".into(), WireValue::Null)]],
+                ),
+            ] {
+                assert!(matches!(
+                    client.execute_prepared_read_batch(&root, selected, arguments).await,
+                    Err(ClientError::Body(_))
+                ));
+                assert_eq!(sent_frames(&written.lock().unwrap()).len(), 3);
+            }
+            let answer = client
+                .execute_prepared_read_batch(&root, handle, vec![vec![]])
+                .await
+                .unwrap();
+            assert_eq!(answer.results[0].rows, vec![vec![WireValue::Int(7)]]);
+            let sent = sent_frames(&written.lock().unwrap());
+            assert_eq!(sent[3].header().request_id(), 4);
+            assert_eq!(sent[3].header().kind(), FrameKind::ExecutePreparedReadBatch);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

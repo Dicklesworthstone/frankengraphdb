@@ -51,6 +51,7 @@ pub enum FrameKind {
     ReadBatchResultChunk = 0x002a,
     ReadBatchResultEnd = 0x002b,
     ExecuteReadStatements = 0x002c,
+    ExecutePreparedReadBatch = 0x002d,
 }
 
 impl TryFrom<u16> for FrameKind {
@@ -97,6 +98,7 @@ impl TryFrom<u16> for FrameKind {
             0x002a => Self::ReadBatchResultChunk,
             0x002b => Self::ReadBatchResultEnd,
             0x002c => Self::ExecuteReadStatements,
+            0x002d => Self::ExecutePreparedReadBatch,
             _ => return Err(ProtocolError::UnknownFrameKind),
         })
     }

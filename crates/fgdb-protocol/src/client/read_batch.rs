@@ -1,12 +1,15 @@
 //! One pinned, authorized native read batch and its ordered result streams.
 
 use super::*;
-use crate::body::{ExecuteReadStatements, ReadBatchResultChunk, ReadBatchResultEnd};
+use crate::body::{
+    ExecutePreparedReadBatch, ExecuteReadStatements, ReadBatchResultChunk, ReadBatchResultEnd,
+};
 use crate::read_batch::ReadBatchProgress;
 
 enum ReadBatchRequest {
     Parameterized(ExecuteBatch),
     Statements(ExecuteReadStatements),
+    Prepared(ExecutePreparedReadBatch),
 }
 
 impl ReadBatchRequest {
@@ -14,6 +17,7 @@ impl ReadBatchRequest {
         match self {
             Self::Parameterized(batch) => batch.argument_sets.len(),
             Self::Statements(batch) => batch.statements.len(),
+            Self::Prepared(batch) => batch.argument_sets.len(),
         }
     }
 
@@ -23,6 +27,7 @@ impl ReadBatchRequest {
         };
         match self {
             Self::Parameterized(batch) => batch.argument_sets.iter_mut().for_each(sort),
+            Self::Prepared(batch) => batch.argument_sets.iter_mut().for_each(sort),
             Self::Statements(batch) => {
                 for statement in &mut batch.statements {
                     sort(&mut statement.parameters);
@@ -84,6 +89,28 @@ impl Client {
         self.collect_read_batch(
             cx,
             ReadBatchRequest::Statements(ExecuteReadStatements { statements }),
+        )
+        .await
+    }
+
+    /// Reuse one prepared read for 1–32 fresh argument sets in one consistent
+    /// session. The complete batch shares signed limits and is admitted before
+    /// any output. Current reads share a pin; temporal arguments retain each
+    /// result's selected cut. Representative preparation values are never used
+    /// as defaults. A non-read or unavailable handle refuses without effects.
+    /// Older servers reject the distinct request; no fallback or retry occurs.
+    pub async fn execute_prepared_read_batch(
+        &mut self,
+        cx: &Cx,
+        handle: PreparedHandle,
+        argument_sets: Vec<Vec<(String, WireValue)>>,
+    ) -> Result<ReadBatchAnswer, ClientError> {
+        self.collect_read_batch(
+            cx,
+            ReadBatchRequest::Prepared(ExecutePreparedReadBatch {
+                handle,
+                argument_sets,
+            }),
         )
         .await
     }
@@ -184,6 +211,33 @@ impl Client {
         .await
     }
 
+    /// Deliver a consistent prepared-read batch under the same flow and
+    /// cancel-and-drain contract as [`Self::execute_read_batch_streaming`].
+    /// Native execution finishes before delivery; callbacks are provisional
+    /// until the single successful terminal. Local shape errors send nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_prepared_read_batch_streaming(
+        &mut self,
+        cx: &Cx,
+        handle: PreparedHandle,
+        argument_sets: Vec<Vec<(String, WireValue)>>,
+        on_columns: impl FnMut(u32, u64, &[String]) -> Result<(), ClientError>,
+        on_row: impl FnMut(u32, Vec<WireValue>) -> Result<(), ClientError>,
+        on_result_end: impl FnMut(u32, u64, u64) -> Result<(), ClientError>,
+    ) -> Result<ReadBatchResultEnd, ClientError> {
+        self.read_batch_request(
+            cx,
+            ReadBatchRequest::Prepared(ExecutePreparedReadBatch {
+                handle,
+                argument_sets,
+            }),
+            on_columns,
+            on_row,
+            on_result_end,
+        )
+        .await
+    }
+
     async fn read_batch_request(
         &mut self,
         cx: &Cx,
@@ -207,6 +261,15 @@ impl Client {
                 self.send(
                     cx,
                     FrameKind::ExecuteReadStatements,
+                    StreamId::CONTROL,
+                    &body,
+                )
+                .await?
+            }
+            ReadBatchRequest::Prepared(body) => {
+                self.send(
+                    cx,
+                    FrameKind::ExecutePreparedReadBatch,
                     StreamId::CONTROL,
                     &body,
                 )
