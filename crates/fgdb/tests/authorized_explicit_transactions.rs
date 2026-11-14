@@ -250,6 +250,176 @@ fn ordinary_statements_and_reads_share_unpublished_effects_and_one_commit() {
 }
 
 #[test]
+fn empty_write_statements_keep_write_completion_through_reads_and_reopen() {
+    run(async |commit, query, txn| {
+        for text in [
+            "MATCH (n:Visible) SET n.p=2",
+            "MATCH (n:Visible) SET n.p=2 RETURN n.p AS p",
+            "UNWIND [] AS p CREATE (n:Visible {p:p})",
+        ] {
+            let vfs = fgdb::MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+            let before = db.frontier().unwrap();
+            let mut owner = db
+                .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+                .unwrap();
+            let result = owner
+                .stage_chain(&mut db, query, &chain(text), |rows, _, _| {
+                    assert!(rows.is_empty());
+                    Ok(())
+                })
+                .unwrap();
+            assert!(result.value.is_empty());
+            assert_eq!(db.frontier().unwrap(), before);
+            let result = owner
+                .read(
+                    &mut db,
+                    query,
+                    &read("MATCH (n:Visible) RETURN n"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            assert!(result.value.is_empty());
+            let stats = owner.statistics().unwrap();
+            assert_eq!(stats.completed_statements, 2);
+            assert_eq!(stats.created_vertices, 0);
+            assert_eq!(stats.created_edges, 0);
+            assert_eq!(stats.mutation_effects, 0);
+            let completed = owner.commit(&mut db).await.unwrap();
+            let EmbeddedTxnCompletion::WriteCommitted { commit_seq } = completed else {
+                panic!("write classification was lost for {text}: {completed:?}");
+            };
+            assert_eq!(commit_seq.0, before.0 + 1);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+            let decision = db
+                .commit_authorization_decision_digest(commit_seq)
+                .unwrap()
+                .unwrap();
+            assert_ne!(decision, fgdb_crypto::Digest([0; 32]));
+            drop(db);
+            let reopened = Database::open_with_vfs(commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(reopened.frontier().unwrap(), commit_seq);
+            assert!(reopened.vertices().unwrap().is_empty());
+            assert_eq!(
+                reopened
+                    .commit_authorization_decision_digest(commit_seq)
+                    .unwrap(),
+                Some(decision)
+            );
+        }
+    });
+}
+
+#[test]
+fn empty_write_classification_survives_later_effects_but_never_rollback() {
+    run(async |commit, query, txn| {
+        for finish in 0..4 {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+            let before = db.frontier().unwrap();
+            let mut owner = db
+                .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+                .unwrap();
+            owner
+                .stage_chain(
+                    &mut db,
+                    query,
+                    &chain("MATCH (n:Visible) SET n.p=2"),
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            if finish == 0 {
+                owner
+                    .stage_chain(
+                        &mut db,
+                        query,
+                        &chain("CREATE (n:Visible {p:3}) RETURN n.p AS p"),
+                        |_, _, _| Ok(()),
+                    )
+                    .unwrap();
+                assert_eq!(owner.statistics().unwrap().created_vertices, 1);
+                assert!(matches!(
+                    owner.commit(&mut db).await.unwrap(),
+                    EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+                        if commit_seq.0 == before.0 + 1
+                ));
+                assert_eq!(db.vertices().unwrap().len(), 1);
+                assert_eq!(
+                    db.vertices().unwrap()[0].props,
+                    vec![(P, CanonicalScalar::Int(3).into())]
+                );
+            } else {
+                match finish {
+                    1 => owner.rollback(),
+                    2 => drop(owner),
+                    _ => {
+                        let error = owner.stage_chain(
+                            &mut db,
+                            query,
+                            &chain("MATCH (n:Visible) SET n.p=4 RETURN n.p AS p"),
+                            |_, _, _| Err(WriteTxnError::AuthorizedMutationRefused),
+                        );
+                        assert!(error.is_err());
+                        assert!(!owner.is_active());
+                        assert!(matches!(
+                            owner.commit(&mut db).await,
+                            Err(WriteTxnError::Finished)
+                        ));
+                    }
+                }
+                assert_eq!(db.frontier().unwrap(), before);
+                assert!(db.vertices().unwrap().is_empty());
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn empty_write_completion_still_validates_the_absent_selection() {
+    run(async |commit, query, txn| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite), NOW).unwrap();
+        let mut owner = db
+            .begin_authorized_write(txn, commit, &issuer, &token, "main", policy(), 10, || NOW)
+            .unwrap();
+        owner
+            .stage_chain(
+                &mut db,
+                query,
+                &chain("MATCH (n:Visible {p:7}) SET n.p=2"),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        let mut concurrent = WriteBatch::new(R);
+        concurrent.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(7))]);
+        let committed = db.write(commit, concurrent).await.unwrap();
+        assert!(matches!(
+            owner.commit(&mut db).await,
+            Err(WriteTxnError::Write(
+                fgdb::WriteError::FirstCommitterWins { .. }
+            ))
+        ));
+        assert_eq!(db.frontier().unwrap(), committed);
+        assert_eq!(
+            db.vertices().unwrap()[0].props,
+            vec![(P, CanonicalScalar::Int(7).into())]
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn rollback_drop_and_delete_release_the_whole_prefix() {
     run(async |commit, query, txn| {
         let mut db = Database::open_memory(commit, keys()).await.unwrap();
@@ -773,7 +943,14 @@ fn reads_before_the_first_write_remain_dependencies_at_commit() {
                 let token = issuer.issue_at(&scope, NOW).unwrap();
                 let mut owner = db
                     .begin_authorized_write(
-                        txn, commit, &issuer, &token, "main", policy(), 10, || NOW,
+                        txn,
+                        commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        policy(),
+                        10,
+                        || NOW,
                     )
                     .unwrap();
                 // No prepared effects exist when this ordinary pattern reads

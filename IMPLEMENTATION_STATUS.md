@@ -12,6 +12,35 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Explicit no-effect writes retain write completion — qualification pending
+
+Source updated 2026-11-14 preserves the compiler's write classification when
+an authorized explicit statement selects no rows or emits no intents. After
+successful statement and output admission, the native owner retains an empty
+canonical prepared template if no write is already prepared. Subsequent reads
+cannot downgrade it to `ReadClosed`; completion validates the original read
+and absence observations, binds the authorization decision, and publishes once
+through the existing Chronicle path. Public empty `WriteBatch` admission and
+ordinary read-only completion retain their existing contracts.
+
+Regression sources cover empty MATCH mutations with and without RETURN,
+empty UNWIND creation, later reads and real writes, exactly one committed
+sequence with unchanged graph data, signed decision persistence on reopen,
+rollback/drop/output refusal, and a concurrent insertion into the previously
+empty selection. Independent source review, pinned Rustfmt for the changed
+files and whitespace checks passed. Compilation, runtime tests and complete
+exact-tree qualification remain pending under shared-host resource pressure.
+`fgdb-w2-txn-lifecycle-mhae` remains open.
+
+The same review identified a separate unresolved first-escape gap under
+`fgdb-w2-escape-bindings-qcp`: provisional engine identities are allocated in
+memory, and their counter floor is persisted only by a later engine commit.
+CREATE RETURN followed by rollback and immediate close/reopen can therefore
+reissue the provisional identity. This is source-traced, not yet a runtime
+verdict. It requires an ordered, recoverable allocation reservation before
+escape; the existing transaction snapshot and graph atomicity must survive
+that reservation. No durable first-escape guarantee is claimed by this slice.
+
 ### Capability-scoped point mutations — qualification pending
 
 Source updated 2026-11-14 routes both returning and nonreturning mutation
