@@ -12,6 +12,41 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Transaction dependencies and subscription wire bounds — qualification pending
+
+The first ordinary graph read in an authorized native transaction now retains
+the canonical transaction source even before any mutation has been staged.
+Both ordinary pattern selection and factorized endpoint selection therefore
+keep the existing positive and absence observations for final validation.
+A concurrent change after the last statement can no longer evade that native
+validation through the former immutable-source fallback. This preserves the
+existing conservative conflict profile; it does not establish full SSI or
+new commit-refusal noninterference.
+
+Subscription delivery now caps each fragment by encoded bytes, row count and
+cumulative value nodes. The subscription codec exposes entry costs through the
+same result-row cost owner. A schema and first row that fit in separate frames
+are sent separately; a row that cannot fit by itself remains a typed refusal.
+The original flow-credit, cancellation, signed-weight and frontier owners
+continue to govern delivery.
+
+FGP explicit transactions retain the execution generation while sending an
+ordinary statement or definite commit refusal. Recovery before the first byte
+replaces the stale diagnostic with a recovery terminal; recovery after partial
+output closes the transport. OutcomeUnknown and recovery/unavailability
+terminals remain independent of the invalidated generation, so a completed
+write cannot be presented as a retryable statement failure.
+
+Regression sources cover changed and absent read dependencies before the first
+write, read-close and staged-write completion, MERGE endpoint phantoms and a
+label-domain-disjoint control; subscription frame/node/entry boundaries and
+schema separation; and blocked or partial transaction refusal delivery.
+Independent source/API reviews completed. The local executor disconnected
+during validation. Final-tree compilation, runtime tests, Rustfmt, Clippy, UBS
+and full exact-tree qualification remain **UNRUN**. These repairs do not close
+`fgdb-w2-txn-lifecycle-mhae`, `fgdb-w4-ssi-witnesses-jds`,
+`fgdb-w10-fgp-core-5b1` or `fgdb-w10-result-machines-eh7`.
+
 ### Consistent prepared read batches across FGP and the CLI — qualification pending
 
 Source added 2026-11-14 exposes `EXECUTE_PREPARED_READ_BATCH` (0x002d)

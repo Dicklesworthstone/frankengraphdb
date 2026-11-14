@@ -811,3 +811,183 @@ fn generation_fence_cancels_unwritten_frames_but_closes_partial_frames_and_flush
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn explicit_transaction_native_refusal_is_fenced_and_discards_staged_prefix() {
+    let ((), report) = run_async_under_lab(0x79a0_0112, |root| async move {
+        for recovery in [false, true] {
+            let name = if recovery {
+                "transaction-refusal-recovery"
+            } else {
+                "transaction-refusal-current"
+            };
+            let (server, token, _) = served(&root, name).await;
+            let db = &server.databases["test"];
+            // BEGIN, the provisional schema and its END complete. The next
+            // native refusal blocks before any byte, without timing races.
+            let writes = if recovery {
+                vec![usize::MAX, usize::MAX, usize::MAX, 0]
+            } else {
+                vec![]
+            };
+            let (mut lane, wire) = lane(&root, db, &token, writes, false);
+            let waiter = server.shutdown.waiter();
+            let binding = lane.conn.binding();
+            let mut active = None;
+            let request = |kind, id, body| {
+                Frame::new(
+                    kind, id, StreamId::CONTROL, binding, body,
+                    FrameLimits::new(4096).unwrap(),
+                ).unwrap()
+            };
+            let begin = request(FrameKind::BeginTransaction, 1, Empty.encode().unwrap());
+            assert!(lane
+                .transaction_request(&root, &waiter, db, &token, &mut active, &begin)
+                .await
+                .is_ok());
+            let sent = frames(&wire.bytes());
+            assert_eq!(sent.len(), 1);
+            let begun = fgdb_protocol::body::TransactionBegun::decode(sent[0].payload()).unwrap();
+            let statement = |mode| fgdb_protocol::body::ExecuteTransaction {
+                handle: begun.handle,
+                statement: Execute {
+                    mode,
+                    statement: "CREATE (n)".to_owned(),
+                    parameters: vec![],
+                },
+            };
+            let write = request(
+                FrameKind::ExecuteTransaction, 2,
+                statement(ExecuteMode::Write).encode().unwrap(),
+            );
+            assert!(lane
+                .transaction_request(&root, &waiter, db, &token, &mut active, &write)
+                .await
+                .is_ok());
+            let sent = frames(&wire.bytes());
+            assert_eq!(sent.len(), 3);
+            assert_eq!(sent[1].header().kind(), FrameKind::TransactionResultChunk);
+            assert_eq!(sent[2].header().kind(), FrameKind::TransactionResultEnd);
+            assert!(active.is_some());
+            assert_eq!(db.db.read(&root).await.unwrap().frontier().unwrap(), CommitSeq(0));
+
+            let refused = request(
+                FrameKind::ExecuteTransaction, 3,
+                statement(ExecuteMode::Read).encode().unwrap(),
+            );
+            let mut execution = Box::pin(lane.transaction_request(
+                &root, &waiter, db, &token, &mut active, &refused,
+            ));
+            if recovery {
+                poll_fn(|task| {
+                    assert!(execution.as_mut().poll(task).is_pending());
+                    if wire.writes.load(Ordering::Acquire) > 3 {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                }).await;
+                assert_eq!(frames(&wire.bytes()).len(), 3);
+                fail_after_marker(&root, db, 777).await;
+            }
+            assert!(execution.await.is_ok());
+            assert!(active.is_none(), "a refused statement cannot retain its staged prefix");
+            let sent = frames(&wire.bytes());
+            assert_eq!(sent.len(), 4);
+            let last = sent.last().unwrap();
+            assert_eq!(last.header().kind(), FrameKind::Error);
+            assert_eq!(last.header().request_id(), 3);
+            let error = ErrorBody::decode(last.payload()).unwrap();
+            if recovery {
+                assert!(matches!(
+                    error.code,
+                    ErrorCode::DatabaseRecovering | ErrorCode::DatabaseUnavailable,
+                ));
+                assert!(!error.message.contains("Read request"));
+                settled(db).await;
+            } else {
+                assert_eq!(error.code, ErrorCode::PermissionDenied);
+                assert!(error.message.contains("Read request"));
+            }
+            let guard = db.db.read(&root).await.unwrap();
+            assert_eq!(guard.frontier().unwrap(), CommitSeq(u64::from(recovery)));
+            assert_eq!(guard.vertices().unwrap().len(), usize::from(recovery));
+            drop(guard);
+            assert_eq!(lane.conn.children_in_flight(), 0);
+            assert_eq!(lane.conn.sends_in_flight(), 0);
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn transaction_refusal_fence_closes_partial_output_but_preserves_unknown_outcomes() {
+    let ((), report) = run_async_under_lab(0x79a0_0113, |root| async move {
+        for flush_pending in [false, true] {
+            let name = if flush_pending {
+                "transaction-refusal-flush"
+            } else {
+                "transaction-refusal-partial"
+            };
+            let (server, token, _) = served(&root, name).await;
+            let db = &server.databases["test"];
+            let generation = db.db.generation().unwrap();
+            let writes = if flush_pending { vec![] } else { vec![3, 0] };
+            let (mut lane, wire) = lane(&root, db, &token, writes, flush_pending);
+            let binding = lane.conn.binding();
+            let mut sending = Box::pin(lane.refuse_transaction(
+                &root,
+                1,
+                StreamId::CONTROL,
+                binding,
+                generation.clone(),
+                Refusal::new(ErrorCode::Conflict, "private transaction diagnostic"),
+            ));
+            poll_fn(|task| {
+                assert!(sending.as_mut().poll(task).is_pending());
+                if wire.writes.load(Ordering::Acquire) > 0 {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }).await;
+            let before = wire.bytes();
+            if flush_pending {
+                assert_eq!(frames(&before).len(), 1);
+                assert!(wire.flushes.load(Ordering::Acquire) > 0);
+            } else {
+                assert_eq!(before.len(), 3);
+            }
+            fail_after_marker(&root, db, 778).await;
+            assert!(matches!(sending.await, Err(Stop::Transport)));
+            assert_eq!(wire.bytes(), before, "no replacement can follow a partial diagnostic");
+            assert_eq!(lane.conn.sends_in_flight(), 0);
+            settled(db).await;
+
+            // An outcome control is deliberately independent of the retired
+            // result generation. Suppressing it would lose the no-replay warning.
+            let (mut terminal_lane, terminal_wire) = self::lane(&root, db, &token, [], false);
+            let binding = terminal_lane.conn.binding();
+            assert!(terminal_lane
+                .refuse_transaction(
+                    &root,
+                    2,
+                    StreamId::CONTROL,
+                    binding,
+                    generation,
+                    Refusal::new(ErrorCode::OutcomeUnknown, "outcome unknown; do not replay"),
+                )
+                .await
+                .is_ok());
+            let terminal = frames(&terminal_wire.bytes());
+            assert_eq!(terminal.len(), 1);
+            let error = ErrorBody::decode(terminal[0].payload()).unwrap();
+            assert_eq!(error.code, ErrorCode::OutcomeUnknown);
+            assert_eq!(error.message, "outcome unknown; do not replay");
+            assert_eq!(terminal_lane.conn.sends_in_flight(), 0);
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -46,6 +46,54 @@ fn take_transaction<'server>(
 }
 
 impl Lane {
+    /// Native diagnostics can depend on the transaction's retired source.
+    /// Fence their complete physical write/flush, exactly like its rows.
+    /// Recovery and unknown-outcome controls remain deliverable after that
+    /// generation ends: neither may imply the failed transaction is retryable.
+    pub(super) async fn refuse_transaction(
+        &mut self,
+        cx: &Cx,
+        request: u64,
+        stream: StreamId,
+        binding: Binding,
+        generation: Generation,
+        refusal: Refusal,
+    ) -> Result<(), Stop> {
+        if matches!(
+            refusal.code,
+            ErrorCode::OutcomeUnknown
+                | ErrorCode::DatabaseRecovering
+                | ErrorCode::DatabaseUnavailable
+        ) {
+            return self
+                .refuse(cx, request, stream, binding, refusal.code, &refusal.message)
+                .await;
+        }
+        let response = Frame::new(
+            FrameKind::Error,
+            request,
+            stream,
+            binding,
+            ErrorBody {
+                code: refusal.code,
+                message: refusal.message,
+            }
+            .encode()
+            .map_err(|_| Stop::Transport)?,
+            self.send_limits,
+        )
+        .map_err(|_| Stop::Transport)?;
+        match self.write_frame(cx, &response, Some(generation)).await {
+            // Replacement is legal only before any diagnostic byte escaped.
+            // write_frame closes partial writes and interrupted flushes.
+            Err(Stop::Recovery(error)) => {
+                self.refuse(cx, request, stream, binding, error.code(), error.message())
+                    .await
+            }
+            result => result,
+        }
+    }
+
     /// Recovery wakes an idle owner without waiting for another client frame.
     /// Closing this connection drops the native transaction and its pins.
     pub(super) async fn receive_transaction(
@@ -208,6 +256,7 @@ impl Lane {
                 let frame_budget = self.send_limits.max_frame_len()
                     - binding.header_len()
                     - CHUNK_OVERHEAD;
+                let output_generation = owned.native.generation();
                 let answer = owned
                     .native
                     .execute_framed(cx, &statement.statement, frame_budget)
@@ -226,13 +275,13 @@ impl Lane {
                         .await
                     }
                     Err(refusal) => self
-                        .refuse(
+                        .refuse_transaction(
                             cx,
                             request,
                             stream,
                             binding,
-                            refusal.code,
-                            &refusal.message,
+                            output_generation,
+                            refusal,
                         )
                         .await
                         .map(|()| false),
@@ -319,17 +368,18 @@ impl Lane {
                 }
                 // The connection no longer owns this transaction before the
                 // completion await. Failure cannot make COMMIT replayable.
+                let output_generation = owned.native.generation();
                 let answer = match owned.native.commit(cx).await {
                     Ok(answer) => answer,
                     Err(refusal) => {
                         return self
-                            .refuse(
+                            .refuse_transaction(
                                 cx,
                                 request,
                                 StreamId::CONTROL,
                                 binding,
-                                refusal.code,
-                                &refusal.message,
+                                output_generation,
+                                refusal,
                             )
                             .await;
                     }
