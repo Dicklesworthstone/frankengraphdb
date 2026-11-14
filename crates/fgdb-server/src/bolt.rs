@@ -47,6 +47,9 @@ mod causal;
 mod cursors;
 
 use crate::execute::{ReadSession, Refusal, SessionError, query_refusal, read_session};
+use crate::execute::transaction::{
+    TransactionStatement, looks_like_write, prepare_transaction_statement,
+};
 use crate::recovery::Generation;
 use crate::shutdown::Waiter;
 use crate::{Served, Server, convert};
@@ -61,12 +64,7 @@ use fgdb_bolt::message::{
 };
 use fgdb_bolt::packstream::{Value, get};
 use fgdb_gql::algebra::GraphValue;
-use fgdb_gql::{
-    GqlMapArgumentText, GqlParameters, GqlTextOffsets, GraphAggregateTextSlot, GraphSymbol,
-    GraphSymbolKind, GraphSymbolResolver, PreparedGraphAggregateText, PreparedGraphBranchText,
-    PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate, PreparedGraphSetText,
-    PreparedGraphWriteChainText, ReverseSymbolCatalog,
-};
+use fgdb_gql::{GqlParameters, PreparedGraphBranchText};
 use fgdb_protocol::body::{Body, ErrorCode, Execute, ExecuteMode, WireTimestamp, WireValue};
 use fgdb_protocol::transport::DuplexIo;
 use fgdb_types::{
@@ -74,7 +72,6 @@ use fgdb_types::{
     CommitSeq, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 use fgdb_warden::{Authority, CapabilityToken};
-use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -363,292 +360,6 @@ struct Transaction<'s> {
     cursors: cursors::Cursors<Pending<'s>>,
 }
 
-enum TransactionStatement {
-    Read(Box<fgdb_gql::PreparedGraphSet>),
-    Aggregate {
-        statement: Box<PreparedGraphSetAggregate>,
-        columns: Vec<String>,
-        slots: Vec<GraphAggregateTextSlot>,
-    },
-    Write(Box<fgdb_gql::PreparedGraphWriteChain>),
-}
-
-impl TransactionStatement {
-    fn columns(&self) -> &[String] {
-        match self {
-            Self::Read(statement) => statement.columns(),
-            Self::Aggregate { columns, .. } => columns,
-            Self::Write(statement) => statement.columns(),
-        }
-    }
-}
-
-fn transaction_statement_error<E: GqlTextOffsets + core::fmt::Display>(
-    lowered: Option<&GqlMapArgumentText>,
-    mut error: E,
-) -> Failure {
-    if let Some(lowered) = lowered {
-        lowered.restore(&mut error);
-    }
-    Failure::from_refusal(Refusal::new(ErrorCode::Statement, error.to_string()))
-}
-
-/// The native owner's meter latches its first refusal. Resolver methods have
-/// an Option return contract, so no failed lookup may continue observing the
-/// catalog or turn the original control refusal into a syntax diagnostic.
-/// Reverse names are copied only after admission and retain the signed scope.
-struct TransactionCatalog<'a> {
-    symbols: &'a crate::Symbols,
-    scope: &'a fgdb_warden::PlannerPredicates,
-    work: RefCell<&'a mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>>,
-    failed: Cell<bool>,
-    denied: Cell<bool>,
-}
-
-impl TransactionCatalog<'_> {
-    fn charge(&self, units: u64) -> Result<(), fgdb::WriteTxnError> {
-        if self.failed.get() {
-            return Err(fgdb::WriteTxnError::AuthorizedMutationRefused);
-        }
-        let result = (self.work.borrow_mut())(units);
-        if result.is_err() {
-            self.failed.set(true);
-        }
-        result
-    }
-
-    fn check(&self) -> Result<(), Failure> {
-        self.charge(0)
-            .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
-        if self.denied.get() {
-            return Err(Failure::from_refusal(crate::execute::write_refusal(
-                &fgdb::WriteTxnError::Authorization(fgdb_warden::Error::ScopeDenied),
-            )));
-        }
-        Ok(())
-    }
-
-    fn admits(&self, symbol: GraphSymbol) -> bool {
-        match symbol {
-            GraphSymbol::Label(id) => self.scope.allows_label(id),
-            GraphSymbol::Relation(id) => self.scope.allows_relation(id),
-            GraphSymbol::Property(id) => self.scope.allows_property(id),
-        }
-    }
-
-    fn copy_name(&self, name: &str) -> Option<String> {
-        self.charge((name.len().div_ceil(64) as u64).saturating_add(1))
-            .ok()?;
-        Some(name.to_owned())
-    }
-}
-
-impl GraphSymbolResolver for &TransactionCatalog<'_> {
-    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
-        if self.denied.get() || self.failed.get() {
-            return None;
-        }
-        self.charge((name.len().div_ceil(64) as u64).saturating_add(1))
-            .ok()?;
-        let symbol = self.symbols.resolve(kind, name);
-        self.charge(0).ok()?;
-        if symbol.is_some_and(|symbol| !self.admits(symbol)) {
-            self.denied.set(true);
-            return None;
-        }
-        symbol
-    }
-
-    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
-        if self.denied.get() || self.failed.get() {
-            return None;
-        }
-        self.charge(1).ok()?;
-        let source = self.symbols.borrowed_reverse_catalog();
-        let mut catalog = ReverseSymbolCatalog::new();
-        for (id, name) in &source.labels {
-            // Hidden catalog growth must not change the signed work bill.
-            // Poll live controls during traversal; charge only visible copies.
-            self.charge(0).ok()?;
-            if self.scope.allows_label(*id) {
-                catalog.labels.insert(*id, self.copy_name(name)?);
-            }
-        }
-        for (id, name) in &source.relations {
-            self.charge(0).ok()?;
-            if self.scope.allows_relation(*id) {
-                catalog.relations.insert(*id, self.copy_name(name)?);
-            }
-        }
-        for (id, name) in &source.properties {
-            self.charge(0).ok()?;
-            if self.scope.allows_property(*id) {
-                catalog.properties.insert(*id, self.copy_name(name)?);
-            }
-        }
-        Some(catalog)
-    }
-
-    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
-        if self.denied.get() || self.failed.get() || !self.scope.allows_label(id) {
-            return None;
-        }
-        self.charge(1).ok()?;
-        let name = self.symbols.borrowed_reverse_catalog().labels.get(&id)?;
-        self.copy_name(name)
-    }
-
-    fn reverse_relation(&self, id: fgdb_delta_types::RelationId) -> Option<String> {
-        if self.denied.get() || self.failed.get() || !self.scope.allows_relation(id) {
-            return None;
-        }
-        self.charge(1).ok()?;
-        let name = self.symbols.borrowed_reverse_catalog().relations.get(&id)?;
-        self.copy_name(name)
-    }
-}
-
-/// Native read preparation wins over keyword hints: an alias or literal
-/// spelling CREATE cannot turn a read into a write. Every compiler and binding
-/// spends the retained owner allowance. Parameters already carry that owner's
-/// trusted once-per-statement clock; no adapter clock is captured again.
-fn prepare_transaction_statement(
-    db: &Served,
-    text: &str,
-    parameters: &GqlParameters,
-    scope: &fgdb_warden::PlannerPredicates,
-    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
-) -> Result<TransactionStatement, Failure> {
-    let catalog = TransactionCatalog {
-        symbols: &db.symbols,
-        scope,
-        work: RefCell::new(work),
-        failed: Cell::new(false),
-        denied: Cell::new(false),
-    };
-    let charge = |units| {
-        catalog
-            .charge(units)
-            .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))
-    };
-    charge(1)?;
-    let lowered_read = GqlMapArgumentText::lower_fields(text, parameters);
-    let (read_text, read_parameters) = lowered_read
-        .as_ref()
-        .map_or((text, parameters), |(lowered, derived)| {
-            (lowered.text(), derived)
-        });
-    let recipe = lowered_read.as_ref().map(|(lowered, _)| lowered);
-    let mut declarations = Vec::new();
-    for declaration in read_parameters.parameter_types() {
-        charge(1)?;
-        declarations.push(declaration);
-    }
-    charge(read_text.len().saturating_sub(text.len()) as u64)?;
-    let read = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
-        read_text,
-        &declarations,
-        &mut &catalog,
-    );
-    catalog.check()?;
-    let read_error = match read {
-        Ok(template) => {
-            charge(1)?;
-            return template
-                .bind_parameters(read_parameters)
-                .map(|statement| TransactionStatement::Read(Box::new(statement)))
-                .map_err(|error| transaction_statement_error(recipe, error));
-        }
-        Err(error) => error,
-    };
-    let mut offset = read_error.offset;
-    let mut read_error = transaction_statement_error(recipe, read_error);
-    charge(1)?;
-    let aggregate = PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
-        read_text,
-        &declarations,
-        &catalog,
-    );
-    catalog.check()?;
-    match aggregate {
-        Ok(template) => {
-            charge(1)?;
-            let statement = template
-                .bind_relation_parameters(read_parameters)
-                .map_err(|error| transaction_statement_error(recipe, error))?;
-            return Ok(TransactionStatement::Aggregate {
-                statement: Box::new(statement),
-                columns: template.columns().to_vec(),
-                slots: template.output_slots().to_vec(),
-            });
-        }
-        Err(error) if error.offset > offset => {
-            offset = error.offset;
-            read_error = transaction_statement_error(recipe, error);
-        }
-        Err(_) => {}
-    }
-    charge(1)?;
-    let aggregate = PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
-        read_text,
-        &declarations,
-        &catalog,
-    );
-    catalog.check()?;
-    match aggregate {
-        Ok(template) => {
-            charge(1)?;
-            let statement = template
-                .bind_parameters(read_parameters)
-                .map_err(|error| transaction_statement_error(recipe, error))?;
-            let statement =
-                PreparedGraphSetAggregate::from_complete_input(statement).ok_or_else(|| {
-                    Failure::from_refusal(Refusal::new(
-                        ErrorCode::Statement,
-                        "aggregate input is unsupported in an explicit write transaction",
-                    ))
-                })?;
-            return Ok(TransactionStatement::Aggregate {
-                statement: Box::new(statement),
-                columns: template.columns().to_vec(),
-                slots: template.output_slots().to_vec(),
-            });
-        }
-        Err(error) if error.offset > offset => {
-            read_error = transaction_statement_error(recipe, error);
-        }
-        Err(_) => {}
-    }
-    if !looks_like_write(text) {
-        return Err(read_error);
-    }
-    charge(1)?;
-    let lowered = GqlMapArgumentText::lower(text, parameters);
-    let (text, parameters) = lowered
-        .as_ref()
-        .map_or((text, parameters), |(lowered, derived)| {
-            (lowered.text(), derived)
-        });
-    let recipe = lowered.as_ref().map(|(lowered, _)| lowered);
-    let mut declarations = Vec::new();
-    for declaration in parameters.parameter_types() {
-        charge(1)?;
-        declarations.push(declaration);
-    }
-    let template = PreparedGraphWriteChainText::prepare_statement_with_parameter_types(
-        text,
-        db.write_relation,
-        &declarations,
-        &catalog,
-    );
-    catalog.check()?;
-    let template = template.map_err(|error| transaction_statement_error(recipe, error))?;
-    charge(1)?;
-    template
-        .bind_parameters(parameters)
-        .map(|statement| TransactionStatement::Write(Box::new(statement)))
-        .map_err(|error| transaction_statement_error(recipe, error))
-}
 /// Serve one Bolt connection until GOODBYE, disconnect or drain.
 pub(crate) async fn run(
     cx: &Cx,
@@ -1097,7 +808,9 @@ impl<'s> Connection<'s> {
                 parameters,
                 |parameters, scope, work| match prepare_transaction_statement(
                     db, text, parameters, scope, work,
-                ) {
+                )
+                .map_err(Failure::from_refusal)
+                {
                     Ok(statement) => Ok(statement),
                     Err(error) => {
                         preparation_refusal = Some(error);
@@ -1534,64 +1247,6 @@ fn read_only() -> Failure {
 
 fn bookmark(database: &str, seq: CommitSeq) -> String {
     format!("fgdb:{database}:{}", seq.0)
-}
-
-/// A dispatch hint and refusal selector, never execution authority. Both
-/// valid native reads and native write definitions are checked before queuing;
-/// only a native authorized owner can execute a mutation under authority.
-fn looks_like_write(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut at = 0;
-    while at < bytes.len() {
-        match bytes[at] {
-            quote @ (b'\'' | b'"' | b'`') => {
-                at += 1;
-                while at < bytes.len() && bytes[at] != quote {
-                    at += if bytes[at] == b'\\' { 2 } else { 1 };
-                }
-                at += 1;
-            }
-            b'/' if bytes.get(at + 1) == Some(&b'*') => {
-                at += 2;
-                let mut depth = 1_usize;
-                while at < bytes.len() && depth != 0 {
-                    if bytes[at] == b'/' && bytes.get(at + 1) == Some(&b'*') {
-                        depth += 1;
-                        at += 2;
-                    } else if bytes[at] == b'*' && bytes.get(at + 1) == Some(&b'/') {
-                        depth -= 1;
-                        at += 2;
-                    } else {
-                        at += 1;
-                    }
-                }
-            }
-            b'/' if bytes.get(at + 1) == Some(&b'/') => {
-                while at < bytes.len() && bytes[at] != b'\n' {
-                    at += 1;
-                }
-            }
-            byte if byte.is_ascii_alphabetic() => {
-                let start = at;
-                while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
-                    at += 1;
-                }
-                let word = &text[start..at];
-                let after_dot = start > 0 && bytes[start - 1] == b'.';
-                if !after_dot
-                    && [
-                        "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "INSERT", "FOREACH",
-                    ]
-                    .iter()
-                    .any(|keyword| word.eq_ignore_ascii_case(keyword))
-                {
-                    return true;
-                }
-            }
-            _ => at += 1,
-        }
-    }
-    false
 }
 
 /// RUN parameters as statement arguments, through the same conversion and
@@ -2127,6 +1782,8 @@ fn value(cell: WireValue, entities: &Entities) -> Result<Value, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execute::transaction::TransactionCatalog;
+    use fgdb_gql::{GraphSymbolKind, GraphSymbolResolver, ReverseSymbolCatalog};
 
     // Existing authority laws use the same production writer without a
     // database generation; lifecycle laws supply one explicitly below.
@@ -2520,15 +2177,9 @@ mod tests {
                     polls += 1;
                     Ok(())
                 };
-                let catalog = TransactionCatalog {
-                    symbols,
-                    scope,
-                    work: RefCell::new(&mut work),
-                    failed: Cell::new(false),
-                    denied: Cell::new(false),
-                };
+                let catalog = TransactionCatalog::new(symbols, scope, &mut work);
                 let visible = (&catalog).reverse_catalog().unwrap();
-                catalog.check().unwrap();
+                catalog.check().map_err(Failure::from_refusal).unwrap();
                 visible
             };
             (visible, units, polls)
@@ -2609,13 +2260,7 @@ mod tests {
             }
             Ok(())
         };
-        let catalog = TransactionCatalog {
-            symbols: &symbols,
-            scope,
-            work: RefCell::new(&mut work),
-            failed: Cell::new(false),
-            denied: Cell::new(false),
-        };
+        let catalog = TransactionCatalog::new(&symbols, scope, &mut work);
         assert!((&catalog).reverse_catalog().is_none());
         let stopped = calls.get();
         assert!(catalog.check().is_err());

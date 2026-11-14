@@ -12,6 +12,60 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Explicit FGP native transactions — qualification pending
+
+Source added 2026-11-13 under `fgdb-w2-txn-lifecycle-mhae` and
+`fgdb-w10-fgp-core-5b1`. FGP now connects BEGIN, transactional execution,
+COMMIT and ROLLBACK to the existing `AuthorizedWriteTransaction`. One Ready
+connection owns one private workspace, original signed permit and recovery
+generation. It holds no database lock between requests. Graph/set reads and
+exact terminal aggregates observe earlier staged writes; other connections
+see only committed state. Native scope, source/work/scratch, result-row,
+creation, mutation and statement allowances remain cumulative.
+
+The wire uses additive tags 0x002e–0x0036, following the independently added
+prepared-read-batch tag 0x002d. Provisional rows have distinct transaction
+chunk/end frames with a connection-owned handle, one-based statement ordinal
+and exact delivered row count. Existing autocommit encodings are unchanged.
+The Rust client exposes collected and callback-based execution, validates
+every result and terminal binding, and reports durable completion only after
+the correct handle, original basis and completed statement count agree.
+An empty owner may read-close; it cannot claim a committed write.
+
+The dispatcher takes ownership before fallible operations and restores it only
+after the complete provisional result was delivered. Statement refusal,
+cancellation, frame/value admission failure, disconnect, drain and recovery
+discard the unpublished prefix. Cancellation of the latest completed stream
+also aborts its retained owner, covering callback rejection after END was
+already sent. Idle recovery wakes the connection and releases the owner.
+Unrelated business requests and credential refresh are Busy while a
+transaction is active, preserving the same authority and allowance.
+
+COMMIT consumes the owner before awaiting native publication. Subscription
+notification follows completion and writer-lock release. No late recovery
+fence turns a committed write into a retryable refusal: it produces
+OutcomeUnknown or closes the transport, and the client never replays it.
+The native scoped binder is shared with Bolt, preserving its classification
+and error mapping. Negotiated schema/row admission covers ordinary and exact
+aggregate output before native statement success.
+
+Regression sources add three body laws, six client laws, four native owner
+laws and four real TCP laws, plus the existing phase/direction test extension.
+They cover exact bytes, malformed/truncated bodies, shared node bounds,
+provisional delivery, own-writes, one publication, rollback/drop, cumulative
+limits, mode/handle isolation, callback cancellation including a deterministic
+post-END cancel, stale basis and ambiguous completion. Independent source/API
+reviews and whitespace inspection completed. The pinned compiler was located,
+but the executor disconnected during dependency setup before compilation.
+Compilation, Rustfmt, Clippy, UBS, runtime tests and the full exact-tree proof
+remain **UNRUN**. Broader lifecycle and FGP beads remain open.
+
+This is the connection-scoped local transaction subset. Durable ownership
+leases, restart/reattachment, durable outcome lookup, full SSI, general
+historical writer reads and non-catalog transaction procedure hosts remain
+separate. Concurrent basis advancement retains native conservative refusal
+and native final conflict validation.
+
 ### FGP value and write-result admission — qualification pending
 
 The protocol codec now shares one value-node allowance across each complete
@@ -811,8 +865,8 @@ Compilation, runtime tests and exact-tree formatting/Clippy/UBS/full proof are
 **UNRUN** because dependency compilation was killed by resource exhaustion and
 the executor became unavailable before product validation.
 
-This is a local native API. The Bolt adapter above uses this owner. FGP explicit
-write adapters, durable ownership leases, reattachment and full SSI remain
+This is a local native API. The Bolt adapter and the explicit FGP adapter above
+use this owner. Durable ownership leases, reattachment and full SSI remain
 separate work; the lifecycle roadmap bead remains open. Ambiguous commit outcomes retain their native meaning and
 are never automatically replayed.
 

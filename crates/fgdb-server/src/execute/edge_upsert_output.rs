@@ -143,8 +143,20 @@ pub(crate) fn collect_aggregate(
     input: &[GraphAggregateRow],
     work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
 ) -> Result<Vec<Vec<WireValue>>, Refusal> {
+    collect_aggregate_with_frame_budget(columns, slots, input, work, None)
+}
+
+/// Explicit FGP transaction aggregates must also fit their negotiated schema
+/// and row frames while the complete workspace can still be rolled back.
+pub(super) fn collect_aggregate_with_frame_budget(
+    columns: &[String],
+    slots: &[GraphAggregateTextSlot],
+    input: &[GraphAggregateRow],
+    work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+    frame_budget: Option<usize>,
+) -> Result<Vec<Vec<WireValue>>, Refusal> {
     let mut charge = |units| work(units).map_err(|error| write_refusal(&error));
-    schema(columns, &mut charge, None)?;
+    schema(columns, &mut charge, frame_budget)?;
     if slots.len() != columns.len() {
         return Err(Refusal::new(
             ErrorCode::Execution,
@@ -162,7 +174,7 @@ pub(crate) fn collect_aggregate(
                 GraphAggregateTextSlot::Aggregate(at) => convert::cell(&row.values()[at]),
             })
             .collect();
-        encoded_row(&cells, &mut charge, None)?;
+        encoded_row(&cells, &mut charge, frame_budget)?;
         rows.push(cells);
     }
     Ok(rows)

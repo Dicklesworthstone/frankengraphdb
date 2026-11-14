@@ -45,6 +45,7 @@ mod difference;
 mod ordered_stream;
 mod read_batch;
 mod source_stream;
+mod transaction;
 
 /// Finished child streams whose late WINDOW_UPDATE/QUERY_CANCEL is benign: a
 /// client may grant credit for a stream the server has just ended.
@@ -248,8 +249,16 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
     let mut token: Option<CapabilityToken> = None;
     let mut selected: Option<Arc<Served>> = None;
     let mut prepared_statements = PreparedStatements::default();
+    let mut active_transaction: Option<transaction::ActiveTransaction<'_>> = None;
     loop {
-        let frame = match lane.receive(cx, &waiter).await {
+        let inbound = match active_transaction.as_ref() {
+            Some(transaction) => {
+                lane.receive_transaction(cx, &waiter, transaction.generation())
+                    .await
+            }
+            None => lane.receive(cx, &waiter).await,
+        };
+        let frame = match inbound {
             Inbound::Frame(frame) => frame,
             Inbound::Closed => return,
             Inbound::Shutdown => {
@@ -259,6 +268,38 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
         };
         let header = *frame.header();
         let request = header.request_id();
+        // An explicit transaction owns one native signed allowance. Ordinary
+        // requests cannot interleave a fresh autocommit session or replace its
+        // authority; the owner remains available for explicit completion.
+        if active_transaction.is_some()
+            && !matches!(
+                header.kind(),
+                FrameKind::ExecuteTransaction
+                    | FrameKind::CommitTransaction
+                    | FrameKind::RollbackTransaction
+                    | FrameKind::Ping
+                    | FrameKind::Drain
+                    | FrameKind::WindowUpdate
+                    | FrameKind::QueryCancel
+            )
+        {
+            let binding = lane.conn.binding();
+            if lane
+                .refuse(
+                    cx,
+                    request,
+                    StreamId::CONTROL,
+                    binding,
+                    ErrorCode::Busy,
+                    "an explicit transaction is active; commit or roll it back first",
+                )
+                .await
+                .is_err()
+            {
+                return;
+            }
+            continue;
+        }
         match header.kind() {
             FrameKind::Hello => {
                 let Ok(hello) = Hello::decode(frame.payload()) else {
@@ -566,6 +607,41 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     return;
                 }
                 lane.send_generation = None;
+            }
+            FrameKind::BeginTransaction
+            | FrameKind::ExecuteTransaction
+            | FrameKind::CommitTransaction
+            | FrameKind::RollbackTransaction => {
+                let (Some(selected), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                // Borrow the server's permanent database map, not the local
+                // Arc clone: the retained native owner borrows its issuer.
+                let Some(db) = server
+                    .databases
+                    .values()
+                    .find(|db| Arc::ptr_eq(db, selected))
+                else {
+                    return;
+                };
+                match lane
+                    .transaction_request(
+                        cx,
+                        &waiter,
+                        db,
+                        token,
+                        &mut active_transaction,
+                        &frame,
+                    )
+                    .await
+                {
+                    Ok(()) | Err(Stop::Cancelled) => {}
+                    Err(Stop::Transport | Stop::Recovery(_)) => return,
+                    Err(Stop::Drain) => {
+                        lane.goodbye(cx).await;
+                        return;
+                    }
+                }
             }
             FrameKind::Prepare => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
@@ -920,9 +996,26 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 lane.goodbye(cx).await;
                 return;
             }
-            // Only a recently finished stream can be addressed here (header
-            // validation refuses any other): its credit or cancel is moot.
-            FrameKind::WindowUpdate | FrameKind::QueryCancel => {}
+            // Credit for a finished stream is moot. A late cancellation of
+            // the latest provisional statement is not: its END may have fit
+            // the initial window before the client's callback rejected a row.
+            // TCP ordering places that cancellation before its next request.
+            FrameKind::WindowUpdate | FrameKind::QueryCancel => {
+                if header.kind() == FrameKind::QueryCancel
+                    && active_transaction
+                        .as_ref()
+                        .is_some_and(|transaction| {
+                            transaction.last_stream == Some(header.stream_id())
+                        })
+                {
+                    if Empty::decode(frame.payload()).is_err() {
+                        return lane
+                            .fatal(cx, request, ErrorCode::Protocol, "malformed QUERY_CANCEL")
+                            .await;
+                    }
+                    active_transaction = None;
+                }
+            }
             FrameKind::ResultAck | FrameKind::ResultRelease => {
                 let refusal = ErrorBody {
                     code: ErrorCode::Protocol,
@@ -1896,7 +1989,11 @@ impl Lane {
                     Err(Stop::Transport)
                 }
             }
-            FrameKind::Execute
+            FrameKind::BeginTransaction
+            | FrameKind::ExecuteTransaction
+            | FrameKind::CommitTransaction
+            | FrameKind::RollbackTransaction
+            | FrameKind::Execute
             | FrameKind::ExecuteBatch
             | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteReadStatements
@@ -1963,6 +2060,25 @@ impl Lane {
         binding: Binding,
         answer: Answer,
     ) -> Result<(), Stop> {
+        self.stream_with_transaction(cx, waiter, request, stream, binding, answer, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// A provisional statement shares ordinary flow control and live guards,
+    /// but carries transaction identity instead of a committed/snapshot claim.
+    /// Only a fully delivered END returns true; a typed result refusal is false.
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_with_transaction(
+        &mut self,
+        cx: &Cx,
+        waiter: &Waiter,
+        request: u64,
+        stream: StreamId,
+        binding: Binding,
+        answer: Answer,
+        transaction: Option<(fgdb_protocol::body::TransactionHandle, u64)>,
+    ) -> Result<bool, Stop> {
         let committed = matches!(&answer.outcome, Outcome::WriteCommitted { .. });
         self.send_generation = Some(answer.generation);
         let mut window = FlowWindow::new(self.initial_window, self.maximum_window)
@@ -1994,7 +2110,8 @@ impl Lane {
                         committed,
                         "the column list exceeds the negotiated frame limit",
                     )
-                    .await;
+                    .await
+                    .map(|()| false);
             }
             let mut chunk_rows = Vec::new();
             let mut nodes = 0;
@@ -2011,7 +2128,8 @@ impl Lane {
                                 committed,
                                 "a result value exceeds the wire bounds",
                             )
-                            .await;
+                            .await
+                            .map(|()| false);
                     };
                     if len > frame_budget.saturating_sub(size)
                         && chunk_rows.is_empty()
@@ -2026,7 +2144,8 @@ impl Lane {
                                 committed,
                                 "a result row exceeds the negotiated frame limit",
                             )
-                            .await;
+                            .await
+                            .map(|()| false);
                     }
                     if len > byte_room - size || row_nodes > MAX_VALUE_NODES - nodes {
                         break;
@@ -2057,10 +2176,15 @@ impl Lane {
                         committed,
                         "a result value exceeds the wire bounds",
                     )
-                    .await;
+                    .await
+                    .map(|()| false);
             };
             let frame = Frame::new(
-                FrameKind::SnapshotResultChunk,
+                if transaction.is_some() {
+                    FrameKind::TransactionResultChunk
+                } else {
+                    FrameKind::SnapshotResultChunk
+                },
                 request,
                 stream,
                 binding,
@@ -2072,13 +2196,31 @@ impl Lane {
                 .await?;
             delivered += count;
         }
-        let end = ResultEnd {
-            outcome: answer.outcome,
-            rows: delivered,
+        let (kind, payload) = match transaction {
+            Some((handle, statement)) => {
+                let end = fgdb_protocol::body::TransactionResultEnd {
+                    handle,
+                    statement,
+                    rows: delivered,
+                };
+                (
+                    FrameKind::TransactionResultEnd,
+                    end.encode().map_err(|_| Stop::Transport)?,
+                )
+            }
+            None => {
+                let end = ResultEnd {
+                    outcome: answer.outcome,
+                    rows: delivered,
+                };
+                (
+                    FrameKind::SnapshotResultEnd,
+                    end.encode().map_err(|_| Stop::Transport)?,
+                )
+            }
         };
-        let payload = end.encode().map_err(|_| Stop::Transport)?;
         let frame = Frame::new(
-            FrameKind::SnapshotResultEnd,
+            kind,
             request,
             stream,
             binding,
@@ -2088,6 +2230,7 @@ impl Lane {
         .map_err(|_| Stop::Transport)?;
         self.credited(cx, waiter, &mut window, stream, &frame, 0)
             .await
+            .map(|()| true)
     }
 
     /// Native writes preflight deterministic framing before completion. If a
@@ -2291,7 +2434,11 @@ impl Lane {
                     .await;
                 Err(Stop::Drain)
             }
-            FrameKind::Execute
+            FrameKind::BeginTransaction
+            | FrameKind::ExecuteTransaction
+            | FrameKind::CommitTransaction
+            | FrameKind::RollbackTransaction
+            | FrameKind::Execute
             | FrameKind::ExecuteBatch
             | FrameKind::ExecuteReadBatch
             | FrameKind::ExecuteReadStatements

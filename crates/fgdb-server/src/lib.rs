@@ -3,9 +3,10 @@
 //! The server composes the embedded engine behind `fgdb-protocol`'s FGP
 //! connection machine over asupersync TCP or TLS 1.3. It reimplements none of the
 //! engine: every statement runs through the same capability-authorized
-//! sessions an embedded host would use, constructed fresh per statement from
-//! the connection's Warden capability, so signature, scope, expiry, signed
-//! budgets and issuer retirement are rechecked for every statement and
+//! sessions an embedded host would use. Autocommit creates a fresh session;
+//! explicit transactions retain their original native owner and cumulative
+//! Warden allowance. Signature, scope, expiry, signed budgets and issuer
+//! retirement remain checked at every statement and completion, and
 //! security applies before expansion (FG-INV-20), never as a result filter.
 //!
 //! FGP also rechecks the selected issuer's cooperative retirement fence and
@@ -33,6 +34,13 @@
 //!   vertex and relationship `MERGE` steps, and support `ON CREATE`/`ON MATCH`
 //!   actions plus terminal `SET`, `REMOVE`, and `DELETE`. Creating MERGE
 //!   chains hold admitted effects for one ordered preparation and commit.
+//! - Connection-scoped explicit FGP writes through `BEGIN_TRANSACTION`,
+//!   `EXECUTE_TRANSACTION`, `COMMIT_TRANSACTION` and `ROLLBACK_TRANSACTION`.
+//!   Statements share one authorized native workspace, see staged effects and
+//!   deliver distinct provisional `TRANSACTION_RESULT_CHUNK/END` frames.
+//!   Only COMMIT publishes. Failed statements, rejected delivery (including a
+//!   late cancellation), disconnect, drain and recovery discard the prefix.
+//!   The retained owner holds no database lock between messages.
 //! - Results as the session-owned, ephemeral `SNAPSHOT_RESULT_CHUNK` /
 //!   `SNAPSHOT_RESULT_END` class on a server-minted child stream, under
 //!   per-stream byte-and-row flow credit replenished by `WINDOW_UPDATE`.
@@ -62,7 +70,7 @@
 //! Not served, and refused with a typed error rather than approximated: the
 //! durable `PublishedResultStream` class with `RESULT_ACK`/`RESULT_RELEASE`,
 //! prepared writes with RETURN, durable transaction ownership/reattachment,
-//! FGP explicit write transactions, durable or capability-masked subscriptions, and HTTP/2,
+//! durable or capability-masked subscriptions, and HTTP/2,
 //! gRPC and WebSocket adapters.
 //! Results are ephemeral. Autocommit results follow native completion, while
 //! explicit transaction rows are provisional until `COMMIT`. Disconnect can

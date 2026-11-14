@@ -13,6 +13,8 @@ pub(crate) mod ordered;
 mod prepared;
 mod read_batch;
 mod subscription;
+pub(crate) mod transaction;
+pub(crate) use transaction::NativeWriteTransaction;
 pub(crate) use conditional::{authorize_write, write_if_current, write_if_current_framed};
 pub(crate) use difference::{DifferenceAnswer, read_difference, read_prepared_difference};
 pub(crate) use prepared::{

@@ -265,6 +265,65 @@ reattachment token, result ACK or replay capability.
 
 ## fgdbd: the served subset
 
+### Explicit native transactions
+
+A client with Write or ReadWrite authority may open one connection-scoped
+native workspace with BEGIN_TRANSACTION. Each EXECUTE_TRANSACTION uses the
+same permit, snapshot basis and cumulative native/signed allowances. Buffered
+Read and Write modes are admitted; Read cannot stage mutations. Graph/set
+reads and exact terminal aggregates see earlier staged effects. Native writes
+and reads retain capability masking before observation and expansion.
+
+The server holds no database lock while waiting for another request. COMMIT
+uses the native conflict/completion owner once, publishing all staged effects
+together or returning the native refusal. A purely read-only use of the owner
+returns ReadClosed at its original basis. ROLLBACK, failed statements,
+malformed transaction requests, output-admission failure, disconnect, drain
+and recovery discard the entire unpublished prefix. Source/ordered streaming
+modes, subscriptions, historical writer reads and non-catalog procedure hosts
+are outside this retained-writer subset and refuse without eager fallback.
+
+Provisional output must fit the negotiated schema and row frame limits before
+the native statement succeeds. Delivery is credit-controlled, and only a
+fully sent TRANSACTION_RESULT_END retains the owner for another operation.
+QUERY_CANCEL also aborts the owner when it targets the most recently finished
+provisional stream. Thus a callback rejection cannot leave a staged prefix
+committable merely because END fit the initial credit window.
+
+Ordinary autocommit/prepared requests and AUTH_REFRESH are Busy while the
+owner is active. PING and flow/cancel control remain available. A foreign or
+stale transaction handle has the same bounded refusal as a missing owner and
+discards any current unpublished prefix. Recovery fences both active and idle
+owners; a recovery race after successful COMMIT reports OutcomeUnknown or
+closes the transport, never an apparently safe-to-retry precommit failure.
+
+```rust
+use fgdb_protocol::body::{Execute, ExecuteMode};
+
+let begun = client.begin_transaction(cx).await?;
+client.execute_transaction(cx, begun.handle, &Execute {
+    mode: ExecuteMode::Write,
+    statement: "CREATE (:Person {name:'Ada',age:37})".into(),
+    parameters: vec![],
+}).await?;
+let provisional = client.execute_transaction(cx, begun.handle, &Execute {
+    mode: ExecuteMode::Read,
+    statement: "MATCH (n:Person) RETURN n.name AS name".into(),
+    parameters: vec![],
+}).await?;
+// These rows are provisional. Only this explicit operation publishes writes.
+let completion = client.commit_transaction(cx, begun.handle).await?;
+```
+
+Instead of commit, call `rollback_transaction(cx, begun.handle)` to discard the
+workspace. A lost commit response can leave the durable outcome unknown;
+reconnecting and repeating the statements can duplicate effects. This profile
+provides no durable lease, restart, reattachment or outcome lookup.
+
+The implementation and regression sources are present. Runtime qualification
+is pending: the execution environment disconnected before changed-source
+compilation, formatting, Clippy or tests ran. See IMPLEMENTATION_STATUS.md.
+
 ### Consistent read batches
 
 `EXECUTE_READ_BATCH` evaluates one read statement for every supplied argument
@@ -1282,7 +1341,7 @@ that needs no durable write can instead return `ReadClosed` (`committed:false`).
 
 Authoritative frame-catalog generation, durable
 result machines with ACK/release/resume, durable transaction preparation,
-explicit transactions with
+durable explicit transaction
 ownership and reattachment, SnapshotQuery proofs, durable and capability-masked
 subscriptions, the surface
 adapters, multi-tenant admission/QoS, and the native Python packaging boundary

@@ -46,6 +46,9 @@ mod read_batch;
 #[path = "loopback/read_statements.rs"]
 mod read_statements;
 
+#[path = "loopback/transactions.rs"]
+mod transactions;
+
 fn issuer_key() -> AuthKey {
     AuthKey::from_seed(8501)
 }
