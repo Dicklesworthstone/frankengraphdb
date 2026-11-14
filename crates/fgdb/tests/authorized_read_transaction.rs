@@ -4,10 +4,15 @@
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryError, QueryResult, QueryValue, WriteBatch};
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
-use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
-use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_gql::{
+    GlaLimitDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphElementMetadata,
+    GraphSymbol, GraphSymbolKind, ReverseSymbolCatalog,
+};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use fgdb_warden::{Authority, Error, Grant, LimitDimension, QueryLimits, Scope};
 use std::cell::Cell;
 
@@ -533,4 +538,223 @@ fn request_cancellation_closes_queries_and_unused_owners_without_retaining_pins(
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn visible_catalog() -> ReverseSymbolCatalog {
+    let mut catalog = ReverseSymbolCatalog::new();
+    catalog.insert_label(LabelId(1), "L");
+    catalog.insert_relation(RelationId(1), "R");
+    catalog.insert_property(PropertyKeyId(1), "p");
+    catalog
+}
+
+#[test]
+fn graph_output_reuses_the_original_cut_and_masks_before_catalog_access() {
+    lab(0x6b20, |contexts| async move {
+        let query = contexts.query();
+        let commit = contexts.commit();
+        let mut db = database(&commit).await;
+        let mut edges = WriteBatch::new(RelationId(1));
+        edges.add_edge(
+            EId(40),
+            VId(1),
+            VId(3),
+            vec![
+                (PropertyKeyId(1), CanonicalScalar::Int(5)),
+                (PropertyKeyId(2), CanonicalScalar::Int(99)),
+            ],
+        );
+        edges.add_edge(EId(41), VId(1), VId(2), vec![]);
+        db.write(&commit, edges).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let mut owner = db
+            .begin_authorized_read(&query, &issuer, &token, "main", symbols, policy(), || NOW)
+            .unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(70)));
+        update.set_edge_property(EId(40), PropertyKeyId(1), Some(CanonicalScalar::Int(50)));
+        db.write(&commit, update).await.unwrap();
+        drop(db);
+        let catalog = visible_catalog(); // Hidden labels/fields have no names.
+        let result: Result<(), QueryError> = owner.query_with_graph_output(
+            &query,
+            "RETURN 1 AS value",
+            &GqlParameters::new(),
+            |_, work, metadata| {
+                work(1)?;
+                let vertex = ElementId::Vertex(VId(1));
+                let edge = ElementId::Edge(EId(40));
+                assert_eq!(
+                    metadata.metadata(vertex, GraphElementMetadata::Labels, &catalog)?,
+                    Some(GraphValue::List(
+                        vec![GraphValue::Scalar(
+                            CanonicalScalar::ucs_basic_text("L").unwrap()
+                        )]
+                        .into_boxed_slice()
+                    ))
+                );
+                assert_eq!(
+                    metadata.metadata(vertex, GraphElementMetadata::Properties, &catalog)?,
+                    GraphValue::map(vec![(
+                        "p".into(),
+                        GraphValue::Scalar(CanonicalScalar::Int(7))
+                    )])
+                );
+                assert_eq!(
+                    metadata.metadata(edge, GraphElementMetadata::Properties, &catalog)?,
+                    GraphValue::map(vec![(
+                        "p".into(),
+                        GraphValue::Scalar(CanonicalScalar::Int(5))
+                    )])
+                );
+                assert_eq!(
+                    metadata.metadata(edge, GraphElementMetadata::Type, &catalog)?,
+                    Some(GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text("R").unwrap()
+                    ))
+                );
+                assert_eq!(
+                    metadata.metadata(edge, GraphElementMetadata::StartNode, &catalog)?,
+                    Some(GraphValue::Vertex(VId(1)))
+                );
+                assert_eq!(
+                    metadata.metadata(edge, GraphElementMetadata::EndNode, &catalog)?,
+                    Some(GraphValue::Vertex(VId(3)))
+                );
+                for hidden in [
+                    ElementId::Vertex(VId(2)),
+                    ElementId::Edge(EId(41)),
+                    ElementId::Vertex(VId(999)),
+                ] {
+                    assert_eq!(
+                        metadata.metadata(hidden, GraphElementMetadata::Properties, &catalog)?,
+                        None
+                    );
+                }
+                Ok(())
+            },
+            |error| error,
+        );
+        result.unwrap();
+        assert_eq!(owner.completed_statements(), 1);
+        assert_eq!(owner.close(&query).unwrap(), basis);
+    });
+}
+
+#[test]
+fn graph_output_spends_the_same_signed_nodes_across_queries_and_latches_refusal() {
+    lab(0x6b21, |contexts| async move {
+        let query = contexts.query();
+        let db = database(&contexts.commit()).await;
+        let pin = db.pinned_read_view().unwrap().downgrade();
+        let issuer = authority();
+        let mut allowed = grant();
+        allowed.limits.max_nodes = 2;
+        let token = issuer.issue_at(&allowed, NOW).unwrap();
+        let mut owner = db
+            .begin_authorized_read(&query, &issuer, &token, "main", symbols, policy(), || NOW)
+            .unwrap();
+        drop(db);
+        let catalog = visible_catalog();
+        let first: Result<(), QueryError> = owner.query_with_graph_output(
+            &query,
+            "RETURN 1 AS value",
+            &GqlParameters::new(),
+            |_, _, metadata| {
+                for id in [VId(1), VId(3)] {
+                    assert!(
+                        metadata
+                            .metadata(
+                                ElementId::Vertex(id),
+                                GraphElementMetadata::Properties,
+                                &catalog
+                            )?
+                            .is_some()
+                    );
+                }
+                Ok(())
+            },
+            |error| error,
+        );
+        first.unwrap();
+        let second: Result<(), QueryError> = owner.query_with_graph_output(
+            &query,
+            "RETURN 2 AS value",
+            &GqlParameters::new(),
+            |_, _, metadata| {
+                refused(
+                    metadata.metadata(
+                        ElementId::Vertex(VId(1)),
+                        GraphElementMetadata::Labels,
+                        &catalog,
+                    ),
+                    Error::LimitExceeded(LimitDimension::Nodes),
+                );
+                Ok(()) // A host cannot turn failed hydration into partial success.
+            },
+            |error| error,
+        );
+        refused(second, Error::LimitExceeded(LimitDimension::Nodes));
+        assert!(!owner.is_active());
+        assert_eq!(owner.completed_statements(), 1);
+        assert!(pin.upgrade().is_none());
+    });
+}
+
+#[test]
+fn graph_output_metadata_phase_limits_and_missing_catalog_fail_terminally() {
+    lab(0x6b22, |contexts| async move {
+        let query = contexts.query();
+        let db = database(&contexts.commit()).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        for missing_catalog in [false, true] {
+            let mut owner = db
+                .begin_authorized_read(
+                    &query,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols,
+                    GqlQueryPolicy::new(1000, 1000, 1_000_000, 128),
+                    || NOW,
+                )
+                .unwrap();
+            let catalog = if missing_catalog {
+                ReverseSymbolCatalog::new()
+            } else {
+                visible_catalog()
+            };
+            let failed = Cell::new(false);
+            let result: Result<(), QueryError> = owner.query_with_graph_output(
+                &query, "RETURN 1 AS value", &GqlParameters::new(),
+                |_, _, metadata| {
+                    for _ in 0..256 {
+                        let value = metadata.metadata(ElementId::Vertex(VId(1)), GraphElementMetadata::Properties, &catalog);
+                        if let Err(error) = value {
+                            if missing_catalog {
+                                assert!(matches!(error, QueryError::Pattern(GqlQueryError::Source(
+                                    fgdb::GqlError::Read(fgdb::ReadError::UnmappedProperty(PropertyKeyId(1)))
+                                ))));
+                            } else {
+                                assert!(matches!(error, QueryError::Pattern(GqlQueryError::Evaluator(limit))
+                                    if limit.dimension == GlaLimitDimension::ScratchEntries));
+                            }
+                            failed.set(true);
+                            refused(metadata.metadata(ElementId::Vertex(VId(1)), GraphElementMetadata::Labels, &catalog),
+                                Error::ExecutionStopped);
+                            break;
+                        }
+                    }
+                    assert!(failed.get());
+                    Ok(())
+                }, |error| error,
+            );
+            refused(result, Error::ExecutionStopped);
+            assert!(!owner.is_active());
+            assert_eq!(owner.completed_statements(), 0);
+        }
+    });
 }

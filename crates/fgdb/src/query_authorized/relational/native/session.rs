@@ -26,7 +26,7 @@ pub use analytics::AuthorizedPreparedFnxCall;
 mod batch;
 #[path = "session/transaction.rs"]
 mod transaction;
-pub use transaction::AuthorizedReadTransaction;
+pub use transaction::{AuthorizedReadOutput, AuthorizedReadTransaction};
 #[path = "session/beacon.rs"]
 mod beacon;
 pub use beacon::AuthorizedBeaconIndex;

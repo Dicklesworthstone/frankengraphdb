@@ -51,7 +51,7 @@ pub use relational::{
     AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
     AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
     AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
-    AuthorizedReadSession, AuthorizedReadTransaction, AuthorizedRowCursor,
+    AuthorizedReadOutput, AuthorizedReadSession, AuthorizedReadTransaction, AuthorizedRowCursor,
     AuthorizedSealedReadSession, AuthorizedSendAggregateCursor, AuthorizedSendRowCursor,
     AuthorizedSortLimits, AuthorizedSpoolCursor,
 };

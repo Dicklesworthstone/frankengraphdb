@@ -180,7 +180,7 @@ pub use query::{
     AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
     AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
     AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
-    AuthorizedReadSession, AuthorizedReadTransaction, AuthorizedRowCursor,
+    AuthorizedReadOutput, AuthorizedReadSession, AuthorizedReadTransaction, AuthorizedRowCursor,
     AuthorizedSealedReadSession, AuthorizedSendAggregateCursor, AuthorizedSendRowCursor,
     AuthorizedSortLimits, AuthorizedSpoolCursor, ExplainRow, HYBRID_SEARCH_OUTPUTS,
     HybridCallError, MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,

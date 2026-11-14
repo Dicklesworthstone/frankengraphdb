@@ -3,6 +3,92 @@
 //! instead moves its permit into the shared native executor for each request.
 
 use super::*;
+use fgdb_delta_types::ElementId;
+use fgdb_gql::{
+    GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GraphElementMetadata,
+    GraphElementMetadataError, ReverseSymbolCatalog,
+};
+use std::cell::Cell;
+
+/// Capability-scoped graph metadata during a checked read-output callback.
+///
+/// An identity is re-admitted at the owner's exact snapshot, including both
+/// endpoints of a relationship. Hidden identities return None; fields are
+/// masked before catalog access or copying. The trusted reverse catalog names
+/// admitted fields and does not grant authority. Calls spend the same live
+/// signed node/work allowance as the statement, never a new read session.
+/// Returned values stay private until the enclosing query succeeds.
+pub trait AuthorizedReadOutput {
+    fn metadata(
+        &mut self,
+        element: ElementId,
+        kind: GraphElementMetadata,
+        catalog: &ReverseSymbolCatalog,
+    ) -> Result<Option<fgdb_gql::algebra::GraphValue>, QueryError>;
+}
+
+struct MetadataReader<F>(F);
+
+impl<F> AuthorizedReadOutput for MetadataReader<F>
+where
+    F: FnMut(
+        ElementId,
+        GraphElementMetadata,
+        &ReverseSymbolCatalog,
+    ) -> Result<Option<fgdb_gql::algebra::GraphValue>, QueryError>,
+{
+    fn metadata(
+        &mut self,
+        element: ElementId,
+        kind: GraphElementMetadata,
+        catalog: &ReverseSymbolCatalog,
+    ) -> Result<Option<fgdb_gql::algebra::GraphValue>, QueryError> {
+        (self.0)(element, kind, catalog)
+    }
+}
+
+#[derive(Default)]
+struct MetadataBudget {
+    work: u64,
+    scratch: u64,
+}
+
+impl MetadataBudget {
+    fn charge(
+        &mut self,
+        event: GlaExecutionEvent,
+        policy: GqlQueryPolicy,
+    ) -> Result<(), QueryError> {
+        let work = u128::from(self.work) + 1;
+        let scratch =
+            u128::from(self.scratch) + u128::from(matches!(event, GlaExecutionEvent::ScratchEntry));
+        for (observed, limit, dimension) in [
+            (
+                work,
+                policy.evaluator.max_work_units,
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                scratch,
+                policy.evaluator.max_scratch_entries,
+                GlaLimitDimension::ScratchEntries,
+            ),
+        ] {
+            if observed > u128::from(limit) {
+                return Err(QueryError::Pattern(fgdb_gql::GqlQueryError::Evaluator(
+                    GlaLimitExceeded {
+                        dimension,
+                        limit,
+                        observed,
+                    },
+                )));
+            }
+        }
+        self.work = work as u64;
+        self.scratch = scratch as u64;
+        Ok(())
+    }
+}
 
 struct State<'issuer, Resolver, Clock> {
     view: EmbeddedReadView,
@@ -88,6 +174,38 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadTransaction<'_, R,
         output: impl FnOnce(QueryResult, &mut dyn FnMut(u64) -> Result<(), QueryError>) -> Result<T, E>,
         map_error: impl Fn(QueryError) -> E,
     ) -> Result<T, E> {
+        self.query_with_graph_output(
+            cx,
+            text,
+            parameters,
+            |result, work, _| output(result, work),
+            map_error,
+        )
+    }
+
+    /// Admit a host representation with graph metadata from the original pin
+    /// and signed permit. There is no database handle or raw snapshot in this
+    /// callback. The host must meter its own conversion through `work` and
+    /// publish only after this method returns successfully.
+    ///
+    /// All metadata calls within this output callback share one additional
+    /// work/scratch ceiling from the fixed query policy. That ceiling bounds
+    /// the metadata phase separately from query evaluation; signed node/work
+    /// allowances remain cumulative across both phases and all statements.
+    /// Metadata failures, even swallowed by the host, terminally close the
+    /// owner and prevent output or pending cache publication.
+    pub fn query_with_graph_output<T, E>(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        parameters: &GqlParameters,
+        output: impl FnOnce(
+            QueryResult,
+            &mut dyn FnMut(u64) -> Result<(), QueryError>,
+            &mut dyn AuthorizedReadOutput,
+        ) -> Result<T, E>,
+        map_error: impl Fn(QueryError) -> E,
+    ) -> Result<T, E> {
         // Take before all fallible work. An error or panic can never restore
         // an owner whose original allowance or last statement was discarded.
         let State {
@@ -131,11 +249,61 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadTransaction<'_, R,
                 .borrow_mut()
                 .admit_rows(rows)
                 .map_err(&map_error)?;
-            let admitted = output(result, &mut |units| {
-                execution.borrow_mut().work_units(units)
+            let metadata_failed = Cell::new(false);
+            let metadata_failure = RefCell::new(None);
+            let mut metadata_budget = MetadataBudget::default();
+            let mut metadata = MetadataReader(|element, kind, catalog: &ReverseSymbolCatalog| {
+                if metadata_failed.get() {
+                    return Err(stopped());
+                }
+                let result = (|| {
+                    execution.borrow_mut().checkpoint()?;
+                    let value = scoped_element_metadata(
+                        &view.snapshot,
+                        self.basis,
+                        &scope,
+                        &execution,
+                        &metadata_failure,
+                        element,
+                        kind,
+                        catalog,
+                        &mut |event| {
+                            let charged = (|| {
+                                execution.borrow_mut().checkpoint()?;
+                                metadata_budget.charge(event, policy)
+                            })();
+                            charged.map_err(|error| {
+                                metadata_failure.borrow_mut().get_or_insert(error);
+                            })
+                        },
+                    );
+                    if let Some(error) = metadata_failure.borrow_mut().take() {
+                        return Err(error);
+                    }
+                    let value = value.map_err(|error| match error {
+                        GraphElementMetadataError::Source(error) => {
+                            QueryError::Pattern(fgdb_gql::GqlQueryError::Source(error))
+                        }
+                        GraphElementMetadataError::Interrupted => stopped(),
+                    })?;
+                    execution.borrow_mut().checkpoint()?;
+                    Ok(value)
+                })();
+                if result.is_err() {
+                    metadata_failed.set(true);
+                }
+                result
             });
+            let admitted = output(
+                result,
+                &mut |units| execution.borrow_mut().work_units(units),
+                &mut metadata,
+            );
             execution.borrow_mut().checkpoint().map_err(&map_error)?;
             let admitted = admitted?;
+            if metadata_failed.get() {
+                return Err(map_error(stopped()));
+            }
             execution.borrow_mut().deliver(0).map_err(&map_error)?;
             Ok(admitted)
         })?;
