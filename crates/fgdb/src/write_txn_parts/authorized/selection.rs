@@ -683,6 +683,8 @@ pub(super) fn select<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u64>(
 
 /// The same pinned and scoped selection, physically returned as two complete
 /// endpoint factors. The original plan controls sparse overlay construction.
+/// Keep the native source even before the first staged write: its positive and
+/// negative observations must participate in the transaction's final validation.
 pub(super) fn select_overlay_factors<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &WriteTxn,
     database: &Database<V>,
@@ -697,7 +699,7 @@ pub(super) fn select_overlay_factors<V: Vfs + Clone, Clock: FnMut() -> u64>(
         database,
         cx,
         request.original().plan().reads_edges(),
-        false,
+        true,
         execution,
         |overlay| {
             controlled(cx, execution, |node, poll, checkpoint| match overlay {
@@ -719,6 +721,8 @@ pub(super) fn select_overlay_factors<V: Vfs + Clone, Clock: FnMut() -> u64>(
 /// cancellation; only admitted rows consume signed/native query allowances.
 /// The resident generation, changed-row payloads and conflict witnesses are not
 /// a bounded-byte or spillable storage abstraction.
+/// An empty workspace still needs this source's read and absence witnesses;
+/// immutable admission alone cannot validate a later explicit COMMIT.
 pub(super) fn select_overlay<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u64>(
     transaction: &WriteTxn,
     database: &Database<V>,
@@ -733,7 +737,7 @@ pub(super) fn select_overlay<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u
         database,
         cx,
         pattern.plan().reads_edges(),
-        false,
+        true,
         execution,
         |overlay| match overlay {
             None => select(database, cx, pattern, scope, policy, execution),
