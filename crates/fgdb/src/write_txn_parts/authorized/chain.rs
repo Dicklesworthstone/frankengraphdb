@@ -481,7 +481,7 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteT
     }
 
     fn supports_seeded_patterns(&self) -> bool {
-        self.scope.sees_all_incidence() && self.scope.sees_all_fields()
+        true
     }
 
     fn seeded_pattern(

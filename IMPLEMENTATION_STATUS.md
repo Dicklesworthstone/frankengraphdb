@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-12 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-14 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,91 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Consistent prepared read batches across FGP and the CLI — qualification pending
+
+Source added 2026-11-14 exposes `EXECUTE_PREPARED_READ_BATCH` (0x002d)
+and the Rust client's collected and callback APIs. One connection-owned
+prepared read accepts 1–32 fresh argument sets. The server attaches the frozen
+template once to one authorized native read session and executes all sets
+through its existing prepared-batch owner. Ordinary reads share the session's
+pin; explicit temporal arguments retain their selected cuts. Every set shares
+the same cumulative signed allowance.
+
+Handle ownership, read-rights precedence, release/refresh invalidation and
+database-generation fences apply. Complete execution, conversion and wire
+admission finish before the first schema or row. Later binding, quota or
+representability failures expose no successful prefix. Existing batch result
+framing, flow credit, cancellation and terminal draining remain the delivery
+owner. Unsupported peers or refused requests never trigger independent reads
+or an automatic retry.
+
+The CLI selects this operation explicitly with `remote --prepared-batch
+--rows-file <path> query <statement>`. Complete JSON/CSV and typed-value
+admission, the 32-set limit and both request envelopes are checked before
+credentials or connection creation. The first set supplies representative
+structural types for one PREPARE; every execution supplies its own complete
+values. The flag requires buffered reads, is mutually exclusive with
+`--consistent-batch`, and uses the same indexed output and one final
+`read_batch` terminal. Raw consistent batches retain their existing semantics.
+Parameterized rows-file JSON now uses the controlled parser so cancellation
+also reaches input parsing.
+
+Regression sources cover exact wire and aggregate value bounds, fresh binding,
+current/historical cuts, scoped visibility, cumulative budgets, late refusal
+without a successful prefix, foreign/released/refreshed handles, callback
+cancellation, recovery before send and while credit-blocked, JSON/CSV CLI
+requests, failed output, and local rejection before credential access.
+Independent protocol, server and CLI source/API reviews completed; the embedded
+robot schema parses as JSON. Before these changes, the pinned compiler ran
+**37 core unit tests and 17 protocol integration tests** on an immutable
+baseline. Those results do not validate this implementation. The executor
+disconnected before changed-source compilation; compilation, Rustfmt, Clippy,
+UBS, new runtime tests and full exact-tree qualification remain **UNRUN**.
+The broader `fgdb-w10-fgp-core-5b1`, `fgdb-w10-result-machines-eh7` and
+`fgdb-5jyok` work remains open.
+
+### Capability-scoped seeded lookups over staged writes — qualification pending
+
+Source added 2026-11-14 removes the all-fields/all-incidence restriction from
+eligible identity- and property-seeded write continuations. Narrowed write
+chains and mutation sources can follow carried vertex identities or visible
+property roots without admitting the unrelated visible graph. This includes
+relational continuations after UNWIND or staged hybrid retrieval. The existing
+immutable-read closure now shares one borrowed-source interface with the
+canonical transaction overlay; masking, connected closure discovery and GLA
+evaluation have one implementation.
+
+The overlay resolves staged winners and tombstones before admission, so
+earlier CREATE, SET, rekey and DELETE effects are visible without reviving
+basis rows. Label, relation and endpoint masks apply before expansion;
+property masks apply before values reach the evaluator. Reverse, undirected
+and bounded quantified traversals use the same visible closure. A lazy
+incidence index over staged edge coordinates avoids rescanning every staged
+edge at every reached vertex. Hidden seed properties and unsupported
+definitions retain ordinary masked admission.
+
+Point absence, property membership and relation-gap observations are retained
+before source probes. A property observation completes only after successful
+evaluation; refusal, cancellation and savepoint rollback retain the existing
+conservative conflict dependencies. Native budgets and the original signed
+permit continue through every continuation. Physical hidden-source probes
+only poll, while visible admission and execution consume their existing
+allowances. This remains the native bounded conflict-checking profile, not a
+claim of complete SSI or a whole-process memory bound.
+
+Three regression sources compare seeded answers against complete masked
+admission, clean versus hidden graphs, staged rekeys/deletions and forward/
+reverse/undirected/quantified traversal; check exact and one-less native
+thresholds and every signed interruption boundary; exercise post-read
+concurrent point, membership, relation and absence conflicts plus savepoint
+rollback; and run a public narrowed write chain with an initial CREATE and
+successive SETs across 8- and 128-vertex populations, including full rollback
+on late refusal. Source/API review completed independently. Changed-source
+compilation, formatting, Clippy, UBS, runtime tests and exact-tree
+qualification remain **UNRUN** after the executor disconnect described above.
+The broader `fgdb-2acff`, `fgdb-cpny9` and
+`fgdb-authorized-staged-hybrid-w7g9p` work remains open.
 
 ### Explicit FGP native transactions — qualification pending
 

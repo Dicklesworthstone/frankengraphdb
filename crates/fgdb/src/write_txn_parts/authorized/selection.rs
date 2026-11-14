@@ -746,8 +746,9 @@ pub(super) fn select_overlay<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u
     )
 }
 
-/// A joined MATCH can admit only its relational roots when the capability
-/// hides no field or incidence. Unsupported definitions and restricted scopes
+/// A joined MATCH admits its visible relational closure through the canonical
+/// overlay. Restricted scopes use the same mask-before-expansion kernel as
+/// immutable authorized reads. Unsupported definitions and hidden seed keys
 /// decline before source work; accepted attempts never retry on a fresh meter.
 /// Each retained winner still spends the existing signed node allowance.
 #[allow(clippy::too_many_arguments)]
@@ -761,9 +762,11 @@ pub(super) fn select_seeded_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
     policy: GqlQueryPolicy,
     execution: &RefCell<&mut Execution<'_, '_, Clock>>,
 ) -> Option<Selected<fgdb_gql::algebra::GraphValueRow>> {
-    if !scope.sees_all_incidence()
-        || !scope.sees_all_fields()
-        || !WriteTxn::supports_seeded_query(pattern.plan())
+    if !WriteTxn::supports_seeded_query(pattern.plan())
+        || matches!(
+            seeds,
+            fgdb_gql::GraphSeeds::Property { key, .. } if !scope.allows_property(key)
+        )
     {
         return None;
     }

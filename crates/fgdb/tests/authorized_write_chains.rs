@@ -5694,3 +5694,153 @@ mod staged_hybrid_contracts {
         });
     }
 }
+
+
+#[test]
+fn narrowed_write_continuations_seed_carried_identities_and_keep_one_shared_budget() {
+    lab(0xc4a1_2301, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+            "CREATE (unused:Visible {p:0}) WITH unused \
+             UNWIND $refs AS a MATCH (a)-[:R]->(b) \
+             SET b.p=b.p+1 WITH b SET b.p=b.p+1 RETURN b.p AS p",
+            R,
+            &[("refs", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap();
+        let parameters = GqlParameters::new()
+            .with_list(
+                "refs",
+                vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Vertex(VId(900)),
+                    GraphValue::Vertex(VId(999)),
+                ],
+            )
+            .unwrap();
+        let program = template.bind_parameters(&parameters).unwrap();
+        let mut measured: Option<fgdb_gql::insertion::GraphInsertStats> = None;
+        for population in [8_u128, 128] {
+            for hidden in [false, true] {
+                for below in [None, Some(0), Some(1), Some(2)] {
+                    let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                    let mut seed = WriteBatch::new(R);
+                    for id in 1..=population {
+                        let mut fields = vec![(P, CanonicalScalar::Int((id * 10) as i64))];
+                        let mut labels = vec![L];
+                        if hidden {
+                            fields.push((SECRET, CanonicalScalar::Int(900)));
+                            labels.push(HIDDEN);
+                        }
+                        seed.create_vertex(VId(id), labels, fields);
+                    }
+                    seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+                    if hidden {
+                        seed.create_vertex(
+                            VId(900), vec![HIDDEN], vec![(P, CanonicalScalar::Int(901))],
+                        );
+                        seed.add_edge(EId(900), VId(1), VId(900), vec![]);
+                        seed.add_edge(EId(901), VId(900), VId(3), vec![]);
+                    }
+                    db.write(&commit, seed).await.unwrap();
+                    if hidden {
+                        let mut other = WriteBatch::new(S);
+                        other.add_edge(EId(902), VId(1), VId(4), vec![]);
+                        db.write(&commit, other).await.unwrap();
+                    }
+                    let before = (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap(),
+                    );
+                    let mut capability = grant(Rights::ReadWrite, 1);
+                    capability.relations = Scope::only([R]);
+                    capability.limits.max_nodes = 32;
+                    let token = issuer.issue_at(&capability, NOW).unwrap();
+                    let mut budget = match measured {
+                        Some(stats) => GraphInsertPolicy::new(
+                            GqlQueryPolicy::new(
+                                stats.selection.snapshot_records,
+                                1,
+                                stats.evaluator.work_units,
+                                stats.evaluator.scratch_entries,
+                            ),
+                            1,
+                            0,
+                        ),
+                        None => GraphInsertPolicy::new(
+                            GqlQueryPolicy::new(32, 1, 1_000_000, 100_000), 1, 0,
+                        ),
+                    };
+                    if let Some(dimension) = below {
+                        let stats = measured.expect("first execution measures the complete chain");
+                        match dimension {
+                            0 => budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                                stats.selection.snapshot_records - 1, 1,
+                            ),
+                            1 => budget.query.evaluator.max_work_units -= 1,
+                            2 => budget.query.evaluator.max_scratch_entries -= 1,
+                            _ => unreachable!(),
+                        }
+                    }
+                    let outcome = db
+                        .execute_graph_write_chain_authorized(
+                            &txn, &query, &commit, &issuer, &token, "main",
+                            &program, budget.with_mutation_limit(2), || NOW,
+                        )
+                        .await;
+                    if below.is_some() {
+                        assert!(outcome.is_err(), "one-less allowance must refuse: {below:?}");
+                        assert_eq!(
+                            (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+                            before,
+                            "the initial CREATE and earlier SET cannot survive a late refusal",
+                        );
+                    } else {
+                        let (stats, rows, completion) = outcome.unwrap();
+                        assert_eq!(rows.value.len(), 1);
+                        assert_eq!(
+                            rows.value[0].values(),
+                            &[GraphValue::Scalar(CanonicalScalar::Int(22))],
+                        );
+                        assert_eq!((stats.created_vertices, stats.created_edges), (1, 0));
+                        assert!(stats.selection.snapshot_records < 32);
+                        if let Some(expected) = measured {
+                            assert_eq!(
+                                stats, expected,
+                                "unrelated visible population or hidden topology changed the seeded work",
+                            );
+                        } else {
+                            measured = Some(stats);
+                        }
+                        for old in &before.1 {
+                            let new = db.vertex(old.vid).unwrap().unwrap();
+                            if old.vid == VId(2) {
+                                assert_eq!(
+                                    new.props.iter().find(|(key, _)| *key == P).unwrap().1,
+                                    CanonicalScalar::Int(22).into(),
+                                );
+                                assert_eq!(
+                                    new.props.iter().find(|(key, _)| *key == SECRET),
+                                    old.props.iter().find(|(key, _)| *key == SECRET),
+                                );
+                            } else {
+                                assert_eq!(new.props, old.props);
+                                assert_eq!(new.labels, old.labels);
+                            }
+                        }
+                        assert_eq!(
+                            completion,
+                            EmbeddedTxnCompletion::WriteCommitted {
+                                commit_seq: fgdb_types::CommitSeq(before.0.0 + 1),
+                            },
+                        );
+                    }
+                    assert_eq!(txn.outstanding_obligations(), 0);
+                }
+            }
+        }
+    });
+}

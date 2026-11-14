@@ -8,6 +8,50 @@ use super::{
     execute_factor_tables, execute_tables,
 };
 use crate::write_txn::overlay_scan::{BoundOverlayCandidates, OverlayRows};
+use super::relational::seeded;
+
+impl<V: Vfs + Clone> seeded::Source for OverlayRows<'_, V> {
+    fn vertex<C>(
+        &self,
+        vid: fgdb_types::VId,
+        scan: &mut C,
+    ) -> Result<Option<&crate::VertexRow>, Fault>
+    where
+        C: FnMut(super::SourceEvent) -> Result<(), Fault>,
+    {
+        self.seeded_vertex(vid, scan)
+    }
+
+    fn property_candidates<C>(
+        &self,
+        key: fgdb_delta_types::PropertyKeyId,
+        values: &[fgdb_types::CanonicalScalar],
+        scan: &mut C,
+        visit: impl FnMut(fgdb_types::VId, &fgdb_types::CanonicalScalar, &mut C) -> Result<(), Fault>,
+    ) -> Result<(), Fault>
+    where
+        C: FnMut(super::SourceEvent) -> Result<(), Fault>,
+    {
+        self.visit_seeded_property_candidates(key, values, scan, visit)
+    }
+
+    fn incidence<'a, C>(
+        &'a self,
+        near: fgdb_types::VId,
+        relation: &fgdb_gql::algebra::EdgeRelation,
+        direction: fgdb_gql::algebra::GlaDirection,
+        scan: &mut C,
+        mut visit: impl FnMut(super::Edge<'a>, &mut C) -> Result<(), Fault>,
+    ) -> Result<(), Fault>
+    where
+        C: FnMut(super::SourceEvent) -> Result<(), Fault>,
+    {
+        self.visit_seeded_incidence(near, relation, direction, scan, |identity, properties, scan| {
+            visit((identity, properties), scan)
+        })
+        .ok_or(GqlQueryError::IdentifiedEdgesRequired)?
+    }
+}
 
 impl<V: Vfs + Clone> Database<V> {
     /// Internal only: the owner borrows the native transaction and its database
@@ -53,6 +97,34 @@ impl<V: Vfs + Clone> Database<V> {
         self.ensure_readable().map_err(GqlQueryError::Source)?;
         cx.with_restriction(|| {
             let mut usage = AdmissionUsage::default();
+            if let Some(seeds) = seeds
+                && (!scope.sees_all_incidence() || !scope.sees_all_fields())
+                && let Some(steps) = seeded::closure_steps(pattern.plan(), seeds, scope)
+            {
+                let (tables, observation) = {
+                    let mut scan = |_| poll().map_err(GqlQueryError::Interrupted);
+                    let mut control = |event| {
+                        checkpoint().map_err(GqlQueryError::Interrupted)?;
+                        usage.observe::<ReadError, QueryError>(policy, event)
+                    };
+                    let observation =
+                        overlay.begin_seeded_observation(pattern.plan(), seeds, &mut control)?;
+                    let mut tables = seeded::admit_tables(
+                        overlay,
+                        seeds,
+                        &steps,
+                        scope,
+                        &mut || node().map_err(GqlQueryError::Interrupted),
+                        &mut scan,
+                        &mut control,
+                    )?;
+                    tables.metadata(pattern.plan(), scope, &mut control)?;
+                    (tables, observation)
+                };
+                let result = execute_tables(tables, pattern, scope, policy, usage, &mut checkpoint)?;
+                overlay.accept_seeded_observation(observation);
+                return Ok(result);
+            }
             let (tables, bound) = admit_overlay_tables(
                 overlay,
                 pattern,

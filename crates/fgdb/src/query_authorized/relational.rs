@@ -8,7 +8,7 @@ mod graph;
 #[path = "relational/native.rs"]
 mod native;
 #[path = "relational/seeded.rs"]
-mod seeded;
+pub(super) mod seeded;
 pub use native::{
     AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
     AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
