@@ -60,7 +60,7 @@ pub use identity::{
 };
 pub use marker::{
     ChainError, ChainedMarker, CommitMarker, EffectSource, HeadCasMismatch, HeadUpdate,
-    IdentityCounters, MARKER_FLAG_IDENTITY_COUNTERS, MarkerChain,
+    IdentityCounterKind, IdentityCounters, MARKER_FLAG_IDENTITY_COUNTERS, MarkerChain,
 };
 pub use pack::{
     DomainAxis, PackBuilder, PackDomain, PackError, PackProtectionProfile, PackedObjectGroup,

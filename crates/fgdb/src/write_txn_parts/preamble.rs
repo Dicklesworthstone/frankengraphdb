@@ -210,21 +210,16 @@ fn permute_run(permutation: &IdentityPermutation, first: u64, last: u64) -> Vec<
 }
 
 impl IdentityAllocation {
-    /// Seed from the last marker that records counters. A stream written
-    /// before the field existed starts at zero: its sequential identities sit
-    /// in the low range, and the existence check skips any the permutation
-    /// would reissue.
+    /// Seed from the cumulative counters validated during chain admission.
+    /// A stream written before the field existed starts at zero: its sequential
+    /// identities sit in the low range, and the existence check skips any the
+    /// permutation would reissue.
     pub(crate) fn from_chain(
         chain: &fgdb_chronicle::MarkerChain,
         keys: &crate::DatabaseKeys,
     ) -> Self {
         Self {
-            counters: chain
-                .entries()
-                .iter()
-                .rev()
-                .find_map(|entry| entry.marker.identity_counters)
-                .unwrap_or_default(),
+            counters: chain.identity_counters(),
             vertices: IdentityPermutation::vertices(keys),
             edges: IdentityPermutation::edges(keys),
             ahead: Default::default(),
@@ -423,6 +418,26 @@ mod identity_allocation_tests {
             allocation.issue(false, |id| id == last),
             Err(WriteTxnError::IdentityExhausted)
         ));
+
+        // Recovery must preserve exhaustion across a later counter-less
+        // marker. The wire counter domain is u64; a floor beyond the current
+        // permutation domain must refuse issuance rather than wrap or reset.
+        for counter in [IdentityPermutation::MAX, u64::MAX] {
+            let recorded = IdentityCounters {
+                vertex: counter,
+                edge: counter,
+            };
+            let recovered = chain(vec![marker(1, Some(recorded)), marker(2, None)]);
+            let mut allocation = IdentityAllocation::from_chain(&recovered, &keys());
+            allocation.prefetch(1, 1);
+            for vertex in [true, false, true, false] {
+                assert!(matches!(
+                    allocation.issue(vertex, |_| false),
+                    Err(WriteTxnError::IdentityExhausted)
+                ));
+                assert_eq!(allocation.counters(), recorded);
+            }
+        }
     }
 
     /// A prefetched run changes no issue. An allocator that prefetches and

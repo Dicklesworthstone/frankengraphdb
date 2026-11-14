@@ -109,13 +109,38 @@ pub const MARKER_FLAG_IDENTITY_COUNTERS: u32 = 1;
 /// Engine-issued identities are a keyed permutation of a per-kind counter.
 /// Every counter at or below these values may already have issued an
 /// identity, and the next engine allocation of each kind takes a larger one.
-/// Each engine commit records the counters, so an open reads the allocator
-/// floor from the last marker instead of inverting the permutation over
-/// every retained identity.
+/// Each engine commit records the counters, so recovery accumulates and
+/// validates the allocator floor instead of inverting the permutation over
+/// every retained identity. A marker without counters preserves both floors.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IdentityCounters {
     pub vertex: u64,
     pub edge: u64,
+}
+
+/// The independently monotonic domain of an engine identity counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityCounterKind {
+    Vertex,
+    Edge,
+}
+
+impl IdentityCounters {
+    fn validate_successor(self, next: Self) -> Result<(), ChainError> {
+        for (kind, previous, found) in [
+            (IdentityCounterKind::Vertex, self.vertex, next.vertex),
+            (IdentityCounterKind::Edge, self.edge, next.edge),
+        ] {
+            if found < previous {
+                return Err(ChainError::IdentityCounterRegression {
+                    kind,
+                    previous,
+                    found,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A canonical commit marker.
@@ -286,6 +311,13 @@ pub enum ChainError {
     /// none, or carries counters with the bit clear. Either would encode a
     /// transcript that decodes to a different marker.
     IdentityCountersFlagMismatch,
+    /// A marker would forget previously issued engine identities. Equality is
+    /// legal, and a legacy marker without counters preserves both floors.
+    IdentityCounterRegression {
+        kind: IdentityCounterKind,
+        previous: u64,
+        found: u64,
+    },
     /// A branch head compare-and-swap failed: the branch's head is not what
     /// this marker expected. THE WRITE IS REFUSED — this is the mechanism that
     /// makes concurrent branch advancement safe, so it must never be a
@@ -317,6 +349,14 @@ impl core::fmt::Display for ChainError {
             Self::IdentityCountersFlagMismatch => {
                 f.write_str("marker flags disagree with the presence of identity counters")
             }
+            Self::IdentityCounterRegression {
+                kind,
+                previous,
+                found,
+            } => write!(
+                f,
+                "{kind:?} identity counter {found} is below its durable floor {previous}"
+            ),
             Self::HeadCasMismatch(mismatch) => write!(
                 f,
                 "branch ({:?},{:?}) head is {:?}, marker expected {:?}",
@@ -393,6 +433,9 @@ pub struct ChainedMarker {
 pub struct MarkerChain {
     entries: Vec<ChainedMarker>,
     heads: Vec<((GraphId, BranchId), MarkerRef)>,
+    /// Cumulative floors, including across later markers without counters.
+    /// Keeping them at admission avoids a history scan on every append.
+    identity_counters: IdentityCounters,
 }
 
 /// The sufficient state for validating the next marker, without retaining any
@@ -421,6 +464,7 @@ impl From<&ChainedMarker> for MarkerFrontier {
 pub(crate) struct MarkerPrefix {
     frontier: Option<MarkerFrontier>,
     heads: Vec<((GraphId, BranchId), MarkerRef)>,
+    identity_counters: IdentityCounters,
 }
 
 impl MarkerPrefix {
@@ -438,13 +482,19 @@ impl MarkerPrefix {
     }
 
     pub(crate) fn append(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
-        let chain_hash = validate_marker(&marker, self.frontier, &self.heads)?;
+        let chain_hash =
+            validate_marker(&marker, self.frontier, &self.heads, self.identity_counters)?;
         let chained = ChainedMarker {
             marker,
             marker_oid: ObjectId(chain_hash.0),
             chain_hash,
         };
-        self.frontier = Some(adopt_marker(&chained, self.frontier, &mut self.heads)?);
+        self.frontier = Some(adopt_marker(
+            &chained,
+            self.frontier,
+            &mut self.heads,
+            &mut self.identity_counters,
+        )?);
         Ok(())
     }
 }
@@ -473,6 +523,7 @@ fn validate_marker(
     marker: &CommitMarker,
     frontier: Option<MarkerFrontier>,
     heads: &[((GraphId, BranchId), MarkerRef)],
+    identity_counters: IdentityCounters,
 ) -> Result<Digest, ChainError> {
     let expected_seq = next_commit_seq(frontier)?;
     if marker.commit_seq != expected_seq.0 {
@@ -493,6 +544,9 @@ fn validate_marker(
                 found: marker.logical_command_seq,
             });
         }
+    }
+    if let Some(next) = marker.identity_counters {
+        identity_counters.validate_successor(next)?;
     }
     if !marker.head_updates_are_canonical() {
         return Err(ChainError::NonCanonicalHeadUpdates);
@@ -521,6 +575,7 @@ fn adopt_marker(
     chained: &ChainedMarker,
     frontier: Option<MarkerFrontier>,
     heads: &mut Vec<((GraphId, BranchId), MarkerRef)>,
+    identity_counters: &mut IdentityCounters,
 ) -> Result<MarkerFrontier, ChainError> {
     let expected_seq = next_commit_seq(frontier)?;
     if chained.marker.commit_seq != expected_seq.0 {
@@ -528,6 +583,9 @@ fn adopt_marker(
             expected: expected_seq.0,
             found: chained.marker.commit_seq,
         });
+    }
+    if let Some(next) = chained.marker.identity_counters {
+        identity_counters.validate_successor(next)?;
     }
     for update in &chained.marker.head_updates {
         let new_head = MarkerRef {
@@ -541,6 +599,9 @@ fn adopt_marker(
             Some((_, head)) => *head = new_head,
             None => heads.push(((update.graph, update.branch), new_head)),
         }
+    }
+    if let Some(next) = chained.marker.identity_counters {
+        *identity_counters = next;
     }
     Ok(MarkerFrontier::from(chained))
 }
@@ -574,6 +635,14 @@ impl MarkerChain {
 
     pub fn entries(&self) -> &[ChainedMarker] {
         &self.entries
+    }
+
+    /// The cumulative engine counters admitted by this chain, or zero before
+    /// any marker carried them. Counter-less markers cannot reset either
+    /// domain. These are committed floors, not reservations for identities
+    /// issued later by a live transaction that has not published a reservation.
+    pub fn identity_counters(&self) -> IdentityCounters {
+        self.identity_counters
     }
 
     /// Reconstruct a chain from stored entries, validating the complete prefix.
@@ -644,6 +713,7 @@ impl MarkerChain {
             marker,
             self.entries.last().map(MarkerFrontier::from),
             &self.heads,
+            self.identity_counters,
         )?;
         // The marker's identity is its own canonical bytes under the chain
         // value, so two markers with identical content at different points in
@@ -670,6 +740,7 @@ impl MarkerChain {
             &chained,
             self.entries.last().map(MarkerFrontier::from),
             &mut self.heads,
+            &mut self.identity_counters,
         )?;
         self.entries.push(chained);
         Ok(self.entries.last().expect("just pushed"))
@@ -922,10 +993,12 @@ mod commit_seq_exhaustion_tests {
                 chain_hash: Digest([0x99; 32]),
             }],
             heads: Vec::new(),
+            identity_counters: IdentityCounters::default(),
         };
         let mut prefix = MarkerPrefix {
             frontier: chain.entries.last().map(MarkerFrontier::from),
             heads: Vec::new(),
+            identity_counters: IdentityCounters::default(),
         };
 
         assert_eq!(chain.next_commit_seq(), Ok(CommitSeq(u64::MAX)));
@@ -963,6 +1036,12 @@ mod commit_seq_exhaustion_tests {
         let mut head_capacity = None;
         for seq in 1..=4096 {
             let mut next = marker(seq);
+            if seq % 7 == 0 {
+                next = next.with_identity_counters(IdentityCounters {
+                    vertex: seq,
+                    edge: seq * 2,
+                });
+            }
             // Alternate graphs and branches, including high identity bits.
             // Every third commit advances all three heads atomically.
             let coordinates = [
@@ -990,6 +1069,15 @@ mod commit_seq_exhaustion_tests {
             assert_eq!(prefix.chain_value(), chain.chain_value());
             assert_eq!(prefix.next_commit_seq(), chain.next_commit_seq());
             assert_eq!(prefix.heads, chain.heads);
+            let counted = seq / 7 * 7;
+            assert_eq!(
+                prefix.identity_counters,
+                IdentityCounters {
+                    vertex: counted,
+                    edge: counted * 2,
+                }
+            );
+            assert_eq!(prefix.identity_counters, chain.identity_counters());
             if seq >= 3 {
                 assert_eq!(prefix.heads.len(), 3);
                 assert_eq!(
@@ -1004,10 +1092,57 @@ mod commit_seq_exhaustion_tests {
     }
 
     #[test]
+    fn identity_counter_maximum_preserves_the_streaming_floor_across_legacy_markers() {
+        let mut prefix = MarkerPrefix::default();
+        let maximum = IdentityCounters {
+            vertex: u64::MAX,
+            edge: u64::MAX,
+        };
+        prefix
+            .append(marker(1).with_identity_counters(maximum))
+            .unwrap();
+        prefix.append(marker(2)).unwrap();
+        prefix
+            .append(marker(3).with_identity_counters(maximum))
+            .unwrap();
+        let settled = prefix.frontier;
+        for (counters, kind) in [
+            (
+                IdentityCounters {
+                    vertex: 0,
+                    edge: u64::MAX,
+                },
+                IdentityCounterKind::Vertex,
+            ),
+            (
+                IdentityCounters {
+                    vertex: u64::MAX,
+                    edge: 0,
+                },
+                IdentityCounterKind::Edge,
+            ),
+        ] {
+            assert_eq!(
+                prefix.append(marker(4).with_identity_counters(counters)),
+                Err(ChainError::IdentityCounterRegression {
+                    kind,
+                    previous: u64::MAX,
+                    found: 0
+                })
+            );
+            assert_eq!(prefix.frontier, settled);
+            assert_eq!(prefix.identity_counters, maximum);
+        }
+        prefix.append(marker(4)).unwrap();
+        assert_eq!(prefix.identity_counters, maximum);
+    }
+
+    #[test]
     fn streaming_prefix_refuses_every_structural_defect_without_advancing_heads() {
         let mut chain = MarkerChain::new();
         let mut prefix = MarkerPrefix::default();
         let mut first = marker(1);
+        first = first.with_identity_counters(IdentityCounters { vertex: 5, edge: 7 });
         first.head_updates = [BranchId(1), BranchId(2)]
             .into_iter()
             .map(|branch| HeadUpdate {
@@ -1019,6 +1154,7 @@ mod commit_seq_exhaustion_tests {
         prefix.append(first.clone()).unwrap();
         chain.append(first).unwrap();
         let mut good = marker(2);
+        good = good.with_identity_counters(IdentityCounters { vertex: 5, edge: 7 });
         good.head_updates = [BranchId(1), BranchId(2)]
             .into_iter()
             .map(|branch| HeadUpdate {
@@ -1042,16 +1178,29 @@ mod commit_seq_exhaustion_tests {
         bad.head_updates[1] = bad.head_updates[0];
         defects.push(bad);
         for wrong_head in 0..2 {
-            let mut bad = good.clone();
+            let mut bad = good.clone().with_identity_counters(IdentityCounters {
+                vertex: 100,
+                edge: 100,
+            });
             bad.head_updates[wrong_head].expected_previous = None;
             defects.push(bad);
         }
         let mut bad = good.clone();
         bad.flags = MARKER_FLAG_IDENTITY_COUNTERS;
+        bad.identity_counters = None;
         defects.push(bad);
+        defects.push(
+            good.clone()
+                .with_identity_counters(IdentityCounters { vertex: 4, edge: 8 }),
+        );
+        defects.push(
+            good.clone()
+                .with_identity_counters(IdentityCounters { vertex: 6, edge: 6 }),
+        );
 
         let settled_frontier = prefix.frontier;
         let settled_heads = prefix.heads.clone();
+        let settled_counters = prefix.identity_counters;
         for bad in defects {
             let expected = chain.append(bad.clone()).unwrap_err();
             assert_eq!(prefix.append(bad), Err(expected));
@@ -1059,6 +1208,8 @@ mod commit_seq_exhaustion_tests {
             assert_eq!(prefix.frontier, settled_frontier);
             assert_eq!(prefix.heads, settled_heads);
             assert_eq!(prefix.heads, chain.heads);
+            assert_eq!(prefix.identity_counters, settled_counters);
+            assert_eq!(prefix.identity_counters, chain.identity_counters());
         }
         // Refusals do not consume the next sequence or partially advance the
         // first head when only the second CAS was wrong.

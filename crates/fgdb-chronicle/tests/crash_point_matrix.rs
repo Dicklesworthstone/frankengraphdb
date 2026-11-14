@@ -35,11 +35,12 @@ use asupersync::fs::UnixVfs;
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{
-    CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CommitError, CrashPoint, MAX_ENTRY_BODY,
+    CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CommitError, CrashPoint, ENTRY_MAGIC,
+    MAX_ENTRY_BODY,
 };
 use fgdb_chronicle::marker::{
-    ChainError, CommitMarker, EffectSource, HeadUpdate, IdentityCounters,
-    MARKER_FLAG_IDENTITY_COUNTERS, MarkerChain,
+    CHAIN_ORIGIN, ChainError, CommitMarker, EffectSource, HeadUpdate, IdentityCounterKind,
+    IdentityCounters, MARKER_FLAG_IDENTITY_COUNTERS, MarkerChain,
 };
 use fgdb_crypto::Digest;
 use fgdb_types::context::{CommitCx, PurposeContexts};
@@ -2287,6 +2288,188 @@ fn prefix_selection_refuses_complete_corruption_after_the_requested_checkpoint()
             .await
             .unwrap();
         assert_prefix_summaries_match_history(&cx, &dir, &history).await;
+    });
+}
+
+#[test]
+fn identity_counter_regression_is_refused_before_d1_without_consuming_the_next_commit() {
+    let dir = scratch_dir("identity-counter-refusal-before-d1");
+    under_lab(0x4944_4431, move |cx| async move {
+        let initial = IdentityCounters { vertex: 9, edge: 4 };
+        let mut coordinator = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        let snapshot = coordinator.chain().clone();
+        coordinator
+            .commit(&cx, &capsule_bytes(1), |seq, oid| {
+                marker_for(seq, oid, &snapshot).with_identity_counters(initial)
+            })
+            .await
+            .unwrap();
+        // A raw marker without counters cannot erase a committed floor.
+        commit_ok(&mut coordinator, &cx, 2).await;
+        let settled_bytes = log_bytes(&dir);
+        let settled = coordinator.chain().clone();
+        for (offered, kind, previous, found) in [
+            (
+                IdentityCounters { vertex: 8, edge: 8 },
+                IdentityCounterKind::Vertex,
+                9,
+                8,
+            ),
+            (
+                IdentityCounters {
+                    vertex: 12,
+                    edge: 3,
+                },
+                IdentityCounterKind::Edge,
+                4,
+                3,
+            ),
+        ] {
+            let error = coordinator
+                .commit(&cx, &capsule_bytes(3), |seq, oid| {
+                    assert_eq!(seq, 3);
+                    marker_for(seq, oid, &settled).with_identity_counters(offered)
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                CommitError::Chain(ChainError::IdentityCounterRegression {
+                    kind: actual_kind,
+                    previous: actual_previous,
+                    found: actual_found,
+                }) if (actual_kind, actual_previous, actual_found) == (kind, previous, found)
+            ));
+            assert_eq!(log_bytes(&dir), settled_bytes);
+            assert_eq!(coordinator.chain().entries(), settled.entries());
+            assert_eq!(coordinator.chain().identity_counters(), initial);
+            assert_eq!(coordinator.chain().next_commit_seq(), Ok(CommitSeq(3)));
+            assert!(!coordinator.capsule_exists(&cx, capsule_oid(3)).await);
+            assert!(!coordinator.is_poisoned());
+        }
+        // A refused proposal does not spend either of its counters, including
+        // the other kind that it offered to advance.
+        let next = IdentityCounters { vertex: 9, edge: 5 };
+        coordinator
+            .commit(&cx, &capsule_bytes(3), |seq, oid| {
+                marker_for(seq, oid, &settled).with_identity_counters(next)
+            })
+            .await
+            .unwrap();
+        commit_ok(&mut coordinator, &cx, 4).await;
+        drop(coordinator);
+        let recovered = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(recovered.chain().identity_counters(), next);
+        assert_eq!(recovered.chain().next_commit_seq(), Ok(CommitSeq(5)));
+        assert_prefix_summaries_match_history(&cx, &dir, recovered.chain()).await;
+    });
+}
+
+#[test]
+fn identity_counter_regressions_in_hash_valid_logs_refuse_full_and_checkpoint_recovery() {
+    let dir = scratch_dir("identity-counter-hash-valid-corruption");
+    under_lab(0x4944_4348, move |cx| async move {
+        let initial = IdentityCounters { vertex: 9, edge: 4 };
+        let latest = IdentityCounters {
+            vertex: 10,
+            edge: 5,
+        };
+        let mut coordinator = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        for (at, counters) in [Some(initial), None, Some(latest), None]
+            .into_iter()
+            .enumerate()
+        {
+            let seq = at as u64 + 1;
+            let snapshot = coordinator.chain().clone();
+            coordinator
+                .commit(&cx, &capsule_bytes(seq), |allocated, oid| {
+                    assert_eq!(allocated, seq);
+                    let marker = marker_for(allocated, oid, &snapshot);
+                    match counters {
+                        Some(value) => marker.with_identity_counters(value),
+                        None => marker,
+                    }
+                })
+                .await
+                .unwrap();
+        }
+        let original = log_bytes(&dir);
+        let entries = coordinator.chain().entries().to_vec();
+        drop(coordinator);
+
+        // Reframe an authenticated, complete log with one semantic defect.
+        // Recompute every downstream hash and branch-head CAS so recovery
+        // cannot reject the fixture merely for ordinary hash corruption.
+        let encode_with_counters = |third_counters: IdentityCounters| {
+            let mut bytes = Vec::new();
+            let mut prior_hash = CHAIN_ORIGIN;
+            let mut prior_head = None;
+            for entry in &entries {
+                let mut marker = entry.marker.clone();
+                marker.head_updates[0].expected_previous = prior_head;
+                if marker.commit_seq == 3 {
+                    marker.identity_counters = Some(third_counters);
+                }
+                let body = marker.canonical_bytes().unwrap();
+                let body_len = u32::try_from(body.len()).unwrap().to_be_bytes();
+                let hash = marker.chain_hash(prior_hash).unwrap();
+                bytes.extend_from_slice(&ENTRY_MAGIC);
+                bytes.extend_from_slice(&body_len);
+                bytes.extend_from_slice(&body);
+                bytes.extend_from_slice(&hash.0);
+                bytes.extend_from_slice(&body_len);
+                bytes.extend_from_slice(b"FGE3");
+                prior_hash = hash;
+                prior_head = Some(MarkerRef {
+                    marker_oid: ObjectId(hash.0),
+                    commit_seq: CommitSeq(marker.commit_seq),
+                });
+            }
+            bytes
+        };
+        assert_eq!(encode_with_counters(latest), original);
+        for counters in [
+            IdentityCounters { vertex: 8, edge: 5 },
+            IdentityCounters {
+                vertex: 10,
+                edge: 3,
+            },
+        ] {
+            let bytes = encode_with_counters(counters);
+            write_log(&dir, &bytes);
+            assert!(matches!(
+                CommitCoordinator::scan_committed_chain(&cx, &UnixVfs::new(), &dir).await,
+                Err(CommitError::CorruptLogEntry { commit_seq: 3 })
+            ));
+            assert!(
+                matches!(
+                    CommitCoordinator::scan_committed_prefix(
+                        &cx,
+                        &UnixVfs::new(),
+                        &dir,
+                        CommitSeq::FIRST
+                    )
+                    .await,
+                    Err(CommitError::CorruptLogEntry { commit_seq: 3 })
+                ),
+                "an earlier checkpoint cannot excuse a corrupt committed suffix"
+            );
+            assert!(matches!(
+                CommitCoordinator::open(&cx, &dir, keys()).await,
+                Err(CommitError::CorruptLogEntry { commit_seq: 3 })
+            ));
+            assert_eq!(
+                log_bytes(&dir),
+                bytes,
+                "complete corrupt markers are not a torn tail"
+            );
+        }
+        write_log(&dir, &original);
+        let recovered = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
+        assert_eq!(recovered.chain().identity_counters(), latest);
+        assert_eq!(recovered.chain().entries(), entries);
+        assert_prefix_summaries_match_history(&cx, &dir, recovered.chain()).await;
+        assert_eq!(log_bytes(&dir), original);
     });
 }
 
