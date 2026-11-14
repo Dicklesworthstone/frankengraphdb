@@ -2301,6 +2301,13 @@ impl<'a> Parser<'a> {
     /// through RETURN or up to another write over its completed relation.
     /// ON MATCH is consumed by the MERGE owner before this boundary is asked.
     pub(super) fn at_chained_read(&self) -> Result<bool, GraphPatternTextError> {
+        let optional_call = if self.optional_call()? {
+            let mut lexer = self.lexer.clone();
+            lexer.next()?; // CALL
+            matches!(lexer.next()?.kind, TokenKind::Punct(b'{' | b'('))
+        } else {
+            false
+        };
         Ok(self.is_word("MATCH")
             || (self.is_word("OPTIONAL")
                 && matches!(self.lexer.clone().next()?.kind,
@@ -2309,7 +2316,20 @@ impl<'a> Parser<'a> {
                 && matches!(
                     self.lexer.clone().next()?.kind,
                     TokenKind::Punct(b'{' | b'(')
-                )))
+                ))
+            || optional_call)
+    }
+
+    /// Framing only: retain OPTIONAL with its writing CALL when a read
+    /// prefix stops. The complete scoped compiler owns the body and imports.
+    fn at_writing_call(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        if self.optional_call()? {
+            lexer.next()?; // CALL
+        } else if !self.is_word("CALL") {
+            return Ok(false);
+        }
+        crate::PreparedGraphWriteChainText::call_has_write(lexer)
     }
 
     /// A next write or graph read over the carried row (fgdb-cpny9).

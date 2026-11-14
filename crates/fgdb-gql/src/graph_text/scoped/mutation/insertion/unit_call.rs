@@ -35,6 +35,7 @@ struct CallPreparation<'a> {
     arm: usize,
     arms: Vec<PreparedGraphCallArmText>,
     quantifier: Option<crate::GraphSetQuantifier>,
+    optional: bool,
     parameters: Vec<GqlParameterSpec>,
     slots: Vec<ElementKeySlot>,
     next: Option<ChainContinuation<'a>>,
@@ -124,6 +125,7 @@ impl PreparedGraphCallText {
         let (mut source, mut outer) =
             parser.multipart_write_prefix(statement, declarations, incoming)?;
         let at = parser.current.at;
+        let optional = parser.take_word("OPTIONAL")?;
         parser.word("CALL")?;
 
         // Hidden property preimages belong to the preceding clause. Import
@@ -184,6 +186,7 @@ impl PreparedGraphCallText {
             arm: 0,
             arms: Vec::new(),
             quantifier,
+            optional,
             parameters,
             slots,
             next: None,
@@ -320,6 +323,7 @@ impl PreparedGraphCallText {
                     output,
                     arms,
                     quantifier: self.quantifier,
+                    optional: self.optional,
                     outer_types: self.outer_types.clone(),
                     export_columns: columns.clone(),
                     export_types: types.clone(),
@@ -536,6 +540,7 @@ impl<'a> CallPreparation<'a> {
             mut slots,
             arms,
             quantifier,
+            optional,
             parameters,
             arm_read_keys,
             combined_exports: exports,
@@ -647,6 +652,7 @@ impl<'a> CallPreparation<'a> {
                 output,
                 arms,
                 quantifier,
+                optional,
                 outer_columns,
                 outer_types,
                 read_keys,

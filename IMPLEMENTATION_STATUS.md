@@ -12,6 +12,71 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Optional write subqueries and graph-output admission — qualification pending
+
+The 2026-11-14 write-bearing `OPTIONAL CALL` increment uses the existing native
+write-chain owner. A returning body that produces no rows preserves each outer
+occurrence with NULL exports, after all UNION arms complete. Body effects remain
+staged even if its later filters remove every result. Duplicate and NULL outer
+values retain their occurrence semantics; typed graph export domains are
+preserved. Unit bodies accept OPTIONAL as redundant. Nested calls and preceding
+or following reads and writes retain the existing transaction owner. Errors,
+cancellation, authority and budget refusals propagate without null extension.
+
+The ordinary `Database::query_write`, native transaction and server prepared
+write paths all reach the same compiler. Parser regressions and six native
+integration scenarios cover public dispatch, UNION, unit/nested calls, empty
+input, aggregates, durable effects and reopen, rollback preserving a staged
+prefix, preflight refusals, cumulative creation/result limits and late expiry.
+[The README](README.md#writing-optional-subqueries--qualification-pending)
+shows a writing optional subquery.
+
+The original eight-file working patch passed pinned scoped Rustfmt, whitespace
+checks and independent source review. Static UBS exited 1: its sole critical
+report is the integration-test helper's intentional panic on an unexpected query
+failure (632 warnings and 211 informational findings were also reported). No
+suppression or gate change was made. After the executor disconnected, the reviewed
+patches were recovered through GitHub; reconstructed test formatting has not been
+rechecked, so the earlier checks are not a final-tree verdict. Compilation,
+runtime and Clippy remain UNRUN under the foundation build failure and outage.
+
+Commit `cdc19771` separately adds
+`AuthorizedReadTransaction::query_with_graph_output` and the bounded
+`AuthorizedReadOutput` metadata interface. Trusted host conversion can hydrate
+graph values from the original immutable snapshot under the original owning
+Read permit. Existing field/label and both-endpoint masks apply before catalog
+access and copying. Metadata calls spend cumulative signed work and node limits;
+a shared output-phase evaluator bound limits their work and scratch independently
+of the statement evaluator. A swallowed metadata refusal still closes the owner.
+Only successful final delivery publishes pending exact-count cache entries.
+
+Native metadata regression sources cover concurrent graph changes, masked labels
+and properties, graph identity hydration, hidden endpoints, cumulative
+limits, missing catalog entries, swallowed errors and pin release. The committed
+API passed scoped Rustfmt, whitespace checks and independent source review.
+Its static UBS scan exited 1 on the already-reviewed diagnostic-enum equality
+false positive. Native runtime and full integrated qualification remain UNRUN.
+
+### Marker clocks and supplied predecessor identity — qualification pending
+
+Commit `c0671b7` validates committed time and supplied global predecessors in
+Chronicle admission and both retained and streaming recovery. The first marker
+must have positive commit HLC, each successor must strictly advance it, and a
+history ending at `u64::MAX` cannot accept a successor. A supplied `prev_global`
+must match both the immediately preceding marker OID and commit sequence; no
+predecessor is valid at genesis. Existing writers and histories that use the
+optional `None` representation remain supported. No durable encoding changed.
+
+Invalid proposals leave commit sequence, heads and allocation floors untouched
+and refuse before capsule D1 publication. Regression sources include exact-link
+and clock failures, exhaustion across reopen, and fully rehashed on-disk
+corruptions rejected by complete and checkpoint-prefix recovery. Complete
+corruption is not truncated as an incomplete tail. Scoped pinned Rustfmt,
+whitespace checks and static UBS passed (0 critical findings). Runtime tests and
+Clippy remain UNRUN because the pinned foundation build was SIGKILLed before
+first-party compilation. This increment does not supply the normative root,
+predecessor-population or HLC evidence owners.
+
 ### Cumulative read-only transactions and allocation floors — qualification pending
 
 Source added 2026-11-14 implements an explicit native read owner in `eb3c3e7`
@@ -101,8 +166,9 @@ and null-extend only exported columns. A procedure's attached `YIELD ... WHERE`
 belongs inside optional evaluation; an explicit following `WITH ... WHERE`
 filters the completed row. Existing typed identities, imports, aggregation,
 UNION, host errors, capability masking and cumulative cancellation/resource
-controls remain owned by the native operators. Optional write bodies, wildcard
-scope imports and full language conformance are outside this increment.
+controls remain owned by the native operators. Optional write bodies are added
+by the later write-chain increment above. Wildcard scope imports for read-only
+CALL and full language conformance remain outside this read increment.
 [The README](README.md#optional-subqueries-and-procedures--qualification-pending)
 shows the syntax.
 

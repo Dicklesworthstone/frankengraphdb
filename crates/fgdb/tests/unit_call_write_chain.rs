@@ -1,5 +1,7 @@
 //! Scoped CALL subqueries retain one atomic owner and their relational contract.
 
+#[path = "unit_call_write_chain/optional.rs"]
+mod optional;
 #[path = "unit_call_write_chain/returning.rs"]
 mod returning;
 

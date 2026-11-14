@@ -14,6 +14,7 @@ pub(crate) struct PreparedGraphCallText {
     pub(crate) output: Option<BoundReadInput>,
     pub(crate) arms: Vec<PreparedGraphCallArmText>,
     pub(crate) quantifier: Option<GraphSetQuantifier>,
+    pub(crate) optional: bool,
     pub(crate) outer_columns: Vec<String>,
     pub(crate) outer_types: Vec<GraphSetColumnType>,
     pub(crate) read_keys: Vec<PropertyKeyId>,
@@ -94,7 +95,8 @@ impl PreparedGraphCallArm {
 
 /// A native unit `CALL { ... }` with a checked import schema. Its body runs
 /// once for each selected row in the same transaction as the surrounding
-/// statement. Body-local bindings never become outer columns.
+/// statement. Body-local bindings never become outer columns. OPTIONAL is
+/// redundant for a unit body; both spellings use this same owner.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphUnitCall {
     pub(crate) input: PreparedGraphSet,
@@ -107,14 +109,17 @@ pub struct PreparedGraphUnitCall {
 }
 
 /// A native write-bearing `CALL { ... RETURN ... }`. Each returned body row
-/// extends its own outer occurrence; a body with no returned rows removes
-/// that occurrence. All writes and reads share the surrounding transaction.
+/// extends its own outer occurrence. An OPTIONAL call preserves an empty
+/// invocation with NULL exports; an ordinary call removes that occurrence.
+/// All writes and reads share the surrounding transaction, including body
+/// effects whose returned rows were filtered away.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphReturningCall {
     pub(crate) input: PreparedGraphSet,
     pub(crate) output: Option<PreparedGraphSet>,
     pub(crate) arms: Vec<PreparedGraphCallArm>,
     pub(crate) quantifier: Option<GraphSetQuantifier>,
+    pub(crate) optional: bool,
     pub(crate) outer_types: Vec<GraphSetColumnType>,
     pub(crate) export_columns: Vec<String>,
     pub(crate) export_types: Vec<GraphSetColumnType>,
@@ -211,6 +216,31 @@ impl PreparedGraphReturningCall {
         if outer.len() != self.outer_types.len() {
             return Err(invalid().into());
         }
+        if self.optional && returned.is_empty() {
+            // The cursor invokes this only after every UNION arm finishes.
+            // Absence preserves one outer occurrence, not one per empty arm.
+            // Copy directly into the joined row: no temporary NULL relation
+            // or uncharged payload is created, and every domain admits NULL.
+            control(Work)?;
+            let null = crate::algebra::GraphValue::Scalar(fgdb_types::CanonicalScalar::Null);
+            control(ScratchEntry)?;
+            let mut cells = Vec::new();
+            for (value, kind) in outer
+                .values()
+                .iter()
+                .chain(std::iter::repeat_n(&null, self.export_types.len()))
+                .zip(self.outer_types.iter().chain(&self.export_types))
+            {
+                control(Work)?;
+                if !kind.accepts(value) {
+                    return Err(invalid().into());
+                }
+                control(ScratchEntry)?;
+                cells.push(value.copy_with_control(control)?);
+            }
+            control(ScratchEntry)?;
+            joined.push(GraphValueRow::from_owned_values(cells));
+        }
         for row in returned {
             control(Work)?;
             if row.len() != self.export_types.len() {
@@ -239,6 +269,12 @@ impl PreparedGraphReturningCall {
 
     pub fn input(&self) -> &PreparedGraphSet {
         &self.input
+    }
+
+    /// Whether an invocation with no returned rows preserves its outer row
+    /// with one NULL per export. Body errors still refuse the whole statement.
+    pub fn is_optional(&self) -> bool {
+        self.optional
     }
 
     pub fn output(&self) -> Option<&PreparedGraphSet> {

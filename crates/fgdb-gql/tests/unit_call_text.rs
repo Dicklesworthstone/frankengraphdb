@@ -921,6 +921,103 @@ fn returning_calls_retain_typed_exports_from_every_native_write_owner() {
 }
 
 #[test]
+fn optional_write_calls_keep_export_domains_imports_and_native_continuations() {
+    use fgdb_gql::GraphSetColumnType::{Edge, Scalar, Vertex};
+
+    for (text, kind) in [
+        ("OPTIONAL CALL { CREATE (n:F) RETURN n AS value }", Vertex),
+        ("OPTIONAL CALL() { CREATE (:F) RETURN 1 AS value }", Scalar),
+        (
+            "MATCH (n:F) OPTIONAL CALL(n) { SET n.p=1 RETURN n AS value } RETURN value",
+            Vertex,
+        ),
+        (
+            "OPTIONAL CALL { CREATE ()-[r:R]->() RETURN r AS value } RETURN value",
+            Edge,
+        ),
+        (
+            "WITH 7 AS x OPTIONAL CALL { WITH x CREATE (:F {p:x}) RETURN x AS value } RETURN value",
+            Scalar,
+        ),
+        (
+            "WITH 7 AS x,8 AS y OPTIONAL CALL(*) { CREATE (:F {p:x,q:y}) RETURN x+y AS value } RETURN value",
+            Scalar,
+        ),
+        (
+            "OPTIONAL CALL { CREATE (:F) RETURN 1 AS value UNION ALL RETURN 2 AS value } RETURN value",
+            Scalar,
+        ),
+    ] {
+        let chain = prepare(text);
+        let GraphWriteChainStep::ReturningCall(call) = &chain.steps()[0] else {
+            panic!("OPTIONAL must retain the native returning write owner: {text}");
+        };
+        assert!(call.is_optional(), "{text}");
+        assert_eq!(call.export_column_types(), &[kind], "{text}");
+        assert_eq!(chain.column_types(), &[kind], "{text}");
+        assert_eq!(chain.columns(), &["value"], "{text}");
+    }
+    for text in [
+        "CREATE (n:F) OPTIONAL CALL(n) { SET n.p=1 RETURN n AS updated } RETURN updated",
+        "CALL { CREATE (:F) RETURN 1 AS x } OPTIONAL CALL(x) { CREATE (:F {p:x}) RETURN x+1 AS y } RETURN x,y",
+        "WITH 1 AS x OPTIONAL CALL(x) { OPTIONAL CALL(x) { CREATE (:F {p:x}) RETURN x AS y } RETURN y } RETURN y",
+        "OPTIONAL CALL { CREATE (n:F) RETURN n } SET n.q=2 RETURN n.p,n.q",
+        "OPTIONAL CALL { CREATE (n:F) RETURN n } MATCH (m:F) CREATE (n)-[:R]->(m) RETURN n",
+        "CREATE (n:F) OPTIONAL CALL(n) { MATCH (n)-[:R]->(m) RETURN m } RETURN n,m",
+    ] {
+        prepare(text);
+    }
+}
+
+#[test]
+fn optional_unit_calls_are_legal_and_returning_calls_retain_scope_refusals() {
+    for text in [
+        "OPTIONAL CALL { CREATE (:F) }",
+        "UNWIND [1,1,2] AS x OPTIONAL CALL(x) { CREATE (:F {p:x}) } RETURN x",
+        "OPTIONAL CALL { CREATE (:F) UNION ALL CREATE (:F) } RETURN 1 AS value",
+    ] {
+        let chain = prepare(text);
+        assert!(
+            matches!(chain.steps()[0], GraphWriteChainStep::UnitCall(_)),
+            "{text}"
+        );
+    }
+    for text in [
+        "WITH 7 AS x OPTIONAL CALL(x) { CREATE (:F) RETURN x } RETURN x",
+        "WITH 7 AS x OPTIONAL CALL() { CREATE (:F {p:x}) RETURN 1 AS value } RETURN value",
+        "OPTIONAL CALL { CREATE (local:F) RETURN 1 AS value } RETURN local",
+        "OPTIONAL CALL { CREATE (:F) RETURN 1 AS value UNION CREATE (:F) }",
+        "OPTIONAL CALL { CREATE (n:F) RETURN n AS value UNION RETURN 1 AS value }",
+        "OPTIONAL CALL { CREATE (:F) RETURN 1 AS value CREATE (:F) }",
+    ] {
+        assert!(
+            PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols).is_err(),
+            "OPTIONAL must not bypass scope or body admission: {text}",
+        );
+    }
+    for text in [
+        "OPTIONAL CALL { RETURN 1 AS value } RETURN value",
+        "OPTIONAL CALL() { MATCH (n:F) RETURN n } RETURN n",
+    ] {
+        assert!(
+            !PreparedGraphWriteChainText::is_chain(text).unwrap(),
+            "{text}"
+        );
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_ok(),
+            "{text}"
+        );
+    }
+    assert!(
+        PreparedGraphSetText::prepare(
+            "OPTIONAL CALL { CREATE (:F) RETURN 1 AS value } RETURN value",
+            symbols,
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn captured_return_maps_keep_the_existing_nesting_boundary() {
     // Keep ordinary supported inputs and the exact diagnostic of the retained
     // native CLI. Deep selector lookahead must yield to this existing guard.

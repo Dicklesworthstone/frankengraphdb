@@ -454,8 +454,9 @@ impl<'a> GraphWriteChainCursor<'a> {
                                     &mut iteration.restored,
                                     control,
                                 )?;
-                                // Empty UNION output removes only this outer
-                                // occurrence, after every arm's effects ran.
+                                // Empty UNION output removes this occurrence
+                                // or null-extends it for OPTIONAL CALL, only
+                                // after every arm's effects ran.
                                 iteration.outer = None;
                             }
                         }
