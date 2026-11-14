@@ -149,6 +149,9 @@ pub struct CommitMarker {
     pub logical_command_seq: u64,
     pub commit_seq: u64,
     pub effect_source: EffectSource,
+    /// An explicit global predecessor, when supplied, must name the exact
+    /// preceding marker. The landed local format also admits `None` after
+    /// genesis; existing writers use that encoding and remain readable.
     pub prev_global: Option<MarkerRef>,
     /// Canonically sorted by `(graph, branch)` — the sort is part of the
     /// transcript, so two apply paths producing the same updates in different
@@ -160,6 +163,8 @@ pub struct CommitMarker {
     pub policy_epoch: u64,
     pub revocation_index: u64,
     pub txn_token: [u8; 16],
+    /// Strictly increasing committed logical time. Zero is the genesis floor,
+    /// not a committed instant; the largest value is assignable exactly once.
     pub commit_hlc: u64,
     pub final_effect_digest: Digest,
     pub authorization_decision_digest: Digest,
@@ -284,6 +289,15 @@ pub struct HeadCasMismatch {
     pub actual: Option<MarkerRef>,
 }
 
+/// A supplied global predecessor disagrees with the actual committed tail.
+/// Boxed in [`ChainError`] so the two full marker identities do not enlarge
+/// every successful validation result or unrelated refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalPredecessorMismatch {
+    pub expected: Option<MarkerRef>,
+    pub found: MarkerRef,
+}
+
 /// Why a marker could not be appended to a chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainError {
@@ -301,6 +315,15 @@ pub enum ChainError {
     /// `logical_command_seq` did not advance. Two commits cannot share one
     /// logical command position.
     NonMonotonicCommandSeq { previous: u64, found: u64 },
+    /// The committed logical clock has reached its largest value. No later
+    /// marker can advance it; wrapping or reusing that instant is forbidden.
+    CommitHlcExhausted { frontier: u64 },
+    /// A marker's committed logical clock did not advance beyond the previous
+    /// committed instant (or the zero genesis floor).
+    NonMonotonicCommitHlc { previous: u64, found: u64 },
+    /// An explicit predecessor names a different marker or exists at genesis.
+    /// An omitted predecessor remains legal in the landed local format.
+    GlobalPredecessorMismatch(Box<GlobalPredecessorMismatch>),
     /// The canonical marker format carries the head-update count as a `u32`.
     /// Refuse an in-memory marker outside that domain rather than truncating
     /// its count and hashing an ambiguous transcript.
@@ -339,6 +362,17 @@ impl core::fmt::Display for ChainError {
             Self::NonMonotonicCommandSeq { previous, found } => {
                 write!(f, "logical_command_seq {found} does not exceed {previous}")
             }
+            Self::CommitHlcExhausted { frontier } => {
+                write!(f, "committed logical clock is exhausted at {frontier}")
+            }
+            Self::NonMonotonicCommitHlc { previous, found } => {
+                write!(f, "commit_hlc {found} does not exceed {previous}")
+            }
+            Self::GlobalPredecessorMismatch(mismatch) => write!(
+                f,
+                "global predecessor {:?} does not match the committed tail {:?}",
+                mismatch.found, mismatch.expected
+            ),
             Self::HeadUpdateCountOverflow { count, max } => write!(
                 f,
                 "head-update count {count} exceeds the canonical-format maximum {max}"
@@ -444,7 +478,9 @@ pub struct MarkerChain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MarkerFrontier {
     commit_seq: CommitSeq,
+    marker_oid: ObjectId,
     logical_command_seq: u64,
+    commit_hlc: u64,
     chain_hash: Digest,
 }
 
@@ -452,7 +488,9 @@ impl From<&ChainedMarker> for MarkerFrontier {
     fn from(chained: &ChainedMarker) -> Self {
         Self {
             commit_seq: CommitSeq(chained.marker.commit_seq),
+            marker_oid: chained.marker_oid,
             logical_command_seq: chained.marker.logical_command_seq,
+            commit_hlc: chained.marker.commit_hlc,
             chain_hash: chained.chain_hash,
         }
     }
@@ -544,6 +582,29 @@ fn validate_marker(
                 found: marker.logical_command_seq,
             });
         }
+    }
+    if let Some(found) = marker.prev_global {
+        let expected = frontier.map(|last| MarkerRef {
+            marker_oid: last.marker_oid,
+            commit_seq: last.commit_seq,
+        });
+        if expected != Some(found) {
+            return Err(ChainError::GlobalPredecessorMismatch(Box::new(
+                GlobalPredecessorMismatch { expected, found },
+            )));
+        }
+    }
+    let previous_hlc = frontier.map_or(0, |last| last.commit_hlc);
+    if previous_hlc == u64::MAX {
+        return Err(ChainError::CommitHlcExhausted {
+            frontier: previous_hlc,
+        });
+    }
+    if marker.commit_hlc <= previous_hlc {
+        return Err(ChainError::NonMonotonicCommitHlc {
+            previous: previous_hlc,
+            found: marker.commit_hlc,
+        });
     }
     if let Some(next) = marker.identity_counters {
         identity_counters.validate_successor(next)?;
@@ -1172,6 +1233,17 @@ mod commit_seq_exhaustion_tests {
         bad.logical_command_seq = 1;
         defects.push(bad);
         let mut bad = good.clone();
+        bad.prev_global = Some(MarkerRef {
+            marker_oid: ObjectId([0xff; 32]),
+            commit_seq: CommitSeq(1),
+        });
+        defects.push(bad);
+        for commit_hlc in [0, 1] {
+            let mut bad = good.clone();
+            bad.commit_hlc = commit_hlc;
+            defects.push(bad);
+        }
+        let mut bad = good.clone();
         bad.head_updates.reverse();
         defects.push(bad);
         let mut bad = good.clone();
@@ -1225,6 +1297,37 @@ mod commit_seq_exhaustion_tests {
         assert_eq!(prefix.append(bad), Err(expected));
         assert_eq!(prefix.heads, chain.heads);
         assert_eq!(prefix.chain_value(), chain.chain_value());
+    }
+
+    #[test]
+    fn streaming_prefix_preserves_the_genesis_and_exhausted_clock_boundaries() {
+        let mut chain = MarkerChain::new();
+        let mut prefix = MarkerPrefix::default();
+        let mut zero = marker(1);
+        zero.commit_hlc = 0;
+        let expected = ChainError::NonMonotonicCommitHlc {
+            previous: 0,
+            found: 0,
+        };
+        assert_eq!(prefix.append(zero.clone()), Err(expected.clone()));
+        assert_eq!(chain.append(zero).unwrap_err(), expected);
+        assert_eq!(prefix.frontier(), CommitSeq::ORIGIN);
+
+        let mut maximum = marker(1);
+        maximum.commit_hlc = u64::MAX;
+        prefix.append(maximum.clone()).unwrap();
+        chain.append(maximum).unwrap();
+        let settled = prefix.frontier;
+        for commit_hlc in [0, 1, u64::MAX] {
+            let mut next = marker(2);
+            next.commit_hlc = commit_hlc;
+            let expected = ChainError::CommitHlcExhausted { frontier: u64::MAX };
+            assert_eq!(prefix.append(next.clone()), Err(expected.clone()));
+            assert_eq!(chain.append(next).unwrap_err(), expected);
+            assert_eq!(prefix.frontier, settled);
+            assert_eq!(prefix.chain_value(), chain.chain_value());
+            assert_eq!(chain.len(), 1);
+        }
     }
 
     #[test]
