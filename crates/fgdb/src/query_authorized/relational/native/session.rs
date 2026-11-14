@@ -24,6 +24,9 @@ mod analytics;
 pub use analytics::AuthorizedPreparedFnxCall;
 #[path = "session/batch.rs"]
 mod batch;
+#[path = "session/transaction.rs"]
+mod transaction;
+pub use transaction::AuthorizedReadTransaction;
 #[path = "session/beacon.rs"]
 mod beacon;
 pub use beacon::AuthorizedBeaconIndex;
