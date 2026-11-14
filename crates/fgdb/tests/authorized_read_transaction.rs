@@ -199,9 +199,23 @@ fn signed_node_and_row_allowances_accumulate_across_separately_delivered_stateme
                 .unwrap();
             let text = "MATCH (n) RETURN n.p AS p";
             assert_eq!(owner.query(&query, text, &params).unwrap(), rows(&[7, 19]));
+            let output_called = Cell::new(false);
             refused(
-                owner.query(&query, text, &params),
+                owner.query_with_output(
+                    &query,
+                    text,
+                    &params,
+                    |result, _| {
+                        output_called.set(true);
+                        Ok(result)
+                    },
+                    |error| error,
+                ),
                 Error::LimitExceeded(dimension),
+            );
+            assert!(
+                !output_called.get(),
+                "signed row admission precedes output adaptation"
             );
             assert_eq!(owner.completed_statements(), 1);
             assert!(!owner.is_active());

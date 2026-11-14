@@ -365,6 +365,195 @@ fn http_transactions_admit_cumulative_and_escaped_json_output_before_commit() {
 }
 
 #[test]
+fn read_only_transaction_pins_snapshot_and_scope_while_another_client_writes() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "read-transaction-snapshot").await;
+        let mut writer = connect(cx, addr, &grant(Rights::ReadWrite)).await;
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:'Ann',age:1})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut scope = grant(Rights::Read);
+        scope.labels = Scope::only([LabelId(1)]);
+        scope.properties = Scope::only([PropertyKeyId(2)]);
+        let mut reader = connect(cx, addr, &scope).await;
+        let begun = reader.begin_read_transaction(cx).await.unwrap();
+        assert_eq!(begun.basis, 1);
+        let read = statement(
+            ExecuteMode::Read,
+            "MATCH (n:Person) RETURN n.name AS name,n.age AS age",
+        );
+        let first = reader
+            .execute_transaction(cx, begun.handle, &read)
+            .await
+            .unwrap();
+        assert_eq!(first.rows, [vec![WireValue::Null, WireValue::Int(1)]]);
+        // A client-side wrong mode sends nothing and preserves its pinned owner.
+        assert!(matches!(
+            reader
+                .execute_transaction(
+                    cx,
+                    begun.handle,
+                    &statement(ExecuteMode::Write, "CREATE (:Person {age:9})"),
+                )
+                .await,
+            Err(ClientError::Protocol(_))
+        ));
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) SET n.age=n.age+100",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let second = reader
+            .execute_transaction(cx, begun.handle, &read)
+            .await
+            .unwrap();
+        assert_eq!(second.rows, first.rows);
+        assert_eq!(second.end.statement, 2);
+        assert_eq!(
+            reader.commit_transaction(cx, begun.handle).await.unwrap(),
+            Outcome::ReadClosed {
+                seq: 1,
+                statements: 2
+            }
+        );
+        assert_eq!(ages(cx, &mut reader).await, [vec![WireValue::Int(101)]]);
+        // Empty read-only completion also reports its original, now newer cut.
+        let empty = reader.begin_read_transaction(cx).await.unwrap();
+        assert_eq!(empty.basis, 2);
+        assert_eq!(
+            reader.commit_transaction(cx, empty.handle).await.unwrap(),
+            Outcome::ReadClosed {
+                seq: 2,
+                statements: 0
+            }
+        );
+        writer.close(cx).await.unwrap();
+        reader.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn read_only_transactions_keep_cumulative_rows_and_abort_unrepresentable_output() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "read-transaction-budgets").await;
+        let mut scope = grant(Rights::Read);
+        scope.limits.max_rows = 1;
+        let mut reader = connect(cx, addr, &scope).await;
+        let begun = reader.begin_read_transaction(cx).await.unwrap();
+        let read = statement(ExecuteMode::Read, "RETURN 1 AS value");
+        reader
+            .execute_transaction(cx, begun.handle, &read)
+            .await
+            .unwrap();
+        assert_eq!(
+            server_code(
+                reader
+                    .execute_transaction(cx, begun.handle, &read,)
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Budget
+        );
+        assert!(reader.commit_transaction(cx, begun.handle).await.is_err());
+        let next = reader.begin_read_transaction(cx).await.unwrap();
+        reader
+            .execute_transaction(cx, next.handle, &read)
+            .await
+            .unwrap();
+        assert_eq!(
+            reader.commit_transaction(cx, next.handle).await.unwrap(),
+            Outcome::ReadClosed {
+                seq: 0,
+                statements: 1
+            }
+        );
+        reader.close(cx).await.unwrap();
+
+        let mut reader = connect(cx, addr, &grant(Rights::Read)).await;
+        let begun = reader.begin_read_transaction(cx).await.unwrap();
+        reader
+            .execute_transaction(cx, begun.handle, &read)
+            .await
+            .unwrap();
+        // This single list row exceeds one negotiated frame. No schema or row
+        // prefix may escape, and the prior successful statement cannot close.
+        let mut callbacks = 0;
+        let refusal = reader
+            .execute_transaction_streaming(
+                cx,
+                begun.handle,
+                &statement(ExecuteMode::Read, "RETURN range(1,700) AS values"),
+                |_| {
+                    callbacks += 1;
+                    Ok(())
+                },
+                |_| panic!("unrepresentable transaction output must not escape"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(refusal), ErrorCode::Budget);
+        assert_eq!(callbacks, 0);
+        assert!(reader.commit_transaction(cx, begun.handle).await.is_err());
+        let empty = reader.begin_read_transaction(cx).await.unwrap();
+        reader.rollback_transaction(cx, empty.handle).await.unwrap();
+        reader.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn read_transaction_callback_cancellation_releases_the_pin_after_provisional_end() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "read-transaction-cancel").await;
+        let mut reader = connect(cx, addr, &grant(Rights::Read)).await;
+        for count in [1, 12] {
+            let begun = reader.begin_read_transaction(cx).await.unwrap();
+            let mut calls = 0;
+            let error = reader
+                .execute_transaction_streaming(
+                    cx,
+                    begun.handle,
+                    &statement(
+                        ExecuteMode::Read,
+                        &format!("UNWIND range(1,{count}) AS n RETURN n"),
+                    ),
+                    |_| Ok(()),
+                    |_| {
+                        calls += 1;
+                        Err(ClientError::Protocol("application rejected read row"))
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                ClientError::Protocol("application rejected read row")
+            ));
+            assert_eq!(calls, 1);
+            assert!(reader.commit_transaction(cx, begun.handle).await.is_err());
+            let next = reader.begin_read_transaction(cx).await.unwrap();
+            reader.rollback_transaction(cx, next.handle).await.unwrap();
+        }
+        reader.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn explicit_statements_share_staged_state_and_publish_one_atomic_commit() {
     run(async |cx| {
         let (addr, shutdown, mut server) = start(cx, "explicit-transaction-atomic").await;
@@ -704,6 +893,71 @@ async fn raw_connection(
     let ready = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
     let binding = Binding::Ready(Ready::decode(ready.payload()).unwrap().binding(session));
     (reader, writer, binding)
+}
+
+#[test]
+fn raw_write_mode_aborts_a_read_only_owner_even_with_write_credentials() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "read-transaction-raw-write").await;
+        let scope = grant(Rights::ReadWrite);
+        let (mut reader, mut writer, binding) = raw_connection(cx, addr, token(&scope)).await;
+        send_raw(
+            &mut writer,
+            cx,
+            FrameKind::BeginReadTransaction,
+            4,
+            StreamId::CONTROL,
+            binding,
+            &Empty,
+        )
+        .await;
+        let begun = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
+        assert_eq!(begun.header().kind(), FrameKind::TransactionBegun);
+        let begun = TransactionBegun::decode(begun.payload()).unwrap();
+        send_raw(
+            &mut writer,
+            cx,
+            FrameKind::ExecuteTransaction,
+            5,
+            StreamId::CONTROL,
+            binding,
+            &ExecuteTransaction {
+                handle: begun.handle,
+                statement: statement(ExecuteMode::Write, "CREATE (:Person {age:999})"),
+            },
+        )
+        .await;
+        let error = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
+        assert_eq!(error.header().kind(), FrameKind::Error);
+        assert_eq!(
+            ErrorBody::decode(error.payload()).unwrap().code,
+            ErrorCode::PermissionDenied
+        );
+        send_raw(
+            &mut writer,
+            cx,
+            FrameKind::CommitTransaction,
+            6,
+            StreamId::CONTROL,
+            binding,
+            &TransactionSelector {
+                handle: begun.handle,
+            },
+        )
+        .await;
+        let error = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
+        assert_eq!(
+            ErrorBody::decode(error.payload()).unwrap().code,
+            ErrorCode::Statement
+        );
+        let mut observer = connect(cx, addr, &grant(Rights::Read)).await;
+        assert!(ages(cx, &mut observer).await.is_empty());
+        observer.close(cx).await.unwrap();
+        drop(reader);
+        drop(writer);
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
 }
 
 #[test]

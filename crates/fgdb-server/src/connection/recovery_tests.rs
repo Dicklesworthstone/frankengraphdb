@@ -102,7 +102,10 @@ fn subscription_schema_and_exact_frame_entry_can_use_separate_fragments() {
             let (mut lane, wire) = lane(&root, db, &token, [], false);
             let binding = lane.conn.binding();
             let stream = StreamId([0x39; 16]);
-            let child = lane.conn.admit_child(stream, ChildKind::Subscription).unwrap();
+            let child = lane
+                .conn
+                .admit_child(stream, ChildKind::Subscription)
+                .unwrap();
             lane.send_generation = Some(db.db.generation().unwrap());
             let waiter = server.shutdown.waiter();
             let mut window = FlowWindow::new(lane.initial_window, lane.maximum_window).unwrap();
@@ -161,12 +164,17 @@ fn subscription_schema_and_exact_frame_entry_can_use_separate_fragments() {
                     window.available(),
                     SendCost {
                         bytes: lane.initial_window.bytes
-                            - sent.iter().map(|frame| frame.header().frame_len() as u64).sum::<u64>(),
+                            - sent
+                                .iter()
+                                .map(|frame| frame.header().frame_len() as u64)
+                                .sum::<u64>(),
                         rows: 0,
                     }
                 );
             }
-            lane.conn.child_terminal(stream, child, ChildTerminus::EphemeralCompleted).unwrap();
+            lane.conn
+                .child_terminal(stream, child, ChildTerminus::EphemeralCompleted)
+                .unwrap();
             assert_eq!(lane.conn.sends_in_flight(), 0);
         }
         server.join_database_workers(&root).await;
@@ -189,7 +197,10 @@ fn subscription_fragments_obey_body_node_and_entry_limits_with_large_flow_credit
             lane.maximum_window = lane.initial_window;
             let binding = lane.conn.binding();
             let stream = StreamId([0x3a; 16]);
-            let child = lane.conn.admit_child(stream, ChildKind::Subscription).unwrap();
+            let child = lane
+                .conn
+                .admit_child(stream, ChildKind::Subscription)
+                .unwrap();
             lane.send_generation = Some(db.db.generation().unwrap());
             let waiter = server.shutdown.waiter();
             let mut window = FlowWindow::new(lane.initial_window, lane.maximum_window).unwrap();
@@ -204,16 +215,28 @@ fn subscription_fragments_obey_body_node_and_entry_limits_with_large_flow_credit
                     ],
                 )
             } else {
-                (Some(Vec::new()), vec![(1, Vec::new()); MAX_ROWS_PER_CHUNK + 1])
+                (
+                    Some(Vec::new()),
+                    vec![(1, Vec::new()); MAX_ROWS_PER_CHUNK + 1],
+                )
             };
             let expected_rows = entries.len() as u64;
-            assert!(lane
-                .send_batch(
-                    &root, &waiter, &mut window, 1, stream, binding, 9, false,
-                    &mut columns, entries,
+            assert!(
+                lane.send_batch(
+                    &root,
+                    &waiter,
+                    &mut window,
+                    1,
+                    stream,
+                    binding,
+                    9,
+                    false,
+                    &mut columns,
+                    entries,
                 )
                 .await
-                .is_ok());
+                .is_ok()
+            );
             let sent = frames_with_limits(&wire.bytes(), limits);
             assert_eq!(sent.len(), 2);
             let mut delivered = 0;
@@ -241,13 +264,25 @@ fn subscription_fragments_obey_body_node_and_entry_limits_with_large_flow_credit
                         other => panic!("unexpected subscription fragment: {other:?}"),
                     }
                 } else {
-                    assert_eq!(part.entries.len(), if index == 0 { MAX_ROWS_PER_CHUNK } else { 1 });
-                    assert!(part.entries.iter().all(|(weight, row)| *weight == 1 && row.is_empty()));
+                    assert_eq!(
+                        part.entries.len(),
+                        if index == 0 { MAX_ROWS_PER_CHUNK } else { 1 }
+                    );
+                    assert!(
+                        part.entries
+                            .iter()
+                            .all(|(weight, row)| *weight == 1 && row.is_empty())
+                    );
                 }
             }
             assert_eq!(delivered, expected_rows);
-            assert_eq!(window.available().rows, lane.initial_window.rows - expected_rows);
-            lane.conn.child_terminal(stream, child, ChildTerminus::EphemeralCompleted).unwrap();
+            assert_eq!(
+                window.available().rows,
+                lane.initial_window.rows - expected_rows
+            );
+            lane.conn
+                .child_terminal(stream, child, ChildTerminus::EphemeralCompleted)
+                .unwrap();
             assert_eq!(lane.conn.sends_in_flight(), 0);
         }
         server.join_database_workers(&root).await;
@@ -561,7 +596,9 @@ fn recovery_resets_credit_blocked_subscriptions_at_the_last_complete_batch() {
 #[test]
 fn recovery_refuses_consistent_read_batches_before_send_and_while_credit_blocked() {
     let ((), report) = run_async_under_lab(0x79a0_0109, |root| async move {
-        for (before_first_byte, prepared) in [(true, false), (false, false), (true, true), (false, true)] {
+        for (before_first_byte, prepared) in
+            [(true, false), (false, false), (true, true), (false, true)]
+        {
             let (server, token, _) = served(
                 &root,
                 match (before_first_byte, prepared) {
@@ -612,14 +649,8 @@ fn recovery_refuses_consistent_read_batches_before_send_and_while_credit_blocked
                     argument_sets: vec![vec![], vec![]],
                 })
             };
-            let mut execution = Box::pin(lane.execute_statement(
-                &root,
-                &waiter,
-                db,
-                &token,
-                1,
-                statement,
-            ));
+            let mut execution =
+                Box::pin(lane.execute_statement(&root, &waiter, db, &token, 1, statement));
             poll_fn(|task| {
                 assert!(execution.as_mut().poll(task).is_pending());
                 if wire.writes.load(Ordering::Acquire) > 0 {
@@ -813,6 +844,137 @@ fn generation_fence_cancels_unwritten_frames_but_closes_partial_frames_and_flush
 }
 
 #[test]
+fn read_transaction_fences_rows_and_data_dependent_refusals_during_recovery() {
+    let ((), report) = run_async_under_lab(0x79a0_0114, |root| async move {
+        for fails in [false, true] {
+            for recovery in [false, true] {
+                let name = format!("read-transaction-output-{fails}-{recovery}");
+                let (mut server, token, _) = served(&root, &name).await;
+                let db = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+                db.symbols
+                    .bind(fgdb_gql::GraphSymbolKind::Property, "age", 1)
+                    .unwrap();
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let mut seed = fgdb::WriteBatch::new(fgdb_delta_types::RelationId(1));
+                seed.create_vertex(
+                    fgdb_types::VId(1),
+                    vec![],
+                    vec![(
+                        fgdb_delta_types::PropertyKeyId(1),
+                        fgdb_types::CanonicalScalar::Int(0),
+                    )],
+                );
+                db.db
+                    .write(&root)
+                    .await
+                    .unwrap()
+                    .write(&contexts.commit(), seed)
+                    .await
+                    .unwrap();
+                let db = &server.databases["test"];
+                let writes = if recovery {
+                    vec![usize::MAX, 0]
+                } else {
+                    vec![]
+                };
+                let (mut lane, wire) = lane(&root, db, &token, writes, false);
+                let waiter = server.shutdown.waiter();
+                let binding = lane.conn.binding();
+                let request = |kind, id, payload| {
+                    Frame::new(
+                        kind,
+                        id,
+                        StreamId::CONTROL,
+                        binding,
+                        payload,
+                        FrameLimits::new(4096).unwrap(),
+                    )
+                    .unwrap()
+                };
+                let begin = request(FrameKind::BeginReadTransaction, 1, Empty.encode().unwrap());
+                let mut active = None;
+                assert!(
+                    lane.transaction_request(&root, &waiter, db, &token, &mut active, &begin,)
+                        .await
+                        .is_ok()
+                );
+                let sent = frames(&wire.bytes());
+                let begun =
+                    fgdb_protocol::body::TransactionBegun::decode(sent[0].payload()).unwrap();
+                assert_eq!(begun.basis, 1);
+                let statement = request(
+                    FrameKind::ExecuteTransaction,
+                    2,
+                    fgdb_protocol::body::ExecuteTransaction {
+                        handle: begun.handle,
+                        statement: Execute {
+                            mode: ExecuteMode::Read,
+                            statement: if fails {
+                                "MATCH (n) RETURN 1/n.age AS value"
+                            } else {
+                                "MATCH (n) RETURN n.age AS value"
+                            }
+                            .to_owned(),
+                            parameters: vec![],
+                        },
+                    }
+                    .encode()
+                    .unwrap(),
+                );
+                let mut sending = Box::pin(lane.transaction_request(
+                    &root,
+                    &waiter,
+                    db,
+                    &token,
+                    &mut active,
+                    &statement,
+                ));
+                if recovery {
+                    poll_fn(|task| {
+                        assert!(sending.as_mut().poll(task).is_pending());
+                        if wire.writes.load(Ordering::Acquire) > 1 {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                    assert_eq!(frames(&wire.bytes()).len(), 1);
+                    fail_after_marker(&root, db, 777).await;
+                }
+                assert!(sending.await.is_ok());
+                let sent = frames(&wire.bytes());
+                if recovery || fails {
+                    assert!(active.is_none());
+                    assert_eq!(sent.len(), 2);
+                    assert_eq!(sent[1].header().kind(), FrameKind::Error);
+                    let error = ErrorBody::decode(sent[1].payload()).unwrap();
+                    if recovery {
+                        assert!(matches!(
+                            error.code,
+                            ErrorCode::DatabaseRecovering | ErrorCode::DatabaseUnavailable
+                        ));
+                        settled(db).await;
+                    } else {
+                        assert_eq!(error.code, ErrorCode::Execution);
+                    }
+                } else {
+                    assert!(active.is_some());
+                    assert_eq!(sent.len(), 3);
+                    assert_eq!(sent[1].header().kind(), FrameKind::TransactionResultChunk);
+                    assert_eq!(sent[2].header().kind(), FrameKind::TransactionResultEnd);
+                }
+                drop(active.take());
+                assert_eq!(lane.conn.children_in_flight(), 0);
+                assert_eq!(lane.conn.sends_in_flight(), 0);
+                server.join_database_workers(&root).await;
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn explicit_transaction_native_refusal_is_fenced_and_discards_staged_prefix() {
     let ((), report) = run_async_under_lab(0x79a0_0112, |root| async move {
         for recovery in [false, true] {
@@ -836,15 +998,21 @@ fn explicit_transaction_native_refusal_is_fenced_and_discards_staged_prefix() {
             let mut active = None;
             let request = |kind, id, body| {
                 Frame::new(
-                    kind, id, StreamId::CONTROL, binding, body,
+                    kind,
+                    id,
+                    StreamId::CONTROL,
+                    binding,
+                    body,
                     FrameLimits::new(4096).unwrap(),
-                ).unwrap()
+                )
+                .unwrap()
             };
             let begin = request(FrameKind::BeginTransaction, 1, Empty.encode().unwrap());
-            assert!(lane
-                .transaction_request(&root, &waiter, db, &token, &mut active, &begin)
-                .await
-                .is_ok());
+            assert!(
+                lane.transaction_request(&root, &waiter, db, &token, &mut active, &begin)
+                    .await
+                    .is_ok()
+            );
             let sent = frames(&wire.bytes());
             assert_eq!(sent.len(), 1);
             let begun = fgdb_protocol::body::TransactionBegun::decode(sent[0].payload()).unwrap();
@@ -857,26 +1025,37 @@ fn explicit_transaction_native_refusal_is_fenced_and_discards_staged_prefix() {
                 },
             };
             let write = request(
-                FrameKind::ExecuteTransaction, 2,
+                FrameKind::ExecuteTransaction,
+                2,
                 statement(ExecuteMode::Write).encode().unwrap(),
             );
-            assert!(lane
-                .transaction_request(&root, &waiter, db, &token, &mut active, &write)
-                .await
-                .is_ok());
+            assert!(
+                lane.transaction_request(&root, &waiter, db, &token, &mut active, &write)
+                    .await
+                    .is_ok()
+            );
             let sent = frames(&wire.bytes());
             assert_eq!(sent.len(), 3);
             assert_eq!(sent[1].header().kind(), FrameKind::TransactionResultChunk);
             assert_eq!(sent[2].header().kind(), FrameKind::TransactionResultEnd);
             assert!(active.is_some());
-            assert_eq!(db.db.read(&root).await.unwrap().frontier().unwrap(), CommitSeq(0));
+            assert_eq!(
+                db.db.read(&root).await.unwrap().frontier().unwrap(),
+                CommitSeq(0)
+            );
 
             let refused = request(
-                FrameKind::ExecuteTransaction, 3,
+                FrameKind::ExecuteTransaction,
+                3,
                 statement(ExecuteMode::Read).encode().unwrap(),
             );
             let mut execution = Box::pin(lane.transaction_request(
-                &root, &waiter, db, &token, &mut active, &refused,
+                &root,
+                &waiter,
+                db,
+                &token,
+                &mut active,
+                &refused,
             ));
             if recovery {
                 poll_fn(|task| {
@@ -886,12 +1065,16 @@ fn explicit_transaction_native_refusal_is_fenced_and_discards_staged_prefix() {
                     } else {
                         Poll::Pending
                     }
-                }).await;
+                })
+                .await;
                 assert_eq!(frames(&wire.bytes()).len(), 3);
                 fail_after_marker(&root, db, 777).await;
             }
             assert!(execution.await.is_ok());
-            assert!(active.is_none(), "a refused statement cannot retain its staged prefix");
+            assert!(
+                active.is_none(),
+                "a refused statement cannot retain its staged prefix"
+            );
             let sent = frames(&wire.bytes());
             assert_eq!(sent.len(), 4);
             let last = sent.last().unwrap();
@@ -951,7 +1134,8 @@ fn transaction_refusal_fence_closes_partial_output_but_preserves_unknown_outcome
                 } else {
                     Poll::Pending
                 }
-            }).await;
+            })
+            .await;
             let before = wire.bytes();
             if flush_pending {
                 assert_eq!(frames(&before).len(), 1);
@@ -961,7 +1145,11 @@ fn transaction_refusal_fence_closes_partial_output_but_preserves_unknown_outcome
             }
             fail_after_marker(&root, db, 778).await;
             assert!(matches!(sending.await, Err(Stop::Transport)));
-            assert_eq!(wire.bytes(), before, "no replacement can follow a partial diagnostic");
+            assert_eq!(
+                wire.bytes(),
+                before,
+                "no replacement can follow a partial diagnostic"
+            );
             assert_eq!(lane.conn.sends_in_flight(), 0);
             settled(db).await;
 
@@ -969,17 +1157,19 @@ fn transaction_refusal_fence_closes_partial_output_but_preserves_unknown_outcome
             // result generation. Suppressing it would lose the no-replay warning.
             let (mut terminal_lane, terminal_wire) = self::lane(&root, db, &token, [], false);
             let binding = terminal_lane.conn.binding();
-            assert!(terminal_lane
-                .refuse_transaction(
-                    &root,
-                    2,
-                    StreamId::CONTROL,
-                    binding,
-                    generation,
-                    Refusal::new(ErrorCode::OutcomeUnknown, "outcome unknown; do not replay"),
-                )
-                .await
-                .is_ok());
+            assert!(
+                terminal_lane
+                    .refuse_transaction(
+                        &root,
+                        2,
+                        StreamId::CONTROL,
+                        binding,
+                        generation,
+                        Refusal::new(ErrorCode::OutcomeUnknown, "outcome unknown; do not replay"),
+                    )
+                    .await
+                    .is_ok()
+            );
             let terminal = frames(&terminal_wire.bytes());
             assert_eq!(terminal.len(), 1);
             let error = ErrorBody::decode(terminal[0].payload()).unwrap();

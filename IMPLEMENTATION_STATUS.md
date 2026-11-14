@@ -12,6 +12,71 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Cumulative read-only transactions and allocation floors — qualification pending
+
+Source added 2026-11-14 implements an explicit native read owner in `eb3c3e7`
+and a connection-scoped FGP adapter. `Database::begin_authorized_read` and the
+matching pinned-view method admit Read credentials, then retain one snapshot
+and one owning Warden `ReadAccess` permit. Sequential requests use the existing
+selector, compiler and masked native executor. Original input, execution, nodes,
+rows and checked output spend cumulative signed limits; per-statement native
+policy remains separate. A statement never renews the permit or borrows a past
+request's context. Different bound temporal cuts refuse before source access.
+
+FGP `BEGIN_READ_TRANSACTION` (`0x0037`) and Rust
+`Client::begin_read_transaction` use the existing transaction handles and
+provisional result/completion machines. Client-side wrong-mode admission sends
+nothing; a raw Write request aborts the server owner. Read-only completion must
+be `ReadClosed` at the original basis with the exact statement count. Closing
+allocates no commit sequence. Other writers can advance independently, and
+recovery fences both physical rows and source-dependent errors from the old
+generation. The client transaction regression helpers were also moved out of
+the accidentally unclosed production `server_error` function and back into
+their test module. This repairs compilation structure and test registration;
+transport-feature runtime execution is still unqualified.
+
+Native regression sources cover scoped Read credentials, stable snapshots,
+cumulative node/work/row limits, pre-conversion row admission, swallowed meter
+failures, temporal selection, cancellation, expiry, retirement, clock rollback,
+unwind and pin release. Adapter sources add four TCP scenarios, client mode and
+completion-forgery cases, and generation-fenced row/error delivery. Row admission
+does not publish pending exact-count caches; only final successful output does.
+The [Fabric protocol](docs/FABRIC_PROTOCOL.md#explicit-read-only-transactions)
+documents the API and bounds. Durable leases, reattachment, outcome lookup and
+full SSI remain outside this increment; the broader transaction and FGP beads
+remain open.
+
+Chronicle commit `c6eacb2` independently protects committed allocation floors.
+Both retained and streaming marker validators reject a decrease in either vertex
+or edge counters, preserve floors across legacy counter-less markers, and update
+their constant-size state only after all admission checks succeed. Engine reopen
+uses that validated floor. Regression sources include pre-D1 refusal, later CAS
+failure, exhausted counters, fully rehashed corrupt logs, complete recovery and
+checkpoint-prefix recovery. No durable encoding changed. This does **not** solve
+the separate CREATE RETURN / rollback / reopen first-escape reservation gap;
+`fgdb-w2-id-allocator-3kd` and `fgdb-w2-escape-bindings-qcp` remain open.
+
+Validation on the pinned toolchain: `cargo test --locked -p fgdb-protocol --lib
+--test protocol` passed **41 unit and 17 integration tests**. That default-feature
+run excludes transport and therefore proves neither client nor server runtime
+behavior. Scoped Rustfmt and whitespace checks passed. Static UBS passed for the
+Chronicle repair. The native-owner scan exited 1 on a reviewed false positive
+comparing diagnostic error enums. The adapter scan also exited 1: its eight
+critical reports concern existing public binding equality, binary frame-header
+test assertions and an unreachable constant nonzero-construction panic. Those
+were reviewed as false positives; neither scan is reported as a green gate.
+Static scanning is not runtime qualification.
+
+The restored combined production check was SIGKILLed in pinned `asupersync`
+before first-party compilation, both with the repository frontend scheduling
+and with one compiler frontend thread. A distinct normal-profile Chronicle test
+attempt without server TLS features was also killed there. No dependency pin,
+source, test profile or assertion setting was changed to obtain a passing gate.
+Native/Chronicle/GQL/server runtime tests, Clippy and complete integrated-tree
+qualification remain **UNRUN**. These terminal build observations supersede the
+earlier interrupted-build report below. The final HTTP regression file was also
+rechecked with pinned Rustfmt after the executor returned.
+
 ### Atomic HTTP transactions and OPTIONAL CALL — qualification pending
 
 Source added 2026-11-14 in `ad50728` and `84d5aac` implements two bounded surface

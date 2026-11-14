@@ -14,12 +14,11 @@ mod prepared;
 mod read_batch;
 mod subscription;
 pub(crate) mod transaction;
-pub(crate) use transaction::NativeWriteTransaction;
 pub(crate) use conditional::{authorize_write, write_if_current, write_if_current_framed};
 pub(crate) use difference::{DifferenceAnswer, read_difference, read_prepared_difference};
 pub(crate) use prepared::{
-    PreparedDefinition, PreparedRead, prepare_statement, read_prepared_session,
-    run_prepared_batch, run_prepared_framed,
+    PreparedDefinition, PreparedRead, prepare_statement, read_prepared_session, run_prepared_batch,
+    run_prepared_framed,
 };
 #[cfg(test)]
 pub(crate) use prepared::{prepare_read, read_prepared, run_prepared};
@@ -27,6 +26,7 @@ pub(crate) use read_batch::{
     ReadBatchAnswer, read_batch, read_prepared_batch, read_statement_batch,
 };
 pub(crate) use subscription::{poll, subscribe};
+pub(crate) use transaction::{NativeReadTransaction, NativeWriteTransaction};
 
 use crate::recovery::{Generation, Unavailable};
 use crate::{Served, TRUNK, convert, unix_millis};
@@ -1126,12 +1126,8 @@ async fn write_returning_in_guard<R: Send>(
     let mut output = |rows: &[fgdb_gql::algebra::GraphValueRow],
                       work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
                       metadata: &mut dyn fgdb::AuthorizedWriteOutput| {
-        let rows = edge_upsert_output::collect_with_frame_budget(
-            &columns,
-            rows,
-            work,
-            frame_budget,
-        )?;
+        let rows =
+            edge_upsert_output::collect_with_frame_budget(&columns, rows, work, frame_budget)?;
         collect(&columns, rows, work, metadata)
     };
     let result = match &prepared {

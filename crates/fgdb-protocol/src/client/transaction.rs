@@ -11,6 +11,7 @@ use crate::body::{
 pub(super) struct TransactionState {
     begun: TransactionBegun,
     statements: u64,
+    read_only: bool,
 }
 
 /// A completely delivered statement result inside a private transaction.
@@ -97,7 +98,6 @@ impl Drop for TransactionBatchGuard<'_> {
 }
 
 impl Client {
-
     /// Execute 1–32 independently parameterized Read/Write statements through
     /// one explicit native transaction and return all results after completion.
     /// Later statements observe earlier staged effects. The existing native
@@ -246,22 +246,40 @@ impl Client {
     /// It retains the original authority and cumulative budgets through
     /// commit or rollback. Disconnect abandons unpublished effects. This is
     /// not a durable transaction lease and cannot be reattached or resumed.
-    pub async fn begin_transaction(
+    pub async fn begin_transaction(&mut self, cx: &Cx) -> Result<TransactionBegun, ClientError> {
+        self.begin_transaction_kind(cx, FrameKind::BeginTransaction, false)
+            .await
+    }
+
+    /// Pin one snapshot with read authority alone. Sequential Read statements
+    /// share its original signed allowance and cannot observe later commits.
+    /// Close with commit_transaction (ReadClosed) or rollback_transaction.
+    /// A local attempt to send Write is refused without consuming this owner.
+    pub async fn begin_read_transaction(
         &mut self,
         cx: &Cx,
+    ) -> Result<TransactionBegun, ClientError> {
+        self.begin_transaction_kind(cx, FrameKind::BeginReadTransaction, true)
+            .await
+    }
+
+    async fn begin_transaction_kind(
+        &mut self,
+        cx: &Cx,
+        kind: FrameKind,
+        read_only: bool,
     ) -> Result<TransactionBegun, ClientError> {
         if self.selected.is_none() {
             return Err(ClientError::Protocol("select a database first"));
         }
-        let request = self
-            .send(cx, FrameKind::BeginTransaction, StreamId::CONTROL, &Empty)
-            .await?;
+        let request = self.send(cx, kind, StreamId::CONTROL, &Empty).await?;
         let frame = self.reply(cx, request).await?;
         let begun: TransactionBegun = expect(&frame, FrameKind::TransactionBegun)?;
         self.finish_request(request)?;
         self.transaction = Some(TransactionState {
             begun,
             statements: 0,
+            read_only,
         });
         Ok(begun)
     }
@@ -325,12 +343,21 @@ impl Client {
         on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
     ) -> Result<TransactionResultEnd, ClientError> {
         let state = self.transaction_state(handle)?;
+        if state.read_only && statement.mode != ExecuteMode::Read {
+            return Err(ClientError::Protocol(
+                "a read-only transaction accepts only Read statements",
+            ));
+        }
         let ordinal = state
             .statements
             .checked_add(1)
-            .ok_or(ClientError::Protocol("transaction statement sequence exhausted"))?;
+            .ok_or(ClientError::Protocol(
+                "transaction statement sequence exhausted",
+            ))?;
         let mut statement = statement.clone();
-        statement.parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        statement
+            .parameters
+            .sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let request = self
             .send(
                 cx,
@@ -339,10 +366,8 @@ impl Client {
                 &ExecuteTransaction { handle, statement },
             )
             .await?;
-        self.receive_transaction_result(
-            cx, request, handle, ordinal, on_columns, on_row,
-        )
-        .await
+        self.receive_transaction_result(cx, request, handle, ordinal, on_columns, on_row)
+            .await
     }
 
     async fn receive_transaction_result(
@@ -367,19 +392,25 @@ impl Client {
                 return Err(ClientError::Closed);
             }
             if header.request_id() != request {
-                return Err(ClientError::Protocol("transaction frame for a different request"));
+                return Err(ClientError::Protocol(
+                    "transaction frame for a different request",
+                ));
             }
             match stream {
                 None if !header.stream_id().is_control() => stream = Some(header.stream_id()),
                 Some(id) if id != header.stream_id() => {
-                    return Err(ClientError::Protocol("transaction frame on a foreign stream"));
+                    return Err(ClientError::Protocol(
+                        "transaction frame on a foreign stream",
+                    ));
                 }
                 _ => {}
             }
             match header.kind() {
                 FrameKind::TransactionResultChunk => {
                     let Some(id) = stream else {
-                        return Err(ClientError::Protocol("transaction chunk on the control stream"));
+                        return Err(ClientError::Protocol(
+                            "transaction chunk on the control stream",
+                        ));
                     };
                     let chunk = ResultChunk::decode(frame.payload())?;
                     let count = chunk.rows.len() as u64;
@@ -388,7 +419,9 @@ impl Client {
                         return Err(ClientError::Protocol("server exceeded its flow credit"));
                     }
                     available = (available.0 - cost, available.1 - count);
-                    progress.observe_chunk(&chunk).map_err(ClientError::Protocol)?;
+                    progress
+                        .observe_chunk(&chunk)
+                        .map_err(ClientError::Protocol)?;
                     if callback_error.is_none()
                         && let Some(names) = chunk.columns
                         && let Err(error) = on_columns(&names)
@@ -420,11 +453,15 @@ impl Client {
                 }
                 FrameKind::TransactionResultEnd => {
                     if stream.is_none() {
-                        return Err(ClientError::Protocol("transaction END on the control stream"));
+                        return Err(ClientError::Protocol(
+                            "transaction END on the control stream",
+                        ));
                     }
                     let end = TransactionResultEnd::decode(frame.payload())?;
                     if end.handle != handle || end.statement != ordinal {
-                        return Err(ClientError::Protocol("transaction END changed owner or ordinal"));
+                        return Err(ClientError::Protocol(
+                            "transaction END changed owner or ordinal",
+                        ));
                     }
                     progress
                         .finish_rows(end.rows, header.frame_len() as u64, available.0)
@@ -481,11 +518,16 @@ impl Client {
         };
         let completion: TransactionCompletion = expect(&frame, FrameKind::TransactionCommitted)?;
         if completion.handle != handle {
-            return Err(ClientError::Protocol("commit completed a different transaction"));
+            return Err(ClientError::Protocol(
+                "commit completed a different transaction",
+            ));
         }
         let valid = match completion.outcome {
             Outcome::WriteCommitted { seq, statements } => {
-                statements != 0 && seq > state.begun.basis && statements == state.statements
+                !state.read_only
+                    && statements != 0
+                    && seq > state.begun.basis
+                    && statements == state.statements
             }
             Outcome::ReadClosed { seq, statements } => {
                 seq == state.begun.basis && statements == state.statements
@@ -530,7 +572,9 @@ impl Client {
         };
         let rolled_back: TransactionSelector = expect(&frame, FrameKind::TransactionRolledBack)?;
         if rolled_back.handle != handle {
-            return Err(ClientError::Protocol("rollback selected a different transaction"));
+            return Err(ClientError::Protocol(
+                "rollback selected a different transaction",
+            ));
         }
         self.finish_request(request)?;
         self.transaction = None;

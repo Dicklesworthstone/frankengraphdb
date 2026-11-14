@@ -61,6 +61,7 @@ pub enum FrameKind {
     TransactionRolledBack = 0x0034,
     TransactionResultChunk = 0x0035,
     TransactionResultEnd = 0x0036,
+    BeginReadTransaction = 0x0037,
 }
 
 impl TryFrom<u16> for FrameKind {
@@ -117,6 +118,7 @@ impl TryFrom<u16> for FrameKind {
             0x0034 => Self::TransactionRolledBack,
             0x0035 => Self::TransactionResultChunk,
             0x0036 => Self::TransactionResultEnd,
+            0x0037 => Self::BeginReadTransaction,
             _ => return Err(ProtocolError::UnknownFrameKind),
         })
     }

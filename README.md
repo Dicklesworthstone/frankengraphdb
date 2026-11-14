@@ -218,8 +218,33 @@ outcome semantics.
 
 This local API was runtime-qualified on 2026-11-11 via
 [the native regression scenarios](crates/fgdb/tests/authorized_explicit_transactions.rs).
-Bolt/FGP explicit write adapters and durable transaction reattachment remain open;
-see [implementation status](IMPLEMENTATION_STATUS.md).
+The FGP explicit write adapter and atomic HTTP transaction scripts are now
+implemented, with runtime qualification pending. Bolt explicit writes and durable
+transaction reattachment remain open; see [implementation status](IMPLEMENTATION_STATUS.md).
+
+### Explicit read-only transactions — qualification pending
+
+`Database::begin_authorized_read` and `EmbeddedReadView::begin_authorized_read`
+return an `AuthorizedReadTransaction` under Read authority. Its sequential
+`query` calls retain one immutable snapshot and one cumulative signed allowance
+for input, native execution and delivered rows. Concurrent writes cannot change
+its answers. `query_with_output` also admits trusted host conversion before
+delivery. A different historical cut, a statement or output failure, cancellation,
+expiry or issuer retirement closes the owner and releases its pin.
+
+FGP clients use `begin_read_transaction`, then the existing
+`execute_transaction` and `commit_transaction` methods. Successful close returns
+`ReadClosed` with the original basis and statement count, including zero for an
+unused owner. It publishes no marker and allocates no commit sequence. The client
+refuses a Write mode locally; a peer bypassing that check is refused by the
+server and loses its read owner. The connection's recovery fence also covers
+these results and data-dependent errors.
+
+See [the wire contract and client example](docs/FABRIC_PROTOCOL.md#explicit-read-only-transactions).
+The default protocol suites pass 58 tests. Native, transport-client and server
+runtime qualification remains pending because the pinned foundation dependency
+compiler was killed before first-party compilation; no durable lease or full-SSI
+guarantee is implied.
 
 ### Exact counts inside write transactions
 
@@ -760,7 +785,7 @@ Grouping and sorting finish before delivery begins. Rows are decoded and flushed
 
 Native `CREATE`/`INSERT`, matched mutations and vertex `MERGE` also support aggregate `RETURN`: for example, `UNWIND [1,1,2] AS x CREATE (n:Person {p:x}) RETURN n.p AS p,count(*) AS created ORDER BY p`. Grouping uses the exact statement occurrences and their frozen post-effect values, including duplicates; it does not rescan the graph. `COUNT`, `SUM`, `MIN`, `MAX` and `COLLECT` use the existing native aggregate engine, including supported `DISTINCT` arguments. Work and scratch quotas remain cumulative, final rows share the normal transaction output allowance, and `LIMIT 0` cannot skip effects or conceal an aggregate error. Counts and integer sums must fit the ordinary Int64 row domain; nonnull exact integer-domain averages still refuse rather than silently round.
 
-`fgdbd` (`crates/fgdb-server`) serves the FGP handshake, `AUTH_REFRESH`, one autocommit GQL read or write per `EXECUTE`, atomic parameterized `EXECUTE_BATCH` writes, reusable prepared read templates, ephemeral flow-controlled result streams, and live `SUBSCRIBE TO` changefeeds (a baseline, then one exact delta per commit), plus the HTTP/1.1 JSON adapter (`/v1/health`, `/v1/databases/<name>/schema`, `/query`, `/write`, `/write-batch`). `CREATE`/`INSERT`, matched `SET`/`REMOVE`/deletion, and vertex `MERGE` can return rows with their native transaction outcome over FGP and HTTP. Their `RETURN` expressions run against the authorized statement result before commit, so expression or result-quota failures discard the writes; `LIMIT 0` still applies effects. The Bolt-compat subset (`BoltCompatProfileV1`, `--bolt-listen`) accepts official Neo4j drivers: autocommit and explicit read transactions each use one pinned generation, bounded autocommit writes execute as one atomic authorized program on `PULL`/`DISCARD`, and write `RETURN` supports scalar values, lists, maps, nodes, relationships and paths. Write graph metadata is hydrated from the final unpublished overlay under the same capability and budgets before commit; a late conversion or output-limit failure rolls back all effects, even with `PULL 1` or `DISCARD`. Read graph values retain their statement's selected historical sequence. Explicit write transactions still refuse with `Neo.ClientError.Statement.AccessMode`. Graph-valued write output was runtime-qualified on 2026-11-11 via [bolt_autocommit.rs](crates/fgdb-server/tests/bolt_autocommit.rs); it is not a full `BoltCompatProfileV2` conformance claim. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion (including native GQL `SUBSCRIBE TO` changefeeds via a pre-expansion Z-set capability homomorphism; analytic `CALL fnx.*` subscriptions still require unrestricted graph scope). It does not yet serve durable result retention (ACK/release/resume), explicit multi-statement write transactions, durable subscriptions, or the HTTP/2, gRPC and WebSocket adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
+`fgdbd` (`crates/fgdb-server`) serves the FGP handshake, `AUTH_REFRESH`, one autocommit GQL read or write per `EXECUTE`, atomic parameterized `EXECUTE_BATCH` writes, explicit connection-scoped read/write transactions, reusable prepared read templates, ephemeral flow-controlled result streams, and live `SUBSCRIBE TO` changefeeds (a baseline, then one exact delta per commit), plus the HTTP/1.1 JSON adapter (`/v1/health`, `/v1/databases/<name>/schema`, `/query`, `/query-batch`, `/write`, `/write-batch`, `/transaction`). `CREATE`/`INSERT`, matched `SET`/`REMOVE`/deletion, and vertex `MERGE` can return rows with their native transaction outcome over FGP and HTTP. Their `RETURN` expressions run against the authorized statement result before commit, so expression or result-quota failures discard the writes; `LIMIT 0` still applies effects. The Bolt-compat subset (`BoltCompatProfileV1`, `--bolt-listen`) accepts official Neo4j drivers: autocommit and explicit read transactions each use one pinned generation, bounded autocommit writes execute as one atomic authorized program on `PULL`/`DISCARD`, and write `RETURN` supports scalar values, lists, maps, nodes, relationships and paths. Write graph metadata is hydrated from the final unpublished overlay under the same capability and budgets before commit; a late conversion or output-limit failure rolls back all effects, even with `PULL 1` or `DISCARD`. Read graph values retain their statement's selected historical sequence. Explicit write transactions still refuse with `Neo.ClientError.Statement.AccessMode`. Graph-valued write output was runtime-qualified on 2026-11-11 via [bolt_autocommit.rs](crates/fgdb-server/tests/bolt_autocommit.rs); it is not a full `BoltCompatProfileV2` conformance claim. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion (including native GQL `SUBSCRIBE TO` changefeeds via a pre-expansion Z-set capability homomorphism; analytic `CALL fnx.*` subscriptions still require unrestricted graph scope). It does not yet serve durable result retention (ACK/release/resume), durable transaction reattachment, durable subscriptions, or the HTTP/2, gRPC and WebSocket adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
 
 FGP also supports reusable native read templates through `Client::prepare_read`, `execute_prepared`/`execute_prepared_streaming`, and `release_prepared`. Preparation binds syntax and operand types without executing or pinning a snapshot; each execution supplies its parameters again and opens a fresh authorized read. Handles belong to one connection, are invalidated by authority refresh or database recovery, and cannot be used to execute writes. Each connection retains at most 64 templates and 4 MiB of original query text. Both schema and row callbacks return `Result<(), ClientError>`; a callback error cancels and drains its result before the client can execute another request.
 

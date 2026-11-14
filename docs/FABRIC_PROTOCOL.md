@@ -71,6 +71,7 @@ these values; callers cannot authenticate merely by constructing the structs.
 | COMMIT_TRANSACTION / TRANSACTION_COMMITTED | 0x0031 / 0x0032 | client / server |
 | ROLLBACK_TRANSACTION / TRANSACTION_ROLLED_BACK | 0x0033 / 0x0034 | client / server |
 | TRANSACTION_RESULT_CHUNK / TRANSACTION_RESULT_END | 0x0035 / 0x0036 | server |
+| BEGIN_READ_TRANSACTION | 0x0037 | client |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -184,7 +185,7 @@ redacted from `Debug`.
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
 | EXECUTE_READ_BATCH | the same body as EXECUTE_BATCH, under an explicit read-only request tag; one read statement and its ordered argument sets |
 | EXECUTE_READ_STATEMENTS | `statements u32` (1–32), then that many EXECUTE payloads: `mode u8` (must be 0), `statement text`, canonical `parameters [(name text, value)]`; one body-wide decoded-value limit |
-| BEGIN_TRANSACTION | empty |
+| BEGIN_TRANSACTION / BEGIN_READ_TRANSACTION | empty; the former opens a write-capable workspace, the latter a read-only snapshot owner |
 | TRANSACTION_BEGUN | nonzero connection-owned `handle [16]`, `basis u64` |
 | EXECUTE_TRANSACTION | `handle [16]`, then EXECUTE fields with mode restricted to 0 (Read) or 1 (Write); ordinary shared value-node and parameter bounds apply |
 | COMMIT_TRANSACTION / ROLLBACK_TRANSACTION / TRANSACTION_ROLLED_BACK | `handle [16]` |
@@ -238,13 +239,15 @@ stream with TRANSACTION_RESULT_CHUNK/END and the ordinary byte/row flow window.
 The END must echo the current handle, the next one-based statement ordinal and
 the exact delivered row count. It is not a snapshot answer or a commit receipt.
 
-The Rust client exposes `begin_transaction`, `execute_transaction`,
+The Rust client exposes `begin_transaction`, `begin_read_transaction`, `execute_transaction`,
 `execute_transaction_streaming`, `commit_transaction` and
-`rollback_transaction`. The first method returns `TransactionBegun`; a
+`rollback_transaction`. Both begin methods return `TransactionBegun`; a
 collected statement returns `TransactionAnswer { columns, rows, end }`.
 Only commit returns `Outcome::WriteCommitted` or `Outcome::ReadClosed`.
 The completion count must equal successfully delivered statement calls; a
 read-close retains BEGIN's basis, while a committed write advances it.
+A read-only owner accepts only `ReadClosed`; even an otherwise well-formed
+`WriteCommitted` response poisons that request and requires reconnecting.
 A handle is local to one connection and grants no authority on another one.
 
 The client blocks unrelated business requests and authority refresh while an
@@ -365,6 +368,82 @@ provides no durable lease, restart, reattachment or outcome lookup.
 The implementation and regression sources are present. Runtime qualification
 is pending: the execution environment disconnected before changed-source
 compilation, formatting, Clippy or tests ran. See IMPLEMENTATION_STATUS.md.
+
+### Explicit read-only transactions
+
+`BEGIN_READ_TRANSACTION` opens an immutable snapshot using **Read authority**.
+ReadWrite and Admin credentials can use the same narrowed operation. It uses
+the existing empty begin body and `TRANSACTION_BEGUN` reply, but has its own
+additive mechanism-profile tag, `0x0037`. Existing `BEGIN_TRANSACTION` bytes and
+write-workspace semantics are unchanged; older peers reject the unknown tag.
+The request is legal only on a selected Ready connection's control stream.
+
+The new native `AuthorizedReadTransaction` retains one read pin and one owning
+Warden read permit. Every statement uses the existing native preparation,
+parameter binding and capability-masked source over that pin. The complete
+original text/argument transcript, execution work, visible nodes, result rows,
+wire conversion and encoded-output admission spend that **same cumulative
+signed allowance**. Beginning another statement never replenishes it. The
+trusted host's native query policy applies per statement; the server also
+applies `DatabaseConfig::max_statements` (64 by default) across the transaction.
+
+No writer lock is held while the transaction is idle or while it reads.
+Other connections can commit, but every read remains at the basis returned by
+BEGIN. Structured branch and temporal binding runs before source access:
+another branch or a bound snapshot different from the basis is refused.
+An explicit `AS OF` selecting exactly the basis is accepted. This does not
+provide multiple historical cuts within one read transaction.
+
+```rust
+use fgdb_protocol::body::{Execute, ExecuteMode, Outcome};
+
+let begun = client.begin_read_transaction(cx).await?;
+let count = client.execute_transaction(cx, begun.handle, &Execute {
+    mode: ExecuteMode::Read,
+    statement: "MATCH (n:Person) RETURN count(*) AS people".into(),
+    parameters: vec![],
+}).await?;
+let people = client.execute_transaction(cx, begun.handle, &Execute {
+    mode: ExecuteMode::Read,
+    statement: "MATCH (n:Person) RETURN n.name AS name ORDER BY name".into(),
+    parameters: vec![],
+}).await?;
+// Both answers read the same basis even when another connection commits.
+let completion = client.commit_transaction(cx, begun.handle).await?;
+assert_eq!(completion, Outcome::ReadClosed {
+    seq: begun.basis,
+    statements: 2,
+});
+```
+
+The client refuses a non-Read mode before sending it and leaves its owner usable.
+If a peer bypasses that check, the server refuses Write and discards the owner,
+even when its bearer has write rights. Write text disguised as Read still passes
+through the native read-only compiler and cannot mutate. Source/ordered streams,
+subscriptions and prepared-handle execution are outside this sequential buffered
+interface. Ordinary PREPARE, autocommit and AUTH_REFRESH remain Busy until close.
+
+COMMIT closes the pin after current cancellation, expiry and issuer-retirement
+checks. Its `ReadClosed` reports the original basis and exact successful statement
+count, including zero for an unused owner, and allocates no commit sequence.
+ROLLBACK and disconnect release the same pin. Any execution or checked-output
+error permanently closes it; an earlier successful result cannot restore it.
+Output callbacks reserve rows before conversion, and only the final successful
+delivery boundary may publish a derived exact-count cache entry.
+
+The existing provisional result flow, callback cancellation and generation-fenced
+physical output apply to this owner as well. Recovery can replace an unwritten
+row or source-dependent error with a recovery control; partial output closes the
+transport. Closing a read-only transaction publishes no graph effects and makes
+no durable lease, reattachment or write-conflict-validation claim.
+
+Regression sources cover the public native owner, read-only credentials and
+masked properties, concurrent commits, cumulative budgets, oversized output,
+client and server mode refusal, completion forgery, cancellation, and recovery
+while sending either rows or data-dependent errors. Native/server/transport
+runtime qualification remains pending because the pinned `asupersync` compiler
+process was SIGKILLed before first-party diagnostics; a protocol-core test pass
+does not validate these runtime paths.
 
 ### Atomic HTTP transaction scripts
 

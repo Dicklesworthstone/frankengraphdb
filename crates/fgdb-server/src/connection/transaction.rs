@@ -4,7 +4,7 @@
 //! introduced, and a lost commit reply is never replayed.
 
 use super::*;
-use crate::execute::NativeWriteTransaction;
+use crate::execute::{NativeReadTransaction, NativeWriteTransaction};
 use fgdb_protocol::body::{
     ExecuteTransaction, TransactionBegun, TransactionCompletion, TransactionHandle,
     TransactionSelector,
@@ -12,9 +12,56 @@ use fgdb_protocol::body::{
 
 pub(super) struct ActiveTransaction<'server> {
     handle: TransactionHandle,
-    native: NativeWriteTransaction<'server>,
+    native: NativeTransaction<'server>,
     statement: u64,
     pub(super) last_stream: Option<StreamId>,
+}
+
+enum NativeTransaction<'server> {
+    Read(NativeReadTransaction<'server>),
+    Write(NativeWriteTransaction<'server>),
+}
+
+impl NativeTransaction<'_> {
+    fn generation(&self) -> Generation {
+        match self {
+            Self::Read(owner) => owner.generation(),
+            Self::Write(owner) => owner.generation(),
+        }
+    }
+
+    fn basis(&self) -> fgdb_types::CommitSeq {
+        match self {
+            Self::Read(owner) => owner.basis(),
+            Self::Write(owner) => owner.basis(),
+        }
+    }
+
+    async fn execute_framed(
+        &mut self,
+        cx: &Cx,
+        request: &Execute,
+        frame_budget: usize,
+    ) -> Result<Answer, Refusal> {
+        match self {
+            Self::Read(owner) => owner.execute_framed(cx, request, frame_budget),
+            Self::Write(owner) => owner.execute_framed(cx, request, frame_budget).await,
+        }
+    }
+
+    async fn commit(self, cx: &Cx) -> Result<Answer, Refusal> {
+        match self {
+            Self::Read(owner) => owner.commit(cx),
+            Self::Write(owner) => owner.commit(cx).await,
+        }
+    }
+
+    fn rollback(self) {
+        match self {
+            Self::Read(owner) => owner.rollback(),
+            Self::Write(owner) => owner.rollback(),
+        }
+    }
 }
 
 impl ActiveTransaction<'_> {
@@ -140,13 +187,27 @@ impl Lane {
         let binding = self.conn.binding();
         self.send_generation = None;
         match frame.header().kind() {
-            FrameKind::BeginTransaction => {
+            FrameKind::BeginTransaction | FrameKind::BeginReadTransaction => {
                 if Empty::decode(frame.payload()).is_err() {
-                    self.fatal(cx, request, ErrorCode::Protocol, "malformed BEGIN_TRANSACTION")
-                        .await;
+                    self.fatal(
+                        cx,
+                        request,
+                        ErrorCode::Protocol,
+                        "malformed transaction begin",
+                    )
+                    .await;
                     return Err(Stop::Transport);
                 }
-                let native = match NativeWriteTransaction::begin(cx, db, token).await {
+                let begun = if frame.header().kind() == FrameKind::BeginReadTransaction {
+                    NativeReadTransaction::begin(cx, db, token)
+                        .await
+                        .map(NativeTransaction::Read)
+                } else {
+                    NativeWriteTransaction::begin(cx, db, token)
+                        .await
+                        .map(NativeTransaction::Write)
+                };
+                let native = match begun {
                     Ok(native) => native,
                     Err(refusal) => {
                         return self
@@ -210,8 +271,13 @@ impl Lane {
             }
             FrameKind::ExecuteTransaction => {
                 let Ok(statement) = ExecuteTransaction::decode(frame.payload()) else {
-                    self.fatal(cx, request, ErrorCode::Protocol, "malformed EXECUTE_TRANSACTION")
-                        .await;
+                    self.fatal(
+                        cx,
+                        request,
+                        ErrorCode::Protocol,
+                        "malformed EXECUTE_TRANSACTION",
+                    )
+                    .await;
                     return Err(Stop::Transport);
                 };
                 let mut owned = match take_transaction(active, statement.handle) {
@@ -253,9 +319,8 @@ impl Lane {
                     .conn
                     .admit_child(stream, ChildKind::Query)
                     .map_err(|_| Stop::Transport)?;
-                let frame_budget = self.send_limits.max_frame_len()
-                    - binding.header_len()
-                    - CHUNK_OVERHEAD;
+                let frame_budget =
+                    self.send_limits.max_frame_len() - binding.header_len() - CHUNK_OVERHEAD;
                 let output_generation = owned.native.generation();
                 let answer = owned
                     .native
@@ -288,14 +353,7 @@ impl Lane {
                 };
                 let delivered = match delivered {
                     Err(Stop::Recovery(error)) => self
-                        .refuse(
-                            cx,
-                            request,
-                            stream,
-                            binding,
-                            error.code(),
-                            error.message(),
-                        )
+                        .refuse(cx, request, stream, binding, error.code(), error.message())
                         .await
                         .map(|()| false),
                     result => result,
@@ -411,15 +469,8 @@ impl Lane {
                         } else {
                             (error.code(), error.message())
                         };
-                        self.refuse(
-                            cx,
-                            request,
-                            StreamId::CONTROL,
-                            binding,
-                            code,
-                            message,
-                        )
-                        .await
+                        self.refuse(cx, request, StreamId::CONTROL, binding, code, message)
+                            .await
                     }
                     result => result,
                 }

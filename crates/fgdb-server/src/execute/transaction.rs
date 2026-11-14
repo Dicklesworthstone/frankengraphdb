@@ -3,7 +3,9 @@
 //! No database lock survives a request, and every error or cancelled operation
 //! discards the whole unpublished prefix. Only commit may publish effects.
 
-use super::{Answer, Created, Refusal, authorize_write, convert, edge_upsert_output, write_refusal};
+use super::{
+    Answer, Created, Refusal, authorize_write, convert, edge_upsert_output, write_refusal,
+};
 use crate::recovery::Generation;
 use crate::{Served, TRUNK, unix_millis};
 use asupersync::Cx;
@@ -18,6 +20,9 @@ use fgdb_protocol::body::{Body, ErrorCode, Execute, ExecuteMode, Outcome};
 use fgdb_types::{CommitSeq, EmbeddedTxnCompletion, PurposeContexts};
 use fgdb_warden::CapabilityToken;
 use std::cell::{Cell, RefCell};
+
+mod read;
+pub(crate) use read::NativeReadTransaction;
 
 /// Connection-scoped ownership of the existing native transaction. This does
 /// not add a durable transaction lease, reattachment, or outcome lookup.
@@ -120,19 +125,17 @@ impl<'s> NativeWriteTransaction<'s> {
                 &query,
                 &request.statement,
                 &parameters,
-                |parameters, scope, work| {
-                    match prepare_transaction_statement(
-                        self.db,
-                        &request.statement,
-                        parameters,
-                        scope,
-                        work,
-                    ) {
-                        Ok(statement) => Ok(statement),
-                        Err(error) => {
-                            preparation_refusal = Some(error);
-                            Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
-                        }
+                |parameters, scope, work| match prepare_transaction_statement(
+                    self.db,
+                    &request.statement,
+                    parameters,
+                    scope,
+                    work,
+                ) {
+                    Ok(statement) => Ok(statement),
+                    Err(error) => {
+                        preparation_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
                     }
                 },
             )
@@ -144,8 +147,7 @@ impl<'s> NativeWriteTransaction<'s> {
                 }
                 write_refusal(&error)
             })?;
-        if request.mode == ExecuteMode::Read
-            && matches!(&statement, TransactionStatement::Write(_))
+        if request.mode == ExecuteMode::Read && matches!(&statement, TransactionStatement::Write(_))
         {
             return Err(Refusal::new(
                 ErrorCode::PermissionDenied,
@@ -273,7 +275,10 @@ impl<'s> NativeWriteTransaction<'s> {
 }
 
 fn finished() -> Refusal {
-    Refusal::new(ErrorCode::Statement, "the explicit transaction is no longer active")
+    Refusal::new(
+        ErrorCode::Statement,
+        "the explicit transaction is no longer active",
+    )
 }
 
 pub(crate) enum TransactionStatement {
@@ -347,9 +352,9 @@ impl<'a> TransactionCatalog<'a> {
     pub(crate) fn check(&self) -> Result<(), Refusal> {
         self.charge(0).map_err(|error| write_refusal(&error))?;
         if self.denied.get() {
-            return Err(write_refusal(
-                &fgdb::WriteTxnError::Authorization(fgdb_warden::Error::ScopeDenied),
-            ));
+            return Err(write_refusal(&fgdb::WriteTxnError::Authorization(
+                fgdb_warden::Error::ScopeDenied,
+            )));
         }
         Ok(())
     }
@@ -624,7 +629,6 @@ pub(crate) fn looks_like_write(text: &str) -> bool {
     false
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,11 +699,7 @@ mod tests {
             assert_eq!(state(&cx, db).await, before);
             accepted(
                 transaction
-                    .execute_framed(
-                        &cx,
-                        &request(ExecuteMode::Write, "CREATE (n)"),
-                        4096,
-                    )
+                    .execute_framed(&cx, &request(ExecuteMode::Write, "CREATE (n)"), 4096)
                     .await,
             );
             let completed = accepted(transaction.commit(&cx).await);
@@ -761,14 +761,11 @@ mod tests {
                     ErrorCode::Budget,
                 ),
             ] {
-                let mut transaction = accepted(NativeWriteTransaction::begin(&cx, db, &token).await);
+                let mut transaction =
+                    accepted(NativeWriteTransaction::begin(&cx, db, &token).await);
                 accepted(
                     transaction
-                        .execute_framed(
-                            &cx,
-                            &request(ExecuteMode::Write, "CREATE (n)"),
-                            4096,
-                        )
+                        .execute_framed(&cx, &request(ExecuteMode::Write, "CREATE (n)"), 4096)
                         .await,
                 );
                 let refusal = transaction
@@ -792,14 +789,11 @@ mod tests {
             let db = &server.databases["test"];
             let before = state(&cx, db).await;
             for explicit in [false, true] {
-                let mut transaction = accepted(NativeWriteTransaction::begin(&cx, db, &token).await);
+                let mut transaction =
+                    accepted(NativeWriteTransaction::begin(&cx, db, &token).await);
                 accepted(
                     transaction
-                        .execute_framed(
-                            &cx,
-                            &request(ExecuteMode::Write, "CREATE (n)"),
-                            4096,
-                        )
+                        .execute_framed(&cx, &request(ExecuteMode::Write, "CREATE (n)"), 4096)
                         .await,
                 );
                 if explicit {
@@ -823,7 +817,10 @@ mod tests {
             let closed = accepted(transaction.commit(&cx).await);
             assert_eq!(
                 closed.outcome,
-                Outcome::ReadClosed { seq: before.0.0, statements: 1 }
+                Outcome::ReadClosed {
+                    seq: before.0.0,
+                    statements: 1
+                }
             );
             assert_eq!(state(&cx, db).await, before);
             server.join_database_workers(&cx).await;
@@ -839,11 +836,7 @@ mod tests {
             let mut transaction = accepted(NativeWriteTransaction::begin(&cx, db, &token).await);
             accepted(
                 transaction
-                    .execute_framed(
-                        &cx,
-                        &request(ExecuteMode::Write, "CREATE (n)"),
-                        4096,
-                    )
+                    .execute_framed(&cx, &request(ExecuteMode::Write, "CREATE (n)"), 4096)
                     .await,
             );
             let concurrent = request(ExecuteMode::Write, "CREATE (n)");
@@ -851,11 +844,7 @@ mod tests {
             let committed = state(&cx, db).await;
             assert_eq!(committed, (CommitSeq(1), 1));
             let error = transaction
-                .execute_framed(
-                    &cx,
-                    &request(ExecuteMode::Read, "MATCH (n) RETURN n"),
-                    4096,
-                )
+                .execute_framed(&cx, &request(ExecuteMode::Read, "MATCH (n) RETURN n"), 4096)
                 .await
                 .err()
                 .expect("a retained transaction cannot silently change its basis");

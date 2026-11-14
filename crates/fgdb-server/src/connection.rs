@@ -7,12 +7,12 @@
 //! QUERY_CANCEL, PING and DRAIN are never starved by the data they control.
 
 use crate::commits::CommitWatcher;
+#[cfg(test)]
+use crate::execute::run_prepared;
 use crate::execute::{
     Answer, PreparedDefinition, Refusal, poll, prepare_statement, read, run_prepared_batch,
     run_prepared_framed, subscribe, write_batch, write_framed, write_if_current_framed,
 };
-#[cfg(test)]
-use crate::execute::run_prepared;
 use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
 use crate::{Served, Server};
@@ -24,10 +24,9 @@ use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
     Execute, ExecuteBatch, ExecuteConditionalWrite, ExecuteDiff, ExecuteMode, ExecutePrepared,
     ExecutePreparedBatch, ExecutePreparedDiff, ExecutePreparedReadBatch, ExecuteReadStatements,
-    Hello, HelloAck,
-    MAX_ROWS_PER_CHUNK, MAX_VALUE_NODES, Outcome, Ping, Prepare, Prepared, PreparedExecutionMode,
-    PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
-    WireValue,
+    Hello, HelloAck, MAX_ROWS_PER_CHUNK, MAX_VALUE_NODES, Outcome, Ping, Prepare, Prepared,
+    PreparedExecutionMode, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd,
+    SelectDatabase, WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -609,6 +608,7 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 lane.send_generation = None;
             }
             FrameKind::BeginTransaction
+            | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction
             | FrameKind::RollbackTransaction => {
@@ -625,14 +625,7 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     return;
                 };
                 match lane
-                    .transaction_request(
-                        cx,
-                        &waiter,
-                        db,
-                        token,
-                        &mut active_transaction,
-                        &frame,
-                    )
+                    .transaction_request(cx, &waiter, db, token, &mut active_transaction, &frame)
                     .await
                 {
                     Ok(()) | Err(Stop::Cancelled) => {}
@@ -1002,11 +995,9 @@ async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
             // TCP ordering places that cancellation before its next request.
             FrameKind::WindowUpdate | FrameKind::QueryCancel => {
                 if header.kind() == FrameKind::QueryCancel
-                    && active_transaction
-                        .as_ref()
-                        .is_some_and(|transaction| {
-                            transaction.last_stream == Some(header.stream_id())
-                        })
+                    && active_transaction.as_ref().is_some_and(|transaction| {
+                        transaction.last_stream == Some(header.stream_id())
+                    })
                 {
                     if Empty::decode(frame.payload()).is_err() {
                         return lane
@@ -1483,14 +1474,11 @@ impl Lane {
         // Deterministic output representability belongs to the private write
         // workspace, before its sole completion. Schema and rows may occupy
         // separate frames; current flow credit does not constrain admission.
-        let frame_budget =
-            self.send_limits.max_frame_len() - binding.header_len() - CHUNK_OVERHEAD;
+        let frame_budget = self.send_limits.max_frame_len() - binding.header_len() - CHUNK_OVERHEAD;
         let answer = match statement {
             Statement::Native(statement) => match statement.mode {
                 ExecuteMode::Read => read(cx, db, token, &statement).await,
-                ExecuteMode::Write => {
-                    write_framed(cx, db, token, &statement, frame_budget).await
-                }
+                ExecuteMode::Write => write_framed(cx, db, token, &statement, frame_budget).await,
                 ExecuteMode::Subscribe | ExecuteMode::ReadStream | ExecuteMode::ReadOrdered => {
                     unreachable!("stream dispatched above")
                 }
@@ -1510,16 +1498,8 @@ impl Lane {
                 mode,
             } => match definition {
                 Ok(definition) => {
-                    run_prepared_framed(
-                        cx,
-                        db,
-                        token,
-                        &definition,
-                        mode,
-                        &parameters,
-                        frame_budget,
-                    )
-                    .await
+                    run_prepared_framed(cx, db, token, &definition, mode, &parameters, frame_budget)
+                        .await
                 }
                 Err(refusal) => Err(refusal),
             },
@@ -1999,6 +1979,7 @@ impl Lane {
                 }
             }
             FrameKind::BeginTransaction
+            | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction
             | FrameKind::RollbackTransaction
@@ -2228,15 +2209,8 @@ impl Lane {
                 )
             }
         };
-        let frame = Frame::new(
-            kind,
-            request,
-            stream,
-            binding,
-            payload,
-            self.send_limits,
-        )
-        .map_err(|_| Stop::Transport)?;
+        let frame = Frame::new(kind, request, stream, binding, payload, self.send_limits)
+            .map_err(|_| Stop::Transport)?;
         self.credited(cx, waiter, &mut window, stream, &frame, 0)
             .await
             .map(|()| true)
@@ -2444,6 +2418,7 @@ impl Lane {
                 Err(Stop::Drain)
             }
             FrameKind::BeginTransaction
+            | FrameKind::BeginReadTransaction
             | FrameKind::ExecuteTransaction
             | FrameKind::CommitTransaction
             | FrameKind::RollbackTransaction

@@ -134,6 +134,42 @@ pub(super) fn collect_with_frame_budget(
     Ok(rows)
 }
 
+/// Read transactions use the same borrowed-value and wire-codec admission as
+/// write RETURN, but spend their retained native ReadAccess permit.
+pub(super) fn collect_query_with_frame_budget(
+    result: fgdb::QueryResult,
+    work: &mut dyn FnMut(u64) -> Result<(), fgdb::QueryError>,
+    frame_budget: usize,
+) -> Result<(Vec<String>, Vec<Vec<WireValue>>), Refusal> {
+    let fgdb::QueryResult::Rows {
+        columns,
+        rows: input,
+    } = result
+    else {
+        return Err(Refusal::new(
+            ErrorCode::Execution,
+            "a read transaction produced a write result",
+        ));
+    };
+    let mut charge = |units| work(units).map_err(super::query_refusal);
+    schema(&columns, &mut charge, Some(frame_budget))?;
+    let mut rows = Vec::new();
+    for row in &input {
+        charge(1)?;
+        if row.len() != columns.len() {
+            return Err(Refusal::new(
+                ErrorCode::Execution,
+                "native read row width mismatch",
+            ));
+        }
+        admission::query(row, &mut charge)?;
+        let cells: Vec<_> = row.iter().map(convert::cell).collect();
+        encoded_row(&cells, &mut charge, Some(frame_budget))?;
+        rows.push(cells);
+    }
+    Ok((columns, rows))
+}
+
 /// Preserve the native aggregate domains and RETURN ordering through the same
 /// bounded borrowed-output admission used by ordinary transaction rows.
 /// No intermediate GraphValueRow can narrow a count, sum or rational average.
@@ -455,8 +491,7 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Budget);
         assert!(!error.message.contains("abc"));
 
-        schema(&[], &mut |_| Ok(()), Some(4))
-            .unwrap_or_else(|error| panic!("{}", error.message));
+        schema(&[], &mut |_| Ok(()), Some(4)).unwrap_or_else(|error| panic!("{}", error.message));
         assert!(schema(&[], &mut |_| Ok(()), Some(3)).is_err());
     }
 

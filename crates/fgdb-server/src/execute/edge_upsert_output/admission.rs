@@ -24,6 +24,20 @@ pub(super) fn row(cells: &[GraphValue], charge: Charge<'_>) -> Result<(), Refusa
     Ok(())
 }
 
+/// Native read cells retain the same exact aggregate domains as RETURN.
+pub(super) fn query(cells: &[fgdb::QueryValue], charge: Charge<'_>) -> Result<(), Refusal> {
+    let mut admission = Admission { charge, nodes: 0 };
+    for cell in cells {
+        match cell {
+            GraphAggregateValue::Value(value) => admission.value(value, 0)?,
+            GraphAggregateValue::Count(_)
+            | GraphAggregateValue::Integer(_)
+            | GraphAggregateValue::Average(_) => admission.node(0)?,
+        }
+    }
+    Ok(())
+}
+
 /// RETURN ordinals may repeat or interleave keys and exact aggregate cells.
 /// Admit the visible tuple with one shared node budget before copying any
 /// payload, including graph values nested inside COLLECT.

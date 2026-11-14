@@ -489,6 +489,7 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::ExecuteReadStatements,
         FrameKind::ExecutePreparedReadBatch,
         FrameKind::BeginTransaction,
+        FrameKind::BeginReadTransaction,
         FrameKind::ExecuteTransaction,
         FrameKind::CommitTransaction,
         FrameKind::RollbackTransaction,
@@ -598,12 +599,13 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         (0x0034, FrameKind::TransactionRolledBack),
         (0x0035, FrameKind::TransactionResultChunk),
         (0x0036, FrameKind::TransactionResultEnd),
+        (0x0037, FrameKind::BeginReadTransaction),
     ] {
         assert_eq!(FrameKind::try_from(tag), Ok(kind));
         assert_eq!(kind as u16, tag);
     }
     assert_eq!(
-        FrameKind::try_from(0x0037),
+        FrameKind::try_from(0x0038),
         Err(ProtocolError::UnknownFrameKind)
     );
 }

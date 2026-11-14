@@ -242,7 +242,8 @@ pub struct DatabaseConfig {
     /// they are bounded process configuration, not a durable schema catalog.
     pub beacon_indexes: Vec<BeaconIndexConfig>,
     pub write_policy: GraphWriteProgramPolicy,
-    /// Host ceiling on expanded statements per write program.
+    /// Host ceiling on expanded statements per write program and on sequential
+    /// statements in an explicit read-only transaction.
     pub max_statements: usize,
     /// Subscription registrations this database admits over the server's
     /// lifetime: a registration lives as long as the open database.
