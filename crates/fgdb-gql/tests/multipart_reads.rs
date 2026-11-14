@@ -405,6 +405,196 @@ fn inline_call_imports_preserve_bags_nulls_and_local_pages() {
 }
 
 #[test]
+fn optional_call_correlates_graph_rows_and_preserves_parallel_edges_and_empty_exports() {
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let mut expected: Vec<_> = EDGES
+        .iter()
+        .map(|(left, _, right)| vertices(&[left.0, right.0]))
+        .collect();
+    expected.push(GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(4)),
+        null.clone(),
+    ]));
+    for statement in [
+        "MATCH (n) OPTIONAL CALL (n) { MATCH (n)-[:R]->(m) RETURN m } \
+         RETURN n,m ORDER BY n,m",
+        "MATCH (n) OPTIONAL CALL { WITH n MATCH (n)-[:R]->(m) RETURN m } \
+         RETURN n,m ORDER BY n,m",
+        "MATCH (n) WITH n OPTIONAL CALL (n) { MATCH (n)-[:R]->(m) RETURN m } \
+         RETURN n,m ORDER BY n,m",
+    ] {
+        assert_eq!(execute(statement), expected, "{statement}");
+    }
+    assert_eq!(
+        execute(
+            "MATCH (n) OPTIONAL CALL (n) { MATCH (n)-[:R]->(m) RETURN m } \
+             WITH n,m WHERE m IS NULL RETURN n.p AS p,m.p AS missing"
+        ),
+        vec![GraphValueRow::from_owned_values(vec![
+            GraphValue::Scalar(CanonicalScalar::Int(3)),
+            null,
+        ])]
+    );
+    // A NULL exported by the first optional body is still a bound NULL in
+    // the next one. It must never become an unbound graph scan.
+    assert_eq!(
+        execute(
+            "MATCH (n {p:3}) OPTIONAL CALL (n) { MATCH (n)-[:R]->(m) RETURN m } \
+             OPTIONAL CALL (m) { MATCH (m)-[:R]->(z) RETURN z } RETURN n,m,z"
+        ),
+        vec![GraphValueRow::from_owned_values(vec![
+            GraphValue::Vertex(VId(4)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Scalar(CanonicalScalar::Null),
+        ])]
+    );
+}
+
+#[test]
+fn optional_call_keeps_duplicate_inputs_empty_aggregates_and_local_union_semantics() {
+    let row = |cells: &[Option<i64>]| {
+        GraphValueRow::from_owned_values(
+            cells
+                .iter()
+                .map(|value| {
+                    GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                })
+                .collect(),
+        )
+    };
+    assert_eq!(
+        execute("OPTIONAL CALL () { UNWIND [] AS x RETURN x } RETURN x"),
+        vec![row(&[None])]
+    );
+    assert!(execute("UNWIND [] AS x OPTIONAL CALL (x) { RETURN 1 AS y } RETURN x,y").is_empty());
+    assert_eq!(
+        execute(
+            "UNWIND [1,2,2,null] AS x OPTIONAL CALL (x) { \
+             WITH x WHERE x=1 RETURN x+10 AS y } RETURN x,y ORDER BY x"
+        ),
+        vec![
+            row(&[Some(1), Some(11)]),
+            row(&[Some(2), None]),
+            row(&[Some(2), None]),
+            row(&[None, None]),
+        ]
+    );
+    // A global count already produces its own row on empty input. Optional
+    // Apply must preserve its zero, whereas a grouped count has no group.
+    assert_eq!(
+        execute(
+            "WITH 4 AS x OPTIONAL CALL (x) { UNWIND [] AS y \
+             RETURN count(*) AS c } RETURN x,c"
+        ),
+        vec![row(&[Some(4), Some(0)])]
+    );
+    assert_eq!(
+        execute(
+            "WITH 4 AS x OPTIONAL CALL (x) { UNWIND [] AS y \
+             RETURN y,count(*) AS c } RETURN x,y,c"
+        ),
+        vec![row(&[Some(4), None, None])]
+    );
+    assert_eq!(
+        execute(
+            "UNWIND [1,2,2] AS x OPTIONAL CALL (x) { \
+             WITH x WHERE x=1 RETURN x AS y \
+             UNION ALL WITH x WHERE x=1 RETURN x AS y } RETURN x,y ORDER BY x,y"
+        ),
+        vec![
+            row(&[Some(1), Some(1)]),
+            row(&[Some(1), Some(1)]),
+            row(&[Some(2), None]),
+            row(&[Some(2), None]),
+        ]
+    );
+    assert_eq!(
+        execute(
+            "WITH 3 AS x OPTIONAL CALL (x) { OPTIONAL CALL () { \
+             UNWIND [] AS z RETURN z } RETURN coalesce(z,x) AS y } RETURN x,y"
+        ),
+        vec![row(&[Some(3), Some(3)])]
+    );
+}
+
+#[test]
+fn optional_call_preserves_errors_and_uses_one_cumulative_cancelable_allowance() {
+    let text = "MATCH (n) OPTIONAL CALL (n) { \
+                MATCH (n)-[:R]->(m) RETURN m } RETURN n,m ORDER BY n,m";
+    let query = prepare(text);
+    let mut checkpoints = 0;
+    let measured = run(&query, wide(), &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    let caps = [
+        measured.rows.snapshot_records,
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    ];
+    assert_eq!(caps[1], 6, "the NULL-extended row is a delivered row");
+    assert_eq!(
+        run(
+            &query,
+            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+            &mut || Ok(())
+        )
+        .unwrap(),
+        measured
+    );
+    for dimension in 0..4 {
+        let mut limited = caps;
+        assert!(limited[dimension] > 0);
+        limited[dimension] -= 1;
+        assert!(
+            run(
+                &query,
+                GqlQueryPolicy::new(limited[0], limited[1], limited[2], limited[3]),
+                &mut || Ok(())
+            )
+            .is_err(),
+            "dimension {dimension}"
+        );
+    }
+    for stop in 0..checkpoints {
+        let mut seen = 0;
+        let result = run(&query, wide(), &mut || {
+            let current = seen;
+            seen += 1;
+            if current == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+    }
+    assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap(), measured);
+    for text in [
+        "WITH 0 AS x OPTIONAL CALL (x) { RETURN 1/x AS y } RETURN y LIMIT 0",
+        "WITH 0 AS x OPTIONAL CALL (x) { RETURN 1/x AS y LIMIT 0 } RETURN y",
+    ] {
+        assert!(
+            run(&prepare(text), wide(), &mut || Ok(())).is_err(),
+            "{text}"
+        );
+    }
+    let reading = prepare("MATCH (n) OPTIONAL CALL (n) { RETURN n.p AS p } RETURN p");
+    assert!(matches!(
+        run_reading(&reading, wide(), &mut || Ok(()), true),
+        Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+            "element-read-error"
+        )))
+    ));
+    assert_ne!(
+        query.canonical_bytes(),
+        prepare(
+            "MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) RETURN m } \
+                 RETURN n,m ORDER BY n,m"
+        )
+        .canonical_bytes()
+    );
+}
+
+#[test]
 fn inline_call_union_keeps_branch_imports_bags_nulls_and_local_pages() {
     let row = |cells: &[Option<i64>]| {
         GraphValueRow::from_owned_values(
@@ -1597,6 +1787,13 @@ fn inline_call_refuses_escaping_names_collisions_and_effects_before_catalog() {
         "CALL { MATCH (n) RETURN n } WITH 1 AS x RETURN n.p",
         "CALL { CREATE (n) RETURN n } RETURN n",
         "CALL { MATCH (n) DELETE n RETURN 1 AS y } RETURN y",
+        "UNWIND [] AS x OPTIONAL CALL (missing) { RETURN 2 AS y } RETURN y",
+        "WITH 1 AS x OPTIONAL CALL (x,x) { RETURN 2 AS y } RETURN y",
+        "WITH 1 AS x OPTIONAL CALL { RETURN x AS y } RETURN y",
+        "WITH 1 AS x OPTIONAL CALL (x) { RETURN x } RETURN x",
+        "OPTIONAL CALL { WITH 2 AS hidden RETURN 1 AS y } RETURN hidden",
+        "OPTIONAL CALL { CREATE (n) RETURN n } RETURN n",
+        "OPTIONAL CALL { MATCH (n) DELETE n RETURN 1 AS y } RETURN y",
     ] {
         let calls = std::cell::Cell::new(0);
         let result = PreparedGraphSetText::prepare(text, |kind, name: &str| {

@@ -801,6 +801,11 @@ impl<'a> Parser<'a> {
         // or OPTIONAL MATCH joins them: that clause starts the next part of
         // a multipart read (deferred_where_continues), never a scope here.
         while self.deferred_where.is_none() {
+            // OPTIONAL CALL is a relational Apply over the completed MATCH
+            // row, not an optional graph-pattern scope.
+            if self.optional_call()? {
+                break;
+            }
             // An OPTIONAL continuation ends before the next clause; its
             // caller draws the implicit `WITH *` there.
             if self.optional_part && (self.is_word("OPTIONAL") || self.is_word("MATCH")) {

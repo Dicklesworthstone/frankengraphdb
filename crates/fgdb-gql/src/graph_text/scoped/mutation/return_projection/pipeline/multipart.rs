@@ -2987,7 +2987,7 @@ impl<'a> Parser<'a> {
             {
                 return Err(expected(
                     self.current.at,
-                    "MATCH, OPTIONAL MATCH, inline CALL or a whole pattern WHERE after row stages",
+                    "MATCH, OPTIONAL MATCH, CALL, OPTIONAL CALL or a whole pattern WHERE after row stages",
                 ));
             }
             let syntax = self.take_part_syntax()?;
@@ -3039,7 +3039,7 @@ impl<'a> Parser<'a> {
                     self.boundary_reads = None;
                     self.projected_sources = None;
                 }
-            } else if self.inline_call()? {
+            } else if self.inline_call()? || self.optional_call()? {
                 let (part, next, done) =
                     self.multipart_call_part(statement, &incoming, aggregate, call_depth)?;
                 result.continuations.push(part);
@@ -3108,6 +3108,14 @@ impl<'a> Parser<'a> {
             && matches!(
                 self.lexer.clone().next()?.kind,
                 TokenKind::Punct(b'{' | b'(')
+            ))
+    }
+
+    pub(in crate::graph_text) fn optional_call(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(self.is_word("OPTIONAL")
+            && matches!(
+                self.lexer.clone().next()?.kind,
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("CALL")
             ))
     }
 
@@ -3186,6 +3194,18 @@ impl<'a> Parser<'a> {
         call_depth: usize,
     ) -> Result<(UnresolvedContinuation<'a>, RowSchema<'a>, bool), GraphSetTextError> {
         let at = self.current.at;
+        let optional = self.take_word("OPTIONAL")?;
+        if optional && !self.inline_call()? {
+            self.word("CALL")?;
+            let (body, exports, imports) =
+                self.multipart_optional_procedure_body(statement, incoming, at, call_depth)?;
+            let terminal_call =
+                matches!(self.current.kind, TokenKind::End | TokenKind::Punct(b';'));
+            let (part, next, terminal) = self.multipart_apply_tail(
+                statement, incoming, aggregate, at, body, exports, imports, true,
+            )?;
+            return Ok((part, next, terminal || terminal_call));
+        }
         // Admission precedes recursive descent and catalog access. This is a
         // parser stack bound, in addition to the whole relational depth bound.
         if call_depth >= 8 {
@@ -3245,6 +3265,100 @@ impl<'a> Parser<'a> {
         self.existence_body = previous_existence;
         let (body, exports, imports) = body?;
         self.punct(b'}', "} after a read-only CALL body ending in RETURN")?;
+        self.multipart_apply_tail(
+            statement, incoming, aggregate, at, body, exports, imports, optional,
+        )
+    }
+
+    /// A named OPTIONAL CALL owns its procedure invocation and attached YIELD
+    /// WHERE. Import the complete caller row for argument/filter evaluation,
+    /// then export only YIELD columns. The native Optional Apply supplies one
+    /// NULL-filled export row if the filtered invocation is empty; host errors
+    /// still propagate. An explicit WITH belongs to the completed caller row.
+    #[allow(clippy::type_complexity)]
+    fn multipart_optional_procedure_body(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        at: usize,
+        call_depth: usize,
+    ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>, Vec<usize>), GraphSetTextError> {
+        self.read_row_bindings.clear();
+        self.boundary_reads = None;
+        self.projected_sources = None;
+        self.call_element_reads = true;
+        let mut schema = incoming.clone();
+        let call = self.call_stage(&mut schema, at)?;
+        let exports = schema[incoming.len()..].to_vec();
+        let mut pipeline = Vec::new();
+        if !incoming.is_empty() {
+            pipeline.push(ReadStageTemplate::Arguments {
+                columns: incoming
+                    .iter()
+                    .map(|(name, _)| name.text.to_owned())
+                    .collect(),
+                types: incoming.iter().map(|(_, kind)| *kind).collect(),
+            });
+        }
+        pipeline.push(call);
+        let relational_filter = self.row_existence_filter(schema.len())?;
+        if !relational_filter {
+            let filter_at = self.current.at;
+            if self.take_word("WHERE")? {
+                let mut depth = pipeline.len();
+                self.row_selection(&schema, &mut pipeline, &mut depth, filter_at)?;
+            }
+            pipeline.push(ReadStageTemplate::Project {
+                at,
+                projection: exports
+                    .iter()
+                    .enumerate()
+                    .map(|(column, (name, _))| ReadProjectionTemplate {
+                        name: name.text.to_owned(),
+                        value: ReadValueTemplate::Column(incoming.len() + column),
+                    })
+                    .collect(),
+                quantifier: GraphSetQuantifier::All,
+            });
+        }
+        let syntax = self.take_part_syntax()?;
+        let mut body = UnresolvedReadInput::from_first(UnresolvedGraphText {
+            statement,
+            syntax,
+            projection: None,
+            pipeline,
+            singleton: true,
+            leading: Vec::new(),
+            leading_types: Vec::new(),
+            correlations: Vec::new(),
+            row_fields: Vec::new(),
+        });
+        if relational_filter {
+            let (parts, _, _) = self.multipart_existence_expression(
+                statement,
+                &schema,
+                false,
+                call_depth,
+                Some(incoming.len()..schema.len()),
+            )?;
+            body.continuations.extend(parts);
+            self.admit_multipart_size(&body)?;
+        }
+        Ok((body, exports, (0..incoming.len()).collect()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn multipart_apply_tail(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        aggregate: bool,
+        at: usize,
+        body: UnresolvedReadInput<'a>,
+        exports: RowSchema<'a>,
+        imports: Vec<usize>,
+        optional: bool,
+    ) -> Result<(UnresolvedContinuation<'a>, RowSchema<'a>, bool), GraphSetTextError> {
         self.read_row_bindings.clear();
         self.boundary_reads = None;
         self.projected_sources = None;
@@ -3291,7 +3405,7 @@ impl<'a> Parser<'a> {
                 operation: UnresolvedContinuationOperation::Apply {
                     body: Box::new(body),
                     imports,
-                    optional: false,
+                    optional,
                 },
             },
             next,
@@ -3930,8 +4044,9 @@ impl<'a> Parser<'a> {
         // An UNWIND directly after a continuation reads that same row (TCK
         // Graph8 [4]: `OPTIONAL MATCH (n) UNWIND keys(n) AS x RETURN ...`).
         // Both named procedures and inline bodies consume the complete MATCH
-        // row. The row pipeline owns named CALL; Apply still owns inline CALL.
-        let before_call = self.is_word("CALL");
+        // row. The row pipeline owns required named CALL; Apply owns inline
+        // bodies and optional named procedures.
+        let before_call = self.is_word("CALL") || self.optional_call()?;
         let before_existence =
             self.returning_existence_projection()? || self.row_list_projection()?;
         let before_write = self.at_multipart_write();
