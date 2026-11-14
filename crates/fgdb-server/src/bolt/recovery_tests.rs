@@ -159,3 +159,129 @@ fn recovery_wakes_and_fences_every_bolt_physical_write_and_flush() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn recovery_fences_bolt_query_and_begin_failures_before_every_write_and_flush() {
+    let ((), report) = run_async_under_lab(0x79a0_0303, |root| async move {
+        for (name, writes, flush_pending, begin_mode) in [
+            ("bolt-error-unwritten", vec![0], false, None),
+            ("bolt-error-partial", vec![5, 0], false, None),
+            ("bolt-error-flush", vec![], true, None),
+            ("bolt-read-begin-unwritten", vec![0], false, Some("r")),
+            ("bolt-read-begin-partial", vec![5, 0], false, Some("r")),
+            ("bolt-read-begin-flush", vec![], true, Some("r")),
+            ("bolt-write-begin-unwritten", vec![0], false, Some("w")),
+            ("bolt-write-begin-partial", vec![5, 0], false, Some("w")),
+            ("bolt-write-begin-flush", vec![], true, Some("w")),
+        ] {
+            let (mut server, token, _) = served(&root, name).await;
+            Arc::get_mut(server.databases.get_mut("test").unwrap())
+                .unwrap()
+                .symbols
+                .bind(fgdb_gql::GraphSymbolKind::Property, "p", 1)
+                .unwrap();
+            let db = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let mut seed = fgdb::WriteBatch::new(fgdb_delta_types::RelationId(1));
+            seed.create_vertex(
+                VId(1),
+                vec![],
+                vec![(
+                    fgdb_delta_types::PropertyKeyId(1),
+                    fgdb_types::CanonicalScalar::Int(0),
+                )],
+            );
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), seed)
+                .await
+                .unwrap();
+            let mut client = connection(&server, token);
+            let request = match begin_mode {
+                Some(mode) => Request::Begin {
+                    extra: vec![
+                        ("mode".into(), Value::string(mode)),
+                        (
+                            "bookmarks".into(),
+                            Value::List(vec![Value::string("fgdb:test:2")]),
+                        ),
+                    ],
+                },
+                None => {
+                    client
+                        .begin(&root, &vec![("mode".into(), Value::string("r"))])
+                        .await
+                        .unwrap();
+                    Request::Run {
+                        // The divisor is graph data, not a parser constant.
+                        query: "MATCH (n) RETURN 1 / n.p AS value".into(),
+                        parameters: vec![],
+                        extra: vec![],
+                    }
+                }
+            };
+            let (stream, wire) = WireIo::new(writes, flush_pending);
+            let mut io = Io {
+                stream: Box::new(stream),
+                local: None,
+                dechunker: Dechunker::new(4096),
+                out: vec![],
+                failed: false,
+            };
+            assert!(!client.handle(&root, &mut io, request).await);
+            assert!(client.failed);
+            assert!(client.transaction.is_none());
+            assert!(client.pending.is_none());
+            assert!(client.output_generation.is_some());
+            let mut decoder = Dechunker::new(4096);
+            decoder.push(&io.out);
+            let message = decoder.next_message().unwrap().unwrap();
+            let Value::Struct { tag: 0x7f, fields } =
+                fgdb_bolt::packstream::decode(&message).unwrap()
+            else {
+                panic!("expected source-dependent FAILURE");
+            };
+            let [Value::Map(metadata)] = fields.as_slice() else {
+                panic!("expected failure metadata");
+            };
+            assert_eq!(
+                get(metadata, "code").and_then(Value::as_str),
+                Some(if begin_mode.is_some() {
+                    "Neo.TransientError.General.DatabaseUnavailable"
+                } else {
+                    "Neo.DatabaseError.Statement.ExecutionFailed"
+                })
+            );
+            let mut send = Box::pin(io.flush(
+                &root,
+                client.output_authority(),
+                client.output_generation.as_ref(),
+            ));
+            let wakes = Arc::new(WakeCounter::default());
+            let waker = std::task::Waker::from(Arc::clone(&wakes));
+            assert!(
+                send.as_mut()
+                    .poll(&mut std::task::Context::from_waker(&waker))
+                    .is_pending()
+            );
+            let before = wire.bytes();
+            let writes = wire.writes.load(Ordering::Acquire);
+            let flushes = wire.flushes.load(Ordering::Acquire);
+            let before_wakes = wakes.0.load(Ordering::Acquire);
+            fail_after_marker(&root, db, 52).await;
+            assert!(wakes.0.load(Ordering::Acquire) > before_wakes);
+            assert_eq!(send.await, Err(Closed));
+            assert!(io.failed);
+            assert_eq!(wire.bytes(), before);
+            assert_eq!(wire.writes.load(Ordering::Acquire), writes);
+            assert_eq!(wire.flushes.load(Ordering::Acquire), flushes);
+            assert_eq!(io.flush(&root, None, None).await, Err(Closed));
+            assert_eq!(wire.bytes(), before);
+            settled(db).await;
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

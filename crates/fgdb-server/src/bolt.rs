@@ -15,8 +15,10 @@
 //!   RESET/disconnect before consumption drops it. Scalar, temporal, list and
 //!   map and graph RETURN values are converted and admitted before commit.
 //!   A lost terminal response never proves rollback and is never auto-replayed.
-//! - BEGIN with read mode or a read-only capability holds one pinned read
-//!   session. Write mode with write authority owns the existing native
+//! - BEGIN with read mode or a read-only capability holds one native read
+//!   owner with a pinned snapshot and cumulative signed allowance, including
+//!   graph metadata conversion. COMMIT performs the native final live check.
+//!   Write mode with write authority owns the existing native
 //!   workspace: RUN stages provisional results and effects, COMMIT alone
 //!   publishes, and ROLLBACK/RESET/drop discard the complete prefix. Reads see
 //!   earlier staged writes. Native cumulative limits and stale-basis refusals
@@ -45,6 +47,7 @@
 mod autocommit;
 mod causal;
 mod cursors;
+mod read_transaction;
 
 use crate::execute::{ReadSession, Refusal, SessionError, query_refusal, read_session};
 use crate::execute::transaction::{
@@ -281,6 +284,10 @@ async fn write_output<W: AsyncWrite + Unpin>(
 struct Failure {
     code: &'static str,
     message: String,
+    /// Recovery controls and an uncertain write completion must remain
+    /// deliverable after their generation is gone. Source-derived diagnostics
+    /// retain the same fence as successful protected output.
+    generation_independent: bool,
 }
 
 impl Failure {
@@ -288,6 +295,7 @@ impl Failure {
         Self {
             code,
             message: message.into(),
+            generation_independent: false,
         }
     }
 
@@ -298,6 +306,12 @@ impl Failure {
     /// The closed FGP error classes onto Neo4j status codes. Only transient
     /// classes use a `TransientError` code, the class drivers retry.
     fn from_refusal(refusal: Refusal) -> Self {
+        let generation_independent = matches!(
+            refusal.code,
+            ErrorCode::DatabaseRecovering
+                | ErrorCode::DatabaseUnavailable
+                | ErrorCode::OutcomeUnknown
+        );
         let code = match refusal.code {
             ErrorCode::Statement | ErrorCode::Protocol | ErrorCode::UnsupportedVersion => {
                 "Neo.ClientError.Statement.SyntaxError"
@@ -315,7 +329,11 @@ impl Failure {
             | ErrorCode::OutcomeUnknown
             | ErrorCode::Cancelled => "Neo.DatabaseError.Statement.ExecutionFailed",
         };
-        Self::new(code, refusal.message)
+        Self {
+            code,
+            message: refusal.message,
+            generation_independent,
+        }
     }
 }
 
@@ -335,7 +353,10 @@ struct Pending<'s> {
 }
 
 enum TransactionSession<'s> {
-    Read(Box<ReadSession<'s>>),
+    Read {
+        owner: Box<fgdb::AuthorizedReadTransaction<'s, crate::Symbols, fn() -> u64>>,
+        generation: Generation,
+    },
     Write {
         owner: Box<AuthorizedWriteTransaction<'s, fn() -> u64>>,
         generation: Generation,
@@ -345,8 +366,9 @@ enum TransactionSession<'s> {
 impl TransactionSession<'_> {
     fn generation(&self) -> Generation {
         match self {
-            Self::Read(session) => session.generation(),
-            Self::Write { generation, .. } => generation.clone(),
+            Self::Read { generation, .. } | Self::Write { generation, .. } => {
+                generation.clone()
+            }
         }
     }
 }
@@ -548,7 +570,9 @@ impl<'s> Connection<'s> {
                 self.failed = true;
                 self.pending = None;
                 self.transaction = None;
-                self.output_generation = None;
+                if refusal.generation_independent {
+                    self.output_generation = None;
+                }
                 io.respond(&failure(refusal));
             }
         }
@@ -648,6 +672,7 @@ impl<'s> Connection<'s> {
                 .db
                 .generation()
                 .map_err(|error| Failure::from_refusal(error.into()))?;
+            self.output_generation = Some(generation.clone());
             let _operation = generation
                 .enter()
                 .map_err(|error| Failure::from_refusal(error.into()))?;
@@ -690,8 +715,14 @@ impl<'s> Connection<'s> {
                 seq,
             )
         } else {
-            let (session, seq) = causal::session(cx, db, token, &name, extra).await?;
-            (TransactionSession::Read(Box::new(session)), seq)
+            read_transaction::begin(
+                cx,
+                db,
+                token,
+                options.minimum_seq,
+                &mut self.output_generation,
+            )
+            .await?
         };
         self.output_generation = Some(session.generation());
         self.transaction = Some(Transaction {
@@ -719,7 +750,12 @@ impl<'s> Connection<'s> {
             .enter()
             .map_err(|error| Failure::from_refusal(error.into()))?;
         let seq = match transaction.session {
-            TransactionSession::Read(_) => transaction.seq,
+            TransactionSession::Read { owner, .. } => {
+                let contexts = PurposeContexts::narrow_runtime_root(cx);
+                (*owner)
+                    .close(&crate::query_cx(&contexts))
+                    .map_err(|error| Failure::from_refusal(query_refusal(error)))?
+            }
             TransactionSession::Write { owner, .. } => {
                 let mut guard = transaction
                     .db
@@ -758,12 +794,12 @@ impl<'s> Connection<'s> {
     async fn run_transaction_statement(
         &mut self,
         cx: &Cx,
+        mut transaction: Transaction<'s>,
         text: &str,
         arguments: &Map,
         parameters: &GqlParameters,
         request_read_only: bool,
     ) -> Result<Map, Failure> {
-        let mut transaction = self.transaction.take().expect("write owner selected");
         let db = transaction.db;
         let token = self.token.as_ref().expect("authenticated");
         crate::execute::authorize_write(db, token).map_err(Failure::from_refusal)?;
@@ -971,34 +1007,44 @@ impl<'s> Connection<'s> {
                 "RUN while a result is still streaming; PULL or DISCARD it first",
             ));
         }
-        if let Some(transaction) = self.transaction.as_ref() {
+        if let Some(transaction) = self.transaction.take() {
+            // Own the entire transaction before every fallible preparation
+            // step. A refused RUN cannot leave either owner or older cursors
+            // usable, even for an in-process caller bypassing handle().
             self.output_database = Some(transaction.db);
             let generation = transaction.session.generation();
+            self.output_generation = Some(generation.clone());
             generation
                 .check()
                 .map_err(|error| Failure::from_refusal(error.into()))?;
-            self.output_generation = Some(generation);
             causal::in_transaction(extra, &transaction.name, transaction.seq)?;
             transaction.cursors.check_admission()?;
+            let arguments = statement_parameters(parameters)?;
+            if matches!(&transaction.session, TransactionSession::Write { .. }) {
+                return self
+                    .run_transaction_statement(
+                        cx,
+                        transaction,
+                        query,
+                        parameters,
+                        &arguments,
+                        get(extra, "mode").and_then(Value::as_str) == Some("r"),
+                    )
+                    .await;
+            }
+            return self.run_read_transaction_statement(
+                cx,
+                transaction,
+                query,
+                parameters,
+                &arguments,
+            );
         }
         // Retain the legacy standalone schema response's lack of a bookmark.
-        // Execution and authorization now belong to the ordinary native CALL
-        // path, including for these forms; this hint grants no authority.
-        let schema_metadata = self.transaction.is_none() && schema_procedure(query).is_some();
+        // Execution and authorization belong to the ordinary native CALL
+        // path; this hint grants no authority.
+        let schema_metadata = schema_procedure(query).is_some();
         let arguments = statement_parameters(parameters)?;
-        if self.transaction.as_ref().is_some_and(|transaction| {
-            matches!(&transaction.session, TransactionSession::Write { .. })
-        }) {
-            return self
-                .run_transaction_statement(
-                    cx,
-                    query,
-                    parameters,
-                    &arguments,
-                    get(extra, "mode").and_then(Value::as_str) == Some("r"),
-                )
-                .await;
-        }
         if let Some(metadata) =
             self.queue_autocommit_write(cx, query, parameters, &arguments, extra)?
         {
@@ -1007,27 +1053,12 @@ impl<'s> Connection<'s> {
         let parameters = arguments;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let query_cx = crate::query_cx(&contexts);
-        // An autocommit statement pins its own generation; one inside a
-        // transaction reads the transaction's.
-        let mut autocommit = None;
-        let (name, db, seq) = if let Some(transaction) = self.transaction.as_mut() {
-            (transaction.name.clone(), transaction.db, transaction.seq)
-        } else {
-            let (name, db) = self.database(extra)?;
-            self.output_database = Some(db);
-            let token = self.token.as_ref().expect("authenticated");
-            let (session, seq) = causal::session(cx, db, token, &name, extra).await?;
-            autocommit = Some(session);
-            (name, db, seq)
-        };
+        // Ordinary autocommit sessions keep their per-execution allowance and
+        // historical selector behavior. Only explicit reads use the owner.
+        let (name, db) = self.database(extra)?;
         self.output_database = Some(db);
-        let session = match autocommit.as_mut() {
-            Some(session) => session,
-            None => match &mut self.transaction.as_mut().expect("in a transaction").session {
-                TransactionSession::Read(session) => session.as_mut(),
-                TransactionSession::Write { .. } => unreachable!("write owner dispatched above"),
-            },
-        };
+        let token = self.token.as_ref().expect("authenticated");
+        let (mut session, seq) = causal::session(cx, db, token, &name, extra).await?;
         let generation = session.generation();
         self.output_generation = Some(generation.clone());
         let (columns, rows, selected) =
@@ -1048,7 +1079,7 @@ impl<'s> Connection<'s> {
                     });
                 }
             };
-        let entities = hydrate(&query_cx, session, db, &rows, selected)?;
+        let entities = hydrate(&query_cx, &mut session, db, &rows, selected)?;
         let rows = rows
             .into_iter()
             .map(|row| {

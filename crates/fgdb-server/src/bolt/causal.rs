@@ -76,7 +76,7 @@ pub(super) fn options(extra: &Map, database: &str) -> Result<Options, Failure> {
     })
 }
 
-fn require_frontier(pinned: CommitSeq, minimum: CommitSeq) -> Result<(), Failure> {
+pub(super) fn require_frontier(pinned: CommitSeq, minimum: CommitSeq) -> Result<(), Failure> {
     if pinned < minimum {
         // No current position is disclosed. No statement has executed, and
         // the caller does not retain this insufficient session for a retry.

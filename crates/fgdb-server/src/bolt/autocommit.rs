@@ -47,15 +47,15 @@ const MAX_RETURN_BYTES: usize = 64 * 1024 * 1024;
 fn output_budget() -> Refusal {
     Refusal::new(
         ErrorCode::Budget,
-        "Bolt write RETURN exceeds the output limit",
+        "Bolt result exceeds the output limit",
     )
 }
 
 fn output_work(
-    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
     units: u64,
 ) -> Result<(), Refusal> {
-    work(units).map_err(|error| crate::execute::write_refusal(&error))
+    work(units)
 }
 
 fn output_bytes(total: &mut usize, bytes: usize) -> Result<(), Refusal> {
@@ -81,7 +81,7 @@ fn admit_scalar_value(
     value: &WireValue,
     depth: usize,
     total: &mut usize,
-    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
     if depth > fgdb_bolt::packstream::MAX_DEPTH {
         return Err(output_budget());
@@ -155,7 +155,7 @@ fn retained_value(
     value: &Value,
     depth: usize,
     total: &mut usize,
-    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
     output_work(work, 1)?;
     if depth > fgdb_bolt::packstream::MAX_DEPTH {
@@ -192,6 +192,47 @@ pub(super) fn collect_returning(
     metadata: &mut dyn fgdb::AuthorizedWriteOutput,
     catalog: &fgdb_gql::ReverseSymbolCatalog,
 ) -> Result<VecDeque<Vec<Value>>, Refusal> {
+    collect_graph_output(
+        rows,
+        max_frame_len,
+        &mut |units| work(units).map_err(|error| crate::execute::write_refusal(&error)),
+        &mut |element, kind, catalog| {
+            metadata
+                .metadata(element, kind, catalog)
+                .map_err(|error| crate::execute::write_refusal(&error))
+        },
+        catalog,
+    )
+    .map(|(rows, _)| rows)
+}
+
+/// Read-only explicit transactions hydrate with the very same representation
+/// code, while their native owner retains its original read permit and pin.
+pub(super) fn collect_read(
+    rows: Vec<Vec<WireValue>>,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), QueryError>,
+    metadata: &mut dyn fgdb::AuthorizedReadOutput,
+    catalog: &fgdb_gql::ReverseSymbolCatalog,
+) -> Result<(VecDeque<Vec<Value>>, usize), Refusal> {
+    collect_graph_output(
+        rows,
+        max_frame_len,
+        &mut |units| work(units).map_err(query_refusal),
+        &mut |element, kind, catalog| {
+            metadata.metadata(element, kind, catalog).map_err(query_refusal)
+        },
+        catalog,
+    )
+}
+
+fn collect_graph_output(
+    rows: Vec<Vec<WireValue>>,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
+    metadata: &mut graph_return::Metadata<'_>,
+    catalog: &fgdb_gql::ReverseSymbolCatalog,
+) -> Result<(VecDeque<Vec<Value>>, usize), Refusal> {
     output_work(work, 1)?;
     let mut reserved = 0;
     output_slots::<Vec<Value>>(&mut reserved, rows.len())?;
@@ -206,7 +247,7 @@ pub(super) fn collect_returning(
         let mut cells = Vec::with_capacity(row.len());
         for cell in row {
             // The record and field list occupy depths 0 and 1. Metadata is
-            // read from the final unpublished overlay before any rows escape.
+            // read from the authorized native source before any rows escape.
             cells.push(encoder.cell(cell, 2, &mut reserved)?);
         }
         let before = retained;
@@ -233,7 +274,35 @@ pub(super) fn collect_returning(
         };
         output.push_back(cells);
     }
-    Ok(output)
+    Ok((output, retained))
+}
+
+/// Admit RUN's complete SUCCESS frame before the read owner can finish its
+/// checked output. Columns are moved from the already-admitted native schema;
+/// no second copy of their payloads is needed for this preflight.
+pub(super) fn admit_read_metadata(
+    metadata: Map,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), QueryError>,
+) -> Result<Map, Refusal> {
+    let mut work = |units| work(units).map_err(query_refusal);
+    let value = Value::Map(metadata);
+    let mut retained = 0;
+    retained_value(&value, 1, &mut retained, &mut work)?;
+    output_work(&mut work, retained.div_ceil(64) as u64 + 1)?;
+    let mut encoded = Vec::new();
+    fgdb_bolt::packstream::encode(&value, &mut encoded);
+    if encoded
+        .len()
+        .checked_add(2) // SUCCESS's structure header and tag.
+        .is_none_or(|bytes| bytes > max_frame_len)
+    {
+        return Err(output_budget());
+    }
+    let Value::Map(metadata) = value else {
+        unreachable!("constructed map")
+    };
+    Ok(metadata)
 }
 
 /// Validate metadata whose meaning matters to a write before retaining it.

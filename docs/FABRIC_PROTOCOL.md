@@ -372,7 +372,8 @@ compilation, formatting, Clippy or tests ran. See IMPLEMENTATION_STATUS.md.
 ### Explicit read-only transactions
 
 `BEGIN_READ_TRANSACTION` opens an immutable snapshot using **Read authority**.
-ReadWrite and Admin credentials can use the same narrowed operation. It uses
+ReadWrite credentials can use the same narrowed operation. Admin is a
+maintenance role and does not grant read authority. It uses
 the existing empty begin body and `TRANSACTION_BEGUN` reply, but has its own
 additive mechanism-profile tag, `0x0037`. Existing `BEGIN_TRANSACTION` bytes and
 write-workspace semantics are unchanged; older peers reject the unknown tag.
@@ -1323,53 +1324,103 @@ application output is admitted.
   `fgdb_protocol::json` holds the one strict JSON grammar and the cell
   encoding the CLI and the adapter share.
 - **The Bolt-compat subset** (`fgdbd serve --bolt-listen`, crate
-  `fgdb-bolt` plus `fgdb-server/src/bolt.rs`): Bolt 5.0 read sessions and
-  bounded autocommit writes. This implemented extension does not qualify the
-  complete planned `BoltCompatProfileV2`. HELLO carries the hex
-  capability token as a `bearer` credential or a `basic` password; a token no
-  served database accepts is refused (`Neo.ClientError.Security.Unauthorized`)
-  and the connection closes. RUN/PULL/DISCARD, BEGIN/COMMIT/ROLLBACK, RESET,
-  GOODBYE and ROUTE (a single-server table, so `neo4j://` works) are served.
-  Read RUN executes on an authorized read session, which cannot express a
-  write. An explicit transaction holds one read session, so all its statements
-  read one generation; writes inside it refuse with
-  `Neo.ClientError.Statement.AccessMode`, and no lock is held across round trips.
+  `fgdb-bolt` plus `fgdb-server/src/bolt.rs`): Bolt 5.0 read sessions,
+  bounded autocommit writes, and native explicit read and write transactions.
+  These implemented extensions do not qualify the complete planned
+  `BoltCompatProfileV2`. HELLO carries the hex capability token as a
+  `bearer` credential or a `basic` password; a token no served database
+  accepts is refused (`Neo.ClientError.Security.Unauthorized`) and the
+  connection closes. RUN/PULL/DISCARD, BEGIN/COMMIT/ROLLBACK, RESET, GOODBYE
+  and ROUTE (a single-server table, so `neo4j://` works) are served.
+
+  BEGIN with `mode: "r"`, or with a Read-only capability, retains one native
+  `AuthorizedReadTransaction`: a pinned snapshot and the original owning
+  Warden read permit. Native preparation and execution, result-row admission
+  and checked graph conversion for every RUN spend that same signed allowance.
+  Metadata reads spend nodes and work; they do not count as extra user result
+  rows or extra statements. The host's explicit statement ceiling also applies.
+  A structured temporal selector must resolve to the BEGIN basis; a different
+  sequence or branch refuses before source execution. No writer lock spans
+  round trips. COMMIT consumes the owner, checks live authority and cancellation,
+  and returns the original snapshot bookmark without creating a commit.
+
+  BEGIN with write/default mode and Write or ReadWrite authority retains the
+  existing native `AuthorizedWriteTransaction`. RUN stages statements and
+  provisional results, including reads of earlier staged changes and supported
+  staged fnx/hybrid calls. PULL and DISCARD consume results without publishing
+  the workspace. COMMIT alone publishes the complete prefix once. Empty or
+  read-only completion retains the native ReadClosed result; an admitted write
+  statement preserves write intent even when its net effects are zero. Native
+  cumulative limits, stale-basis checks and uncertain commit outcomes apply.
+  Read mode never gains write authority, and a write attempted through a read
+  owner refuses with `Neo.ClientError.Statement.AccessMode`.
+
+  Both explicit owners retain independently addressed `qid` results. The
+  cursor count and 64 MiB of retained owned capacities bound multiplexing;
+  these are finite result-retention limits, not a process-RSS claim. Read RUN
+  admits the complete converted rows, cursor retention and its SUCCESS schema
+  frame before publishing a qid. Any refused statement or output conversion
+  abandons the owner and all outstanding results. ROLLBACK, RESET, disconnect
+  and cancellation also discard the complete unpublished transaction state.
+  No durable transaction lease or reconnect/reattachment handle is created.
+
   Autocommit write RUN binds a bounded request without effects; PULL or DISCARD
-  consumes it exactly once through the native authorized transaction owner.
-  RESET, GOODBYE or disconnect before consumption abandons that request.
-  Scalar, list, map and graph-valued write RETURN are admitted in full before
-  publication, even for PULL 1 or DISCARD. The graph values' labels, types,
-  endpoints and visible properties come from the final unpublished overlay,
-  through the same signed permit and cumulative native work/scratch allowance.
-  A deleted, absent or hidden identity cannot be hydrated. Metadata, depth,
-  frame-size, budget or authority failure aborts every staged effect. Once
-  committed, retained rows contain their own metadata and never issue a later
-  hydration query or replay the write. Graph-output regression sources are in
-  `tests/bolt_autocommit.rs`; the 2026-11-11 implementation remains unqualified
-  by runtime gates after the execution environment became unavailable.
-  Read vertices, relationships and paths are returned as Bolt
-  graph values, including inside lists and maps. Their labels, relationship
-  types, endpoints and properties are read through the same authorized
-  session at the statement's selected sequence, including historical reads.
-  Paths preserve traversal direction and reuse node/relationship identities;
-  missing relationship metadata or exhausted hydration allowances refuse the
-  whole RUN before records are delivered. Metadata lookup batches each use
-  the ordinary native and signed per-execution limits; these lookups do not
-  yet share one cumulative RUN allowance. `CALL db.labels()`,
+  consumes it exactly once through the native authorized writer. RESET,
+  GOODBYE or disconnect before consumption abandons that request. Scalar,
+  temporal, list, map and graph-valued write RETURN are admitted in full before
+  publication, even for PULL 1 or DISCARD. Labels, types, endpoints and visible
+  properties come from the final unpublished overlay through the same signed
+  permit. A deleted, absent or hidden identity cannot be hydrated. Metadata,
+  depth, frame-size, budget or authority failure aborts every staged effect.
+  Once committed, retained rows contain their own metadata and never issue a
+  later hydration query or replay the write.
+
+  Explicit read graph output uses that same bounded Bolt serializer, with
+  metadata supplied directly by the native read owner at its original cut.
+  Vertex masks, both relationship endpoints and field masks are checked before
+  catalog lookup or payload copying. Nested lists/maps and paths preserve graph
+  values, traversal direction and repeated identities. No synthetic hydration
+  query or fresh read permit is opened. All metadata calls within one output
+  callback share an additional native work/scratch ceiling, separate from query
+  evaluation; signed node/work limits remain cumulative through both phases
+  and all statements. Refused or swallowed metadata errors prevent output and
+  pending cache publication.
+
+  Ordinary autocommit reads keep their authorized per-execution session and
+  historical selection behavior. Their existing batched graph hydration uses
+  separate native/signed execution allowances; the cumulative explicit-owner
+  guarantee does not extend to that older autocommit path. `CALL db.labels()`,
   `db.relationshipTypes()` and `db.propertyKeys()` answer the same
-  scope-filtered schema names as HTTP's schema route. The FGP error classes map
-  onto Neo4j status codes, and Busy/Draining/DatabaseRecovering use a retryable
-  `TransientError`. Bookmarks name the generation read and are not required
-  inputs. A retained transaction, delayed PULL or COMMIT from an invalidated
-  generation refuses even after the database is ready again; start a new read
-  transaction. Failed recovery uses a non-retryable database error. Results are
-  the same ephemeral class as FGP's.
+  scope-filtered schema names as HTTP's schema route.
+
+  FGP error classes map onto Neo4j status codes. Busy, Draining and
+  DatabaseRecovering use a retryable `TransientError`; failed recovery and
+  OutcomeUnknown remain non-retryable. Source-dependent failures retain the
+  generation fence through every physical write and flush, just like result
+  records. Only the typed recovery/unavailable controls and OutcomeUnknown
+  bypass a stale generation so their terminal control can be delivered.
+  A delayed PULL, RUN or COMMIT on an invalidated owner cannot resume after the
+  database becomes ready again. Bookmarks are local database-qualified lower
+  bounds, not signed cluster read proofs. Results remain ephemeral.
+
+  Regression sources include three new TCP tests in
+  `tests/bolt_autocommit.rs` for cumulative nodes/rows, a concurrent FGP writer
+  with masked nested graph values and independent cursors, and oversized
+  hydrated records refused before RUN success. Production-connection lab
+  sources also cover statement/selector failures, final close after issuer
+  retirement, and recovery during unwritten, partially written and
+  flush-pending source-dependent errors, including read/write BEGIN bookmark
+  refusals. These additions are qualification
+  pending: the pinned foundation build was SIGKILLed before first-party
+  diagnostics, then the executor disconnected before final adapter formatting,
+  static analysis, compilation or runtime tests. Source recovery through
+  GitHub does not qualify those gates; see IMPLEMENTATION_STATUS.md.
 
 Not served, and refused with a typed error rather than approximated: the
 durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE,
 durable transaction preparation,
-explicit multi-statement transactions with ownership and
-reattachment, durable subscriptions with resume across reconnects, the full
+transaction leases with durable ownership and reattachment,
+durable subscriptions with resume across reconnects, the full
 `BoltCompatProfileV2` contract, and the
 HTTP/2, gRPC and WebSocket adapters. Because results are ephemeral, a disconnect can lose undelivered
 rows but never a commit: a write's outcome is decided before its first frame.

@@ -1,5 +1,5 @@
-//! Bolt graph values are owned before publication, from the authorized final
-//! write overlay. Hydration has no database handle, new permit or later read.
+//! Bolt graph values are owned before output, from the native authorized
+//! snapshot or write overlay. Hydration has no new permit or later query.
 
 use super::{
     Entities, Refusal, Value, WireValue, admit_scalar_value, output_budget, output_bytes,
@@ -12,23 +12,30 @@ use fgdb_protocol::body::ErrorCode;
 use fgdb_types::{EId, VId};
 use std::collections::BTreeMap;
 
-pub(super) struct ReturnEncoder<'a> {
-    work: &'a mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
-    metadata: &'a mut dyn fgdb::AuthorizedWriteOutput,
+pub(super) type Metadata<'a> = dyn FnMut(
+        ElementId,
+        GraphElementMetadata,
+        &ReverseSymbolCatalog,
+    ) -> Result<Option<GraphValue>, Refusal>
+    + 'a;
+
+pub(super) struct ReturnEncoder<'a, 'metadata> {
+    work: &'a mut dyn FnMut(u64) -> Result<(), Refusal>,
+    metadata: &'a mut Metadata<'metadata>,
     catalog: &'a ReverseSymbolCatalog,
 }
 
 fn unavailable() -> Refusal {
     Refusal::new(
         ErrorCode::Execution,
-        "graph value is unavailable in the write workspace",
+        "graph value is unavailable in the authorized source",
     )
 }
 
-impl<'a> ReturnEncoder<'a> {
+impl<'a, 'metadata> ReturnEncoder<'a, 'metadata> {
     pub(super) fn new(
-        work: &'a mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
-        metadata: &'a mut dyn fgdb::AuthorizedWriteOutput,
+        work: &'a mut dyn FnMut(u64) -> Result<(), Refusal>,
+        metadata: &'a mut Metadata<'metadata>,
         catalog: &'a ReverseSymbolCatalog,
     ) -> Self {
         Self {
@@ -101,10 +108,7 @@ impl<'a> ReturnEncoder<'a> {
         element: ElementId,
         kind: GraphElementMetadata,
     ) -> Result<GraphValue, Refusal> {
-        self.metadata
-            .metadata(element, kind, self.catalog)
-            .map_err(|error| crate::execute::write_refusal(&error))?
-            .ok_or_else(unavailable)
+        (self.metadata)(element, kind, self.catalog)?.ok_or_else(unavailable)
     }
 
     fn metadata_cell(
@@ -115,7 +119,7 @@ impl<'a> ReturnEncoder<'a> {
         bytes: &mut usize,
     ) -> Result<Value, Refusal> {
         let native = self.read(element, kind)?;
-        let wire = crate::execute::graph_output_value(&native, self.work)?;
+        let wire = crate::execute::graph_output_value_checked(&native, self.work)?;
         drop(native);
         self.cell(wire, depth, bytes)
     }

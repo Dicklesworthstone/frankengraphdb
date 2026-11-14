@@ -12,6 +12,47 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Bolt read transactions retain native authority — qualification pending
+
+The 2026-11-14 Bolt read adapter retains `AuthorizedReadTransaction` across
+BEGIN, RUN and COMMIT. Read-mode BEGIN and Read-only grants select this owner;
+write-mode BEGIN with Write or ReadWrite authority retains the existing native
+writer. Each read RUN uses the original immutable snapshot and cumulative signed
+input, work, node and delivered-row allowances. The host's statement ceiling
+also applies. A structured temporal selector must resolve to the BEGIN basis.
+There is no database lock between messages.
+
+Graph values, including nested lists, maps, relationships and paths, are hydrated
+through `query_with_graph_output` under the original permit and masks. Metadata
+does not count as another user row or statement. The shared Bolt encoder admits
+actual owned capacities, complete RECORD sizes, transaction cursor retention and
+the RUN SUCCESS frame before native final delivery. Failures discard the owner
+and all provisional cursors. COMMIT consumes the native owner and rechecks live
+authority/cancellation, returning the original snapshot bookmark without a new
+commit sequence.
+
+Data-dependent failures now retain the source recovery-generation fence through
+physical writes and flushes. Read and write BEGIN retain their exact selected
+generation before basis-dependent bookmark refusals. Only typed recovery and
+unavailable controls and unknown write completion are generation independent; successful publication cannot be
+turned into a retryable precommit failure. The read owner and its graph output
+stay pinned while independent FGP writes advance the head. Durable transaction
+leases, reattachment, full Bolt V2 and full SSI remain outside this increment.
+Autocommit reads still use their existing per-execution ReadSession path and its
+separate metadata queries; this change does not claim cumulative autocommit
+metadata accounting.
+
+Six added regression functions cover signed metadata-node and user-row budgets,
+concurrent FGP writes with frozen/masked graph cursors, original bookmarks,
+oversized graph output before RUN success, statement and temporal limits, live
+authority at an unused owner's close, and recovery fencing for source-derived
+query and read/write BEGIN failures at unwritten, partially written and pending
+flush boundaries. Independent native/API and adapter source reviews completed.
+The executor disconnected before final Bolt formatting, static scanning, compilation
+or runtime checks, so those gates remain **UNRUN**. The prior 58-test protocol
+result excludes the server adapter and is not Bolt qualification. The recovered
+sources were reviewed through GitHub; no passing integrated-tree claim is made.
+
 ### Optional write subqueries and graph-output admission — qualification pending
 
 The 2026-11-14 write-bearing `OPTIONAL CALL` increment uses the existing native
@@ -965,7 +1006,8 @@ Source added 2026-11-11 under `fgdb-roadmap-bolt-v2-vb6e` and
 `fgdb-w2-txn-lifecycle-mhae`. The Bolt adapter now composes the native
 `AuthorizedWriteTransaction` owner across BEGIN, RUN and COMMIT.
 Write/default BEGIN with signed Write or ReadWrite rights opens a writer;
-read-only grants and read mode retain the existing pinned read session.
+read-only grants and read mode retain the native read owner described above
+(added 2026-11-14).
 
 Each accepted statement stages into the same private workspace. Later graph/set
 and exact terminal aggregate reads see earlier staged effects, while other
@@ -1001,11 +1043,12 @@ the exact-tree proof remain **UNRUN**; whole-workspace formatting also reports
 pre-existing differences. The broader roadmap beads remain open.
 
 This is a bounded local owner, not durable reattachment or full Bolt V2.
-Explicit writer reads use the native graph/set and exact aggregate subset;
-non-catalog procedure hosts and historical/branch forms refuse and discard
-the staged prefix. Explicit read mode retains the
-broader committed-snapshot reader. Concurrent basis advancement retains the
-native conservative refusal, and full SSI remains separate.
+Explicit writer reads use native graph/set, exact aggregates, catalog calls and
+supported staged fnx/hybrid hosts. Historical and branch forms outside the
+native writer's basis contract refuse and discard the staged prefix. Explicit
+read mode uses the retained committed-snapshot owner described above. Concurrent
+write-basis advancement retains the native conservative refusal, and full SSI
+remains separate.
 See `docs/bolt-autocommit-writes.md` for the protocol boundary.
 
 ### Correlated COLLECT subqueries — qualification pending

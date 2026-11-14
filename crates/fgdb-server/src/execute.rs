@@ -7,7 +7,8 @@ mod difference;
 mod edge_upsert_output;
 pub(crate) use edge_upsert_output::{
     collect as graph_output_rows, collect_aggregate as graph_output_aggregate,
-    metadata as graph_output_value,
+    collect_query as graph_output_read, metadata as graph_output_value,
+    metadata_checked as graph_output_value_checked,
 };
 pub(crate) mod ordered;
 mod prepared;

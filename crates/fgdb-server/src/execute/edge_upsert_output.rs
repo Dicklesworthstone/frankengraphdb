@@ -18,9 +18,16 @@ pub(crate) fn metadata(
     input: &fgdb_gql::algebra::GraphValue,
     work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
 ) -> Result<WireValue, Refusal> {
-    admission::row(std::slice::from_ref(input), &mut |units| {
+    metadata_checked(input, &mut |units| {
         work(units).map_err(|error| write_refusal(&error))
-    })?;
+    })
+}
+
+pub(crate) fn metadata_checked(
+    input: &fgdb_gql::algebra::GraphValue,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
+) -> Result<WireValue, Refusal> {
+    admission::row(std::slice::from_ref(input), work)?;
     Ok(convert::graph(input))
 }
 
@@ -141,6 +148,14 @@ pub(super) fn collect_query_with_frame_budget(
     work: &mut dyn FnMut(u64) -> Result<(), fgdb::QueryError>,
     frame_budget: usize,
 ) -> Result<(Vec<String>, Vec<Vec<WireValue>>), Refusal> {
+    collect_query(result, work, Some(frame_budget))
+}
+
+pub(crate) fn collect_query(
+    result: fgdb::QueryResult,
+    work: &mut dyn FnMut(u64) -> Result<(), fgdb::QueryError>,
+    frame_budget: Option<usize>,
+) -> Result<(Vec<String>, Vec<Vec<WireValue>>), Refusal> {
     let fgdb::QueryResult::Rows {
         columns,
         rows: input,
@@ -152,7 +167,7 @@ pub(super) fn collect_query_with_frame_budget(
         ));
     };
     let mut charge = |units| work(units).map_err(super::query_refusal);
-    schema(&columns, &mut charge, Some(frame_budget))?;
+    schema(&columns, &mut charge, frame_budget)?;
     let mut rows = Vec::new();
     for row in &input {
         charge(1)?;
@@ -164,7 +179,7 @@ pub(super) fn collect_query_with_frame_budget(
         }
         admission::query(row, &mut charge)?;
         let cells: Vec<_> = row.iter().map(convert::cell).collect();
-        encoded_row(&cells, &mut charge, Some(frame_budget))?;
+        encoded_row(&cells, &mut charge, frame_budget)?;
         rows.push(cells);
     }
     Ok((columns, rows))
