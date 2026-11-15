@@ -855,6 +855,9 @@ pub struct WriteTxn {
     savepoints: Vec<EmbeddedSavepoint>,
     /// Enabled only while a mixed write program owns its rollback workspace.
     program_multi_relation: bool,
+    /// The current native CALL invocation's admitted lexical imports. This
+    /// is statement-local evaluator state, never committed graph state.
+    call_arguments: Option<std::sync::Arc<fgdb_gql::algebra::GraphValueRow>>,
     read_set: std::cell::RefCell<std::collections::BTreeSet<ElementId>>,
     /// Explicit field getters retain point domains without narrowing full reads.
     point_reads: std::cell::RefCell<PointReads>,

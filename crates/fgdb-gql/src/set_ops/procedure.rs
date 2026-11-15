@@ -20,6 +20,10 @@ use fgdb_types::VId;
 
 macro_rules! forward_metadata_to_source {
     () => {
+        fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+            self.source.call_arguments()
+        }
+
         fn element_metadata(
             &mut self,
             element: ElementId,
@@ -418,6 +422,13 @@ pub enum GraphSeeds<'a> {
 /// when the host supplies them, procedure calls. Every existing closure over
 /// patterns is a source with no procedures.
 pub trait GraphSetSource<E, C> {
+    /// Immutable lexical imports owned and admitted by a native write CALL.
+    /// The relational executor installs this outer frame; nested Apply owns
+    /// its own frame. These values grant no graph or element authority.
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        None
+    }
+
     fn pattern(
         &mut self,
         pattern: &PreparedGraphPattern<GraphValueRow>,
@@ -585,6 +596,14 @@ pub(crate) struct BorrowedSource<'s, 'r, E, C> {
 }
 
 impl<E, C> GraphSetSource<E, C> for BorrowedSource<'_, '_, E, C> {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.source.call_arguments().or_else(|| {
+            self.elements
+                .as_deref()
+                .and_then(|reader| reader.call_arguments())
+        })
+    }
+
     fn supports_procedure_rows(&self) -> bool {
         self.source.supports_procedure_rows()
     }
@@ -895,6 +914,12 @@ pub struct WithElementReads<S, R> {
 /// [`with_element_metadata`]. Every read shares the input's snapshot and
 /// authority, including identities carried in parameters and list values.
 pub trait GraphElementReader<E> {
+    /// Keep the native CALL imports available to a post-write projection or
+    /// aggregate even after its input occurrence bag becomes empty.
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        None
+    }
+
     fn element_property(
         &mut self,
         element: ElementId,
@@ -949,6 +974,17 @@ where
 pub struct WithElementMetadata<S, R> {
     pub source: S,
     pub metadata: R,
+    call_arguments: Option<std::sync::Arc<GraphValueRow>>,
+}
+
+impl<S, R> WithElementMetadata<S, R> {
+    /// Attach an already admitted native CALL frame. An empty row is a real
+    /// frame and prevents CALL () from inheriting its parent's imports.
+    #[must_use]
+    pub fn with_call_arguments(mut self, arguments: Option<std::sync::Arc<GraphValueRow>>) -> Self {
+        self.call_arguments = arguments;
+        self
+    }
 }
 
 pub fn with_element_metadata<S, R, E>(source: S, metadata: R) -> WithElementMetadata<S, R>
@@ -960,7 +996,11 @@ where
         &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
     ) -> Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>,
 {
-    WithElementMetadata { source, metadata }
+    WithElementMetadata {
+        source,
+        metadata,
+        call_arguments: None,
+    }
 }
 
 impl<E, S, R> GraphElementReader<E> for WithElementMetadata<S, R>
@@ -973,6 +1013,12 @@ where
         &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
     ) -> Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>,
 {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.call_arguments
+            .clone()
+            .or_else(|| self.source.call_arguments())
+    }
+
     fn element_property(
         &mut self,
         element: ElementId,
@@ -1012,6 +1058,12 @@ where
         &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
     ) -> Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>,
 {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.call_arguments
+            .clone()
+            .or_else(|| self.source.call_arguments())
+    }
+
     fn supports_procedure_rows(&self) -> bool {
         self.source.supports_procedure_rows()
     }
@@ -1085,6 +1137,12 @@ where
     S: GraphSetSource<E, C>,
     R: GraphElementReader<E>,
 {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.source
+            .call_arguments()
+            .or_else(|| self.elements.call_arguments())
+    }
+
     fn element_metadata(
         &mut self,
         element: ElementId,

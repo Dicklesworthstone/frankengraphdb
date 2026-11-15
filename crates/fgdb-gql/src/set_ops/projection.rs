@@ -2127,6 +2127,10 @@ pub(crate) fn evaluate_value_reading<E>(
 pub(crate) type ElementRead<'r, E> = dyn ElementReader<E> + 'r;
 
 pub(crate) trait ElementReader<E> {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        None
+    }
+
     fn property(
         &mut self,
         element: ElementId,
@@ -2220,6 +2224,10 @@ impl<E> Relay<'_, '_, E> {
 }
 
 impl<E> ElementReader<Stop> for Relay<'_, '_, E> {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.read.call_arguments()
+    }
+
     fn property(
         &mut self,
         element: ElementId,
@@ -2282,6 +2290,10 @@ impl<'a, S: super::GraphSetSource<E, C> + ?Sized, E, C> SourceElements<'a, S, E,
 impl<S: super::GraphSetSource<E, C> + ?Sized, E, C> ElementReader<E>
     for SourceElements<'_, S, E, C>
 {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.source.call_arguments()
+    }
+
     fn property(
         &mut self,
         element: ElementId,
@@ -2317,6 +2329,10 @@ impl<S: super::GraphSetSource<E, C> + ?Sized, E, C> ElementReader<E>
 pub(crate) struct HostElements<'a, E>(pub(crate) &'a mut dyn super::GraphElementReader<E>);
 
 impl<E> ElementReader<E> for HostElements<'_, E> {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.0.call_arguments()
+    }
+
     fn property(
         &mut self,
         element: ElementId,
@@ -2346,6 +2362,10 @@ impl<E> ElementReader<E> for HostElements<'_, E> {
 }
 
 impl<E> super::GraphElementReader<E> for HostElements<'_, E> {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.0.call_arguments()
+    }
+
     fn element_property(
         &mut self,
         element: ElementId,
@@ -2380,6 +2400,10 @@ pub(crate) struct MappedElements<'a, 'r, E, F> {
 }
 
 impl<E, T, F: FnMut(E) -> T> ElementReader<T> for MappedElements<'_, '_, E, F> {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.read.call_arguments()
+    }
+
     fn property(
         &mut self,
         element: ElementId,

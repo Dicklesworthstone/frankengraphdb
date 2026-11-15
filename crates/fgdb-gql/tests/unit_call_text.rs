@@ -41,6 +41,243 @@ fn no_graph(
 }
 
 #[test]
+fn scoped_write_imports_survive_every_native_with_owner() {
+    for text in [
+        "WITH 7 AS x CALL(x) { WITH 1 AS y CREATE (:F {p:x+y}) } RETURN x",
+        "WITH 7 AS x CALL(x) { CREATE (:F) WITH 1 AS y CREATE (:F {p:x+y}) } RETURN x",
+        "WITH 7 AS x CALL(x) { CREATE (:F) WITH count(*) AS c \
+         CREATE (:F {p:x+c}) RETURN x+c AS value } RETURN value",
+        "WITH 7 AS x CALL(x) { CREATE (:F) WITH DISTINCT 1 AS y ORDER BY x+y \
+         CREATE (:F {p:x+y}) } RETURN x",
+        "WITH 7 AS x CALL(x) { WITH (x) AS x CREATE (:F {p:x}) } RETURN x",
+        "MATCH (n:F) CALL(n) { SET n.p=1 WITH 0 AS ignored SET n.q=n.p } RETURN n",
+        "WITH 7 AS x CALL(x) { MERGE (:F {p:x}) WITH 1 AS y \
+         CREATE (:F {p:x+y}) RETURN x AS value } RETURN value",
+        "WITH 7 AS x CALL(x) { MERGE (:F {p:x}) WITH count(*) AS c \
+         CREATE (:F {p:x+c}) RETURN x AS value } RETURN value",
+        "MATCH (a:F),(b:F) WITH a,b,7 AS x CALL(a,b,x) { \
+         MERGE (a)-[:R]->(b) WITH 1 AS y CREATE (:F {p:x+y}) } RETURN x",
+        "MATCH (a:F),(b:F) WITH a,b,7 AS x CALL(a,b,x) { \
+         MERGE (a)-[r:R]->(b) ON CREATE SET r.p=x \
+         WITH count(*) AS c CREATE (:F {p:x+c}) } RETURN x",
+        "WITH 7 AS x CALL(x) { WITH 0 AS ignored \
+         FOREACH (y IN [1,2] | CREATE (:F {p:x+y})) } RETURN x",
+    ] {
+        prepare(text);
+    }
+}
+
+#[test]
+fn scoped_write_import_names_cannot_be_redeclared_or_inherited_by_empty_calls() {
+    for text in [
+        "UNWIND [] AS x CALL(x) { WITH 1 AS x CREATE (:F) }",
+        "WITH 7 AS x CALL(x) { CREATE (:F) WITH 1 AS x CREATE (:F) }",
+        "WITH 7 AS x CALL(x) { CREATE (:F) WITH count(*) AS x CREATE (:F) }",
+        "WITH 7 AS x CALL(x) { MERGE (:F) WITH 1 AS x CREATE (:F) }",
+        "MATCH (n:F) CALL(n) { SET n.p=1 WITH 1 AS n CREATE (:F) }",
+        "WITH 7 AS x CALL(x) { WITH 1 AS y UNWIND [2] AS x CREATE (:F) }",
+        "WITH 7 AS x CALL(x) { WITH 1 AS y CALL() { CREATE (:F {p:x}) } }",
+        "WITH 7 AS x CALL { WITH x WITH 1 AS y CREATE (:F {p:x}) }",
+        "WITH 7 AS x CALL { WITH x CREATE (:F) WITH 1 AS y CREATE (:F {p:x}) }",
+    ] {
+        assert!(
+            PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols).is_err(),
+            "unexpectedly admitted {text}",
+        );
+    }
+}
+
+#[test]
+fn scoped_write_arguments_outlive_empty_bags_and_restore_parent_frames() {
+    use fgdb_delta_types::ElementId;
+    use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
+    use fgdb_gql::insertion::{GraphInsertIntent, GraphInsertPolicy};
+    use fgdb_gql::{
+        GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphElementReader,
+        GraphIntegerError, GraphSetSource, GraphWriteChainCursor, GraphWriteChainTask,
+    };
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
+    use std::sync::Arc;
+
+    struct Lexical(Option<Arc<GraphValueRow>>);
+
+    impl GraphSetSource<(), ()> for Lexical {
+        fn call_arguments(&self) -> Option<Arc<GraphValueRow>> {
+            self.0.clone()
+        }
+
+        fn pattern(
+            &mut self,
+            _: &PreparedGraphPattern<GraphValueRow>,
+            _: GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+            panic!("lexical import restoration must not query a graph source")
+        }
+    }
+
+    impl GraphElementReader<()> for Lexical {
+        fn call_arguments(&self) -> Option<Arc<GraphValueRow>> {
+            self.0.clone()
+        }
+
+        fn element_property(
+            &mut self,
+            _: ElementId,
+            _: PropertyKeyId,
+        ) -> Result<Option<CanonicalPropertyValue>, ()> {
+            panic!("source-free lexical restoration must not read an element")
+        }
+    }
+
+    let query = GqlQueryPolicy::new(100, 100, 1_000_000, 1_000_000);
+    for (text, expected_rows, expected_properties) in [
+        (
+            "WITH 7 AS x CALL(x) { WITH 1 AS y CREATE (:F {p:x+y}) \
+             WITH 2 AS z CREATE (:F {p:x+z}) RETURN x+z AS value } RETURN value",
+            vec![9],
+            vec![8, 9],
+        ),
+        (
+            "WITH 7 AS x CALL(x) { UNWIND [] AS ignored CREATE (:F) \
+             WITH count(*) AS c CREATE (:F {p:x+c}) \
+             RETURN x+c AS value } RETURN value",
+            vec![7],
+            vec![7],
+        ),
+        (
+            "WITH 7 AS x CALL(x) { WITH 0 AS ignored \
+             CALL() { WITH 100 AS x CREATE (:F {p:x}) } \
+             WITH 2 AS y CREATE (:F {p:x+y}) RETURN x AS value } RETURN value",
+            vec![7],
+            vec![9, 100],
+        ),
+        (
+            "WITH 7 AS x CALL(x) { CREATE (:F {p:x}) WITH 2 AS y \
+             RETURN x+y AS value UNION ALL WITH 3 AS y RETURN x+y AS value } RETURN value",
+            vec![9, 10],
+            vec![7],
+        ),
+        (
+            "WITH 7 AS x CALL(x) { WITH 0 AS ignored \
+             FOREACH (y IN [1,2] | CREATE (:F {p:x+y})) } RETURN x",
+            vec![7],
+            vec![8, 9],
+        ),
+        (
+            "UNWIND [2,2] AS x CALL(x) { WITH 1 AS y CREATE (:F {p:x+y}) \
+             WITH count(*) AS c RETURN x+c AS value } RETURN value",
+            vec![3, 3],
+            vec![3, 3],
+        ),
+    ] {
+        let chain = prepare(text);
+        let mut cursor = GraphWriteChainCursor::new(&chain, true);
+        let mut rows = None;
+        let mut next_id = 0_u128;
+        let mut properties = Vec::new();
+        let mut retain = |batch: fgdb_gql::insertion::GraphInsertBatch| {
+            for intent in batch.into_intents() {
+                let GraphInsertIntent::Vertex { properties: fields, .. } = intent else {
+                    panic!("only a native vertex creation is expected");
+                };
+                assert_eq!(fields.len(), 1, "{text}");
+                assert_eq!(fields[0].0, PropertyKeyId(1), "{text}");
+                properties.push(fields[0].1.clone());
+            }
+        };
+        while let Some(task) = cursor
+            .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
+            .unwrap()
+        {
+            let arguments = cursor.call_arguments();
+            match task {
+                GraphWriteChainTask::Read(read) => {
+                    rows = Some(
+                        read.execute_governed(
+                            rows.take(), query, Lexical(arguments), || Ok(()),
+                        )
+                        .unwrap_or_else(|error| panic!("read {text}: {error:?}"))
+                        .value,
+                    );
+                }
+                GraphWriteChainTask::Write {
+                    step: GraphWriteChainStep::Query(insert),
+                    delivers: false,
+                    ..
+                } => {
+                    let proposal = insert
+                        .collect_governed_over(
+                            rows.take(),
+                            GraphInsertPolicy::new(query, 100, 0),
+                            Lexical(arguments.clone()),
+                            |_| {
+                                next_id += 1;
+                                Ok::<_, ()>(ElementId::Vertex(VId(next_id)))
+                            },
+                            || Ok(()),
+                        )
+                        .unwrap_or_else(|error| panic!("collect {text}: {error:?}"));
+                    let (batch, output) = proposal.into_parts();
+                    retain(batch);
+                    rows = Some(
+                        output.finish_governed_reading(Lexical(arguments), || Ok(()))
+                            .unwrap_or_else(|error| panic!("output {text}: {error:?}"))
+                            .value,
+                    );
+                }
+                GraphWriteChainTask::Write {
+                    step: GraphWriteChainStep::Insert(insert),
+                    delivers: false,
+                    ..
+                } => {
+                    let batch = insert
+                        .execute_governed_over(
+                            rows.take(),
+                            GraphInsertPolicy::new(query, 100, 0),
+                            Lexical(arguments),
+                            |_| {
+                                next_id += 1;
+                                Ok::<_, ()>(ElementId::Vertex(VId(next_id)))
+                            },
+                            || Ok(()),
+                        )
+                        .unwrap_or_else(|error| panic!("insert {text}: {error:?}"));
+                    retain(batch);
+                    rows = Some(Vec::new());
+                }
+                other => panic!("unexpected native task for {text}: {other:?}"),
+            }
+        }
+        assert!(cursor.call_arguments().is_none(), "{text}");
+        let mut actual: Vec<_> = rows
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                assert_eq!(row.len(), 1, "{text}");
+                row.values()[0].clone()
+            })
+            .collect();
+        actual.sort();
+        assert_eq!(
+            actual,
+            expected_rows.into_iter()
+                .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                .collect::<Vec<_>>(),
+            "{text}",
+        );
+        properties.sort();
+        assert_eq!(
+            properties,
+            expected_properties.into_iter()
+                .map(|value| CanonicalPropertyValue::from(CanonicalScalar::Int(value)))
+                .collect::<Vec<_>>(),
+            "{text}",
+        );
+        assert_eq!(next_id as usize, properties.len(), "{text}");
+    }
+}
+
+#[test]
 fn unit_calls_admit_native_read_write_bodies_and_every_import_spelling() {
     for text in [
         "CALL { CREATE (:F) }",

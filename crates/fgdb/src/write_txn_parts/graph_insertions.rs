@@ -133,6 +133,7 @@ fn chain_insert_source<'a, V: Vfs + Clone>(
             )
         },
     )
+    .with_call_arguments(transaction.call_arguments.clone())
 }
 
 impl WriteTxn {
@@ -459,6 +460,7 @@ impl WriteTxn {
                     event,
                 )
             })? {
+                workspace.txn.call_arguments = cursor.call_arguments();
                 // Scoped writes suspend the outer occurrence bag while their
                 // bodies use this workspace and cumulative allowance. The
                 // scheduler retains unit rows or joins declared CALL exports;
@@ -960,6 +962,7 @@ impl WriteTxn {
                 add(&mut used, &complete);
                 rows = Some(returning.value);
             }
+            workspace.txn.call_arguments = None;
             // After a FOREACH, these are the restored outer occurrences, not
             // the last physical iteration's body-local continuation rows.
             let Some(mut value) = rows else {

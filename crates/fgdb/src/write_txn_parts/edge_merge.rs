@@ -1149,7 +1149,8 @@ impl WriteTxn {
                                     database, cx, &failure, element, kind, catalog, control,
                                 )
                             },
-                        );
+                        )
+                        .with_call_arguments(self.call_arguments.clone());
                         merge.select_governed_with_source(owned, allowance, &mut source, || {
                             match failure.borrow_mut().take() {
                                 Some(error) => Err(error),

@@ -802,7 +802,8 @@ impl WriteTxn {
                             database, cx, &failure, element, kind, catalog, control,
                         )
                     },
-                );
+                )
+                .with_call_arguments(self.call_arguments.clone());
                 merge.select_governed_with_source::<WriteTxnError, A, _>(
                     owned,
                     policy.query,

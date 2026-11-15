@@ -93,6 +93,7 @@ impl PreparedGraphForeachText {
         let (owned, incoming) = match from {
             Some(from) => {
                 let owned = Some(Box::new(from.owned_columns()));
+                parser.call_scope = from.call_scope;
                 parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
                 (owned, Some(from.row))
             }
@@ -214,6 +215,7 @@ impl PreparedGraphForeachText {
             row: local,
             boundary: None,
             parameters: parser.syntax.parameters.clone(),
+            call_scope: parser.call_scope.clone(),
         });
         Ok(ForeachPreparation {
             statement,
@@ -410,6 +412,7 @@ impl<'a> ForeachPreparation<'a> {
                     row: outer,
                     boundary: None,
                     parameters,
+                    call_scope: parser.call_scope.clone(),
                 }),
                 true,
             )

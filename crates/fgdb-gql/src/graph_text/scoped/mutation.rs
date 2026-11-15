@@ -15,7 +15,7 @@ pub(in crate::graph_text) mod script;
 
 use super::*;
 use crate::GraphSymbolResolver;
-use crate::graph_text::GraphPathFunction;
+use crate::graph_text::{CallScope, GraphPathFunction};
 use crate::mutation_text::{
     MutationActionTemplate, MutationIntegerTemplateOp, MutationReturnTemplate, MutationTextInput,
 };
@@ -1819,6 +1819,7 @@ pub(crate) struct ChainContinuation<'a> {
     row: Vec<(Name<'a>, crate::GraphSetColumnType)>,
     boundary: Option<BoundaryReads<'a>>,
     parameters: Vec<GqlParameterSpec>,
+    call_scope: Option<CallScope<'a>>,
 }
 
 impl<'a> ChainContinuation<'a> {
@@ -1915,6 +1916,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         let (incoming, owned) = match from {
             Some(from) => {
                 let owned = Some(Box::new(from.owned_columns()));
+                parser.call_scope = from.call_scope;
                 parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
                 (Some(from.row), owned)
             }
@@ -1991,6 +1993,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         let (columns, types) = from.owned_columns();
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones())
+            .with_call_scope(from.call_scope)
             .resume_after(from.boundary, &from.parameters, from.at)?;
         let (source, row) = if parser.is_word("MATCH") {
             let (source, row) = parser.owned_match_row_prefix(statement, from.row)?;
@@ -2376,7 +2379,13 @@ impl<'a> Parser<'a> {
             row,
             boundary: self.boundary_reads.take(),
             parameters: self.syntax.parameters.clone(),
+            call_scope: self.call_scope.clone(),
         })
+    }
+
+    fn with_call_scope(mut self, scope: Option<CallScope<'a>>) -> Self {
+        self.call_scope = scope;
+        self
     }
 
     /// Start a later write of a chain at its own clause, in the scope the

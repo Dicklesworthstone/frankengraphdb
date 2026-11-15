@@ -18,6 +18,7 @@ impl WriteTxn {
             chain_retirements: None,
             savepoints: Vec::new(),
             program_multi_relation: false,
+            call_arguments: None,
             read_set: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             point_reads: std::cell::RefCell::new(PointReads::default()),
             count_reads: std::cell::RefCell::new(CountReads::default()),

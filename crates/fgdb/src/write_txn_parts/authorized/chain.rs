@@ -459,6 +459,10 @@ struct ChainSource<'s, 'db, 'run, 'cx, 'permit, V: Vfs, Clock> {
 impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteTxnError>
     for ChainSource<'_, '_, '_, '_, '_, V, Clock>
 {
+    fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+        self.transaction.call_arguments.clone()
+    }
+
     fn pattern(
         &mut self,
         pattern: &PreparedGraphPattern<GraphValueRow>,
@@ -1186,6 +1190,7 @@ impl<V: Vfs + Clone> Database<V> {
                     event,
                 )
             })? {
+                workspace.transaction().call_arguments = cursor.call_arguments();
                 if let GraphWriteChainTask::Read(read) = &task {
                     let allowance =
                         remaining(policy, &used, mutation_effects, read.delivers_rows());
@@ -1415,7 +1420,8 @@ impl<V: Vfs + Clone> Database<V> {
                                     }
                                     result
                                 },
-                            );
+                            )
+                            .with_call_arguments(transaction.call_arguments.clone());
                             let allocate = |request| {
                                 database.borrow_mut().allocate_identity(query_cx, request)
                             };
@@ -1644,6 +1650,9 @@ impl<V: Vfs + Clone> Database<V> {
                 rows = Some(returning.value);
                 at += 1;
             }
+            // No inner lexical value survives into the root continuation,
+            // checked output, commit, or the next explicit statement.
+            workspace.transaction().call_arguments = None;
             if let Some(frozen) = frozen {
                 finish_frozen(
                     workspace.transaction(),

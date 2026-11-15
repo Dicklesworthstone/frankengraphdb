@@ -843,6 +843,7 @@ impl PreparedGraphEdgeMergeText {
         let (columns, types) = from.owned_columns();
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones())
+            .with_call_scope(from.call_scope)
             .resume_after(from.boundary, &from.parameters, from.at)?;
         parser.chain_write = true;
         // Owned FOREACH rows carry identities directly. Their pattern fields
@@ -1118,6 +1119,7 @@ impl PreparedGraphEdgeMergeText {
                 row,
                 boundary: None,
                 parameters: parser.syntax.parameters.clone(),
+                call_scope: parser.call_scope.clone(),
             },
         )))
     }
@@ -2258,6 +2260,26 @@ impl<'a> Parser<'a> {
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<ParsedEdgeReturn<'a>, GraphEdgeMergeTextError> {
         let at = self.current.at;
+        if self.call_scope.is_some()
+            && self.is_word("WITH")
+            && let Some(row) = row
+        {
+            let keep = self.visible_width(row);
+            let edge = relationship.unwrap_or(Name {
+                text: Self::anonymous_name(keep),
+                at,
+            });
+            let mut output = row[..keep].to_vec();
+            output.push((edge, GraphSetColumnType::Edge));
+            if let Some((path, _)) = path {
+                output.push((path, GraphSetColumnType::Path));
+            }
+            let mut returning =
+                ParsedEdgeReturn::identity_head(relationship, path, row, keep, edge, at)?;
+            returning.tail =
+                Some(self.edge_merge_tail(&mut returning, columns, output, true)?);
+            return Ok(returning);
+        }
         // Under RETURN, a WITH head continues to this statement's own tail.
         let head = keyword == "RETURN" && self.take_word("WITH")?;
         if !head {

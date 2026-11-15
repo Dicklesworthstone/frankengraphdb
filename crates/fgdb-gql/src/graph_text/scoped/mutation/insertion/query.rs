@@ -648,7 +648,10 @@ impl<'a> Parser<'a> {
         // Imported owned identities have no frozen CREATE-property slot.
         // Read their terminal fields through the existing staged row tail.
         let implicit = (self.chain_write && self.at_chained_write()?)
-            || (self.read_elements && self.return_reads_row_element(source, false)?);
+            || (self.read_elements && self.return_reads_row_element(source, false)?)
+            // The native row pipeline owns a scoped WITH's redeclaration,
+            // grouping and import restoration, including empty input bags.
+            || (self.call_scope.is_some() && self.is_word("WITH"));
         let head = implicit || self.take_word("WITH")?;
         if !head {
             self.word("RETURN")?;

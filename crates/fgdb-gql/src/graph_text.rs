@@ -1054,8 +1054,8 @@ enum CorrelationTarget<'a> {
 }
 
 /// Scope-clause imports retain their original values for one CALL invocation.
-/// The argument schema belongs to that invocation's nearest native Apply frame;
-/// the imported names remain visible across projections without becoming
+/// The argument schema belongs to that invocation's native Apply or write
+/// scheduler frame; imported names remain visible across projections without becoming
 /// implicit grouping keys.
 #[derive(Clone)]
 struct CallScope<'a> {

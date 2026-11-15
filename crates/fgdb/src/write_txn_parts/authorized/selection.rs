@@ -587,6 +587,7 @@ pub(super) fn scoped_input<'a, V: Vfs + Clone, Clock: FnMut() -> u64>(
             )
         },
     )
+    .with_call_arguments(transaction.call_arguments.clone())
 }
 
 pub(super) fn returning_element_reader<'a, V: Vfs + Clone, Clock: FnMut() -> u64>(
@@ -614,6 +615,7 @@ pub(super) fn returning_element_reader<'a, V: Vfs + Clone, Clock: FnMut() -> u64
             )
         },
     )
+    .with_call_arguments(transaction.call_arguments.clone())
 }
 
 /// A [`property`] value for a consumer that holds only a scalar: a stored

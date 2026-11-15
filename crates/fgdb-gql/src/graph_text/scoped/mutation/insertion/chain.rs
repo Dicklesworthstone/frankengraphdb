@@ -1059,6 +1059,7 @@ impl PreparedGraphWriteChainText {
             let (columns, types) = from.owned_columns();
             let parser = Parser::new_with_parameter_types(body, declarations)?
                 .with_zones(resolve.time_zones())
+                .with_call_scope(from.call_scope)
                 .resume_after(from.boundary, &from.parameters, from.at)?;
             let (unresolved, output) = parser.write_read_continuation(body, from.row)?;
             let slots = unresolved.element_key_slots();

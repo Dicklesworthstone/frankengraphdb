@@ -1581,6 +1581,10 @@ impl PreparedGraphSet {
             elements: &'a mut ElementRead<'read, E>,
         }
         impl<E, C> GraphSetSource<E, C> for OwnedRows<'_, '_, E> {
+            fn call_arguments(&self) -> Option<std::sync::Arc<GraphValueRow>> {
+                self.elements.call_arguments()
+            }
+
             fn pattern(
                 &mut self,
                 _: &PreparedGraphPattern<GraphValueRow>,

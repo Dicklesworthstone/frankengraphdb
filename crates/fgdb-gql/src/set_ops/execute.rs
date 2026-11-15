@@ -280,6 +280,12 @@ pub(super) fn execute<E, C>(
         },
         evaluator: GlaExecutionStats::default(),
     };
+    if let Some(arguments) = source.call_arguments() {
+        // The native scope owner admitted the immutable row. Reserve this
+        // evaluator's frame slot; Arguments leaves charge every payload copy.
+        meter.event(GlaExecutionEvent::ScratchEntry)?;
+        meter.arguments.push(arguments);
+    }
     let mut operand = 0;
     let value = run(query, source, &mut meter, &mut operand)?;
     // Nothing escapes until all sources and relational operations succeed.

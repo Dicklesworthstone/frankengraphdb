@@ -4,6 +4,7 @@
 
 use super::chain::{PreparedContinuation, PreparedReadContinuation};
 use super::*;
+use crate::graph_text::CallScope;
 use crate::graph_text::parameters::UnresolvedGraphText;
 use crate::graph_text::scoped::mutation::return_projection::pipeline::multipart::UnresolvedReadInput;
 use crate::set_text::multipart::BoundReadInput;
@@ -117,6 +118,7 @@ impl PreparedGraphCallText {
         let (owned, incoming) = match from {
             Some(from) => {
                 let owned = Some(Box::new(from.owned_columns()));
+                parser.call_scope = from.call_scope;
                 parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
                 (owned, Some(from.row))
             }
@@ -372,15 +374,24 @@ impl<'a> CallPreparation<'a> {
         } else {
             Vec::new()
         };
+        let row: Vec<_> = self
+            .imports
+            .iter()
+            .map(|&column| self.outer[column])
+            .collect();
+        // Each arm has its own import frame. Explicit scope imports remain
+        // global for this invocation; legacy importing WITH keeps ordinary
+        // projection lifetime and never inherits an enclosing CALL's globals.
+        let call_scope = self.scoped_imports.as_ref().map(|_| CallScope {
+            arguments: row.clone(),
+            imports: row.iter().map(|(name, _)| *name).collect(),
+        });
         self.next = Some(ChainContinuation {
             at: parser.current.at,
-            row: self
-                .imports
-                .iter()
-                .map(|&column| self.outer[column])
-                .collect(),
+            row,
             boundary: None,
             parameters: self.parameters.clone(),
+            call_scope,
         });
         Ok(())
     }
@@ -592,6 +603,7 @@ impl<'a> CallPreparation<'a> {
                     row: combined,
                     boundary: None,
                     parameters,
+                    call_scope: parser.call_scope.clone(),
                 }),
                 true,
             )
