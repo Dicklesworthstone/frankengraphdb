@@ -173,6 +173,24 @@ fn recovery_fences_bolt_query_and_begin_failures_before_every_write_and_flush() 
             ("bolt-write-begin-unwritten", vec![0], false, Some("w")),
             ("bolt-write-begin-partial", vec![5, 0], false, Some("w")),
             ("bolt-write-begin-flush", vec![], true, Some("w")),
+            (
+                "bolt-autocommit-bookmark-unwritten",
+                vec![0],
+                false,
+                Some("autocommit"),
+            ),
+            (
+                "bolt-autocommit-bookmark-partial",
+                vec![5, 0],
+                false,
+                Some("autocommit"),
+            ),
+            (
+                "bolt-autocommit-bookmark-flush",
+                vec![],
+                true,
+                Some("autocommit"),
+            ),
         ] {
             let (mut server, token, _) = served(&root, name).await;
             Arc::get_mut(server.databases.get_mut("test").unwrap())
@@ -200,6 +218,14 @@ fn recovery_fences_bolt_query_and_begin_failures_before_every_write_and_flush() 
                 .unwrap();
             let mut client = connection(&server, token);
             let request = match begin_mode {
+                Some("autocommit") => Request::Run {
+                    query: "RETURN 1 AS value".into(),
+                    parameters: vec![],
+                    extra: vec![(
+                        "bookmarks".into(),
+                        Value::List(vec![Value::string("fgdb:test:2")]),
+                    )],
+                },
                 Some(mode) => Request::Begin {
                     extra: vec![
                         ("mode".into(), Value::string(mode)),

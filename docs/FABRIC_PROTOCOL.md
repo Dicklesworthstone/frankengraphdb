@@ -1375,21 +1375,25 @@ application output is admitted.
   Once committed, retained rows contain their own metadata and never issue a
   later hydration query or replay the write.
 
-  Explicit read graph output uses that same bounded Bolt serializer, with
-  metadata supplied directly by the native read owner at its original cut.
+  Read graph output uses that same bounded Bolt serializer, with metadata
+  supplied directly by the native read owner at its selected cut.
   Vertex masks, both relationship endpoints and field masks are checked before
   catalog lookup or payload copying. Nested lists/maps and paths preserve graph
   values, traversal direction and repeated identities. No synthetic hydration
   query or fresh read permit is opened. All metadata calls within one output
   callback share an additional native work/scratch ceiling, separate from query
   evaluation; signed node/work limits remain cumulative through both phases
-  and all statements. Refused or swallowed metadata errors prevent output and
+  and, for explicit transactions, all statements. Refused or swallowed metadata errors prevent output and
   pending cache publication.
 
-  Ordinary autocommit reads keep their authorized per-execution session and
-  historical selection behavior. Their existing batched graph hydration uses
-  separate native/signed execution allowances; the cumulative explicit-owner
-  guarantee does not extend to that older autocommit path. `CALL db.labels()`,
+  Ordinary autocommit reads retain their independent per-statement allowance
+  and historical selection behavior. Query evaluation, graph hydration and
+  complete RECORD/RUN SUCCESS admission spend that one allowance before RUN
+  succeeds. Metadata does not start another query or consume another user row.
+  A historical read hydrates every graph value at its exact selected sequence
+  and reports that sequence in its completion bookmark. Each new autocommit
+  statement still receives a fresh permit; explicit transactions retain their
+  original permit across statements. `CALL db.labels()`,
   `db.relationshipTypes()` and `db.propertyKeys()` answer the same
   scope-filtered schema names as HTTP's schema route.
 

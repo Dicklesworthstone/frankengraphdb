@@ -49,10 +49,10 @@ mod causal;
 mod cursors;
 mod read_transaction;
 
-use crate::execute::{ReadSession, Refusal, SessionError, query_refusal, read_session};
 use crate::execute::transaction::{
     TransactionStatement, looks_like_write, prepare_transaction_statement,
 };
+use crate::execute::{ReadSession, Refusal, query_refusal, read_session};
 use crate::recovery::Generation;
 use crate::shutdown::Waiter;
 use crate::{Served, Server, convert};
@@ -61,30 +61,32 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use core::future::poll_fn;
 use core::pin::Pin;
 use core::task::Poll;
-use fgdb::{AuthorizedWriteTransaction, PreparedNativeRead, QueryError, QueryResult};
+use fgdb::{AuthorizedWriteTransaction, PreparedNativeRead, QueryError};
 use fgdb_bolt::message::{
     Dechunker, MAGIC, Map, Request, Response, decode_request, negotiate, structure,
 };
 use fgdb_bolt::packstream::{Value, get};
+#[cfg(test)]
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, PreparedGraphBranchText};
 use fgdb_protocol::body::{Body, ErrorCode, Execute, ExecuteMode, WireTimestamp, WireValue};
 use fgdb_protocol::transport::DuplexIo;
 use fgdb_types::{
     CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime,
-    CommitSeq, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
+    CommitSeq, EmbeddedTxnCompletion, PurposeContexts,
 };
+#[cfg(test)]
+use fgdb_types::{EId, VId};
 use fgdb_warden::{Authority, CapabilityToken};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
+use std::collections::BTreeSet;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static CONNECTIONS: AtomicU64 = AtomicU64::new(0);
 
 /// Records written before the socket is flushed.
 const RECORDS_PER_WRITE: usize = 256;
-
-/// The most vertices one hydration lookup binds as a list.
-const HYDRATION_BATCH: usize = 4096;
 
 /// Why a connection ends without another message.
 #[derive(Debug, PartialEq, Eq)]
@@ -366,9 +368,7 @@ enum TransactionSession<'s> {
 impl TransactionSession<'_> {
     fn generation(&self) -> Generation {
         match self {
-            Self::Read { generation, .. } | Self::Write { generation, .. } => {
-                generation.clone()
-            }
+            Self::Read { generation, .. } | Self::Write { generation, .. } => generation.clone(),
         }
     }
 }
@@ -1053,62 +1053,61 @@ impl<'s> Connection<'s> {
         let parameters = arguments;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let query_cx = crate::query_cx(&contexts);
-        // Ordinary autocommit sessions keep their per-execution allowance and
-        // historical selector behavior. Only explicit reads use the owner.
+        // Ordinary sessions retain their historical selectors and fresh
+        // per-statement allowance. Conversion and graph metadata belong to
+        // this SAME execution, not a new query per catalog field.
         let (name, db) = self.database(extra)?;
         self.output_database = Some(db);
         let token = self.token.as_ref().expect("authenticated");
-        let (mut session, seq) = causal::session(cx, db, token, &name, extra).await?;
+        let (mut session, _) =
+            causal::session(cx, db, token, &name, extra, &mut self.output_generation).await?;
         let generation = session.generation();
         self.output_generation = Some(generation.clone());
-        let (columns, rows, selected) =
-            match session.query_with_snapshot(&query_cx, query, &parameters) {
-                Ok((QueryResult::Rows { columns, rows }, selected)) => (
-                    columns,
-                    rows.iter()
-                        .map(|row| row.iter().map(convert::cell).collect::<Vec<_>>())
-                        .collect::<Vec<_>>(),
-                    selected,
-                ),
-                Ok((QueryResult::Write { .. }, _)) => return Err(read_only()),
-                Err(error) => {
-                    return Err(if looks_like_write(query) {
-                        read_only()
-                    } else {
-                        Failure::from_refusal(query_refusal(error))
-                    });
-                }
-            };
-        let entities = hydrate(&query_cx, &mut session, db, &rows, selected)?;
-        let rows = rows
-            .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .map(|cell| value(cell, &entities))
-                    .collect::<Result<Vec<_>, _>>()
+        let max_frame_len = self.server.limits.max_frame_len as usize;
+        let ((rows, metadata), selected) = session
+            .query_with_graph_output(&query_cx, query, &parameters, |result, work, metadata| {
+                let (columns, rows) = crate::execute::graph_output_read(result, work, None)?;
+                let (rows, _) = autocommit::collect_read(
+                    rows,
+                    max_frame_len,
+                    work,
+                    metadata,
+                    db.symbols.borrowed_reverse_catalog(),
+                )?;
+                let metadata = autocommit::admit_read_metadata(
+                    vec![
+                        (
+                            "fields".to_owned(),
+                            Value::List(columns.into_iter().map(Value::String).collect()),
+                        ),
+                        ("t_first".to_owned(), Value::Int(0)),
+                    ],
+                    max_frame_len,
+                    work,
+                )?;
+                Ok((rows, metadata))
             })
-            .collect::<Result<VecDeque<_>, _>>()?;
+            .map_err(|refusal| {
+                // A write-looking source must not hide a real budget,
+                // authority, cancellation or source failure.
+                if refusal.code == ErrorCode::Statement && looks_like_write(query) {
+                    read_only()
+                } else {
+                    Failure::from_refusal(refusal)
+                }
+            })?;
         let qid = self.buffer_result(
             cx,
             Pending {
                 rows,
                 database: name,
                 db,
-                seq: (!schema_metadata).then_some(seq),
+                seq: (!schema_metadata).then_some(selected),
                 generation,
                 write: None,
             },
         )?;
-        let mut metadata = vec![
-            (
-                "fields".to_owned(),
-                Value::List(columns.into_iter().map(Value::String).collect()),
-            ),
-            ("t_first".to_owned(), Value::Int(0)),
-        ];
-        if let Some(qid) = qid {
-            metadata.push(("qid".to_owned(), Value::Int(qid)));
-        }
+        debug_assert!(qid.is_none(), "autocommit has no transaction cursor");
         Ok(metadata)
     }
 
@@ -1413,6 +1412,7 @@ struct Entities {
 }
 
 /// Every graph identity a result carries, including paths inside collections.
+#[cfg(test)]
 fn collect_entities(value: &WireValue, vertices: &mut BTreeSet<u128>, edges: &mut BTreeSet<u128>) {
     match value {
         WireValue::Vertex(id) => {
@@ -1440,182 +1440,11 @@ fn collect_entities(value: &WireValue, vertices: &mut BTreeSet<u128>, edges: &mu
     }
 }
 
-/// Execute a metadata lookup through the original authorized session. Only a
-/// hidden catalog binding reads as absent; expiry, cancellation and exhausted
-/// signed budgets abort the whole RUN instead of emitting incomplete values.
-fn lookup(
-    query_cx: &fgdb_types::QueryCx,
-    session: &mut ReadSession<'_>,
-    text: &str,
-    parameters: &GqlParameters,
-) -> Result<Vec<Vec<WireValue>>, Failure> {
-    match session.query(query_cx, text, parameters) {
-        Ok(QueryResult::Rows { rows, .. }) => Ok(rows
-            .iter()
-            .map(|row| row.iter().map(convert::cell).collect())
-            .collect()),
-        Ok(QueryResult::Write { .. }) => Err(read_only()),
-        Err(SessionError::Query(QueryError::Authorization(fgdb_warden::Error::ScopeDenied))) => {
-            Ok(Vec::new())
-        }
-        Err(error) => Err(Failure::from_refusal(query_refusal(error))),
-    }
-}
-
 fn unavailable_graph_value() -> Failure {
     Failure::new(
         "Neo.DatabaseError.Statement.ExecutionFailed",
         "graph value is unavailable in the selected snapshot",
     )
-}
-
-/// Hydrate only graph identities present in authorized output. Every lookup
-/// uses this statement's session and effective cut; no database lock or raw
-/// storage accessor is reacquired. Catalog-sized lookup batches retain the
-/// existing native and signed per-execution limits.
-fn hydrate(
-    query_cx: &fgdb_types::QueryCx,
-    session: &mut ReadSession<'_>,
-    db: &Served,
-    rows: &[Vec<WireValue>],
-    at: CommitSeq,
-) -> Result<Entities, Failure> {
-    let mut vertices = BTreeSet::new();
-    let mut edges = BTreeSet::new();
-    for row in rows {
-        for cell in row {
-            collect_entities(cell, &mut vertices, &mut edges);
-        }
-    }
-    if vertices.is_empty() && edges.is_empty() {
-        return Ok(Entities::default());
-    }
-    let temporal = format!("FOR SYSTEM_TIME AS OF SEQ {}", at.0);
-    let mut entities = Entities {
-        nodes: vertices
-            .iter()
-            .map(|&id| (id, (Vec::new(), Vec::new())))
-            .collect(),
-        relationships: BTreeMap::new(),
-    };
-    let ids: Vec<u128> = vertices.into_iter().collect();
-    for batch in ids.chunks(HYDRATION_BATCH) {
-        let list: Vec<GraphValue> = batch
-            .iter()
-            .map(|&id| GraphValue::Vertex(VId(id)))
-            .collect();
-        let parameters = GqlParameters::new()
-            .with_list("__fgdb_vertices", list)
-            .map_err(|error| Failure::invalid(error.to_string()))?;
-        for (label, _) in db.symbols.labels() {
-            let text = format!(
-                "UNWIND $__fgdb_vertices AS n MATCH (n:{}) {temporal} RETURN n",
-                quoted(label)
-            );
-            for row in lookup(query_cx, session, &text, &parameters)? {
-                if let Some(WireValue::Vertex(id)) = row.first()
-                    && let Some((labels, _)) = entities.nodes.get_mut(id)
-                {
-                    labels.push(label.to_owned());
-                }
-            }
-        }
-        for (property, _) in db.symbols.properties() {
-            let text = format!(
-                "UNWIND $__fgdb_vertices AS n MATCH (n) {temporal} RETURN n, n.{} AS v",
-                quoted(property)
-            );
-            for row in lookup(query_cx, session, &text, &parameters)? {
-                let [WireValue::Vertex(id), cell] = row.as_slice() else {
-                    continue;
-                };
-                if matches!(cell, WireValue::Null) {
-                    continue;
-                }
-                let value = value(cell.clone(), &Entities::default())?;
-                if let Some((_, properties)) = entities.nodes.get_mut(id) {
-                    properties.push((property.to_owned(), value));
-                }
-            }
-        }
-    }
-    let ids: Vec<u128> = edges.into_iter().collect();
-    for batch in ids.chunks(HYDRATION_BATCH) {
-        let parameters = GqlParameters::new()
-            .with_list(
-                "__fgdb_edges",
-                batch.iter().map(|&id| GraphValue::Edge(EId(id))).collect(),
-            )
-            .map_err(|error| Failure::invalid(error.to_string()))?;
-        // Identity-list membership belongs to the relational WITH filter;
-        // the graph WHERE scalar compiler accepts property operands only.
-        // This uses the existing native row algebra for full-width EIds.
-        // Names come from exactly the declared catalog, as node labels do.
-        // A typed source is rejected before expansion when its relation is
-        // outside the capability, and no reverse catalog is guessed from IDs.
-        for (kind, _) in db.symbols.relations() {
-            let source = format!("MATCH (s)-[r:{}]->(t) {temporal}", quoted(kind));
-            let text = format!("{source} WITH r, s, t WHERE r IN $__fgdb_edges RETURN r, s, t");
-            let metadata = lookup(query_cx, session, &text, &parameters)?;
-            if metadata.is_empty() {
-                continue;
-            }
-            for row in metadata {
-                let [
-                    WireValue::Edge(id),
-                    WireValue::Vertex(source),
-                    WireValue::Vertex(target),
-                ] = row.as_slice()
-                else {
-                    return Err(unavailable_graph_value());
-                };
-                if batch.binary_search(id).is_err() {
-                    return Err(unavailable_graph_value());
-                }
-                entities.relationships.insert(
-                    *id,
-                    Relationship {
-                        source: *source,
-                        target: *target,
-                        kind: kind.to_owned(),
-                        properties: Vec::new(),
-                    },
-                );
-            }
-            for (property, _) in db.symbols.properties() {
-                let text = format!(
-                    "{source} WITH r, r.{} AS v WHERE r IN $__fgdb_edges RETURN r, v",
-                    quoted(property)
-                );
-                for row in lookup(query_cx, session, &text, &parameters)? {
-                    let [WireValue::Edge(id), cell] = row.as_slice() else {
-                        return Err(unavailable_graph_value());
-                    };
-                    if matches!(cell, WireValue::Null) {
-                        continue;
-                    }
-                    let value = value(cell.clone(), &Entities::default())?;
-                    let relationship = entities
-                        .relationships
-                        .get_mut(id)
-                        .ok_or_else(unavailable_graph_value)?;
-                    relationship.properties.push((property.to_owned(), value));
-                }
-            }
-        }
-        if batch
-            .iter()
-            .any(|id| !entities.relationships.contains_key(id))
-        {
-            return Err(unavailable_graph_value());
-        }
-    }
-    Ok(entities)
-}
-
-/// A schema name as a delimited identifier.
-fn quoted(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
 }
 
 fn feature_not_supported(what: &str) -> Failure {

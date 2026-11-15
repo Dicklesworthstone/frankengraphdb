@@ -293,6 +293,7 @@ impl ReadSession<'_> {
         self.generation.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn query(
         &mut self,
         cx: &fgdb_types::QueryCx,
@@ -315,6 +316,29 @@ impl ReadSession<'_> {
         // when its immutable snapshot remains readable in the engine.
         self.generation.check().map_err(SessionError::Unavailable)?;
         result.map_err(SessionError::Query)
+    }
+
+    /// Convert and hydrate a complete read while its one native execution
+    /// permit is live. The adapter must not publish callback output until the
+    /// final authority and source-generation checks both succeed.
+    pub(crate) fn query_with_graph_output<T>(
+        &mut self,
+        cx: &fgdb_types::QueryCx,
+        text: &str,
+        parameters: &fgdb_gql::GqlParameters,
+        output: impl FnOnce(
+            QueryResult,
+            &mut dyn FnMut(u64) -> Result<(), QueryError>,
+            &mut dyn fgdb::AuthorizedReadOutput,
+        ) -> Result<T, Refusal>,
+    ) -> Result<(T, fgdb_types::CommitSeq), Refusal> {
+        let generation = self.generation.clone();
+        let _operation = generation.enter().map_err(Refusal::from)?;
+        let result =
+            self.native
+                .query_with_graph_output(cx, text, parameters, output, query_refusal);
+        generation.check().map_err(Refusal::from)?;
+        result
     }
 
     pub(crate) fn prepare(

@@ -7,7 +7,7 @@
 //! A future local bookmark refuses promptly; this adapter has no causal wait
 //! queue and never silently drops a requested timeout or impersonated identity.
 
-use super::{CommitSeq, Cx, Failure, Map, ReadSession, Served, Value, get};
+use super::{CommitSeq, Cx, Failure, Generation, Map, ReadSession, Served, Value, get};
 use fgdb_warden::CapabilityToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,11 +98,16 @@ pub(super) async fn session<'s>(
     token: &CapabilityToken,
     database: &str,
     extra: &Map,
+    output_generation: &mut Option<Generation>,
 ) -> Result<(ReadSession<'s>, CommitSeq), Failure> {
     let minimum = options(extra, database)?.minimum_seq;
     let (session, frontier) = super::read_session(cx, db, token)
         .await
         .map_err(Failure::from_refusal)?;
+    // A future-bookmark refusal depends on this exact source frontier, just
+    // like BEGIN's refusal. Keep its fence even though no owner is returned;
+    // recovery controls retain their separate generation-independent class.
+    *output_generation = Some(session.generation());
     session
         .generation()
         .check()

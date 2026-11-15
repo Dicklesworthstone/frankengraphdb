@@ -113,7 +113,12 @@ fn statement_time_bolt_defers_effects_keeps_bound_return_and_hydrates_the_select
             panic!("expected the node's property map");
         };
         assert_eq!(get(properties, "stamp"), Some(&timestamp(0)));
-        client.pull(&root, &mut wire, -1, false).await.unwrap();
+        assert_eq!(client.pending.as_ref().unwrap().seq, Some(CommitSeq(1)));
+        let done = client.pull(&root, &mut wire, -1, false).await.unwrap();
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:test:1")
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
         server.join_database_workers(&root).await;
     });
