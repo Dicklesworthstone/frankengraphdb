@@ -355,6 +355,69 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         })
     }
 
+    /// Execute one read and admit its host-owned representation under the
+    /// SAME signed permit, returning the exact snapshot selected by the query.
+    ///
+    /// Metadata is read from that selected cut, including historical queries,
+    /// under the original property, label and endpoint masks. It spends the
+    /// statement's remaining signed node/work allowance; it neither executes
+    /// another statement nor spends another user-result row. The metadata
+    /// phase also shares one work/scratch ceiling from the fixed native policy.
+    ///
+    /// `output` is trusted host code. It must charge copying and conversion
+    /// through `work` and publish only after this method succeeds. Row limits
+    /// are admitted before the callback, and late authority, cancellation or
+    /// swallowed metadata failures prevent every part of the result from
+    /// escaping. Ordinary errors leave this per-execution session reusable;
+    /// invalid lifetime credentials and callback unwind close it as usual.
+    pub fn query_with_graph_output<T, E>(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        parameters: &GqlParameters,
+        output: impl FnOnce(
+            QueryResult,
+            &mut dyn FnMut(u64) -> Result<(), QueryError>,
+            &mut dyn AuthorizedReadOutput,
+        ) -> Result<T, E>,
+        map_error: impl Fn(QueryError) -> E,
+    ) -> Result<(T, CommitSeq), E> {
+        // Host errors need not expose QueryError. Track native terminality at
+        // its mapping boundary, before the caller chooses an error envelope.
+        let terminal = std::cell::Cell::new(false);
+        let map_native = |error| {
+            if terminal_error(&error) {
+                terminal.set(true);
+            }
+            map_error(error)
+        };
+        self.run_scoped(
+            cx,
+            |view, branch, scope, resolver, policy, execution| {
+                let ((result, at), rows) = text_at(
+                    view, branch, scope, resolver, policy, execution, text, parameters,
+                )
+                .map_err(&map_native)?;
+                let admitted = transaction::admit_graph_output(
+                    view,
+                    at,
+                    scope,
+                    policy,
+                    execution,
+                    result,
+                    rows,
+                    output,
+                    &map_native,
+                )?;
+                // The shared output boundary already reserved the user rows.
+                // run_scoped performs final delivery and cache publication.
+                Ok(((admitted, at), 0))
+            },
+            &map_native,
+            |_| terminal.get(),
+        )
+    }
+
     /// Prepare once using only this session's fixed trusted catalog. Parameters
     /// supply declared types; payloads are rebound on execute. The original
     /// branch selector is retained, including shared/exclusive parameter rules.

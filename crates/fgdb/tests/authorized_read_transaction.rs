@@ -758,3 +758,238 @@ fn graph_output_metadata_phase_limits_and_missing_catalog_fail_terminally() {
         }
     });
 }
+
+#[test]
+fn session_graph_output_uses_the_selected_history_and_one_pinned_generation() {
+    lab(0x6b30, |contexts| async move {
+        let query = contexts.query();
+        let commit = contexts.commit();
+        let mut db = database(&commit).await;
+        let mut edges = WriteBatch::new(RelationId(1));
+        edges.add_edge(
+            EId(40),
+            VId(1),
+            VId(3),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+        );
+        edges.add_edge(EId(41), VId(1), VId(2), vec![]);
+        let historical = db.write(&commit, edges).await.unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(70)));
+        update.set_edge_property(EId(40), PropertyKeyId(1), Some(CanonicalScalar::Int(50)));
+        let frontier = db.write(&commit, update).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let mut session = db
+            .authorized_read_session(&query, &issuer, &token, "main", symbols, policy(), || NOW)
+            .unwrap();
+        let mut later = WriteBatch::new(RelationId(1));
+        later.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(700)));
+        db.write(&commit, later).await.unwrap();
+        drop(db);
+        let catalog = visible_catalog();
+        for (at, expected_vertex, expected_edge) in [(historical, 7, 5), (frontier, 70, 50)] {
+            let text = format!(
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ {} RETURN n.p AS p ORDER BY p",
+                at.0
+            );
+            let (result, selected) = session
+                .query_with_graph_output(
+                    &query,
+                    &text,
+                    &GqlParameters::new(),
+                    |result, work, metadata| -> Result<_, QueryError> {
+                        work(1)?;
+                        for (element, expected) in [
+                            (ElementId::Vertex(VId(1)), expected_vertex),
+                            (ElementId::Edge(EId(40)), expected_edge),
+                        ] {
+                            assert_eq!(
+                                metadata.metadata(
+                                    element,
+                                    GraphElementMetadata::Properties,
+                                    &catalog
+                                )?,
+                                GraphValue::map(vec![(
+                                    "p".into(),
+                                    GraphValue::Scalar(CanonicalScalar::Int(expected))
+                                )])
+                            );
+                        }
+                        assert_eq!(
+                            metadata.metadata(
+                                ElementId::Vertex(VId(1)),
+                                GraphElementMetadata::Labels,
+                                &catalog
+                            )?,
+                            Some(GraphValue::List(
+                                vec![GraphValue::Scalar(
+                                    CanonicalScalar::ucs_basic_text("L").unwrap()
+                                )]
+                                .into_boxed_slice()
+                            ))
+                        );
+                        assert_eq!(
+                            metadata.metadata(
+                                ElementId::Edge(EId(40)),
+                                GraphElementMetadata::EndNode,
+                                &catalog
+                            )?,
+                            Some(GraphValue::Vertex(VId(3)))
+                        );
+                        for hidden in [ElementId::Vertex(VId(2)), ElementId::Edge(EId(41))] {
+                            assert_eq!(
+                                metadata.metadata(
+                                    hidden,
+                                    GraphElementMetadata::Properties,
+                                    &catalog
+                                )?,
+                                None
+                            );
+                        }
+                        Ok(result)
+                    },
+                    |error| error,
+                )
+                .unwrap();
+            assert_eq!(selected, at);
+            let mut expected = [expected_vertex, 19];
+            expected.sort();
+            assert_eq!(result, rows(&expected));
+        }
+        assert_eq!(
+            session.query(&query, READ, &GqlParameters::new()).unwrap(),
+            rows(&[19, 70])
+        );
+    });
+}
+
+#[test]
+fn session_graph_output_shares_nodes_work_and_user_rows_with_the_statement() {
+    lab(0x6b31, |contexts| async move {
+        let query = contexts.query();
+        let db = database(&contexts.commit()).await;
+        let issuer = authority();
+        let catalog = visible_catalog();
+        for dimension in [
+            LimitDimension::Nodes,
+            LimitDimension::Work,
+            LimitDimension::Rows,
+        ] {
+            let mut allowed = grant();
+            if dimension == LimitDimension::Nodes {
+                allowed.limits.max_nodes = 2;
+            }
+            if dimension == LimitDimension::Rows {
+                allowed.limits.max_rows = 1;
+            }
+            let token = issuer.issue_at(&allowed, NOW).unwrap();
+            let mut session = db
+                .authorized_read_session(&query, &issuer, &token, "main", symbols, policy(), || NOW)
+                .unwrap();
+            let entered = Cell::new(false);
+            let result: Result<(_, _), QueryError> = session.query_with_graph_output(
+                &query,
+                READ,
+                &GqlParameters::new(),
+                |_, work, metadata| {
+                    entered.set(true);
+                    if dimension == LimitDimension::Nodes {
+                        // Query admission already spent both visible nodes;
+                        // hydration must not replenish that signed allowance.
+                        let _ = metadata.metadata(
+                            ElementId::Vertex(VId(1)),
+                            GraphElementMetadata::Properties,
+                            &catalog,
+                        );
+                    } else if dimension == LimitDimension::Work {
+                        let _ = work(allowed.limits.max_work + 1);
+                    }
+                    Ok(()) // Swallowing a meter refusal cannot release output.
+                },
+                |error| error,
+            );
+            refused(result, Error::LimitExceeded(dimension));
+            assert_eq!(entered.get(), dimension != LimitDimension::Rows);
+            // A new statement deliberately has its own allowance, unlike an
+            // explicit transaction; this does not renew the failed execution.
+            assert!(!session.is_closed());
+            session
+                .query(&query, "RETURN 1 AS value", &GqlParameters::new())
+                .unwrap();
+        }
+    });
+}
+
+#[test]
+fn session_graph_output_cannot_hide_a_metadata_failure_behind_a_host_error_type() {
+    lab(0x6b32, |contexts| async move {
+        let query = contexts.query();
+        let db = database(&contexts.commit()).await;
+        let pin = db.pinned_read_view().unwrap().downgrade();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let mut session = db
+            .authorized_read_session(&query, &issuer, &token, "main", symbols, policy(), || NOW)
+            .unwrap();
+        drop(db);
+        let result: Result<((), _), &'static str> = session.query_with_graph_output(
+            &query,
+            "RETURN 1 AS value",
+            &GqlParameters::new(),
+            |_, _, metadata| {
+                assert!(
+                    metadata
+                        .metadata(
+                            ElementId::Vertex(VId(1)),
+                            GraphElementMetadata::Properties,
+                            &ReverseSymbolCatalog::new()
+                        )
+                        .is_err()
+                );
+                Ok(())
+            },
+            |_| "native refusal",
+        );
+        assert_eq!(result, Err("native refusal"));
+        assert!(session.is_closed());
+        assert!(pin.upgrade().is_none());
+    });
+}
+
+#[test]
+fn session_graph_output_rechecks_live_authority_after_successful_hydration() {
+    lab(0x6b33, |contexts| async move {
+        let query = contexts.query();
+        let db = database(&contexts.commit()).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let now = Cell::new(NOW);
+        let mut session = db
+            .authorized_read_session(&query, &issuer, &token, "main", symbols, policy(), || {
+                now.get()
+            })
+            .unwrap();
+        let result: Result<((), _), QueryError> = session.query_with_graph_output(
+            &query,
+            "RETURN 1 AS value",
+            &GqlParameters::new(),
+            |_, _, metadata| {
+                assert!(
+                    metadata
+                        .metadata(
+                            ElementId::Vertex(VId(1)),
+                            GraphElementMetadata::Properties,
+                            &visible_catalog()
+                        )?
+                        .is_some()
+                );
+                now.set(1001);
+                Ok(())
+            },
+            |error| error,
+        );
+        refused(result, Error::Expired);
+        assert!(session.is_closed());
+    });
+}

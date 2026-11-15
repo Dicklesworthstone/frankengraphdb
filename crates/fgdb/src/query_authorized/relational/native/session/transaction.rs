@@ -1,6 +1,8 @@
 //! An explicit read owner with one pin and one cumulative signed allowance.
 //! The ordinary session deliberately has per-execution allowances; this owner
 //! instead moves its permit into the shared native executor for each request.
+//! Both owners share the checked graph-output boundary below, so metadata
+//! hydration never starts a second execution or resets a signed allowance.
 
 use super::*;
 use fgdb_delta_types::ElementId;
@@ -88,6 +90,90 @@ impl MetadataBudget {
         self.scratch = scratch as u64;
         Ok(())
     }
+}
+
+/// Admit one result representation against its actual selected cut. This is
+/// shared by ordinary sessions (whose cut may be historical) and explicit
+/// transactions (whose cut is their fixed BEGIN basis). The caller owns final
+/// delivery; all result rows have already been reserved when this returns.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn admit_graph_output<T, E>(
+    view: &EmbeddedReadView,
+    at: CommitSeq,
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    execution: &Live<'_, '_, '_>,
+    result: QueryResult,
+    rows: usize,
+    output: impl FnOnce(
+        QueryResult,
+        &mut dyn FnMut(u64) -> Result<(), QueryError>,
+        &mut dyn AuthorizedReadOutput,
+    ) -> Result<T, E>,
+    map_error: impl Fn(QueryError) -> E,
+) -> Result<T, E> {
+    // Reserve before a second representation is allocated. Final delivery
+    // validates callback work without charging these same user rows twice.
+    execution
+        .borrow_mut()
+        .admit_rows(rows)
+        .map_err(&map_error)?;
+    let metadata_failed = Cell::new(false);
+    let metadata_failure = RefCell::new(None);
+    let mut metadata_budget = MetadataBudget::default();
+    let mut metadata = MetadataReader(|element, kind, catalog: &ReverseSymbolCatalog| {
+        if metadata_failed.get() {
+            return Err(stopped());
+        }
+        let result = (|| {
+            execution.borrow_mut().checkpoint()?;
+            let value = scoped_element_metadata(
+                &view.snapshot,
+                at,
+                scope,
+                execution,
+                &metadata_failure,
+                element,
+                kind,
+                catalog,
+                &mut |event| {
+                    let charged = (|| {
+                        execution.borrow_mut().checkpoint()?;
+                        metadata_budget.charge(event, policy)
+                    })();
+                    charged.map_err(|error| {
+                        metadata_failure.borrow_mut().get_or_insert(error);
+                    })
+                },
+            );
+            if let Some(error) = metadata_failure.borrow_mut().take() {
+                return Err(error);
+            }
+            let value = value.map_err(|error| match error {
+                GraphElementMetadataError::Source(error) => {
+                    QueryError::Pattern(fgdb_gql::GqlQueryError::Source(error))
+                }
+                GraphElementMetadataError::Interrupted => stopped(),
+            })?;
+            execution.borrow_mut().checkpoint()?;
+            Ok(value)
+        })();
+        if result.is_err() {
+            metadata_failed.set(true);
+        }
+        result
+    });
+    let admitted = output(
+        result,
+        &mut |units| execution.borrow_mut().work_units(units),
+        &mut metadata,
+    );
+    execution.borrow_mut().checkpoint().map_err(&map_error)?;
+    let admitted = admitted?;
+    if metadata_failed.get() {
+        return Err(map_error(stopped()));
+    }
+    Ok(admitted)
 }
 
 struct State<'issuer, Resolver, Clock> {
@@ -241,69 +327,10 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadTransaction<'_, R,
             // Resolver and binder errors cannot hide a concurrent retirement
             // or expiry. This also preserves a latched native meter refusal.
             execution.borrow_mut().checkpoint().map_err(&map_error)?;
-            let ((result, _), rows) = result?;
-            // Reserve rows before a second representation is allocated. The
-            // final zero-row delivery below validates callback work without
-            // charging these same result rows twice.
-            execution
-                .borrow_mut()
-                .admit_rows(rows)
-                .map_err(&map_error)?;
-            let metadata_failed = Cell::new(false);
-            let metadata_failure = RefCell::new(None);
-            let mut metadata_budget = MetadataBudget::default();
-            let mut metadata = MetadataReader(|element, kind, catalog: &ReverseSymbolCatalog| {
-                if metadata_failed.get() {
-                    return Err(stopped());
-                }
-                let result = (|| {
-                    execution.borrow_mut().checkpoint()?;
-                    let value = scoped_element_metadata(
-                        &view.snapshot,
-                        self.basis,
-                        &scope,
-                        &execution,
-                        &metadata_failure,
-                        element,
-                        kind,
-                        catalog,
-                        &mut |event| {
-                            let charged = (|| {
-                                execution.borrow_mut().checkpoint()?;
-                                metadata_budget.charge(event, policy)
-                            })();
-                            charged.map_err(|error| {
-                                metadata_failure.borrow_mut().get_or_insert(error);
-                            })
-                        },
-                    );
-                    if let Some(error) = metadata_failure.borrow_mut().take() {
-                        return Err(error);
-                    }
-                    let value = value.map_err(|error| match error {
-                        GraphElementMetadataError::Source(error) => {
-                            QueryError::Pattern(fgdb_gql::GqlQueryError::Source(error))
-                        }
-                        GraphElementMetadataError::Interrupted => stopped(),
-                    })?;
-                    execution.borrow_mut().checkpoint()?;
-                    Ok(value)
-                })();
-                if result.is_err() {
-                    metadata_failed.set(true);
-                }
-                result
-            });
-            let admitted = output(
-                result,
-                &mut |units| execution.borrow_mut().work_units(units),
-                &mut metadata,
-            );
-            execution.borrow_mut().checkpoint().map_err(&map_error)?;
-            let admitted = admitted?;
-            if metadata_failed.get() {
-                return Err(map_error(stopped()));
-            }
+            let ((result, at), rows) = result?;
+            let admitted = admit_graph_output(
+                &view, at, &scope, policy, &execution, result, rows, output, &map_error,
+            )?;
             execution.borrow_mut().deliver(0).map_err(&map_error)?;
             Ok(admitted)
         })?;
