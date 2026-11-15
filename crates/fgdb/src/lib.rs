@@ -149,7 +149,7 @@ pub use derived_watermarks::{
 mod seal_maintenance;
 pub use seal_maintenance::SealPublicationError;
 mod schema_catalog;
-pub use schema_catalog::SymbolCatalogError;
+pub use schema_catalog::{SymbolCatalogError, SymbolCatalogOpenError, SymbolCatalogReadView};
 use schema_catalog::SchemaState;
 mod prepared_write;
 mod query;

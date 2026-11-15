@@ -91,6 +91,31 @@ enum Selector {
     Literal(u64),
     Parameter { name: String, offset: usize },
 }
+impl Selector {
+    fn bind(&self, arguments: &GqlParameters) -> Result<CommitSeq, GraphTemporalSetTextError> {
+        let value = match self {
+            Self::Literal(value) => *value,
+            Self::Parameter { name, offset } => match arguments.get(name) {
+                None => {
+                    return Err(fail(
+                        *offset,
+                        GraphTemporalSetTextErrorKind::MissingParameter,
+                    ));
+                }
+                Some(GqlParameterValue::UInt64(value)) => value,
+                Some(value) => {
+                    return Err(fail(
+                        *offset,
+                        GraphTemporalSetTextErrorKind::ParameterTypeMismatch {
+                            found: value.parameter_type(),
+                        },
+                    ));
+                }
+            },
+        };
+        Ok(CommitSeq(value))
+    }
+}
 #[derive(Clone, Copy)]
 enum Kind<'a> {
     Word(&'a str),
@@ -351,6 +376,34 @@ fn locate(statement: &str) -> Result<(usize, usize, Selector), GraphTemporalSetT
     Ok((start, end, selector))
 }
 
+/// Select the statement's historical cut before resolving schema symbols.
+///
+/// Uses the same bounded, comment-aware selector parser as temporal graph
+/// queries. A missing clause returns `None`; a present clause accepts a
+/// decimal u64 or a UInt64 parameter. Parameters unrelated to the selector
+/// are left to the eventual statement binder.
+///
+/// This only binds the root statement's selector. It neither validates the
+/// remaining query nor grants access to the selected revision. Hosts must
+/// still prepare and execute the statement through the native read owner.
+pub fn bind_graph_snapshot_selector(
+    statement: &str,
+    arguments: &GqlParameters,
+) -> Result<Option<CommitSeq>, GraphTemporalSetTextError> {
+    match locate(statement) {
+        Ok((_, _, selector)) => selector.bind(arguments).map(Some),
+        Err(error)
+            if error.kind == GraphTemporalSetTextErrorKind::MissingSystemTimeClause
+                && !scan(statement)
+                    .windows(2)
+                    .any(|pair| pair[0].word("FOR") && pair[1].word("SYSTEM_TIME")) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Clone)]
 pub struct PreparedTemporalGraphSetText {
     statement: String,
@@ -510,26 +563,7 @@ impl PreparedTemporalGraphSetText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<BoundTemporalGraphSetQuery, GraphTemporalSetTextError> {
-        let as_of = match &self.selector {
-            Selector::Literal(value) => *value,
-            Selector::Parameter { name, offset } => match arguments.get(name) {
-                None => {
-                    return Err(fail(
-                        *offset,
-                        GraphTemporalSetTextErrorKind::MissingParameter,
-                    ));
-                }
-                Some(GqlParameterValue::UInt64(value)) => value,
-                Some(value) => {
-                    return Err(fail(
-                        *offset,
-                        GraphTemporalSetTextErrorKind::ParameterTypeMismatch {
-                            found: value.parameter_type(),
-                        },
-                    ));
-                }
-            },
-        };
+        let as_of = self.selector.bind(arguments)?;
         let local = arguments.subset_for(self.inner.parameter_schema());
         let query = self
             .inner
@@ -548,7 +582,7 @@ impl PreparedTemporalGraphSetText {
         }
         Ok(BoundTemporalGraphSetQuery {
             query,
-            as_of: CommitSeq(as_of),
+            as_of,
         })
     }
 }
@@ -598,6 +632,82 @@ mod tests {
             _ => None,
         }
     }
+    #[test]
+    fn symbol_free_snapshot_selection_uses_the_temporal_parser() {
+        let mut arguments = GqlParameters::new();
+        arguments.insert("cut", GqlParameterValue::UInt64(19)).unwrap();
+        arguments.insert("unused", GqlParameterValue::Int64(7)).unwrap();
+        for text in [
+            "MATCH (n:Future) FOR SYSTEM_TIME AS OF SEQ 19 RETURN n",
+            "MATCH (n:Future) /* FOR SYSTEM_TIME AS OF SEQ 999 */ FOR SYSTEM_TIME AS OF SEQ $cut UNWIND [1] AS x RETURN x",
+            "MATCH (n:Future) FOR SYSTEM_TIME AS OF SEQ $cut CALL { WITH n RETURN n } RETURN n",
+        ] {
+            assert_eq!(bind_graph_snapshot_selector(text, &arguments), Ok(Some(CommitSeq(19))));
+        }
+        for text in [
+            "MATCH (n:Future) RETURN n",
+            "MATCH (for) RETURN for",
+            "MATCH (n) RETURN n.for AS for",
+            "RETURN 'FOR SYSTEM_TIME AS OF SEQ 999' AS text",
+            "/* FOR SYSTEM_TIME AS OF SEQ 999 */ MATCH (n) RETURN n",
+        ] {
+            assert_eq!(bind_graph_snapshot_selector(text, &arguments), Ok(None));
+        }
+    }
+
+    #[test]
+    fn symbol_free_snapshot_selection_preserves_types_offsets_and_bounds() {
+        let text = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $cut RETURN n";
+        let offset = text.find("$cut").unwrap();
+        assert_eq!(
+            bind_graph_snapshot_selector(text, &GqlParameters::new()),
+            Err(fail(offset, GraphTemporalSetTextErrorKind::MissingParameter))
+        );
+        let mut arguments = GqlParameters::new();
+        arguments.insert("cut", GqlParameterValue::Int64(19)).unwrap();
+        assert_eq!(
+            bind_graph_snapshot_selector(text, &arguments),
+            Err(fail(
+                offset,
+                GraphTemporalSetTextErrorKind::ParameterTypeMismatch {
+                    found: GqlParameterType::Int64,
+                },
+            ))
+        );
+        for text in [
+            "MATCH (n) FOR SYSTEM_TIME RETURN n",
+            "MATCH (n) FOR SYSTEM_TIME AS OF RETURN n",
+        ] {
+            assert_eq!(
+                bind_graph_snapshot_selector(text, &arguments).unwrap_err().kind,
+                GraphTemporalSetTextErrorKind::MissingSystemTimeClause
+            );
+        }
+        for text in [
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ -1 RETURN n",
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 18446744073709551616 RETURN n",
+        ] {
+            assert_eq!(
+                bind_graph_snapshot_selector(text, &arguments).unwrap_err().kind,
+                GraphTemporalSetTextErrorKind::InvalidSequenceSelector
+            );
+        }
+        assert_eq!(
+            bind_graph_snapshot_selector(
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 FOR SYSTEM_TIME AS OF SEQ 2 RETURN n",
+                &arguments,
+            ).unwrap_err().kind,
+            GraphTemporalSetTextErrorKind::DuplicateSystemTimeClause
+        );
+        let oversized = " ".repeat(MAX_GRAPH_TEXT_BYTES + 1);
+        assert_eq!(
+            bind_graph_snapshot_selector(&oversized, &arguments).unwrap_err().kind,
+            GraphTemporalSetTextErrorKind::Set(GraphSetTextErrorKind::Pattern(
+                GraphPatternTextErrorKind::DefinitionTooLarge,
+            ))
+        );
+    }
+
     #[test]
     fn whole_compound_statement_shares_one_temporal_selector_and_catalog() {
         let text = "MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at WHERE a.p >= $lo RETURN a.p AS p UNION ALL MATCH (b) WHERE b.p <= $hi RETURN b.p AS p ORDER BY p";

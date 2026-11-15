@@ -273,7 +273,188 @@ pub(super) fn marker_at(
     })
 }
 
+/// Why a current-only catalog open could not admit a published generation.
+#[derive(Debug)]
+pub enum SymbolCatalogOpenError {
+    /// The ordinary database identity, storage, or catalog admission failed.
+    Open(Box<OpenError>),
+    /// No checkpoint is current with the observed committed chain. A writer
+    /// must publish or recover it before a current-only reader can proceed.
+    RecoveryRequired,
+}
+
+impl core::fmt::Display for SymbolCatalogOpenError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Open(error) => error.fmt(f),
+            Self::RecoveryRequired => f.write_str(
+                "symbol metadata requires a current published checkpoint; database recovery is required",
+            ),
+        }
+    }
+}
+
+impl core::error::Error for SymbolCatalogOpenError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Open(error) => Some(error.as_ref()),
+            Self::RecoveryRequired => None,
+        }
+    }
+}
+
+impl From<OpenError> for SymbolCatalogOpenError {
+    fn from(error: OpenError) -> Self {
+        Self::Open(Box::new(error))
+    }
+}
+
+/// Immutable catalog metadata from one admitted database generation.
+///
+/// Trusted embedded hosts can prepare name resolvers without materializing
+/// graph payloads. The view pins its selected frontier and catalog, and owns
+/// no writer lease.
+#[derive(Clone)]
+pub struct SymbolCatalogReadView {
+    catalog: Arc<SchemaCatalog>,
+    frontier: CommitSeq,
+}
+
+impl core::fmt::Debug for SymbolCatalogReadView {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SymbolCatalogReadView")
+            .field("frontier", &self.frontier)
+            .field("epoch", &self.catalog.epoch())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SymbolCatalogReadView {
+    async fn from_published<V: Vfs>(
+        cx: &CommitCx,
+        published: PublishedRead<V>,
+    ) -> Result<Self, OpenError> {
+        let schema = SchemaState::load(
+            cx,
+            &published.store,
+            published.schema,
+            published.published_at,
+        )
+        .await?;
+        Ok(Self {
+            catalog: schema.catalog,
+            frontier: published.published_at,
+        })
+    }
+
+    /// The exact published frontier selected when this view was opened.
+    #[must_use]
+    pub fn frontier(&self) -> CommitSeq {
+        self.frontier
+    }
+
+    /// Borrow the immutable names selected with this view's frontier.
+    #[must_use]
+    pub fn symbol_catalog(&self) -> &SymbolCatalog {
+        self.catalog.symbols()
+    }
+
+    /// Resolve names at a historical cut within this view's pinned frontier.
+    pub fn symbol_catalog_at(
+        &self,
+        at: CommitSeq,
+    ) -> Result<SymbolCatalog, SymbolCatalogError> {
+        if at.0 > self.frontier.0 {
+            return Err(ReadError::BeyondFrontier {
+                asked: at,
+                frontier: self.frontier,
+            }
+            .into());
+        }
+        Ok(self.catalog.symbols_at(at)?)
+    }
+}
+
+impl Database<UnixVfs> {
+    /// Open catalog metadata only when its publication is current.
+    ///
+    /// This path takes no writer lease, performs no recovery, and never
+    /// materializes graph payloads. Bounded and sealed query hosts can use it
+    /// before their own graph admission without acquiring a resident fallback.
+    pub async fn open_current_symbol_catalog(
+        cx: &CommitCx,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+    ) -> Result<SymbolCatalogReadView, SymbolCatalogOpenError> {
+        Self::open_current_symbol_catalog_with_vfs(cx, UnixVfs::new(), path, keys).await
+    }
+
+    /// Open immutable symbol metadata for a trusted embedded host.
+    ///
+    /// Uses the same committed-chain and manifest selection as
+    /// [`Self::open_read_view`]. A current publication reads only its metadata
+    /// and catalog, without materializing graph blocks or vertex patches.
+    /// An interrupted publication follows the existing read-view recovery
+    /// path, including its last-published-generation behavior under a live
+    /// writer's lease.
+    pub async fn open_symbol_catalog(
+        cx: &CommitCx,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+    ) -> Result<SymbolCatalogReadView, OpenError> {
+        Self::open_symbol_catalog_with_vfs(cx, UnixVfs::new(), path, keys).await
+    }
+}
+
 impl<V: Vfs + Clone> Database<V> {
+    /// [`Database::open_current_symbol_catalog`] through an explicit filesystem.
+    #[doc(hidden)]
+    pub async fn open_current_symbol_catalog_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+    ) -> Result<SymbolCatalogReadView, SymbolCatalogOpenError> {
+        let path = path.as_ref();
+        require_database_dir(cx, &vfs, path).await?;
+        match Self::read_current_generation(cx, &vfs, path, &keys, None).await? {
+            ReadGeneration::Current(published) => {
+                SymbolCatalogReadView::from_published(cx, published)
+                    .await
+                    .map_err(Into::into)
+            }
+            ReadGeneration::Lagging(_) | ReadGeneration::Unselected => {
+                Err(SymbolCatalogOpenError::RecoveryRequired)
+            }
+        }
+    }
+
+    /// [`Database::open_symbol_catalog`] through an explicit filesystem.
+    #[doc(hidden)]
+    pub async fn open_symbol_catalog_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+    ) -> Result<SymbolCatalogReadView, OpenError> {
+        let path = path.as_ref();
+        require_database_dir(cx, &vfs, path).await?;
+        match Self::read_current_generation(cx, &vfs, path, &keys, None).await? {
+            ReadGeneration::Current(published) => {
+                SymbolCatalogReadView::from_published(cx, published).await
+            }
+            ReadGeneration::Lagging(_) | ReadGeneration::Unselected => {
+                // Healing and live-writer arbitration already belong to this
+                // opener. Retain only its admitted metadata after it returns.
+                let view = Self::open_read_view_with_vfs(cx, vfs, path, keys).await?;
+                Ok(SymbolCatalogReadView {
+                    catalog: Arc::clone(&view.snapshot.schema.catalog),
+                    frontier: view.frontier(),
+                })
+            }
+        }
+    }
+
     /// Borrow the names pinned by this handle's current healthy generation.
     /// This privileged embedded API grants no new restricted-query authority.
     pub fn symbol_catalog(&self) -> Result<&SymbolCatalog, ReadError> {
@@ -723,6 +904,286 @@ mod tests {
             assert!(db.symbol_catalog().unwrap().is_empty());
             assert!(db.vertex(VId(1)).unwrap().is_some());
             assert_eq!(db.register_symbols(&cx, &bindings()).await.unwrap(), CommitSeq(2));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn metadata_views_pin_latest_and_historical_names_without_a_writer_lease() {
+        let ((), report) = run_async_under_lab(0x5ca1_0007, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let origin = Database::open_symbol_catalog_with_vfs(
+                &cx, vfs.clone(), &path, keys(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(origin.frontier(), CommitSeq::ORIGIN);
+            assert!(origin.symbol_catalog().is_empty());
+
+            let first = db.register_symbols(&cx, &bindings()).await.unwrap();
+            let graph = db.write(&cx, vertex(1, 42)).await.unwrap();
+            let pinned = Database::open_symbol_catalog_with_vfs(
+                &cx, vfs.clone(), &path, keys(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(pinned.frontier(), graph);
+            assert_eq!(pinned.symbol_catalog(), &bindings());
+            assert!(pinned.symbol_catalog_at(CommitSeq::ORIGIN).unwrap().is_empty());
+            assert_eq!(pinned.symbol_catalog_at(first).unwrap(), bindings());
+
+            let mut later = SymbolCatalog::default();
+            later.bind("Later", CatalogSymbol::Label(LabelId(8))).unwrap();
+            let last = db.register_symbols(&cx, &later).await.unwrap();
+            let current = Database::open_symbol_catalog_with_vfs(
+                &cx, vfs.clone(), &path, keys(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(current.frontier(), last);
+            assert_eq!(current.symbol_catalog(), db.symbol_catalog().unwrap());
+            let historical = current.symbol_catalog_at(graph).unwrap();
+            let mut expected = bindings();
+            expected.reserve_through(CatalogSymbol::Label(LabelId(8)));
+            assert_eq!(historical, expected);
+            assert_eq!(historical.high_water_mark(CatalogSymbolKind::Label), 8);
+            assert_eq!(historical.resolve(CatalogSymbolKind::Label, "Later"), None);
+            assert_eq!(
+                current.symbol_catalog_at(last).unwrap()
+                    .resolve(CatalogSymbolKind::Label, "Later"),
+                Some(CatalogSymbol::Label(LabelId(8)))
+            );
+            assert_eq!(pinned.frontier(), graph);
+            assert_eq!(pinned.symbol_catalog(), &bindings());
+            assert!(matches!(
+                pinned.symbol_catalog_at(last),
+                Err(SymbolCatalogError::Read(ReadError::BeyondFrontier {
+                    asked,
+                    frontier,
+                })) if asked == last && frontier == graph
+            ));
+            assert!(origin.symbol_catalog().is_empty());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn current_metadata_admission_does_not_materialize_damaged_graph_payloads() {
+        let ((), report) = run_async_under_lab(0x5ca1_0008, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            db.register_symbols(&cx, &bindings()).await.unwrap();
+            let graph = db.write(&cx, vertex(1, 42)).await.unwrap();
+            let selected = db.store.get_root(&cx, db.snapshot.root).await.unwrap();
+            let patch = selected.vertex_patches.first().expect("graph vertex payload");
+            let object_path = db.store.path(patch.patch_id);
+            cx.with_restriction_async(async {
+                let mut file = vfs.open(
+                    &object_path,
+                    &OpenOptions::new().write(true).truncate(true),
+                ).await?;
+                file.write_all(b"damaged graph payload").await?;
+                file.sync_all().await
+            })
+            .await
+            .unwrap();
+
+            let metadata = Database::open_symbol_catalog_with_vfs(
+                &cx, vfs.clone(), &path, keys(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(metadata.frontier(), graph);
+            assert_eq!(metadata.symbol_catalog(), &bindings());
+            let current = Database::open_current_symbol_catalog_with_vfs(
+                &cx, vfs.clone(), &path, keys(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(current.frontier(), graph);
+            assert_eq!(current.symbol_catalog(), metadata.symbol_catalog());
+            assert!(
+                Database::open_read_view_with_vfs(&cx, vfs, &path, keys())
+                    .await
+                    .is_err()
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn metadata_open_preserves_live_writer_lag_and_heals_after_publication_failure() {
+        let ((), report) = run_async_under_lab(0x5ca1_0009, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            db.register_symbols(&cx, &bindings()).await.unwrap();
+            let published = db.write(&cx, vertex(1, 42)).await.unwrap();
+            let mut later = SymbolCatalog::default();
+            later.bind("Later", CatalogSymbol::Label(LabelId(8))).unwrap();
+            let error = db.register_symbols_with_faults(
+                &cx,
+                &later,
+                None,
+                Some(DerivedPublicationStage::PublishRootSlot),
+            ).await.unwrap_err();
+            assert!(matches!(
+                error,
+                SymbolCatalogError::Write(source)
+                    if matches!(*source, WriteError::CommittedNeedsRecovery { .. })
+            ));
+
+            // The live owner retains healing authority. Readers can still
+            // bind the previously published catalog and its exact frontier.
+            let lagging = Database::open_symbol_catalog_with_vfs(
+                &cx, vfs.clone(), &path, keys(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(lagging.frontier(), published);
+            assert_eq!(lagging.symbol_catalog(), &bindings());
+            drop(db);
+
+            // Once the lease is released, ordinary read-view recovery admits
+            // the committed successor before metadata is returned.
+            let healed = Database::open_symbol_catalog_with_vfs(
+                &cx, vfs.clone(), &path, keys(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(healed.frontier(), CommitSeq(published.0 + 1));
+            assert_eq!(
+                healed.symbol_catalog().resolve(CatalogSymbolKind::Label, "Later"),
+                Some(CatalogSymbol::Label(LabelId(8)))
+            );
+            let historical = healed.symbol_catalog_at(published).unwrap();
+            let mut expected = bindings();
+            expected.reserve_through(CatalogSymbol::Label(LabelId(8)));
+            assert_eq!(historical, expected);
+            assert_eq!(historical.high_water_mark(CatalogSymbolKind::Label), 8);
+            assert_eq!(historical.resolve(CatalogSymbolKind::Label, "Later"), None);
+            assert_eq!(lagging.frontier(), published);
+            assert_eq!(lagging.symbol_catalog(), &bindings());
+            let reopened = Database::open_with_vfs(&cx, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(reopened.frontier().unwrap(), healed.frontier());
+            assert_eq!(reopened.symbol_catalog().unwrap(), healed.symbol_catalog());
+            assert_eq!(reopened.coordinator.chain().entries().len(), 3);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn current_only_metadata_refuses_unpublished_cuts_without_healing_or_graph_reads() {
+        let ((), report) = run_async_under_lab(0x5ca1_0010, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for missing_slot in [false, true] {
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                db.register_symbols(&cx, &bindings()).await.unwrap();
+                let published = db.write(&cx, vertex(1, 42)).await.unwrap();
+                let selected = db.store.get_root(&cx, db.snapshot.root).await.unwrap();
+                let patch = selected.vertex_patches.first().expect("graph vertex payload");
+                let graph_path = db.store.path(patch.patch_id);
+                let graph_unavailable = graph_path.with_extension("metadata-test-unavailable");
+                let slot_path = path.join(fgdb_chronicle::store::ROOT_FILE_NAME);
+                let slot_before = cx.with_restriction_async(vfs.read(&slot_path))
+                    .await.unwrap();
+                if missing_slot {
+                    let slot_unavailable = slot_path.with_extension("metadata-test-unavailable");
+                    cx.with_restriction_async(vfs.rename(&slot_path, &slot_unavailable))
+                        .await.unwrap();
+                } else {
+                    let mut later = SymbolCatalog::default();
+                    later.bind("Later", CatalogSymbol::Label(LabelId(8))).unwrap();
+                    assert!(matches!(
+                        db.register_symbols_with_faults(
+                            &cx,
+                            &later,
+                            None,
+                            Some(DerivedPublicationStage::PublishRootSlot),
+                        ).await,
+                        Err(SymbolCatalogError::Write(source))
+                            if matches!(*source, WriteError::CommittedNeedsRecovery { .. })
+                    ));
+                }
+                drop(db);
+                // The writer lease is free, so a recovering opener could heal.
+                // Hide a graph payload too: strict metadata admission must
+                // refuse the publication before any graph read or repair.
+                cx.with_restriction_async(vfs.rename(&graph_path, &graph_unavailable))
+                    .await.unwrap();
+                assert!(matches!(
+                    Database::open_current_symbol_catalog_with_vfs(
+                        &cx, vfs.clone(), &path, keys(),
+                    ).await,
+                    Err(SymbolCatalogOpenError::RecoveryRequired)
+                ));
+                assert!(matches!(
+                    cx.with_restriction_async(vfs.symlink_metadata(&graph_path)).await,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                ));
+                if missing_slot {
+                    assert!(matches!(
+                        cx.with_restriction_async(vfs.read(&slot_path)).await,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                    ));
+                } else {
+                    assert_eq!(
+                        cx.with_restriction_async(vfs.read(&slot_path)).await.unwrap(),
+                        slot_before
+                    );
+                }
+
+                // Restore only the test payload. Ordinary metadata opening
+                // retains the existing healing contract for either slot state.
+                cx.with_restriction_async(vfs.rename(&graph_unavailable, &graph_path))
+                    .await.unwrap();
+                let healed = Database::open_symbol_catalog_with_vfs(
+                    &cx, vfs.clone(), &path, keys(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    healed.frontier(),
+                    if missing_slot { published } else { CommitSeq(published.0 + 1) }
+                );
+                assert_eq!(
+                    healed.symbol_catalog().resolve(CatalogSymbolKind::Label, "Person"),
+                    Some(CatalogSymbol::Label(LABEL))
+                );
+                assert_eq!(
+                    healed.symbol_catalog().resolve(CatalogSymbolKind::Label, "Later"),
+                    if missing_slot { None } else { Some(CatalogSymbol::Label(LabelId(8))) }
+                );
+                let current = Database::open_current_symbol_catalog_with_vfs(
+                    &cx, vfs, &path, keys(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(current.frontier(), healed.frontier());
+                assert_eq!(current.symbol_catalog(), healed.symbol_catalog());
+            }
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

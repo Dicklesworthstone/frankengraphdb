@@ -99,6 +99,39 @@ impl Step {
     }
 }
 
+/// Select every read's committed cut before a shared symbol resolver is built.
+/// Writes and ordinary reads use the transaction's current basis. A mixed
+/// request is admitted only when all these cuts expose the same catalog.
+pub(super) fn catalog_cuts(
+    options: &Options,
+    resolver: Option<&fgdb::PinnedTzdb>,
+    cx: &QueryCx,
+) -> Result<Vec<Option<CommitSeq>>, Failure> {
+    let mut cuts = Vec::new();
+    for (index, step) in options.steps.iter().enumerate() {
+        cx.checkpoint().map_err(Failure::query)?;
+        if SavepointOp::of(step.kind).is_some() {
+            continue;
+        }
+        if step.kind == StepKind::Write {
+            cuts.push(None);
+            continue;
+        }
+        let cut = (|| {
+            let mut params = GqlParameters::new();
+            for (name, raw) in &step.raw_params {
+                params
+                    .insert(name, parameter(raw, resolver)?)
+                    .map_err(Failure::query)?;
+            }
+            super::symbols::text_cut(&step.text, &params)
+        })()
+        .map_err(|error| at_step(index, error))?;
+        cuts.push(cut);
+    }
+    Ok(cuts)
+}
+
 pub(super) fn validate_input(steps: &[Step]) -> Result<(), Failure> {
     if steps.is_empty() || steps.len() > MAX_STATEMENTS {
         return Err(Failure::usage(

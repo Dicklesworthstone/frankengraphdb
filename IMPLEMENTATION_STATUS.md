@@ -12,6 +12,57 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### CLI resolves durable names at the selected snapshot — qualification pending
+
+The CLI now discovers persisted label, relationship-type and property-key names
+before preparing local queries, writes, transactions, CSV imports, loads and
+searches. `create --persist-bindings` explicitly registers supplied flags and
+bindings-file declarations through the native schema transaction. Existing
+flag-only creation keeps sequence zero; a nonempty registration consumes its own
+commit sequence. Exact redeclarations are harmless, conflicting names or IDs
+refuse, and extra declarations supplied to a read stay local to that invocation.
+
+A native `SymbolCatalogReadView` retains only the authenticated immutable catalog
+and selected frontier. Its current-publication path does not materialize graph
+payloads. Ordinary opening retains the existing interrupted-publication recovery
+and live-writer arbitration behavior. Buffered and direct sealed CLI profiles
+select a current-only metadata opener that refuses lagging or unavailable
+publication without a resident graph fallback.
+
+Historical binding uses the existing bounded, comment-aware temporal selector
+parser and native UInt64 parameter rules. Certificate replay selects names at the
+certificate's retained snapshot. Diff and ordered transaction requests that
+would share one resolver across different visible catalogs explicitly refuse;
+floor-only changes do not cause that refusal. Ordinary reader and writer opens
+check the selected frontier before executing or emitting output. Direct sealed
+readers pin their existing as-of argument to that frontier. A concurrent
+publication therefore cannot silently pair a prepared resolver with another
+current generation.
+
+Existing pure input and plan validation still completes before a deferred
+metadata-open failure takes precedence. This preserves missing-database refusal
+ordering for malformed CSV, invalid batch rows, unsupported buffered plans and
+bad analytics arguments. Catalog conflicts and incompatible selected cuts remain
+immediate errors. Ordinary metadata discovery may finish recovery of an already
+committed publication before later input validation refuses a command; the
+refused command contributes no new graph effects.
+
+Regression sources cover cross-process discovery for named graph reads and
+writes, streamed and buffered reads, compaction/reopen, historical names and
+certificate replay, conflict refusal, ephemeral declarations, old creation
+behavior, and a deterministic concurrent-publication import race. Native tests
+exercise current, pinned and historical metadata, damaged graph payloads,
+interrupted publication and strict bounded-host admission; GQL tests cover
+selector syntax, comments, types and limits. Compiler checks, runtime tests,
+Rustfmt, Clippy, UBS and exact-tree qualification remain **UNRUN** because the
+execution environment is unavailable. Independent source review and exact-base
+blob reconstruction are recorded separately from executable qualification.
+
+Automatic server/session resolver refresh, general schema DDL and constraints,
+index lifecycle and multi-coordinate catalog behavior remain open under
+`fgdb-7r8sy`. This increment makes the durable name catalog directly usable from
+the local CLI; it does not close that broader owner.
+
 ### Durable symbol catalogs share Chronicle and Strata publication — qualification pending
 
 The native embedded owner now registers immutable label, relationship-type and

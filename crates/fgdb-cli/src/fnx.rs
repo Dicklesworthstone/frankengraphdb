@@ -111,6 +111,10 @@ impl ProjectionFlags {
         "--sealed-quantum",
     ];
 
+    pub(super) const fn as_of(&self) -> Option<CommitSeq> {
+        self.as_of
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.label.is_none()
             && self.relation.is_none()
@@ -341,7 +345,8 @@ impl ProjectionFlags {
         };
         // Unset flags keep the canonical whole graph, including its refusal
         // of an implicit multigraph collapse, and its default admission.
-        let mut base = FnxReadOptions::whole_graph(self.as_of);
+        let mut base =
+            FnxReadOptions::whole_graph(self.as_of.or(bindings.catalog_frontier));
         if let Some(limit) = self.graph_staging_bytes {
             base.source_limits.max_staging_bytes = limit;
         }
@@ -655,7 +660,7 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
         native,
         lowered_params: lowered.map(|(_, params)| params),
         relation,
-        as_of,
+        as_of: as_of.or(options.catalog_frontier),
         memory,
         sealing,
         source_limits,

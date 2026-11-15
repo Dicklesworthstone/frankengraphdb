@@ -21,6 +21,10 @@ pub(super) struct PathFlags {
 impl PathFlags {
     pub(super) const FLAGS: [&str; 2] = ["--path-source", "--path-target"];
 
+    pub(super) fn as_of(&self) -> Option<CommitSeq> {
+        self.as_of.map(CommitSeq)
+    }
+
     pub(super) fn enabled(&self) -> bool {
         self.source.is_some() || self.target.is_some()
     }
