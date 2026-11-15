@@ -12,6 +12,35 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Bolt explicit write output admission — qualification pending
+
+The explicit write-transaction adapter now keeps graph serialization, retained
+cursor capacity accounting and complete RUN SUCCESS admission inside the native
+checked-output callback. It uses the shared graph serializer's measured owned
+capacities instead of scanning the result again after native authority checks.
+Column copies, summary construction, metadata traversal and encoding spend the
+same cumulative signed work allowance as the statement.
+
+The callback reserves the statement completion summary, including maximum-width
+integer counter slots, before exposing the private cursor. After native success,
+actual counters replace those scalar slots and zero counters are removed without
+growing retained allocations. This conservative reservation can refuse a very
+small frame limit even when the eventual short counters would fit. Failure in
+serialization, frame admission, retained capacity, signed work or live authority
+drops the taken transaction and its complete unpublished prefix. No result cursor
+is returned before the native final checks succeed.
+
+Regression sources cover exact RUN metadata bounds, one-byte-over refusal with
+whole-prefix rollback, retained capacity and counter preservation, cumulative
+signed work, and authority retirement during metadata admission. The tight RUN
+frame test drives the production connection directly; it does not claim a
+demonstrated socket-level exploit. Scoped formatter execution, compiler/runtime
+tests, Clippy, UBS and exact-tree proof have no completed passing verdict: the
+execution environment disconnected during dependency compilation. Source review
+and exact-base reconstruction are complete; this is an unqualified source
+increment. The broader Bolt profile beads remain open
+(`fgdb-roadmap-bolt-v2-vb6e`, `fgdb-w10-bolt-a0s`).
+
 ### Autocommit read graph output retains its selected snapshot — qualification pending
 
 Native commit `5c249eb4` adds `AuthorizedReadSession::query_with_graph_output`.

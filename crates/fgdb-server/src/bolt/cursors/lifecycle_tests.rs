@@ -1244,6 +1244,124 @@ fn explicit_transaction_cumulative_limits_and_late_output_failure_abort_prefix()
 }
 
 #[test]
+fn explicit_write_run_metadata_frame_admission_is_atomic() {
+    let ((), report) = run_async_under_lab(0xb017_e00c, |root| async move {
+        let names: Vec<String> = (0..3)
+            .map(|index| format!("field_{index}_{}", "x".repeat(120)))
+            .collect();
+        let query = format!(
+            "CREATE (n:Visible {{p:2}}) RETURN 1 AS {}, 2 AS {}, 3 AS {}",
+            names[0], names[1], names[2],
+        );
+        let expected = vec![
+            (
+                "fields".to_owned(),
+                Value::List(names.iter().cloned().map(Value::String).collect()),
+            ),
+            ("t_first".to_owned(), Value::Int(0)),
+            ("qid".to_owned(), Value::Int(1)),
+        ];
+        let mut encoded = Vec::new();
+        fgdb_bolt::packstream::encode(
+            &Value::Struct {
+                tag: 0x70,
+                fields: vec![Value::Map(expected.clone())],
+            },
+            &mut encoded,
+        );
+        // Exercise the native adapter directly, as the other tight-frame
+        // tests do. Its output bound applies even when Request construction
+        // bypasses the socket decoder's independent input-message bound.
+        for fits in [true, false] {
+            let (mut server, token) =
+                explicit_fixture(&root, &format!("bolt-write-metadata-frame-{fits}")).await;
+            server.limits.max_frame_len =
+                u32::try_from(encoded.len() - usize::from(!fits)).unwrap();
+            let db = &server.databases["test"];
+            let mut client = connection(&server, token);
+            let mut wire = io();
+            client.begin(&root, &extra()).await.unwrap();
+            let prefix = stage_explicit(
+                &root,
+                &mut client,
+                &mut wire,
+                "CREATE (:Visible {p:1})",
+                vec![],
+            )
+            .await;
+            assert_eq!(prefix, 0);
+            let result = send(
+                &root,
+                &mut client,
+                &mut wire,
+                Request::Run {
+                    query: query.clone(),
+                    parameters: vec![],
+                    extra: vec![],
+                },
+            )
+            .await;
+            assert!(records(&result).is_empty());
+            if fits {
+                assert_eq!(summary(&result, 0x70), &expected);
+                let cursors = &client.transaction.as_ref().unwrap().cursors;
+                let (pending, reserved) = &cursors.results[&1];
+                // Final counters cannot increase the capacity measured under
+                // the signed callback; removing zero counters keeps its charge.
+                assert!(*reserved >= retained_bytes(&root, pending).unwrap());
+                let pulled = send(
+                    &root,
+                    &mut client,
+                    &mut wire,
+                    Request::Pull { n: -1, qid: 1 },
+                )
+                .await;
+                assert_eq!(
+                    records(&pulled),
+                    vec![vec![Value::Int(1), Value::Int(2), Value::Int(3)]]
+                );
+                let Value::Map(stats) = get(summary(&pulled, 0x70), "stats").unwrap() else {
+                    panic!("a write completion has statistics");
+                };
+                assert_eq!(get(stats, "nodes-created"), Some(&Value::Int(1)));
+                assert_eq!(get(stats, "contains-updates"), Some(&Value::Bool(true)));
+                assert!(get(stats, "relationships-created").is_none());
+                let discarded = send(
+                    &root,
+                    &mut client,
+                    &mut wire,
+                    Request::Discard { n: -1, qid: prefix },
+                )
+                .await;
+                summary(&discarded, 0x70);
+                let committed = send(&root, &mut client, &mut wire, Request::Commit).await;
+                summary(&committed, 0x70);
+                assert_committed_vertices(&root, db, 1, 2).await;
+            } else {
+                let failure = summary(&result, 0x7f);
+                assert_eq!(
+                    get(failure, "code").and_then(Value::as_str),
+                    Some("Neo.ClientError.Statement.ExecutionFailed")
+                );
+                assert!(
+                    get(failure, "message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("Bolt result exceeds"))
+                );
+                assert!(get(failure, "fields").is_none());
+                assert!(get(failure, "qid").is_none());
+                assert!(client.failed);
+                assert!(client.transaction.is_none());
+                assert!(client.pending.is_none());
+                assert_committed_vertices(&root, db, 0, 0).await;
+            }
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn explicit_preparation_refusals_abort_the_prefix_before_any_result_escapes() {
     let ((), report) = run_async_under_lab(0xb017_e00a, |root| async move {
         let (server, all) = explicit_fixture(&root, "bolt-explicit-preparation").await;

@@ -192,6 +192,18 @@ pub(super) fn collect_returning(
     metadata: &mut dyn fgdb::AuthorizedWriteOutput,
     catalog: &fgdb_gql::ReverseSymbolCatalog,
 ) -> Result<VecDeque<Vec<Value>>, Refusal> {
+    collect_write(rows, max_frame_len, work, metadata, catalog).map(|(rows, _)| rows)
+}
+
+/// Explicit write transactions retain the same measured representation while
+/// their native checked-output callback still owns authority and rollback.
+pub(super) fn collect_write(
+    rows: Vec<Vec<WireValue>>,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    metadata: &mut dyn fgdb::AuthorizedWriteOutput,
+    catalog: &fgdb_gql::ReverseSymbolCatalog,
+) -> Result<(VecDeque<Vec<Value>>, usize), Refusal> {
     collect_graph_output(
         rows,
         max_frame_len,
@@ -203,7 +215,6 @@ pub(super) fn collect_returning(
         },
         catalog,
     )
-    .map(|(rows, _)| rows)
 }
 
 /// Read-only explicit transactions hydrate with the very same representation
@@ -285,11 +296,33 @@ pub(super) fn admit_read_metadata(
     max_frame_len: usize,
     work: &mut dyn FnMut(u64) -> Result<(), QueryError>,
 ) -> Result<Map, Refusal> {
-    let mut work = |units| work(units).map_err(query_refusal);
+    admit_metadata(metadata, max_frame_len, &mut |units| {
+        work(units).map_err(query_refusal)
+    })
+    .map(|(metadata, _)| metadata)
+}
+
+/// The write owner's summaries use the same complete-frame preflight. Return
+/// their actual owned capacity so cursor admission need not rescan it later.
+pub(super) fn admit_write_metadata(
+    metadata: Map,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+) -> Result<(Map, usize), Refusal> {
+    admit_metadata(metadata, max_frame_len, &mut |units| {
+        work(units).map_err(|error| crate::execute::write_refusal(&error))
+    })
+}
+
+fn admit_metadata(
+    metadata: Map,
+    max_frame_len: usize,
+    work: &mut dyn FnMut(u64) -> Result<(), Refusal>,
+) -> Result<(Map, usize), Refusal> {
     let value = Value::Map(metadata);
     let mut retained = 0;
-    retained_value(&value, 1, &mut retained, &mut work)?;
-    output_work(&mut work, retained.div_ceil(64) as u64 + 1)?;
+    retained_value(&value, 1, &mut retained, work)?;
+    output_work(work, retained.div_ceil(64) as u64 + 1)?;
     let mut encoded = Vec::new();
     fgdb_bolt::packstream::encode(&value, &mut encoded);
     if encoded
@@ -302,7 +335,7 @@ pub(super) fn admit_read_metadata(
     let Value::Map(metadata) = value else {
         unreachable!("constructed map")
     };
-    Ok(metadata)
+    Ok((metadata, retained))
 }
 
 /// Validate metadata whose meaning matters to a write before retaining it.

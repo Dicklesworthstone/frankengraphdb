@@ -141,6 +141,50 @@ impl<T> Cursors<T> {
     }
 }
 
+impl Cursors<Pending<'_>> {
+    /// Fill the fixed scalar slots reserved by the write-output callback.
+    /// No payload allocation can grow after native authority is released.
+    /// Zero counters are removed without shrinking the retained capacity
+    /// charge; the entire original reservation lasts until cursor exhaustion.
+    pub(super) fn complete_write_summary(
+        &mut self,
+        qid: i64,
+        vertices: u64,
+        edges: u64,
+        changed: bool,
+    ) -> Result<(), Failure> {
+        let vertices = i64::try_from(vertices)
+            .map_err(|_| Failure::invalid("transaction statement count is out of range"))?;
+        let edges = i64::try_from(edges)
+            .map_err(|_| Failure::invalid("transaction statement count is out of range"))?;
+        let (pending, _) = self
+            .results
+            .get_mut(&qid)
+            .expect("checked write-output callback retained its cursor");
+        let Some(super::autocommit::PendingWrite::Completed(summary)) = &mut pending.write else {
+            unreachable!("write-output callback reserved a completed summary");
+        };
+        let Some((_, Value::Map(stats))) = summary.iter_mut().find(|(key, _)| key == "stats")
+        else {
+            unreachable!("write-output callback reserved the statistics map");
+        };
+        for (key, value) in stats.iter_mut() {
+            match key.as_str() {
+                "contains-updates" => *value = Value::Bool(changed),
+                "nodes-created" => *value = Value::Int(vertices),
+                "relationships-created" => *value = Value::Int(edges),
+                _ => unreachable!("write-output callback reserved only known counters"),
+            }
+        }
+        stats.retain(|(key, _)| match key.as_str() {
+            "nodes-created" => vertices != 0,
+            "relationships-created" => edges != 0,
+            _ => true,
+        });
+        Ok(())
+    }
+}
+
 impl<'s> Connection<'s> {
     /// Both graph statements and schema procedures publish through one owner.
     pub(super) fn buffer_result(

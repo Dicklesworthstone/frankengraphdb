@@ -37,6 +37,131 @@ fn extra() -> Map {
     vec![("db".into(), Value::string("test"))]
 }
 
+#[test]
+fn write_metadata_admission_checks_exact_frames_capacity_and_signed_work() {
+    fn metadata() -> Map {
+        let mut name = String::with_capacity(128);
+        name.push_str("output");
+        let mut fields = Vec::with_capacity(4);
+        fields.push(Value::String(name));
+        let mut key = String::with_capacity(64);
+        key.push_str("fields");
+        let mut map = Vec::with_capacity(8);
+        map.push((key, Value::List(fields)));
+        map
+    }
+    let mut encoded = Vec::new();
+    fgdb_bolt::packstream::encode(
+        &Value::Struct {
+            tag: 0x70,
+            fields: vec![Value::Map(metadata())],
+        },
+        &mut encoded,
+    );
+    let mut used = 0;
+    let mut calls = 0;
+    let (admitted, capacity) = admit_write_metadata(metadata(), encoded.len(), &mut |units| {
+        used += units;
+        calls += 1;
+        Ok(())
+    })
+    .unwrap_or_else(|error| panic!("{}", error.message));
+    assert_eq!(admitted, metadata());
+    assert_eq!(
+        capacity,
+        8 * std::mem::size_of::<(String, Value)>()
+            + 64
+            + 4 * std::mem::size_of::<Value>()
+            + 128,
+    );
+    assert!(used > 1 && calls > 1);
+    let error = admit_write_metadata(metadata(), encoded.len() - 1, &mut |_| Ok(()))
+        .err()
+        .expect("the SUCCESS structure header is part of the limit");
+    assert_eq!(error.code, ErrorCode::Budget);
+    for fail_at in 1..=calls {
+        let mut call = 0;
+        let error = admit_write_metadata(metadata(), encoded.len(), &mut |_| {
+            call += 1;
+            if call == fail_at {
+                Err(fgdb::WriteTxnError::Authorization(
+                    fgdb_warden::Error::LimitExceeded(fgdb_warden::LimitDimension::Work),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .err()
+        .expect("no partial metadata escapes a meter refusal");
+        assert_eq!(error.code, ErrorCode::Budget);
+        assert_eq!(call, fail_at);
+    }
+
+    let keys = fgdb::DatabaseKeys::new(
+        [1; 32],
+        fgdb_types::DatabaseSecurityNamespaceId([2; 32]),
+        [3; 32],
+    );
+    for late_stop in [false, true] {
+        let authority = crate::issuer(
+            asupersync::security::key::AuthKey::from_seed(0xb017_e00c),
+            &keys,
+            1,
+        )
+        .unwrap();
+        let token = authority
+            .issue_at(
+                &Grant {
+                    branch: crate::TRUNK.into(),
+                    labels: Scope::All,
+                    relations: Scope::All,
+                    properties: Scope::All,
+                    rights: Rights::Write,
+                    limits: QueryLimits {
+                        max_nodes: 0,
+                        max_rows: 0,
+                        max_work: 2 * used - 1,
+                    },
+                    expires_at_ms: 100,
+                },
+                1,
+            )
+            .unwrap();
+        let mut permit = authority
+            .verify_at(&token, crate::TRUNK, 1)
+            .unwrap()
+            .into_write_at(crate::TRUNK, 1)
+            .unwrap();
+        admit_write_metadata(metadata(), encoded.len(), &mut |units| {
+            permit
+                .charge_work_at(1, units)
+                .map_err(fgdb::WriteTxnError::Authorization)
+        })
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        let mut call = 0;
+        let error = admit_write_metadata(metadata(), encoded.len(), &mut |units| {
+            call += 1;
+            if late_stop && call == 2 {
+                authority.retire();
+            }
+            permit
+                .charge_work_at(1, units)
+                .map_err(fgdb::WriteTxnError::Authorization)
+        })
+        .err()
+        .expect("the original signed allowance and live authority still govern metadata");
+        assert_eq!(
+            error.code,
+            if late_stop {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::Budget
+            },
+        );
+        assert!(permit.checkpoint_at(1).is_err());
+    }
+}
+
 async fn frontier(cx: &Cx, db: &Served) -> CommitSeq {
     db.db.read(cx).await.unwrap().frontier().unwrap()
 }

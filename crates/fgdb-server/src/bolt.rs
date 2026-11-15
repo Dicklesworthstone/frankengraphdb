@@ -864,7 +864,7 @@ impl<'s> Connection<'s> {
                 }
                 Failure::from_refusal(crate::execute::write_refusal(&error))
             })?;
-        let columns = statement.columns().to_vec();
+        let columns = statement.columns();
         let is_write = matches!(&statement, TransactionStatement::Write(_));
         if is_write && request_read_only {
             return Err(read_only());
@@ -874,22 +874,97 @@ impl<'s> Connection<'s> {
             .ok_or_else(|| Failure::invalid("transaction is finished"))?;
         let mut admitted = None;
         let mut output_refusal = None;
+        let max_frame_len = self.server.limits.max_frame_len as usize;
         let mut collect =
             |rows: Result<Vec<Vec<WireValue>>, Refusal>,
              work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
              metadata: &mut dyn fgdb::AuthorizedWriteOutput| {
-                let output = rows.and_then(|rows| {
-                    autocommit::collect_returning(
+                let output = (|| -> Result<(Map, i64), Failure> {
+                    let rows = rows.map_err(Failure::from_refusal)?;
+                    let (rows, retained) = autocommit::collect_write(
                         rows,
-                        self.server.limits.max_frame_len as usize,
+                        max_frame_len,
                         work,
                         metadata,
                         db.symbols.borrowed_reverse_catalog(),
                     )
-                });
+                    .map_err(Failure::from_refusal)?;
+                    let write_failure =
+                        |error| Failure::from_refusal(crate::execute::write_refusal(&error));
+                    // Final counters are available only after native output
+                    // succeeds. Reserve their largest fixed-width encoding
+                    // now; filling them later only replaces scalar values or
+                    // removes zero-valued entries, never grows an allocation.
+                    work(transaction.name.len().div_ceil(64) as u64 + 8).map_err(write_failure)?;
+                    let (summary, summary_bytes) = autocommit::admit_write_metadata(
+                        vec![
+                            (
+                                "type".to_owned(),
+                                Value::string(if is_write { "w" } else { "r" }),
+                            ),
+                            ("t_last".to_owned(), Value::Int(0)),
+                            ("db".to_owned(), Value::string(transaction.name.clone())),
+                            (
+                                "stats".to_owned(),
+                                Value::Map(vec![
+                                    ("contains-updates".to_owned(), Value::Bool(true)),
+                                    ("nodes-created".to_owned(), Value::Int(i64::MAX)),
+                                    ("relationships-created".to_owned(), Value::Int(i64::MAX)),
+                                ]),
+                            ),
+                            ("fgdb_transaction_local".to_owned(), Value::Bool(true)),
+                        ],
+                        max_frame_len,
+                        work,
+                    )
+                    .map_err(Failure::from_refusal)?;
+                    work(transaction.name.len().div_ceil(64) as u64 + 1).map_err(write_failure)?;
+                    let database = transaction.name.clone();
+                    let retained = retained
+                        .checked_add(summary_bytes)
+                        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Pending<'_>>()))
+                        .and_then(|bytes| bytes.checked_add(database.capacity()))
+                        .ok_or_else(|| {
+                            Failure::from_refusal(Refusal::new(
+                                ErrorCode::Budget,
+                                "Bolt transaction retained-result budget exceeded",
+                            ))
+                        })?;
+                    work(1).map_err(write_failure)?;
+                    let mut fields = Vec::with_capacity(columns.len());
+                    for column in columns {
+                        work(column.len().div_ceil(64) as u64 + 1).map_err(write_failure)?;
+                        fields.push(Value::String(column.clone()));
+                    }
+                    // This cursor is private to the taken transaction until
+                    // the entire native callback and final live checks pass.
+                    // A refusal drops it together with the staged prefix.
+                    let qid = transaction.cursors.insert(
+                        Pending {
+                            rows,
+                            database,
+                            db,
+                            seq: None,
+                            generation: generation.clone(),
+                            write: Some(autocommit::PendingWrite::Completed(summary)),
+                        },
+                        retained,
+                    )?;
+                    let (metadata, _) = autocommit::admit_write_metadata(
+                        vec![
+                            ("fields".to_owned(), Value::List(fields)),
+                            ("t_first".to_owned(), Value::Int(0)),
+                            ("qid".to_owned(), Value::Int(qid)),
+                        ],
+                        max_frame_len,
+                        work,
+                    )
+                    .map_err(Failure::from_refusal)?;
+                    Ok((metadata, qid))
+                })();
                 match output {
-                    Ok(rows) => {
-                        admitted = Some(rows);
+                    Ok(output) => {
+                        admitted = Some(output);
                         Ok(())
                     }
                     Err(error) => {
@@ -902,7 +977,7 @@ impl<'s> Connection<'s> {
             TransactionStatement::Read(statement) => owner
                 .read(&mut guard, &query_cx, statement, |rows, work, metadata| {
                     collect(
-                        crate::execute::graph_output_rows(&columns, rows, work),
+                        crate::execute::graph_output_rows(columns, rows, work),
                         work,
                         metadata,
                     )
@@ -913,7 +988,7 @@ impl<'s> Connection<'s> {
             } => owner
                 .read_aggregate(&mut guard, &query_cx, statement, |rows, work, metadata| {
                     collect(
-                        crate::execute::graph_output_aggregate(&columns, slots, rows, work),
+                        crate::execute::graph_output_aggregate(columns, slots, rows, work),
                         work,
                         metadata,
                     )
@@ -922,7 +997,7 @@ impl<'s> Connection<'s> {
             TransactionStatement::Write(statement) => owner
                 .stage_chain(&mut guard, &query_cx, statement, |rows, work, metadata| {
                     collect(
-                        crate::execute::graph_output_rows(&columns, rows, work),
+                        crate::execute::graph_output_rows(columns, rows, work),
                         work,
                         metadata,
                     )
@@ -931,9 +1006,8 @@ impl<'s> Connection<'s> {
         };
         drop(guard);
         result.map_err(|error| {
-            Failure::from_refusal(
-                output_refusal.unwrap_or_else(|| crate::execute::write_refusal(&error)),
-            )
+            output_refusal
+                .unwrap_or_else(|| Failure::from_refusal(crate::execute::write_refusal(&error)))
         })?;
         generation
             .check()
@@ -945,54 +1019,12 @@ impl<'s> Connection<'s> {
         let edges = after.created_edges - before.created_edges;
         let changed =
             vertices != 0 || edges != 0 || after.mutation_effects != before.mutation_effects;
-        let mut stats = vec![("contains-updates".to_owned(), Value::Bool(changed))];
-        for (name, count) in [
-            ("nodes-created", vertices),
-            ("relationships-created", edges),
-        ] {
-            if count != 0 {
-                let count = i64::try_from(count)
-                    .map_err(|_| Failure::invalid("transaction statement count is out of range"))?;
-                stats.push((name.to_owned(), Value::Int(count)));
-            }
-        }
-        // Counters describe this provisional statement. Only COMMIT returns
-        // the native completion bookmark; PULL/DISCARD never publish a write.
-        let summary = vec![
-            (
-                "type".to_owned(),
-                Value::string(if is_write { "w" } else { "r" }),
-            ),
-            ("t_last".to_owned(), Value::Int(0)),
-            ("db".to_owned(), Value::string(transaction.name.clone())),
-            ("stats".to_owned(), Value::Map(stats)),
-            ("fgdb_transaction_local".to_owned(), Value::Bool(true)),
-        ];
-        let pending = Pending {
-            rows: admitted.expect("checked statement output admission ran"),
-            database: transaction.name.clone(),
-            db,
-            seq: None,
-            generation,
-            write: Some(autocommit::PendingWrite::Completed(summary)),
-        };
+        let (metadata, qid) = admitted.expect("checked statement output admission ran");
+        transaction
+            .cursors
+            .complete_write_summary(qid, vertices, edges, changed)?;
         self.transaction = Some(transaction);
-        let qid = match self.buffer_result(cx, pending) {
-            Ok(Some(qid)) => qid,
-            Ok(None) => unreachable!("transaction result has an owner"),
-            Err(error) => {
-                self.transaction = None;
-                return Err(error);
-            }
-        };
-        Ok(vec![
-            (
-                "fields".to_owned(),
-                Value::List(columns.into_iter().map(Value::String).collect()),
-            ),
-            ("t_first".to_owned(), Value::Int(0)),
-            ("qid".to_owned(), Value::Int(qid)),
-        ])
+        Ok(metadata)
     }
 
     async fn run(
