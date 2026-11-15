@@ -121,7 +121,9 @@ OPTIONAL CALL (person) {
 RETURN person, friend
 ```
 
-Each incoming person occurrence retains all qualifying body results, or one row with a NULL friend when the body returns none. Explicit import lists and legacy importing `WITH` use the existing scope rules; wildcard `CALL (*)` imports are not part of this increment.
+Each incoming person occurrence retains all qualifying body results, or one row with a NULL friend when the body returns none. Explicit import lists, wildcard `CALL (*)` / `OPTIONAL CALL (*)`, and legacy importing `WITH` use the existing native scope rules. A wildcard imports every visible caller variable, including graph identities, lists, maps and NULL values; it does not expose internal columns. The same imports reach every UNION arm and nested subqueries use their own enclosing scope.
+
+For example, the query above can use `OPTIONAL CALL (*)` in place of `OPTIONAL CALL (person)`. This also works for read-only subqueries inside atomic write chains. Body `WITH` clauses retain the existing native projection behavior: carry an imported variable through each inner `WITH` if a later clause needs it. Full Cypher scope-clause lifetime semantics remain separate work.
 
 Named procedures also accept `OPTIONAL CALL fnx.bridges(direction => 'undirected') YIELD node, neighbor RETURN node, neighbor`. A `WHERE` attached to `YIELD` filters inside the optional invocation before null extension. A subsequent explicit `WITH ... WHERE` filters its completed output. Procedure errors, cancellation and authorization or budget refusals still propagate.
 

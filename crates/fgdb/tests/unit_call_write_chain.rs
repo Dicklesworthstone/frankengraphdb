@@ -148,7 +148,7 @@ mod union_arms {
                 R,
                 policy(rows),
                 |request| {
-                    assert!(matches!(request, GraphInsertRequest::Vertex { .. }));
+                    assert!(matches!(request.request, GraphInsertRequest::Vertex { .. }));
                     allocated += 1;
                     Ok::<_, Infallible>(ElementId::Vertex(VId(100 + allocated)))
                 },

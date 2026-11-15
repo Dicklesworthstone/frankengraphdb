@@ -405,6 +405,176 @@ fn inline_call_imports_preserve_bags_nulls_and_local_pages() {
 }
 
 #[test]
+fn wildcard_call_scopes_keep_bags_nulls_nested_names_and_union_imports() {
+    let row = |cells: &[Option<i64>]| {
+        GraphValueRow::from_owned_values(
+            cells
+                .iter()
+                .map(|value| {
+                    GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                })
+                .collect(),
+        )
+    };
+    for (text, expected) in [
+        (
+            "CALL (*) { RETURN 7 AS value } RETURN value",
+            vec![row(&[Some(7)])],
+        ),
+        (
+            "UNWIND [2,2,null] AS x WITH x,3 AS z CALL (*) { RETURN x+z AS value } \
+             RETURN x,z,value",
+            vec![
+                row(&[Some(2), Some(3), Some(5)]),
+                row(&[Some(2), Some(3), Some(5)]),
+                row(&[None, Some(3), None]),
+            ],
+        ),
+        (
+            "WITH 3 AS x CALL (*) { WITH x,x+1 AS z \
+             CALL (*) { RETURN x+z AS total } RETURN total AS value } RETURN x,value",
+            vec![row(&[Some(3), Some(7)])],
+        ),
+        (
+            "WITH 3 AS x CALL (*) { WITH x,x+1 AS local RETURN local AS first } \
+             CALL (*) { RETURN x+first AS second } RETURN x,first,second",
+            vec![row(&[Some(3), Some(4), Some(7)])],
+        ),
+        (
+            "WITH [1,2] AS xs,{value:4} AS m \
+             CALL (*) { RETURN size(xs)+m.value AS value } RETURN value",
+            vec![row(&[Some(6)])],
+        ),
+        (
+            "UNWIND [1,1,2,null] AS x WITH x,10 AS offset OPTIONAL CALL (*) { \
+             WITH x,offset WHERE x=2 RETURN x+offset AS value \
+             UNION ALL WITH x,offset WHERE x=2 RETURN x+offset+1 AS value } RETURN x,value",
+            vec![
+                row(&[Some(1), None]),
+                row(&[Some(1), None]),
+                row(&[Some(2), Some(12)]),
+                row(&[Some(2), Some(13)]),
+                row(&[None, None]),
+            ],
+        ),
+        (
+            "OPTIONAL CALL (*) { UNWIND [] AS item RETURN item } RETURN item",
+            vec![row(&[None])],
+        ),
+        (
+            "UNWIND [] AS x OPTIONAL CALL (*) { RETURN x AS value } RETURN x,value",
+            Vec::new(),
+        ),
+    ] {
+        let mut actual = execute(text);
+        let mut expected = expected;
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected, "{text}");
+    }
+}
+
+#[test]
+fn wildcard_call_scopes_share_explicit_import_plans_and_governance() {
+    for (wildcard, explicit) in [
+        (
+            "CALL (*) { RETURN 7 AS value } RETURN value",
+            "CALL () { RETURN 7 AS value } RETURN value",
+        ),
+        (
+            "MATCH (n) WITH n,n.p AS before CALL (*) { RETURN n.p+before AS value } \
+             RETURN n,value ORDER BY n",
+            "MATCH (n) WITH n,n.p AS before CALL (n,before) { RETURN n.p+before AS value } \
+             RETURN n,value ORDER BY n",
+        ),
+        (
+            "MATCH (n) WITH n ORDER BY n.p CALL (*) { RETURN n.p AS value } RETURN value",
+            "MATCH (n) WITH n ORDER BY n.p CALL (n) { RETURN n.p AS value } RETURN value",
+        ),
+        (
+            "WITH $input AS x,3 AS z OPTIONAL CALL (*) { \
+             RETURN x+z AS value UNION ALL RETURN x-z AS value } RETURN value ORDER BY value",
+            "WITH $input AS x,3 AS z OPTIONAL CALL (x,z) { \
+             RETURN x+z AS value UNION ALL RETURN x-z AS value } RETURN value ORDER BY value",
+        ),
+    ] {
+        let implicit = PreparedGraphSetText::prepare(wildcard, symbols).unwrap();
+        let explicit = PreparedGraphSetText::prepare(explicit, symbols).unwrap();
+        assert_eq!(
+            implicit.canonical_template_bytes(),
+            explicit.canonical_template_bytes(),
+            "{wildcard}"
+        );
+        let arguments = if wildcard.contains("$input") {
+            GqlParameters::new().with_int64("input", 5).unwrap()
+        } else {
+            GqlParameters::new()
+        };
+        let implicit = implicit.bind_parameters(&arguments).unwrap();
+        let explicit = explicit.bind_parameters(&arguments).unwrap();
+        let actual = run(&implicit, wide(), &mut || Ok(())).unwrap();
+        let expected = run(&explicit, wide(), &mut || Ok(())).unwrap();
+        assert_eq!(actual, expected, "{wildcard}");
+        assert!(
+            run(
+                &implicit,
+                GqlQueryPolicy::new(u64::MAX, 0, u64::MAX, u64::MAX),
+                &mut || Ok(())
+            )
+            .is_err(),
+            "wildcard bodies share the final row allowance: {wildcard}"
+        );
+        assert!(matches!(
+            run(&implicit, wide(), &mut || Err(17)),
+            Err(GqlQueryError::Interrupted(17))
+        ));
+    }
+    let expected: Vec<_> = [(1, 2), (2, 4), (3, 4), (4, 6)]
+        .into_iter()
+        .map(|(id, value)| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Int(value)),
+            ])
+        })
+        .collect();
+    assert_eq!(
+        execute(
+            "MATCH (n) WITH n,n.p AS before CALL (*) { RETURN n.p+before AS value } \
+             RETURN n,value ORDER BY n"
+        ),
+        expected
+    );
+}
+
+#[test]
+fn wildcard_call_scopes_reject_mixed_imports_and_nonvisible_names_before_catalog() {
+    for text in [
+        "WITH 1 AS x CALL (*,x) { RETURN 2 AS value } RETURN value",
+        "WITH 1 AS x CALL (x,*) { RETURN 2 AS value } RETURN value",
+        "CALL (**) { RETURN 2 AS value } RETURN value",
+        "WITH 1 AS x CALL (*) { RETURN x } RETURN x",
+        "WITH 1 AS dropped WITH 2 AS kept CALL (*) { RETURN dropped AS value } RETURN value",
+        "CALL (*) { RETURN missing AS value } RETURN value",
+        "WITH 1 AS x CALL (*) { WITH 2 AS hidden RETURN hidden AS value } RETURN hidden",
+        "WITH 3 AS x CALL (*) { WITH x,x+1 AS local RETURN local AS first } \
+         CALL (*) { RETURN local AS second } RETURN second",
+        "UNWIND [] AS x OPTIONAL CALL (*) { RETURN x } RETURN x",
+        "WITH 1 AS x OPTIONAL CALL (*,x) { RETURN 2 AS value } RETURN value",
+        "WITH 1 AS x OPTIONAL CALL (*) { RETURN x AS value UNION ALL RETURN missing AS value } RETURN value",
+        "MATCH (n) WITH n CALL (*) { RETURN __fg_boundary_0 AS value } RETURN value",
+    ] {
+        let calls = std::cell::Cell::new(0);
+        let result = PreparedGraphSetText::prepare(text, |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "{text}");
+        assert_eq!(calls.get(), 0, "scope failure must precede catalog: {text}");
+    }
+}
+
+#[test]
 fn optional_call_correlates_graph_rows_and_preserves_parallel_edges_and_empty_exports() {
     let null = GraphValue::Scalar(CanonicalScalar::Null);
     let mut expected: Vec<_> = EDGES

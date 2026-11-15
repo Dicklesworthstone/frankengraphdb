@@ -12,6 +12,52 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Autocommit read graph output retains its selected snapshot — qualification pending
+
+Native commit `5c249eb4` adds `AuthorizedReadSession::query_with_graph_output`.
+The query, trusted host conversion and graph metadata reads share one signed
+execution permit and the exact bound snapshot, including historical selectors.
+The shared output boundary also serves explicit read transactions. User rows
+are reserved once before conversion; metadata spends cumulative node/work limits
+and an additional native work/scratch ceiling without becoming another user
+row. Field, label and both-endpoint masks apply before catalog access or copying.
+Late authority, cancellation and swallowed metadata failures prevent delivery
+and pending cache publication.
+
+The Bolt autocommit adapter uses this boundary and the existing checked graph
+serializer for nodes, relationships, paths and nested values. Complete RECORD
+and RUN SUCCESS sizes are admitted before RUN succeeds. The older per-field
+metadata queries are removed. Historical output and completion bookmarks use
+the selected sequence, while each independent autocommit statement still
+receives its own allowance. Unsatisfied-bookmark errors retain the selected
+source generation before frontier validation, including recovery during a
+partial send or pending flush.
+
+Four native regression sources cover historical/pinned metadata, cumulative
+node/work/row limits, opaque host error mapping and late expiry. Three TCP
+sources cover signed hydration limits, masked historical graph values across
+later writes, exact bookmarks and oversized records before RUN SUCCESS;
+existing recovery-output tests also cover autocommit bookmark failures.
+Scoped pinned Rustfmt and whitespace checks pass. Compiler/runtime, Clippy,
+UBS and exact-tree qualification are still pending.
+This increment does not complete durable output retention or the full Bolt
+compatibility profile.
+
+### Wildcard correlated read imports — qualification pending
+
+The read compiler now accepts `CALL (*)` and `OPTIONAL CALL (*)`, expanding
+the caller's visible variables through the existing explicit-import Apply and
+UNION operators. Hidden boundary columns remain private. Write-bearing CALL
+already accepted wildcard imports; nested read bodies now use the same spelling
+inside atomic write chains. Focused regression sources cover duplicate and NULL
+occurrences, empty scopes and inputs, nested/optional/UNION bodies, malformed
+imports, canonical-plan and budget parity, pinned and staged graph reads,
+capability masking, reopen and complete rollback on late result-limit failure.
+Scoped pinned Rustfmt and whitespace checks pass; runtime qualification is
+pending. The existing native WITH projection behavior is unchanged; global
+scope-clause import lifetime and redeclaration rules still need their own
+implementation and conformance coverage.
+
 ### Bolt read transactions retain native authority — qualification pending
 
 The 2026-11-14 Bolt read adapter retains `AuthorizedReadTransaction` across
@@ -38,9 +84,8 @@ unavailable controls and unknown write completion are generation independent; su
 turned into a retryable precommit failure. The read owner and its graph output
 stay pinned while independent FGP writes advance the head. Durable transaction
 leases, reattachment, full Bolt V2 and full SSI remain outside this increment.
-Autocommit reads still use their existing per-execution ReadSession path and its
-separate metadata queries; this change does not claim cumulative autocommit
-metadata accounting.
+Autocommit reads now use the same native output boundary through their
+per-execution ReadSession, as described in the newer autocommit increment above.
 
 Six added regression functions cover signed metadata-node and user-row budgets,
 concurrent FGP writes with frozen/masked graph cursors, original bookmarks,

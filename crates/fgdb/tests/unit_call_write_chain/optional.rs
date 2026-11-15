@@ -245,6 +245,94 @@ fn optional_unit_nested_calls_and_empty_global_aggregates_keep_their_own_semanti
 }
 
 #[test]
+fn wildcard_read_calls_feed_optional_write_union_arms_under_one_atomic_owner() {
+    let ((), report) = run_async_under_lab(0xca11_2007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let text = "UNWIND [1,1,2] AS x OPTIONAL CALL (*) { \
+                    CALL (*) { RETURN x+10 AS offset } \
+                    CREATE (created:Visible {p:offset}) WITH x,created \
+                    WHERE x=2 RETURN created AS made \
+                    UNION ALL CALL (*) { RETURN x+20 AS offset } \
+                    CREATE (created:Visible {p:offset}) WITH x,created \
+                    WHERE false RETURN created AS made } RETURN x,made.p AS p";
+        let expected = vec![
+            vec![int(1), null()],
+            vec![int(1), null()],
+            vec![int(2), int(12)],
+        ];
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let mut allocated = 0;
+        assert_eq!(
+            execute(&mut db, &contexts, text, &["x", "p"], 3, &mut allocated).await,
+            expected
+        );
+        assert_eq!(allocated, 6, "both arms retain every outer occurrence");
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert!(pinned.vertices().unwrap().is_empty());
+        let properties = |db: &Database<MemVfs>| {
+            let mut properties: Vec<_> = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .map(|vertex| vertex.props)
+                .collect();
+            properties.sort();
+            properties
+        };
+        let expected_properties: Vec<_> = [11, 11, 12, 21, 21, 22]
+            .into_iter()
+            .map(|value| vec![(P, CanonicalScalar::Int(value).into())])
+            .collect();
+        assert_eq!(properties(&db), expected_properties);
+
+        let issuer = authority();
+        for allowed_rows in [3, 2] {
+            let mut authorized = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let basis = authorized.frontier().unwrap();
+            let token = issuer
+                .issue_at(&grant(Rights::ReadWrite, allowed_rows), NOW)
+                .unwrap();
+            let result = authorized
+                .execute_graph_write_chain_authorized(
+                    &contexts.txn(),
+                    &contexts.query(),
+                    &contexts.commit(),
+                    &issuer,
+                    &token,
+                    "main",
+                    &program(text),
+                    insert_policy(3),
+                    || NOW,
+                )
+                .await;
+            if allowed_rows == 3 {
+                let (_, output, _) = result.unwrap();
+                let actual: Vec<_> = output
+                    .value
+                    .iter()
+                    .map(|row| row.values().to_vec())
+                    .collect();
+                assert_eq!(actual, expected);
+                assert_eq!(properties(&authorized), expected_properties);
+                assert_eq!(authorized.frontier().unwrap().0, basis.0 + 1);
+            } else {
+                result.expect_err("wildcard imports cannot renew the output allowance");
+                assert_eq!(authorized.frontier().unwrap(), basis);
+                assert!(authorized.vertices().unwrap().is_empty());
+            }
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn optional_absence_cannot_hide_static_denials_or_mint_result_and_creation_budgets() {
     let ((), report) = run_async_under_lab(0xca11_2004, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

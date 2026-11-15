@@ -3213,26 +3213,44 @@ impl<'a> Parser<'a> {
         let mut schema = Vec::new();
         let scoped = self.take(b'(')?;
         if scoped && !self.take(b')')? {
-            loop {
-                let name = self.name()?;
-                let Some(column) = incoming
-                    .iter()
-                    .position(|(binding, _)| binding.text == name.text)
-                else {
-                    return Err(expected(name.at, "an existing CALL import"));
-                };
-                if imports.contains(&column) {
-                    return Err(expected(name.at, "unique CALL imports"));
+            if self.take(b'*')? {
+                // Wildcard scope imports name exactly the caller's visible
+                // row, in its existing column order. Hidden property preimages
+                // are implementation columns, never new body bindings. The
+                // same explicit import vector is reused by every UNION arm.
+                for (column, &(name, kind)) in
+                    incoming[..self.visible_width(incoming)].iter().enumerate()
+                {
+                    self.capacity(
+                        imports.len(),
+                        MAX_PATTERN_VERTICES,
+                        crate::algebra::PatternLimitDimension::Columns,
+                    )?;
+                    imports.push(column);
+                    schema.push((name, kind));
                 }
-                self.capacity(
-                    imports.len(),
-                    MAX_PATTERN_VERTICES,
-                    crate::algebra::PatternLimitDimension::Columns,
-                )?;
-                imports.push(column);
-                schema.push((name, incoming[column].1));
-                if !self.take(b',')? {
-                    break;
+            } else {
+                loop {
+                    let name = self.name()?;
+                    let Some(column) = incoming
+                        .iter()
+                        .position(|(binding, _)| binding.text == name.text)
+                    else {
+                        return Err(expected(name.at, "an existing CALL import"));
+                    };
+                    if imports.contains(&column) {
+                        return Err(expected(name.at, "unique CALL imports"));
+                    }
+                    self.capacity(
+                        imports.len(),
+                        MAX_PATTERN_VERTICES,
+                        crate::algebra::PatternLimitDimension::Columns,
+                    )?;
+                    imports.push(column);
+                    schema.push((name, incoming[column].1));
+                    if !self.take(b',')? {
+                        break;
+                    }
                 }
             }
             self.punct(b')', ")")?;
