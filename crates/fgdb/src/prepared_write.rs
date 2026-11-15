@@ -346,7 +346,7 @@ impl<V: Vfs + Clone> Database<V> {
                     graph: crate::GRAPH,
                     branch: crate::BRANCH,
                     relation,
-                    schema_epoch: crate::SchemaEpoch(0),
+                    schema_epoch: self.snapshot.schema.catalog.epoch(),
                     schema_transition: None,
                     rows: Vec::new(),
                 },
@@ -360,7 +360,7 @@ impl<V: Vfs + Clone> Database<V> {
             if coordinate.graph != crate::GRAPH
                 || coordinate.branch != crate::BRANCH
                 || relation.is_some_and(|relation| coordinate.relation != relation)
-                || coordinate.schema_epoch != crate::SchemaEpoch(0)
+                || coordinate.schema_epoch != self.snapshot.schema.catalog.epoch()
                 || coordinate.schema_transition.is_some()
             {
                 return Err(crate::WriteTxnError::UnsupportedAtomicMutation);

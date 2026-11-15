@@ -44,6 +44,7 @@
 // (rust-lang/rust#159228) rejects under -D warnings. As in fgdb-server.
 #![recursion_limit = "256"]
 
+pub mod catalog;
 pub mod coalesced;
 pub mod compact;
 pub mod edge_props;

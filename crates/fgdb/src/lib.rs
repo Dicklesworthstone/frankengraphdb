@@ -148,6 +148,9 @@ pub use derived_watermarks::{
 };
 mod seal_maintenance;
 pub use seal_maintenance::SealPublicationError;
+mod schema_catalog;
+pub use schema_catalog::SymbolCatalogError;
+use schema_catalog::SchemaState;
 mod prepared_write;
 mod query;
 mod scrub;
@@ -233,8 +236,10 @@ use fgdb_crypto::{Digest, zeroize::SharedSecret};
 use fgdb_delta_types::{
     CanonicalError, CommittedMarker, CoordinateEntry, DeltaRow, ElementId, IndexError, LabelId,
     LocalDeltaBatchIndex, LogicalDeltaBatch, LogicalDeltaTemplate, PropertyKeyId, RelationId,
-    SchemaEpoch, fold_target_disjoint,
+    fold_target_disjoint,
 };
+#[cfg(test)]
+use fgdb_delta_types::SchemaEpoch;
 use fgdb_strata::edge_props::BlockProps;
 use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
 use fgdb_strata::root::{PartitionRoot, RootError, merge_all_edges_with_props};
@@ -782,6 +787,9 @@ pub enum WriteError {
     /// Loading the authenticated conflict history failed before this write
     /// entered the durable commit protocol. The current graph remains valid.
     HistoryRebuild(Box<RebuildError>),
+    /// A schema effect or its immutable objects failed admission before D1.
+    /// No marker was submitted and the published generation remains current.
+    CatalogAdmission(Box<RebuildError>),
     /// The batch was empty. Refused rather than committed as a no-op: an empty
     /// commit consumes a sequence and publishes a marker, and a caller that did
     /// that by accident should be told.
@@ -1133,6 +1141,7 @@ impl core::fmt::Display for WriteError {
                     "prepared-write conflict history could not be loaded: {error}"
                 )
             }
+            Self::CatalogAdmission(error) => write!(f, "catalog admission: {error}"),
             Self::EmptyBatch => write!(f, "an empty batch consumes a commit sequence for nothing"),
             Self::ZonedTimestampRequiresResolver { .. } => {
                 f.write_str("zoned timestamp writes require a pinned tzdb resolver")
@@ -1946,6 +1955,8 @@ struct Snapshot {
     /// The manifest published beside `root` (fgdb-63w2) — the identity a
     /// root slot carries, re-derived identically by every rebuild.
     manifest: ManifestVersion,
+    /// Immutable names are selected and published with this graph generation.
+    schema: SchemaState,
     /// The ordered local delta window derived from the same Chronicle cut as
     /// every graph field above. Keeping it inside the immutable generation is
     /// what makes a pinned view one coherent graph-and-delta publication:
@@ -2672,6 +2683,7 @@ fn manifest_bytes_len(snapshot: &Snapshot) -> Result<u64, OpenError> {
         // Length-only computation: every V2 record is RECORD_LEN regardless of
         // the commitment value, so the zero digest cannot drift the answer.
         published_chain_hash: Digest([0u8; 32]),
+        schema: snapshot.schema.reference,
     }];
     let bytes = encode_manifest(&records).map_err(|_| OpenError::NotADatabase {
         path: PathBuf::new(),
@@ -3216,6 +3228,7 @@ impl<V: Vfs + Clone> Database<V> {
             root_id: checkpoint.root_id,
             manifest: checkpoint.manifest,
             published_at: checkpoint.published_at,
+            schema: checkpoint.schema,
         };
         Ok(if scan.frontier() == checkpoint.published_at {
             ReadGeneration::Current(published)
@@ -3242,6 +3255,7 @@ impl<V: Vfs + Clone> Database<V> {
                 store,
                 root_id,
                 manifest,
+                schema,
                 ..
             } = published;
             // The normal read-only walk releases edge admission before
@@ -3265,8 +3279,9 @@ impl<V: Vfs + Clone> Database<V> {
                 })?;
             let exact_counts = collector.finish(&mut control)?;
             cx.checkpoint().map_err(RebuildError::Interrupted)?;
+            let schema = SchemaState::load(cx, &store, schema, root.published_at).await?;
             let mut snapshot =
-                current_generation(manifest, root_id, &root, blocks, block_props, patches);
+                current_generation(manifest, schema, root_id, &root, blocks, block_props, patches);
             snapshot.exact_counts = exact_counts;
             snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
             Ok(EmbeddedReadView {
@@ -4469,7 +4484,7 @@ impl<V: Vfs + Clone> Database<V> {
                 graph: GRAPH,
                 branch: BRANCH,
                 relation: batch.relation,
-                schema_epoch: SchemaEpoch(0),
+                schema_epoch: self.snapshot.schema.catalog.epoch(),
                 schema_transition: None,
                 rows,
             }],
@@ -4657,7 +4672,7 @@ impl<V: Vfs + Clone> Database<V> {
                 graph: GRAPH,
                 branch: BRANCH,
                 relation,
-                schema_epoch: SchemaEpoch(0),
+                schema_epoch: self.snapshot.schema.catalog.epoch(),
                 schema_transition: None,
                 rows,
             }],
@@ -4787,6 +4802,15 @@ impl<V: Vfs + Clone> Database<V> {
             fgdb_strata::root::MAX_ROOT_PATCHES as usize,
         )
         .map_err(|error| WriteError::RootCapacity(Box::new(error)))?;
+        let next_schema = self.snapshot.schema
+            .apply_template(
+                cx,
+                &self.store,
+                &template,
+                schema_catalog::marker_at(self.coordinator.chain(), self.snapshot.frontier),
+            )
+            .await
+            .map_err(|error| WriteError::CatalogAdmission(Box::new(error)))?;
         let capsule = prepare_capsule(self.keys.k_oid(), self.keys.namespace, &template)?;
         // The allocator's counters ride in the marker (fgdb-hxgm1 channel 2):
         // every identity this handle has issued so far, committed here or
@@ -4914,6 +4938,9 @@ impl<V: Vfs + Clone> Database<V> {
                 continue;
             }
             for row in &coordinate.rows {
+                if matches!(row, DeltaRow::Schema { .. }) {
+                    continue;
+                }
                 exact_counts.apply_before(&folded, row);
                 folded
                     .apply(self.keys.block_keys(), frontier, row)
@@ -5167,6 +5194,7 @@ impl<V: Vfs + Clone> Database<V> {
             partition: PARTITION,
             root: root_id,
             published_chain_hash,
+            schema: next_schema.reference,
         }];
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishManifest);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
@@ -5351,6 +5379,7 @@ impl<V: Vfs + Clone> Database<V> {
             root: root_id,
             sealed_source_root: None,
             manifest,
+            schema: next_schema,
             delta_index: next_delta_index,
         });
         // Writer-owned membership advances in the same no-await transition.
@@ -5797,8 +5826,40 @@ impl<V: Vfs + Clone> Database<V> {
             cx.checkpoint().map_err(RebuildError::Interrupted)?;
             candidate.insert(batch.clone()).map_err(index_error)?;
         }
+        // Older synchronous preparation needs the exact admitted catalog
+        // generations, including floor-only epochs. Rehydrate them alongside
+        // the full delta prefix before replacing either part of the snapshot.
+        let schema = if after == CommitSeq::ORIGIN {
+            let mut schema = SchemaState::empty();
+            for batch in candidate.since(CommitSeq::ORIGIN).map_err(index_error)? {
+                cx.checkpoint().map_err(RebuildError::Interrupted)?;
+                schema = schema
+                    .apply_entries(
+                        cx,
+                        &self.store,
+                        batch.coordinate_entries(),
+                        schema_catalog::marker_at(
+                            self.coordinator.chain(),
+                            CommitSeq(batch.commit_seq().0 - 1),
+                        ),
+                    )
+                    .await?;
+            }
+            if schema.reference != self.snapshot.schema.reference {
+                return Err(RebuildError::Store(StoreError::MalformedCatalog(
+                    fgdb_strata::catalog::CatalogError::InvalidTransition(
+                        "retained schema history disagrees with the selected generation",
+                    ),
+                )));
+            }
+            schema
+        } else {
+            self.snapshot.schema.clone()
+        };
         cx.checkpoint().map_err(RebuildError::Interrupted)?;
-        Arc::make_mut(&mut self.snapshot).delta_index = candidate;
+        let snapshot = Arc::make_mut(&mut self.snapshot);
+        snapshot.delta_index = candidate;
+        snapshot.schema = schema;
         self.delta_materialized_after = after;
         if after == CommitSeq::ORIGIN {
             self.preparation_anchor = None;
@@ -5900,6 +5961,7 @@ impl<V: Vfs + Clone> Database<V> {
             &self.keys,
             writer,
             self.snapshot.exact_counts.clone(),
+            self.snapshot.schema.clone(),
             frontier,
             published_chain_hash,
             std::mem::take(&mut self.receipts),
@@ -5922,6 +5984,7 @@ impl<V: Vfs + Clone> Database<V> {
             // Length-only computation, as in manifest_bytes_len: every V2
             // record is RECORD_LEN regardless of the commitment value.
             published_chain_hash: Digest([0u8; 32]),
+            schema: snapshot.schema.reference,
         }];
         let manifest_len = encode_manifest(&manifest_records)
             .map(|bytes| bytes.len() as u64)
@@ -6504,7 +6567,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     replay_capacity: ReplayRootCapacity,
 ) -> Result<OpenedGeneration, RebuildError> {
     let SelectedCheckpoint {
-        root_id, manifest, ..
+        root_id, manifest, schema, ..
     } = checkpoint;
     // The sealed lists a retained writer holds come from the same verified
     // reads as the decoded state.
@@ -6538,7 +6601,10 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     // statement histories or retaining an extra strong spent-set handle.
     let mut next_birth_ordinal =
         writer.spent_vertices().len() as u64 + writer.spent_edges().len() as u64;
-    let mut snapshot = current_generation(manifest, root_id, &root, blocks, block_props, patches);
+    let mut schema = SchemaState::load(cx, store, schema, published_at).await?;
+    let mut snapshot = current_generation(
+        manifest, schema.clone(), root_id, &root, blocks, block_props, patches,
+    );
     let mut versions = VersionHeads::from_checkpoint(&snapshot);
 
     // The SUFFIX: everything the crash window or plain lag left past the
@@ -6546,10 +6612,12 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     let frontier = fold_stream(
         cx,
         coordinator,
+        store,
         keys,
         &mut FoldState {
             writer: &mut writer,
             exact_counts: &mut exact_counts,
+            schema: &mut schema,
             versions: &mut versions,
             next_birth_ordinal: &mut next_birth_ordinal,
             crypto_verification_events,
@@ -6598,6 +6666,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             keys,
             writer,
             exact_counts,
+            schema,
             frontier,
             published_chain_hash,
             PublishReceipts::default(),
@@ -6777,6 +6846,7 @@ struct PublishedRead<V: Vfs> {
     manifest: ManifestVersion,
     /// The frontier already bound to this manifest and the committed chain.
     published_at: CommitSeq,
+    schema: Option<fgdb_strata::catalog::CatalogRef>,
 }
 
 /// The checkpoint a root slot selects, once verified (fgdb-ge6a).
@@ -6786,6 +6856,7 @@ struct SelectedCheckpoint {
     /// The stored manifest the root slot named, whose one record selected
     /// `root_id`. A current checkpoint keeps this identity as its own.
     manifest: ManifestVersion,
+    schema: Option<fgdb_strata::catalog::CatalogRef>,
 }
 
 /// Repair is an explicit full-history admission path, never a property of an
@@ -6965,6 +7036,7 @@ fn checkpoint_from_manifest_commitment(
         root_id: record.root,
         published_at: root.published_at,
         manifest: claimed,
+        schema: record.schema,
     })
 }
 
@@ -6986,7 +7058,10 @@ async fn ensure_slot_target_resolves<V: Vfs>(
     path: &Path,
 ) -> Result<(), OpenError> {
     match store.resolve_manifest(cx, snapshot.manifest).await {
-        Ok(resolved) if resolved.len() == 1 && resolved[0].0.root == snapshot.root => Ok(()),
+        Ok(resolved)
+            if resolved.len() == 1
+                && resolved[0].0.root == snapshot.root
+                && resolved[0].0.schema == snapshot.schema.reference => Ok(()),
         outcome => Err(OpenError::SlotUnrecoverable {
             path: path.to_path_buf(),
             detail: format!(
@@ -7038,6 +7113,7 @@ fn counts_from_admission(
 /// 2026-10-14, manifest V3).
 fn current_generation(
     manifest: ManifestVersion,
+    schema: SchemaState,
     root_id: PartitionRootVersion,
     root: &PartitionRoot,
     blocks: Vec<Vec<AdjacencyEntry>>,
@@ -7064,6 +7140,7 @@ fn current_generation(
         root: root_id,
         sealed_source_root: None,
         manifest,
+        schema,
         delta_index: LocalDeltaBatchIndex::new(),
     }
 }
@@ -7079,15 +7156,18 @@ async fn rebuild<V: Vfs>(
 ) -> Result<OpenedGeneration, RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut exact_counts = ExactCounts::new(true);
+    let mut schema = SchemaState::empty();
     let mut next_birth_ordinal = 0u64;
     let mut versions = VersionHeads::default();
     let frontier = fold_stream(
         cx,
         coordinator,
+        store,
         keys,
         &mut FoldState {
             writer: &mut writer,
             exact_counts: &mut exact_counts,
+            schema: &mut schema,
             versions: &mut versions,
             next_birth_ordinal: &mut next_birth_ordinal,
             crypto_verification_events,
@@ -7104,6 +7184,7 @@ async fn rebuild<V: Vfs>(
         keys,
         writer,
         exact_counts,
+        schema,
         frontier,
         published_chain_hash,
         PublishReceipts::default(),
@@ -7514,6 +7595,7 @@ fn decode_sealed_partition(
 struct FoldState<'a> {
     writer: &'a mut BlockWriter,
     exact_counts: &'a mut ExactCounts,
+    schema: &'a mut SchemaState,
     versions: &'a mut VersionHeads,
     next_birth_ordinal: &'a mut u64,
     crypto_verification_events: &'a mut Vec<CryptoVerificationEvent>,
@@ -7522,6 +7604,7 @@ struct FoldState<'a> {
 async fn fold_stream<V: Vfs>(
     cx: &CommitCx,
     coordinator: &CommitCoordinator<V>,
+    store: &BlockStore<V>,
     keys: &DatabaseKeys,
     state: &mut FoldState<'_>,
     after: CommitSeq,
@@ -7574,11 +7657,22 @@ async fn fold_stream<V: Vfs>(
                 error,
             })?;
 
+        *state.schema = state.schema
+            .apply_template(
+                cx,
+                store,
+                &template,
+                schema_catalog::marker_at(coordinator.chain(), CommitSeq(commit_seq.0 - 1)),
+            )
+            .await?;
         for coordinate in template.coordinate_entries() {
             if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {
                 continue;
             }
             for row in &coordinate.rows {
+                if matches!(row, DeltaRow::Schema { .. }) {
+                    continue;
+                }
                 state.exact_counts.apply_before(state.writer, row);
                 state
                     .writer
@@ -7657,6 +7751,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
     keys: &'a DatabaseKeys,
     writer: BlockWriter,
     exact_counts: ExactCounts,
+    schema: SchemaState,
     frontier: CommitSeq,
     published_chain_hash: Digest,
     receipts: PublishReceipts,
@@ -7671,6 +7766,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
         keys,
         writer,
         exact_counts,
+        schema,
         frontier,
         published_chain_hash,
         receipts,
@@ -7688,6 +7784,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     keys: &DatabaseKeys,
     writer: BlockWriter,
     exact_counts: ExactCounts,
+    schema: SchemaState,
     frontier: CommitSeq,
     published_chain_hash: Digest,
     receipts: PublishReceipts,
@@ -7743,8 +7840,9 @@ async fn publish_and_snapshot_inner<V: Vfs>(
         store.attach_runs_to_verified_root(&mut verified_root, carried_runs)?;
     }
     let root_id = verified_root.id();
-    let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
+    let mut manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
         .expect("one root is one canonical record");
+    manifest_records[0].schema = schema.reference;
     let (manifest, _) = store
         .publish_root_and_manifest(cx, verified_root, &manifest_records, &mut receipts)
         .await?;
@@ -7786,6 +7884,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
             root: root_id,
             sealed_source_root: None,
             manifest,
+            schema,
             delta_index: LocalDeltaBatchIndex::new(),
         },
         writer,

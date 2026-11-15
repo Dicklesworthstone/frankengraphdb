@@ -687,6 +687,7 @@ mod tests {
             root: fgdb_strata::PartitionRootVersion(fgdb_types::ObjectId([0; 32])),
             sealed_source_root: None,
             manifest: fgdb_strata::manifest::ManifestVersion(fgdb_types::ObjectId([0; 32])),
+            schema: crate::schema_catalog::SchemaState::empty(),
             delta_index: Default::default(),
         }
     }

@@ -2869,6 +2869,7 @@ fn a_root_publication_packs_a_bulk_commits_segments_and_keeps_its_root_loose() {
                 partition: root.partition,
                 root: root_id,
                 published_chain_hash: fgdb_crypto::Digest([0xa1; 32]),
+                schema: None,
             }];
             let (manifest_id, _) = store
                 .publish_root_and_manifest(&cx, verified, &records, &mut receipts)

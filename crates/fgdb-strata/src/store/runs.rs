@@ -405,6 +405,7 @@ impl<V: Vfs> BlockStore<V> {
         run: &AdjRunSegment,
         limits: SealedLimits,
         published_chain_hash: Digest,
+        schema: Option<crate::catalog::CatalogRef>,
     ) -> Result<
         (
             PartitionRootVersion,
@@ -465,6 +466,7 @@ impl<V: Vfs> BlockStore<V> {
             partition,
             root,
             published_chain_hash,
+            schema,
         }])
         .map_err(StoreError::MalformedManifest)?;
         let manifest = crate::manifest::ManifestVersion(crate::manifest::manifest_id(

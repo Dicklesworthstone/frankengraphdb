@@ -69,6 +69,8 @@ pub enum ExtentObjectKind {
     EdgePropertyPatch = 7,
     Manifest = 8,
     Pack = 9,
+    SchemaCatalog = 10,
+    SchemaTransition = 11,
 }
 
 impl ExtentObjectKind {
@@ -87,6 +89,8 @@ impl ExtentObjectKind {
             7 => Some(Self::EdgePropertyPatch),
             8 => Some(Self::Manifest),
             9 => Some(Self::Pack),
+            10 => Some(Self::SchemaCatalog),
+            11 => Some(Self::SchemaTransition),
             _ => None,
         }
     }
@@ -1501,6 +1505,28 @@ pub fn open_key_envelope_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_extent_kinds_are_distinct_and_bound_into_authentication() {
+        let config = StrataEcsConfig::new([0x25; 32]);
+        let namespace = DatabaseSecurityNamespaceId([0x17; 32]);
+        let id = ObjectId([0x42; 32]);
+        for kind in [ExtentObjectKind::SchemaCatalog, ExtentObjectKind::SchemaTransition] {
+            assert_eq!(ExtentObjectKind::from_code(kind.code()), Some(kind));
+            let encoded = encode_extent(&config, namespace, kind, id, b"catalog object").unwrap();
+            let plain = decode_extent(&config, namespace, kind, id, 1024, &encoded, false).unwrap();
+            assert_eq!(plain.plaintext, b"catalog object");
+            for wrong in [ExtentObjectKind::Manifest, ExtentObjectKind::Pack] {
+                assert!(decode_extent(&config, namespace, wrong, id, 1024, &encoded, false).is_err());
+            }
+            let other = if kind == ExtentObjectKind::SchemaCatalog {
+                ExtentObjectKind::SchemaTransition
+            } else {
+                ExtentObjectKind::SchemaCatalog
+            };
+            assert!(decode_extent(&config, namespace, other, id, 1024, &encoded, false).is_err());
+        }
+    }
 
     #[test]
     fn multi_stripe_roundtrip_heals_front_middle_and_truncated_tail_and_refuses_swaps() {

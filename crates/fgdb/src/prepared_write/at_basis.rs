@@ -11,6 +11,7 @@ use crate::{
     WriteHeads, WriteTxn, WriteTxnError,
 };
 use asupersync::fs::Vfs;
+use fgdb_delta_types::DeltaRow;
 use fgdb_strata::writer::BlockWriter;
 use fgdb_types::CommitSeq;
 use std::sync::Arc;
@@ -219,6 +220,12 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     for row in &coordinate.rows {
                         checkpoint()?;
+                        // Catalog effects were admitted when this immutable
+                        // history was loaded. They do not mutate graph rows;
+                        // the exact admitted catalog is selected below.
+                        if matches!(row, DeltaRow::Schema { .. }) {
+                            continue;
+                        }
                         writer
                             .apply(self.keys.block_keys(), at, row)
                             .map_err(|error| basis_rebuild(at, error))?;
@@ -256,8 +263,14 @@ impl<V: Vfs + Clone> Database<V> {
             // selects by frontier. Versions and spent identities, unlike read
             // lookup, must be reconstructed without any post-basis statements.
             checkpoint()?;
+            let schema = self
+                .snapshot
+                .schema
+                .at(basis)
+                .map_err(|error| WriteTxnError::BasisRebuild(Box::new(error)))?;
             let mut snapshot = (*self.snapshot).clone();
             snapshot.frontier = basis;
+            snapshot.schema = schema;
             let snapshot = Arc::new(snapshot);
             let heads = WriteHeads {
                 versions,

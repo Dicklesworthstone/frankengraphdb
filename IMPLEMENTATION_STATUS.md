@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-14 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-15 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,76 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Durable symbol catalogs share Chronicle and Strata publication — qualification pending
+
+The native embedded owner now registers immutable label, relationship-type and
+property-key names with `Database::register_symbols`. A registration merges
+explicit native-width bindings and caller-supplied allocation floors; identical
+declarations are a no-op and conflicting names or IDs refuse before publication.
+This does not infer allocation floors from unnamed numeric IDs in existing graph
+data and does not allocate new symbol IDs on a caller's behalf.
+
+Each accepted extension is one existing Schema delta in the ordinary
+capsule/marker transaction stream. Its immutable registered catalog and transition
+objects become durable before D1. Admission checks the exact existing predecessor
+marker, before root/epoch, coordinate and immutable successor; neither object
+names a future assigned commit sequence. FGSM V4 pins the selected catalog beside
+the partition root. Catalog-free manifests keep their V3 bytes, and V2/V3 decode
+with no catalog.
+
+Normal writes, full replay, checkpoint suffix recovery, read-only and sealed
+reads, compaction and adjacency-run publication carry the same catalog generation.
+Pinned views keep their names. Historical name selection hides later bindings and
+retains conservative allocation floors. Synchronous historical preparation uses
+the exact admitted schema generation, including floor-only epochs; explicit
+origin history materialization rebuilds that cache before replacing the retained
+window. Ordinary prepared writes remain subject to FCW; read-dependent
+transactions and refresh/rebase paths may conservatively refuse after a schema
+change. No broader schema-compatibility claim is made.
+
+Scrub re-verifies the selected catalog and all retained capsule-referenced
+transitions and before/after catalog roots through the ordinary authenticated
+storage path. Missing or damaged schema dependencies fence the handle, including
+historical objects needed by full recovery. Catalog objects are immutable
+transaction dependencies, not graph blocks that derived-data repair can invent.
+
+Eight native regression functions cover named GQL reads without external bindings,
+pins/history, idempotence/conflict, normal and full reopen, floor-only historical
+preparation, nine post-D2 publication stages, three pre-marker crash boundaries,
+forged apply-basis refusal, missing/corrupt schema objects, nonzero-epoch creation
+and incremental composition, and standing-view initialization. New standing views
+start at the selected catalog epoch; a later schema transition still requires an
+explicit rebuild. Eight codec, manifest and storage tests cover canonical bounds,
+Unicode/u64 IDs, conservative
+floors, epoch/coordinate refusal, legacy bytes and authenticated kind separation.
+All new test execution, compiler checks, final Rustfmt, Clippy, registry-check,
+UBS and exact-tree qualification remain **UNRUN** because the execution
+environment is unavailable. Independent source review and exact-base patch/blob
+reconstruction are complete; JavaScript registry transcript checks do not replace
+the Rust registry gate.
+
+This is the name-catalog subset of `fgdb-7r8sy`; schema constraints, general DDL,
+index lifecycle and multi-coordinate catalogs remain open.
+
+### Write CALL scope imports survive every mutation phase — qualification pending
+
+Commit `07dfae3ba3e8711aff2612ab860f1d32633ef546` extends explicit and wildcard
+scope imports through write-bearing CALL bodies: WITH, aggregation and DISTINCT,
+CREATE and mutation selection, node/edge MERGE, FOREACH, and nested unit,
+returning, optional and UNION calls. Each native invocation retains its metered
+immutable argument frame. FOREACH inherits it; nested CALL scopes shadow it and
+restore the enclosing frame on completion or error. Typed Arguments and
+RestoreArguments stay in the existing algebra and executor. Legacy importing
+WITH retains ordinary projection lifetime.
+
+Three GQL and five native regression functions cover the mutation phases,
+duplicate/NULL inputs, empty aggregates, nested scopes, late refusal and atomic
+rollback. The change is committed directly on main and mirrored to master.
+Independent source review and exact-base reconstruction are complete. Compiler,
+runtime tests, final formatting, Clippy, UBS and exact-tree qualification remain
+**UNRUN** after executor disconnection. Broader parser and write-CALL owners remain
+open; this is an unqualified source increment.
 
 ### Read CALL scope imports survive WITH — qualification pending
 
@@ -41,12 +111,9 @@ DISTINCT ordering edge and a test value's boxed-list type. Compiler/runtime test
 final formatting, Clippy, UBS and exact-tree qualification remain UNRUN after the
 execution environment disconnected during dependency compilation.
 
-Only read CALL creates this lexical scope over an actual Apply frame.
-Read subqueries inside write chains can use their own Apply, but write-bearing
-CALL bodies still need native invocation-frame integration before they can retain
-imports across their separate mutation phases. That unfinished writer work is
-excluded. The broader `fgdb-w5-parsers-nje` and
-`fgdb-unit-write-call-z7amx` work remains open.
+Read CALL uses its actual Apply frame. The newer write-scope increment above
+adds native invocation-frame integration across mutation phases. The broader
+`fgdb-w5-parsers-nje` and `fgdb-unit-write-call-z7amx` work remains open.
 
 ### Bolt explicit write output admission — qualification pending
 
@@ -121,7 +188,8 @@ capability masking, reopen and complete rollback on late result-limit failure.
 Scoped pinned Rustfmt and whitespace checks passed for that wildcard increment;
 its runtime qualification remains pending. Read CALL import lifetime and
 redeclaration enforcement are added by the newer scope increment above.
-Write-bearing CALL lifetime parity and broader conformance remain open.
+Write-bearing CALL lifetime parity is added by the newer write-scope increment
+above; broader conformance remains open.
 
 ### Bolt read transactions retain native authority — qualification pending
 

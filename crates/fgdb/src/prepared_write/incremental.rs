@@ -235,7 +235,7 @@ impl<V: Vfs + Clone> Database<V> {
         if coordinate.graph != crate::GRAPH
             || coordinate.branch != crate::BRANCH
             || coordinate.relation != suffix.relation
-            || coordinate.schema_epoch != crate::SchemaEpoch(0)
+            || coordinate.schema_epoch != self.snapshot.schema.catalog.epoch()
             || coordinate.schema_transition.is_some()
             || suffix.rows.iter().any(|row| !supported(row))
         {

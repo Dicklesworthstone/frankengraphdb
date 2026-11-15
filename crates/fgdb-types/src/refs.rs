@@ -150,6 +150,7 @@ active_logical_object_kinds! {
     CommitCapsule = 0x000a => "CommitCapsule",
     PreparedCommitRecord = 0x000b => "PreparedCommitRecord",
     DurableCapabilityValidationEvidence = 0x028f => "DurableCapabilityValidationEvidence",
+    SchemaTransition = 0x042d => "SchemaTransition",
     DeltaBlockVersion = 0x04d4 => "DeltaBlockVersion",
     DurableCapabilityHeader = 0x0550 => "DurableCapabilityHeader",
     ExactDurableCapabilityKindBody = 0x0551 => "ExactDurableCapabilityKindBody",
@@ -165,6 +166,7 @@ active_logical_object_kinds! {
     DeltaRootSegment = 0x058b => "DeltaRootSegment",
     DeltaRootIndexSegment = 0x058c => "DeltaRootIndexSegment",
     AdjRunSegment = 0x058d => "AdjRunSegment",
+    SchemaCatalog = 0x058e => "SchemaCatalog",
 }
 
 /// Implemented by every durable logical object type that references can

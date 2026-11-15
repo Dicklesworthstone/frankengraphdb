@@ -250,6 +250,7 @@ fn manifest_records() -> Vec<ManifestRecord> {
             partition: 7,
             root: PartitionRootVersion(ObjectId([0x11; 32])),
             published_chain_hash: fgdb_crypto::Digest([0xa1; 32]),
+            schema: None,
         },
         ManifestRecord {
             graph: GraphId(3),
@@ -257,6 +258,7 @@ fn manifest_records() -> Vec<ManifestRecord> {
             partition: 9,
             root: PartitionRootVersion(ObjectId([0x22; 32])),
             published_chain_hash: fgdb_crypto::Digest([0xa2; 32]),
+            schema: None,
         },
         ManifestRecord {
             graph: GraphId(4),
@@ -264,6 +266,7 @@ fn manifest_records() -> Vec<ManifestRecord> {
             partition: 1,
             root: PartitionRootVersion(ObjectId([0x33; 32])),
             published_chain_hash: fgdb_crypto::Digest([0xa3; 32]),
+            schema: None,
         },
     ]
 }

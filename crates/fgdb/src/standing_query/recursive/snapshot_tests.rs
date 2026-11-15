@@ -307,3 +307,88 @@ fn every_snapshot_bootstrap_checkpoint_and_budget_refusal_preserves_the_owner() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn named_schema_snapshot_epochs_support_views_and_preserve_schema_refusal() {
+    let ((), report) = run_async_under_lab(0x6a84, |root| async move {
+        use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut names = SymbolCatalog::default();
+        names.bind("Link", CatalogSymbol::Relation(R)).unwrap();
+        db.register_symbols(&commit, &names).await.unwrap();
+        assert_ne!(
+            db.snapshot.schema.catalog.epoch(),
+            fgdb_delta_types::SchemaEpoch(0)
+        );
+
+        // An explicitly selected relation retains its epoch even before it has
+        // edges. The first graph delta must match that admitted generation.
+        let empty = db
+            .register_standing_reachability(&query, R, policy())
+            .unwrap();
+        let mut first = WriteBatch::new(R);
+        for id in 1..=3 {
+            first.create_vertex(VId(id), vec![], vec![]);
+        }
+        first.add_edge(EId(1), VId(1), VId(2), vec![]);
+        first.add_edge(EId(2), VId(2), VId(3), vec![]);
+        db.write(&commit, first).await.unwrap();
+        check(&db, &query, &empty, R);
+
+        // A view built over live edges uses the same catalog epoch as the
+        // empty-relation path; both continue incrementally without rebuilding.
+        let populated = db
+            .register_standing_reachability(&query, R, policy())
+            .unwrap();
+        let mut next = WriteBatch::new(R);
+        next.create_vertex(VId(4), vec![], vec![]);
+        next.add_edge(EId(3), VId(3), VId(4), vec![]);
+        let graph_at = db.write(&commit, next).await.unwrap();
+        for handle in [&empty, &populated] {
+            check(&db, &query, handle, R);
+            assert_eq!(
+                db.standing_reachability(&query, handle)
+                    .unwrap()
+                    .rows()
+                    .len(),
+                6
+            );
+        }
+
+        // A later catalog transition still requires an explicit view rebuild.
+        // Admitting the initial nonzero epoch does not authorize schema replay.
+        let mut more_names = SymbolCatalog::default();
+        more_names
+            .bind(
+                "weight",
+                CatalogSymbol::Property(fgdb_delta_types::PropertyKeyId(1)),
+            )
+            .unwrap();
+        let schema_at = db.register_symbols(&commit, &more_names).await.unwrap();
+        assert!(schema_at > graph_at);
+        for handle in [&empty, &populated] {
+            assert!(matches!(
+                db.standing_reachability(&query, handle),
+                Err(StandingQueryError::Unavailable {
+                    frontier,
+                    reason: StandingQueryFailure::InvalidDelta,
+                }) if frontier == graph_at
+            ));
+            assert_eq!(
+                db.rebuild_standing_query(&query, handle, policy()).unwrap(),
+                schema_at
+            );
+            check(&db, &query, handle, R);
+        }
+        let mut last = WriteBatch::new(R);
+        last.delete_edge(EId(2));
+        db.write(&commit, last).await.unwrap();
+        check(&db, &query, &empty, R);
+        check(&db, &query, &populated, R);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -67,6 +67,7 @@ fn records(root: &PartitionRoot, id: PartitionRootVersion) -> [ManifestRecord; 1
         partition: root.partition,
         root: id,
         published_chain_hash: fgdb_crypto::Digest([0xa1; 32]),
+        schema: None,
     }]
 }
 

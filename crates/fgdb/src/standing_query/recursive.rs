@@ -12,7 +12,7 @@ use fgdb_delta_types::zset::reachability::ReachabilityError;
 use fgdb_delta_types::zset::reachability::committed::{
     CommittedReachability, CommittedReachabilityError, CommittedReachabilityUpdate,
 };
-use fgdb_delta_types::{LimbLimit, SchemaEpoch};
+use fgdb_delta_types::LimbLimit;
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 type Pair = (VId, VId);
@@ -184,15 +184,13 @@ pub(super) fn topology_snapshot(
         &mut |event| meter.charge(event),
     )
     .map_err(snapshot_error)?;
-    // The embedded write template fixes coordinates to SchemaEpoch(0).
-    // Record an explicitly selected relation even when empty. An all-relation
-    // projection has no synthetic edge type; insert records each live type.
-    // A schema-capable spine must supply authenticated current catalog epochs
-    // instead; the shared
-    // builder already supports them, including known empty relations.
+    // The catalog and graph belong to the same admitted snapshot. Preserve its
+    // epoch for known empty relations and every live topology record so later
+    // graph commits at this catalog generation remain compatible.
+    let schema_epoch = snapshot.schema.catalog.epoch();
     if let Some(relation) = relation {
         builder
-            .record_epoch(relation, SchemaEpoch(0), &mut |event| meter.charge(event))
+            .record_epoch(relation, schema_epoch, &mut |event| meter.charge(event))
             .map_err(snapshot_error)?;
     }
     source::visit_edges(
@@ -207,7 +205,7 @@ pub(super) fn topology_snapshot(
                 .insert(
                     entry.eid,
                     (entry.relation, entry.src, entry.dst),
-                    SchemaEpoch(0),
+                    schema_epoch,
                     LIMBS,
                     &mut |event| {
                         control(match event {
