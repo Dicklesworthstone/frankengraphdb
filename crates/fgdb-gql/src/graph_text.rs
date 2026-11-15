@@ -1053,6 +1053,16 @@ enum CorrelationTarget<'a> {
     Identity { text: bool },
 }
 
+/// Scope-clause imports retain their original values for one CALL invocation.
+/// The argument schema belongs to that invocation's nearest native Apply frame;
+/// the imported names remain visible across projections without becoming
+/// implicit grouping keys.
+#[derive(Clone)]
+struct CallScope<'a> {
+    arguments: Vec<(Name<'a>, crate::GraphSetColumnType)>,
+    imports: Vec<Name<'a>>,
+}
+
 struct Parser<'a> {
     lexer: Lexer<'a>,
     current: Token<'a>,
@@ -1122,6 +1132,7 @@ struct Parser<'a> {
     /// Inside an inline CALL body. Its terminal RETURN may aggregate the
     /// body's rows, once per outer row, as a row-domain aggregate stage.
     call_body: bool,
+    call_scope: Option<CallScope<'a>>,
     /// An EXISTS/COUNT body may finish its branch with the completed read
     /// relation at UNION or its closing brace, without an explicit RETURN.
     /// A nested ordinary CALL still requires its own RETURN.
@@ -1371,6 +1382,7 @@ impl<'a> Parser<'a> {
             resolved_entries: false,
             call_element_reads: false,
             call_body: false,
+            call_scope: None,
             existence_body: false,
             optional_body: false,
             read_elements: false,

@@ -475,6 +475,289 @@ fn wildcard_call_scopes_keep_bags_nulls_nested_names_and_union_imports() {
 }
 
 #[test]
+fn scoped_call_imports_survive_with_and_nested_scope_boundaries() {
+    let row = |cells: &[Option<i64>]| {
+        GraphValueRow::from_owned_values(
+            cells
+                .iter()
+                .map(|value| {
+                    GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                })
+                .collect(),
+        )
+    };
+    for (text, expected) in [
+        (
+            "UNWIND [2,2,null] AS x CALL (x) { WITH 3 AS y RETURN x+y AS z } RETURN x,z",
+            vec![
+                row(&[Some(2), Some(5)]),
+                row(&[Some(2), Some(5)]),
+                row(&[None, None]),
+            ],
+        ),
+        (
+            "WITH 2 AS x,3 AS z CALL (z,x) { WITH 7 AS y WITH y+1 AS next \
+             RETURN x+z+next AS value } RETURN value",
+            vec![row(&[Some(13)])],
+        ),
+        (
+            "WITH 3 AS x CALL (*) { WITH 2 AS y CALL (y,x) { WITH 1 AS z \
+             RETURN x+y+z AS nested } WITH nested RETURN x+nested AS value } RETURN value",
+            vec![row(&[Some(9)])],
+        ),
+        (
+            "WITH 3 AS x CALL (x) { WITH x AS renamed WITH renamed+1 AS y \
+             RETURN x+y AS value } RETURN value",
+            vec![row(&[Some(7)])],
+        ),
+        (
+            "WITH 3 AS x CALL (x) { WITH x AS x RETURN x AS value } RETURN value",
+            vec![row(&[Some(3)])],
+        ),
+        (
+            "WITH 3 AS x CALL (x) { WITH 1 AS local RETURN x+local AS value \
+             UNION ALL WITH 2 AS local RETURN x+local AS value } RETURN value ORDER BY value",
+            vec![row(&[Some(4)]), row(&[Some(5)])],
+        ),
+        (
+            "WITH 3 AS x CALL (x) { WITH 1 AS local CALL () { WITH 9 AS x \
+             RETURN x AS innerValue } RETURN x+innerValue AS value } RETURN value",
+            vec![row(&[Some(12)])],
+        ),
+        (
+            "WITH [1,2] AS xs,{value:4} AS m CALL (*) { WITH 1 AS y \
+             RETURN size(xs)+m.value+y AS value } RETURN value",
+            vec![row(&[Some(7)])],
+        ),
+    ] {
+        assert_eq!(execute(text), expected, "{text}");
+    }
+    // Legacy importing WITH retains its ordinary lexical lifetime and may
+    // be shadowed by a subsequent WITH; empty scope admits no outer names.
+    assert_eq!(
+        execute(
+            "WITH 3 AS x CALL { WITH x WITH 9 AS x RETURN x AS value } RETURN value"
+        ),
+        vec![row(&[Some(9)])]
+    );
+    for text in [
+        "WITH 3 AS x WITH 1 AS y RETURN x",
+        "WITH 3 AS x CALL { WITH x WITH 1 AS y RETURN x AS value } RETURN value",
+        "WITH 3 AS x CALL (x) { WITH 1 AS y CALL () { RETURN x AS z } RETURN z } RETURN z",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn scoped_call_imports_are_constants_outside_grouping_and_distinct() {
+    let row = |cells: &[Option<i64>]| {
+        GraphValueRow::from_owned_values(
+            cells
+                .iter()
+                .map(|value| {
+                    GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                })
+                .collect(),
+        )
+    };
+    for (text, expected) in [
+        (
+            "UNWIND [2,2,null] AS x CALL (x) { UNWIND [] AS y WITH count(*) AS c \
+             RETURN x AS seen,c } RETURN x,seen,c",
+            vec![
+                row(&[Some(2), Some(2), Some(0)]),
+                row(&[Some(2), Some(2), Some(0)]),
+                row(&[None, None, Some(0)]),
+            ],
+        ),
+        (
+            "WITH 4 AS x CALL (x) { UNWIND [] AS y WITH count(*) AS c \
+             WITH c+1 AS next RETURN x+next AS value } RETURN value",
+            vec![row(&[Some(5)])],
+        ),
+        (
+            "WITH 4 AS x OPTIONAL CALL (x) { UNWIND [] AS y WITH y,count(*) AS c \
+             RETURN x+y+c AS value } RETURN x,value",
+            vec![row(&[Some(4), None])],
+        ),
+        (
+            "WITH 10 AS x CALL (x) { UNWIND [1,1,2] AS y WITH y,count(*) AS c \
+             RETURN x+y+c AS value } RETURN value",
+            vec![row(&[Some(13)]), row(&[Some(13)])],
+        ),
+        (
+            "WITH 10 AS x CALL (x) { UNWIND [1,1,2] AS y WITH DISTINCT y \
+             RETURN x+y AS value } RETURN value ORDER BY value",
+            vec![row(&[Some(11)]), row(&[Some(12)])],
+        ),
+        (
+            "WITH {value:3} AS x CALL (x) { UNWIND [1,1] AS y WITH DISTINCT y \
+             RETURN x.value+y AS value } RETURN value",
+            vec![row(&[Some(4)])],
+        ),
+        (
+            "UNWIND [] AS x CALL (x) { UNWIND [] AS y WITH count(*) AS c \
+             RETURN x AS seen,c } RETURN seen,c",
+            Vec::new(),
+        ),
+    ] {
+        assert_eq!(execute(text), expected, "{text}");
+    }
+    assert_eq!(
+        execute(
+            "WITH 10 AS x CALL (x) { UNWIND [1,3,2] AS item \
+             WITH item ORDER BY item DESC WITH collect(item) AS items \
+             RETURN [item IN items | item+x] AS values } RETURN values"
+        ),
+        vec![GraphValueRow::from_owned_values(vec![GraphValue::List(
+            [13, 12, 11]
+                .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                .to_vec()
+                .into_boxed_slice()
+        )])],
+        "restoring imports does not reorder an explicitly ordered collection"
+    );
+    for (text, expected) in [
+        (
+            "WITH 10 AS x CALL (x) { UNWIND [2,1,2] AS y \
+             WITH DISTINCT y ORDER BY x,y DESC WITH collect(y) AS items \
+             RETURN items AS values } RETURN values",
+            vec![2, 1],
+        ),
+        (
+            "WITH 10 AS x CALL (x) { UNWIND [2,1] AS y \
+             WITH y+1 AS z ORDER BY x,y DESC WITH collect(z) AS items \
+             RETURN items AS values } RETURN values",
+            vec![3, 2],
+        ),
+    ] {
+        assert_eq!(
+            execute(text),
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::List(
+                expected
+                    .into_iter()
+                    .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                    .collect()
+            )])],
+            "{text}"
+        );
+    }
+    assert!(
+        PreparedGraphSetText::prepare(
+            "WITH 10 AS x CALL (x) { UNWIND [2,1] AS y \
+             WITH DISTINCT y+1 AS z ORDER BY x,y RETURN z AS value } RETURN value",
+            symbols
+        )
+        .is_err(),
+        "a scoped global does not make a dropped local sort key legal under DISTINCT"
+    );
+}
+
+#[test]
+fn scoped_call_imports_preserve_graph_identity_after_projection_and_empty_aggregation() {
+    let expected: Vec<_> = (1..=4)
+        .map(|id| {
+            let degree = EDGES
+                .iter()
+                .filter(|(source, _, _)| *source == VId(id))
+                .count() as i64;
+            let value = [1, 2, 2, 3][id as usize - 1] + degree;
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Int(value)),
+            ])
+        })
+        .collect();
+    assert_eq!(
+        execute(
+            "MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) WITH count(*) AS degree \
+             RETURN n.p+degree AS value } RETURN n,value ORDER BY n"
+        ),
+        expected
+    );
+    let mut expected: Vec<_> = EDGES
+        .iter()
+        .map(|(source, _, target)| {
+            let p = |id: VId| [1, 2, 2, 3][id.0 as usize - 1];
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(*source),
+                GraphValue::Scalar(CanonicalScalar::Int(p(*source) + p(*target))),
+            ])
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(
+        execute(
+            "MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) WITH m \
+             RETURN n.p+m.p AS value } RETURN n,value ORDER BY n,value"
+        ),
+        expected
+    );
+}
+
+#[test]
+fn scoped_call_import_redeclarations_fail_before_catalog_even_without_rows() {
+    for text in [
+        "WITH 1 AS x CALL (x) { WITH 2 AS x RETURN x AS value } RETURN value",
+        "WITH 1 AS x CALL (*) { WITH x+1 AS x RETURN x AS value } RETURN value",
+        "UNWIND [] AS x CALL (x) { WITH count(*) AS x RETURN x AS value } RETURN value",
+        "WITH 1 AS x CALL (x) { WITH min(x) AS x RETURN x AS value } RETURN value",
+        "WITH 1 AS x CALL (x) { WITH count(*)+1 AS x RETURN x AS value } RETURN value",
+        "WITH 1 AS x CALL (x) { WITH 2 AS y UNWIND [3] AS x RETURN x AS value } RETURN value",
+        "WITH 1 AS x CALL (x) { WITH 2 AS y CALL db.labels() YIELD label AS x RETURN x AS value } RETURN value",
+        "MATCH (n) CALL (n) { MATCH (m) WITH m AS n RETURN n AS value } RETURN value",
+        "WITH 1 AS x CALL (x) { RETURN x AS value UNION ALL WITH 2 AS x RETURN x AS value } RETURN value",
+    ] {
+        let calls = std::cell::Cell::new(0);
+        let result = PreparedGraphSetText::prepare(text, |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "{text}");
+        assert_eq!(calls.get(), 0, "scope refusal precedes catalog: {text}");
+    }
+}
+
+#[test]
+fn restored_call_imports_share_wildcard_identity_and_execution_budgets() {
+    let explicit =
+        "WITH 2 AS x CALL (x) { WITH 3 AS y RETURN x+y AS value } RETURN value";
+    let wildcard =
+        "WITH 2 AS x CALL (*) { WITH 3 AS y RETURN x+y AS value } RETURN value";
+    let explicit = PreparedGraphSetText::prepare(explicit, symbols).unwrap();
+    let wildcard = PreparedGraphSetText::prepare(wildcard, symbols).unwrap();
+    assert_eq!(
+        explicit.canonical_template_bytes(),
+        wildcard.canonical_template_bytes()
+    );
+    let query = explicit.bind_parameters(&GqlParameters::new()).unwrap();
+    assert!(
+        run(
+            &query,
+            GqlQueryPolicy::new(u64::MAX, 0, u64::MAX, u64::MAX),
+            &mut || Ok(())
+        )
+        .is_err()
+    );
+    assert!(
+        run(
+            &query,
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, 1, u64::MAX),
+            &mut || Ok(())
+        )
+        .is_err()
+    );
+    assert!(matches!(
+        run(&query, wide(), &mut || Err(17)),
+        Err(GqlQueryError::Interrupted(17))
+    ));
+}
+
+#[test]
 fn wildcard_call_scopes_share_explicit_import_plans_and_governance() {
     for (wildcard, explicit) in [
         (

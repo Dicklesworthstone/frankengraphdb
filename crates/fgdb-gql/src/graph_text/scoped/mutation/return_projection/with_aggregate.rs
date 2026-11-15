@@ -723,6 +723,9 @@ impl<'a> Parser<'a> {
                 } else {
                     return Err(expected(item_at, "AS alias for a computed WITH value"));
                 };
+                if !returning {
+                    self.check_call_scope_name(name)?;
+                }
                 if returned.iter().any(|(prior, _, _)| prior.text == name.text) {
                     return Err(aggregate_error(
                         name.at,
@@ -784,6 +787,12 @@ impl<'a> Parser<'a> {
             }
             if let Output::Key(key) = output {
                 self.record_parameter_alias(name, &inputs[keys[key]].value, schema);
+            }
+            if !returning {
+                match output {
+                    Output::Key(key) => self.check_call_scope_alias(name, &inputs[keys[key]].value, schema)?,
+                    _ => self.check_call_scope_name(name)?,
+                }
             }
             returned.push((name, output, kind));
             if !self.take(b',')? {

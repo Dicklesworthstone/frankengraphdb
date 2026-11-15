@@ -2939,6 +2939,27 @@ impl<'a> Parser<'a> {
         &mut self,
         statement: &'a str,
         aggregate: bool,
+        incoming: RowSchema<'a>,
+        call_depth: usize,
+        owned: bool,
+    ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
+        // Every new correlated body owns its own Arguments relation. Outer
+        // globals are available only if this body actually captured them;
+        // local frame order can differ from the enclosing CALL's frame.
+        let scope = self.call_scope.clone();
+        if !owned && let Some(active) = &mut self.call_scope {
+            active.imports.retain(|name| incoming.iter().any(|(binding, _)| binding.text == name.text));
+            active.arguments.clone_from(&incoming);
+        }
+        let parsed = self.multipart_parts_in_frame(statement, aggregate, incoming, call_depth, owned);
+        self.call_scope = scope;
+        parsed
+    }
+
+    fn multipart_parts_in_frame(
+        &mut self,
+        statement: &'a str,
+        aggregate: bool,
         mut incoming: RowSchema<'a>,
         call_depth: usize,
         owned: bool,
@@ -3266,6 +3287,10 @@ impl<'a> Parser<'a> {
         let previous_reads = core::mem::replace(&mut self.call_element_reads, true);
         let previous_body = core::mem::replace(&mut self.call_body, true);
         let previous_existence = core::mem::take(&mut self.existence_body);
+        let previous_scope = core::mem::replace(&mut self.call_scope, scoped.then(|| CallScope {
+            arguments: schema.clone(),
+            imports: schema.iter().map(|(name, _)| *name).collect(),
+        }));
         let body = self.multipart_call_body(
             statement,
             incoming,
@@ -3278,6 +3303,7 @@ impl<'a> Parser<'a> {
         self.call_body = previous_body;
         self.call_element_reads = previous_reads;
         self.existence_body = previous_existence;
+        self.call_scope = previous_scope;
         let (body, exports, imports) = body?;
         self.punct(b'}', "} after a read-only CALL body ending in RETURN")?;
         self.multipart_apply_tail(
@@ -4459,6 +4485,9 @@ impl<'a> Parser<'a> {
                     // An unaliased RETURN item is named by its exact text.
                     self.source_name(at, end)
                 };
+                if with {
+                    self.check_call_scope_alias(alias, &value, incoming)?;
+                }
                 if outputs
                     .iter()
                     .any(|(name, _): &(Name<'a>, ReadValueTemplate)| name.text == alias.text)

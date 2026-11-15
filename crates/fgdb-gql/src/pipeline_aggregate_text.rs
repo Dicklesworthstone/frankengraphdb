@@ -319,6 +319,7 @@ impl PreparedGraphPipelineAggregateText {
             for stage in stages {
                 operators.push(match stage {
                     ReadStageTemplate::Arguments { .. } => "Arguments",
+                    ReadStageTemplate::RestoreArguments { .. } => "RestoreArguments",
                     ReadStageTemplate::Aggregate { .. } => "Aggregate",
                     ReadStageTemplate::InputRows { .. } => "InputRows",
                     ReadStageTemplate::Unwind { .. } => "Unwind",

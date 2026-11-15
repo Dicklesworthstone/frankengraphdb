@@ -12,6 +12,42 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Read CALL scope imports survive WITH — qualification pending
+
+Explicit `CALL (x, ...)` and wildcard `CALL (*)` read subqueries retain
+their imported variables across inner WITH projections, DISTINCT, grouping and
+ordering. The compiler restores missing names from that invocation's immutable
+Apply argument frame through the existing relational operators. Imports are
+reattached after aggregation or DISTINCT rather than becoming implicit grouping
+keys, preserving the single aggregate row over empty input and each duplicate
+outer occurrence.
+
+Nested scopes use their own argument frames, including empty scopes, and restore
+the enclosing scope on return. Legacy importing WITH keeps its existing ordinary
+projection lifetime. A same-name pass-through of an imported column is legal;
+rebinding it to a computed value or aggregate is rejected before catalog access.
+Imported names remain available to ORDER BY after DISTINCT, while a truly dropped
+local ordering key retains the existing refusal. Hidden property and expression
+columns stay behind the visible schema and have their offsets shifted together.
+The new restore stage contributes to template identity and definition depth and
+uses existing execution work, scratch and cancellation controls.
+
+Five focused GQL regression functions and one native integration regression cover
+scope boundaries, NULLs and duplicate rows, empty aggregates, ordered collections,
+graph identities, redeclaration preflight on empty inputs, wildcard/explicit
+template identity, exact budget refusal, pinned snapshots, staged writes and
+capability masking. Independent source review corrected an imported-variable
+DISTINCT ordering edge and a test value's boxed-list type. Compiler/runtime tests,
+final formatting, Clippy, UBS and exact-tree qualification remain UNRUN after the
+execution environment disconnected during dependency compilation.
+
+Only read CALL creates this lexical scope over an actual Apply frame.
+Read subqueries inside write chains can use their own Apply, but write-bearing
+CALL bodies still need native invocation-frame integration before they can retain
+imports across their separate mutation phases. That unfinished writer work is
+excluded. The broader `fgdb-w5-parsers-nje` and
+`fgdb-unit-write-call-z7amx` work remains open.
+
 ### Bolt explicit write output admission — qualification pending
 
 The explicit write-transaction adapter now keeps graph serialization, retained
@@ -82,10 +118,10 @@ inside atomic write chains. Focused regression sources cover duplicate and NULL
 occurrences, empty scopes and inputs, nested/optional/UNION bodies, malformed
 imports, canonical-plan and budget parity, pinned and staged graph reads,
 capability masking, reopen and complete rollback on late result-limit failure.
-Scoped pinned Rustfmt and whitespace checks pass; runtime qualification is
-pending. The existing native WITH projection behavior is unchanged; global
-scope-clause import lifetime and redeclaration rules still need their own
-implementation and conformance coverage.
+Scoped pinned Rustfmt and whitespace checks passed for that wildcard increment;
+its runtime qualification remains pending. Read CALL import lifetime and
+redeclaration enforcement are added by the newer scope increment above.
+Write-bearing CALL lifetime parity and broader conformance remain open.
 
 ### Bolt read transactions retain native authority — qualification pending
 

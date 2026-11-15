@@ -646,6 +646,7 @@ fn append_stage(
 ) -> Result<(), GraphSetTextError> {
     let (at, growth) = match &stage {
         ReadStageTemplate::Arguments { .. } => (0, 0),
+        ReadStageTemplate::RestoreArguments { at, .. } => (*at, 3),
         ReadStageTemplate::InputRows { .. } => (0, 1),
         ReadStageTemplate::Aggregate { at, .. } => (*at, 3),
         ReadStageTemplate::Project { at, .. }
@@ -2095,6 +2096,10 @@ impl<'a> Parser<'a> {
         // The MATCH input and first WITH projection each own one relational node.
         let mut depth = 2;
         loop {
+            // A scope-clause import is invocation-global. Restore it after
+            // the preceding WITH has finished, rather than adding a grouping
+            // key (which would erase COUNT's one row over an empty input).
+            self.restore_call_scope(&mut schema, &mut stages, &mut depth, self.current.at)?;
             if let Some(page) = self.row_expression_page(&schema)? {
                 append_stage(&mut stages, page, &mut depth)?;
             }
@@ -2404,7 +2409,12 @@ impl<'a> Parser<'a> {
                         && !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(' | b'.'))
                         && !self.elements.contains(&word)
                         && input[..visible].iter().any(|(name, _)| name.text == word)
-                        && !output.iter().any(|(name, _)| name.text == word) =>
+                        && !output.iter().any(|(name, _)| name.text == word)
+                        // Scope-clause imports are restored after projection,
+                        // including DISTINCT, before the next page is parsed.
+                        && !self.call_scope.as_ref().is_some_and(|scope| {
+                            scope.imports.iter().any(|name| name.text == word)
+                        }) =>
                 {
                     return Ok(true);
                 }
@@ -2469,6 +2479,108 @@ impl<'a> Parser<'a> {
         Ok(columns)
     }
 
+    /// A scope-clause import may be projected under its own name, but a new
+    /// value may not capture that name. Legacy importing WITH has no globals.
+    pub(in crate::graph_text) fn check_call_scope_alias(
+        &self,
+        alias: Name<'a>,
+        value: &ReadValueTemplate,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<(), GraphSetTextError> {
+        if matches!(value, ReadValueTemplate::Column(column)
+            if schema.get(*column).is_some_and(|(name, _)| name.text == alias.text))
+        {
+            return Ok(());
+        }
+        self.check_call_scope_name(alias)
+    }
+
+    pub(in crate::graph_text) fn check_call_scope_name(
+        &self,
+        alias: Name<'a>,
+    ) -> Result<(), GraphSetTextError> {
+        if self.call_scope.as_ref().is_some_and(|scope| {
+            scope.imports.iter().any(|name| name.text == alias.text)
+        }) {
+            return Err(expected(alias.at, "an imported CALL variable without redeclaration"));
+        }
+        Ok(())
+    }
+
+    /// Reattach only missing globals from the immutable invocation frame.
+    /// They remain outside DISTINCT/grouping and before private boundary
+    /// columns, so neither multiplicity nor wildcard visibility changes.
+    pub(in crate::graph_text) fn restore_call_scope(
+        &mut self,
+        schema: &mut RowSchema<'a>,
+        stages: &mut Vec<ReadStageTemplate>,
+        depth: &mut usize,
+        at: usize,
+    ) -> Result<(), GraphSetTextError> {
+        let Some(scope) = &self.call_scope else {
+            return Ok(());
+        };
+        let mut imports = Vec::new();
+        for name in &scope.imports {
+            if schema.iter().any(|(present, _)| present.text == name.text) {
+                continue;
+            }
+            let column = scope.arguments.iter().position(|(argument, _)| argument.text == name.text)
+                .ok_or_else(|| expected(at, "the current CALL argument frame"))?;
+            imports.push(column);
+        }
+        if imports.is_empty() {
+            return Ok(());
+        }
+        self.capacity(
+            schema.len() + imports.len() - 1,
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        let width = schema.len();
+        let insert_at = self.visible_width(schema);
+        let inserted = imports.len();
+        let missing: Vec<_> = imports.iter().map(|&column| scope.arguments[column]).collect();
+        let stage = ReadStageTemplate::RestoreArguments {
+            at,
+            columns: scope.arguments.iter().map(|(name, _)| name.text.to_owned()).collect(),
+            types: scope.arguments.iter().map(|(_, kind)| *kind).collect(),
+            imports,
+            insert_at,
+        };
+        append_stage(stages, stage, depth)?;
+        schema.splice(insert_at..insert_at, missing);
+        let shift = |column: &mut usize| {
+            if *column >= insert_at {
+                *column += inserted;
+            }
+        };
+        if let Some(boundary) = &mut self.boundary_reads
+            && boundary.width == width
+        {
+            boundary.reads.iter_mut().for_each(|read| shift(&mut read.2));
+            boundary.functions.iter_mut().for_each(|read| shift(&mut read.2));
+            boundary.grouped.iter_mut().for_each(|read| shift(&mut read.3));
+            boundary.scoped.iter_mut().for_each(|read| shift(&mut read.2));
+            boundary.visible += inserted;
+            boundary.width += inserted;
+        }
+        for reads in [
+            &mut self.projected_sources,
+            &mut self.existence_reads,
+            &mut self.comprehension_reads,
+            &mut self.grouped_comprehensions,
+        ] {
+            if let Some((guard, spans)) = reads
+                && *guard == width
+            {
+                *guard += inserted;
+                spans.iter_mut().for_each(|span| shift(&mut span.2));
+            }
+        }
+        Ok(())
+    }
+
     /// A RETURN (`returning`) names an unaliased computed value by its
     /// source text, as openCypher does; a WITH binding needs its AS name.
     fn row_projection(
@@ -2527,6 +2639,9 @@ impl<'a> Parser<'a> {
                     // as in openCypher: `n.p` over a carried `n` is "n.p".
                     self.source_name(at, end)
                 };
+                if !returning {
+                    self.check_call_scope_alias(alias, &value, schema)?;
+                }
                 if next_schema.iter().any(|(name, _)| name.text == alias.text) {
                     return Err(error(
                         alias.at,
