@@ -230,7 +230,13 @@ pub struct DatabaseConfig {
     pub issuer_key: AuthKey,
     /// Bumping the policy epoch invalidates every token issued under the old one.
     pub policy_epoch: u64,
+    /// Optional operator declarations layered over the selected durable names.
+    /// Exact durable redeclarations are allowed; conflicting names or ids refuse
+    /// startup. Extra declarations remain process-local and are not persisted.
     pub symbols: Symbols,
+    /// Optional publication pin for configuration bound through a prior
+    /// metadata-only open. Startup refuses if that publication has changed.
+    pub catalog_frontier: Option<fgdb_types::CommitSeq>,
     /// The native mutation coordinate (the CLI's `--write-relation`).
     pub write_relation: RelationId,
     pub query_policy: GqlQueryPolicy,
@@ -277,6 +283,7 @@ impl DatabaseConfig {
             issuer_key,
             policy_epoch: 1,
             symbols: Symbols::new(),
+            catalog_frontier: None,
             write_relation: RelationId(1),
             query_policy,
             read_cache_limits: fgdb::ReadCacheLimits::default(),
@@ -342,6 +349,12 @@ pub enum ServerError {
     DuplicateDatabase(String),
     InvalidDatabaseName,
     Open(fgdb::OpenError),
+    Catalog(fgdb::ReadError),
+    Symbols(SymbolConflict),
+    CatalogChanged {
+        expected: fgdb_types::CommitSeq,
+        actual: fgdb_types::CommitSeq,
+    },
     ReadCache(Box<asupersync::error::Error>),
     BeaconConfig {
         name: String,
@@ -365,6 +378,13 @@ impl core::fmt::Display for ServerError {
                 f.write_str("a database name must be 1..=128 bytes of [A-Za-z0-9_.-]")
             }
             Self::Open(error) => write!(f, "cannot open database: {error}"),
+            Self::Catalog(error) => write!(f, "cannot read database symbol catalog: {error}"),
+            Self::Symbols(error) => write!(f, "cannot configure database symbols: {error}"),
+            Self::CatalogChanged { expected, actual } => write!(
+                f,
+                "database publication changed from {} to {} while binding its symbol catalog; retry startup",
+                expected.0, actual.0,
+            ),
             Self::ReadCache(error) => write!(f, "cannot configure read-cache retention: {error}"),
             Self::BeaconConfig { name, reason } => {
                 write!(f, "invalid Beacon index {name:?}: {reason}")
@@ -456,6 +476,7 @@ pub(crate) struct Served {
     /// Direct transport binders use it before handing off immutable operands.
     pub(crate) statement_clock: fgdb::StatementClock,
     pub(crate) authority: Authority,
+    /// Startup names for surfaces which retain this immutable generation.
     pub(crate) symbols: Symbols,
     pub(crate) write_relation: RelationId,
     pub(crate) query_policy: GqlQueryPolicy,
@@ -558,6 +579,16 @@ impl Server {
         let mut db = Database::open(&contexts.commit(), path, config.keys)
             .await
             .map_err(ServerError::Open)?;
+        if let Some(expected) = config.catalog_frontier {
+            let actual = db.frontier().map_err(ServerError::Catalog)?;
+            if expected != actual {
+                return Err(ServerError::CatalogChanged { expected, actual });
+            }
+        }
+        let symbols = config
+            .symbols
+            .with_catalog(db.symbol_catalog().map_err(ServerError::Catalog)?)
+            .map_err(ServerError::Symbols)?;
         let statement_clock = fgdb::StatementClock::new(|_| {
             let elapsed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -594,7 +625,7 @@ impl Server {
                 db,
                 statement_clock,
                 authority,
-                symbols: config.symbols,
+                symbols,
                 write_relation: config.write_relation,
                 query_policy: config.query_policy,
                 write_policy: config.write_policy,
