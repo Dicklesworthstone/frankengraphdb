@@ -12,6 +12,57 @@ The repository contains real durable mechanisms and executable cross-layer paths
 
 ## Live product verticals
 
+### Automatic symbol allocation and local schema administration — qualification pending
+
+Native commit `057bb8b3682391301ab49849dcd63cb8e91a06e9` adds
+`Database::register_symbol_names` to the existing durable catalog owner. Explicit
+bindings and floors are merged privately, automatic requests are sorted and
+deduplicated by namespace/name, and the entire extension publishes through one
+ordinary schema transaction. Returned bindings are available only after success.
+
+Before allocating a new name, the owner authenticates complete retained Chronicle
+history and reserves every numeric label, relationship type and property key it
+has used, including removals, deleted elements, counters, escrow properties and
+numeric writes since an earlier registration. It does not infer unused IDs from
+the current graph. Unavailable or explicitly retired origin history refuses new
+allocation. An already-bound request remains a no-op without that census.
+The cost is proportional to retained history for new automatic names; ordinary
+graph writes gain no additional history scan.
+
+The CLI exposes `schema` for current/historical metadata inspection and atomic
+registration with mixed `NAME` and `NAME=ID` declarations. `--if-current` checks
+the real writer's frontier before effects. `--as-of` is read-only and incompatible
+with registration flags. `create --persist-bindings` also accepts name-only
+declarations. Robot output uses existing row framing with kind/name/id columns,
+an exact selected/committed sequence, and decimal-string wide integers for IDs
+above the signed 64-bit range. Inspection reads authenticated catalog metadata,
+without requiring resident graph payloads.
+
+Five native regression sources cover canonical/native-width allocation, real
+query use, deleted numeric history, compaction/reopen, intervening numeric writes,
+atomic refusal, idempotence, retired history and cancellation. Four process-level
+CLI sources cover name-only creation, later writes/reads without flags, guarded
+registration, historical catalogs, compaction/reopen, deleted IDs, conflicts,
+exhaustion, input-mode refusal, Unicode/escaped names and full-width output.
+
+Independent source review completed. Local changed-source Rustfmt and whitespace
+checks passed before the execution environment disconnected. The final GitHub
+files reconstruct the reviewed logical patches against their immutable base,
+preserving base formatting rather than guessing the unavailable formatted bytes.
+Exact-anchor reversal and GitHub blob readback verify that reconstruction; the
+robot schema and expected JSON rows parse. These are source checks, not a Rust
+compiler or runtime verdict. Compiler checks, runtime regressions, final-tree
+Rustfmt, Clippy, UBS, the full mandatory gate and exact-tree proof remain
+**UNRUN**. Earlier pinned asupersync compiler processes received SIGKILL; this session's
+smaller attempt was interrupted before first-party
+diagnostics, and the executor subsequently became unavailable.
+
+`fgdb-7r8sy` remains in progress. General DDL, constraints, durable index
+lifecycle, multi-coordinate catalogs, and automatic interning within graph writes
+remain outside this increment. The unavailable executor also prevents the
+normal Beads export helper; this entry records qualification without claiming a
+closed bead or a passing gate.
+
 ### Server sessions resolve durable names at their selected snapshots — qualification pending
 
 Startup discovery landed in `0e8ecd25d0b8373c394d37064ffaf672ae78a0ec`.

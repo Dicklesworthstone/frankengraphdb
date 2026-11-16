@@ -2362,6 +2362,155 @@ fn embedded_write_and_transaction_if_current_guard_durable_frontier() {
 }
 
 #[test]
+fn schema_name_allocation_is_durable_and_usable_without_numeric_flags() {
+    let fixture = Fixture::new("allocated-schema");
+    assert_eq!(
+        succeeded(
+            &fixture.discovered(
+                "create",
+                &[
+                    "--persist-bindings",
+                    "--label", "Zulu", "--label", "Person", "--label", "Person",
+                    "--relation", "KNOWS", "--property", "name", "--property", "id=42",
+                ],
+            ),
+            "created",
+        ),
+        1
+    );
+    let initial = fixture.discovered("schema", &[]);
+    assert_eq!(succeeded(&initial, "rows"), 1);
+    assert_eq!(
+        rows(&initial),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"label"},{"type":"text","value":"Person"},{"type":"int","value":"1"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"label"},{"type":"text","value":"Zulu"},{"type":"int","value":"2"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"relation"},{"type":"text","value":"KNOWS"},{"type":"int","value":"1"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"property"},{"type":"text","value":"id"},{"type":"int","value":"42"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"property"},{"type":"text","value":"name"},{"type":"int","value":"43"}]}"#,
+        ]
+    );
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("write", &[
+                "CREATE (a:Person {id:1,name:'Ada'}),(b:Person {id:2,name:'Bob'}),(a)-[:KNOWS]->(b)",
+            ]),
+            "written",
+        ),
+        2
+    );
+    let query = fixture.discovered("query", &[
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS name,b.id AS id",
+    ]);
+    assert_eq!(succeeded(&query, "rows"), 2);
+    assert_eq!(rows(&query), [
+        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"Ada"},{"type":"int","value":"2"}]}"#,
+    ]);
+    let added = fixture.discovered("schema", &["--if-current", "2", "--property", "score"]);
+    assert_eq!(succeeded(&added, "rows"), 3);
+    assert!(rows(&added).iter().any(|row| row.contains(r#""value":"score"},{"type":"int","value":"44""#)));
+    assert_eq!(
+        succeeded(&fixture.discovered("schema", &["--property", "score"]), "rows"),
+        3,
+        "redeclaring a name must not append a schema commit",
+    );
+    let historical = fixture.discovered("schema", &["--as-of", "2"]);
+    assert_eq!(succeeded(&historical, "rows"), 2);
+    assert_eq!(rows(&historical), rows(&initial));
+    let origin = fixture.discovered("schema", &["--as-of", "0"]);
+    assert_eq!(succeeded(&origin, "rows"), 0);
+    assert!(rows(&origin).is_empty());
+    assert_eq!(succeeded(&fixture.discovered("compact", &[]), "compacted"), 3);
+    let reopened = fixture.discovered("schema", &[]);
+    assert_eq!(succeeded(&reopened, "rows"), 3);
+    assert_eq!(rows(&reopened), rows(&added));
+}
+
+#[test]
+fn schema_registration_skips_unnamed_ordinals_from_deleted_data() {
+    let fixture = Fixture::new("schema-retired-ordinals");
+    assert_eq!(succeeded(&fixture.discovered("create", &[]), "created"), 0);
+    assert_eq!(succeeded(&fixture.discovered("write", &[
+        "--label", "Old=77", "--relation", "LINK=88", "--property", "old=99",
+        "CREATE (a:Old {old:1}),(b:Old {old:2}),(a)-[:LINK]->(b)",
+    ]), "written"), 1);
+    assert_eq!(succeeded(&fixture.discovered("write", &[
+        "--label", "Old=77", "MATCH (n:Old) DETACH DELETE n",
+    ]), "written"), 2);
+    assert_eq!(succeeded(&fixture.discovered("compact", &[]), "compacted"), 2);
+    let allocated = fixture.discovered("schema", &[
+        "--label", "New", "--relation", "NEW_LINK", "--property", "new",
+    ]);
+    assert_eq!(succeeded(&allocated, "rows"), 3);
+    assert_eq!(rows(&allocated), [
+        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"label"},{"type":"text","value":"New"},{"type":"int","value":"78"}]}"#,
+        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"relation"},{"type":"text","value":"NEW_LINK"},{"type":"int","value":"89"}]}"#,
+        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"property"},{"type":"text","value":"new"},{"type":"int","value":"100"}]}"#,
+    ]);
+    // An intervening numeric-only write must also advance the next census.
+    assert_eq!(succeeded(&fixture.discovered("write", &[
+        "--label", "Unregistered=500", "CREATE (:Unregistered)",
+    ]), "written"), 4);
+    let later = fixture.discovered("schema", &["--label", "Later"]);
+    assert_eq!(succeeded(&later, "rows"), 5);
+    assert!(rows(&later).iter().any(|row| row.contains(r#""value":"Later"},{"type":"int","value":"501""#)));
+}
+
+#[test]
+fn schema_registration_conflicts_exhaustion_and_stale_guards_publish_nothing() {
+    let fixture = Fixture::new("schema-atomic-refusals");
+    assert_eq!(succeeded(&fixture.discovered("create", &[
+        "--persist-bindings", "--label", "Person", "--property", "id",
+    ]), "created"), 1);
+    let before = fixture.discovered("schema", &[]);
+    assert_eq!(succeeded(&before, "rows"), 1);
+    for flags in [
+        vec!["--label", "Other=1", "--property", "never"],
+        vec!["--label", "Last=18446744073709551615", "--label", "New", "--property", "never"],
+        vec!["--if-current", "0", "--label", "New"],
+    ] {
+        refused(&fixture.discovered("schema", &flags), 3, "query");
+        let after = fixture.discovered("schema", &[]);
+        assert_eq!(succeeded(&after, "rows"), 1);
+        assert_eq!(rows(&after), rows(&before));
+    }
+    let conflict = fixture.discovered("schema", &["--if-current", "0", "--label", "New"]);
+    assert!(terminal(&conflict).contains(r#""code":"conflict""#));
+    let future = fixture.discovered("schema", &["--as-of", "2"]);
+    refused(&future, 3, "query");
+    assert!(!String::from_utf8_lossy(&future.stdout).contains(r#""event":"columns""#));
+}
+
+#[test]
+fn schema_cli_rejects_ambiguous_modes_and_preserves_exact_names_and_u64_ids() {
+    let fixture = Fixture::new("schema-input-contract");
+    for (command, flags) in [
+        ("create", vec!["--label", "Person"]),
+        ("schema", vec!["--as-of", "0", "--label", "Person"]),
+        ("schema", vec!["--as-of", "0", "--if-current", "0"]),
+        ("schema", vec!["--param", "x=int:1"]),
+        ("schema", vec!["--label", ""]),
+        ("schema", vec!["--write-relation", "1"]),
+        ("schema", vec!["RETURN 1"]),
+        ("query", vec!["--label", "Person", "RETURN 1"]),
+    ] {
+        refused(&fixture.discovered(command, &flags), 2, "usage");
+        assert!(!fixture.db().exists(), "invalid input must refuse before database creation");
+    }
+    assert_eq!(succeeded(&fixture.discovered("create", &[]), "created"), 0);
+    let registered = fixture.discovered("schema", &[
+        "--label", "étiquette", "--property", "a=b=18446744073709551615",
+        "--relation", "line\nbreak",
+    ]);
+    assert_eq!(succeeded(&registered, "rows"), 1);
+    assert_eq!(rows(&registered), [
+        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"label"},{"type":"text","value":"étiquette"},{"type":"int","value":"1"}]}"#,
+        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"relation"},{"type":"text","value":"line\nbreak"},{"type":"int","value":"1"}]}"#,
+        r#"{"v":1,"event":"row","cells":[{"type":"text","value":"property"},{"type":"text","value":"a=b"},{"type":"wideint","value":"18446744073709551615"}]}"#,
+    ]);
+}
+
+#[test]
 fn persisted_bindings_reopen_without_flags_across_write_and_read_profiles() {
     let fixture = Fixture::new("persisted-symbols");
     std::fs::write(

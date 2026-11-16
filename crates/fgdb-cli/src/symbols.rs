@@ -1,11 +1,11 @@
 //! Discover immutable names at the selected revision before query binding.
 //!
-//! Operator declarations extend the invocation's resolver only. Persisting
-//! them is an explicit creation option routed through the native transaction.
+//! Query declarations extend the invocation's resolver only. The schema command
+//! and explicit creation option publish names through the native transaction.
 
 use super::{Failure, Options, execution_failure, open_failure, refusal};
 use fgdb::{Database, DatabaseKeys, PinnedTzdb};
-use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+use fgdb_delta_types::catalog::{CatalogSymbol, CatalogSymbolKind, SymbolCatalog};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{GqlMapArgumentText, GqlParameters, bind_graph_snapshot_selector};
 use fgdb_types::{CommitCx, CommitSeq, QueryCx};
@@ -35,6 +35,110 @@ fn with_declarations(
 
 pub(super) fn declared(options: &Options) -> Result<SymbolCatalog, Failure> {
     with_declarations(options, SymbolCatalog::default())
+}
+
+pub(super) fn has_declarations(options: &Options) -> bool {
+    !options.symbol_names.is_empty()
+        || !options.labels.is_empty()
+        || !options.relations.is_empty()
+        || !options.properties.is_empty()
+}
+
+fn check_expected(options: &Options, actual: CommitSeq) -> Result<(), Failure> {
+    if options.if_current.is_some_and(|expected| expected != actual.0) {
+        return Err(Failure::coded(
+            refusal::Code::Conflict,
+            "the expected frontier is no longer current; no schema registration was executed",
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve and publish the entire declaration set under the native writer's
+/// exclusive ownership. Numeric declarations and automatic names share one
+/// transaction, so a late conflict or exhausted namespace cannot partly land.
+pub(super) async fn register<V: asupersync::fs::Vfs + Clone>(
+    database: &mut Database<V>,
+    cx: &CommitCx,
+    options: &Options,
+) -> Result<CommitSeq, Failure> {
+    check_expected(options, database.frontier().map_err(Failure::io)?)?;
+    let explicit = declared(options)?;
+    if options.symbol_names.is_empty() {
+        return database
+            .register_symbols(cx, &explicit)
+            .await
+            .map_err(execution_failure);
+    }
+    let names: Vec<_> = options
+        .symbol_names
+        .iter()
+        .map(|(kind, name)| (*kind, name.as_str()))
+        .collect();
+    database
+        .register_symbol_names(cx, &explicit, &names)
+        .await
+        .map_err(execution_failure)
+}
+
+/// Catalog inspection uses authenticated metadata, including when graph blocks
+/// are unavailable. The selected catalog and terminal sequence come from the
+/// same immutable view; a historical request never becomes a write basis.
+pub(super) async fn inspect(
+    open_cx: &CommitCx,
+    cx: &QueryCx,
+    options: &Options,
+    keys: DatabaseKeys,
+    robot: bool,
+    out: &mut impl std::io::Write,
+) -> Result<(), Failure> {
+    let view = Database::open_symbol_catalog(open_cx, &options.db, keys)
+        .await
+        .map_err(open_failure)?;
+    check_expected(options, view.frontier())?;
+    let at = options.schema_at.unwrap_or(view.frontier());
+    let catalog = view.symbol_catalog_at(at).map_err(execution_failure)?;
+    render_catalog(&catalog, at, cx, robot, out)
+}
+
+pub(super) fn render_catalog(
+    catalog: &SymbolCatalog,
+    at: CommitSeq,
+    cx: &QueryCx,
+    robot: bool,
+    out: &mut impl std::io::Write,
+) -> Result<(), Failure> {
+    let mut rows = Vec::new();
+    for (symbol, name) in catalog.bindings() {
+        cx.checkpoint().map_err(Failure::io)?;
+        let kind = match symbol.kind() {
+            CatalogSymbolKind::Label => "label",
+            CatalogSymbolKind::Relation => "relation",
+            CatalogSymbolKind::Property => "property",
+        };
+        let ordinal_type = if i64::try_from(symbol.ordinal()).is_ok() {
+            "int"
+        } else {
+            "wideint"
+        };
+        rows.push(if robot {
+            vec![
+                format!(r#"{{"type":"text","value":{}}}"#, super::quoted(kind)),
+                format!(r#"{{"type":"text","value":{}}}"#, super::quoted(name)),
+                format!(r#"{{"type":"{ordinal_type}","value":"{}"}}"#, symbol.ordinal()),
+            ]
+        } else {
+            vec![kind.to_owned(), name.to_owned(), symbol.ordinal().to_string()]
+        });
+    }
+    super::render_rows(
+        &["kind".to_owned(), "name".to_owned(), "id".to_owned()],
+        rows,
+        at.0,
+        "rows",
+        robot,
+        out,
+    )
 }
 
 /// Exact redeclarations are harmless; neither axis of an existing binding

@@ -696,6 +696,56 @@ Ordinary reads share one pinned native session and one cumulative signed allowan
 
 The complete regular UTF-8 file is decoded before credentials or connection. Raw input is limited to 1 MiB, each JSON string to 64 KiB, and the encoded request to the client frame limit. Nested parameters retain the existing depth and value limits. This command accepts the ordinary address, database, token and TLS options; it takes no positional statement, `--param`, argument-file, read-mode or `--consistent-batch` options. Execution is buffered on the server, with incremental delivery to the CLI.
 
+**Durable names without hand-assigned IDs.** The local owner can now register labels,
+relationship types and property keys with name-only declarations, then use those
+names in later processes. This is the automatic-allocation slice of
+`fgdb-7r8sy`; executable qualification is pending as recorded in
+`IMPLEMENTATION_STATUS.md`.
+
+```bash
+# Use the owner-only fgdb.keys file described above.
+fgdb create --db mydb.fgdbdir --key-file fgdb.keys --persist-bindings \
+  --label Person --relation KNOWS --property name
+fgdb write --db mydb.fgdbdir --key-file fgdb.keys \
+  "CREATE (:Person {name: 'Ada'})"
+
+# Inspect the durable catalog without loading graph payloads.
+fgdb schema --db mydb.fgdbdir --key-file fgdb.keys
+
+# Extend the existing catalog atomically at the expected revision.
+# Name-only declarations and explicit IDs can share one registration.
+fgdb schema --db mydb.fgdbdir --key-file fgdb.keys --if-current 2 \
+  --property score --label Team=100
+
+# Inspect exactly the names visible at an earlier committed revision.
+fgdb schema --db mydb.fgdbdir --key-file fgdb.keys --as-of 1
+```
+
+`schema` returns `kind`, `name` and `id` columns in canonical namespace/name
+order. Robot output reuses the existing columns/row/result contract; its terminal
+`seq` names the selected or committed revision. IDs are decimal strings with
+type `int` through `i64::MAX` and `wideint` above that range, preserving all
+64 bits. With no declarations, the command reads metadata only. Historical
+inspection cannot combine with registration flags or `--if-current`.
+
+Every registration combines all explicit and automatic declarations into one
+existing schema transaction. Exact redeclarations retain their IDs and do not
+append a commit. A conflicting name/ID, exhausted namespace, or stale frontier
+refuses the entire request. `--bindings-file` can supply additional explicit
+bindings. Name-only creation requires `--persist-bindings`; numeric declarations
+on ordinary query/write commands remain local to that invocation.
+
+New automatic IDs are allocated above every numeric symbol used in authenticated
+retained history, including symbols removed from the current graph and numeric
+writes made after an earlier registration. New allocation therefore traverses
+retained history and refuses if origin history is unavailable or retired.
+Existing-name no-ops do not need that traversal. The embedded equivalent is
+`Database::register_symbol_names(cx, explicit_bindings, names)`; read
+`Database::symbol_catalog()` after success to obtain the committed IDs.
+This is a privileged local/embedded administration surface. General schema DDL,
+constraints, automatic interning inside arbitrary graph writes, and remote
+schema mutation remain separate work.
+
 **Composable catalog discovery.** `CALL db.labels()`, `CALL db.relationshipTypes()` and `CALL db.propertyKeys()` enumerate the host's declared symbol bindings in name order, including declarations not yet used by graph data. Their default columns are `label`, `relationshipType` and `propertyKey`. Bare calls, `YIELD *`, aliases, filters, joins, aggregation and parameterized prepared reads use the native query pipeline in the embedded API, CLI, FGP, HTTP and Bolt:
 
 ```cypher
