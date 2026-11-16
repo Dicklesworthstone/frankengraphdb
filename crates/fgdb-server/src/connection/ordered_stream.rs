@@ -4,7 +4,7 @@
 
 use super::source_stream::{Chunks, SourceStatement};
 use super::*;
-use crate::execute::ordered::{ordered_generation, read_ordered_session};
+use crate::execute::ordered::{ordered_generation, read_ordered_session_for};
 use core::future::Future;
 use fgdb_types::PurposeContexts;
 
@@ -151,6 +151,10 @@ impl Lane {
             }
         };
         self.send_generation = Some(generation.clone());
+        let text = match statement {
+            SourceStatement::Prepared(prepared) => prepared.statement(),
+            SourceStatement::Text(text) => text,
+        };
         let mut window = FlowWindow::new(self.initial_window, self.maximum_window)
             .map_err(|_| Stop::Transport)?;
         // Admission owns its one filesystem future across PING/credit races
@@ -164,7 +168,14 @@ impl Lane {
                 stream,
                 request,
                 binding,
-                read_ordered_session(cx, db, token, definition, generation),
+                read_ordered_session_for(
+                    cx,
+                    db,
+                    token,
+                    definition,
+                    generation,
+                    (text, &parameters),
+                ),
             )
             .await?
         {

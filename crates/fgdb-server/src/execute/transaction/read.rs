@@ -2,7 +2,7 @@
 //! lock. The transport owns delivery and recovery; native owns the one permit.
 
 use super::{Answer, Created, Refusal, finished};
-use crate::execute::{convert, edge_upsert_output, query_refusal};
+use crate::execute::{authorize_read, convert, edge_upsert_output, query_refusal, symbols_at};
 use crate::recovery::Generation;
 use crate::{Served, TRUNK, unix_millis};
 use asupersync::Cx;
@@ -24,17 +24,25 @@ impl<'s> NativeReadTransaction<'s> {
         db: &'s Served,
         token: &CapabilityToken,
     ) -> Result<Self, Refusal> {
+        authorize_read(db, token)?;
         let _operation = db.db.enter().map_err(Refusal::from)?;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let query = crate::query_cx(&contexts);
         let (view, generation) = db.db.read_view(cx).await.map_err(Refusal::from)?;
+        authorize_read(db, token)?;
+        let symbols = symbols_at(&view, &db.symbols, &[]);
+        authorize_read(db, token)?;
+        query
+            .checkpoint()
+            .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+        generation.check().map_err(Refusal::from)?;
         let owner = view
             .begin_authorized_read(
                 &query,
                 &db.authority,
                 token,
                 TRUNK,
-                db.symbols.clone(),
+                symbols?,
                 db.query_policy,
                 unix_millis as fn() -> u64,
             )

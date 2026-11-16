@@ -27,6 +27,7 @@ enum WriteRequest {
     Program(Execute),
     Returning {
         definition: Returning,
+        symbols: crate::Symbols,
         // RUN's definition/binding debit narrows the execution allowance.
         // The native owner still checks live authority at consumption.
         token: CapabilityToken,
@@ -45,10 +46,7 @@ pub(super) enum PendingWrite {
 const MAX_RETURN_BYTES: usize = 64 * 1024 * 1024;
 
 fn output_budget() -> Refusal {
-    Refusal::new(
-        ErrorCode::Budget,
-        "Bolt result exceeds the output limit",
-    )
+    Refusal::new(ErrorCode::Budget, "Bolt result exceeds the output limit")
 }
 
 fn output_work(
@@ -231,7 +229,9 @@ pub(super) fn collect_read(
         max_frame_len,
         &mut |units| work(units).map_err(query_refusal),
         &mut |element, kind, catalog| {
-            metadata.metadata(element, kind, catalog).map_err(query_refusal)
+            metadata
+                .metadata(element, kind, catalog)
+                .map_err(query_refusal)
         },
         catalog,
     )
@@ -353,19 +353,15 @@ fn write_options(extra: &Map, database: &str) -> Result<CommitSeq, Failure> {
 /// The old keyword detector is only a hint, never execution authority. A
 /// valid native read wins even when an alias, label or comment spells CREATE.
 /// Branch selectors use the same native owner as normal read preparation.
-fn is_native_read(db: &Served, text: &str, parameters: &GqlParameters) -> bool {
+fn is_native_read(symbols: &crate::Symbols, text: &str, parameters: &GqlParameters) -> bool {
     let Ok(selector) = PreparedGraphBranchText::prepare(text) else {
         return false;
     };
     let Ok(selected) = selector.bind_parameters(parameters) else {
         return false;
     };
-    PreparedNativeRead::prepare(
-        selected.statement(),
-        selected.parameters(),
-        db.symbols.clone(),
-    )
-    .is_ok()
+    PreparedNativeRead::prepare(selected.statement(), selected.parameters(), symbols.clone())
+        .is_ok()
 }
 
 /// Admission probes native definitions, not expanded rows. The resolver
@@ -373,18 +369,17 @@ fn is_native_read(db: &Served, text: &str, parameters: &GqlParameters) -> bool {
 /// binder runs again at consumption, under its cooperative execution budget.
 fn is_native_write(
     db: &Served,
+    symbols: &crate::Symbols,
     text: &str,
     parameters: &GqlParameters,
     scope: &PlannerPredicates,
 ) -> bool {
     let resolve = |kind, name: &str| {
-        db.symbols
-            .resolve(kind, name)
-            .filter(|symbol| match symbol {
-                GraphSymbol::Label(label) => scope.allows_label(*label),
-                GraphSymbol::Relation(relation) => scope.allows_relation(*relation),
-                GraphSymbol::Property(property) => scope.allows_property(*property),
-            })
+        symbols.resolve(kind, name).filter(|symbol| match symbol {
+            GraphSymbol::Label(label) => scope.allows_label(*label),
+            GraphSymbol::Relation(relation) => scope.allows_relation(*relation),
+            GraphSymbol::Property(property) => scope.allows_property(*property),
+        })
     };
     if PreparedGraphWriteChainText::is_chain(text).unwrap_or(false) {
         // Preparing the definition does not expand parameter rows or allocate
@@ -411,11 +406,12 @@ fn is_native_write(
 }
 
 impl<'s> Connection<'s> {
-    /// No graph access, identity allocation or transaction opening occurs here.
+    /// Catalog discovery pins only the published generation. No graph traversal,
+    /// identity allocation or transaction opening occurs here.
     /// RETURN binds its immutable native definition to obtain the output schema;
     /// its preparation debit follows it into the checked execution owner. Only
     /// PULL/DISCARD evaluates the statement or publishes its admitted effects.
-    pub(super) fn queue_autocommit_write(
+    pub(super) async fn queue_autocommit_write(
         &mut self,
         cx: &Cx,
         query: &str,
@@ -429,14 +425,29 @@ impl<'s> Connection<'s> {
         let (name, db) = self.database(extra)?;
         self.output_database = Some(db);
         let token = self.token.as_ref().expect("authenticated");
+        db.authority
+            .verify_at(token, crate::TRUNK, crate::unix_millis())
+            .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
+        let (view, generation) = db
+            .db
+            .read_view(cx)
+            .await
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        self.output_generation = Some(generation.clone());
+        // Waiting for publication cannot extend this credential's lifetime.
         let capability = db
             .authority
             .verify_at(token, crate::TRUNK, crate::unix_millis())
             .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
-        if is_native_read(db, query, parameters) {
+        let symbols =
+            crate::execute::symbols_at(&view, &db.symbols, &[]).map_err(Failure::from_refusal)?;
+        generation
+            .check()
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        if is_native_read(&symbols, query, parameters) {
             return Ok(None);
         }
-        let program = is_native_write(db, query, parameters, capability.predicates());
+        let program = is_native_write(db, &symbols, query, parameters, capability.predicates());
         let minimum_seq = write_options(extra, &name)?;
         if !matches!(
             capability.predicates().rights(),
@@ -454,10 +465,6 @@ impl<'s> Connection<'s> {
         statement
             .encode()
             .map_err(|error| Failure::invalid(error.to_string()))?;
-        let generation = db
-            .db
-            .generation()
-            .map_err(|error| Failure::from_refusal(error.into()))?;
         let (request, columns) = if program {
             (WriteRequest::Program(statement), Vec::new())
         } else {
@@ -476,7 +483,7 @@ impl<'s> Connection<'s> {
             crate::execute::admit_write_parameters(&mut permit, parameters)
                 .map_err(Failure::from_refusal)?;
             let template = query_cx.with_restriction(|| {
-                ReturningTemplate::prepare(db, query, parameters)
+                ReturningTemplate::prepare(db, &symbols, query, parameters)
                     .map(|template| template.filter(ReturningTemplate::returns_rows))
             });
             let definition = template.and_then(|template| {
@@ -502,7 +509,14 @@ impl<'s> Connection<'s> {
             let token = crate::execute::write_execution_token(&permit, token)
                 .map_err(Failure::from_refusal)?;
             let columns = definition.columns().to_vec();
-            (WriteRequest::Returning { definition, token }, columns)
+            (
+                WriteRequest::Returning {
+                    definition,
+                    symbols,
+                    token,
+                },
+                columns,
+            )
         };
         generation
             .check()
@@ -558,11 +572,17 @@ impl<'s> Connection<'s> {
                     created: answer.created,
                 }
             }
-            WriteRequest::Returning { definition, token } => {
+            WriteRequest::Returning {
+                definition,
+                symbols,
+                token,
+            } => {
+                let output_symbols = symbols.clone();
                 let execution: crate::execute::Execution<'_, VecDeque<Vec<Value>>> =
                     Box::pin(crate::execute::write_returning_checked(
                         cx,
                         pending.db,
+                        &symbols,
                         &token,
                         definition,
                         Some((&pending.generation, deferred.minimum_seq)),
@@ -572,7 +592,7 @@ impl<'s> Connection<'s> {
                                 max_frame_len,
                                 work,
                                 metadata,
-                                pending.db.symbols.borrowed_reverse_catalog(),
+                                output_symbols.borrowed_reverse_catalog(),
                             )
                         },
                     ));

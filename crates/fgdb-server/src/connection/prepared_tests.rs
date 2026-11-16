@@ -1018,6 +1018,7 @@ fn prepared_returning_binding_and_native_execution_share_one_signed_work_ceiling
             match crate::execute::write_returning_checked(
                 &root,
                 db,
+                &db.symbols,
                 &scoped,
                 bound,
                 None,

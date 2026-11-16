@@ -748,7 +748,7 @@ fn difference_response(answer: &DifferenceAnswer) -> Response {
 
 /// `GET /v1/databases/<name>/schema`: the label, relation and property
 /// names this token may see.
-fn schema_response<'s>(
+async fn schema_response<'s>(
     cx: &Cx,
     server: &'s Server,
     name: &str,
@@ -783,14 +783,17 @@ fn schema_response<'s>(
         Ok(generation) => generation,
         Err(error) => return refusal_response(error.code(), error.message()),
     };
-    match crate::execute::schema(db, &token) {
+    // Catalog acquisition can now suspend. Protect a catalog-dependent
+    // refusal with the same generation fence as the successful name list.
+    if !output.pin_generation(generation.clone()) {
+        return refusal_response(ErrorCode::Execution, "connection unavailable");
+    }
+    let result = crate::execute::schema(cx, db, &token).await;
+    if let Err(error) = generation.check() {
+        return refusal_response(error.code(), error.message());
+    }
+    match result {
         Ok(schema) => {
-            if let Err(error) = generation.check() {
-                return refusal_response(error.code(), error.message());
-            }
-            if !output.pin_generation(generation) {
-                return refusal_response(ErrorCode::Execution, "connection unavailable");
-            }
             let list = |names: &[String]| {
                 names
                     .iter()
@@ -950,7 +953,7 @@ pub(crate) async fn respond<'s>(
         );
     };
     if verb == "schema" {
-        return schema_response(cx, server, name, &request, output);
+        return schema_response(cx, server, name, &request, output).await;
     }
     if matches!(verb, "compact" | "scrub") {
         return maintenance_response(cx, server, name, verb, &request, output).await;

@@ -7,7 +7,7 @@ use super::{
     Answer, Created, Refusal, authorize_write, convert, edge_upsert_output, write_refusal,
 };
 use crate::recovery::Generation;
-use crate::{Served, TRUNK, unix_millis};
+use crate::{Served, Symbols, TRUNK, unix_millis};
 use asupersync::Cx;
 use fgdb::AuthorizedWriteTransaction;
 use fgdb_gql::{
@@ -32,6 +32,7 @@ pub(crate) struct NativeWriteTransaction<'s> {
     owner: Option<Box<AuthorizedWriteTransaction<'s, fn() -> u64>>>,
     generation: Generation,
     basis: CommitSeq,
+    symbols: Symbols,
 }
 
 impl<'s> NativeWriteTransaction<'s> {
@@ -60,6 +61,7 @@ impl<'s> NativeWriteTransaction<'s> {
             )
             .map_err(|error| write_refusal(&error))?;
         let basis = owner.basis();
+        let symbols = super::write_symbols(db, token, &guard, None)?;
         generation.check().map_err(Refusal::from)?;
         drop(guard);
         Ok(Self {
@@ -68,6 +70,7 @@ impl<'s> NativeWriteTransaction<'s> {
             owner: Some(Box::new(owner)),
             generation,
             basis,
+            symbols,
         })
     }
 
@@ -127,6 +130,7 @@ impl<'s> NativeWriteTransaction<'s> {
                 &parameters,
                 |parameters, scope, work| match prepare_transaction_statement(
                     self.db,
+                    &self.symbols,
                     &request.statement,
                     parameters,
                     scope,
@@ -445,12 +449,13 @@ impl GraphSymbolResolver for &TransactionCatalog<'_> {
 /// trusted once-per-statement clock; no adapter clock is captured again.
 pub(crate) fn prepare_transaction_statement(
     db: &Served,
+    symbols: &Symbols,
     text: &str,
     parameters: &GqlParameters,
     scope: &fgdb_warden::PlannerPredicates,
     work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
 ) -> Result<TransactionStatement, Refusal> {
-    let catalog = TransactionCatalog::new(&db.symbols, scope, work);
+    let catalog = TransactionCatalog::new(symbols, scope, work);
     let charge = |units| catalog.charge(units).map_err(|error| write_refusal(&error));
     charge(1)?;
     let lowered_read = GqlMapArgumentText::lower_fields(text, parameters);
@@ -651,6 +656,47 @@ mod tests {
     async fn state(cx: &Cx, db: &Served) -> (CommitSeq, usize) {
         let guard = db.db.read(cx).await.unwrap();
         (guard.frontier().unwrap(), guard.vertices().unwrap().len())
+    }
+
+    #[test]
+    fn native_read_owner_keeps_the_begin_catalog_after_registration() {
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+
+        let ((), report) = run_async_under_lab(0x7a8c_0032, |cx| async move {
+            let (server, token, _) = served(&cx, "explicit-read-catalog-pin").await;
+            let db = &server.databases["test"];
+            let mut pinned = accepted(NativeReadTransaction::begin(&cx, db, &token).await);
+            assert_eq!(pinned.basis(), CommitSeq(0));
+            let contexts = PurposeContexts::narrow_runtime_root(&cx);
+            let mut catalog = SymbolCatalog::default();
+            catalog
+                .bind("score", CatalogSymbol::Property(PropertyKeyId(11)))
+                .unwrap();
+            db.db
+                .write(&cx)
+                .await
+                .unwrap()
+                .register_symbols(&contexts.commit(), &catalog)
+                .await
+                .unwrap();
+            let statement = request(ExecuteMode::Read, "CALL db.propertyKeys()");
+            let old = accepted(pinned.execute_framed(&cx, &statement, 4096));
+            assert!(
+                old.rows.is_empty(),
+                "names registered after BEGIN are not visible"
+            );
+            assert_eq!(old.outcome, Outcome::Rows { seq: 0 });
+            accepted(pinned.commit(&cx));
+
+            let mut current = accepted(NativeReadTransaction::begin(&cx, db, &token).await);
+            let rows = accepted(current.execute_framed(&cx, &statement, 4096));
+            assert_eq!(rows.rows, [vec![WireValue::Text("score".to_owned())]]);
+            assert_eq!(rows.outcome, Outcome::Rows { seq: 1 });
+            accepted(current.commit(&cx));
+            server.join_database_workers(&cx).await;
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

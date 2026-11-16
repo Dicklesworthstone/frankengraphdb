@@ -28,6 +28,104 @@ fn refused<T>(result: Result<T, Refusal>, expected: ErrorCode) {
 }
 
 #[test]
+fn subscriptions_bind_durable_names_at_registration_and_refuse_later_schema_changes() {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_types::{CanonicalScalar, CommitSeq, VId};
+
+    let ((), report) = run_async_under_lab(0x79a0_ca06, |root| async move {
+        let (server, token, _) = served(&root, "subscription-durable-catalog").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        {
+            let mut names = SymbolCatalog::default();
+            names
+                .bind_all([
+                    ("Person", CatalogSymbol::Label(LabelId(1))),
+                    ("score", CatalogSymbol::Property(PropertyKeyId(1))),
+                ])
+                .unwrap();
+            let mut writer = db.db.write(&root).await.unwrap();
+            writer
+                .register_symbols(&contexts.commit(), &names)
+                .await
+                .unwrap();
+            let mut seed = fgdb::WriteBatch::new(RelationId(1));
+            seed.create_vertex(
+                VId(1),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(42))],
+            );
+            assert_eq!(
+                writer.write(&contexts.commit(), seed).await.unwrap(),
+                CommitSeq(2)
+            );
+        }
+        let statement = request("SUBSCRIBE TO MATCH (n:Person) RETURN n.score AS score");
+        let mut selected = success(subscribe(&root, db, &token, &statement).await);
+        let baseline = success(poll(&root, db, &token, &mut selected).await).unwrap();
+        assert_eq!(selected.columns, ["score"]);
+        assert!(baseline.batch.is_snapshot());
+        assert_eq!(baseline.entries, [(1, vec![WireValue::Int(42)])]);
+        selected
+            .consumer
+            .acknowledge(baseline.batch.receipt())
+            .unwrap();
+        {
+            let mut changed = fgdb::WriteBatch::new(RelationId(1));
+            changed.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), changed)
+                .await
+                .unwrap();
+        }
+        let delta = success(poll(&root, db, &token, &mut selected).await).unwrap();
+        assert!(!delta.batch.is_snapshot());
+        assert_eq!(delta.entries.len(), 2);
+        assert!(delta.entries.contains(&(-1, vec![WireValue::Int(42)])));
+        assert!(delta.entries.contains(&(1, vec![WireValue::Int(7)])));
+        selected
+            .consumer
+            .acknowledge(delta.batch.receipt())
+            .unwrap();
+        {
+            let mut names = SymbolCatalog::default();
+            names
+                .bind("Later", CatalogSymbol::Label(LabelId(8)))
+                .unwrap();
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .register_symbols(&contexts.commit(), &names)
+                .await
+                .unwrap();
+        }
+        refused(
+            poll(&root, db, &token, &mut selected).await,
+            ErrorCode::Execution,
+        );
+        // Only an explicit new registration accepts the current schema epoch.
+        // The existing subscription never silently replaces its definition.
+        let mut replacement = success(subscribe(&root, db, &token, &statement).await);
+        let fresh = success(poll(&root, db, &token, &mut replacement).await).unwrap();
+        assert!(fresh.batch.is_snapshot());
+        assert_eq!(fresh.entries, [(1, vec![WireValue::Int(7)])]);
+        replacement
+            .consumer
+            .acknowledge(fresh.batch.receipt())
+            .unwrap();
+        drop(selected);
+        drop(replacement);
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn native_phase_reservations_share_work_and_keep_rows_at_final_delivery() {
     let policy = GqlQueryPolicy::new(100_000, 100_000, 100_000, 100_000);
     let limits = QueryLimits {

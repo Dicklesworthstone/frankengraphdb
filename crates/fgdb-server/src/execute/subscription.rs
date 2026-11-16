@@ -438,9 +438,25 @@ pub(crate) async fn subscribe(
         (statement.statement.as_str(), parameters.as_ref()),
         |(lowered, derived)| (lowered.text(), derived),
     );
-    let prepared =
-        PreparedNativeRead::prepare_subscription(&query, text, parameters, db.symbols.clone())
-            .map_err(subscribe_refusal)?;
+    // Name binding and registration use the same guarded native publication.
+    // The resulting circuit keeps this catalog; a later schema transition
+    // follows the native rebuild/refusal contract instead of rebinding it.
+    let symbols = guard
+        .symbol_catalog()
+        .map_err(|error| query_refusal(QueryError::Read(error)))
+        .and_then(|catalog| {
+            db.symbols.with_catalog(catalog).map_err(|_| {
+                Refusal::new(
+                    ErrorCode::Conflict,
+                    "configured symbol bindings conflict with the selected catalog",
+                )
+            })
+        });
+    permit.checkpoint_at(unix_millis()).map_err(authorization)?;
+    checkpoint(&query)?;
+    generation.check().map_err(Refusal::from)?;
+    let prepared = PreparedNativeRead::prepare_subscription(&query, text, parameters, symbols?)
+        .map_err(subscribe_refusal)?;
     let (nodes, source_width) = prepared
         .subscription_footprint_authorized(&query, parameters, &scope)
         .map_err(native_refusal)?;

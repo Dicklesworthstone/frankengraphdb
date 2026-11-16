@@ -8,6 +8,200 @@ fn accepted<T>(result: Result<T, Refusal>) -> T {
 }
 
 #[test]
+fn ordered_reads_bind_durable_names_at_the_selected_cut_and_fence_stale_preparations() {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_protocol::body::{Prepare, PrepareMode};
+    use fgdb_types::{CanonicalScalar, CommitSeq, VId};
+
+    let ((), report) = run_async_under_lab(0x79a0_ca10, |root| async move {
+        let (mut server, token, path) = served(&root, "ordered-durable-catalog").await;
+        let directory = path.join("ordered-scratch");
+        asupersync::fs::create_dir(&directory).await.unwrap();
+        let mut config = crate::OrderedReadConfig::new(&directory);
+        config.max_concurrent = 1;
+        config.sort.run_rows = 2;
+        config.sort.page_bytes = 31;
+        config.sort.max_sort_work = 1_000_000;
+        Arc::get_mut(server.databases.get_mut("test").unwrap())
+            .unwrap()
+            .ordered_reads = Some(
+            crate::ordered::OrderedReads::open(&root, config)
+                .await
+                .unwrap(),
+        );
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = contexts.query();
+        {
+            let mut writer = db.db.write(&root).await.unwrap();
+            let mut catalog = SymbolCatalog::default();
+            catalog
+                .bind_all([
+                    ("Person", CatalogSymbol::Label(LabelId(1))),
+                    ("score", CatalogSymbol::Property(PropertyKeyId(1))),
+                ])
+                .unwrap();
+            assert_eq!(
+                writer
+                    .register_symbols(&contexts.commit(), &catalog)
+                    .await
+                    .unwrap(),
+                CommitSeq(1)
+            );
+            let mut graph = fgdb::WriteBatch::new(RelationId(1));
+            for (id, score) in [(1, 30), (2, 10), (3, 20)] {
+                graph.create_vertex(
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(score))],
+                );
+            }
+            assert_eq!(
+                writer.write(&contexts.commit(), graph).await.unwrap(),
+                CommitSeq(2)
+            );
+        }
+        let historical_text =
+            "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.score AS value ORDER BY value";
+        let historical_arguments = vec![("at".to_owned(), WireValue::Count(2))];
+        let prepared = accepted(
+            crate::execute::prepare_read(
+                &root,
+                db,
+                &token,
+                &Prepare {
+                    mode: PrepareMode::Read,
+                    statement: historical_text.into(),
+                    parameters: historical_arguments.clone(),
+                },
+            )
+            .await,
+        );
+        {
+            let mut writer = db.db.write(&root).await.unwrap();
+            let mut later = SymbolCatalog::default();
+            later
+                .bind_all([
+                    ("Later", CatalogSymbol::Label(LabelId(9))),
+                    ("later", CatalogSymbol::Property(PropertyKeyId(9))),
+                ])
+                .unwrap();
+            assert_eq!(
+                writer
+                    .register_symbols(&contexts.commit(), &later)
+                    .await
+                    .unwrap(),
+                CommitSeq(3)
+            );
+            let mut graph = fgdb::WriteBatch::new(RelationId(1));
+            for (id, score) in [(4, 60), (5, 40), (6, 50)] {
+                graph.create_vertex(
+                    VId(id),
+                    vec![LabelId(9)],
+                    vec![(PropertyKeyId(9), CanonicalScalar::Int(score))],
+                );
+            }
+            assert_eq!(
+                writer.write(&contexts.commit(), graph).await.unwrap(),
+                CommitSeq(4)
+            );
+        }
+        let generation = accepted(ordered_generation(db, &token));
+        let historical_parameters =
+            crate::convert::parameters(&historical_arguments, None).unwrap();
+        {
+            let (mut session, template) = accepted(
+                read_ordered_session_for(
+                    &root,
+                    db,
+                    &token,
+                    Some(&prepared),
+                    generation.clone(),
+                    (historical_text, &historical_parameters),
+                )
+                .await,
+            );
+            let template = template.expect("the cached historical template is attached");
+            let mut cursor = accepted(
+                accepted(session.start(&query, &template, &historical_parameters))
+                    .finish()
+                    .await,
+            );
+            assert_eq!(cursor.snapshot_seq(), 2);
+            for expected in [10, 20, 30] {
+                assert_eq!(
+                    accepted(cursor.next().await),
+                    Some(vec![WireValue::Int(expected)])
+                );
+            }
+            assert!(accepted(cursor.next().await).is_none());
+            assert!(cursor.exhausted());
+        }
+        let empty = fgdb_gql::GqlParameters::new();
+        {
+            let missing = "MATCH (n:Later) FOR SYSTEM_TIME AS OF SEQ 2 RETURN n.later AS value ORDER BY value";
+            let (mut session, _) = accepted(
+                read_ordered_session_for(
+                    &root,
+                    db,
+                    &token,
+                    None,
+                    generation.clone(),
+                    (missing, &empty),
+                )
+                .await,
+            );
+            let refusal = session
+                .prepare(&query, missing, &empty)
+                .err()
+                .expect("later names cannot bind against an earlier catalog");
+            assert_eq!(refusal.code, ErrorCode::Statement);
+        }
+        let newer =
+            crate::convert::parameters(&[("at".into(), WireValue::Count(4))], None).unwrap();
+        let stale = read_ordered_session_for(
+            &root,
+            db,
+            &token,
+            Some(&prepared),
+            generation.clone(),
+            (historical_text, &newer),
+        )
+        .await
+        .err()
+        .expect("rebinding a prepared cut must recheck its name map");
+        assert_eq!(stale.code, ErrorCode::Conflict);
+        // A refused prepared map releases its sole scratch lease. A fresh
+        // request discovers the current names and performs a new native sort.
+        {
+            let current = "MATCH (n:Later) RETURN n.later AS value ORDER BY value";
+            let (mut session, _) = accepted(
+                read_ordered_session_for(&root, db, &token, None, generation, (current, &empty))
+                    .await,
+            );
+            let template = accepted(session.prepare(&query, current, &empty));
+            let mut cursor = accepted(
+                accepted(session.start(&query, &template, &empty))
+                    .finish()
+                    .await,
+            );
+            assert_eq!(cursor.snapshot_seq(), 4);
+            for expected in [40, 50, 60] {
+                assert_eq!(
+                    accepted(cursor.next().await),
+                    Some(vec![WireValue::Int(expected)])
+                );
+            }
+            assert!(accepted(cursor.next().await).is_none());
+            assert!(cursor.exhausted());
+        }
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn ordered_admission_is_authenticated_bounded_and_old_cursors_fail_after_recovery() {
     let ((), report) = run_async_under_lab(0x79a0_0602, |root| async move {
         let (mut server, token, path) = served(&root, "ordered-recovery").await;

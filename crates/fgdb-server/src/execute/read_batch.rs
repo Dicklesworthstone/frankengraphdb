@@ -161,9 +161,30 @@ async fn read_batch_inner(
     }
     let results = match input {
         ReadBatchInput::Prepared(prepared, _) => {
+            let cuts = parameters
+                .iter()
+                .map(|(_, parameters)| {
+                    admission
+                        .charge_work_at(unix_millis(), parameters.canonical_byte_len() as u64)
+                        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+                    query
+                        .checkpoint()
+                        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+                    let cut = query.with_restriction(|| prepared.catalog_cut(parameters));
+                    admission
+                        .checkpoint_at(unix_millis())
+                        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+                    query
+                        .checkpoint()
+                        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+                    generation.check().map_err(Refusal::from)?;
+                    prepared.generation.check().map_err(Refusal::from)?;
+                    cut
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let (mut session, template) = ordered::in_generation(
                 &prepared.generation,
-                read_prepared_session(cx, db, token, prepared),
+                prepared::read_prepared_session_at(cx, db, token, prepared, &cuts),
             )
             .await?;
             let _operation = prepared.generation.enter().map_err(Refusal::from)?;
@@ -176,13 +197,14 @@ async fn read_batch_inner(
                 .execute_batch_with_snapshots(&query, &statements)
         }
         ReadBatchInput::Parameterized(_) | ReadBatchInput::Statements(_) => {
-            let (mut session, _) =
-                ordered::in_generation(&generation, read_session(cx, db, token)).await?;
-            let _operation = generation.enter().map_err(Refusal::from)?;
             let statements = parameters
                 .iter()
                 .map(|(text, parameters)| (*text, parameters))
                 .collect::<Vec<_>>();
+            let (mut session, _) =
+                ordered::in_generation(&generation, read_session_for(cx, db, token, &statements))
+                    .await?;
+            let _operation = generation.enter().map_err(Refusal::from)?;
             session
                 .native
                 .query_batch_with_snapshots(&query, &statements)

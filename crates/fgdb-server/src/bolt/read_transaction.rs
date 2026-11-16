@@ -10,6 +10,7 @@ pub(super) async fn begin<'s>(
     minimum: CommitSeq,
     output_generation: &mut Option<Generation>,
 ) -> Result<(TransactionSession<'s>, CommitSeq), Failure> {
+    crate::execute::authorize_read(db, token).map_err(Failure::from_refusal)?;
     let _operation = db
         .db
         .enter()
@@ -23,13 +24,23 @@ pub(super) async fn begin<'s>(
     // A bookmark refusal depends on the selected view's frontier. Its FAILURE
     // must retain this exact fence even when no transaction owner is returned.
     *output_generation = Some(generation.clone());
+    crate::execute::authorize_read(db, token).map_err(Failure::from_refusal)?;
+    let symbols = crate::execute::symbols_at(&view, &db.symbols, &[]);
+    crate::execute::authorize_read(db, token).map_err(Failure::from_refusal)?;
+    cx.checkpoint().map_err(|error| {
+        Failure::from_refusal(Refusal::new(ErrorCode::Cancelled, error.to_string()))
+    })?;
+    generation
+        .check()
+        .map_err(|error| Failure::from_refusal(error.into()))?;
+    let symbols = symbols.map_err(Failure::from_refusal)?;
     let owner = view
         .begin_authorized_read(
             &crate::query_cx(&contexts),
             &db.authority,
             token,
             crate::TRUNK,
-            db.symbols.clone(),
+            symbols.clone(),
             db.query_policy,
             crate::unix_millis as fn() -> u64,
         )
@@ -43,6 +54,7 @@ pub(super) async fn begin<'s>(
         TransactionSession::Read {
             owner: Box::new(owner),
             generation,
+            symbols,
         },
         basis,
     ))
@@ -62,7 +74,7 @@ impl<'s> Connection<'s> {
         let _operation = generation
             .enter()
             .map_err(|error| Failure::from_refusal(error.into()))?;
-        let TransactionSession::Read { owner, .. } = &mut transaction.session else {
+        let TransactionSession::Read { owner, symbols, .. } = &mut transaction.session else {
             unreachable!("read owner selected");
         };
         if owner.completed_statements() >= db.max_statements as u64 {
@@ -94,7 +106,7 @@ impl<'s> Connection<'s> {
                     max_frame_len,
                     work,
                     metadata,
-                    db.symbols.borrowed_reverse_catalog(),
+                    symbols.borrowed_reverse_catalog(),
                 )
                 .map_err(Failure::from_refusal)?;
                 work(transaction.name.len().div_ceil(64) as u64 + 1)

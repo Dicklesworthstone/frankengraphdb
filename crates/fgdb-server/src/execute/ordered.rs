@@ -82,12 +82,47 @@ pub(crate) fn ordered_generation(
     db.db.generation().map_err(Refusal::from)
 }
 
+#[cfg(test)]
 pub(crate) async fn read_ordered_session<'a>(
     cx: &Cx,
     db: &'a Served,
     token: &CapabilityToken,
     prepared: Option<&PreparedRead>,
     generation: Generation,
+) -> Result<(OrderedSession<'a>, Option<fgdb::AuthorizedPreparedRead>), Refusal> {
+    read_ordered_session_at(cx, db, token, prepared, generation, &[]).await
+}
+
+pub(crate) async fn read_ordered_session_at<'a>(
+    cx: &Cx,
+    db: &'a Served,
+    token: &CapabilityToken,
+    prepared: Option<&PreparedRead>,
+    generation: Generation,
+    cuts: &[Option<fgdb_types::CommitSeq>],
+) -> Result<(OrderedSession<'a>, Option<fgdb::AuthorizedPreparedRead>), Refusal> {
+    read_ordered_session_selected(cx, db, token, prepared, generation, cuts, None).await
+}
+
+pub(crate) async fn read_ordered_session_for<'a>(
+    cx: &Cx,
+    db: &'a Served,
+    token: &CapabilityToken,
+    prepared: Option<&PreparedRead>,
+    generation: Generation,
+    statement: (&str, &fgdb_gql::GqlParameters),
+) -> Result<(OrderedSession<'a>, Option<fgdb::AuthorizedPreparedRead>), Refusal> {
+    read_ordered_session_selected(cx, db, token, prepared, generation, &[], Some(statement)).await
+}
+
+async fn read_ordered_session_selected<'a>(
+    cx: &Cx,
+    db: &'a Served,
+    token: &CapabilityToken,
+    prepared: Option<&PreparedRead>,
+    generation: Generation,
+    cuts: &[Option<fgdb_types::CommitSeq>],
+    statement: Option<(&str, &fgdb_gql::GqlParameters)>,
 ) -> Result<(OrderedSession<'a>, Option<fgdb::AuthorizedPreparedRead>), Refusal> {
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = crate::query_cx(&contexts);
@@ -105,6 +140,43 @@ pub(crate) async fn read_ordered_session<'a>(
     if let Some(prepared) = prepared {
         prepared.generation.check().map_err(Refusal::from)?;
     }
+    // Snapshot selection is admitted before lowering or parsing. The native
+    // session still owns the complete execution bill after scratch admission.
+    let selected_cuts;
+    let cuts: &[Option<fgdb_types::CommitSeq>] = if let Some((text, parameters)) = statement {
+        let source_bytes = if prepared.is_some() {
+            0
+        } else {
+            text.len() as u64
+        };
+        admission
+            .charge_work_at(
+                unix_millis(),
+                source_bytes.saturating_add(parameters.canonical_byte_len() as u64),
+            )
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        query
+            .checkpoint()
+            .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+        let cut = query.with_restriction(|| match prepared {
+            Some(prepared) => prepared.catalog_cut(parameters),
+            None => statement_catalog_cut(text, parameters),
+        });
+        admission
+            .checkpoint_at(unix_millis())
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        query
+            .checkpoint()
+            .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+        generation.check().map_err(Refusal::from)?;
+        if let Some(prepared) = prepared {
+            prepared.generation.check().map_err(Refusal::from)?;
+        }
+        selected_cuts = [cut?];
+        &selected_cuts
+    } else {
+        cuts
+    };
     let host = db.ordered_reads.as_ref().ok_or_else(|| {
         Refusal::new(
             ErrorCode::Statement,
@@ -135,6 +207,24 @@ pub(crate) async fn read_ordered_session<'a>(
         in_generation(&generation, admitted_files).await?;
     let (view, _) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     generation.check().map_err(Refusal::from)?;
+    let symbols = symbols_at(&view, &db.symbols, cuts);
+    admission
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    generation.check().map_err(Refusal::from)?;
+    if let Some(prepared) = prepared {
+        prepared.generation.check().map_err(Refusal::from)?;
+    }
+    let symbols = symbols?;
+    if prepared.is_some_and(|prepared| !same_symbols(&prepared.symbols, &symbols)) {
+        return Err(Refusal::new(
+            ErrorCode::Conflict,
+            "the prepared statement's symbol catalog changed; prepare it again at the selected snapshot",
+        ));
+    }
     let result = match prepared {
         Some(prepared) => view
             .authorized_prepared_ordered_read_session(
@@ -142,7 +232,7 @@ pub(crate) async fn read_ordered_session<'a>(
                 &db.authority,
                 token,
                 TRUNK,
-                db.symbols.clone(),
+                symbols.clone(),
                 db.query_policy,
                 unix_millis as fn() -> u64,
                 Arc::clone(&prepared.selector),
@@ -160,7 +250,7 @@ pub(crate) async fn read_ordered_session<'a>(
                 &db.authority,
                 token,
                 TRUNK,
-                db.symbols.clone(),
+                symbols,
                 db.query_policy,
                 unix_millis as fn() -> u64,
                 scratch,

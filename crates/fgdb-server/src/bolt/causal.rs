@@ -99,9 +99,10 @@ pub(super) async fn session<'s>(
     database: &str,
     extra: &Map,
     output_generation: &mut Option<Generation>,
+    statement: (&str, &fgdb_gql::GqlParameters),
 ) -> Result<(ReadSession<'s>, CommitSeq), Failure> {
     let minimum = options(extra, database)?.minimum_seq;
-    let (session, frontier) = super::read_session(cx, db, token)
+    let (session, frontier) = crate::execute::read_session_for(cx, db, token, &[statement])
         .await
         .map_err(Failure::from_refusal)?;
     // A future-bookmark refusal depends on this exact source frontier, just

@@ -29,6 +29,7 @@ fn representation_refusal_rolls_back_the_complete_native_write() {
         let result = write_returning_checked(
             &root,
             db,
+            &db.symbols,
             &token,
             prepare(
                 db,
@@ -75,6 +76,7 @@ fn chain_representation_refusal_rolls_back_all_prior_creations() {
         let result = write_returning_checked(
             &root,
             db,
+            &db.symbols,
             &token,
             prepare(db, "CREATE (a) WITH a CREATE (b) RETURN 7 AS value"),
             None,
@@ -110,6 +112,7 @@ fn converted_output_and_empty_output_both_precede_one_completion() {
                 write_returning_checked(
                     &root,
                     db,
+                    &db.symbols,
                     &token,
                     prepare(db, text),
                     None,
@@ -158,6 +161,7 @@ fn representation_work_uses_the_native_signed_allowance() {
         let result = write_returning_checked(
             &root,
             db,
+            &db.symbols,
             &token,
             prepare(db, "CREATE (n) RETURN 7 AS value"),
             None,
@@ -184,6 +188,7 @@ fn deferred_returning_checks_its_floor_and_never_crosses_recovery_generations() 
         let result = write_returning_checked(
             &root,
             db,
+            &db.symbols,
             &token,
             prepare(db, "CREATE (n) RETURN 7 AS value"),
             Some((&generation, CommitSeq(1))),
@@ -202,6 +207,7 @@ fn deferred_returning_checks_its_floor_and_never_crosses_recovery_generations() 
         let result = write_returning_checked(
             &root,
             db,
+            &db.symbols,
             &token,
             definition,
             Some((&generation, CommitSeq(0))),
@@ -276,6 +282,7 @@ fn retained_returning_definitions_are_not_authority_or_an_identity_bypass() {
         let result = write_returning_checked(
             &root,
             db,
+            &db.symbols,
             &token,
             definition,
             None,
@@ -286,6 +293,255 @@ fn retained_returning_definitions_are_not_authority_or_an_identity_bypass() {
         .await;
         assert!(result.is_err());
         assert_eq!(state(&root, db).await, (CommitSeq(0), 0));
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+async fn register_write_catalog(cx: &Cx, db: &Served, future: bool) {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+
+    let mut catalog = SymbolCatalog::default();
+    catalog
+        .bind_all([
+            ("Person", CatalogSymbol::Label(LabelId(7))),
+            ("score", CatalogSymbol::Property(PropertyKeyId(11))),
+        ])
+        .unwrap();
+    if future {
+        catalog
+            .bind("future", CatalogSymbol::Property(PropertyKeyId(12)))
+            .unwrap();
+    }
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    db.db
+        .write(cx)
+        .await
+        .unwrap()
+        .register_symbols(&contexts.commit(), &catalog)
+        .await
+        .unwrap();
+}
+
+#[test]
+fn write_surfaces_discover_symbols_registered_after_startup() {
+    use fgdb_gql::GraphSymbolKind;
+    use fgdb_protocol::body::{
+        ExecuteConditionalWrite, Prepare, PrepareMode, PreparedExecutionMode,
+    };
+
+    let ((), report) = run_async_under_lab(0x7a8c_0030, |root| async move {
+        let (server, token, _) = served(&root, "live-write-catalog").await;
+        let db = &server.databases["test"];
+        register_write_catalog(&root, db, false).await;
+        assert_eq!(db.symbols.resolve(GraphSymbolKind::Label, "Person"), None);
+
+        let request = |statement: &str| Execute {
+            mode: fgdb_protocol::body::ExecuteMode::Write,
+            statement: statement.to_owned(),
+            parameters: vec![],
+        };
+        let first = accepted(
+            write(
+                &root,
+                db,
+                &token,
+                &request("CREATE (n:Person {score:1}) RETURN n.score AS score"),
+            )
+            .await,
+        );
+        assert_eq!(first.rows, [vec![WireValue::Int(1)]]);
+        accepted(write(&root, db, &token, &request("CREATE (n:Person {score:2})")).await);
+        let batch = accepted(
+            write_batch(
+                &root,
+                db,
+                &token,
+                &ExecuteBatch {
+                    statement: "CREATE (n:Person {score:$score})".to_owned(),
+                    argument_sets: vec![
+                        vec![("score".to_owned(), WireValue::Int(3))],
+                        vec![("score".to_owned(), WireValue::Int(4))],
+                    ],
+                },
+            )
+            .await,
+        );
+        assert_eq!(batch.created.vertices, 2);
+        let expected_seq = state(&root, db).await.0.0;
+        let conditional = accepted(
+            write_if_current(
+                &root,
+                db,
+                &token,
+                &ExecuteConditionalWrite {
+                    expected_seq,
+                    statement: "CREATE (n:Person {score:5}) RETURN n.score AS score".to_owned(),
+                    parameters: vec![],
+                },
+            )
+            .await,
+        );
+        assert_eq!(conditional.rows, [vec![WireValue::Int(5)]]);
+
+        let mut transaction = accepted(NativeWriteTransaction::begin(&root, db, &token).await);
+        let provisional = accepted(
+            transaction
+                .execute_framed(
+                    &root,
+                    &request("CREATE (n:Person {score:6}) RETURN n.score AS score"),
+                    4096,
+                )
+                .await,
+        );
+        assert_eq!(provisional.rows, [vec![WireValue::Int(6)]]);
+        accepted(transaction.commit(&root).await);
+
+        for (mode, execution, statement) in [
+            (
+                PrepareMode::Write,
+                PreparedExecutionMode::Write,
+                "CREATE (n:Person {score:7})",
+            ),
+            (
+                PrepareMode::WriteReturning,
+                PreparedExecutionMode::WriteReturning,
+                "CREATE (n:Person {score:8}) RETURN n.score AS score",
+            ),
+        ] {
+            let definition = accepted(
+                prepare_statement(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        mode,
+                        statement: statement.to_owned(),
+                        parameters: vec![],
+                    },
+                )
+                .await,
+            );
+            accepted(run_prepared(&root, db, &token, &definition, execution, &[]).await);
+        }
+        let all = accepted(
+            read(
+                &root,
+                db,
+                &token,
+                &Execute {
+                    mode: fgdb_protocol::body::ExecuteMode::Read,
+                    statement: "MATCH (n:Person) RETURN n.score AS score ORDER BY score".to_owned(),
+                    parameters: vec![],
+                },
+            )
+            .await,
+        );
+        assert_eq!(
+            all.rows,
+            (1..=8)
+                .map(|score| vec![WireValue::Int(score)])
+                .collect::<Vec<_>>()
+        );
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn retained_write_definitions_refuse_changed_catalogs_before_effects() {
+    use fgdb_protocol::body::{Prepare, PrepareMode, PreparedExecutionMode};
+
+    let ((), report) = run_async_under_lab(0x7a8c_0031, |root| async move {
+        let (server, token, _) = served(&root, "retained-write-catalog").await;
+        let db = &server.databases["test"];
+        register_write_catalog(&root, db, false).await;
+        let mut definitions = Vec::new();
+        for (mode, execution, statement) in [
+            (
+                PrepareMode::Write,
+                PreparedExecutionMode::Write,
+                "CREATE (n:Person {score:1})",
+            ),
+            (
+                PrepareMode::WriteReturning,
+                PreparedExecutionMode::WriteReturning,
+                "CREATE (n:Person {score:2}) RETURN n.score AS score",
+            ),
+            (
+                PrepareMode::Write,
+                PreparedExecutionMode::Write,
+                "CREATE (n:Person {score:3}) WITH n CREATE (m:Person {score:4})",
+            ),
+        ] {
+            let definition = accepted(
+                prepare_statement(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        mode,
+                        statement: statement.to_owned(),
+                        parameters: vec![],
+                    },
+                )
+                .await,
+            );
+            definitions.push((definition, execution));
+        }
+        let (symbols, _) = accepted(write_catalog(&root, db, &token).await);
+        let returning = accepted(ReturningTemplate::prepare(
+            db,
+            &symbols,
+            "CREATE (n:Person {score:5}) RETURN n.score AS score",
+            &GqlParameters::new(),
+        ))
+        .expect("RETURN definition");
+        let returning = accepted(returning.bind(&GqlParameters::new()));
+        // Data commits advance the frontier without invalidating a name map.
+        for (definition, execution) in &definitions {
+            accepted(run_prepared(&root, db, &token, definition, *execution, &[]).await);
+        }
+        register_write_catalog(&root, db, true).await;
+        let before = state(&root, db).await;
+        for (definition, execution) in &definitions {
+            let refusal = run_prepared(&root, db, &token, definition, *execution, &[])
+                .await
+                .err()
+                .expect("old catalog must require a new definition");
+            assert_eq!(refusal.code, ErrorCode::Conflict);
+            assert_eq!(state(&root, db).await, before);
+        }
+        let refusal = write_returning_checked(
+            &root,
+            db,
+            &symbols,
+            &token,
+            returning,
+            None,
+            |_, _, _, _| -> Result<(), Refusal> { panic!("stale catalog cannot produce output") },
+        )
+        .await
+        .err()
+        .expect("deferred RETURN must retain its catalog");
+        assert_eq!(refusal.code, ErrorCode::Conflict);
+        assert_eq!(state(&root, db).await, before);
+        let fresh = accepted(
+            write(
+                &root,
+                db,
+                &token,
+                &Execute {
+                    mode: fgdb_protocol::body::ExecuteMode::Write,
+                    statement: "CREATE (n:Person {future:9}) RETURN n.future AS value".to_owned(),
+                    parameters: vec![],
+                },
+            )
+            .await,
+        );
+        assert_eq!(fresh.rows, [vec![WireValue::Int(9)]]);
+        assert_eq!(state(&root, db).await.1, before.1 + 1);
         server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");

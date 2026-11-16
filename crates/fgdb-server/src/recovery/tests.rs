@@ -13,6 +13,18 @@ use fgdb_warden::{CapabilityToken, Grant, QueryLimits, Rights, Scope};
 use std::future::Future;
 use std::path::PathBuf;
 
+fn catalog_accept<T>(result: Result<T, crate::execute::Refusal>) -> T {
+    result.unwrap_or_else(|error| panic!("{}: {}", error.code.name(), error.message))
+}
+
+fn catalog_request(mode: ExecuteMode, statement: &str) -> Execute {
+    Execute {
+        mode,
+        statement: statement.to_owned(),
+        parameters: vec![],
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct WakeCounter(pub(crate) AtomicUsize);
 impl std::task::Wake for WakeCounter {
@@ -121,6 +133,71 @@ pub(crate) async fn served(cx: &Cx, name: &str) -> (Server, CapabilityToken, Pat
     served_with_config(cx, name, |_| {}).await
 }
 
+async fn served_catalog(
+    cx: &Cx,
+    name: &str,
+    configure: impl FnOnce(&mut DatabaseConfig),
+) -> (Server, CapabilityToken, PathBuf) {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_types::{CanonicalScalar, EId};
+
+    let (initial, token, path) = served(cx, name).await;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    {
+        let mut writer = initial.databases["test"].db.write(cx).await.unwrap();
+        let mut catalog = SymbolCatalog::default();
+        catalog
+            .bind_all([
+                ("Person", CatalogSymbol::Label(LabelId(1))),
+                ("Secret", CatalogSymbol::Label(LabelId(2))),
+                ("KNOWS", CatalogSymbol::Relation(RelationId(3))),
+                ("SECRET_REL", CatalogSymbol::Relation(RelationId(4))),
+                ("score", CatalogSymbol::Property(PropertyKeyId(1))),
+                ("secret", CatalogSymbol::Property(PropertyKeyId(2))),
+            ])
+            .unwrap();
+        assert_eq!(
+            writer
+                .register_symbols(&contexts.commit(), &catalog)
+                .await
+                .unwrap(),
+            CommitSeq(1)
+        );
+        let mut graph = WriteBatch::new(RelationId(3));
+        graph.create_vertex(
+            VId(1),
+            vec![LabelId(1), LabelId(2)],
+            vec![
+                (PropertyKeyId(1), CanonicalScalar::Int(42)),
+                (PropertyKeyId(2), CanonicalScalar::Int(999)),
+            ],
+        );
+        graph.create_vertex(
+            VId(2),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        graph.add_edge(EId(1), VId(1), VId(2), vec![]);
+        assert_eq!(
+            writer.write(&contexts.commit(), graph).await.unwrap(),
+            CommitSeq(2)
+        );
+    }
+    initial.finish_shutdown(cx).await;
+    drop(initial);
+    let mut server = Server::new(cx, ServerLimits::default()).unwrap();
+    let keys = DatabaseKeys::new(
+        [0x91; 32],
+        DatabaseSecurityNamespaceId([0x92; 32]),
+        [0x93; 32],
+    );
+    let mut config = DatabaseConfig::new("test", keys, AuthKey::from_seed(791));
+    configure(&mut config);
+    server.open_database(cx, &path, config).await.unwrap();
+    (server, token, path)
+}
+
 async fn served_with_config(
     cx: &Cx,
     name: &str,
@@ -209,6 +286,708 @@ pub(crate) async fn settled(db: &Served) -> DatabaseStatus {
         }
     })
     .await
+}
+
+#[test]
+fn durable_catalog_opens_named_reads_preparation_and_writes_without_configuration() {
+    use fgdb_protocol::body::{Outcome, Prepare, PrepareMode, WireValue};
+
+    let ((), report) = run_async_under_lab(0x79a0_ca01, |root| async move {
+        let (server, token, _) = served_catalog(&root, "catalog-startup", |_| {}).await;
+        let db = &server.databases["test"];
+        let request = catalog_request(
+            ExecuteMode::Read,
+            "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.score AS source, type(r) AS relation, b.score AS target",
+        );
+        let answer = catalog_accept(crate::execute::read(&root, db, &token, &request).await);
+        assert_eq!(answer.outcome, Outcome::Rows { seq: 2 });
+        assert_eq!(
+            answer.rows,
+            [vec![
+                WireValue::Int(42),
+                WireValue::Text("KNOWS".into()),
+                WireValue::Int(7)
+            ]]
+        );
+        let prepared = catalog_accept(
+            crate::execute::prepare_read(
+                &root,
+                db,
+                &token,
+                &Prepare {
+                    mode: PrepareMode::Read,
+                    statement: "MATCH (n:Person) RETURN n.score AS score ORDER BY score".into(),
+                    parameters: vec![],
+                },
+            )
+            .await,
+        );
+        assert_eq!(
+            catalog_accept(crate::execute::read_prepared(&root, db, &token, &prepared, &[]).await)
+                .rows,
+            [vec![WireValue::Int(7)], vec![WireValue::Int(42)]]
+        );
+        let written = catalog_accept(
+            crate::execute::write(
+                &root,
+                db,
+                &token,
+                &catalog_request(
+                    ExecuteMode::Write,
+                    "CREATE (n:Person {score:99}) RETURN n.score AS score",
+                ),
+            )
+            .await,
+        );
+        assert_eq!(written.rows, [vec![WireValue::Int(99)]]);
+        assert_eq!(written.created.vertices, 1);
+        assert_eq!(
+            catalog_accept(crate::execute::read_prepared(&root, db, &token, &prepared, &[]).await)
+                .rows,
+            [
+                vec![WireValue::Int(7)],
+                vec![WireValue::Int(42)],
+                vec![WireValue::Int(99)]
+            ]
+        );
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn durable_catalog_startup_conflicts_do_not_change_the_database_or_hold_its_writer() {
+    use fgdb_gql::GraphSymbolKind;
+
+    let ((), report) = run_async_under_lab(0x79a0_ca02, |root| async move {
+        let (server, _, path) = served_catalog(&root, "catalog-startup-conflicts", |_| {}).await;
+        server.finish_shutdown(&root).await;
+        drop(server);
+        let before = std::fs::read(path.join("manifest.root")).unwrap();
+        for (kind, name, id) in [
+            (GraphSymbolKind::Label, "Person", 99),
+            (GraphSymbolKind::Label, "Impostor", 1),
+            (GraphSymbolKind::Relation, "KNOWS", 99),
+            (GraphSymbolKind::Property, "score", 99),
+        ] {
+            let mut attempt = Server::new(&root, ServerLimits::default()).unwrap();
+            let keys = DatabaseKeys::new(
+                [0x91; 32],
+                DatabaseSecurityNamespaceId([0x92; 32]),
+                [0x93; 32],
+            );
+            let mut config = DatabaseConfig::new("test", keys.clone(), AuthKey::from_seed(791));
+            config.symbols.bind(kind, name, id).unwrap();
+            assert!(matches!(
+                attempt.open_database(&root, &path, config).await,
+                Err(crate::ServerError::Symbols(_))
+            ));
+            assert!(!attempt.databases.contains_key("test"));
+            assert_eq!(std::fs::read(path.join("manifest.root")).unwrap(), before);
+            attempt
+                .open_database(
+                    &root,
+                    &path,
+                    DatabaseConfig::new("test", keys, AuthKey::from_seed(791)),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                attempt.databases["test"]
+                    .db
+                    .read(&root)
+                    .await
+                    .unwrap()
+                    .frontier()
+                    .unwrap(),
+                CommitSeq(2)
+            );
+            attempt.finish_shutdown(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn durable_catalog_http_schema_masks_names_and_configured_extras_stay_ephemeral() {
+    use asupersync::http::h1::types::{Method, RequestBuilder};
+    use fgdb_delta_types::catalog::CatalogSymbolKind;
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_gql::GraphSymbolKind;
+    use fgdb_warden::Restriction;
+
+    let ((), report) = run_async_under_lab(0x79a0_ca03, |root| async move {
+        let (server, token, path) = served_catalog(&root, "catalog-masking", |config| {
+            config
+                .symbols
+                .bind(GraphSymbolKind::Label, "Person", 1)
+                .unwrap();
+            config
+                .symbols
+                .bind(GraphSymbolKind::Property, "local_only", 50)
+                .unwrap();
+        })
+        .await;
+        let limited = token
+            .attenuate(Restriction::Labels(Scope::only([LabelId(1)])))
+            .unwrap()
+            .attenuate(Restriction::Relations(Scope::only([RelationId(3)])))
+            .unwrap()
+            .attenuate(Restriction::Properties(Scope::only([PropertyKeyId(1)])))
+            .unwrap();
+        for (capability, expected) in [
+            (
+                &token,
+                r#"{"v":1,"labels":["Person","Secret"],"relations":["KNOWS","SECRET_REL"],"properties":["local_only","score","secret"]}"#,
+            ),
+            (
+                &limited,
+                r#"{"v":1,"labels":["Person"],"relations":["KNOWS"],"properties":["score"]}"#,
+            ),
+        ] {
+            let request = RequestBuilder::new(Method::Get, "/v1/databases/test/schema")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", fgdb_protocol::json::hex(&capability.encode())),
+                )
+                .build();
+            let response = crate::http::respond(
+                &root,
+                &server,
+                request,
+                &crate::http::OutputAuthority::new(),
+            )
+            .await;
+            assert_eq!(response.status, 200);
+            assert_eq!(String::from_utf8(response.body).unwrap(), expected);
+        }
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = &server.databases["test"];
+        assert_eq!(
+            db.db.read(&root).await.unwrap().frontier().unwrap(),
+            CommitSeq(2)
+        );
+        server.finish_shutdown(&root).await;
+        drop(server);
+        let keys = DatabaseKeys::new(
+            [0x91; 32],
+            DatabaseSecurityNamespaceId([0x92; 32]),
+            [0x93; 32],
+        );
+        let reopened = Database::open(&contexts.commit(), &path, keys)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .symbol_catalog()
+                .unwrap()
+                .resolve(CatalogSymbolKind::Property, "local_only"),
+            None
+        );
+        assert_eq!(reopened.frontier().unwrap(), CommitSeq(2));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn durable_catalog_refresh_preserves_pinned_and_historical_name_visibility() {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_protocol::body::{Outcome, WireValue};
+    use fgdb_types::CanonicalScalar;
+
+    let ((), report) = run_async_under_lab(0x79a0_ca04, |root| async move {
+        let (server, token, _) = served_catalog(&root, "catalog-refresh-history", |_| {}).await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (mut pinned, pinned_at) =
+            catalog_accept(crate::execute::read_session(&root, db, &token).await);
+        assert_eq!(pinned_at, CommitSeq(2));
+        // The server opened after the first schema commit. Its startup names
+        // must still be absent when preparing against the origin snapshot.
+        let missing = crate::execute::read(
+            &root,
+            db,
+            &token,
+            &catalog_request(
+                ExecuteMode::Read,
+                "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ 0 RETURN n.score",
+            ),
+        )
+        .await
+        .err()
+        .expect("names committed at sequence one are absent at origin");
+        assert_eq!(missing.code, ErrorCode::Statement);
+        {
+            let mut later = SymbolCatalog::default();
+            later
+                .bind_all([
+                    ("Later", CatalogSymbol::Label(LabelId(8))),
+                    ("later", CatalogSymbol::Property(PropertyKeyId(9))),
+                ])
+                .unwrap();
+            let mut writer = db.db.write(&root).await.unwrap();
+            assert_eq!(
+                writer
+                    .register_symbols(&contexts.commit(), &later)
+                    .await
+                    .unwrap(),
+                CommitSeq(3)
+            );
+            let mut graph = WriteBatch::new(RelationId(3));
+            graph.create_vertex(
+                VId(3),
+                vec![LabelId(8)],
+                vec![(PropertyKeyId(9), CanonicalScalar::Int(31))],
+            );
+            assert_eq!(
+                writer.write(&contexts.commit(), graph).await.unwrap(),
+                CommitSeq(4)
+            );
+        }
+        let current = catalog_accept(
+            crate::execute::read(
+                &root,
+                db,
+                &token,
+                &catalog_request(ExecuteMode::Read, "MATCH (n:Later) RETURN n.later AS value"),
+            )
+            .await,
+        );
+        assert_eq!(current.outcome, Outcome::Rows { seq: 4 });
+        assert_eq!(current.rows, [vec![WireValue::Int(31)]]);
+        let schema = catalog_accept(crate::execute::schema(&root, db, &token).await);
+        assert_eq!(schema.labels, ["Later", "Person", "Secret"]);
+        assert_eq!(schema.properties, ["later", "score", "secret"]);
+        let previous = catalog_accept(
+            crate::execute::read(
+                &root,
+                db,
+                &token,
+                &catalog_request(
+                    ExecuteMode::Read,
+                    "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ 2 RETURN n.score AS score ORDER BY score",
+                ),
+            )
+            .await,
+        );
+        assert_eq!(previous.outcome, Outcome::Rows { seq: 2 });
+        assert_eq!(
+            previous.rows,
+            [vec![WireValue::Int(7)], vec![WireValue::Int(42)]]
+        );
+        let missing = crate::execute::read(
+            &root,
+            db,
+            &token,
+            &catalog_request(
+                ExecuteMode::Read,
+                "MATCH (n:Later) FOR SYSTEM_TIME AS OF SEQ 2 RETURN n.later",
+            ),
+        )
+        .await
+        .err()
+        .expect("a later durable name cannot bind against an earlier catalog");
+        assert_eq!(missing.code, ErrorCode::Statement);
+        let parameters = fgdb_gql::GqlParameters::new();
+        let (_, selected) = pinned
+            .query_with_snapshot(
+                &contexts.query(),
+                "MATCH (n:Person) RETURN n.score AS score ORDER BY score",
+                &parameters,
+            )
+            .unwrap_or_else(|_| panic!("the pinned catalog keeps its original names"));
+        assert_eq!(selected, CommitSeq(2));
+        assert!(
+            pinned
+                .query(
+                    &contexts.query(),
+                    "MATCH (n:Later) RETURN n.later",
+                    &parameters
+                )
+                .is_err(),
+            "an already-open session must not acquire a later catalog"
+        );
+        drop(pinned);
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn durable_catalog_recovery_refreshes_names_and_fences_prepared_generations() {
+    use fgdb_delta_types::LabelId;
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_protocol::body::{Prepare, PrepareMode, WireValue};
+
+    let ((), report) = run_async_under_lab(0x79a0_ca05, |root| async move {
+        let (server, token, _) = served_catalog(&root, "catalog-recovery", |_| {}).await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let prepared = catalog_accept(
+            crate::execute::prepare_read(
+                &root,
+                db,
+                &token,
+                &Prepare {
+                    mode: PrepareMode::Read,
+                    statement: "MATCH (n:Person) RETURN n.score AS score ORDER BY score".into(),
+                    parameters: vec![],
+                },
+            )
+            .await,
+        );
+        {
+            let mut later = SymbolCatalog::default();
+            later
+                .bind("Recovered", CatalogSymbol::Label(LabelId(8)))
+                .unwrap();
+            let mut writer = db.db.write(&root).await.unwrap();
+            assert!(matches!(
+                writer
+                    .register_symbols_with_faults(
+                        &contexts.commit(),
+                        &later,
+                        None,
+                        Some(DerivedPublicationStage::PublishPartitionRoot),
+                    )
+                    .await,
+                Err(fgdb::SymbolCatalogError::Write(error))
+                    if matches!(*error, WriteError::CommittedNeedsRecovery { .. })
+            ));
+        }
+        assert_eq!(settled(db).await, DatabaseStatus::Ready { generation: 2 });
+        let schema = catalog_accept(crate::execute::schema(&root, db, &token).await);
+        assert_eq!(schema.labels, ["Person", "Recovered", "Secret"]);
+        let old = crate::execute::read_prepared(&root, db, &token, &prepared, &[])
+            .await
+            .err()
+            .expect("recovery invalidates the former preparation generation");
+        assert_eq!(old.code, ErrorCode::DatabaseRecovering);
+        let fresh = catalog_accept(
+            crate::execute::read(
+                &root,
+                db,
+                &token,
+                &catalog_request(ExecuteMode::Read, "MATCH (n:Recovered) RETURN n"),
+            )
+            .await,
+        );
+        assert!(
+            fresh.rows.is_empty(),
+            "the recovered schema committed, no graph effect did"
+        );
+        let original = catalog_accept(
+            crate::execute::read(
+                &root,
+                db,
+                &token,
+                &catalog_request(
+                    ExecuteMode::Read,
+                    "MATCH (n:Person) RETURN n.score AS score ORDER BY score",
+                ),
+            )
+            .await,
+        );
+        assert_eq!(
+            original.rows,
+            [vec![WireValue::Int(7)], vec![WireValue::Int(42)]]
+        );
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn durable_catalog_schema_checks_authority_before_and_after_waiting_for_a_writer() {
+    use fgdb_warden::Restriction;
+
+    let ((), report) = run_async_under_lab(0x79a0_ca07, |root| async move {
+        let (server, token, _) = served_catalog(&root, "catalog-schema-authority", |_| {}).await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut held = db.db.write(&root).await.unwrap();
+        held.write(&contexts.commit(), vertex(99)).await.unwrap();
+        let denied = token.attenuate(Restriction::Rights(Rights::Write)).unwrap();
+        let mut unauthorized = Box::pin(crate::execute::schema(&root, db, &denied));
+        match unauthorized
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+        {
+            Poll::Ready(Err(error)) => assert_eq!(error.code, ErrorCode::PermissionDenied),
+            _ => panic!("read rights must be checked before waiting on the writer"),
+        }
+        drop(unauthorized);
+        let mut waiting = Box::pin(crate::execute::schema(&root, db, &token));
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending(),
+            "no retained view exists until this writer publishes"
+        );
+        assert!(db.authority.retire());
+        drop(held);
+        let error = waiting
+            .await
+            .err()
+            .expect("retired authority cannot receive names");
+        assert_eq!(
+            error.message,
+            fgdb_warden::Error::AuthorityRetired.to_string()
+        );
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn durable_catalog_prepared_reads_bind_the_execution_cut_and_ignore_allocator_floors() {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_protocol::body::{Outcome, Prepare, PrepareMode, WireValue};
+    use fgdb_types::CanonicalScalar;
+
+    let ((), report) = run_async_under_lab(0x79a0_ca08, |root| async move {
+        let (server, token, _) = served_catalog(&root, "catalog-prepared-cuts", |_| {}).await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let statement = "MATCH (n:Person) RETURN n.score AS score ORDER BY score";
+        let current = catalog_accept(
+            crate::execute::prepare_read(
+                &root,
+                db,
+                &token,
+                &Prepare {
+                    mode: PrepareMode::Read,
+                    statement: statement.into(),
+                    parameters: vec![],
+                },
+            )
+            .await,
+        );
+        let at = |seq| vec![("at".to_owned(), WireValue::Count(seq))];
+        let historical = catalog_accept(
+            crate::execute::prepare_read(
+                &root,
+                db,
+                &token,
+                &Prepare {
+                    mode: PrepareMode::Read,
+                    statement: "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.score AS score ORDER BY score".into(),
+                    parameters: at(2),
+                },
+            )
+            .await,
+        );
+        {
+            let mut floors = SymbolCatalog::default();
+            floors.reserve_through(CatalogSymbol::Property(PropertyKeyId(12345)));
+            let mut writer = db.db.write(&root).await.unwrap();
+            assert_eq!(
+                writer
+                    .register_symbols(&contexts.commit(), &floors)
+                    .await
+                    .unwrap(),
+                CommitSeq(3)
+            );
+        }
+        let floor_only =
+            catalog_accept(crate::execute::read_prepared(&root, db, &token, &current, &[]).await);
+        assert_eq!(floor_only.outcome, Outcome::Rows { seq: 3 });
+        assert_eq!(
+            floor_only.rows,
+            [vec![WireValue::Int(7)], vec![WireValue::Int(42)]]
+        );
+        let floor_cut = catalog_accept(
+            crate::execute::read_prepared(&root, db, &token, &historical, &at(3)).await,
+        );
+        assert_eq!(floor_cut.outcome, Outcome::Rows { seq: 3 });
+        assert_eq!(floor_cut.rows, floor_only.rows);
+        {
+            let mut graph = WriteBatch::new(RelationId(3));
+            graph.create_vertex(
+                VId(3),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(99))],
+            );
+            assert_eq!(
+                db.db
+                    .write(&root)
+                    .await
+                    .unwrap()
+                    .write(&contexts.commit(), graph)
+                    .await
+                    .unwrap(),
+                CommitSeq(4)
+            );
+        }
+        let data_only =
+            catalog_accept(crate::execute::read_prepared(&root, db, &token, &current, &[]).await);
+        assert_eq!(data_only.outcome, Outcome::Rows { seq: 4 });
+        assert_eq!(
+            data_only.rows,
+            [
+                vec![WireValue::Int(7)],
+                vec![WireValue::Int(42)],
+                vec![WireValue::Int(99)]
+            ]
+        );
+        {
+            let mut later = SymbolCatalog::default();
+            later
+                .bind("Later", CatalogSymbol::Label(LabelId(8)))
+                .unwrap();
+            assert_eq!(
+                db.db
+                    .write(&root)
+                    .await
+                    .unwrap()
+                    .register_symbols(&contexts.commit(), &later)
+                    .await
+                    .unwrap(),
+                CommitSeq(5)
+            );
+        }
+        let changed = crate::execute::read_prepared(&root, db, &token, &current, &[])
+            .await
+            .err()
+            .expect("a current prepared read cannot retain an obsolete name map");
+        assert_eq!(changed.code, ErrorCode::Conflict);
+        for (seq, expected) in [(2, floor_only.rows), (4, data_only.rows)] {
+            let previous = catalog_accept(
+                crate::execute::read_prepared(&root, db, &token, &historical, &at(seq)).await,
+            );
+            assert_eq!(previous.outcome, Outcome::Rows { seq });
+            assert_eq!(previous.rows, expected);
+        }
+        let changed_cut = crate::execute::read_prepared(&root, db, &token, &historical, &at(5))
+            .await
+            .err()
+            .expect("rebinding AS OF must also recheck the selected catalog");
+        assert_eq!(changed_cut.code, ErrorCode::Conflict);
+        assert_eq!(
+            catalog_accept(
+                crate::execute::read_prepared(&root, db, &token, &historical, &at(2)).await,
+            )
+            .outcome,
+            Outcome::Rows { seq: 2 },
+            "a refused new cut must not mutate the reusable historical template"
+        );
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn durable_catalog_batches_and_differences_require_compatible_historical_names() {
+    use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_protocol::body::{ExecuteBatch, WireValue};
+    use fgdb_types::CanonicalScalar;
+
+    let ((), report) = run_async_under_lab(0x79a0_ca09, |root| async move {
+        let (server, token, _) = served_catalog(&root, "catalog-mixed-cuts", |_| {}).await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        {
+            let mut writer = db.db.write(&root).await.unwrap();
+            let mut graph = WriteBatch::new(RelationId(3));
+            graph.create_vertex(
+                VId(3),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(99))],
+            );
+            assert_eq!(
+                writer.write(&contexts.commit(), graph).await.unwrap(),
+                CommitSeq(3)
+            );
+            let mut later = SymbolCatalog::default();
+            later
+                .bind("Later", CatalogSymbol::Label(LabelId(8)))
+                .unwrap();
+            assert_eq!(
+                writer
+                    .register_symbols(&contexts.commit(), &later)
+                    .await
+                    .unwrap(),
+                CommitSeq(4)
+            );
+        }
+        let batch = |after| {
+            ExecuteBatch {
+            statement: "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.score AS score ORDER BY score".into(),
+            argument_sets: vec![
+                vec![("at".into(), WireValue::Count(2))],
+                vec![("at".into(), WireValue::Count(after))],
+            ],
+        }
+        };
+        let compatible =
+            catalog_accept(crate::execute::read_batch(&root, db, &token, &batch(3)).await);
+        assert_eq!(compatible.results.len(), 2);
+        assert_eq!(compatible.results[0].seq, 2);
+        assert_eq!(compatible.results[1].seq, 3);
+        assert_eq!(
+            compatible.results[0].rows,
+            [vec![WireValue::Int(7)], vec![WireValue::Int(42)]]
+        );
+        assert_eq!(
+            compatible.results[1].rows,
+            [
+                vec![WireValue::Int(7)],
+                vec![WireValue::Int(42)],
+                vec![WireValue::Int(99)]
+            ]
+        );
+        let statements = |after| {
+            vec![
+                catalog_request(
+                    ExecuteMode::Read,
+                    "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ 2 RETURN n.score AS score ORDER BY score",
+                ),
+                catalog_request(
+                    ExecuteMode::Read,
+                    &format!(
+                        "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {after} RETURN n.score AS score ORDER BY score"
+                    ),
+                ),
+            ]
+        };
+        let separate = catalog_accept(
+            crate::execute::read_statement_batch(&root, db, &token, &statements(3)).await,
+        );
+        for (left, right) in compatible.results.iter().zip(&separate.results) {
+            assert_eq!(left.seq, right.seq);
+            assert_eq!(left.rows, right.rows);
+        }
+        let statement = "MATCH (n:Person) RETURN n.score AS score";
+        let difference = catalog_accept(
+            crate::execute::read_difference(&root, db, &token, statement, &[], 2, 3).await,
+        );
+        assert_eq!(difference.before, 2);
+        assert_eq!(difference.after, 3);
+        assert_eq!(difference.entries, [(1, vec![WireValue::Int(99)])]);
+        let mixed_parameters = crate::execute::read_batch(&root, db, &token, &batch(4))
+            .await
+            .err()
+            .expect("a parameter batch cannot bind one resolver across different catalogs");
+        assert_eq!(mixed_parameters.code, ErrorCode::Statement);
+        let mixed_statements =
+            crate::execute::read_statement_batch(&root, db, &token, &statements(4))
+                .await
+                .err()
+                .expect("a statement batch cannot silently borrow names from another cut");
+        assert_eq!(mixed_statements.code, ErrorCode::Statement);
+        let mixed_difference =
+            crate::execute::read_difference(&root, db, &token, statement, &[], 2, 4)
+                .await
+                .err()
+                .expect("a buffered difference must refuse incompatible endpoint catalogs");
+        assert_eq!(mixed_difference.code, ErrorCode::Statement);
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

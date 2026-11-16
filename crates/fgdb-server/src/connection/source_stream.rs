@@ -7,7 +7,9 @@
 //! cancellation can be serviced during accumulation.
 
 use super::*;
-use crate::execute::{PreparedRead, read_prepared_session, read_session};
+use crate::execute::PreparedRead;
+#[cfg(test)]
+use crate::execute::{read_prepared_session, read_session};
 use fgdb_types::PurposeContexts;
 
 pub(super) enum SourceStatement<'a> {
@@ -162,17 +164,21 @@ impl Lane {
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let query = crate::query_cx(&contexts);
         let opened = match statement {
-            SourceStatement::Text(text) => match read_session(cx, db, token).await {
-                Ok((mut session, _)) => {
-                    self.send_generation = Some(session.generation());
-                    session
-                        .prepare(&query, text, &parameters)
-                        .map(|prepared| (session, prepared))
+            SourceStatement::Text(text) => {
+                match crate::execute::read_session_for(cx, db, token, &[(text, &parameters)]).await
+                {
+                    Ok((mut session, _)) => {
+                        self.send_generation = Some(session.generation());
+                        session
+                            .prepare(&query, text, &parameters)
+                            .map(|prepared| (session, prepared))
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
-            },
+            }
             SourceStatement::Prepared(prepared) => {
-                read_prepared_session(cx, db, token, prepared).await
+                crate::execute::read_prepared_session_for(cx, db, token, prepared, &parameters)
+                    .await
             }
         };
         let (mut session, prepared) = match opened {

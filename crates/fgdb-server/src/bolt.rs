@@ -52,7 +52,7 @@ mod read_transaction;
 use crate::execute::transaction::{
     TransactionStatement, looks_like_write, prepare_transaction_statement,
 };
-use crate::execute::{ReadSession, Refusal, query_refusal, read_session};
+use crate::execute::{ReadSession, Refusal, query_refusal};
 use crate::recovery::Generation;
 use crate::shutdown::Waiter;
 use crate::{Served, Server, convert};
@@ -358,10 +358,12 @@ enum TransactionSession<'s> {
     Read {
         owner: Box<fgdb::AuthorizedReadTransaction<'s, crate::Symbols, fn() -> u64>>,
         generation: Generation,
+        symbols: crate::Symbols,
     },
     Write {
         owner: Box<AuthorizedWriteTransaction<'s, fn() -> u64>>,
         generation: Generation,
+        symbols: crate::Symbols,
     },
 }
 
@@ -698,6 +700,8 @@ impl<'s> Connection<'s> {
                 )
                 .map_err(|error| Failure::from_refusal(crate::execute::write_refusal(&error)))?;
             let seq = owner.basis();
+            let symbols = crate::execute::write_symbols(db, token, &guard, None)
+                .map_err(Failure::from_refusal)?;
             if seq < options.minimum_seq {
                 return Err(Failure::new(
                     "Neo.TransientError.General.DatabaseUnavailable",
@@ -711,6 +715,7 @@ impl<'s> Connection<'s> {
                 TransactionSession::Write {
                     owner: Box::new(owner),
                     generation,
+                    symbols,
                 },
                 seq,
             )
@@ -810,7 +815,7 @@ impl<'s> Connection<'s> {
         let _operation = generation
             .enter()
             .map_err(|error| Failure::from_refusal(error.into()))?;
-        let TransactionSession::Write { owner, .. } = &mut transaction.session else {
+        let TransactionSession::Write { owner, symbols, .. } = &mut transaction.session else {
             unreachable!("write owner selected");
         };
         // Preserve the complete request/value bounds of the other adapters.
@@ -843,7 +848,7 @@ impl<'s> Connection<'s> {
                 text,
                 parameters,
                 |parameters, scope, work| match prepare_transaction_statement(
-                    db, text, parameters, scope, work,
+                    db, symbols, text, parameters, scope, work,
                 )
                 .map_err(Failure::from_refusal)
                 {
@@ -886,7 +891,7 @@ impl<'s> Connection<'s> {
                         max_frame_len,
                         work,
                         metadata,
-                        db.symbols.borrowed_reverse_catalog(),
+                        symbols.borrowed_reverse_catalog(),
                     )
                     .map_err(Failure::from_refusal)?;
                     let write_failure =
@@ -1077,8 +1082,9 @@ impl<'s> Connection<'s> {
         // path; this hint grants no authority.
         let schema_metadata = schema_procedure(query).is_some();
         let arguments = statement_parameters(parameters)?;
-        if let Some(metadata) =
-            self.queue_autocommit_write(cx, query, parameters, &arguments, extra)?
+        if let Some(metadata) = self
+            .queue_autocommit_write(cx, query, parameters, &arguments, extra)
+            .await?
         {
             return Ok(metadata);
         }
@@ -1091,9 +1097,18 @@ impl<'s> Connection<'s> {
         let (name, db) = self.database(extra)?;
         self.output_database = Some(db);
         let token = self.token.as_ref().expect("authenticated");
-        let (mut session, _) =
-            causal::session(cx, db, token, &name, extra, &mut self.output_generation).await?;
+        let (mut session, _) = causal::session(
+            cx,
+            db,
+            token,
+            &name,
+            extra,
+            &mut self.output_generation,
+            (query, &parameters),
+        )
+        .await?;
         let generation = session.generation();
+        let symbols = session.symbols().clone();
         self.output_generation = Some(generation.clone());
         let max_frame_len = self.server.limits.max_frame_len as usize;
         let ((rows, metadata), selected) = session
@@ -1104,7 +1119,7 @@ impl<'s> Connection<'s> {
                     max_frame_len,
                     work,
                     metadata,
-                    db.symbols.borrowed_reverse_catalog(),
+                    symbols.borrowed_reverse_catalog(),
                 )?;
                 let metadata = autocommit::admit_read_metadata(
                     vec![

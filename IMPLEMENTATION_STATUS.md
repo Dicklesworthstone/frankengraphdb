@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-15 (qualification is stated separately).
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest source review is 2026-11-16 (qualification is stated separately).
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -11,6 +11,35 @@ FrankenGraphDB is not yet a released graph-database product. There are no tagged
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
 ## Live product verticals
+
+### Server sessions resolve durable names at their selected snapshots — qualification pending
+
+Startup discovery landed in `0e8ecd25d0b8373c394d37064ffaf672ae78a0ec`.
+The server merges persisted label, relationship-type and property-key names with
+explicit operator declarations; exact redeclarations are harmless and conflicts
+refuse. Current and historical sessions bind and hydrate graph results with the
+catalog at their selected cut. Requests spanning incompatible name maps refuse.
+
+Prepared reads and writes retain their effective name map. Data commits and
+allocation-floor changes remain compatible; a changed mapping returns `Conflict`
+and requires preparation again. FGP and Bolt explicit transactions pin names at
+BEGIN. Deferred Bolt RETURN also retains its catalog through output admission
+and checks compatibility under the writer before publication.
+
+HTTP schema discovery reads the current authorized view and masks names by token
+scope. Subscription registration uses the live catalog; a later incompatible
+mapping explicitly invalidates the retained definition. Configured Beacon indexes
+resolve durable names before binding, and a startup frontier check rejects a
+publication change between metadata discovery and full opening.
+
+Regression sources cover startup conflicts, historical and prepared reads,
+ordinary/batch/conditional/explicit/prepared writes, Bolt graph metadata and
+deferred-write refusal, HTTP masking, and subscription invalidation. Edited
+server sources pass Rustfmt and diff checks. The workspace formatting check
+reports existing drift in unchanged native/schema sources; those sources are
+not reformatted here. Compiler/runtime results, Clippy, UBS and exact-tree
+qualification remain pending. General schema DDL, constraints, index lifecycle
+and multi-coordinate catalogs remain open under `fgdb-7r8sy`.
 
 ### CLI resolves durable names at the selected snapshot — qualification pending
 
@@ -58,10 +87,9 @@ Rustfmt, Clippy, UBS and exact-tree qualification remain **UNRUN** because the
 execution environment is unavailable. Independent source review and exact-base
 blob reconstruction are recorded separately from executable qualification.
 
-Automatic server/session resolver refresh, general schema DDL and constraints,
-index lifecycle and multi-coordinate catalog behavior remain open under
-`fgdb-7r8sy`. This increment makes the durable name catalog directly usable from
-the local CLI; it does not close that broader owner.
+General schema DDL and constraints, index lifecycle and multi-coordinate catalog
+behavior remain open under `fgdb-7r8sy`. This increment makes the durable name
+catalog directly usable from the local CLI; it does not close that broader owner.
 
 ### Durable symbol catalogs share Chronicle and Strata publication — qualification pending
 

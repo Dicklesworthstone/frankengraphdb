@@ -458,7 +458,8 @@ mod tests {
                     native,
                 )])))
                 .unwrap();
-            let schema = crate::execute::schema(db, &token)
+            let schema = crate::execute::schema(&root, db, &token)
+                .await
                 .unwrap_or_else(|error| panic!("{}", error.message));
             assert_eq!(schema.labels, vec!["Person"]);
             assert_eq!(schema.relations, vec!["MENTORS"]);
@@ -523,7 +524,8 @@ mod tests {
                 .unwrap()
                 .attenuate(Restriction::Properties(Scope::only([PropertyKeyId(low)])))
                 .unwrap();
-            let schema = crate::execute::schema(db, &denied)
+            let schema = crate::execute::schema(&root, db, &denied)
+                .await
                 .unwrap_or_else(|error| panic!("{}", error.message));
             assert!(schema.labels.is_empty());
             assert!(schema.relations.is_empty());

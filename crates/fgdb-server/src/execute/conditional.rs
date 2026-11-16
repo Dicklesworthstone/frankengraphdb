@@ -90,8 +90,10 @@ async fn write_if_current_inner(
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
     let parameters = parameters?;
     admit_write_parameters(&mut permit, &parameters)?;
-    let prepared = query
-        .with_restriction(|| ReturningTemplate::prepare(db, &statement.statement, &parameters));
+    let symbols = write_symbols(db, token, &guard, None)?;
+    let prepared = query.with_restriction(|| {
+        ReturningTemplate::prepare(db, &symbols, &statement.statement, &parameters)
+    });
     let prepared = prepared.and_then(|template| {
         template
             .map(|template| template.bind_current(&query, db, &parameters))
@@ -109,6 +111,7 @@ async fn write_if_current_inner(
             write_returning_in_guard(
                 cx,
                 db,
+                &symbols,
                 &execution_token,
                 prepared,
                 guard,
