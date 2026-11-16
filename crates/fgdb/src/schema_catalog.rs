@@ -5,7 +5,7 @@
 //! catalog generation, and recovery derives that generation from those effects.
 
 use crate::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use fgdb_delta_types::catalog::{
     CatalogBindingError, CatalogSymbol, CatalogSymbolKind, SymbolCatalog,
 };
@@ -487,6 +487,77 @@ impl<V: Vfs + Clone> Database<V> {
         self.register_symbols_with_faults(cx, bindings, None, None).await
     }
 
+    /// Register names without requiring callers to choose their numeric IDs.
+    ///
+    /// Explicit bindings are admitted first. New names then receive the next
+    /// unspent ordinal in canonical namespace/name order, independent of request
+    /// order or duplicates. Existing names keep their IDs. The complete request
+    /// publishes as one schema transaction, and no allocated ID escapes before
+    /// that transaction succeeds. Read [`Self::symbol_catalog`] after success to
+    /// obtain the committed bindings.
+    ///
+    /// Before allocating, this method authenticates the complete retained
+    /// Chronicle history and reserves every numeric symbol it has used,
+    /// including labels and properties later removed and deleted elements.
+    /// This also covers numeric graph writes made since a previous registration.
+    /// Allocation therefore costs a retained-history traversal, not a scan of
+    /// only the live graph. Unavailable or explicitly retired origin history
+    /// refuses allocation; it must never be treated as an empty namespace.
+    /// Requests that introduce no automatic names need no history traversal.
+    ///
+    /// Like [`Self::register_symbols`], this is a privileged embedded/operator
+    /// surface and grants no remote schema authority.
+    pub async fn register_symbol_names(
+        &mut self,
+        cx: &CommitCx,
+        explicit: &SymbolCatalog,
+        names: &[(CatalogSymbolKind, &str)],
+    ) -> Result<CommitSeq, SymbolCatalogError> {
+        self.ensure_writable()?;
+        let checkpoint = || {
+            cx.checkpoint().map_err(|error| {
+                SymbolCatalogError::Storage(Box::new(RebuildError::Interrupted(error)))
+            })
+        };
+        checkpoint()?;
+        let mut merged = self.snapshot.schema.catalog.symbols().clone();
+        merge_symbol_bindings(&mut merged, explicit, checkpoint)?;
+        let mut requested = BTreeSet::new();
+        let mut needs_allocation = false;
+        for &(kind, name) in names {
+            checkpoint()?;
+            if name.is_empty() {
+                return Err(CatalogBindingError::EmptyName.into());
+            }
+            needs_allocation |= merged.resolve(kind, name).is_none();
+            requested.insert((kind, name));
+        }
+        if needs_allocation {
+            self.ensure_delta_window(cx, CommitSeq::ORIGIN)
+                .await
+                .map_err(|error| SymbolCatalogError::Storage(Box::new(error)))?;
+            for batch in self.delta_since(CommitSeq::ORIGIN)? {
+                checkpoint()?;
+                for coordinate in batch.coordinate_entries() {
+                    checkpoint()?;
+                    if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {
+                        continue;
+                    }
+                    merged.reserve_through(CatalogSymbol::Relation(coordinate.relation));
+                    for row in &coordinate.rows {
+                        reserve_delta_symbols(&mut merged, row, checkpoint)?;
+                    }
+                }
+            }
+            for (kind, name) in requested {
+                checkpoint()?;
+                merged.intern(kind, name)?;
+            }
+        }
+        checkpoint()?;
+        self.register_symbols(cx, &merged).await
+    }
+
     /// The production catalog path with the same Chronicle/publication fault
     /// boundaries used by graph writes, for the integrated recovery matrix.
     #[doc(hidden)]
@@ -503,25 +574,11 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(|error| SymbolCatalogError::Storage(Box::new(error)))?;
         let before = &self.snapshot.schema;
         let mut merged = before.catalog.symbols().clone();
-        for (symbol, name) in bindings.bindings() {
+        merge_symbol_bindings(&mut merged, bindings, || {
             cx.checkpoint()
                 .map_err(RebuildError::Interrupted)
-                .map_err(|error| SymbolCatalogError::Storage(Box::new(error)))?;
-            merged.bind(name, symbol)?;
-        }
-        for kind in [
-            CatalogSymbolKind::Label,
-            CatalogSymbolKind::Relation,
-            CatalogSymbolKind::Property,
-        ] {
-            let ordinal = bindings.high_water_mark(kind);
-            let symbol = match kind {
-                CatalogSymbolKind::Label => CatalogSymbol::Label(LabelId(ordinal)),
-                CatalogSymbolKind::Relation => CatalogSymbol::Relation(RelationId(ordinal)),
-                CatalogSymbolKind::Property => CatalogSymbol::Property(PropertyKeyId(ordinal)),
-            };
-            merged.reserve_through(symbol);
-        }
+                .map_err(|error| SymbolCatalogError::Storage(Box::new(error)))
+        })?;
         let basis = self.snapshot.frontier;
         let Some(catalog) = before.catalog.successor(basis, &merged)? else {
             return Ok(basis);
@@ -568,6 +625,80 @@ impl<V: Vfs + Clone> Database<V> {
             .commit_template(cx, template, crash_at, publication_failure, None)
             .await?)
     }
+}
+
+fn merge_symbol_bindings(
+    merged: &mut SymbolCatalog,
+    bindings: &SymbolCatalog,
+    mut checkpoint: impl FnMut() -> Result<(), SymbolCatalogError>,
+) -> Result<(), SymbolCatalogError> {
+    for (symbol, name) in bindings.bindings() {
+        checkpoint()?;
+        merged.bind(name, symbol)?;
+    }
+    for kind in [
+        CatalogSymbolKind::Label,
+        CatalogSymbolKind::Relation,
+        CatalogSymbolKind::Property,
+    ] {
+        checkpoint()?;
+        let ordinal = bindings.high_water_mark(kind);
+        let symbol = match kind {
+            CatalogSymbolKind::Label => CatalogSymbol::Label(LabelId(ordinal)),
+            CatalogSymbolKind::Relation => CatalogSymbol::Relation(RelationId(ordinal)),
+            CatalogSymbolKind::Property => CatalogSymbol::Property(PropertyKeyId(ordinal)),
+        };
+        merged.reserve_through(symbol);
+    }
+    Ok(())
+}
+
+/// Reserve from committed effects, including negative effects. Looking only at
+/// surviving elements would reissue the ordinals of removed labels/properties
+/// or retired elements. Poll inside variable-width rows as well as between rows.
+fn reserve_delta_symbols<E>(
+    symbols: &mut SymbolCatalog,
+    row: &DeltaRow,
+    mut checkpoint: impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    checkpoint()?;
+    match row {
+        DeltaRow::CreateVertex { labels, props, .. } => {
+            for &label in labels {
+                checkpoint()?;
+                symbols.reserve_through(CatalogSymbol::Label(label));
+            }
+            for &(property, _) in props {
+                checkpoint()?;
+                symbols.reserve_through(CatalogSymbol::Property(property));
+            }
+        }
+        DeltaRow::CreateEdge { relation, props, .. } => {
+            symbols.reserve_through(CatalogSymbol::Relation(*relation));
+            for &(property, _) in props {
+                checkpoint()?;
+                symbols.reserve_through(CatalogSymbol::Property(property));
+            }
+        }
+        DeltaRow::LabelMembership { label, .. } => {
+            symbols.reserve_through(CatalogSymbol::Label(*label));
+        }
+        DeltaRow::Property { property, .. } | DeltaRow::Counter { property, .. } => {
+            symbols.reserve_through(CatalogSymbol::Property(*property));
+        }
+        DeltaRow::Escrow { subject_property, .. } => {
+            if let Some(property) = subject_property {
+                symbols.reserve_through(CatalogSymbol::Property(*property));
+            }
+        }
+        DeltaRow::DeleteVertex { .. }
+        | DeltaRow::DeleteEdge { .. }
+        | DeltaRow::ValidTime { .. }
+        | DeltaRow::Sketch { .. }
+        | DeltaRow::Schema { .. }
+        | DeltaRow::Constraint { .. } => {}
+    }
+    Ok(())
 }
 
 impl EmbeddedReadView {
@@ -627,6 +758,358 @@ mod tests {
             vec![(PROPERTY, CanonicalScalar::Int(score))],
         );
         write
+    }
+
+    #[test]
+    fn automatic_names_publish_once_in_canonical_order_and_drive_native_queries() {
+        let ((), report) = run_async_under_lab(0x5ca1_0011, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let high = u64::from(u32::MAX) + 20;
+            let mut explicit = SymbolCatalog::default();
+            explicit
+                .bind("score", CatalogSymbol::Property(PropertyKeyId(high)))
+                .unwrap();
+            explicit.reserve_through(CatalogSymbol::Label(LabelId(high)));
+            let names = [
+                (CatalogSymbolKind::Property, "Ω"),
+                (CatalogSymbolKind::Label, "Ω"),
+                (CatalogSymbolKind::Label, "Alpha"),
+                (CatalogSymbolKind::Relation, "KNOWS"),
+                (CatalogSymbolKind::Property, "alpha"),
+                (CatalogSymbolKind::Property, "score"),
+                (CatalogSymbolKind::Label, "Alpha"),
+            ];
+            let mut expected = explicit.clone();
+            expected
+                .bind_all([
+                    ("Alpha", CatalogSymbol::Label(LabelId(high + 1))),
+                    ("Ω", CatalogSymbol::Label(LabelId(high + 2))),
+                    ("KNOWS", CatalogSymbol::Relation(RelationId(1))),
+                    ("alpha", CatalogSymbol::Property(PropertyKeyId(high + 1))),
+                    ("Ω", CatalogSymbol::Property(PropertyKeyId(high + 2))),
+                ])
+                .unwrap();
+            for reverse in [false, true] {
+                let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                let origin = db.pinned_read_view().unwrap();
+                let mut requested = names;
+                if reverse {
+                    requested.reverse();
+                }
+                let registered = db
+                    .register_symbol_names(&cx, &explicit, &requested)
+                    .await
+                    .unwrap();
+                assert_eq!(registered, CommitSeq(1));
+                assert_eq!(db.coordinator.chain().entries().len(), 1);
+                assert_eq!(db.symbol_catalog().unwrap(), &expected);
+                assert!(origin.symbol_catalog().is_empty());
+                assert!(db.symbol_catalog_at(CommitSeq::ORIGIN).unwrap().is_empty());
+                let manifest = db.manifest().unwrap();
+                let generation = db.slot_generation;
+                assert_eq!(
+                    db.register_symbol_names(&cx, &explicit, &names).await.unwrap(),
+                    registered
+                );
+                assert_eq!(db.manifest().unwrap(), manifest);
+                assert_eq!(db.slot_generation, generation);
+                let mut write = WriteBatch::new(RelationId(1));
+                write.create_vertex(
+                    VId(1),
+                    vec![LabelId(high + 1)],
+                    vec![(PropertyKeyId(high), CanonicalScalar::Int(42))],
+                );
+                db.write(&cx, write).await.unwrap();
+                assert_eq!(
+                    db.query(
+                        &contexts.query(),
+                        "MATCH (n:Alpha) RETURN n.score AS value",
+                        &GqlParameters::new(),
+                        CatalogSymbolResolver::new(db.symbol_catalog().unwrap()),
+                        GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                    )
+                    .unwrap(),
+                    QueryResult::Rows {
+                        columns: vec!["value".to_owned()],
+                        rows: vec![vec![QueryValue::Value(GraphValue::Scalar(
+                            CanonicalScalar::Int(42),
+                        ))]],
+                    }
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn automatic_names_reserve_removed_numeric_history_after_compaction_and_reopen() {
+        let ((), report) = run_async_under_lab(0x5ca1_0012, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let mut create = WriteBatch::new(RelationId(51));
+            create.create_vertex(
+                VId(1),
+                vec![LabelId(17)],
+                vec![(PropertyKeyId(21), CanonicalScalar::Int(1))],
+            );
+            create.create_vertex(VId(2), vec![], vec![]);
+            create.add_edge(
+                EId(1),
+                VId(1),
+                VId(2),
+                vec![(PropertyKeyId(61), CanonicalScalar::Int(2))],
+            );
+            db.write(&cx, create).await.unwrap();
+            let mut change = WriteBatch::new(RelationId(51));
+            change.set_vertex_label(VId(1), LabelId(77), true);
+            change.set_vertex_property(VId(1), PropertyKeyId(101), Some(CanonicalScalar::Int(3)));
+            change.set_edge_property(EId(1), PropertyKeyId(111), Some(CanonicalScalar::Int(4)));
+            db.write(&cx, change).await.unwrap();
+            let mut clear = WriteBatch::new(RelationId(51));
+            clear.set_vertex_label(VId(1), LabelId(77), false);
+            clear.set_vertex_property(VId(1), PropertyKeyId(101), None);
+            clear.set_edge_property(EId(1), PropertyKeyId(111), None);
+            db.write(&cx, clear).await.unwrap();
+            let mut retire = WriteBatch::new(RelationId(51));
+            retire.delete_vertex(VId(1));
+            retire.delete_vertex(VId(2));
+            let before = db.write(&cx, retire).await.unwrap();
+            assert!(db.vertices().unwrap().is_empty());
+            db.compact(&cx).await.unwrap();
+            drop(db);
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(db.delta_materialized_after, before);
+            let names = [
+                (CatalogSymbolKind::Label, "Person"),
+                (CatalogSymbolKind::Relation, "KNOWS"),
+                (CatalogSymbolKind::Property, "score"),
+            ];
+            let registered = db
+                .register_symbol_names(&cx, &SymbolCatalog::default(), &names)
+                .await
+                .unwrap();
+            assert_eq!(registered, CommitSeq(before.0 + 1));
+            let mut expected = SymbolCatalog::default();
+            expected
+                .bind_all([
+                    ("Person", CatalogSymbol::Label(LabelId(78))),
+                    ("KNOWS", CatalogSymbol::Relation(RelationId(52))),
+                    ("score", CatalogSymbol::Property(PropertyKeyId(112))),
+                ])
+                .unwrap();
+            assert_eq!(db.symbol_catalog().unwrap(), &expected);
+            assert!(db.symbol_catalog_at(before).unwrap().is_empty());
+            assert!(db.vertices().unwrap().is_empty());
+            let pinned = db.pinned_read_view().unwrap();
+
+            // Native numeric writers remain supported. A later registration
+            // must include their symbols even when those elements are gone.
+            let mut numeric = WriteBatch::new(RelationId(90));
+            numeric.create_vertex(
+                VId(3),
+                vec![LabelId(200)],
+                vec![(PropertyKeyId(300), CanonicalScalar::Int(5))],
+            );
+            db.write(&cx, numeric).await.unwrap();
+            let mut retire = WriteBatch::new(RelationId(90));
+            retire.delete_vertex(VId(3));
+            db.write(&cx, retire).await.unwrap();
+            db.compact(&cx).await.unwrap();
+            drop(db);
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            db.register_symbol_names(
+                &cx,
+                &SymbolCatalog::default(),
+                &[
+                    (CatalogSymbolKind::Label, "Later"),
+                    (CatalogSymbolKind::Relation, "NEXT"),
+                    (CatalogSymbolKind::Property, "later"),
+                ],
+            )
+            .await
+            .unwrap();
+            expected
+                .bind_all([
+                    ("Later", CatalogSymbol::Label(LabelId(201))),
+                    ("NEXT", CatalogSymbol::Relation(RelationId(91))),
+                    ("later", CatalogSymbol::Property(PropertyKeyId(301))),
+                ])
+                .unwrap();
+            assert_eq!(db.symbol_catalog().unwrap(), &expected);
+            assert_eq!(
+                db.symbol_catalog_at(registered)
+                    .unwrap()
+                    .resolve(CatalogSymbolKind::Label, "Later"),
+                None
+            );
+            assert_eq!(pinned.symbol_catalog().len(), 3);
+            let manifest = db.manifest().unwrap();
+            drop(db);
+            let rebuilt = Database::bind_with_vfs(&cx, vfs, &path, keys(), true)
+                .await
+                .unwrap();
+            assert_eq!(rebuilt.symbol_catalog().unwrap(), &expected);
+            assert_eq!(rebuilt.manifest().unwrap(), manifest);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn automatic_name_requests_refuse_conflicts_exhaustion_and_missing_history_atomically() {
+        let ((), report) = run_async_under_lab(0x5ca1_0013, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+            db.register_symbols(&cx, &bindings()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let manifest = db.manifest().unwrap();
+            let catalog = db.symbol_catalog().unwrap().clone();
+            let mut explicit = SymbolCatalog::default();
+            explicit.bind("Conflict", CatalogSymbol::Label(LABEL)).unwrap();
+            assert!(matches!(
+                db.register_symbol_names(
+                    &cx,
+                    &explicit,
+                    &[(CatalogSymbolKind::Property, "candidate")],
+                ).await,
+                Err(SymbolCatalogError::Binding(CatalogBindingError::OrdinalConflict { .. }))
+            ));
+            assert!(matches!(
+                db.register_symbol_names(
+                    &cx,
+                    &SymbolCatalog::default(),
+                    &[(CatalogSymbolKind::Label, "candidate"), (CatalogSymbolKind::Property, "")],
+                ).await,
+                Err(SymbolCatalogError::Binding(CatalogBindingError::EmptyName))
+            ));
+            let mut explicit = SymbolCatalog::default();
+            explicit.bind("explicit", CatalogSymbol::Label(LabelId(100))).unwrap();
+            explicit.reserve_through(CatalogSymbol::Property(PropertyKeyId(u64::MAX)));
+            assert!(matches!(
+                db.register_symbol_names(
+                    &cx,
+                    &explicit,
+                    &[(CatalogSymbolKind::Label, "candidate"), (CatalogSymbolKind::Property, "new")],
+                ).await,
+                Err(SymbolCatalogError::Binding(CatalogBindingError::OrdinalsExhausted {
+                    kind: CatalogSymbolKind::Property,
+                }))
+            ));
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(db.manifest().unwrap(), manifest);
+            assert_eq!(db.symbol_catalog().unwrap(), &catalog);
+            assert_eq!(db.coordinator.chain().entries().len(), 1);
+
+            // Explicit retention is not permission to guess the missing
+            // high-water marks from current graph contents.
+            Arc::make_mut(&mut db.snapshot).delta_index.retire_prefix(before).unwrap();
+            assert!(matches!(
+                db.register_symbol_names(
+                    &cx,
+                    &SymbolCatalog::default(),
+                    &[(CatalogSymbolKind::Label, "candidate")],
+                ).await,
+                Err(SymbolCatalogError::Storage(error))
+                    if matches!(*error, RebuildError::Index {
+                        error: IndexError::CursorRetired { .. }, ..
+                    })
+            ));
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(db.manifest().unwrap(), manifest);
+            assert_eq!(db.symbol_catalog().unwrap(), &catalog);
+            // Redeclarations allocate nothing and remain usable without an
+            // origin-history reload, including the exact no-op sequence.
+            assert_eq!(
+                db.register_symbol_names(
+                    &cx,
+                    &SymbolCatalog::default(),
+                    &[(CatalogSymbolKind::Label, "Person")],
+                ).await.unwrap(),
+                before
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn cancelled_automatic_registration_preserves_names_frontier_and_publication() {
+        let ((), report) = run_async_under_lab(0x5ca1_0014, |root| async move {
+            let mut handle = root
+                .spawn(move |child| async move {
+                    let contexts = PurposeContexts::narrow_runtime_root(&child);
+                    let cx = contexts.commit();
+                    let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                    db.write(&cx, vertex(1, 42)).await.unwrap();
+                    let snapshot = Arc::clone(&db.snapshot);
+                    let generation = db.slot_generation;
+                    let state = db.state;
+                    child.set_cancel_reason(asupersync::CancelReason::user(
+                        "cancel symbol registration before allocation",
+                    ));
+                    assert!(matches!(
+                        db.register_symbol_names(
+                            &cx,
+                            &bindings(),
+                            &[(CatalogSymbolKind::Label, "Next")],
+                        ).await,
+                        Err(SymbolCatalogError::Storage(error))
+                            if matches!(*error, RebuildError::Interrupted(_))
+                    ));
+                    assert!(Arc::ptr_eq(&snapshot, &db.snapshot));
+                    assert_eq!(db.slot_generation, generation);
+                    assert_eq!(db.state, state);
+                    assert!(db.symbol_catalog().unwrap().is_empty());
+                    assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+                })
+                .unwrap();
+            assert_eq!(handle.join(&root).await, Ok(()));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn symbol_history_census_checks_cancellation_inside_wide_rows() {
+        let row = DeltaRow::CreateVertex {
+            vid: VId(1),
+            birth_ordinal: 0,
+            labels: vec![LabelId(10), LabelId(20), LabelId(30)],
+            props: vec![
+                (PropertyKeyId(40), CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1))),
+                (PropertyKeyId(50), CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2))),
+            ],
+            valid_time: None,
+        };
+        let original = SymbolCatalog::default();
+        // A candidate is private until the full census and allocation succeed.
+        // Interruption at each inner boundary must propagate immediately.
+        for stop in 1..=6 {
+            let mut candidate = original.clone();
+            let mut calls = 0;
+            assert_eq!(
+                reserve_delta_symbols(&mut candidate, &row, || {
+                    calls += 1;
+                    if calls == stop { Err("interrupted") } else { Ok(()) }
+                }),
+                Err("interrupted")
+            );
+            assert_eq!(calls, stop);
+            assert_eq!(original.high_water_mark(CatalogSymbolKind::Label), 0);
+            assert_eq!(original.high_water_mark(CatalogSymbolKind::Property), 0);
+        }
+        let mut admitted = original;
+        reserve_delta_symbols(&mut admitted, &row, || Ok::<(), ()>(())).unwrap();
+        assert_eq!(admitted.high_water_mark(CatalogSymbolKind::Label), 30);
+        assert_eq!(admitted.high_water_mark(CatalogSymbolKind::Property), 50);
     }
 
     #[test]
