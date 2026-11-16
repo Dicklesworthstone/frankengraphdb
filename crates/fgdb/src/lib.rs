@@ -179,6 +179,7 @@ pub use gql_cert::{
     NativePlanCertificate, NativeProcedureEvidence, NativeReadClass,
 };
 pub use gql_exec::source::{SnapshotEdgeSource, SnapshotVertexSource};
+pub use query::AuthorizedAsyncRowCursor;
 pub use query::{
     AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
     AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
@@ -197,7 +198,6 @@ pub use query::{
     ReplayRefusal, ResidentIndex, ResidentIndexError, SealedProjectionOpenError, SealedQueryError,
     SealedReadView, StatementClock, StatementTimeError,
 };
-pub use query::AuthorizedAsyncRowCursor;
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteOutput,
     AuthorizedWriteSession, AuthorizedWriteTransaction, IdentityPermutation,

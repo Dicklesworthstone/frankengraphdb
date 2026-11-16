@@ -2362,6 +2362,313 @@ fn embedded_write_and_transaction_if_current_guard_durable_frontier() {
 }
 
 #[test]
+fn schema_allocates_names_without_reinterpreting_legacy_numeric_data() {
+    let fixture = Fixture::new("schema-auto-names");
+    assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);
+    assert_eq!(
+        succeeded(
+            &fixture.discovered(
+                "write",
+                &[
+                    "--label",
+                    "Person=4294967300",
+                    "--property",
+                    "id=4294967301",
+                    "--relation",
+                    "OLD=4294967302",
+                    "CREATE (a:Person {id:7}),(a)-[:OLD]->(a)",
+                ]
+            ),
+            "written"
+        ),
+        1
+    );
+    let names = [
+        "--property",
+        "name",
+        "--relation",
+        "KNOWS",
+        "--label",
+        "Person",
+        "--label",
+        "Person",
+    ];
+    let registered = fixture.discovered("schema", &names);
+    assert_eq!(succeeded(&registered, "rows"), 2);
+    assert!(terminal(&registered).contains("\"count\":3"));
+    assert_eq!(
+        rows(&registered),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"label"},{"type":"text","value":"Person"},{"type":"int","value":"4294967301"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"relation"},{"type":"text","value":"KNOWS"},{"type":"int","value":"4294967303"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"property"},{"type":"text","value":"name"},{"type":"int","value":"4294967302"}]}"#,
+        ]
+    );
+    let repeated = fixture.discovered("schema", &names);
+    assert_eq!(succeeded(&repeated, "rows"), 2);
+    assert!(terminal(&repeated).contains("\"count\":3"));
+    assert_eq!(rows(&repeated), rows(&registered));
+    let new_label = fixture.discovered("query", &["MATCH (n:Person) RETURN n"]);
+    assert_eq!(succeeded(&new_label, "rows"), 2);
+    assert!(
+        rows(&new_label).is_empty(),
+        "automatic names must not alias old numeric data"
+    );
+
+    assert_eq!(
+        succeeded(
+            &fixture.discovered(
+                "schema",
+                &[
+                    "--label",
+                    "Legacy=4294967300",
+                    "--property",
+                    "legacy_id=4294967301",
+                    "--relation",
+                    "LEGACY_EDGE=4294967302",
+                ]
+            ),
+            "rows",
+        ),
+        3
+    );
+    let legacy = fixture.discovered("query", &["MATCH (n:Legacy) RETURN n.legacy_id"]);
+    assert_eq!(succeeded(&legacy, "rows"), 3);
+    assert_eq!(rows(&legacy).len(), 1);
+    assert!(rows(&legacy)[0].contains("\"value\":\"7\""));
+    assert_eq!(
+        succeeded(
+            &fixture.discovered(
+                "write",
+                &["CREATE (a:Person {name:'Ada'}),(b:Person {name:'Bob'}),(a)-[:KNOWS]->(b)"]
+            ),
+            "written",
+        ),
+        4
+    );
+    let named = fixture.discovered(
+        "query",
+        &["MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name,b.name"],
+    );
+    assert_eq!(succeeded(&named, "rows"), 4);
+    assert_eq!(
+        rows(&named),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"text","value":"Ada"},{"type":"text","value":"Bob"}]}"#
+        ]
+    );
+
+    // Explicit declarations win independently of their command-line position.
+    let mixed = Fixture::new("schema-mixed-names");
+    assert_eq!(succeeded(&mixed.discovered("create", &[]), "created"), 0);
+    let declared = mixed.discovered(
+        "schema",
+        &[
+            "--label",
+            "Person",
+            "--label",
+            "Person=9",
+            "--property",
+            "name",
+        ],
+    );
+    assert_eq!(succeeded(&declared, "rows"), 1);
+    assert!(terminal(&declared).contains("\"count\":2"));
+    succeeded(
+        &mixed.discovered(
+            "query",
+            &["--label", "Person=9", "MATCH (n:Person) RETURN n"],
+        ),
+        "rows",
+    );
+    refused(
+        &mixed.discovered(
+            "query",
+            &["--label", "Person=8", "MATCH (n:Person) RETURN n"],
+        ),
+        2,
+        "usage",
+    );
+}
+
+#[test]
+fn schema_registers_legacy_names_and_extends_them_across_processes() {
+    let fixture = Fixture::new("schema-register");
+    assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);
+    assert_eq!(
+        succeeded(
+            &fixture.robot("write", &["CREATE (:Person {id:7})"]),
+            "written"
+        ),
+        1
+    );
+    let adopted = fixture.robot("schema", &["--if-current", "1"]);
+    assert_eq!(succeeded(&adopted, "rows"), 2);
+    assert!(terminal(&adopted).contains("\"count\":2"));
+    let query = fixture.discovered("query", &["MATCH (n:Person) RETURN n.id"]);
+    assert_eq!(succeeded(&query, "rows"), 2);
+    assert_eq!(rows(&query).len(), 1);
+    assert!(rows(&query)[0].contains("\"value\":\"7\""));
+
+    // The added label and relationship ordinals cross the u32 boundary.
+    // Flags and a file form one durable extension, preserving old names.
+    std::fs::write(
+        fixture.dir.join("extension"),
+        "label Company=4294967300\nrelation WORKS_AT=4294967301\n",
+    )
+    .unwrap();
+    let extension = fixture.discovered(
+        "schema",
+        &[
+            "--bindings-file",
+            "extension",
+            "--property",
+            "name=42",
+            "--if-current",
+            "2",
+        ],
+    );
+    assert_eq!(succeeded(&extension, "rows"), 3);
+    assert!(terminal(&extension).contains("\"count\":5"));
+    assert_eq!(
+        succeeded(
+            &fixture.discovered(
+                "write",
+                &["MATCH (p:Person {id:7}) CREATE (c:Company {name:'Acme'}),(p)-[:WORKS_AT]->(c)"],
+            ),
+            "written",
+        ),
+        4
+    );
+    let statement = "MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.id,c.name";
+    let current = fixture.discovered("query", &[statement]);
+    assert_eq!(succeeded(&current, "rows"), 4);
+    assert_eq!(
+        rows(&current),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"7"},{"type":"text","value":"Acme"}]}"#
+        ]
+    );
+    let historical = fixture.discovered(
+        "query",
+        &["MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ 2 RETURN p.id"],
+    );
+    assert_eq!(succeeded(&historical, "rows"), 2);
+    assert_eq!(rows(&historical), rows(&query));
+    let hidden = fixture.discovered(
+        "query",
+        &["MATCH (c:Company) FOR SYSTEM_TIME AS OF SEQ 2 RETURN c"],
+    );
+    refused(&hidden, 3, "query");
+    assert!(terminal(&hidden).contains("\"code\":\"not_found\""));
+    succeeded(&fixture.discovered("compact", &[]), "compacted");
+    assert_eq!(
+        rows(&fixture.discovered("query", &[statement])),
+        rows(&current)
+    );
+    succeeded(&fixture.discovered("scrub", &[]), "scrubbed");
+}
+
+#[test]
+fn schema_registration_is_atomic_idempotent_and_frontier_guarded() {
+    let fixture = Fixture::new("schema-conflicts");
+    assert_eq!(
+        succeeded(&fixture.robot("create", &["--persist-bindings"]), "created"),
+        1
+    );
+    let before = directory_bytes(&fixture.db());
+    let same = fixture.robot("schema", &["--if-current", "1"]);
+    assert_eq!(succeeded(&same, "rows"), 1);
+    assert!(terminal(&same).contains("\"count\":2"));
+    assert_eq!(directory_bytes(&fixture.db()), before);
+
+    // A later conflict cannot publish an earlier otherwise-valid declaration.
+    for bindings in [
+        [
+            "--label", "Fresh", "--label", "Added=9", "--label", "Person=8",
+        ],
+        [
+            "--label", "Fresh", "--label", "Added=9", "--label", "Other=1",
+        ],
+        [
+            "--label",
+            "Fresh",
+            "--property",
+            "added=9",
+            "--property",
+            "id=8",
+        ],
+        [
+            "--label",
+            "Fresh",
+            "--property",
+            "added=9",
+            "--property",
+            "other=1",
+        ],
+    ] {
+        refused(&fixture.discovered("schema", &bindings), 3, "query");
+        assert_eq!(directory_bytes(&fixture.db()), before);
+    }
+    let stale = fixture.discovered("schema", &["--label", "Added=9", "--if-current", "0"]);
+    refused(&stale, 3, "query");
+    assert!(terminal(&stale).contains("\"code\":\"conflict\""));
+    assert_eq!(directory_bytes(&fixture.db()), before);
+    let added = fixture.discovered("schema", &["--label", "Added=9", "--if-current", "1"]);
+    assert_eq!(succeeded(&added, "rows"), 2);
+    assert!(terminal(&added).contains("\"count\":3"));
+    assert_eq!(
+        succeeded(
+            &fixture.discovered("query", &["MATCH (n:Added) RETURN n"]),
+            "rows"
+        ),
+        2
+    );
+}
+
+#[test]
+fn schema_refuses_inapplicable_input_and_inspects_without_declarations() {
+    let fixture = Fixture::new("schema-preflight");
+    for arguments in [
+        vec!["--label", ""],
+        vec!["--property", "id=1", "RETURN 1"],
+        vec!["--property", "id=1", "--param", "x=int:1"],
+        vec!["--property", "id=1", "--write-relation", "1"],
+        vec!["--property", "id=1", "--persist-bindings"],
+        vec![
+            "--property",
+            "id=1",
+            "--if-current",
+            "1",
+            "--if-current",
+            "1",
+        ],
+        vec!["--property", "id=1", "--stream"],
+    ] {
+        refused(&fixture.discovered("schema", &arguments), 2, "usage");
+        assert!(!fixture.db().exists());
+    }
+    std::fs::write(fixture.dir.join("empty"), "# no declarations\n").unwrap();
+    refused(
+        &fixture.discovered("schema", &["--bindings-file", "empty"]),
+        4,
+        "open",
+    );
+    // Inspection and registration both require an existing database.
+    refused(&fixture.discovered("schema", &[]), 4, "open");
+    refused(&fixture.robot("schema", &[]), 4, "open");
+    assert!(!fixture.db().exists());
+    assert_eq!(succeeded(&fixture.discovered("create", &[]), "created"), 0);
+    let before = directory_bytes(&fixture.db());
+    for flags in [vec![], vec!["--bindings-file", "empty"]] {
+        let inspected = fixture.discovered("schema", &flags);
+        assert_eq!(succeeded(&inspected, "rows"), 0);
+        assert!(rows(&inspected).is_empty());
+        assert_eq!(directory_bytes(&fixture.db()), before);
+    }
+}
+
+#[test]
 fn schema_name_allocation_is_durable_and_usable_without_numeric_flags() {
     let fixture = Fixture::new("allocated-schema");
     assert_eq!(
@@ -2693,7 +3000,7 @@ fn persisted_bindings_follow_history_and_refuse_cross_catalog_composition() {
 }
 
 #[test]
-fn binding_persistence_is_creation_only_and_legacy_creation_keeps_sequence_zero() {
+fn persist_bindings_flag_is_creation_only_and_legacy_creation_keeps_sequence_zero() {
     let fixture = Fixture::new("legacy-symbols");
     assert_eq!(succeeded(&fixture.robot("create", &[]), "created"), 0);
     refused(

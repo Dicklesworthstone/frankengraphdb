@@ -950,6 +950,30 @@ fn assert_rows(output: &Outcome, expected: &str) {
 }
 
 #[test]
+fn schema_registration_has_exact_robot_rows_and_idempotent_completion() {
+    let db = TestDb::new("schema-register");
+    assert_eq!(db.create(), 0);
+    let registered = db.command("schema", &["--label", "Registered=8", "--if-current", "0"]);
+    assert_eq!(registered.sequence("rows"), 1);
+    assert_eq!(registered.terminal().get("count").unsigned(), 1);
+    assert_eq!(
+        registered.events[1].get("columns"),
+        &json(r#"["kind","name","id"]"#)
+    );
+    let expected = r#"[[{"type":"text","value":"label"},{"type":"text","value":"Registered"},{"type":"int","value":"8"}]]"#;
+    assert_rows(&registered, expected);
+    let repeated = db.command("schema", &["--label", "Registered=8", "--if-current", "1"]);
+    assert_eq!(repeated.sequence("rows"), 1);
+    assert_eq!(repeated.terminal().get("count").unsigned(), 1);
+    assert_rows(&repeated, expected);
+    let conflict = db.command("schema", &["--label", "Registered=9"]);
+    conflict.error(3, "query");
+    let stale = db.command("schema", &["--property", "new=8", "--if-current", "0"]);
+    stale.error(3, "query");
+    assert_eq!(stale.terminal().get("code").string(), "conflict");
+}
+
+#[test]
 fn catalog_procedures_reopen_through_the_native_cli_query_surface() {
     let db = TestDb::new("catalog-procedures");
     let created = db.create();

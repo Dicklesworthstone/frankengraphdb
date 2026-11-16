@@ -15,6 +15,7 @@ machine-readable contract that the tests freeze.
 | Command | What it does |
 |---|---|
 | `create` | Create a new database directory (refuses an existing one). |
+| `schema` | Inspect durable label, relation and property names, or register declarations atomically. `--as-of <seq>` inspects historical metadata. |
 | `adopt --db <dir>` | Sync a copied database before its first write. Needs no keys; does not change data or advance the frontier. |
 | `write <gql>` | Run one native write program in one transaction. |
 | `query <gql>` | Native read, including `EXPLAIN`. A write statement is refused (exit 3), never retried as a write. `--stream` flushes one row at a time on the streamable profiles; `--certify-to <file>` saves a replayable result certificate. |
@@ -58,18 +59,51 @@ group or other permission bits (`chmod 600`). Anything else is refused with
 exit 4 before the database is opened or created. The check reads the opened
 handle, not the path, and the file may be at most 64 KiB.
 
-### Bindings: no implicit catalog
+### Durable label, relationship and property names
 
-Label, relation and property IDs are explicit on every invocation:
-`--label Person=1 --relation KNOWS=1 --property name=1`. Supply the same
-bindings when you reopen. The CLI never guesses or hashes names, and `labels()`
-/ `type()` reflection answers from the supplied bindings.
+Register names once with `create --persist-bindings`, or use `schema` to extend
+the catalog of an existing database. The latter can also adopt names for numeric
+IDs already used by graph data. Both use an ordinary atomic schema transaction:
+
+```bash
+fgdb schema --db graph --key-file keys \
+  --label Person --relation KNOWS --property name
+fgdb write --db graph --key-file keys "CREATE (:Person {name:'Ada'})"
+fgdb query --db graph --key-file keys 'MATCH (n:Person) RETURN n.name'
+```
+
+Bare names on `schema` and `create --persist-bindings` allocate IDs in canonical
+namespace/name order. Explicit `name=u64` declarations can adopt existing numeric
+IDs, and reserve their IDs before automatic allocation. Allocation checks
+authenticated retained history, including deleted graph data, so an old numeric
+ID cannot silently acquire a new
+meaning. This costs a history traversal when new automatic names are requested;
+unavailable origin history refuses allocation. Exact repeats need no traversal.
+
+Each later invocation discovers the names at its selected snapshot, including
+historical reads. An exact redeclaration is a no-op; conflicting names or IDs
+refuse the complete registration. `schema --if-current <seq>` also refuses when
+another commit has advanced the frontier. With no declarations, `schema` lists
+the catalog; `schema --as-of <seq>` selects historical metadata and cannot combine
+with declarations or `--if-current`. The command takes no GQL.
+
+Both inspection and successful registration return the complete selected catalog
+as `kind`, `name` and `id` columns. Robot output completes with `kind=rows`, the
+selected `seq`, and `count` of all returned bindings, including existing names.
+IDs use decimal-string `int` cells through `i64::MAX` and `wideint` above it, so
+the full unsigned 64-bit range remains exact. A missing successful terminal must
+not be treated as a confirmed registration.
+
+Explicit `--label`, `--relation` and `--property` flags on reads and writes still
+extend only that invocation. The CLI never guesses or hashes names. Creating a
+database without `--persist-bindings` retains the empty sequence-zero catalog.
 
 `--bindings-file <file>` reads the same mapping once from a file, one binding
 per line (`label Person=1`, `relation KNOWS=1`, `property name=1`; `#` comments
 and blank lines are ignored; at most 1 MiB). File and flags combine, and must
 not repeat a name or an ID within a kind. `fgdbd serve` accepts the same file
-per database. It is an explicit mapping you keep, not a catalog in the database.
+per database. Pass it to `schema` to persist all its declarations together;
+passing it to a query does not change the database.
 
 ### Loading edges between vertices that are already in the database
 
