@@ -197,11 +197,12 @@ pub(crate) struct ReadCursor<'q> {
 }
 
 enum ReadSource<'q> {
-    Rows(fgdb::AuthorizedSendRowCursor<'q>),
+    Rows(fgdb::AuthorizedAsyncRowCursor<'q>),
     Aggregate(fgdb::AuthorizedAsyncAggregateCursor<'q>),
 }
 
 impl ReadCursor<'_> {
+    #[cfg(test)]
     pub(crate) fn is_aggregate(&self) -> bool {
         matches!(self.native, ReadSource::Aggregate(_))
     }
@@ -226,31 +227,13 @@ impl ReadCursor<'_> {
         state == fgdb_gql::stream::VertexScanState::Exhausted
     }
 
-    /// Ordinary row streams keep their existing frame-sized batch pulls.
-    /// Aggregate input must use the cooperative future, never this method.
-    pub(crate) fn next_immediate(&mut self) -> Result<Option<Vec<WireValue>>, Refusal> {
-        let _operation = self.generation.enter().map_err(Refusal::from)?;
-        let ReadSource::Rows(cursor) = &mut self.native else {
-            return Err(Refusal::new(
-                ErrorCode::Execution,
-                "aggregate input requires cooperative execution",
-            ));
-        };
-        let result = cursor
-            .next()
-            .transpose()
-            .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect()));
-        self.generation.check().map_err(Refusal::from)?;
-        result.map_err(query_refusal)
-    }
-
     pub(crate) async fn next(&mut self) -> Result<Option<Vec<WireValue>>, Refusal> {
         let generation = self.generation.clone();
         ordered::in_generation(&generation, async {
             let result = match &mut self.native {
                 ReadSource::Rows(cursor) => cursor
-                    .next()
-                    .transpose()
+                    .next_row()
+                    .await
                     .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect())),
                 ReadSource::Aggregate(cursor) => cursor.next_row().await.map(|row| {
                     row.map(|row| {
@@ -389,7 +372,7 @@ impl ReadSession<'_> {
                 .map(ReadSource::Aggregate),
             _ => self
                 .native
-                .stream_send(cx, prepared, parameters)
+                .stream_async(cx, prepared, parameters)
                 .map(ReadSource::Rows),
         };
         generation.check().map_err(Refusal::from)?;

@@ -687,6 +687,58 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
         self.advancing = false;
         self.source_pending = false;
     }
+
+    /// Examine at most 64 root/incidence candidates or fixed-join transitions
+    /// before yielding. Skipped source histories and unsuccessful joins also
+    /// yield; suspension preserves every source position and logical charge.
+    /// One source callback or probe remains a governed synchronous operation.
+    pub fn poll_next<C>(
+        &mut self,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Option<ScanResult<GraphValueRow, S::Error, C>>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != EdgeScanState::Open {
+            return core::task::Poll::Ready(None);
+        }
+        let mut remaining = 64;
+        let result = match self.advance_bounded(&mut remaining) {
+            Ok(core::task::Poll::Pending) => {
+                context.waker().wake_by_ref();
+                return core::task::Poll::Pending;
+            }
+            Ok(core::task::Poll::Ready(value)) => Ok(value),
+            Err(error) => Err(error),
+        };
+        core::task::Poll::Ready(self.finish(result))
+    }
+
+    fn finish<E>(
+        &mut self,
+        result: Result<Option<GraphValueRow>, E>,
+    ) -> Option<Result<GraphValueRow, E>> {
+        let item = match result {
+            Ok(Some(row)) => {
+                if self.plan.count == Some(self.meter.rows.result_rows) {
+                    self.state = EdgeScanState::Exhausted;
+                }
+                Some(Ok(row))
+            }
+            Ok(None) => {
+                self.state = EdgeScanState::Exhausted;
+                None
+            }
+            Err(error) => {
+                self.state = EdgeScanState::Failed;
+                Some(Err(error))
+            }
+        };
+        if self.state != EdgeScanState::Open {
+            self.close();
+        }
+        item
+    }
     /// Pull and project one complete row under this cursor's single meter.
     ///
     /// The cursor must be compiled from pull.pattern(), with that same checked
@@ -714,9 +766,73 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             return None;
         }
         let mut arithmetic = Some(arithmetic);
-        let result: Result<Option<GraphValueRow>, E> = (|| loop {
-            let Some(row) = self.advance_inner::<false, C>().map_err(&mut scan)? else {
-                return Ok(None);
+        loop {
+            let mut remaining = usize::MAX;
+            let result = match self.advance_projected_bounded(
+                pull,
+                &mut remaining,
+                &mut scan,
+                &mut arithmetic,
+            ) {
+                Ok(core::task::Poll::Pending) => continue,
+                Ok(core::task::Poll::Ready(value)) => Ok(value),
+                Err(error) => Err(error),
+            };
+            return self.finish(result);
+        }
+    }
+
+    /// Cooperatively project the same row sequence as next_projected. Skipped
+    /// and post-LIMIT input still runs the checked projection before EOF, with
+    /// the same ordinals, errors, source reads and cumulative allowances.
+    pub fn poll_next_projected<C, E>(
+        &mut self,
+        context: &mut core::task::Context<'_>,
+        pull: &crate::GraphSetRowPull,
+        mut scan: impl FnMut(GqlQueryError<EdgeScanError<S::Error>, C>) -> E,
+        arithmetic: impl FnOnce(u64, usize, crate::GraphIntegerError) -> E,
+    ) -> core::task::Poll<Option<Result<GraphValueRow, E>>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != EdgeScanState::Open {
+            return core::task::Poll::Ready(None);
+        }
+        let mut remaining = 64;
+        let result = match self.advance_projected_bounded(
+            pull,
+            &mut remaining,
+            &mut scan,
+            &mut Some(arithmetic),
+        ) {
+            Ok(core::task::Poll::Pending) => {
+                context.waker().wake_by_ref();
+                return core::task::Poll::Pending;
+            }
+            Ok(core::task::Poll::Ready(value)) => Ok(value),
+            Err(error) => Err(error),
+        };
+        core::task::Poll::Ready(self.finish(result))
+    }
+
+    fn advance_projected_bounded<C, E>(
+        &mut self,
+        pull: &crate::GraphSetRowPull,
+        remaining: &mut usize,
+        scan: &mut impl FnMut(GqlQueryError<EdgeScanError<S::Error>, C>) -> E,
+        arithmetic: &mut Option<impl FnOnce(u64, usize, crate::GraphIntegerError) -> E>,
+    ) -> Result<core::task::Poll<Option<GraphValueRow>>, E>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        loop {
+            let row = match self
+                .advance_bounded_inner::<false, C>(remaining)
+                .map_err(&mut *scan)?
+            {
+                core::task::Poll::Pending => return Ok(core::task::Poll::Pending),
+                core::task::Poll::Ready(None) => return Ok(core::task::Poll::Ready(None)),
+                core::task::Poll::Ready(Some(row)) => row,
             };
             let ordinal = self.projected_rows;
             let next_ordinal = ordinal
@@ -727,7 +843,7 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
                 Some(
                     self.meter
                         .increment(GqlBudgetDimension::ResultRows, self.meter.rows.result_rows)
-                        .map_err(&mut scan)?,
+                        .map_err(&mut *scan)?,
                 )
             } else {
                 None
@@ -737,7 +853,7 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
                 // VM checkpoints and property callbacks execute serially. Both
                 // debit the same meter before work, allocation, or source read.
                 let meter = std::cell::RefCell::new(&mut self.meter);
-                let mapping = std::cell::RefCell::new(&mut scan);
+                let mapping = std::cell::RefCell::new(&mut *scan);
                 pull.project_with_properties(
                     &row,
                     ordinal,
@@ -804,30 +920,10 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             };
             self.meter
                 .event(GlaExecutionEvent::ResultRow)
-                .map_err(&mut scan)?;
+                .map_err(&mut *scan)?;
             self.meter.rows.result_rows = next;
-            return Ok(Some(projected));
-        })();
-        let item = match result {
-            Ok(Some(row)) => {
-                if self.plan.count == Some(self.meter.rows.result_rows) {
-                    self.state = EdgeScanState::Exhausted;
-                }
-                Some(Ok(row))
-            }
-            Ok(None) => {
-                self.state = EdgeScanState::Exhausted;
-                None
-            }
-            Err(error) => {
-                self.state = EdgeScanState::Failed;
-                Some(Err(error))
-            }
-        };
-        if self.state != EdgeScanState::Open {
-            self.close();
+            return Ok(core::task::Poll::Ready(Some(projected)));
         }
-        item
     }
 
     fn advance<C>(&mut self) -> ScanResult<Option<GraphValueRow>, S::Error, C>
@@ -1010,26 +1106,8 @@ impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> Iterator for EdgeScanCur
         if self.state != EdgeScanState::Open {
             return None;
         }
-        let item = match self.advance() {
-            Ok(Some(row)) => {
-                if self.plan.count == Some(self.meter.rows.result_rows) {
-                    self.state = EdgeScanState::Exhausted;
-                }
-                Some(Ok(row))
-            }
-            Ok(None) => {
-                self.state = EdgeScanState::Exhausted;
-                None
-            }
-            Err(error) => {
-                self.state = EdgeScanState::Failed;
-                Some(Err(error))
-            }
-        };
-        if self.state != EdgeScanState::Open {
-            self.close();
-        }
-        item
+        let result = self.advance();
+        self.finish(result)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, (self.state != EdgeScanState::Open).then_some(0))

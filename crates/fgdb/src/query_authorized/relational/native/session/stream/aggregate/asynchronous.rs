@@ -2,16 +2,9 @@
 //! One pending pull owns its reducer, snapshot pin and live signed permit.
 
 use super::*;
-use core::future::poll_fn;
-use core::task::{Context, Poll};
+use core::task::Poll;
 use fgdb_gql::edge_stream::EdgeScanState;
 use fgdb_gql::edge_stream::aggregate::EdgeAggregateCursor;
-
-type AsyncPull<'q> = Box<
-    dyn FnMut(&mut Context<'_>) -> Poll<Result<(Option<GraphAggregateRow>, bool), QueryError>>
-        + Send
-        + 'q,
->;
 
 /// Completed native aggregates with cooperative source intake. Each poll
 /// examines at most 64 root/incidence candidates or join transitions before
@@ -30,7 +23,7 @@ type AsyncPull<'q> = Box<
 /// fuses the cursor and closes its session, rather than resuming a lost prefix.
 /// A normal close before/after a pull preserves a valid reusable session.
 pub struct AuthorizedAsyncAggregateCursor<'q> {
-    inner: AuthorizedRowCursor<'q, GraphAggregateRow, AsyncPull<'q>>,
+    inner: AuthorizedRowCursor<'q, GraphAggregateRow, AsyncPull<'q, GraphAggregateRow>>,
     layout: Layout,
 }
 
@@ -58,42 +51,7 @@ impl AuthorizedAsyncAggregateCursor<'_> {
     }
 
     pub async fn next_row(&mut self) -> Result<Option<GraphAggregateRow>, QueryError> {
-        if self.inner.state != VertexScanState::Open {
-            return Ok(None);
-        }
-        self.inner.state = VertexScanState::Failed;
-        let mut guard = self.inner.guard.take();
-        if let Some(guard) = &mut guard {
-            guard.armed = true;
-        }
-        let mut driver = self
-            .inner
-            .driver
-            .take()
-            .expect("open aggregate owns driver");
-        let result = poll_fn(|context| driver(context)).await;
-        match result {
-            Ok((value, finished)) => {
-                if let Some(guard) = &mut guard {
-                    guard.armed = false;
-                }
-                if finished || value.is_none() {
-                    self.inner.state = VertexScanState::Exhausted;
-                } else {
-                    self.inner.state = VertexScanState::Open;
-                    self.inner.driver = Some(driver);
-                    self.inner.guard = guard;
-                }
-                Ok(value)
-            }
-            Err(error) => {
-                let result = Err(error);
-                if let Some(guard) = &mut guard {
-                    guard.armed = terminal(&result);
-                }
-                result
-            }
-        }
+        self.inner.next_async().await
     }
 }
 
@@ -112,14 +70,14 @@ fn build<'q, C: FnMut() -> u64 + Send>(
     cx: &'q QueryCx,
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
-) -> Opened<'q, GraphAggregateRow, Layout, AsyncPull<'q>> {
+) -> Opened<'q, GraphAggregateRow, Layout, AsyncPull<'q, GraphAggregateRow>> {
     let Bound {
         plan,
         at,
         columns,
         layout,
     } = bound;
-    let driver: AsyncPull<'q> = match plan {
+    let driver: AsyncPull<'q, GraphAggregateRow> = match plan {
         Plan::Vertex(plan) => {
             let source = ScopedSource {
                 inner: view

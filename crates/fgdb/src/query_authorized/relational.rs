@@ -10,12 +10,12 @@ mod native;
 #[path = "relational/seeded.rs"]
 pub(super) mod seeded;
 pub use native::{
-    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
-    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
-    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
-    AuthorizedReadOutput, AuthorizedReadSession, AuthorizedReadTransaction, AuthorizedRowCursor,
-    AuthorizedSealedReadSession, AuthorizedSendAggregateCursor, AuthorizedSendRowCursor,
-    AuthorizedSortLimits, AuthorizedSpoolCursor,
+    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedAsyncRowCursor,
+    AuthorizedBeaconIndex, AuthorizedDifferenceCursor, AuthorizedDifferenceExecution,
+    AuthorizedOrderExecution, AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall,
+    AuthorizedPreparedRead, AuthorizedReadOutput, AuthorizedReadSession, AuthorizedReadTransaction,
+    AuthorizedRowCursor, AuthorizedSealedReadSession, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
 use super::*;

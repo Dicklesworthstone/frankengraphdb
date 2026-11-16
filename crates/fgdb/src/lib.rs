@@ -197,6 +197,7 @@ pub use query::{
     ReplayRefusal, ResidentIndex, ResidentIndexError, SealedProjectionOpenError, SealedQueryError,
     SealedReadView, StatementClock, StatementTimeError,
 };
+pub use query::AuthorizedAsyncRowCursor;
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteOutput,
     AuthorizedWriteSession, AuthorizedWriteTransaction, IdentityPermutation,

@@ -158,6 +158,58 @@ impl EdgeScanSource for Fixture {
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(1000, 1000, 100_000, 100_000)
 }
+
+#[test]
+fn cooperative_edge_rows_preserve_orientations_windows_and_exact_meters() {
+    use core::task::{Context, Poll, Waker};
+    let mut fixture = Fixture::new();
+    fixture.edges = (0..257)
+        .map(|id| {
+            (
+                EId(id),
+                (
+                    IDS[0],
+                    R,
+                    IDS[1],
+                    vec![(P, CanonicalScalar::Int(id as i64).into())],
+                ),
+            )
+        })
+        .collect();
+    fixture.ids = fixture.edges.keys().copied().collect();
+    for direction in [
+        GlaDirection::Forward,
+        GlaDirection::Reverse,
+        GlaDirection::Undirected,
+    ] {
+        let query = prepared(&statement(direction, "WHERE r.p >= 200", true, 3, 7));
+        let plan = EdgeScanPlan::compile(query.plan()).unwrap();
+        let mut synchronous = EdgeScanCursor::new(fixture.clone(), plan.clone(), policy(), || {
+            Ok::<(), &str>(())
+        });
+        let expected = synchronous.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let mut cooperative =
+            EdgeScanCursor::new(fixture.clone(), plan, policy(), || Ok::<(), &str>(()));
+        let mut context = Context::from_waker(Waker::noop());
+        let mut actual = Vec::new();
+        let mut suspended = 0;
+        loop {
+            let before = cooperative.row_stats().snapshot_records;
+            match cooperative.poll_next(&mut context) {
+                Poll::Pending => suspended += 1,
+                Poll::Ready(Some(row)) => actual.push(row.unwrap()),
+                Poll::Ready(None) => break,
+            }
+            assert!(cooperative.row_stats().snapshot_records - before <= 64);
+        }
+        assert!(suspended >= 3);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 7);
+        assert_eq!(cooperative.row_stats(), synchronous.row_stats());
+        assert_eq!(cooperative.evaluator_stats(), synchronous.evaluator_stats());
+        assert_eq!(cooperative.state(), EdgeScanState::Exhausted);
+    }
+}
 fn plain(rows: &[GraphValueRow]) -> Vec<Vec<GraphValue>> {
     rows.iter().map(|r| r.values().to_vec()).collect()
 }

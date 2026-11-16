@@ -311,6 +311,12 @@ fn native_aggregate_announces_and_services_controls_during_input_without_scratch
         let mut batch = crate::recovery::tests::vertex(1);
         for id in 2..=4096 {
             batch.create_vertex(fgdb_types::VId(id), vec![], vec![]);
+            batch.add_edge(
+                fgdb_types::EId(id),
+                fgdb_types::VId(id - 1),
+                fgdb_types::VId(id),
+                vec![],
+            );
         }
         db.db
             .write(&root)
@@ -320,88 +326,247 @@ fn native_aggregate_announces_and_services_controls_during_input_without_scratch
             .await
             .unwrap();
 
-        for stop in ["cancel", "recovery"] {
-            let (mut lane, wire, stream) = lane(&root, db, &token);
-            let binding = lane.conn.binding();
-            let waiter = server.shutdown.waiter();
-            let mut execution = Box::pin(lane.source_read(
-                &root,
-                &waiter,
-                db,
-                &token,
-                1,
-                stream,
-                binding,
-                SourceStatement::Text("MATCH (n) RETURN count(*) AS n"),
-                &[],
-            ));
-            assert!(poll_once(execution.as_mut()).is_pending());
-            let announced = wire.lock().unwrap().outgoing.clone();
-            let mut decoder = fgdb_protocol::Decoder::new(FrameLimits::new(4096).unwrap());
-            let first = decoder.decode(&announced, |_| Ok(())).unwrap();
-            assert_eq!(first.consumed, announced.len());
-            let frame = first.frame.expect("schema precedes source accumulation");
-            assert_eq!(frame.header().kind(), FrameKind::SnapshotResultChunk);
-            assert_eq!(frame.header().stream_id(), stream);
-            let chunk = ResultChunk::decode(frame.payload()).unwrap();
-            assert_eq!(chunk.columns, Some(vec!["n".into()]));
-            assert!(chunk.rows.is_empty(), "no partial aggregate may escape");
+        // Every source profile must yield while there is still no next row.
+        // This exercises the actual source_read dispatch, not just a synthetic
+        // pending future passed directly to the control helper.
+        for (case, (statement, columns)) in [
+            ("MATCH (n) RETURN count(*) AS n", &["n"][..]),
+            ("MATCH (n) RETURN n SKIP 4000 LIMIT 1", &["n"][..]),
+            (
+                "MATCH (n) RETURN n, 1 AS value SKIP 4000 LIMIT 1",
+                &["n", "value"][..],
+            ),
+            (
+                "MATCH (a)-[r]->(b) RETURN r AS n SKIP 4000 LIMIT 1",
+                &["n"][..],
+            ),
+            (
+                "MATCH (a)-[r]->(b)-[s]->(c) RETURN r AS n,s SKIP 4000 LIMIT 1",
+                &["n", "s"][..],
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for stop in ["cancel", "recovery"] {
+                let (mut lane, wire, stream) = lane(&root, db, &token);
+                let binding = lane.conn.binding();
+                let waiter = server.shutdown.waiter();
+                let mut execution = Box::pin(lane.source_read(
+                    &root,
+                    &waiter,
+                    db,
+                    &token,
+                    1,
+                    stream,
+                    binding,
+                    SourceStatement::Text(statement),
+                    &[],
+                ));
+                assert!(poll_once(execution.as_mut()).is_pending());
+                let announced = wire.lock().unwrap().outgoing.clone();
+                let mut decoder = fgdb_protocol::Decoder::new(FrameLimits::new(4096).unwrap());
+                let first = decoder.decode(&announced, |_| Ok(())).unwrap();
+                assert_eq!(first.consumed, announced.len());
+                let frame = first.frame.expect("schema precedes source accumulation");
+                assert_eq!(frame.header().kind(), FrameKind::SnapshotResultChunk);
+                assert_eq!(frame.header().stream_id(), stream);
+                let chunk = ResultChunk::decode(frame.payload()).unwrap();
+                assert_eq!(
+                    chunk.columns,
+                    Some(columns.iter().map(|column| (*column).to_owned()).collect())
+                );
+                assert!(
+                    chunk.rows.is_empty(),
+                    "no row may precede its completed source pull: {statement}"
+                );
 
-            inject(
-                &wire,
-                FrameKind::Ping,
-                StreamId::CONTROL,
-                binding,
-                &Ping { nonce: 611 },
-            );
-            assert!(poll_once(execution.as_mut()).is_pending());
-            let outgoing = wire.lock().unwrap().outgoing.clone();
-            let pong = decoder
-                .decode(&outgoing[announced.len()..], |_| Ok(()))
-                .unwrap();
-            assert_eq!(pong.consumed, outgoing.len() - announced.len());
-            let pong = pong.frame.expect("PING is serviced while count is pending");
-            assert_eq!(pong.header().kind(), FrameKind::Pong);
-            assert_eq!(Ping::decode(pong.payload()).unwrap().nonce, 611);
+                inject(
+                    &wire,
+                    FrameKind::Ping,
+                    StreamId::CONTROL,
+                    binding,
+                    &Ping { nonce: 611 },
+                );
+                assert!(poll_once(execution.as_mut()).is_pending());
+                let outgoing = wire.lock().unwrap().outgoing.clone();
+                let pong = decoder
+                    .decode(&outgoing[announced.len()..], |_| Ok(()))
+                    .unwrap();
+                assert_eq!(pong.consumed, outgoing.len() - announced.len());
+                let pong = pong
+                    .frame
+                    .expect("PING is serviced while the source is pending");
+                assert_eq!(pong.header().kind(), FrameKind::Pong);
+                assert_eq!(Ping::decode(pong.payload()).unwrap().nonce, 611);
 
-            match stop {
-                "cancel" => inject(&wire, FrameKind::QueryCancel, stream, binding, &Empty),
-                "recovery" => {
-                    crate::recovery::tests::fail_after_marker(&root, db, 4097).await;
-                    assert!(matches!(
-                        crate::recovery::tests::settled(db).await,
-                        crate::DatabaseStatus::Ready { .. }
-                    ));
+                match stop {
+                    "cancel" => inject(&wire, FrameKind::QueryCancel, stream, binding, &Empty),
+                    "recovery" => {
+                        crate::recovery::tests::fail_after_marker(&root, db, 4097 + case as u128)
+                            .await;
+                        assert!(matches!(
+                            crate::recovery::tests::settled(db).await,
+                            crate::DatabaseStatus::Ready { .. }
+                        ));
+                    }
+                    _ => unreachable!(),
                 }
-                _ => unreachable!(),
-            }
-            let result = execution.await;
-            match stop {
-                "cancel" => assert!(matches!(result, Err(Stop::Cancelled))),
-                "recovery" => assert!(matches!(result, Err(Stop::Recovery(_)))),
-                _ => unreachable!(),
-            }
-            let after = wire.lock().unwrap().outgoing.clone();
-            assert_eq!(after[..outgoing.len()], outgoing[..]);
-            let tail = &after[outgoing.len()..];
-            match stop {
-                // FABRIC_PROTOCOL.md: a QUERY_CANCEL is answered with one
-                // stream-scoped `cancelled` ERROR. That is the stream's only
-                // terminal, and no partial aggregate row precedes it.
-                "cancel" => {
-                    let terminal = decoder.decode(tail, |_| Ok(())).unwrap();
-                    assert_eq!(terminal.consumed, tail.len());
-                    let frame = terminal.frame.expect("the cancel is answered");
-                    assert_eq!(frame.header().kind(), FrameKind::Error);
-                    assert_eq!(frame.header().stream_id(), stream);
-                    let refusal = ErrorBody::decode(frame.payload()).unwrap();
-                    assert_eq!(refusal.code, ErrorCode::Cancelled);
+                let result = execution.await;
+                match stop {
+                    "cancel" => assert!(matches!(result, Err(Stop::Cancelled))),
+                    "recovery" => assert!(matches!(result, Err(Stop::Recovery(_)))),
+                    _ => unreachable!(),
                 }
-                // Recovery retires the generation; nothing more is written.
-                "recovery" => assert!(tail.is_empty()),
-                _ => unreachable!(),
+                let after = wire.lock().unwrap().outgoing.clone();
+                assert_eq!(after[..outgoing.len()], outgoing[..]);
+                let tail = &after[outgoing.len()..];
+                match stop {
+                    // FABRIC_PROTOCOL.md: a QUERY_CANCEL is answered with one
+                    // stream-scoped `cancelled` ERROR. That is the stream's only
+                    // terminal, and no incomplete source row precedes it.
+                    "cancel" => {
+                        let terminal = decoder.decode(tail, |_| Ok(())).unwrap();
+                        assert_eq!(terminal.consumed, tail.len());
+                        let frame = terminal.frame.expect("the cancel is answered");
+                        assert_eq!(frame.header().kind(), FrameKind::Error);
+                        assert_eq!(frame.header().stream_id(), stream);
+                        let refusal = ErrorBody::decode(frame.payload()).unwrap();
+                        assert_eq!(refusal.code, ErrorCode::Cancelled);
+                    }
+                    // Recovery retires the generation; nothing more is written.
+                    "recovery" => assert!(tail.is_empty()),
+                    _ => unreachable!(),
+                }
             }
         }
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_row_frames_batch_exact_credit_and_do_not_examine_an_uncredited_suffix() {
+    use fgdb_warden::{Grant, QueryLimits, Scope};
+
+    let ((), report) = run_async_under_lab(0x79a0_0611, |root| async move {
+        let (server, _, _) = served(&root, "native-row-frame-credit").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut batch = crate::recovery::tests::vertex(1);
+        for id in 2..=6 {
+            batch.create_vertex(fgdb_types::VId(id), vec![], vec![]);
+        }
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), batch)
+            .await
+            .unwrap();
+        let token = db
+            .authority
+            .issue_at(
+                &Grant {
+                    labels: Scope::All,
+                    ..Grant::read_only(
+                        crate::TRUNK,
+                        u64::MAX / 2,
+                        QueryLimits {
+                            max_nodes: 4,
+                            max_work: 100_000,
+                            max_rows: 10,
+                        },
+                    )
+                },
+                crate::unix_millis(),
+            )
+            .unwrap();
+        let (mut lane, wire, stream) = lane(&root, db, &token);
+        lane.initial_window.rows = 4;
+        let binding = lane.conn.binding();
+        let waiter = server.shutdown.waiter();
+        let mut execution = Box::pin(lane.source_read(
+            &root,
+            &waiter,
+            db,
+            &token,
+            1,
+            stream,
+            binding,
+            SourceStatement::Text("MATCH (n) RETURN n"),
+            &[],
+        ));
+        // Four rows consume the exact grant. A speculative fifth pull would
+        // fail the signed node allowance instead of waiting for more credit.
+        assert!(poll_once(execution.as_mut()).is_pending());
+        let sent = wire.lock().unwrap().outgoing.clone();
+        let mut decoder = fgdb_protocol::Decoder::new(FrameLimits::new(4096).unwrap());
+        let metadata = decoder.decode(&sent, |_| Ok(())).unwrap();
+        let metadata_len = metadata.consumed;
+        let metadata = metadata.frame.unwrap();
+        assert_eq!(metadata.header().kind(), FrameKind::SnapshotResultChunk);
+        assert!(
+            ResultChunk::decode(metadata.payload())
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        let rows = decoder.decode(&sent[metadata_len..], |_| Ok(())).unwrap();
+        assert_eq!(
+            rows.consumed,
+            sent.len() - metadata_len,
+            "available rows belong to one frame, not one frame per row"
+        );
+        let rows = rows.frame.unwrap();
+        assert_eq!(rows.header().kind(), FrameKind::SnapshotResultChunk);
+        let rows = ResultChunk::decode(rows.payload()).unwrap();
+        assert_eq!(rows.columns, None);
+        assert_eq!(
+            rows.rows,
+            (1..=4)
+                .map(|id| vec![WireValue::Vertex(id)])
+                .collect::<Vec<_>>()
+        );
+
+        inject(
+            &wire,
+            FrameKind::Ping,
+            StreamId::CONTROL,
+            binding,
+            &Ping { nonce: 612 },
+        );
+        assert!(poll_once(execution.as_mut()).is_pending());
+        let pinged = wire.lock().unwrap().outgoing.clone();
+        let pong = decoder.decode(&pinged[sent.len()..], |_| Ok(())).unwrap();
+        assert_eq!(pong.consumed, pinged.len() - sent.len());
+        assert_eq!(pong.frame.unwrap().header().kind(), FrameKind::Pong);
+
+        inject(
+            &wire,
+            FrameKind::WindowUpdate,
+            stream,
+            binding,
+            &WindowUpdate {
+                sequence: 1,
+                bytes: 1024,
+                rows: 1,
+            },
+        );
+        assert!(execution.await.is_ok());
+        let finished = wire.lock().unwrap().outgoing.clone();
+        let refusal = decoder
+            .decode(&finished[pinged.len()..], |_| Ok(()))
+            .unwrap();
+        assert_eq!(refusal.consumed, finished.len() - pinged.len());
+        let refusal = refusal
+            .frame
+            .expect("the newly credited source pull must refuse");
+        assert_eq!(refusal.header().kind(), FrameKind::Error);
+        assert_eq!(
+            ErrorBody::decode(refusal.payload()).unwrap().code,
+            ErrorCode::Budget
+        );
         server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
