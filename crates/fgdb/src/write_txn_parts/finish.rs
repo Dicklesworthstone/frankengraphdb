@@ -431,13 +431,24 @@ impl WriteTxn {
         if previous.authorization_decision_digest.is_some() {
             return Err(original_conflict);
         }
-        // This embedded evaluator is defined only for its fixed graph, branch
-        // and schema epoch. Inspect coordinate metadata even when it has no
-        // rows: a row-free schema transition must not authorize replay.
+        // Bind replay to the exact catalog at the original basis, not to the
+        // catalog-free epoch. Registered names do not change these existing
+        // independence laws when their immutable generation stayed fixed.
+        // Even floor-only catalog changes remain ineligible: equal visible
+        // names are not proof that the original schema contract is unchanged.
+        let Ok(basis_schema) = database.snapshot.schema.at(self.basis) else {
+            return Err(original_conflict);
+        };
+        if basis_schema.reference != database.snapshot.schema.reference {
+            return Err(original_conflict);
+        }
+        let schema_epoch = basis_schema.catalog.epoch();
+        // Inspect coordinate metadata even when it has no rows: a row-free
+        // schema transition or forged epoch must not authorize replay.
         let supported_coordinate = |coordinate: &fgdb_delta_types::CoordinateEntry| {
             coordinate.graph == crate::GRAPH
                 && coordinate.branch == crate::BRANCH
-                && coordinate.schema_epoch == fgdb_delta_types::SchemaEpoch(0)
+                && coordinate.schema_epoch == schema_epoch
                 && coordinate.schema_transition.is_none()
         };
         for coordinate in previous.template.coordinate_entries() {
